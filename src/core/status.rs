@@ -21,7 +21,7 @@ use crate::db::{
     GraphSnapshotType, MeshStorageStatus, PROVENANCE_CHAIN_HASH_VERSION,
     PROVENANCE_STATUS_UNVERIFIED, StoredAuditEntry, StoredCurationCandidate,
     StoredCurationTtlPolicy, StoredMemory, StoredMemoryLink, audit_actions,
-    default_curation_ttl_policy_id_for_review_state,
+    default_curation_ttl_policy_id_for_review_state, read_pool::PoolStats,
 };
 use crate::models::degradation::GRAPH_SKYLINE_DEGENERATE_COMMUNITIES_CODE;
 use crate::models::posture::{
@@ -902,8 +902,11 @@ impl RuntimeReport {
 pub struct ReadPoolStatusReport {
     pub active: usize,
     pub idle: usize,
+    pub active_pins: usize,
+    pub expired_pins: usize,
     pub max_seen: usize,
     pub drops: u64,
+    pub release_failures: u64,
     pub ad_hoc_bypass_count: u64,
     pub acquire_wait: ReadPoolAcquireWaitReport,
 }
@@ -922,13 +925,36 @@ impl ReadPoolStatusReport {
         Self {
             active: 0,
             idle: 0,
+            active_pins: 0,
+            expired_pins: 0,
             max_seen: 0,
             drops: 0,
+            release_failures: 0,
             ad_hoc_bypass_count: 0,
             acquire_wait: ReadPoolAcquireWaitReport {
                 samples: 0,
                 p50_ns: 0,
                 p99_ns: 0,
+            },
+        }
+    }
+}
+
+impl From<PoolStats> for ReadPoolStatusReport {
+    fn from(stats: PoolStats) -> Self {
+        Self {
+            active: stats.active,
+            idle: stats.idle,
+            active_pins: stats.active_pins,
+            expired_pins: stats.expired_pins,
+            max_seen: stats.max_seen,
+            drops: stats.drops,
+            release_failures: stats.release_failures,
+            ad_hoc_bypass_count: stats.ad_hoc_bypass_count,
+            acquire_wait: ReadPoolAcquireWaitReport {
+                samples: stats.acquire_wait.samples,
+                p50_ns: stats.acquire_wait.p50_ns,
+                p99_ns: stats.acquire_wait.p99_ns,
             },
         }
     }

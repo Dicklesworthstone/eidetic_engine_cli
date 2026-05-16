@@ -3440,8 +3440,11 @@ fn render_read_pool_status_json(
     parent.field_object("read_pool", |pool| {
         pool.field_raw("active", &report.active.to_string());
         pool.field_raw("idle", &report.idle.to_string());
+        pool.field_raw("active_pins", &report.active_pins.to_string());
+        pool.field_raw("expired_pins", &report.expired_pins.to_string());
         pool.field_raw("max_seen", &report.max_seen.to_string());
         pool.field_raw("drops", &report.drops.to_string());
+        pool.field_raw("release_failures", &report.release_failures.to_string());
         pool.field_raw(
             "ad_hoc_bypass_count",
             &report.ad_hoc_bypass_count.to_string(),

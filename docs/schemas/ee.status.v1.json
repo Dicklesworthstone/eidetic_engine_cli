@@ -62,13 +62,16 @@
   "$defs": {
     "readPoolStatus": {
       "type": "object",
-      "required": ["active", "idle", "max_seen", "drops", "ad_hoc_bypass_count", "acquire_wait"],
+      "required": ["active", "idle", "active_pins", "expired_pins", "max_seen", "drops", "release_failures", "ad_hoc_bypass_count", "acquire_wait"],
       "additionalProperties": false,
       "properties": {
         "active": {"type": "integer", "minimum": 0},
         "idle": {"type": "integer", "minimum": 0},
+        "active_pins": {"type": "integer", "minimum": 0},
+        "expired_pins": {"type": "integer", "minimum": 0},
         "max_seen": {"type": "integer", "minimum": 0},
         "drops": {"type": "integer", "minimum": 0},
+        "release_failures": {"type": "integer", "minimum": 0},
         "ad_hoc_bypass_count": {"type": "integer", "minimum": 0},
         "acquire_wait": {
           "type": "object",

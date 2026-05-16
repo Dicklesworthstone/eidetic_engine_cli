@@ -8,6 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use ee::core::status::{ReadPoolStatusReport, StatusReport};
+use ee::db::read_pool::{AcquireWaitStats, PoolStats};
 use ee::output::render_status_json;
 use serde_json::Value;
 
@@ -17,8 +18,11 @@ const STATUS_SCHEMA_PATH: &str = "docs/schemas/ee.status.v1.json";
 const READ_POOL_FIELDS: &[&str] = &[
     "active",
     "idle",
+    "active_pins",
+    "expired_pins",
     "max_seen",
     "drops",
+    "release_failures",
     "ad_hoc_bypass_count",
     "acquire_wait",
 ];
@@ -157,7 +161,16 @@ fn read_pool_status_schema_declares_counters_and_wait_summary() -> TestResult {
         "/$defs/readPoolStatus/properties",
         READ_POOL_FIELDS,
     )?;
-    for counter in ["active", "idle", "max_seen", "drops", "ad_hoc_bypass_count"] {
+    for counter in [
+        "active",
+        "idle",
+        "active_pins",
+        "expired_pins",
+        "max_seen",
+        "drops",
+        "release_failures",
+        "ad_hoc_bypass_count",
+    ] {
         let type_pointer = format!("/$defs/readPoolStatus/properties/{counter}/type");
         let minimum_pointer = format!("/$defs/readPoolStatus/properties/{counter}/minimum");
         ensure_str_eq(&schema, &type_pointer, "integer")?;
@@ -238,8 +251,11 @@ fn read_pool_status_report_default_emits_zero_counters() -> TestResult {
     let report = ReadPoolStatusReport::default();
     if report.active != 0
         || report.idle != 0
+        || report.active_pins != 0
+        || report.expired_pins != 0
         || report.max_seen != 0
         || report.drops != 0
+        || report.release_failures != 0
         || report.ad_hoc_bypass_count != 0
         || report.acquire_wait.samples != 0
         || report.acquire_wait.p50_ns != 0
@@ -257,6 +273,46 @@ fn read_pool_status_report_default_emits_zero_counters() -> TestResult {
     if gathered != report {
         return Err(format!(
             "ReadPoolStatusReport::gather drifted from Default: {gathered:?} vs {report:?}"
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn read_pool_status_report_preserves_lifecycle_pool_stats() -> TestResult {
+    let report = ReadPoolStatusReport::from(PoolStats {
+        active: 2,
+        idle: 1,
+        active_pins: 2,
+        expired_pins: 1,
+        max_size: 4,
+        max_seen: 3,
+        drops: 5,
+        release_failures: 7,
+        ad_hoc_bypass_count: 11,
+        acquire_wait: AcquireWaitStats {
+            samples: 13,
+            p50_ns: 17,
+            p99_ns: 19,
+        },
+        size_was_zero: false,
+    });
+
+    if report.active != 2
+        || report.idle != 1
+        || report.active_pins != 2
+        || report.expired_pins != 1
+        || report.max_seen != 3
+        || report.drops != 5
+        || report.release_failures != 7
+        || report.ad_hoc_bypass_count != 11
+        || report.acquire_wait.samples != 13
+        || report.acquire_wait.p50_ns != 17
+        || report.acquire_wait.p99_ns != 19
+    {
+        return Err(format!(
+            "ReadPoolStatusReport must preserve pool lifecycle counters; got {report:?}"
         ));
     }
 
@@ -309,7 +365,24 @@ fn rendered_status_json_includes_qos_posture_without_active_records_by_default()
 
 #[test]
 fn rendered_status_json_includes_read_pool_with_all_counters() -> TestResult {
-    let status = StatusReport::gather();
+    let mut status = StatusReport::gather();
+    status.read_pool = ReadPoolStatusReport::from(PoolStats {
+        active: 2,
+        idle: 1,
+        active_pins: 2,
+        expired_pins: 1,
+        max_size: 4,
+        max_seen: 3,
+        drops: 5,
+        release_failures: 7,
+        ad_hoc_bypass_count: 11,
+        acquire_wait: AcquireWaitStats {
+            samples: 13,
+            p50_ns: 17,
+            p99_ns: 19,
+        },
+        size_was_zero: false,
+    });
     let rendered = render_status_json(&status);
     let parsed: Value = serde_json::from_str(&rendered)
         .map_err(|error| format!("status JSON did not parse: {error}"))?;
@@ -320,7 +393,16 @@ fn rendered_status_json_includes_read_pool_with_all_counters() -> TestResult {
         .pointer("/data/read_pool")
         .ok_or_else(|| format!("data.read_pool missing from rendered status JSON: {parsed}"))?;
     ensure_object_keys_eq(&parsed, "/data/read_pool", READ_POOL_FIELDS)?;
-    for counter in ["active", "idle", "max_seen", "drops", "ad_hoc_bypass_count"] {
+    for counter in [
+        "active",
+        "idle",
+        "active_pins",
+        "expired_pins",
+        "max_seen",
+        "drops",
+        "release_failures",
+        "ad_hoc_bypass_count",
+    ] {
         let pointer = format!("/data/read_pool/{counter}");
         let value = read_pool
             .pointer(&format!("/{counter}"))
@@ -330,6 +412,14 @@ fn rendered_status_json_includes_read_pool_with_all_counters() -> TestResult {
             return Err(format!("{pointer} overflowed usize range: {value}"));
         }
     }
+    ensure_u64_eq(&parsed, "/data/read_pool/active", 2)?;
+    ensure_u64_eq(&parsed, "/data/read_pool/idle", 1)?;
+    ensure_u64_eq(&parsed, "/data/read_pool/active_pins", 2)?;
+    ensure_u64_eq(&parsed, "/data/read_pool/expired_pins", 1)?;
+    ensure_u64_eq(&parsed, "/data/read_pool/max_seen", 3)?;
+    ensure_u64_eq(&parsed, "/data/read_pool/drops", 5)?;
+    ensure_u64_eq(&parsed, "/data/read_pool/release_failures", 7)?;
+    ensure_u64_eq(&parsed, "/data/read_pool/ad_hoc_bypass_count", 11)?;
     ensure_object_keys_eq(&parsed, "/data/read_pool/acquire_wait", ACQUIRE_WAIT_FIELDS)?;
     for counter in ACQUIRE_WAIT_FIELDS {
         let pointer = format!("/data/read_pool/acquire_wait/{counter}");
@@ -338,6 +428,9 @@ fn rendered_status_json_includes_read_pool_with_all_counters() -> TestResult {
             .and_then(Value::as_u64)
             .ok_or_else(|| format!("{pointer} not a u64"))?;
     }
+    ensure_u64_eq(&parsed, "/data/read_pool/acquire_wait/samples", 13)?;
+    ensure_u64_eq(&parsed, "/data/read_pool/acquire_wait/p50_ns", 17)?;
+    ensure_u64_eq(&parsed, "/data/read_pool/acquire_wait/p99_ns", 19)?;
 
     Ok(())
 }
