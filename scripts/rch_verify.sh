@@ -181,7 +181,11 @@ if [ "$COMMAND_KIND" = "rejected" ]; then
     exit 2
 fi
 
-WOULD_OFFLOAD=true
+if [ "$COMMAND_KIND" = "raw" ]; then
+    WOULD_OFFLOAD=false
+else
+    WOULD_OFFLOAD=true
+fi
 RCH_INVOCATION=(
     "$RCH_BIN" "exec" "--"
     "env" "TMPDIR=/tmp" "CARGO_TARGET_DIR=$REMOTE_TARGET_DIR"
@@ -189,7 +193,11 @@ RCH_INVOCATION=(
 )
 
 if [ "$DRY_RUN" -eq 1 ]; then
-    emit_json true null 0 "dry run: explicit rch exec planned" "" "rch_verify_dry_run"
+    dry_run_degraded=("rch_verify_dry_run")
+    if [ "$COMMAND_KIND" = "raw" ]; then
+        dry_run_degraded+=("rch_verify_raw_command_may_not_offload")
+    fi
+    emit_json true null 0 "dry run: explicit rch exec planned" "" "${dry_run_degraded[@]}"
     exit 0
 fi
 
@@ -215,7 +223,7 @@ elapsed_ms=$((end_ms - start_ms))
 
 worker_id="$(
     printf '%s' "$combined_output" \
-        | sed -n 's/.*\\[RCH\\] remote \([^ ]*\).*/\1/p' \
+        | sed -n 's/.*\[RCH\] remote \([^ ]*\).*/\1/p' \
         | tail -n 1
 )"
 if [ -n "$worker_id" ]; then
@@ -226,6 +234,9 @@ stdout_tail="$(printf '%s' "$combined_output" | tail_text)"
 degraded=()
 if [ "$exit_code" -ne 0 ]; then
     degraded+=("rch_verify_remote_command_failed")
+fi
+if [ "$COMMAND_KIND" = "raw" ]; then
+    degraded+=("rch_verify_raw_command_may_not_offload")
 fi
 
 emit_json true "$exit_code" "$elapsed_ms" "$stdout_tail" "" "${degraded[@]}"
