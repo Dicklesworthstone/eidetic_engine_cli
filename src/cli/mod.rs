@@ -23985,24 +23985,26 @@ fn db_status_has_pending_migration(report: &DbStatusReport) -> bool {
 fn db_status_degraded(report: &DbStatusReport) -> Vec<serde_json::Value> {
     let mut degraded = Vec::new();
     if db_status_has_pending_migration(report) {
-        degraded.push(serde_json::json!({
-            "code": "db_migration_pending",
-            "severity": "medium",
-            "message": "Database has pending migrations; db inspection may be incomplete until migrations run.",
-            "repair": "ee init --workspace .",
-        }));
+        degraded.push(DegradationAggregationInput::new(
+            "db_status",
+            "db_migration_pending",
+            "medium",
+            "Database has pending migrations; db inspection may be incomplete until migrations run.",
+            "ee init --workspace .",
+        ));
     }
     if report.wal_file_exists == Some(true)
         && (!report.exists || report.shm_file_exists == Some(false))
     {
-        degraded.push(serde_json::json!({
-            "code": "db_wal_stale",
-            "severity": "medium",
-            "message": "Database WAL sidecar exists without a matching SHM sidecar; WAL state may be stale.",
-            "repair": "ee init --workspace .",
-        }));
+        degraded.push(DegradationAggregationInput::new(
+            "db_status",
+            "db_wal_stale",
+            "medium",
+            "Database WAL sidecar exists without a matching SHM sidecar; WAL state may be stale.",
+            "ee init --workspace .",
+        ));
     }
-    degraded
+    aggregate_cli_degraded_json(degraded)
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -44126,6 +44128,48 @@ default_half_life_days = 45
             &rendered[0]["sources"],
             &serde_json::json!(["graph_centrality_read"]),
             "source label",
+        )
+    }
+
+    #[test]
+    fn db_status_degraded_entries_are_aggregated() -> TestResult {
+        let report = super::DbStatusReport {
+            database_path: ".ee/ee.db".to_string(),
+            exists: false,
+            file_size_bytes: None,
+            wal_path: Some(".ee/ee.db-wal".to_string()),
+            wal_file_exists: Some(true),
+            wal_size_bytes: Some(128),
+            shm_file_exists: Some(false),
+            journal_mode: None,
+            page_size_bytes: None,
+            page_count: None,
+            schema_version: Some(1),
+            latest_compiled_schema_version: Some(2),
+            needs_migration: Some(true),
+            applied_migration_count: Some(1),
+            pending_migration_versions: Some(vec![2]),
+            table_count: None,
+            table_row_counts: None,
+            error: None,
+        };
+
+        let degraded = super::db_status_degraded(&report);
+        ensure_equal(&degraded.len(), &2, "db status degraded count")?;
+        ensure_equal(
+            &degraded[0]["code"],
+            &serde_json::json!("db_migration_pending"),
+            "migration code",
+        )?;
+        ensure_equal(
+            &degraded[0]["sources"],
+            &serde_json::json!(["db_status"]),
+            "migration source label",
+        )?;
+        ensure_equal(
+            &degraded[1]["code"],
+            &serde_json::json!("db_wal_stale"),
+            "wal code",
         )
     }
 

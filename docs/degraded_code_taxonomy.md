@@ -81,6 +81,7 @@ Current conventions:
 | `skyline` | `ee status --skyline` structural skyline degradation. |
 | `agent_detection` | Agent inventory and agent-status detection degradation. |
 | `build` | Binary version and build-provenance degradation. |
+| `db_status` | `ee db status` migration or sidecar-file degradation. |
 | `dependency_contract` | `ee diag dependencies` dependency-contract degradation. |
 | `graph_centrality_read` | `ee graph centrality` persisted centrality read degradation. |
 | `integrity` | `ee diag integrity` database, schema, canary, or provenance-sample degradation. |
