@@ -547,6 +547,13 @@ impl MergedConfig {
                 self.source(CURATION_DECAY_HALF_LIFE_DAYS_KEY),
             ));
         }
+        if let Some(threshold) = self.values.curation.specificity_min {
+            entries.push(ConfigShowEntry::new(
+                CURATION_SPECIFICITY_MIN_KEY,
+                threshold.to_string(),
+                self.source(CURATION_SPECIFICITY_MIN_KEY),
+            ));
+        }
 
         // Learn section
         if let Some(threshold) = self.values.learn.cluster_coherence_threshold {
@@ -658,6 +665,13 @@ impl MergedConfig {
                 PRIVACY_REDACT_SECRETS_KEY,
                 redact.to_string(),
                 self.source(PRIVACY_REDACT_SECRETS_KEY),
+            ));
+        }
+        if let Some(ref classes) = self.values.privacy.redaction_classes {
+            entries.push(ConfigShowEntry::new(
+                PRIVACY_REDACTION_CLASSES_KEY,
+                classes.join(","),
+                self.source(PRIVACY_REDACTION_CLASSES_KEY),
             ));
         }
 
@@ -2512,5 +2526,21 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn show_report_covers_every_resolved_source_key() -> TestResult {
+        let defaults =
+            built_in_config(&expander()).map_err(|error| format!("defaults failed: {error}"))?;
+        let merged = merge_config(&ConfigLayers::with_defaults(defaults));
+        let report = merged.to_show_report();
+        let report_keys: Vec<&str> = report.entries.iter().map(|entry| entry.key).collect();
+
+        for key in merged.sources().keys() {
+            if !report_keys.contains(key) {
+                return Err(format!("show report missing resolved source key {key}"));
+            }
+        }
+        ensure_equal(&report.entry_count, &report.entries.len(), "entry count")
     }
 }
