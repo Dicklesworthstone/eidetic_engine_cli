@@ -1445,8 +1445,7 @@ fn cap_u32(requested: u32, cap: u64) -> (u32, bool) {
 
 fn selected_profile_from_config(workspace_root: &Path) -> Option<OperatingProfile> {
     let path = workspace_root.join(".ee").join("config.toml");
-    ensure_no_profile_config_symlink_components(&path, "read").ok()?;
-    let contents = fs::read_to_string(path).ok()?;
+    let contents = read_profile_config_if_regular(&path, "read").ok()??;
     let document = contents.parse::<DocumentMut>().ok()?;
     document
         .as_table()
@@ -1658,20 +1657,44 @@ fn effective_config_path(workspace_root: &Path, config_path: Option<&Path>) -> P
 }
 
 fn read_optional_config(path: &Path) -> Result<(bool, String), ProfileConfigError> {
-    ensure_no_profile_config_symlink_components(path, "read").map_err(|source| {
+    match read_profile_config_if_regular(path, "read").map_err(|source| {
         ProfileConfigError::Read {
             path: path.to_path_buf(),
             source,
         }
-    })?;
-    match fs::read_to_string(path) {
-        Ok(contents) => Ok((true, contents)),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok((false, String::new())),
-        Err(source) => Err(ProfileConfigError::Read {
-            path: path.to_path_buf(),
-            source,
-        }),
+    })? {
+        Some(contents) => Ok((true, contents)),
+        None => Ok((false, String::new())),
     }
+}
+
+fn read_profile_config_if_regular(
+    path: &Path,
+    operation: &'static str,
+) -> Result<Option<String>, io::Error> {
+    ensure_no_profile_config_symlink_components(path, operation)?;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to {operation} profile config `{}` because it is not a regular file",
+                path.display()
+            ),
+        ));
+    }
+    fs::read_to_string(path).map(Some)
 }
 
 fn ensure_no_profile_config_symlink_components(
@@ -2715,6 +2738,27 @@ mod tests {
             selected_profile_from_config(temp.path()),
             None,
             "runtime profile must not read symlinked config",
+        )
+    }
+
+    #[test]
+    fn profile_config_plan_rejects_config_directory() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::create_dir_all(temp.path().join(".ee").join("config.toml"))
+            .map_err(|error| error.to_string())?;
+
+        let options = config_options(temp.path(), OperatingProfile::Portable, true);
+        let error = plan_profile_config(&options)
+            .expect_err("profile config plan should reject config directory");
+
+        ensure_true(
+            error.to_string().contains("not a regular file"),
+            "config directory error message",
+        )?;
+        ensure(
+            selected_profile_from_config(temp.path()),
+            None,
+            "runtime profile must not read config directory",
         )
     }
 
