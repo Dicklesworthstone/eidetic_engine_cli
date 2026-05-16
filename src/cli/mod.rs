@@ -44776,6 +44776,46 @@ mod tests {
     }
 
     #[test]
+    fn maintenance_graph_witnesses_prune_command_accepts_ttl_overrides() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "maintenance",
+            "graph-witnesses-prune",
+            "--dry-run",
+            "--retention-days",
+            "45",
+            "--algorithm-ttl",
+            "cache_results=90",
+            "--algorithm-ttl",
+            "personalized_pagerank=14",
+        ])
+        .map_err(|error| {
+            format!(
+                "failed to parse maintenance graph-witnesses-prune: {:?}",
+                error.kind()
+            )
+        })?;
+
+        match parsed.command {
+            Some(Command::Maintenance(MaintenanceCommand::GraphWitnessesPrune(args))) => {
+                ensure_equal(&args.dry_run, &true, "dry run")?;
+                ensure_equal(&args.retention_days, &Some(45), "retention days")?;
+                ensure_equal(
+                    &args.algorithm_ttl,
+                    &vec![
+                        "cache_results=90".to_string(),
+                        "personalized_pagerank=14".to_string(),
+                    ],
+                    "algorithm TTL overrides",
+                )
+            }
+            other => Err(format!(
+                "expected maintenance graph-witnesses-prune command, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
     fn learn_decay_workspace_config_maps_to_runner_settings() -> TestResult {
         let config = crate::config::ConfigFile::parse(
             r#"

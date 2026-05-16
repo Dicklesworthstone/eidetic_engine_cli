@@ -214,6 +214,10 @@ path = "tests/conformance/cass_contracts.rs"
 name = "query_v1_matrix"
 path = "tests/conformance/query_v1_matrix.rs"
 
+[[test]]
+name = "witness_retention_e2e"
+path = "tests/contracts/witness_retention_e2e.rs"
+
 [patch.crates-io]
 asupersync = { path = "/data/projects/asupersync" }
 fsqlite = { path = "/data/projects/frankensqlite/crates/fsqlite" }
