@@ -978,6 +978,69 @@ mod tests {
     }
 
     #[test]
+    fn cancel_during_wait_no_pooled_connection_acquired_no_leak() {
+        let pool = ReadConnectionPool::new(
+            DatabaseConfig::memory(),
+            PoolConfig::new(1, Duration::from_secs(30)).with_acquire_timeout(Duration::ZERO),
+        );
+        let first = must(pool.acquire(), "first pooled connection opens");
+
+        let timed_out = must(pool.acquire(), "timed-out acquire opens ad-hoc connection");
+        assert!(timed_out.is_ad_hoc());
+        let stats = pool.stats();
+        assert_eq!(stats.active, 1);
+        assert_eq!(stats.idle, 0);
+        assert_eq!(stats.active_pins, 0);
+        assert_eq!(stats.ad_hoc_bypass_count, 1);
+
+        drop(timed_out);
+        assert_eq!(pool.stats().active, 1);
+
+        drop(first);
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 1);
+        assert_eq!(stats.active_pins, 0);
+    }
+
+    #[test]
+    fn cancel_just_after_acquire_connection_returns_to_lifo_no_pin_state() {
+        let pool = memory_pool(1, Duration::from_secs(30));
+        let acquired = must(pool.acquire(), "pooled connection opens");
+        let slot_id = acquired.slot_id();
+
+        drop(acquired);
+
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 1);
+        assert_eq!(stats.active_pins, 0);
+
+        let reacquired = must(pool.acquire(), "dropped connection returns to LIFO");
+        assert_eq!(reacquired.slot_id(), slot_id);
+    }
+
+    #[test]
+    fn cancel_during_pin_rollback_runs_connection_returns_to_lifo() {
+        let (_tempdir, database_path, pool) = file_pool(1);
+        let pin = must(pool.pin_snapshot(), "snapshot pin opens");
+        let slot_id = pin.slot_id();
+        assert_eq!(snapshot_item_count(&pin), 1);
+
+        insert_snapshot_item(&database_path, 2, "during_pin");
+        drop(pin);
+
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 1);
+        assert_eq!(stats.active_pins, 0);
+
+        let reacquired = must(pool.acquire(), "rolled-back pin returns connection");
+        assert_eq!(reacquired.slot_id(), slot_id);
+        assert_eq!(snapshot_item_count(&reacquired), 2);
+    }
+
+    #[test]
     fn watchdog_pin_within_max_duration_is_not_disturbed() {
         let (_tempdir, _database_path, pool) = file_pool(1);
         let pin = must(pool.pin_snapshot(), "snapshot pin opens");
