@@ -7412,6 +7412,8 @@ mod tests {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let database_path = temp.path().join("ee.db");
         let workspace_identity = temp.path().display().to_string();
+        let score_memory_c = "mem_scoredecay0000000000000003";
+        let score_memory_d = "mem_scoredecay0000000000000004";
         {
             let connection =
                 DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
@@ -7428,14 +7430,14 @@ mod tests {
             for memory_id in [
                 SCORE_MEMORY_A,
                 SCORE_MEMORY_B,
-                SCORE_MEMORY_C,
-                SCORE_MEMORY_D,
+                score_memory_c,
+                score_memory_d,
             ] {
                 insert_score_memory(&connection, memory_id, 0.8)?;
             }
             insert_score_memory_link(&connection, "qos-link-ab", SCORE_MEMORY_A, SCORE_MEMORY_B)?;
-            insert_score_memory_link(&connection, "qos-link-bc", SCORE_MEMORY_B, SCORE_MEMORY_C)?;
-            insert_score_memory_link(&connection, "qos-link-cd", SCORE_MEMORY_C, SCORE_MEMORY_D)?;
+            insert_score_memory_link(&connection, "qos-link-bc", SCORE_MEMORY_B, score_memory_c)?;
+            insert_score_memory_link(&connection, "qos-link-cd", score_memory_c, score_memory_d)?;
             connection.close().map_err(|error| error.to_string())?;
         }
         crate::core::qos::publish_qos_lane_record(
