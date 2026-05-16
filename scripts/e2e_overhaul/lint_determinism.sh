@@ -47,9 +47,10 @@ count_exemptions() {
         printf '0'
         return 0
     fi
-    grep -R -E '#\[(allow|expect)\(clippy::disallowed_methods\)\]' "$REPO_ROOT/src" 2>/dev/null \
-        | wc -l \
-        | tr -d ' '
+    {
+        grep -R -E '#\[(allow|expect)\(clippy::disallowed_methods\)\]' "$REPO_ROOT/src" 2>/dev/null \
+            || true
+    } | wc -l | tr -d ' '
 }
 
 emit_lint_summary() {
