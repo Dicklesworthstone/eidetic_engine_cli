@@ -642,6 +642,9 @@ fn hits_inputs_from_scores(
 fn proximity_graph_from_links(links: &[StoredMemoryLink]) -> Result<Graph, DomainError> {
     let mut graph = Graph::strict();
     for link in links {
+        if !crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref()) {
+            continue;
+        }
         let mut attrs = AttrMap::new();
         attrs.insert(
             GOMORY_HU_WEIGHT_ATTR.to_owned(),
@@ -1404,6 +1407,32 @@ mod tests {
     }
 
     #[test]
+    fn proximity_hotspots_ignore_denied_mesh_links() -> TestResult {
+        let links = vec![
+            stored_memory_link("link_allowed", "mem_a", "mem_b", None),
+            stored_memory_link(
+                "link_denied",
+                "mem_b",
+                "mem_c",
+                Some(denied_mesh_link_metadata()),
+            ),
+        ];
+
+        let reports = proximity_hotspot_reports_from_links(&links)
+            .map_err(|error| format!("failed to build proximity reports: {error}"))?;
+
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].memory_a, "mem_a");
+        assert_eq!(reports[0].memory_b, "mem_b");
+        assert_eq!(
+            reports[0].tree_path.as_deref(),
+            Some(&["mem_a".to_owned(), "mem_b".to_owned()][..])
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn causal_bottlenecks_order_by_betweenness_then_memory_id() -> TestResult {
         let reports = vec![
             causal_bottleneck("mem_b", 0.25),
@@ -1557,5 +1586,46 @@ mod tests {
                 .to_owned(),
             tree_path: tree_path.map(|nodes| nodes.into_iter().map(str::to_owned).collect()),
         }
+    }
+
+    fn stored_memory_link(
+        id: &str,
+        source: &str,
+        target: &str,
+        metadata_json: Option<String>,
+    ) -> StoredMemoryLink {
+        StoredMemoryLink {
+            id: id.to_owned(),
+            src_memory_id: source.to_owned(),
+            dst_memory_id: target.to_owned(),
+            relation: "related".to_owned(),
+            weight: 1.0,
+            confidence: 1.0,
+            directed: false,
+            evidence_count: 1,
+            last_reinforced_at: None,
+            source: "agent".to_owned(),
+            created_at: "2026-05-16T00:00:00Z".to_owned(),
+            created_by: Some("insights-mesh-test".to_owned()),
+            metadata_json,
+        }
+    }
+
+    fn denied_mesh_link_metadata() -> String {
+        serde_json::json!({
+            "mesh": {
+                "workspaceScopeDecision": "deny",
+                "materialLane": "graphSignal",
+                "cachedMaterialId": "mesh_insights_denied",
+                "originWorkspaceId": "wsp_remote_private",
+                "originWorkspaceLabel": "/Users/alice/private/repo",
+                "producerPeerId": "peer_builder_one",
+                "producerPeerLabel": "/Users/alice/private/peer-agent",
+                "importDecisionId": "mesh_insights_decision_denied",
+                "trustLane": "quarantined",
+                "redactionPosture": "metadata_only"
+            }
+        })
+        .to_string()
     }
 }
