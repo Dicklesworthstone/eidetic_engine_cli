@@ -8,7 +8,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -195,6 +195,7 @@ pub enum SwarmBriefSourceKind {
     Bv,
     Git,
     HostProfile,
+    Qos,
     Rch,
 }
 
@@ -208,6 +209,7 @@ impl SwarmBriefSourceKind {
             Self::Bv => "bv",
             Self::Git => "git",
             Self::HostProfile => "host_profile",
+            Self::Qos => "qos",
             Self::Rch => "rch",
         }
     }
@@ -1451,6 +1453,7 @@ pub fn collect_swarm_brief(
         SwarmBriefSourceProvenance::local_probe(),
         || AgentInventorySourceAdapter.collect(options),
     );
+    attach_qos_resource_pressure(&mut report, &options.workspace);
     apply_swarm_brief_advice(&mut report);
     report.finalize();
     report
@@ -1495,6 +1498,112 @@ fn skipped_source_output(
         },
         contribution: SwarmBriefContribution::None,
     }
+}
+
+fn attach_qos_resource_pressure(report: &mut SwarmBriefReport, workspace: &Path) {
+    let workspace_identity = workspace.to_string_lossy();
+    let now_epoch_ms = current_epoch_ms();
+    let summary =
+        super::qos::summarize_qos_lane_registry(workspace, &workspace_identity, now_epoch_ms);
+    report
+        .resource_pressure
+        .extend(qos_resource_pressure_hints(&summary));
+    report
+        .degraded
+        .extend(summary.degraded.iter().map(|degradation| {
+            SwarmBriefDegradation::warning(
+                SwarmBriefSourceKind::Qos,
+                degradation.code.clone(),
+                degradation.message.clone(),
+                Some(degradation.repair.clone()),
+            )
+        }));
+}
+
+#[cfg(test)]
+fn attach_qos_summary_for_test(
+    report: &mut SwarmBriefReport,
+    summary: &super::qos::QosLaneSummary,
+) {
+    report
+        .resource_pressure
+        .extend(qos_resource_pressure_hints(summary));
+    report
+        .degraded
+        .extend(summary.degraded.iter().map(|degradation| {
+            SwarmBriefDegradation::warning(
+                SwarmBriefSourceKind::Qos,
+                degradation.code.clone(),
+                degradation.message.clone(),
+                Some(degradation.repair.clone()),
+            )
+        }));
+}
+
+fn current_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
+fn qos_resource_pressure_hints(
+    summary: &super::qos::QosLaneSummary,
+) -> Vec<SwarmBriefResourcePressureHint> {
+    let mut hints = Vec::new();
+    if summary.foreground_active_count > 0 {
+        hints.push(SwarmBriefResourcePressureHint {
+            source: SwarmBriefSourceKind::Qos,
+            level: "high".to_string(),
+            message: format!(
+                "qos foreground pressure active: {} foreground lane(s)",
+                summary.foreground_active_count
+            ),
+        });
+    }
+    if summary.background_active_count > 0 {
+        hints.push(SwarmBriefResourcePressureHint {
+            source: SwarmBriefSourceKind::Qos,
+            level: "medium".to_string(),
+            message: format!(
+                "qos background derived work active: {} lane(s)",
+                summary.background_active_count
+            ),
+        });
+    }
+    if summary.maintenance_active_count > 0 {
+        hints.push(SwarmBriefResourcePressureHint {
+            source: SwarmBriefSourceKind::Qos,
+            level: "medium".to_string(),
+            message: format!(
+                "qos maintenance work active: {} lane(s)",
+                summary.maintenance_active_count
+            ),
+        });
+    }
+    if summary.verification_active_count > 0 {
+        hints.push(SwarmBriefResourcePressureHint {
+            source: SwarmBriefSourceKind::Qos,
+            level: "low".to_string(),
+            message: format!(
+                "qos remote verification active: {} lane(s)",
+                summary.verification_active_count
+            ),
+        });
+    }
+    if summary.stale_ignored_count > 0 {
+        hints.push(SwarmBriefResourcePressureHint {
+            source: SwarmBriefSourceKind::Qos,
+            level: "low".to_string(),
+            message: format!(
+                "qos ignored stale lane record(s): {}",
+                summary.stale_ignored_count
+            ),
+        });
+    }
+    hints.sort();
+    hints.dedup();
+    hints
 }
 
 fn apply_source_output(report: &mut SwarmBriefReport, output: SwarmBriefSourceOutput) {
@@ -2776,6 +2885,7 @@ fn default_source_repair(source: SwarmBriefSourceKind) -> &'static str {
         SwarmBriefSourceKind::Bv => "bv --robot-triage --robot-triage-by-track",
         SwarmBriefSourceKind::Git => "git status --short --branch --untracked-files=all",
         SwarmBriefSourceKind::HostProfile => "ee profile probe --json",
+        SwarmBriefSourceKind::Qos => "ee status --json | jq .data.qos",
         SwarmBriefSourceKind::Rch => "rch status --json",
     }
 }
@@ -2788,6 +2898,7 @@ fn missing_source_knowledge(source: SwarmBriefSourceKind) -> &'static str {
         SwarmBriefSourceKind::Bv => "critical path and graph-aware priority",
         SwarmBriefSourceKind::Git => "dirty files and recent commit surfaces",
         SwarmBriefSourceKind::HostProfile => "local CPU, memory, and profile pressure",
+        SwarmBriefSourceKind::Qos => "foreground/background active-lane pressure",
         SwarmBriefSourceKind::Rch => "remote build queue and active build pressure",
     }
 }
@@ -4313,6 +4424,57 @@ mod tests {
                 && !rendered.contains("queryShapeHash")
                 && !rendered.contains("workspaceHash"),
             "handoff text should stay compact and omit raw key-shape field names"
+        );
+    }
+
+    #[test]
+    fn qos_pressure_hints_raise_swarm_brief_resource_posture_without_raw_request() {
+        let mut report = report_with_ready_sources();
+        let summary = super::super::qos::QosLaneSummary {
+            schema: super::super::qos::QOS_ACTIVE_LANE_SUMMARY_SCHEMA_V1.to_string(),
+            workspace_hash: "sha256:workspace".to_string(),
+            active_records: Vec::new(),
+            foreground_active_count: 1,
+            background_active_count: 2,
+            verification_active_count: 1,
+            maintenance_active_count: 1,
+            stale_ignored_count: 1,
+            degraded: Vec::new(),
+        };
+
+        attach_qos_summary_for_test(&mut report, &summary);
+        apply_swarm_brief_advice(&mut report);
+        report.finalize();
+
+        let summary = summarize_swarm_brief_report(&report);
+        assert_eq!(
+            summary.pointer("/resourcePressurePosture"),
+            Some(&json!("high"))
+        );
+        assert!(
+            report.resource_pressure.iter().any(|hint| {
+                hint.source == SwarmBriefSourceKind::Qos
+                    && hint.level == "high"
+                    && hint.message.contains("foreground pressure")
+            }),
+            "foreground QoS pressure should become a high resource-pressure hint"
+        );
+        assert!(
+            report.resource_pressure.iter().any(|hint| {
+                hint.source == SwarmBriefSourceKind::Qos
+                    && hint.level == "medium"
+                    && hint.message.contains("background derived work")
+            }),
+            "background derived QoS work should be visible without raw task content"
+        );
+        let rendered = stable_summary_json(&summary);
+        assert!(
+            rendered.contains("\"resourcePressurePosture\":\"high\""),
+            "support-bundle swarm summary should expose compact QoS pressure posture"
+        );
+        assert!(
+            !rendered.contains("request_text") && !rendered.contains("summarize private task"),
+            "QoS pressure summary must not expose raw request text"
         );
     }
 
