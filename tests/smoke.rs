@@ -1096,6 +1096,39 @@ fn status_skyline_human_stdout_is_compact_status_surface() -> TestResult {
     ensure_ends_with(&stdout, '\n', "status skyline trailing newline")
 }
 
+#[test]
+fn status_skyline_json_stdout_is_stable_machine_data() -> TestResult {
+    let output = run_ee(&["status", "--skyline", "--json"])?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    ensure(
+        output.status.success(),
+        format!("status --skyline --json should succeed; stderr: {stderr}"),
+    )?;
+    ensure(
+        stderr.is_empty(),
+        "stderr must be empty for JSON status skyline".to_string(),
+    )?;
+    ensure_starts_with(
+        &stdout,
+        "{\"schema\":\"ee.response.v1\"",
+        "status skyline JSON response schema",
+    )?;
+    ensure_contains(
+        &stdout,
+        "\"schema\":\"ee.status.skyline.v1\"",
+        "status skyline data schema",
+    )?;
+    ensure_contains(
+        &stdout,
+        "\"command\":\"status --skyline\"",
+        "status skyline command",
+    )?;
+    ensure_ends_with(&stdout, '\n', "status skyline JSON trailing newline")
+}
+
 #[cfg(unix)]
 #[test]
 fn profile_config_plan_and_apply_json_are_stable_machine_data() -> TestResult {

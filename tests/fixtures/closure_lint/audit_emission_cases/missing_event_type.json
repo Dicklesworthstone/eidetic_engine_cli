@@ -1,0 +1,7 @@
+{
+  "schema": "ee.closure_lint.audit_emission_case.v1",
+  "case": "missing_event_type",
+  "bead_id": "bd-3usjw.no-event-type",
+  "description": "Bead declares an `AUDIT EMISSION:` block but never names a concrete event_type literal (no `event_type=` token in the description). Without a concrete emission name the audit-row contract is meaningless. Expected closure-lint outcome: fail with reason mentioning event_type.",
+  "expected": "fail"
+}

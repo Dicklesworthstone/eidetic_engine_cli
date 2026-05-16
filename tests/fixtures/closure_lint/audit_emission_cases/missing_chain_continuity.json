@@ -1,0 +1,7 @@
+{
+  "schema": "ee.closure_lint.audit_emission_case.v1",
+  "case": "missing_chain_continuity",
+  "bead_id": "bd-3usjw.no-chain",
+  "description": "Bead declares an `AUDIT EMISSION:` block with an event_type= literal but omits the chain_continuity / chain_hash acceptance criterion. The audit-row contract requires explicit declaration that the row joins the existing chain (so forensic queries return). Expected closure-lint outcome: fail with reason mentioning chain_continuity.",
+  "expected": "fail"
+}

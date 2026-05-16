@@ -1,0 +1,7 @@
+{
+  "schema": "ee.closure_lint.audit_emission_case.v1",
+  "case": "no_audit_block",
+  "bead_id": "bd-3usjw.no-audit-block",
+  "description": "Closed implements-surface bead whose description has no `AUDIT EMISSION:` block at all. The rule is shape-validation-when-declared, so this bead is exempt and produces no violation. The bulk retrofit + the durable_write enforcement gate are separate follow-up beads.",
+  "expected": "pass"
+}

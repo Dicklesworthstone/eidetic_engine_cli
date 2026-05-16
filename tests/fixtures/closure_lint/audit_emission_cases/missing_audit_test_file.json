@@ -1,0 +1,7 @@
+{
+  "schema": "ee.closure_lint.audit_emission_case.v1",
+  "case": "missing_audit_test_file",
+  "bead_id": "bd-3usjw.no-test-file",
+  "description": "Bead declares an `AUDIT EMISSION:` block with event_type= and chain_continuity present but references no `*_audit.rs` test file that exists on disk. Without an executable audit test the contract is unverified. Expected closure-lint outcome: fail with reason mentioning audit_test_file.",
+  "expected": "fail"
+}

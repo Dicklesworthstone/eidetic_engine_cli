@@ -1,0 +1,7 @@
+{
+  "schema": "ee.closure_lint.audit_emission_case.v1",
+  "case": "valid_audit_block",
+  "bead_id": "bd-3usjw.valid-audit",
+  "description": "Closed implements-surface bead with a fully-formed `AUDIT EMISSION:` block: an event_type= literal, a chain_continuity acceptance criterion, and a referenced *_audit.rs test file that exists on disk. Expected closure-lint outcome: pass.",
+  "expected": "pass"
+}
