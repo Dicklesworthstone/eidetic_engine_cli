@@ -228,6 +228,7 @@ fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
 
     write_file(&workspace.join(".gitignore"), "ignored.tmp\n")?;
     write_file(&workspace.join("tracked.txt"), "base\n")?;
+    write_file(&workspace.join("both.txt"), "base\n")?;
     write_file(&workspace.join("rename_old.txt"), "rename me\n")?;
     write_file(&workspace.join("delete_me.txt"), "delete me\n")?;
     write_file(
@@ -240,6 +241,7 @@ fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
             "add",
             ".gitignore",
             "tracked.txt",
+            "both.txt",
             "rename_old.txt",
             "delete_me.txt",
             "binary.bin",
@@ -248,6 +250,9 @@ fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
     run_git(workspace, &["commit", "-q", "-m", "seed"])?;
 
     write_file(&workspace.join("tracked.txt"), "base\nunstaged\n")?;
+    write_file(&workspace.join("both.txt"), "base\nstaged\n")?;
+    run_git(workspace, &["add", "both.txt"])?;
+    write_file(&workspace.join("both.txt"), "base\nstaged\nunstaged\n")?;
     write_file(&workspace.join("staged.txt"), "staged\n")?;
     run_git(workspace, &["add", "staged.txt"])?;
     run_git(workspace, &["mv", "rename_old.txt", "rename_new.txt"])?;
@@ -292,7 +297,19 @@ fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
         .iter()
         .map(|entry| (entry.path.as_str(), entry))
         .collect::<BTreeMap<_, _>>();
+    let entry_paths = snapshot
+        .entries
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect::<Vec<_>>();
+    let mut sorted_entry_paths = entry_paths.clone();
+    sorted_entry_paths.sort_unstable();
+    assert_eq!(
+        entry_paths, sorted_entry_paths,
+        "snapshot entries must be deterministically sorted by path"
+    );
     assert!(entries_by_path.contains_key("tracked.txt"));
+    assert!(entries_by_path.contains_key("both.txt"));
     assert!(entries_by_path.contains_key("staged.txt"));
     assert!(entries_by_path.contains_key("rename_new.txt"));
     assert!(entries_by_path.contains_key("delete_me.txt"));
@@ -308,6 +325,11 @@ fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
     assert_eq!(tracked.entry_kind, "ordinary");
     assert_eq!(tracked.staged, ".");
     assert_eq!(tracked.unstaged, "M");
+
+    let both = entry_by_path(&snapshot.entries, "both.txt")?;
+    assert_eq!(both.entry_kind, "ordinary");
+    assert_eq!(both.staged, "M");
+    assert_eq!(both.unstaged, "M");
 
     let staged = entry_by_path(&snapshot.entries, "staged.txt")?;
     assert_eq!(staged.staged, "A");
