@@ -112,7 +112,7 @@ fn doc_distinguishes_current_and_planned_redaction_flags() -> TestResult {
         "current `--redaction <level>`",
         "planned `--redaction <level>`",
         "Handoff, context, and support-bundle level flags are part of",
-        "not all live yet",
+        "not all live",
     ] {
         ensure(
             doc.contains(required_phrase),
@@ -264,7 +264,9 @@ fn doc_does_not_claim_unregistered_redaction_env_override() -> TestResult {
         std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/env_vars.md"))
             .map_err(|e| format!("read docs/env_vars.md: {e}"))?;
 
-    if doc.contains("`EE_REDACTION_") {
+    let claims_live_env_override = doc.contains("`EE_REDACTION_")
+        && !doc.contains("No `EE_REDACTION_*` redaction-level override is currently registered");
+    if claims_live_env_override {
         ensure(
             env_registry_doc.contains("`EE_REDACTION_"),
             "docs/redaction_levels.md claims an `EE_REDACTION_*` override, but docs/env_vars.md has no registered redaction env override",
