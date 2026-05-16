@@ -3066,6 +3066,19 @@ impl ManualRunner {
             );
         }
 
+        let qos_decision = qos_throttle_decision_for_steward_job(
+            &self.normalized_workspace_path(),
+            JobType::IndexCoalesce,
+            budget,
+            preflight.pending_jobs,
+            crate::core::qos::QosThrottleCheckpoint::BeforeExpensivePhase,
+            false,
+            current_epoch_millis(),
+        );
+        if let Some(adjusted) = qos_decision.adjusted_item_budget {
+            options.job_limit = Some(adjusted);
+        }
+
         options.dry_run = false;
         let report = match crate::core::index::process_index_jobs(&options) {
             Ok(report) => report,
@@ -3108,11 +3121,14 @@ impl ManualRunner {
             outcome,
             Some(u64::from(report.processed_jobs)),
             error,
-            Some(index_coalesce_job_details(
-                &preflight,
-                Some(&report),
-                false,
-                report.processed_jobs > 0,
+            Some(with_qos_throttle_detail(
+                index_coalesce_job_details(
+                    &preflight,
+                    Some(&report),
+                    false,
+                    report.processed_jobs > 0,
+                ),
+                &qos_decision,
             )),
         )
     }
@@ -4516,6 +4532,62 @@ fn budget_times_out_before_mutation(budget: &JobBudgetState) -> bool {
             && limit.on_exceed == BudgetExceedAction::Cancel
             && limit.limit == 0
     })
+}
+
+fn qos_throttle_decision_for_steward_job(
+    workspace_path: &Path,
+    job_type: JobType,
+    budget: &JobBudgetState,
+    planned_items: u32,
+    checkpoint: crate::core::qos::QosThrottleCheckpoint,
+    may_yield: bool,
+    now_epoch_ms: u64,
+) -> crate::core::qos::QosBackgroundThrottleDecision {
+    let workspace_identity = workspace_path.to_string_lossy();
+    let summary = crate::core::qos::summarize_qos_lane_registry(
+        workspace_path,
+        &workspace_identity,
+        now_epoch_ms,
+    );
+    let remaining_item_budget = budget
+        .remaining(ResourceType::Items)
+        .and_then(|remaining| u32::try_from(remaining).ok())
+        .map_or(planned_items, |remaining| remaining.min(planned_items));
+    let minimum_item_budget = if planned_items == 0 { 0 } else { 1 };
+
+    crate::core::qos::decide_background_throttle(
+        &summary,
+        crate::core::qos::QosBackgroundThrottleInput {
+            lane: qos_lane_for_steward_job(job_type),
+            checkpoint,
+            remaining_item_budget,
+            minimum_item_budget,
+            may_yield,
+        },
+    )
+}
+
+const fn qos_lane_for_steward_job(job_type: JobType) -> crate::core::qos::QosLane {
+    match job_type {
+        JobType::HealthCheck => crate::core::qos::QosLane::BackgroundDerived,
+        _ => crate::core::qos::QosLane::MaintenanceSteward,
+    }
+}
+
+fn with_qos_throttle_detail(
+    mut details: JsonValue,
+    decision: &crate::core::qos::QosBackgroundThrottleDecision,
+) -> JsonValue {
+    if decision.behavior_changed() {
+        if let Some(object) = details.as_object_mut() {
+            object.insert("qosThrottle".to_owned(), json!(decision));
+        }
+    }
+    details
+}
+
+fn current_epoch_millis() -> u64 {
+    u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0)
 }
 
 struct OpenedWorkspaceDatabase {
@@ -6257,6 +6329,120 @@ mod tests {
         assert_eq!(BudgetExceedAction::Warn.to_string(), "warn");
         assert_eq!(BudgetExceedAction::Throttle.to_string(), "throttle");
         assert_eq!(BudgetExceedAction::Checkpoint.to_string(), "checkpoint");
+    }
+
+    #[test]
+    fn steward_qos_throttle_shrinks_background_budget_under_foreground_pressure() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path();
+        let workspace_identity = workspace.display().to_string();
+        crate::core::qos::publish_qos_lane_record(
+            workspace,
+            &crate::core::qos::QosLaneRecordInput {
+                workspace_identity: &workspace_identity,
+                lane: crate::core::qos::QosLane::ForegroundRead,
+                command_class: "context",
+                process_id: Some(101),
+                profile_label: Some("balanced"),
+                budget_label: Some("interactive"),
+                request_text: Some("foreground query should be hashed"),
+                request_hash: None,
+                started_at_epoch_ms: 100,
+                ttl_ms: 1_000,
+                status: crate::core::qos::QosLaneStatus::Active,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        let budget = create_job_budget("job-qos", JobType::IndexCoalesce, "2026-04-30T12:00:00Z");
+        let decision = qos_throttle_decision_for_steward_job(
+            workspace,
+            JobType::IndexCoalesce,
+            &budget,
+            100,
+            crate::core::qos::QosThrottleCheckpoint::BeforeExpensivePhase,
+            false,
+            500,
+        );
+
+        ensure(
+            decision.action,
+            crate::core::qos::QosBackgroundThrottleAction::ShrinkItemBudget,
+            "qos action",
+        )?;
+        ensure(decision.adjusted_item_budget, Some(50), "adjusted budget")?;
+        ensure(decision.foreground_pressure, true, "foreground pressure")
+    }
+
+    #[test]
+    fn steward_qos_throttle_ignores_stale_foreground_records() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path();
+        let workspace_identity = workspace.display().to_string();
+        crate::core::qos::publish_qos_lane_record(
+            workspace,
+            &crate::core::qos::QosLaneRecordInput {
+                workspace_identity: &workspace_identity,
+                lane: crate::core::qos::QosLane::ForegroundRead,
+                command_class: "context",
+                process_id: Some(102),
+                profile_label: Some("balanced"),
+                budget_label: Some("interactive"),
+                request_text: Some("stale foreground query should be hashed"),
+                request_hash: None,
+                started_at_epoch_ms: 100,
+                ttl_ms: 100,
+                status: crate::core::qos::QosLaneStatus::Active,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        let budget = create_job_budget("job-qos", JobType::IndexCoalesce, "2026-04-30T12:00:00Z");
+        let decision = qos_throttle_decision_for_steward_job(
+            workspace,
+            JobType::IndexCoalesce,
+            &budget,
+            100,
+            crate::core::qos::QosThrottleCheckpoint::BeforeExpensivePhase,
+            false,
+            500,
+        );
+
+        ensure(
+            decision.action,
+            crate::core::qos::QosBackgroundThrottleAction::Continue,
+            "qos action",
+        )?;
+        ensure(decision.foreground_pressure, false, "foreground pressure")
+    }
+
+    #[test]
+    fn steward_qos_detail_is_emitted_only_when_behavior_changes() -> TestResult {
+        let changed = crate::core::qos::QosBackgroundThrottleDecision {
+            action: crate::core::qos::QosBackgroundThrottleAction::ShrinkItemBudget,
+            foreground_pressure: true,
+            adjusted_item_budget: Some(25),
+            reason: "foreground_pressure_shrink_budget".to_owned(),
+        };
+        let unchanged = crate::core::qos::QosBackgroundThrottleDecision {
+            action: crate::core::qos::QosBackgroundThrottleAction::Continue,
+            foreground_pressure: false,
+            adjusted_item_budget: None,
+            reason: "no_foreground_pressure".to_owned(),
+        };
+
+        let changed_details = with_qos_throttle_detail(json!({"schema": "test"}), &changed);
+        ensure(
+            changed_details["qosThrottle"]["action"].as_str(),
+            Some("shrink_item_budget"),
+            "changed detail action",
+        )?;
+        let unchanged_details = with_qos_throttle_detail(json!({"schema": "test"}), &unchanged);
+        ensure(
+            unchanged_details.get("qosThrottle").is_none(),
+            true,
+            "unchanged detail omitted",
+        )
     }
 
     // ========================================================================
