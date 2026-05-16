@@ -319,13 +319,18 @@ pub fn pattern_matches_path(pattern: &str, path: &str) -> bool {
     if pattern == path {
         return true;
     }
-    // Normalize ** to * so that common recursive reservation patterns from
-    // Agent Mail ("src/**", "src/graph/**") work with the minimal glob matcher.
-    // The underlying glob_match already treats * as crossing directory
-    // separators (byte-level), so this normalization gives the expected
-    // "this directory and everything under it" semantics without changing
-    // the small deterministic glob language used elsewhere (tripwire preflight).
-    let normalized = pattern.replace("**", "*");
+    // Normalize ** (and degenerate *** etc.) to *.
+    // This makes common recursive reservation patterns from Agent Mail
+    // ("src/**", "src/graph/**") and Beads work correctly with the minimal
+    // byte-level glob matcher (which already crosses '/' for *).
+    // We do not change the glob language itself (used by tripwire preflight)
+    // because that must stay small and deterministic.
+    let mut normalized = pattern.replace("**", "*");
+    // Handle degenerate cases like "***" -> "**" -> "*" in one pass is not enough;
+    // a second replace covers up to 4 stars in practice for file paths.
+    if normalized.contains("**") {
+        normalized = normalized.replace("**", "*");
+    }
     glob_match(&normalized, path)
 }
 

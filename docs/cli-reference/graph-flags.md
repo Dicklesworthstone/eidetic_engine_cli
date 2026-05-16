@@ -177,5 +177,5 @@ surface in this checkout does not yet expose them as top-level flags:
 
 | Planned flag | Tracked surface | Current status |
 | --- | --- | --- |
-| `ee status --skyline` | `bd-mhc1.3` / `ee.status.skyline.v1` | Status skyline schema and core reporting code exist, but `ee status` currently has no dedicated `--skyline` flag. |
+| `ee status --skyline` | `bd-mhc1.2` / `ee.status.skyline.v1` | Implemented. Emits a schema-valid skyline status surface in JSON and compact human output; full community scoring remains owned by the G8.a composite skyline work. |
 | `--allow-tombstone-load-bearing` | load-bearing curation policy | Not present in the current Clap structs. Use `--no-structural-decay` for the implemented opt-out surface. |

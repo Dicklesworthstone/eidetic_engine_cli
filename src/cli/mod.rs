@@ -36687,8 +36687,9 @@ mod tests {
         HandoffCommand, HealthArgs, ImportCommand, JobCommand, LearnCommand,
         LearnExperimentCommand, MaintenanceCommand, MemoryCommand, OutcomeQuarantineCommand,
         OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand, RuleCommand, ShadowMode,
-        SituationCommand, SwarmBriefArgs, SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand,
-        VerifyCommand, WorkflowCommand, decay_settings_from_config, run, write_index_rebuild_error,
+        SituationCommand, StatusArgs, SwarmBriefArgs, SwarmCommand, TaskFrameCommand,
+        TaskFrameSubgoalCommand, VerifyCommand, WorkflowCommand, decay_settings_from_config, run,
+        write_index_rebuild_error,
     };
     use crate::core::index::IndexRebuildError;
     use crate::core::search::{
