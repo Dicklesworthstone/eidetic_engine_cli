@@ -630,6 +630,7 @@ struct ContextPerformanceTrace {
     db_open_count: usize,
     index_status_checks: usize,
     pack_record_writes: usize,
+    read_snapshot: Option<ReadSnapshotTrace>,
     filter_input_count: usize,
     filtered_count: usize,
     focus_state_read_attempts: usize,
@@ -637,6 +638,15 @@ struct ContextPerformanceTrace {
     focus_candidate_count: usize,
     candidate_resolution: CandidateResolutionMetrics,
     timings: Vec<PerformanceTiming>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReadSnapshotTrace {
+    pinned: bool,
+    slot_id: Option<u64>,
+    lease_held_ms: u64,
+    expired: bool,
+    poisoned: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -676,14 +686,26 @@ impl ContextPerformanceTrace {
         });
     }
 
+    fn record_read_snapshot(&mut self, snapshot: &SnapshotPin<'_>) {
+        self.read_snapshot = Some(ReadSnapshotTrace {
+            pinned: snapshot.is_pinned(),
+            slot_id: snapshot.slot_id(),
+            lease_held_ms: duration_millis_u64(snapshot.age()),
+            expired: snapshot.is_expired(),
+            poisoned: snapshot.is_poisoned(),
+        });
+    }
+
     fn elapsed_ms(&self, name: &str) -> u64 {
         self.timings
             .iter()
             .find(|timing| timing.name == name)
-            .map_or(0, |timing| {
-                u64::try_from(timing.elapsed.as_millis()).unwrap_or(u64::MAX)
-            })
+            .map_or(0, |timing| duration_millis_u64(timing.elapsed))
     }
+}
+
+fn duration_millis_u64(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[derive(Debug)]
@@ -1508,6 +1530,7 @@ fn run_context_pack_with_performance_inner(
     }
     trace.record_elapsed("packPersistence", persist_start);
     trace.record_elapsed("total", total_start);
+    trace.record_read_snapshot(&read_snapshot);
 
     let consensus_conflicts = crate::pack::analyze_pack_consensus_conflicts(&draft);
     push_consensus_conflict_degradations(
@@ -1716,6 +1739,7 @@ fn pack_assembly_slo_for_run(
 fn context_db_reads_json(trace: &ContextPerformanceTrace) -> serde_json::Value {
     serde_json::json!({
         "dbOpenCount": trace.db_open_count,
+        "readSnapshot": context_read_snapshot_json(trace.read_snapshot.as_ref()),
         "indexStatusChecks": trace.index_status_checks,
         "memoryBatchReads": trace.candidate_resolution.memory_batch_reads,
         "tagBatchReads": trace.candidate_resolution.tag_batch_reads,
@@ -1723,6 +1747,33 @@ fn context_db_reads_json(trace: &ContextPerformanceTrace) -> serde_json::Value {
         "focusStateReads": trace.focus_state_read_attempts,
         "packRecordWrites": trace.pack_record_writes,
     })
+}
+
+fn context_read_snapshot_json(snapshot: Option<&ReadSnapshotTrace>) -> serde_json::Value {
+    match snapshot {
+        Some(snapshot) => serde_json::json!({
+            "surface": "read_snapshot",
+            "pinned": snapshot.pinned,
+            "slotId": snapshot.slot_id,
+            "leaseHeldMs": snapshot.lease_held_ms,
+            "expired": snapshot.expired,
+            "poisoned": snapshot.poisoned,
+            "snapshotGeneration": null,
+            "pageCacheHitRatio": null,
+            "forkCostUs": null,
+        }),
+        None => serde_json::json!({
+            "surface": "read_snapshot",
+            "pinned": false,
+            "slotId": null,
+            "leaseHeldMs": 0,
+            "expired": false,
+            "poisoned": false,
+            "snapshotGeneration": null,
+            "pageCacheHitRatio": null,
+            "forkCostUs": null,
+        }),
+    }
 }
 
 fn context_search_json(
@@ -5543,9 +5594,9 @@ mod tests {
 
     use super::{
         AccessLevel, CandidateResolutionMetrics, CapabilitySet, CommandContext,
-        ContextPerformanceTrace, PackSlotAcquisition, PerformanceTiming, candidate_selection_why,
-        context_performance_json, focus_candidate_why, focus_relevance, pack_assembly_slo_for_run,
-        try_acquire_pack_slot, unit_score,
+        ContextPerformanceTrace, PackSlotAcquisition, PerformanceTiming, ReadSnapshotTrace,
+        candidate_selection_why, context_performance_json, focus_candidate_why, focus_relevance,
+        pack_assembly_slo_for_run, try_acquire_pack_slot, unit_score,
     };
     use crate::config::{ReadPoolConfig, WorkspaceLocation};
     use crate::core::budget::RequestBudget;
@@ -7221,6 +7272,13 @@ mod tests {
             db_open_count: 1,
             index_status_checks: 1,
             pack_record_writes: 1,
+            read_snapshot: Some(ReadSnapshotTrace {
+                pinned: true,
+                slot_id: Some(7),
+                lease_held_ms: 12,
+                expired: false,
+                poisoned: false,
+            }),
             candidate_resolution: CandidateResolutionMetrics {
                 search_hits: 2,
                 resolved_memory_ids: 2,
@@ -7259,6 +7317,13 @@ mod tests {
         assert_eq!(json["data"]["command"], "pack");
         assert_eq!(json["data"]["query"]["textIncluded"], false);
         assert_eq!(json["data"]["dbReads"]["memoryBatchReads"], 1);
+        assert_eq!(
+            json["data"]["dbReads"]["readSnapshot"]["surface"],
+            "read_snapshot"
+        );
+        assert_eq!(json["data"]["dbReads"]["readSnapshot"]["pinned"], true);
+        assert_eq!(json["data"]["dbReads"]["readSnapshot"]["slotId"], 7);
+        assert_eq!(json["data"]["dbReads"]["readSnapshot"]["leaseHeldMs"], 12);
         assert_eq!(json["data"]["candidates"]["convertedCandidates"], 2);
         assert_eq!(json["data"]["pack"]["pruning"]["tokenBudgetExceeded"], 2);
         assert_eq!(json["data"]["cache"]["status"], "fallback");
