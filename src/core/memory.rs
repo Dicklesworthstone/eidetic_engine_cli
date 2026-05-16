@@ -1153,12 +1153,12 @@ pub fn assess_memory_evidence_freshness(
         ProvenanceUri::File { path, span } => {
             let source_path = resolve_provenance_file_path(path, workspace_path);
             let canonical_uri = provenance.to_string();
-            let source_text = match fs::read_to_string(&source_path) {
-                Ok(contents) => match span {
+            let source_text = match read_provenance_file_text(&source_path) {
+                Ok(Some(contents)) => match span {
                     Some(_) => extract_line_span(&contents, *span).unwrap_or_default(),
                     None => contents,
                 },
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(None) => {
                     return EvidenceFreshness {
                         status: EvidenceFreshnessStatus::MissingSource,
                         provenance_uri: Some(canonical_uri),
@@ -1172,14 +1172,11 @@ pub fn assess_memory_evidence_freshness(
                         ),
                     };
                 }
-                Err(error) => {
+                Err(message) => {
                     return EvidenceFreshness {
                         status: EvidenceFreshnessStatus::UnreachableSource,
                         provenance_uri: Some(canonical_uri),
-                        detail: format!(
-                            "Referenced provenance file {} could not be read: {error}.",
-                            source_path.display()
-                        ),
+                        detail: message,
                         repair: Some(
                             "Fix file permissions or revise the memory provenance URI.".to_owned(),
                         ),
@@ -1228,6 +1225,54 @@ pub fn assess_memory_evidence_freshness(
             ),
         },
     }
+}
+
+fn read_provenance_file_text(source_path: &Path) -> Result<Option<String>, String> {
+    if let Some(symlink_path) = first_existing_symlink_component(source_path).map_err(|error| {
+        format!(
+            "Referenced provenance file {} could not be inspected at {}: {}.",
+            source_path.display(),
+            error.path.display(),
+            error.source
+        )
+    })? {
+        return Err(format!(
+            "Referenced provenance file {} traverses symlinked path component {}.",
+            source_path.display(),
+            symlink_path.display()
+        ));
+    }
+
+    match fs::symlink_metadata(source_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(format!(
+                "Referenced provenance file {} is not a regular file.",
+                source_path.display()
+            ));
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(format!(
+                "Referenced provenance file {} could not be inspected: {error}.",
+                source_path.display()
+            ));
+        }
+    }
+
+    fs::read_to_string(source_path).map(Some).map_err(|error| {
+        format!(
+            "Referenced provenance file {} could not be read: {error}.",
+            source_path.display()
+        )
+    })
 }
 
 fn resolve_provenance_file_path(path: &str, workspace_path: Option<&Path>) -> PathBuf {
@@ -6050,6 +6095,41 @@ mod tests {
         let unknown =
             assess_memory_evidence_freshness(&freshness_memory("No explicit source.", None), None);
         ensure(unknown.status, EvidenceFreshnessStatus::Unknown, "unknown")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn assess_memory_evidence_freshness_rejects_symlinked_file_source() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_source = temp.path().join("outside.md");
+        let linked_source = temp.path().join("linked.md");
+        std::fs::write(&outside_source, "Freshness source release evidence line\n")
+            .map_err(|error| error.to_string())?;
+        symlink(&outside_source, &linked_source).map_err(|error| error.to_string())?;
+
+        let freshness = assess_memory_evidence_freshness(
+            &freshness_memory(
+                "Freshness source release evidence line",
+                Some("file://linked.md".to_owned()),
+            ),
+            Some(temp.path()),
+        );
+
+        ensure(
+            freshness.status,
+            EvidenceFreshnessStatus::UnreachableSource,
+            "symlinked file source status",
+        )?;
+        if freshness.detail.contains("symlinked path component") {
+            Ok(())
+        } else {
+            Err(format!(
+                "unexpected symlinked freshness detail: {}",
+                freshness.detail
+            ))
+        }
     }
 
     fn remember_revisable_memory(
