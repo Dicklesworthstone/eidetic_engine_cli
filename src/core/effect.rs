@@ -1115,6 +1115,10 @@ impl EffectManifest {
                 "Analyze session evidence spans for curation candidates",
             ),
             CommandEffect::read_only("rule list", "List procedural rules"),
+            CommandEffect::read_only(
+                "rule provenance",
+                "Inspect the rule-to-memory provenance ego graph",
+            ),
             CommandEffect::read_only("rule show", "Show procedural rule"),
             CommandEffect::read_only("schema export", "Export public response schemas"),
             CommandEffect::read_only("schema list", "List response schemas"),

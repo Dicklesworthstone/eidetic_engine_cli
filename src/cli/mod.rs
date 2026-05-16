@@ -202,6 +202,10 @@ use crate::core::verify::{
 };
 use crate::core::why::{WhyOptions, explain_memory};
 use crate::core::workspace as workspace_core;
+use crate::db::DbConnection;
+use crate::graph::{
+    bipartite_provenance::compute_rule_provenance_ego, build_rule_provenance_bipartite_from_tables,
+};
 use crate::models::preflight::{
     RiskCategory, RiskLevel, TripwireAction, TripwireState, TripwireType,
 };
@@ -6044,6 +6048,8 @@ pub enum RuleCommand {
     List(RuleListArgs),
     /// Show one procedural rule.
     Show(RuleShowArgs),
+    /// Show the rule-to-memory provenance ego graph.
+    Provenance(RuleProvenanceArgs),
     /// Record lifecycle evidence for a procedural rule.
     Mark(RuleMarkArgs),
     /// Protect or unprotect a procedural rule.
@@ -6158,6 +6164,18 @@ pub struct RuleShowArgs {
     /// Include tombstoned rules.
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_tombstoned: bool,
+}
+
+/// Arguments for `ee rule provenance`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct RuleProvenanceArgs {
+    /// Rule ID.
+    #[arg(value_name = "RULE_ID")]
+    pub rule_id: String,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee rule mark`.
@@ -9020,6 +9038,9 @@ where
         }
         Some(Command::Rule(RuleCommand::Show(ref args))) => {
             handle_rule_show(&cli, args, stdout, stderr)
+        }
+        Some(Command::Rule(RuleCommand::Provenance(ref args))) => {
+            handle_rule_provenance(&cli, args, stdout, stderr)
         }
         Some(Command::Rule(RuleCommand::Mark(ref args))) => {
             handle_rule_mark(&cli, args, stdout, stderr)
@@ -30759,6 +30780,88 @@ where
     }
 }
 
+fn handle_rule_provenance<W, E>(
+    cli: &Cli,
+    args: &RuleProvenanceArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match load_rule_provenance_ego(cli, args) {
+        Ok(raw) => write_rule_provenance_report(cli, &raw, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn load_rule_provenance_ego(cli: &Cli, args: &RuleProvenanceArgs) -> Result<String, DomainError> {
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_owned()),
+        });
+    }
+
+    let workspace_id = workspace_core::stable_workspace_id(&workspace_path);
+    let connection =
+        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open database: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+    let graph = build_rule_provenance_bipartite_from_tables(&connection, &workspace_id).map_err(
+        |error| DomainError::Storage {
+            message: format!("Failed to build rule provenance graph: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        },
+    )?;
+    let ego = compute_rule_provenance_ego(&graph, &args.rule_id);
+    serde_json::to_string(&ego).map_err(|error| DomainError::Storage {
+        message: format!("Failed to serialize rule provenance graph: {error}"),
+        repair: Some("ee doctor".to_owned()),
+    })
+}
+
+fn write_rule_provenance_report<W>(cli: &Cli, raw: &str, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &(render_rule_provenance_human(raw) + "\n"))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_toon_from_json(raw) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::ResponseEnvelope::success().data_raw(raw).finish() + "\n"),
+        ),
+    }
+}
+
+fn render_rule_provenance_human(raw: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return "Rule provenance unavailable".to_owned();
+    };
+    let rule_id = value["ruleId"].as_str().unwrap_or("unknown");
+    let status = value["status"].as_str().unwrap_or("unknown");
+    let cited_count = value["citedMemories"].as_array().map_or(0, Vec::len);
+    let peer_count = value["coCitingRules"].as_array().map_or(0, Vec::len);
+    format!(
+        "Rule provenance\n  Rule: {rule_id}\n  Status: {status}\n  Cited memories: {cited_count}\n  Co-citing rules: {peer_count}"
+    )
+}
+
 fn handle_rule_mark<W, E>(
     cli: &Cli,
     args: &RuleMarkArgs,
@@ -36204,6 +36307,7 @@ impl NormalizedInvocation {
                     RuleCommand::Add(_) => "rule add".to_string(),
                     RuleCommand::List(_) => "rule list".to_string(),
                     RuleCommand::Show(_) => "rule show".to_string(),
+                    RuleCommand::Provenance(_) => "rule provenance".to_string(),
                     RuleCommand::Mark(_) => "rule mark".to_string(),
                     RuleCommand::Protect(_) => "rule protect".to_string(),
                     RuleCommand::Update(_) => "rule update".to_string(),
@@ -40460,6 +40564,14 @@ mod tests {
         ensure_contains(&stdout, "--section", "insights help section flag")?;
         ensure_contains(&stdout, "--explain", "insights help explain flag")?;
         ensure(stderr.is_empty(), "insights help stderr must be empty")
+    }
+
+    #[test]
+    fn rule_help_lists_provenance() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "rule", "--help"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "rule help exit")?;
+        ensure_contains(&stdout, "provenance", "rule help provenance subcommand")?;
+        ensure(stderr.is_empty(), "rule help stderr must be empty")
     }
 
     #[test]
@@ -46000,6 +46112,20 @@ default_half_life_days = 45
                 ensure_equal(&args.include_tombstoned, &true, "include tombstoned")
             }
             _ => Err("expected Rule Show command".to_string()),
+        }
+    }
+
+    #[test]
+    fn rule_provenance_command_parses_id() -> TestResult {
+        let rule_id = crate::models::RuleId::from_uuid(uuid::Uuid::from_u128(15)).to_string();
+        let parsed = Cli::try_parse_from(["ee", "rule", "provenance", rule_id.as_str()])
+            .map_err(|error| format!("failed to parse rule provenance: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Rule(RuleCommand::Provenance(ref args))) => {
+                ensure_equal(&args.rule_id, &rule_id, "rule id")
+            }
+            _ => Err("expected Rule Provenance command".to_string()),
         }
     }
 
