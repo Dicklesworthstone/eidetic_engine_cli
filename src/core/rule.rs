@@ -2283,9 +2283,9 @@ fn write_side_path_no_overwrite(path: &Path, bytes: &[u8]) -> Result<(), DomainE
             ),
             repair: Some("inspect the partial side-path artifact before retrying".to_owned()),
         })?;
-    file.flush().map_err(|error| DomainError::Storage {
+    file.sync_all().map_err(|error| DomainError::Storage {
         message: format!(
-            "failed to flush playbook export '{}': {error}",
+            "failed to sync playbook export '{}': {error}",
             path.display()
         ),
         repair: Some("inspect disk health and retry".to_owned()),

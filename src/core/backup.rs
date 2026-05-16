@@ -3147,8 +3147,8 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), DomainError> {
             message: format!("failed to write '{}': {error}", path.display()),
             repair: Some("inspect the partial backup directory before retrying".to_owned()),
         })?;
-    file.flush().map_err(|error| DomainError::Storage {
-        message: format!("failed to flush '{}': {error}", path.display()),
+    file.sync_all().map_err(|error| DomainError::Storage {
+        message: format!("failed to sync '{}': {error}", path.display()),
         repair: Some("inspect disk health and retry backup creation".to_owned()),
     })
 }

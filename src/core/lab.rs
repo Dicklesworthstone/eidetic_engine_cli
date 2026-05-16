@@ -754,8 +754,8 @@ fn maybe_store_frozen_episode(
         .map_err(|error| lab_storage_error("write frozen episode artifact", error))?;
     file.write_all(b"\n")
         .map_err(|error| lab_storage_error("finish frozen episode artifact", error))?;
-    file.flush()
-        .map_err(|error| lab_storage_error("flush frozen episode artifact", error))?;
+    file.sync_all()
+        .map_err(|error| lab_storage_error("sync frozen episode artifact", error))?;
     report.episode_hash = Some(artifact.episode_hash);
     report.stored = true;
     Ok(())
