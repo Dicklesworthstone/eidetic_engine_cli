@@ -103,20 +103,20 @@ fn ensure_u64_eq(json: &Value, pointer: &str, expected: u64) -> TestResult {
 fn read_pool_status_schema_declares_all_four_counters() -> TestResult {
     let schema = read_json(STATUS_SCHEMA_PATH)?;
 
-    // `read_pool` must appear in the top-level `required` list so the schema
-    // refuses status payloads that omit the field.
-    ensure_string_array_contains(&schema, "/required", "read_pool")?;
+    // `read_pool` must appear in the envelope's `data.required` list so the
+    // schema refuses status payloads that omit the field.
+    ensure_string_array_contains(&schema, "/properties/data/required", "read_pool")?;
 
     // The `standard` field profile (`ee status --json` default) must
     // emit `read_pool`, so the per-profile registry stays consistent
     // with the schema's required-set.
-    ensure_string_array_contains(&schema, "/fieldProfiles/standard", "read_pool")?;
+    ensure_string_array_contains(&schema, "/field_presets/standard", "read_pool")?;
 
-    // The top-level `properties.read_pool` slot must point at the
+    // The `data.properties.read_pool` slot must point at the
     // canonical `$defs/readPoolStatus` definition.
     ensure_str_eq(
         &schema,
-        "/properties/read_pool/$ref",
+        "/properties/data/properties/read_pool/$ref",
         "#/$defs/readPoolStatus",
     )?;
 
