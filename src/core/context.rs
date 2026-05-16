@@ -68,6 +68,7 @@ use crate::pack::{
     PackResourceProfile, PackScoreBreakdown, PackSection, PackTrustSignal,
     assemble_draft_with_profile_and_options, estimate_tokens_default, pack_item_provenance_json,
 };
+use crate::runtime::determinism::{Deterministic, Seed};
 
 static PACK_HASH_LOG_RUN_INDEX: AtomicU64 = AtomicU64::new(0);
 static PACK_SLOT_PROCESS_GATES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
@@ -2248,6 +2249,44 @@ fn persist_pack_record(
     draft: &crate::pack::PackDraft,
     degraded: &[ContextResponseDegradation],
 ) -> Result<(), String> {
+    persist_pack_record_with_pack_id(
+        connection,
+        workspace_path,
+        request,
+        draft,
+        degraded,
+        PackId::now(),
+    )
+    .map(|_| ())
+}
+
+fn persist_pack_record_seeded(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    request: &ContextRequest,
+    draft: &crate::pack::PackDraft,
+    degraded: &[ContextResponseDegradation],
+    determinism: &Deterministic<Seed>,
+) -> Result<String, String> {
+    let mut pack_id_token = determinism.shared_child("ulid.pack");
+    persist_pack_record_with_pack_id(
+        connection,
+        workspace_path,
+        request,
+        draft,
+        degraded,
+        PackId::now_seeded(&mut pack_id_token),
+    )
+}
+
+fn persist_pack_record_with_pack_id(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    request: &ContextRequest,
+    draft: &crate::pack::PackDraft,
+    degraded: &[ContextResponseDegradation],
+    pack_id: PackId,
+) -> Result<String, String> {
     // Bead bd-17c65.1.9 (A9). Pre-overhaul this surface emitted
     // `context_pack_persist_failed: workspace not found` on every call
     // because the lookup used the raw path. `ee init` / `ee remember`
@@ -2280,7 +2319,6 @@ fn persist_pack_record(
         }
     };
 
-    let pack_id = PackId::now();
     let pack_hash = draft
         .hash
         .clone()
@@ -2350,7 +2388,8 @@ fn persist_pack_record(
 
     connection
         .insert_pack_record(&pack_id.to_string(), &input, &items, &omissions)
-        .map_err(|e| format!("insert failed: {e}"))
+        .map_err(|e| format!("insert failed: {e}"))?;
+    Ok(pack_id.to_string())
 }
 
 fn load_coordination_snapshot(
@@ -7693,6 +7732,66 @@ mod tests {
         assert_eq!(stored_item.trust_subclass.as_deref(), Some("reviewed"));
 
         connection.close().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn persist_pack_record_seeded_replays_pack_id() -> Result<(), String> {
+        use std::path::Path;
+
+        use super::{compute_pack_hash, persist_pack_record_seeded};
+        use crate::db::{CreateWorkspaceInput, DbConnection};
+        use crate::pack::{ContextRequest, PackCandidate, TokenBudget, assemble_draft};
+        use crate::runtime::determinism::Deterministic;
+
+        fn persisted_pack_id(seed: u64) -> Result<String, String> {
+            let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            let workspace_path = "/tmp/ee-context-seeded-pack-id";
+            connection
+                .insert_workspace(
+                    "wsp_01234567890123456789077777",
+                    &CreateWorkspaceInput {
+                        path: workspace_path.to_string(),
+                        name: Some("seeded pack id".to_string()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+
+            let request = ContextRequest::from_query("seeded pack id")
+                .map_err(|error| error.to_string())?;
+            let mut draft = assemble_draft(
+                "seeded pack id",
+                TokenBudget::default_context(),
+                Vec::<PackCandidate>::new(),
+            )
+            .map_err(|error| error.to_string())?;
+            draft.hash = Some(compute_pack_hash(&request, &draft, &[]));
+
+            let determinism = Deterministic::from_seed(seed);
+            let pack_id = persist_pack_record_seeded(
+                &connection,
+                Path::new(workspace_path),
+                &request,
+                &draft,
+                &[],
+                &determinism,
+            )?;
+            let stored = connection
+                .get_pack_record(&pack_id)
+                .map_err(|error| error.to_string())?;
+            assert!(stored.is_some(), "seeded pack record should be stored");
+            connection.close().map_err(|error| error.to_string())?;
+            Ok(pack_id)
+        }
+
+        let first = persisted_pack_id(77)?;
+        let replay = persisted_pack_id(77)?;
+        let other_seed = persisted_pack_id(78)?;
+
+        assert_eq!(first, replay);
+        assert_ne!(first, other_seed);
+        assert!(first.starts_with("pack_"));
         Ok(())
     }
 }
