@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use ee::models::{MemoryId, ProvenanceUri, UnitScore};
+use ee::models::{MemoryId, ProvenanceUri, RedactionLevel, UnitScore};
 use ee::pack::{
     ContextPackProfile, PackAssemblyOptions, PackCandidate, PackCandidateInput, PackDraft,
     PackProvenance, PackSection, TokenBudget, assemble_draft,
@@ -40,12 +40,13 @@ fn candidate_from_spec(
     tokens: u32,
     relevance: u16,
     utility: u16,
-    duplicate_content: bool,
+    content_shape: u8,
 ) -> Result<PackCandidate, String> {
-    let content = if duplicate_content {
-        "Shared property-test memory content.".to_string()
-    } else {
-        format!("Property-test memory content {index}.")
+    let content = match content_shape % 4 {
+        0 => "Shared property-test memory content.".to_string(),
+        1 => format!("Property-test memory content {index}."),
+        2 => format!("Property-test memory references /tmp/ee-pack-{index}/target/debug."),
+        _ => format!("Property-test credential placeholder password=redact-me-{index}."),
     };
     PackCandidate::new(PackCandidateInput {
         memory_id: memory_id(index),
@@ -60,11 +61,22 @@ fn candidate_from_spec(
     .map_err(|error| format!("{error:?}"))
 }
 
-fn candidate_specs() -> impl Strategy<Value = Vec<(u32, u16, u16, bool)>> {
-    prop::collection::vec(
-        (1_u32..=250, 0_u16..=1000, 0_u16..=1000, any::<bool>()),
-        0..32,
-    )
+fn candidates_from_specs(specs: Vec<(u32, u16, u16, u8)>) -> Result<Vec<PackCandidate>, String> {
+    let mut candidates = Vec::with_capacity(specs.len());
+    for (index, (tokens, relevance, utility, content_shape)) in specs.into_iter().enumerate() {
+        candidates.push(candidate_from_spec(
+            index,
+            tokens,
+            relevance,
+            utility,
+            content_shape,
+        )?);
+    }
+    Ok(candidates)
+}
+
+fn candidate_specs() -> impl Strategy<Value = Vec<(u32, u16, u16, u8)>> {
+    prop::collection::vec((1_u32..=250, 0_u16..=1000, 0_u16..=1000, 0_u8..=7), 0..32)
 }
 
 fn profile_for(raw: u8) -> ContextPackProfile {
@@ -74,6 +86,38 @@ fn profile_for(raw: u8) -> ContextPackProfile {
         2 => ContextPackProfile::Thorough,
         _ => ContextPackProfile::Submodular,
     }
+}
+
+fn redaction_level_for(raw: usize) -> RedactionLevel {
+    RedactionLevel::all()[raw % RedactionLevel::all().len()]
+}
+
+fn pack_options() -> impl Strategy<Value = PackAssemblyOptions> {
+    (
+        any::<bool>(),
+        any::<bool>(),
+        0_usize..RedactionLevel::all().len(),
+    )
+        .prop_map(
+            |(include_coverage_fill, output_redaction_enabled, redaction_level_raw)| {
+                PackAssemblyOptions {
+                    include_coverage_fill,
+                    output_redaction_enabled,
+                    redaction_level: redaction_level_for(redaction_level_raw),
+                }
+            },
+        )
+}
+
+fn determinism_seed() -> impl Strategy<Value = u64> {
+    prop_oneof![
+        Just(0),
+        Just(1),
+        Just(42),
+        Just(0xdead_beef),
+        Just(u64::MAX),
+        any::<u64>(),
+    ]
 }
 
 fn deterministic_reordered<T>(mut values: Vec<T>, seed: u64) -> Vec<T> {
@@ -91,6 +135,80 @@ fn stable_test_word(mut value: u64) -> u64 {
 
 fn draft_bytes(draft: &PackDraft) -> Vec<u8> {
     format!("{draft:#?}").into_bytes()
+}
+
+#[test]
+fn seeded_pack_assembly_replays_edge_seeds_and_option_axes() -> Result<(), String> {
+    let specs = vec![
+        (12, 980, 700, 1),
+        (18, 920, 600, 0),
+        (24, 850, 900, 2),
+        (15, 810, 500, 3),
+        (21, 760, 650, 5),
+    ];
+    let candidates = candidates_from_specs(specs)?;
+    let budget = TokenBudget::new(64).map_err(|error| format!("{error:?}"))?;
+    let profiles = [
+        ContextPackProfile::Compact,
+        ContextPackProfile::Balanced,
+        ContextPackProfile::Thorough,
+        ContextPackProfile::Submodular,
+    ];
+    let option_axes = [
+        PackAssemblyOptions::default(),
+        PackAssemblyOptions {
+            include_coverage_fill: false,
+            ..PackAssemblyOptions::default()
+        },
+        PackAssemblyOptions {
+            output_redaction_enabled: false,
+            redaction_level: RedactionLevel::None,
+            ..PackAssemblyOptions::default()
+        },
+        PackAssemblyOptions {
+            redaction_level: RedactionLevel::Strict,
+            ..PackAssemblyOptions::default()
+        },
+    ];
+
+    for seed in [0, 1, 42, 0xdead_beef, u64::MAX] {
+        for profile in profiles {
+            for options in option_axes {
+                let first = assemble_draft_with_profile_and_options_seeded(
+                    profile,
+                    "property pack deterministic edge seed",
+                    budget,
+                    candidates.clone(),
+                    options,
+                    &Deterministic::from_seed(seed),
+                )
+                .map_err(|error| format!("{error:?}"))?;
+                let replay = assemble_draft_with_profile_and_options_seeded(
+                    profile,
+                    "property pack deterministic edge seed",
+                    budget,
+                    candidates.clone(),
+                    options,
+                    &Deterministic::from_seed(seed),
+                )
+                .map_err(|error| format!("{error:?}"))?;
+                let reordered = assemble_draft_with_profile_and_options_seeded(
+                    profile,
+                    "property pack deterministic edge seed",
+                    budget,
+                    deterministic_reordered(candidates.clone(), seed),
+                    options,
+                    &Deterministic::from_seed(seed),
+                )
+                .map_err(|error| format!("{error:?}"))?;
+
+                assert_eq!(draft_bytes(&first), draft_bytes(&replay));
+                assert_eq!(draft_bytes(&first), draft_bytes(&reordered));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 proptest! {
@@ -123,13 +241,7 @@ proptest! {
     ) {
         let budget = TokenBudget::new(budget_raw)
             .map_err(|error| TestCaseError::fail(format!("{error:?}")))?;
-        let mut candidates = Vec::with_capacity(specs.len());
-        for (index, (tokens, relevance, utility, duplicate_content)) in specs.into_iter().enumerate() {
-            candidates.push(
-                candidate_from_spec(index, tokens, relevance, utility, duplicate_content)
-                    .map_err(TestCaseError::fail)?,
-            );
-        }
+        let candidates = candidates_from_specs(specs).map_err(TestCaseError::fail)?;
 
         let draft = assemble_draft("property pack budget", budget, candidates)
             .map_err(|error| TestCaseError::fail(format!("{error:?}")))?;
@@ -162,23 +274,17 @@ proptest! {
     #[test]
     fn seeded_pack_assembly_replays_byte_identical_output(
         budget_raw in 1_u32..=400,
-        seed in any::<u64>(),
+        seed in determinism_seed(),
         profile_raw in any::<u8>(),
+        options in pack_options(),
         query_suffix in "[a-z0-9 _-]{0,48}",
         specs in candidate_specs(),
     ) {
         let budget = TokenBudget::new(budget_raw)
             .map_err(|error| TestCaseError::fail(format!("{error:?}")))?;
-        let mut candidates = Vec::with_capacity(specs.len());
-        for (index, (tokens, relevance, utility, duplicate_content)) in specs.into_iter().enumerate() {
-            candidates.push(
-                candidate_from_spec(index, tokens, relevance, utility, duplicate_content)
-                    .map_err(TestCaseError::fail)?,
-            );
-        }
+        let candidates = candidates_from_specs(specs).map_err(TestCaseError::fail)?;
         let query = format!("property pack determinism {query_suffix}");
         let profile = profile_for(profile_raw);
-        let options = PackAssemblyOptions::default();
 
         let first = assemble_draft_with_profile_and_options_seeded(
             profile,
