@@ -4775,8 +4775,9 @@ pub fn graph_neighborhood(
         .map_err(|error| GraphError::storage("query memory-link neighborhood", error))?;
 
     let mut edges: Vec<GraphNeighborhoodEdge> = links
-        .iter()
-        .filter_map(|link| neighborhood_edge_for_link(&options.memory_id, options.direction, link))
+        .into_iter()
+        .filter(|link| memory_link_mesh_metadata_visible(link.metadata_json.as_deref()))
+        .filter_map(|link| neighborhood_edge_for_link(&options.memory_id, options.direction, &link))
         .collect();
     edges.sort_by(compare_neighborhood_edges);
 
@@ -7343,6 +7344,56 @@ mod tests {
         assert_eq!(json["graph"]["neighborCount"], 2);
         assert_eq!(json["edges"][0]["relativeDirection"], "incoming");
         assert_eq!(json["edges"][1]["weight"], serde_json::json!(0.9));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn graph_neighborhood_ignores_denied_mesh_links() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000044",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.8,
+        )?;
+        insert_link_with_metadata(
+            &connection,
+            "link_00000000000000000000000045",
+            MEMORY_A,
+            MEMORY_C,
+            true,
+            0.7,
+            0.6,
+            Some(mesh_link_metadata("deny", "graphSignal", true)),
+        )?;
+
+        let report = graph_result(super::graph_neighborhood(
+            &connection,
+            &super::GraphNeighborhoodOptions::new(MEMORY_A),
+        ))?;
+
+        assert_eq!(report.status, super::GraphNeighborhoodStatus::Found);
+        assert_eq!(report.edges.len(), 1);
+        assert_eq!(report.edges[0].link_id, "link_00000000000000000000000044");
+        assert_eq!(report.edges[0].neighbor_memory_id, MEMORY_B);
+        assert_eq!(
+            report
+                .nodes
+                .iter()
+                .map(|node| node.memory_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![MEMORY_A, MEMORY_B]
+        );
+        assert!(
+            !report
+                .edges
+                .iter()
+                .any(|edge| edge.neighbor_memory_id == MEMORY_C)
+        );
 
         connection.close().map_err(|error| error.to_string())
     }
