@@ -677,8 +677,9 @@ pub fn explain_focus(options: &FocusExplainOptions) -> Result<FocusReport, Domai
 pub fn read_active_focus_state(workspace_path: &Path) -> Result<Option<FocusState>, DomainError> {
     let workspace_path = normalize_workspace_path(workspace_path);
     let storage_path = focus_state_path(&workspace_path);
+    ensure_no_symlink_components(&storage_path, "read")?;
 
-    let metadata = match fs::metadata(&storage_path) {
+    let metadata = match fs::symlink_metadata(&storage_path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
@@ -753,17 +754,26 @@ pub fn focus_memory_statuses_from_lookup(
 fn load_focus(workspace_path: &Path) -> Result<LoadedFocus, DomainError> {
     let workspace_path = normalize_workspace_path(workspace_path);
     let storage_path = focus_state_path(&workspace_path);
-    let (state, degraded) = if storage_path.exists() {
-        (read_focus_state(&storage_path)?, Vec::new())
-    } else {
-        (
+    ensure_no_symlink_components(&storage_path, "read")?;
+    let (state, degraded) = match fs::symlink_metadata(&storage_path) {
+        Ok(_) => (read_focus_state(&storage_path)?, Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
             empty_focus_state(&workspace_path, DEFAULT_FOCUS_CAPACITY)?,
             vec![FocusDegradation::low(
                 "focus_state_absent",
                 "No focus state artifact exists yet; reporting an empty passive state.",
                 Some("ee focus set <memory-id> --json".to_owned()),
             )],
-        )
+        ),
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Failed to stat focus state {}: {error}",
+                    storage_path.display()
+                ),
+                repair: Some("Check workspace .ee/focus permissions.".to_owned()),
+            });
+        }
     };
     Ok(LoadedFocus {
         workspace_path,
@@ -774,6 +784,7 @@ fn load_focus(workspace_path: &Path) -> Result<LoadedFocus, DomainError> {
 }
 
 fn read_focus_state(path: &Path) -> Result<FocusState, DomainError> {
+    ensure_no_symlink_components(path, "read")?;
     let raw = fs::read_to_string(path).map_err(|error| DomainError::Storage {
         message: format!("Failed to read focus state {}: {error}", path.display()),
         repair: Some("Check workspace .ee/focus permissions.".to_owned()),
@@ -789,6 +800,7 @@ fn read_focus_state(path: &Path) -> Result<FocusState, DomainError> {
 }
 
 fn write_focus_state(path: &Path, state: &FocusState) -> Result<(), DomainError> {
+    ensure_no_symlink_components(path, "write")?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
             message: format!(
@@ -798,6 +810,7 @@ fn write_focus_state(path: &Path, state: &FocusState) -> Result<(), DomainError>
             repair: Some("Check workspace .ee permissions.".to_owned()),
         })?;
     }
+    ensure_no_symlink_components(path, "write")?;
     let mut body =
         serde_json::to_string_pretty(&state.data_json()).map_err(|error| DomainError::Storage {
             message: format!("Failed to serialize focus state: {error}"),
@@ -810,7 +823,7 @@ fn write_focus_state(path: &Path, state: &FocusState) -> Result<(), DomainError>
     })?;
 
     // Update cache with new state to avoid stale reads
-    if let Ok(mtime) = fs::metadata(path).and_then(|m| m.modified()) {
+    if let Ok(mtime) = fs::symlink_metadata(path).and_then(|m| m.modified()) {
         if let Ok(mut guard) = get_focus_cache().lock() {
             *guard = Some(FocusCacheEntry {
                 path: path.to_path_buf(),
@@ -820,6 +833,47 @@ fn write_focus_state(path: &Path, state: &FocusState) -> Result<(), DomainError>
         }
     }
 
+    Ok(())
+}
+
+fn ensure_no_symlink_components(path: &Path, operation: &'static str) -> Result<(), DomainError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Refusing to {operation} focus state `{}` through symlinked path component `{}`.",
+                        path.display(),
+                        current.display()
+                    ),
+                    repair: Some(
+                        "Replace the symlink with a real workspace .ee/focus path before retrying."
+                            .to_owned(),
+                    ),
+                });
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Failed to inspect focus state path component `{}` before {operation}: {error}",
+                        current.display()
+                    ),
+                    repair: Some("Check workspace .ee/focus permissions.".to_owned()),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1361,6 +1415,70 @@ mod tests {
         )?;
         ensure(report.state.item_count(), 0, "cleared item count")?;
         ensure(report.state.capacity, 3, "new capacity")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_focus_rejects_symlinked_metadata_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().join("workspace");
+        let real_metadata = dir.path().join("real-ee");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&real_metadata).map_err(|error| error.to_string())?;
+        symlink(&real_metadata, workspace.join(".ee")).map_err(|error| error.to_string())?;
+
+        let result = set_focus(&FocusSetOptions {
+            workspace_path: workspace,
+            memory_ids: vec![memory_id(45).to_string()],
+            focal_memory_id: None,
+            pinned_memory_ids: Vec::new(),
+            capacity: 2,
+            reason: "symlink guard".to_owned(),
+            provenance: Vec::new(),
+            scope: FocusScope::default(),
+        });
+        let error = result.expect_err("symlinked .ee parent should be rejected");
+        ensure(
+            error.message().contains("symlinked path component"),
+            true,
+            "symlinked .ee error message",
+        )?;
+        ensure(
+            real_metadata.join("focus").join("state.json").exists(),
+            false,
+            "focus write must not follow symlinked .ee parent",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn show_focus_rejects_symlinked_state_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().join("workspace");
+        let focus_dir = workspace.join(".ee").join("focus");
+        std::fs::create_dir_all(&focus_dir).map_err(|error| error.to_string())?;
+
+        let outside_state = dir.path().join("outside-focus.json");
+        let state = focus_state(&[memory_id(46)], 2).map_err(|error| error.message())?;
+        let mut body =
+            serde_json::to_string_pretty(&state.data_json()).map_err(|error| error.to_string())?;
+        body.push('\n');
+        std::fs::write(&outside_state, body).map_err(|error| error.to_string())?;
+        symlink(&outside_state, focus_dir.join("state.json")).map_err(|error| error.to_string())?;
+
+        let result = show_focus(&FocusShowOptions {
+            workspace_path: workspace,
+        });
+        let error = result.expect_err("symlinked focus state should be rejected");
+        ensure(
+            error.message().contains("symlinked path component"),
+            true,
+            "symlinked state error message",
+        )
     }
 
     #[test]
