@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use blake3::Hasher;
 use chrono::Utc;
@@ -278,10 +278,12 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
     let bundle_id = generate_bundle_id();
     let bundle_dir = output_dir.join(format!("ee_support_{bundle_id}"));
 
+    reject_existing_symlink_component(&bundle_dir, "support bundle output")?;
     fs::create_dir_all(&bundle_dir).map_err(|e| DomainError::Storage {
         message: format!("Failed to create bundle directory: {e}"),
         repair: Some("Check write permissions on output directory".to_string()),
     })?;
+    reject_existing_symlink_component(&bundle_dir, "support bundle output")?;
 
     let diagnostics = collect_diagnostics(&workspace_path, options.audit_limit)?;
 
@@ -424,12 +426,14 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
             repair: Some("Provide a valid bundle path".to_string()),
         });
     }
+    reject_existing_symlink_component(&options.bundle_path, "support bundle")?;
 
     let manifest_path = if options.bundle_path.is_dir() {
         options.bundle_path.join(MANIFEST_FILE)
     } else {
         options.bundle_path.clone()
     };
+    reject_existing_symlink_component(&manifest_path, "support bundle manifest")?;
 
     let bundle_dir = manifest_path.parent().unwrap_or(&options.bundle_path);
 
@@ -446,8 +450,11 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
 
     if let Some(ref m) = manifest {
         for entry in &m.files {
-            let file_path = bundle_dir.join(&entry.path);
-            if file_path.is_file() {
+            let Ok(file_path) = resolve_bundle_file_no_symlinks(bundle_dir, &entry.path) else {
+                hash_mismatches.push(entry.path.clone());
+                continue;
+            };
+            if regular_file_no_symlink(&file_path) {
                 files_found.push(entry.path.clone());
                 if let Ok(content) = fs::read_to_string(&file_path) {
                     total_size += content.len() as u64;
@@ -458,6 +465,8 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
                         }
                     }
                 }
+            } else if options.verify_hashes {
+                hash_mismatches.push(entry.path.clone());
             }
         }
     } else if options.bundle_path.is_dir() {
@@ -465,7 +474,10 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str() {
                     files_found.push(name.to_owned());
-                    if let Ok(meta) = entry.metadata() {
+                    if let Ok(meta) = fs::symlink_metadata(entry.path()) {
+                        if meta.file_type().is_symlink() {
+                            continue;
+                        }
                         total_size += meta.len();
                     }
                 }
@@ -665,8 +677,8 @@ fn observed_bundle_signature(bundle_dir: &Path, manifest: &BundleManifest) -> St
         .files
         .iter()
         .map(|entry| {
-            let path = bundle_dir.join(&entry.path);
-            let observed = fs::read_to_string(&path)
+            let observed = resolve_bundle_file_no_symlinks(bundle_dir, &entry.path)
+                .and_then(|path| read_regular_file_no_symlinks(&path))
                 .map(|content| compute_hash(&content))
                 .unwrap_or_else(|_| "missing_or_unreadable".to_owned());
             format!("{}={observed}", entry.path)
@@ -690,7 +702,8 @@ fn missing_bundle_section(artifact_id: &str, section: &str, file_name: &str) -> 
 }
 
 fn read_bundle_json(bundle_dir: &Path, file_name: &str) -> Option<Value> {
-    fs::read_to_string(bundle_dir.join(file_name))
+    resolve_bundle_file_no_symlinks(bundle_dir, file_name)
+        .and_then(|path| read_regular_file_no_symlinks(&path))
         .ok()
         .and_then(|content| serde_json::from_str(&content).ok())
 }
@@ -2080,6 +2093,7 @@ fn generate_bundle_id() -> String {
 }
 
 fn write_file_with_hash(path: &Path, content: &str) -> Result<u64, DomainError> {
+    reject_existing_symlink_component(path, "support bundle file")?;
     let mut file = File::create(path).map_err(|e| DomainError::Storage {
         message: format!("Failed to create file {}: {e}", path.display()),
         repair: None,
@@ -2090,6 +2104,85 @@ fn write_file_with_hash(path: &Path, content: &str) -> Result<u64, DomainError> 
             repair: None,
         })?;
     Ok(content.len() as u64)
+}
+
+fn reject_existing_symlink_component(path: &Path, label: &str) -> Result<(), DomainError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Refusing to access {label} through symlinked path component {}.",
+                        current.display()
+                    ),
+                    repair: Some("Choose a real, non-symlink support bundle path.".to_owned()),
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Failed to inspect {label} path component {}: {error}",
+                        current.display()
+                    ),
+                    repair: Some("Check support bundle path permissions.".to_owned()),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_bundle_file_no_symlinks(
+    bundle_dir: &Path,
+    relative: &str,
+) -> Result<PathBuf, DomainError> {
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute()
+        || relative_path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::Prefix(_) | Component::RootDir
+            )
+        })
+    {
+        return Err(DomainError::Storage {
+            message: format!("Unsafe support bundle manifest path: {relative}."),
+            repair: Some("Regenerate the support bundle with relative file names only.".to_owned()),
+        });
+    }
+
+    let resolved = bundle_dir.join(relative_path);
+    reject_existing_symlink_component(&resolved, "support bundle file")?;
+    Ok(resolved)
+}
+
+fn regular_file_no_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+fn read_regular_file_no_symlinks(path: &Path) -> Result<String, DomainError> {
+    if !regular_file_no_symlink(path) {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Support bundle file is not a regular non-symlink file: {}.",
+                path.display()
+            ),
+            repair: Some("Regenerate the support bundle.".to_owned()),
+        });
+    }
+    fs::read_to_string(path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to read support bundle file {}: {error}",
+            path.display()
+        ),
+        repair: Some("Check support bundle file permissions.".to_owned()),
+    })
 }
 
 fn compute_hash(content: &str) -> String {
@@ -2159,6 +2252,180 @@ mod tests {
         };
         let result = inspect_bundle(&options);
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_bundle_rejects_symlinked_output_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_path("create-symlink-output");
+        let workspace = root.join("workspace");
+        let real_output = root.join("real-output");
+        let linked_output = root.join("linked-output");
+        fs::create_dir_all(workspace.join(".ee"))
+            .map_err(|error| format!("failed to create workspace: {error}"))?;
+        fs::create_dir_all(&real_output)
+            .map_err(|error| format!("failed to create real output: {error}"))?;
+        symlink(&real_output, &linked_output)
+            .map_err(|error| format!("failed to create output symlink: {error}"))?;
+
+        let result = create_bundle(&BundleOptions {
+            workspace,
+            output_dir: Some(linked_output),
+            dry_run: false,
+            redacted: true,
+            include_raw: false,
+            audit_limit: 5,
+        });
+        let error = result.expect_err("symlinked output parent should be rejected");
+        assert!(
+            error.message().contains("symlinked path component"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert!(
+            fs::read_dir(real_output)
+                .map_err(|error| format!("failed to read real output: {error}"))?
+                .next()
+                .is_none(),
+            "support bundle creation must not write through the symlink target"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspect_bundle_rejects_symlinked_manifest() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_path("inspect-symlink-manifest");
+        let bundle_dir = root.join("bundle");
+        fs::create_dir_all(&bundle_dir)
+            .map_err(|error| format!("failed to create bundle dir: {error}"))?;
+        let outside_manifest = root.join("outside-manifest.json");
+        fs::write(&outside_manifest, "{}")
+            .map_err(|error| format!("failed to write outside manifest: {error}"))?;
+        symlink(&outside_manifest, bundle_dir.join(MANIFEST_FILE))
+            .map_err(|error| format!("failed to create manifest symlink: {error}"))?;
+
+        let result = inspect_bundle(&InspectOptions {
+            bundle_path: bundle_dir,
+            verify_hashes: true,
+        });
+        let error = result.expect_err("symlinked manifest should be rejected");
+        assert!(
+            error.message().contains("symlinked path component"),
+            "unexpected error: {}",
+            error.message()
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspect_bundle_marks_symlinked_manifest_entry_mismatch() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_path("inspect-symlink-entry");
+        let bundle_dir = root.join("bundle");
+        fs::create_dir_all(&bundle_dir)
+            .map_err(|error| format!("failed to create bundle dir: {error}"))?;
+        let secret = "outside bundle evidence should not be hashed";
+        let outside_file = root.join("outside.json");
+        fs::write(&outside_file, secret)
+            .map_err(|error| format!("failed to write outside file: {error}"))?;
+        symlink(&outside_file, bundle_dir.join("leak.json"))
+            .map_err(|error| format!("failed to create entry symlink: {error}"))?;
+
+        let manifest = BundleManifest {
+            schema: SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1.to_owned(),
+            bundle_id: "test-bundle".to_owned(),
+            created_at: "2026-05-16T00:00:00Z".to_owned(),
+            workspace_path: "redacted-workspace".to_owned(),
+            ee_version: "test".to_owned(),
+            files: vec![ManifestEntry {
+                path: "leak.json".to_owned(),
+                size_bytes: secret.len() as u64,
+                content_hash: compute_hash(secret),
+                redacted: true,
+            }],
+            total_size_bytes: secret.len() as u64,
+            redaction_applied: true,
+            redaction_reasons: vec![],
+        };
+        fs::write(
+            bundle_dir.join(MANIFEST_FILE),
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("failed to write manifest: {error}"))?;
+
+        let report = inspect_bundle(&InspectOptions {
+            bundle_path: bundle_dir,
+            verify_hashes: true,
+        })
+        .map_err(|error| error.message())?;
+        assert!(!report.valid, "symlinked entry must not validate");
+        assert!(
+            report.hash_mismatches.contains(&"leak.json".to_owned()),
+            "symlinked entry should be reported as a mismatch"
+        );
+        assert!(
+            !report.files_found.contains(&"leak.json".to_owned()),
+            "symlinked entry must not count as collected bundle evidence"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inspect_bundle_marks_parent_traversal_manifest_entry_mismatch() -> TestResult {
+        let root = unique_test_path("inspect-parent-traversal");
+        let bundle_dir = root.join("bundle");
+        fs::create_dir_all(&bundle_dir)
+            .map_err(|error| format!("failed to create bundle dir: {error}"))?;
+        let outside_content = "outside bundle content";
+        fs::write(root.join("outside.json"), outside_content)
+            .map_err(|error| format!("failed to write outside file: {error}"))?;
+
+        let manifest = BundleManifest {
+            schema: SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1.to_owned(),
+            bundle_id: "test-bundle".to_owned(),
+            created_at: "2026-05-16T00:00:00Z".to_owned(),
+            workspace_path: "redacted-workspace".to_owned(),
+            ee_version: "test".to_owned(),
+            files: vec![ManifestEntry {
+                path: "../outside.json".to_owned(),
+                size_bytes: outside_content.len() as u64,
+                content_hash: compute_hash(outside_content),
+                redacted: true,
+            }],
+            total_size_bytes: outside_content.len() as u64,
+            redaction_applied: true,
+            redaction_reasons: vec![],
+        };
+        fs::write(
+            bundle_dir.join(MANIFEST_FILE),
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("failed to write manifest: {error}"))?;
+
+        let report = inspect_bundle(&InspectOptions {
+            bundle_path: bundle_dir,
+            verify_hashes: true,
+        })
+        .map_err(|error| error.message())?;
+        assert!(!report.valid, "parent traversal entry must not validate");
+        assert!(
+            report
+                .hash_mismatches
+                .contains(&"../outside.json".to_owned()),
+            "parent traversal entry should be reported as a mismatch"
+        );
+        assert!(
+            !report.files_found.contains(&"../outside.json".to_owned()),
+            "parent traversal entry must not count as collected bundle evidence"
+        );
+        Ok(())
     }
 
     #[test]
