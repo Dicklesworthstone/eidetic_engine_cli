@@ -8,7 +8,7 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -479,7 +479,7 @@ fn refresh_graph_centrality_snapshot(workspace_arg: &str) -> TestResult {
 }
 
 #[cfg(feature = "graph")]
-fn mark_latest_centrality_snapshot_stale(workspace: &PathBuf, workspace_arg: &str) -> TestResult {
+fn mark_latest_centrality_snapshot_stale(workspace: &Path, workspace_arg: &str) -> TestResult {
     let database_path = workspace.join(".ee").join("ee.db");
     let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
     let workspace = connection

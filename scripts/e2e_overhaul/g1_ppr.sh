@@ -10,6 +10,7 @@ require_jq
 START_SECONDS="$(python3 -c 'import time; print(time.monotonic())')"
 epic_setup "g1_ppr"
 seed_corpus
+ee_workspace config set graph.feature.ppr.enabled true --json >/dev/null
 
 e2e_log_note "g1_ppr_surface=context --ppr-weight --explain"
 remember_ppr_fixture() {

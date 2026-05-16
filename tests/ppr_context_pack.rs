@@ -93,6 +93,16 @@ fn insert_support_link(
     connection.close().map_err(|error| error.to_string())
 }
 
+fn enable_ppr_feature(workspace_path: &Path) -> TestResult {
+    let config_dir = workspace_path.join(".ee");
+    fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+    fs::write(
+        config_dir.join("config.toml"),
+        "[graph.feature.ppr]\nenabled = true\n\n[graph.feature.proximity]\nenabled = true\n",
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn context_options(
     workspace_path: &Path,
     db_path: &Path,
@@ -213,6 +223,7 @@ fn context_pack_with_ppr_emits_score_breakdown_and_matches_golden() -> TestResul
         &db_path,
         "PPR golden fixture structural reranking release baseline memory.",
     )?;
+    enable_ppr_feature(workspace_path)?;
     insert_support_link(workspace_path, &db_path, &seed_id, &neighbor_id)?;
 
     let response = run_context_pack(&context_options(workspace_path, &db_path, Some(1.0)))

@@ -17,8 +17,8 @@ const QUICK_MEASURE_ITERS: usize = 9;
 const MINHASH_SPEEDUP_FLOOR: f64 = 5.0;
 const TOP_K: usize = 100;
 const SIGNATURE_COUNT: usize = 1;
-const COMPARE_SCALE: usize = 2_000;
-const SCALES: &[usize] = &[100, 1_000, COMPARE_SCALE];
+const BENCH_SCALES: &[usize] = &[100, 1_000, 2_000];
+const COMPARE_SCALE: usize = 10_000;
 
 #[derive(Clone, Copy, Debug)]
 struct QuickStats {
@@ -130,7 +130,7 @@ fn bench_graph_minhash_rank(c: &mut Criterion) {
 
     let mut group = c.benchmark_group(BENCH_GROUP_NAME);
     group.sample_size(10);
-    for &scale in SCALES {
+    for &scale in BENCH_SCALES {
         let graph = seeded_graph(scale);
         group.bench_with_input(
             BenchmarkId::new("minhash_rank_top_k", format!("{scale}_memories")),
@@ -164,5 +164,10 @@ mod tests {
     #[test]
     fn top_k_matches_bead_acceptance() {
         assert_eq!(super::TOP_K, 100);
+    }
+
+    #[test]
+    fn compare_scale_exercises_large_top_k_graph() {
+        assert!(super::COMPARE_SCALE >= 10_000);
     }
 }

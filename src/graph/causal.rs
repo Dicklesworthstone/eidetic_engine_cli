@@ -1,9 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use asupersync::Cx;
 use fnx_algorithms::{find_cycle_directed, min_cost_flow, transitive_closure};
 use fnx_runtime::CgseValue;
 use serde::{Deserialize, Serialize};
 
+use crate::graph::algorithms::{DEFAULT_BACKGROUND_BUDGET, current_or_testing_cx, run_with_budget};
+use crate::graph::{GraphError, GraphResult};
 use crate::models::degradation::GRAPH_CAUSAL_NO_EVIDENCE_CODE;
 
 use super::{AttrMap, DiGraph};
@@ -60,6 +63,38 @@ pub struct CausalExplanationStep {
 
 #[must_use]
 pub fn compute_causal_ancestry(graph: &DiGraph, failure_id: &str) -> CausalAncestry {
+    try_compute_causal_ancestry(graph, failure_id).unwrap_or_else(|error| CausalAncestry {
+        failure_id: failure_id.to_owned(),
+        ancestors: Vec::new(),
+        degraded: vec![causal_algorithm_degradation(&error)],
+    })
+}
+
+pub fn try_compute_causal_ancestry(
+    graph: &DiGraph,
+    failure_id: &str,
+) -> GraphResult<CausalAncestry> {
+    let cx = current_or_testing_cx();
+    compute_causal_ancestry_with_cx(&cx, graph, failure_id)
+}
+
+pub fn compute_causal_ancestry_with_cx(
+    cx: &Cx,
+    graph: &DiGraph,
+    failure_id: &str,
+) -> GraphResult<CausalAncestry> {
+    let graph = graph.clone();
+    let failure_id = failure_id.to_owned();
+    run_with_budget(
+        cx,
+        "causal_ancestry",
+        DEFAULT_BACKGROUND_BUDGET,
+        move || compute_causal_ancestry_unbudgeted(&graph, &failure_id),
+    )
+}
+
+#[must_use]
+fn compute_causal_ancestry_unbudgeted(graph: &DiGraph, failure_id: &str) -> CausalAncestry {
     if !graph.has_node(failure_id) {
         return CausalAncestry {
             failure_id: failure_id.to_owned(),
@@ -103,6 +138,39 @@ pub fn compute_min_cost_explanation(
     graph: &DiGraph,
     failure_id: &str,
 ) -> Option<MinCostExplanation> {
+    try_compute_min_cost_explanation(graph, failure_id)
+        .ok()
+        .flatten()
+}
+
+pub fn try_compute_min_cost_explanation(
+    graph: &DiGraph,
+    failure_id: &str,
+) -> GraphResult<Option<MinCostExplanation>> {
+    let cx = current_or_testing_cx();
+    compute_min_cost_explanation_with_cx(&cx, graph, failure_id)
+}
+
+pub fn compute_min_cost_explanation_with_cx(
+    cx: &Cx,
+    graph: &DiGraph,
+    failure_id: &str,
+) -> GraphResult<Option<MinCostExplanation>> {
+    let graph = graph.clone();
+    let failure_id = failure_id.to_owned();
+    run_with_budget(
+        cx,
+        "causal_min_cost_explanation",
+        DEFAULT_BACKGROUND_BUDGET,
+        move || compute_min_cost_explanation_unbudgeted(&graph, &failure_id),
+    )
+}
+
+#[must_use]
+fn compute_min_cost_explanation_unbudgeted(
+    graph: &DiGraph,
+    failure_id: &str,
+) -> Option<MinCostExplanation> {
     if !graph.has_node(failure_id) {
         return None;
     }
@@ -135,6 +203,14 @@ fn causal_no_evidence_degradation() -> CausalGraphDegradation {
     CausalGraphDegradation {
         code: GRAPH_CAUSAL_NO_EVIDENCE_CODE.to_owned(),
         severity: "low".to_owned(),
+        cycle_members: Vec::new(),
+    }
+}
+
+fn causal_algorithm_degradation(error: &GraphError) -> CausalGraphDegradation {
+    CausalGraphDegradation {
+        code: error.kind_str().to_owned(),
+        severity: "warning".to_owned(),
         cycle_members: Vec::new(),
     }
 }
@@ -337,6 +413,8 @@ mod tests {
     use super::*;
     use fnx_runtime::CompatibilityMode;
 
+    type TestResult = Result<(), String>;
+
     fn graph() -> DiGraph {
         DiGraph::new(CompatibilityMode::Strict)
     }
@@ -370,6 +448,44 @@ mod tests {
             .iter()
             .map(|step| (step.source.as_str(), step.target.as_str()))
             .collect()
+    }
+
+    fn graph_result<T>(result: GraphResult<T>) -> Result<T, String> {
+        result.map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn causal_budget_wrappers_preserve_existing_outputs() -> TestResult {
+        let mut graph = graph();
+        add_causal_edge(&mut graph, "failure", "mid", 0.8);
+        add_causal_edge(&mut graph, "mid", "root", 0.9);
+
+        let cx = Cx::for_testing();
+        let ancestry = graph_result(compute_causal_ancestry_with_cx(&cx, &graph, "failure"))?;
+        let explanation =
+            graph_result(compute_min_cost_explanation_with_cx(&cx, &graph, "failure"))?
+                .ok_or_else(|| "expected min-cost explanation through budget wrapper".to_owned())?;
+
+        assert_eq!(
+            ancestry.ancestors,
+            vec![
+                CausalAncestor {
+                    memory_id: "mid".to_owned(),
+                    path_length: 1,
+                },
+                CausalAncestor {
+                    memory_id: "root".to_owned(),
+                    path_length: 2,
+                },
+            ]
+        );
+        assert!(ancestry.degraded.is_empty());
+        assert_eq!(explanation.cause_id, "root");
+        assert_eq!(
+            path_pairs(&explanation),
+            vec![("failure", "mid"), ("mid", "root")]
+        );
+        Ok(())
     }
 
     #[test]

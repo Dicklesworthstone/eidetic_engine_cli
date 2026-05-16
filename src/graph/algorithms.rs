@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -98,7 +99,7 @@ pub fn run_with_cached_budget<R, F>(
     f: F,
 ) -> GraphResult<AlgorithmResultCacheRun<R>>
 where
-    R: Clone + DeserializeOwned + Send + Serialize + 'static,
+    R: Clone + DeserializeOwned + Send + Serialize + Sync + 'static,
     F: FnOnce() -> R + Send + 'static,
 {
     run_with_result_cache(spec, || run_with_budget(cx, name, budget, f))
@@ -300,13 +301,21 @@ struct CachedComputation<R> {
 }
 
 static ALGORITHM_CACHE_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+static IN_MEMORY_ALGORITHM_RESULTS: OnceLock<Mutex<HashMap<String, InMemoryAlgorithmResult>>> =
+    OnceLock::new();
+
+#[derive(Clone)]
+struct InMemoryAlgorithmResult {
+    result: Arc<dyn Any + Send + Sync>,
+    expires_at: Option<Instant>,
+}
 
 pub fn run_with_result_cache<R, Compute>(
     spec: &AlgorithmResultCacheSpec<'_>,
     compute: Compute,
 ) -> GraphResult<AlgorithmResultCacheRun<R>>
 where
-    R: Clone + DeserializeOwned + Serialize,
+    R: Clone + DeserializeOwned + Send + Serialize + Sync + 'static,
     Compute: FnOnce() -> GraphResult<R>,
 {
     let params_hash =
@@ -317,9 +326,9 @@ where
     );
     let cached = compute_or_load_algorithm_result(
         &cache_key,
-        || load_cached_algorithm_result(spec, &params_hash),
+        || load_cached_algorithm_result_with_memory(spec, &params_hash, &cache_key),
         compute,
-        |result| store_cached_algorithm_result(spec, &params_hash, result),
+        |result| store_cached_algorithm_result_with_memory(spec, &params_hash, &cache_key, result),
     )?;
 
     Ok(AlgorithmResultCacheRun {
@@ -377,6 +386,81 @@ fn algorithm_cache_lock(cache_key: &str) -> Arc<Mutex<()>> {
         .entry(cache_key.to_owned())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
+}
+
+fn load_cached_algorithm_result_with_memory<R>(
+    spec: &AlgorithmResultCacheSpec<'_>,
+    params_hash: &str,
+    cache_key: &str,
+) -> GraphResult<Option<R>>
+where
+    R: Clone + DeserializeOwned + Send + Sync + 'static,
+{
+    if let Some(result) = load_in_memory_algorithm_result(cache_key) {
+        return Ok(Some(result));
+    }
+
+    let result = load_cached_algorithm_result(spec, params_hash)?;
+    if let Some(result) = &result {
+        store_in_memory_algorithm_result(cache_key, result, spec.ttl_seconds);
+    }
+    Ok(result)
+}
+
+fn store_cached_algorithm_result_with_memory<R>(
+    spec: &AlgorithmResultCacheSpec<'_>,
+    params_hash: &str,
+    cache_key: &str,
+    result: &R,
+) -> GraphResult<()>
+where
+    R: Clone + Send + Serialize + Sync + 'static,
+{
+    store_cached_algorithm_result(spec, params_hash, result)?;
+    store_in_memory_algorithm_result(cache_key, result, spec.ttl_seconds);
+    Ok(())
+}
+
+fn load_in_memory_algorithm_result<R>(cache_key: &str) -> Option<R>
+where
+    R: Clone + Send + Sync + 'static,
+{
+    let mut cache = IN_MEMORY_ALGORITHM_RESULTS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(entry) = cache.get(cache_key) else {
+        return None;
+    };
+    if entry
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= Instant::now())
+    {
+        cache.remove(cache_key);
+        return None;
+    }
+    Arc::clone(&entry.result)
+        .downcast::<R>()
+        .ok()
+        .map(|result| (*result).clone())
+}
+
+fn store_in_memory_algorithm_result<R>(cache_key: &str, result: &R, ttl_seconds: u64)
+where
+    R: Clone + Send + Sync + 'static,
+{
+    let expires_at = Instant::now().checked_add(Duration::from_secs(ttl_seconds));
+    IN_MEMORY_ALGORITHM_RESULTS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            cache_key.to_owned(),
+            InMemoryAlgorithmResult {
+                result: Arc::new(result.clone()),
+                expires_at,
+            },
+        );
 }
 
 fn load_cached_algorithm_result<R>(
@@ -652,7 +736,7 @@ fn duration_millis_saturating(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
-fn check_cancelled(cx: &Cx, name: &'static str) -> GraphResult<()> {
+pub(crate) fn check_cancelled(cx: &Cx, name: &'static str) -> GraphResult<()> {
     if cx.checkpoint().is_ok() && !cx.is_cancel_requested() {
         return Ok(());
     }

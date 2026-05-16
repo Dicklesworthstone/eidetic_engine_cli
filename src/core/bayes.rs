@@ -67,7 +67,7 @@ impl BetaPosterior {
             Some(Self {
                 alpha,
                 beta,
-                interval_harmful_weight: 1.0,
+                interval_harmful_weight: DEFAULT_HARMFUL_WEIGHT,
             })
         } else {
             None

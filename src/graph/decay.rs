@@ -4,6 +4,8 @@ use fnx_algorithms::{articulation_points, number_connected_components, onion_lay
 use fnx_classes::Graph;
 use serde::{Deserialize, Serialize};
 
+use crate::graph::{GraphResult, algorithms};
+
 pub const DEFAULT_ONION_DECAY_MAX: f64 = 3.0;
 pub const DEFAULT_ARTICULATION_PROTECTION: f64 = 0.5;
 
@@ -70,6 +72,32 @@ pub struct StructuralDecayConnectivityReport {
 
 #[must_use]
 pub fn compute_articulation_points(graph: &Graph) -> ArticulationPointReport {
+    match try_compute_articulation_points(graph) {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::graph",
+                algorithm = "articulation_points",
+                error = %error,
+                "structural decay articulation-point wrapper failed; returning empty report"
+            );
+            ArticulationPointReport { memory_ids: vec![] }
+        }
+    }
+}
+
+pub fn try_compute_articulation_points(graph: &Graph) -> GraphResult<ArticulationPointReport> {
+    let cx = algorithms::current_or_testing_cx();
+    let graph = graph.clone();
+    algorithms::run_with_budget(
+        &cx,
+        "articulation_points",
+        algorithms::DEFAULT_BACKGROUND_BUDGET,
+        move || compute_articulation_points_unbudgeted(&graph),
+    )
+}
+
+fn compute_articulation_points_unbudgeted(graph: &Graph) -> ArticulationPointReport {
     let mut memory_ids = articulation_points(graph).nodes;
     memory_ids.sort();
     ArticulationPointReport { memory_ids }
@@ -77,6 +105,35 @@ pub fn compute_articulation_points(graph: &Graph) -> ArticulationPointReport {
 
 #[must_use]
 pub fn compute_onion_layers(graph: &Graph) -> OnionLayerReport {
+    match try_compute_onion_layers(graph) {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::graph",
+                algorithm = "onion_layers",
+                error = %error,
+                "structural decay onion-layer wrapper failed; returning empty report"
+            );
+            OnionLayerReport {
+                layers_by_memory: BTreeMap::new(),
+                max_layer: 0,
+            }
+        }
+    }
+}
+
+pub fn try_compute_onion_layers(graph: &Graph) -> GraphResult<OnionLayerReport> {
+    let cx = algorithms::current_or_testing_cx();
+    let graph = graph.clone();
+    algorithms::run_with_budget(
+        &cx,
+        "onion_layers",
+        algorithms::DEFAULT_BACKGROUND_BUDGET,
+        move || compute_onion_layers_unbudgeted(&graph),
+    )
+}
+
+fn compute_onion_layers_unbudgeted(graph: &Graph) -> OnionLayerReport {
     let layers_by_memory = onion_layers(graph)
         .layers
         .into_iter()
@@ -92,6 +149,39 @@ pub fn compute_onion_layers(graph: &Graph) -> OnionLayerReport {
 
 #[must_use]
 pub fn compute_structural_decay_connectivity(graph: &Graph) -> StructuralDecayConnectivityReport {
+    match try_compute_structural_decay_connectivity(graph) {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::graph",
+                algorithm = "number_connected_components",
+                error = %error,
+                "structural decay connectivity wrapper failed; returning connected baseline"
+            );
+            StructuralDecayConnectivityReport {
+                component_count: 0,
+                is_connected: true,
+            }
+        }
+    }
+}
+
+pub fn try_compute_structural_decay_connectivity(
+    graph: &Graph,
+) -> GraphResult<StructuralDecayConnectivityReport> {
+    let cx = algorithms::current_or_testing_cx();
+    let graph = graph.clone();
+    algorithms::run_with_budget(
+        &cx,
+        "number_connected_components",
+        algorithms::DEFAULT_BACKGROUND_BUDGET,
+        move || compute_structural_decay_connectivity_unbudgeted(&graph),
+    )
+}
+
+fn compute_structural_decay_connectivity_unbudgeted(
+    graph: &Graph,
+) -> StructuralDecayConnectivityReport {
     let component_count = number_connected_components(graph).count;
     StructuralDecayConnectivityReport {
         component_count,

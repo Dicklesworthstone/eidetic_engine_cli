@@ -8,7 +8,7 @@ use fnx_classes::digraph::DiGraph;
 use crate::db::DbConnection;
 use crate::graph::algorithms::{
     AlgorithmResultCacheRun, AlgorithmResultCacheSpec, DEFAULT_FOREGROUND_BUDGET,
-    current_or_testing_cx, run_with_budget, run_with_cached_budget,
+    current_or_testing_cx, run_with_budget, run_with_cached_budget, run_with_result_cache,
 };
 use crate::graph::{ComplexityWitnessCounters, GraphResult, emit_complexity_witness};
 use crate::models::MemoryId;
@@ -158,6 +158,23 @@ pub fn compute_personalized_pagerank_result_cached_with_cx(
         DEFAULT_FOREGROUND_BUDGET,
         move || compute_personalized_pagerank_result_unbudgeted(&graph, &seed_map, policy),
     )
+}
+
+pub fn compute_personalized_pagerank_result_cached_with_graph<F>(
+    spec: &AlgorithmResultCacheSpec<'_>,
+    seed_map: &BTreeMap<String, f64>,
+    policy: PersonalizedPageRankPolicy,
+    build_graph: F,
+) -> GraphResult<AlgorithmResultCacheRun<PageRankResult>>
+where
+    F: FnOnce() -> GraphResult<DiGraph>,
+{
+    let cx = current_or_testing_cx();
+    let seed_map = seed_map.clone();
+    run_with_result_cache(spec, || {
+        let graph = build_graph()?;
+        compute_personalized_pagerank_result_with_cx(&cx, &graph, &seed_map, policy)
+    })
 }
 
 fn compute_personalized_pagerank_result_unbudgeted(
@@ -786,6 +803,7 @@ mod tests {
             "alpha": DEFAULT_PERSONALIZED_PAGERANK_ALPHA,
             "maxIterations": DEFAULT_PERSONALIZED_PAGERANK_MAX_ITERATIONS,
             "seedCount": 1,
+            "seedWeights": &seeds,
             "tolerance": DEFAULT_PERSONALIZED_PAGERANK_TOLERANCE
         });
         let spec = AlgorithmResultCacheSpec {
@@ -823,6 +841,94 @@ mod tests {
             .map_err(|error| error.to_string())?;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].params_hash, first.params_hash);
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn personalized_pagerank_cached_with_graph_skips_projection_on_cache_hit() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let snapshot_id = "gsnap_0000000000000000000000522";
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-ppr-cache-lazy-graph".to_owned(),
+                    name: Some("ppr cache lazy graph".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_graph_snapshot(
+                snapshot_id,
+                &CreateGraphSnapshotInput {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    snapshot_version: 11,
+                    schema_version: "ee.graph.snapshot.v1".to_owned(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 2,
+                    edge_count: 1,
+                    metrics_json: r#"{"nodes":[],"edges":[]}"#.to_owned(),
+                    content_hash: "blake3:ppr-cache-lazy-graph".to_owned(),
+                    source_generation: 11,
+                    expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut graph = DiGraph::strict();
+        let a = memory_id(61);
+        let b = memory_id(62);
+        graph
+            .add_edge_with_attrs(
+                a.to_string(),
+                b.to_string(),
+                edge_attrs("supports", 1.0, 1.0),
+            )
+            .map_err(|error| error.to_string())?;
+        let seeds = BTreeMap::from([(a.to_string(), 1.0)]);
+        let params = serde_json::json!({
+            "alpha": DEFAULT_PERSONALIZED_PAGERANK_ALPHA,
+            "maxIterations": DEFAULT_PERSONALIZED_PAGERANK_MAX_ITERATIONS,
+            "seedCount": 1,
+            "seedWeights": &seeds,
+            "tolerance": DEFAULT_PERSONALIZED_PAGERANK_TOLERANCE
+        });
+        let spec = AlgorithmResultCacheSpec {
+            conn: &connection,
+            workspace_id: WORKSPACE_ID,
+            snapshot_id,
+            snapshot_content_hash: "blake3:ppr-cache-lazy-graph",
+            algorithm: "personalized_pagerank",
+            params: &params,
+            ttl_seconds: 300,
+        };
+        let build_count = std::cell::Cell::new(0_usize);
+
+        let first = graph_result(compute_personalized_pagerank_result_cached_with_graph(
+            &spec,
+            &seeds,
+            PersonalizedPageRankPolicy::default(),
+            || {
+                build_count.set(build_count.get() + 1);
+                Ok(graph.clone())
+            },
+        ))?;
+        let second = graph_result(compute_personalized_pagerank_result_cached_with_graph(
+            &spec,
+            &seeds,
+            PersonalizedPageRankPolicy::default(),
+            || {
+                build_count.set(build_count.get() + 1);
+                Ok(DiGraph::strict())
+            },
+        ))?;
+
+        assert!(!first.cache_hit);
+        assert!(second.cache_hit);
+        assert_eq!(build_count.get(), 1);
+        assert_pagerank_results_equivalent(&first.result, &second.result);
 
         connection.close().map_err(|error| error.to_string())
     }

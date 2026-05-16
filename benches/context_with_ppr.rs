@@ -51,6 +51,11 @@ fn seed_benchmark_fixture(temp_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let db_path = workspace_path.join(".ee").join("ee.db");
     let index_dir = workspace_path.join(".ee").join("index");
     std::fs::create_dir_all(db_path.parent().expect("db parent")).expect("create .ee dir");
+    std::fs::write(
+        workspace_path.join(".ee").join("config.toml"),
+        "[graph.feature.ppr]\nenabled = true\n",
+    )
+    .expect("enable PPR benchmark feature flag");
 
     let connection = DbConnection::open_file(&db_path).expect("open benchmark db");
     connection.migrate().expect("migrate benchmark db");
@@ -58,9 +63,15 @@ fn seed_benchmark_fixture(temp_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let workspace_id = stable_workspace_id(&workspace_path);
 
     for index in 0..MEMORY_COUNT {
-        let content = format!(
-            "PPR context benchmark memory {index}: structural reranking release seed evidence."
-        );
+        let content = if index < 200 {
+            format!(
+                "PPR context benchmark primary memory {index:04}: structural reranking release seed evidence."
+            )
+        } else {
+            format!(
+                "PPR context benchmark background memory {index:04}: linked graph filler outside the query cohort."
+            )
+        };
         connection
             .insert_memory(
                 &format!("mem_ppr_context_bench_{index:08}"),
