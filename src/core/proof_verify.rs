@@ -225,7 +225,7 @@ fn collect_proof_artifacts(
         let path = entry.path();
         ensure_no_proof_path_symlink_components(&path, "discover proof artifact")?;
         let metadata = fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_dir() || !is_proof_artifact(&path, kind) {
+        if !metadata.file_type().is_file() || !is_proof_artifact(&path, kind) {
             continue;
         }
         artifacts.push(ProofArtifact {
@@ -246,6 +246,16 @@ fn is_proof_artifact(path: &Path, kind: ProofArtifactKind) -> bool {
 
 fn extract_invariants(path: &Path) -> io::Result<Vec<String>> {
     ensure_no_proof_path_symlink_components(path, "read proof artifact")?;
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to read proof artifact `{}` because it is not a regular file",
+                path.display()
+            ),
+        ));
+    }
     let body = fs::read_to_string(path)?;
     let mut invariants = body
         .lines()
@@ -473,6 +483,22 @@ mod tests {
             Ok(())
         } else {
             Err(format!("unexpected symlink error: {error}"))
+        }
+    }
+
+    #[test]
+    fn invariant_extraction_rejects_non_regular_artifact_path() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let artifact_dir = temp.path().join("proof.lean");
+        fs::create_dir_all(&artifact_dir).map_err(|error| error.to_string())?;
+
+        let error = extract_invariants(&artifact_dir)
+            .expect_err("non-regular proof artifact path should be rejected")
+            .to_string();
+        if error.contains("not a regular file") {
+            Ok(())
+        } else {
+            Err(format!("unexpected non-regular artifact error: {error}"))
         }
     }
 }
