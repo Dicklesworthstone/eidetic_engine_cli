@@ -46,7 +46,7 @@ if [[ ! -s "$SCHEMA" ]]; then
   fail_fixture "catalog" "missing ee.swarm_incident.v1 schema"
 fi
 
-mapfile -t fixture_files < <(find "$FIXTURE_DIR" -maxdepth 1 -type f -name '*.json' | sort)
+mapfile -t fixture_files < <(find "$FIXTURE_DIR" -maxdepth 1 -type f -name '*.json' ! -name 'unsafe_recovery_actions.json' | sort)
 expected_count=5
 actual_count="${#fixture_files[@]}"
 if [[ "$actual_count" != "$expected_count" ]]; then

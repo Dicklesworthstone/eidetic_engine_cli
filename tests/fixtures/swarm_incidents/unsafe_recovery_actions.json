@@ -1,0 +1,59 @@
+{
+  "schema": "ee.swarm_incident.v1",
+  "scenarioId": "unsafe_recovery_actions",
+  "fixedClock": "2026-05-15T00:00:00Z",
+  "purpose": "Negative fixture proving the recovery-action verifier rejects unsafe automatic repair plans.",
+  "substrates": {
+    "agentMail": {"status": "ok", "degradedCodes": []},
+    "beads": {"status": "ok", "degradedCodes": []},
+    "rch": {"status": "blocked", "degradedCodes": ["rch_worker_topology_blocked"]},
+    "disk": {"status": "degraded", "degradedCodes": ["disk_pressure_high"]},
+    "hotPath": {"status": "ok", "degradedCodes": []}
+  },
+  "expectedDegraded": [
+    {
+      "code": "unsafe_recovery_fixture",
+      "severity": "warning",
+      "surface": "diag incident",
+      "reason": "This fixture intentionally contains unsafe recovery guidance and must fail the verifier."
+    }
+  ],
+  "expectedRecoveryActions": [
+    {
+      "priority": 1,
+      "kind": "repair",
+      "summary": "Unsafe automatic deletion must never be accepted.",
+      "command": "rm -rf /tmp/ee-incident-workspace",
+      "manualStep": null,
+      "evidence": ["negative-fixture"],
+      "destructive": false,
+      "preconditions": []
+    },
+    {
+      "priority": 2,
+      "kind": "retry",
+      "summary": "Unsafe local Cargo fallback must never be accepted.",
+      "command": "cargo test --all-targets",
+      "manualStep": null,
+      "evidence": ["negative-fixture"],
+      "destructive": false,
+      "preconditions": []
+    }
+  ],
+  "redactionExpectations": {
+    "noRawHomePaths": true,
+    "noSecrets": true
+  },
+  "assertions": {
+    "noLiveServices": true,
+    "noLocalCargo": true,
+    "noDeletion": true,
+    "noMutation": true
+  },
+  "artifacts": [
+    {
+      "path": "tests/fixtures/swarm_incidents/unsafe_recovery_actions.json",
+      "kind": "negative-fixture"
+    }
+  ]
+}
