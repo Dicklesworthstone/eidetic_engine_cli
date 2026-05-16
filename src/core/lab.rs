@@ -768,6 +768,22 @@ fn read_frozen_episode(
 ) -> Result<Option<FrozenEpisodeArtifact>, DomainError> {
     let path = frozen_episode_path(workspace, episode_id);
     ensure_no_lab_symlink_components(&path, "read frozen episode artifact")?;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            return Ok(None);
+        }
+        Err(error) => return Err(lab_storage_error("inspect frozen episode artifact", error)),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(lab_storage_error_message(
+            "validate frozen episode artifact path",
+            format!(
+                "refusing to read frozen episode artifact {} because it is not a regular file",
+                path.display()
+            ),
+        ));
+    }
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -1470,6 +1486,22 @@ mod tests {
             error.message().contains("symlinked path component"),
             true,
             "symlinked artifact error message",
+        )
+    }
+
+    #[test]
+    fn replay_rejects_non_regular_frozen_episode_artifact() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let episode_id = "episode_lab_directory_artifact";
+        let artifact_path = frozen_episode_path(workspace.path(), episode_id);
+        fs::create_dir_all(&artifact_path).map_err(|error| error.to_string())?;
+
+        let error = read_frozen_episode(workspace.path(), episode_id)
+            .expect_err("directory frozen episode artifact should be rejected");
+        ensure(
+            error.message().contains("not a regular file"),
+            true,
+            "directory artifact error message",
         )
     }
 
