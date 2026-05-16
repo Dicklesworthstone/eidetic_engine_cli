@@ -521,8 +521,34 @@ pub fn add_task_subgoal(options: &TaskSubgoalAddOptions) -> Result<TaskFrameRepo
 
 fn read_store(store_path: &Path) -> Result<TaskFrameStoreDocument, DomainError> {
     ensure_no_symlink_components(store_path, "read")?;
-    if !store_path.exists() {
-        return Ok(TaskFrameStoreDocument::default());
+    let metadata = match fs::symlink_metadata(store_path) {
+        Ok(metadata) => metadata,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(TaskFrameStoreDocument::default());
+        }
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Failed to inspect task-frame store `{}`: {error}",
+                    store_path.display()
+                ),
+                repair: Some("Check workspace .ee permissions.".to_owned()),
+            });
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Refusing to read task-frame store `{}` because it is not a regular file.",
+                store_path.display()
+            ),
+            repair: Some("Replace .ee/task_frames.json with a regular JSON file.".to_owned()),
+        });
     }
     let text = fs::read_to_string(store_path).map_err(|error| DomainError::Storage {
         message: format!(
@@ -990,6 +1016,28 @@ mod tests {
                 "{{\"schema\":\"{}\",\"frames\":[]}}\n",
                 TASK_FRAME_STORE_SCHEMA_V1
             )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn show_frame_rejects_store_directory_before_read() -> TestResult {
+        let workspace = temp_workspace("store-directory")?;
+        fs::create_dir_all(task_frame_store_path(&workspace)).map_err(|error| error.to_string())?;
+
+        let error = match show_task_frame(&TaskFrameShowOptions {
+            workspace_path: workspace,
+            frame_id: None,
+            active: true,
+        }) {
+            Ok(report) => return Err(format!("store directory should fail, got {report:?}")),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "storage");
+        assert!(
+            error.message().contains("not a regular file"),
+            "error should mention regular file"
         );
         Ok(())
     }
