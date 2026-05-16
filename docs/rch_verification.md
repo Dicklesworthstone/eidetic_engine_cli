@@ -56,3 +56,35 @@ remote `/data/projects/...` and local `/Volumes/...` evidence.
 `refused`. Use `rch_environment_failure` for topology/local-fallback blockers
 and `capacity_or_timeout` for worker capacity, timeout, or all-workers-offline
 signals; those are not code failures.
+
+## Compile-Blocker Routing
+
+Use `scripts/rch_compile_blocker_router.py` when a remote verifier reaches
+Cargo and fails on compiler diagnostics. It is read-only: it consumes a
+transcript plus optional Agent Mail reservation JSON and emits
+`ee.rch.compile_blocker_route.v1` JSON with an Agent Mail-ready Markdown
+summary.
+
+Examples:
+
+```bash
+scripts/rch_compile_blocker_router.py failed-rch.txt \
+  --command "cargo test --lib why_toon_matches_json_contract -- --nocapture" \
+  --bead-id bd-123 \
+  --agent-name SilentLark \
+  --reservations reservations.json \
+  --json
+```
+
+Routing decisions:
+
+- `self_fix_allowed`: the first diagnostic file is reserved by the current
+  agent.
+- `reserved_by_other_agent`: an active exact or glob reservation owns the first
+  diagnostic file.
+- `no_owner_found`: the first diagnostic is local to this repo, but no active
+  reservation matched.
+- `upstream_dependency_failure`: the first diagnostic is under a sibling
+  `/data/projects/...` dependency rather than this repo.
+- `environment_failure`: the transcript is an RCH topology/local-fallback
+  blocker or lacks an actionable compiler diagnostic.
