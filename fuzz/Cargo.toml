@@ -103,6 +103,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "witness_retention"
+path = "fuzz_targets/witness_retention.rs"
+test = false
+doc = false
+bench = false
+
 [patch.crates-io]
 asupersync = { path = "/data/projects/asupersync" }
 fsqlite = { path = "/data/projects/frankensqlite/crates/fsqlite" }
