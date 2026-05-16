@@ -329,6 +329,7 @@ fn drop_idle_connections(connections: Vec<DbConnection>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
 
     fn memory_pool(max_size: usize, idle_timeout: Duration) -> ReadConnectionPool {
@@ -586,5 +587,65 @@ mod tests {
             connection.execute_raw("CREATE TABLE pin_error_reuse (id INTEGER PRIMARY KEY)"),
             "connection remains reusable after failed pin",
         );
+    }
+
+    #[test]
+    fn in_process_fanout_pool_size_eight_holds_eight_stable_snapshots_while_writer_commits() {
+        let (_tempdir, database_path, pool) = file_pool(8);
+        let readers = 8usize;
+
+        let pins: Vec<_> = (0..readers)
+            .map(|_| must(pool.pin_snapshot(), "reader snapshot pin opens"))
+            .collect();
+        let mut records: Vec<(u64, i64)> = pins
+            .iter()
+            .map(|pin| (pin.slot_id(), snapshot_item_count(pin)))
+            .collect();
+        records.sort_by_key(|(slot_id, _)| *slot_id);
+
+        assert_eq!(records.len(), readers);
+        let unique_slots: BTreeSet<u64> = records.iter().map(|(slot_id, _)| *slot_id).collect();
+        assert_eq!(unique_slots.len(), readers);
+        for (_slot_id, before) in &records {
+            assert_eq!(*before, 1);
+        }
+
+        insert_snapshot_item(&database_path, 2, "after");
+
+        for pin in &pins {
+            assert_eq!(snapshot_item_count(pin), 1);
+        }
+
+        drop(pins);
+        let fresh = must(pool.acquire(), "fresh connection opens after fanout");
+        assert_eq!(snapshot_item_count(&fresh), 2);
+        drop(fresh);
+
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.max_seen, readers);
+        assert!(stats.idle <= readers);
+    }
+
+    #[test]
+    fn in_process_fanout_pool_size_one_rejects_second_concurrent_snapshot() {
+        let (_tempdir, _database_path, pool) = file_pool(1);
+        let first = must(pool.pin_snapshot(), "first snapshot pin opens");
+
+        let error = match pool.pin_snapshot() {
+            Ok(_) => panic!("pool_size=1 should reject concurrent snapshot fanout"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("read connection pool exhausted at max_size=1")
+        );
+        assert_eq!(pool.stats().active, 1);
+
+        drop(first);
+        assert_eq!(pool.stats().active, 0);
+        assert_eq!(pool.stats().idle, 1);
     }
 }
