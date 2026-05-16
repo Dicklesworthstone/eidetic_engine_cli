@@ -514,6 +514,15 @@ fn write_registry_document(
         repair: Some("report the QoS registry serialization failure".to_owned()),
     })?;
     let temp_path = path.with_extension("json.tmp");
+    if let Some(symlink) = first_existing_symlink_component(&temp_path)? {
+        return Err(DomainError::Storage {
+            message: format!(
+                "refusing to write QoS active-lane registry temp file through symlink '{}'",
+                symlink.display()
+            ),
+            repair: Some("replace the symlinked .ee/qos temp path with a real file".to_owned()),
+        });
+    }
     fs::write(&temp_path, format!("{json}\n")).map_err(|error| DomainError::Storage {
         message: format!(
             "failed to write QoS active-lane registry temp file '{}': {error}",
@@ -995,6 +1004,34 @@ mod tests {
         assert_eq!(summary.degraded.len(), 1);
         assert_eq!(summary.degraded[0].code, QOS_REGISTRY_UNAVAILABLE_CODE);
         assert!(summary.degraded[0].message.contains("symlink"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_write_rejects_symlinked_temp_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir()?;
+        let workspace = tempdir.path().join("workspace");
+        let path = qos_registry_path(&workspace);
+        let outside = tempdir.path().join("outside-temp-target.json");
+        fs::create_dir_all(path.parent().expect("registry parent"))?;
+        fs::write(&outside, "outside sentinel")?;
+        symlink(&outside, path.with_extension("json.tmp"))?;
+
+        let error = publish_qos_lane_record(
+            &workspace,
+            &record_input(QosLane::VerificationRch, "cargo-test", "query", 100),
+        )
+        .expect_err("symlinked temp file should reject registry write");
+
+        assert!(
+            error.message().contains("temp file through symlink"),
+            "unexpected symlink temp error: {}",
+            error.message()
+        );
+        assert_eq!(fs::read_to_string(&outside)?, "outside sentinel");
         Ok(())
     }
 
