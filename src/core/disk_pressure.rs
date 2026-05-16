@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+use serde::ser::{SerializeStruct, Serializer};
+
+use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 
 pub const ARTIFACT_RETENTION_DIAGNOSTICS_SCHEMA_V1: &str = "ee.artifact_retention.diagnostics.v1";
 pub const BUILD_ADMISSION_DIAGNOSTICS_SCHEMA_V1: &str = "ee.build_admission.diagnostics.v1";
@@ -164,8 +167,7 @@ pub struct DiskPressureGuidance {
     pub repair: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug)]
 pub struct BuildAdmissionReport {
     pub schema: &'static str,
     pub command: &'static str,
@@ -178,6 +180,28 @@ pub struct BuildAdmissionReport {
     pub checks: Vec<BuildAdmissionCheck>,
     pub degraded: Vec<BuildAdmissionDegradation>,
     pub recovery_actions: Vec<DiskPressureRecoveryAction>,
+}
+
+impl Serialize for BuildAdmissionReport {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let degraded = build_admission_degraded_data_json(&self.degraded);
+        let mut state = serializer.serialize_struct("BuildAdmissionReport", 11)?;
+        state.serialize_field("schema", &self.schema)?;
+        state.serialize_field("command", &self.command)?;
+        state.serialize_field("sideEffectFree", &self.side_effect_free)?;
+        state.serialize_field("mutationPolicy", &self.mutation_policy)?;
+        state.serialize_field("workspace", &self.workspace)?;
+        state.serialize_field("externalBuildRoot", &self.external_build_root)?;
+        state.serialize_field("minFreeBytes", &self.min_free_bytes)?;
+        state.serialize_field("admitted", &self.admitted)?;
+        state.serialize_field("checks", &self.checks)?;
+        state.serialize_field("degraded", &degraded)?;
+        state.serialize_field("recoveryActions", &self.recovery_actions)?;
+        state.end()
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -204,6 +228,31 @@ pub struct BuildAdmissionDegradation {
     pub severity: &'static str,
     pub message: String,
     pub repair: String,
+}
+
+fn build_admission_degraded_data_json(
+    degraded: &[BuildAdmissionDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "build_admission",
+            entry.code,
+            entry.severity,
+            entry.message.clone(),
+            entry.repair.clone(),
+        )
+    }))
+    .into_iter()
+    .map(|entry| {
+        serde_json::json!({
+            "code": entry.code,
+            "severity": entry.severity,
+            "message": entry.message,
+            "repair": entry.repair,
+            "sources": entry.sources,
+        })
+    })
+    .collect()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -1680,6 +1729,67 @@ mod tests {
                 "ask_human",
             ],
             "action kinds",
+        )
+    }
+
+    #[test]
+    fn build_admission_report_serializes_aggregated_degraded_entries() -> TestResult {
+        let report = BuildAdmissionReport {
+            schema: BUILD_ADMISSION_DIAGNOSTICS_SCHEMA_V1,
+            command: "diag build-admission",
+            side_effect_free: true,
+            mutation_policy: "read_only_report_no_files_modified",
+            workspace: DiskPressureWorkspace {
+                path: ".".to_owned(),
+                source: "test",
+            },
+            external_build_root: EXTERNAL_BUILD_ROOT.to_owned(),
+            min_free_bytes: 1024,
+            admitted: false,
+            checks: Vec::new(),
+            degraded: vec![
+                BuildAdmissionDegradation {
+                    code: "build_admission_denied",
+                    severity: "warning",
+                    message: "required path is close to the threshold".to_owned(),
+                    repair: "move build output to the external root".to_owned(),
+                },
+                BuildAdmissionDegradation {
+                    code: "build_admission_denied",
+                    severity: "medium",
+                    message: "required path is below the admission threshold".to_owned(),
+                    repair: "free space before running a build".to_owned(),
+                },
+            ],
+            recovery_actions: Vec::new(),
+        };
+
+        let value = serde_json::to_value(&report).map_err(|error| error.to_string())?;
+        let degraded = value
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("missing degraded array in {value}"))?;
+
+        ensure(degraded.len(), 1usize, "aggregated degraded count")?;
+        ensure(
+            degraded[0].get("code"),
+            Some(&serde_json::json!("build_admission_denied")),
+            "aggregated code",
+        )?;
+        ensure(
+            degraded[0].get("severity"),
+            Some(&serde_json::json!("medium")),
+            "severity escalated",
+        )?;
+        ensure(
+            degraded[0].get("repair"),
+            Some(&serde_json::json!("free space before running a build")),
+            "highest severity repair selected",
+        )?;
+        ensure(
+            degraded[0].get("sources"),
+            Some(&serde_json::json!(["build_admission"])),
+            "source label",
         )
     }
 
