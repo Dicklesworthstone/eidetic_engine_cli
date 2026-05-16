@@ -16,10 +16,10 @@ Every production label must appear in both this document and
 | `search.score_jitter` | `src/core/search.rs:run_search` | Deterministic score perturbation for stability tests |
 | `search.canonical_ties` | `src/core/search.rs:canonicalize_equivalent_component_scores` | Stable ordering for equal-score search results |
 | `search.rerank` | `src/core/search.rs:search_sync` | Rerank-stage deterministic tie-breaks |
-| `ulid.memory` | `src/models/id.rs:Id::now` | Memory UUIDv7 generation |
-| `ulid.audit` | `src/db/mod.rs:generate_audit_id` | Audit UUIDv7 generation |
-| `ulid.workspace` | `src/core/workspace.rs:stable_workspace_id` | Workspace UUIDv7 generation |
-| `ulid.pack` | `src/core/context.rs:persist_pack_record` | Context pack UUIDv7 generation |
+| `ulid.memory` | `src/models/id.rs:Id::now_seeded` | Memory UUIDv7 generation |
+| `ulid.audit` | `src/db/mod.rs:generate_audit_id_seeded` | Audit UUIDv7 generation |
+| `ulid.workspace` | `src/core/workspace.rs:stable_workspace_id_seeded` | Workspace UUIDv7 generation |
+| `ulid.pack` | `src/core/context.rs:persist_pack_record_seeded` | Context pack UUIDv7 generation |
 | `clustering.kmeans_init` | `src/curate/cluster_coherence.rs:centroid_hash` | Cluster centroid hash derivation |
 | `counterfactual.replay` | `src/core/lab.rs:run_counterfactual` | Counterfactual replay child seed |
 | `lab.replay` | `src/core/lab.rs:replay_episode` | Lab replay child seed |

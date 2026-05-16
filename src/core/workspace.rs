@@ -20,6 +20,7 @@ use crate::db::{
     WorkspaceScopeFields, generate_audit_id,
 };
 use crate::models::{DomainError, WorkspaceId};
+use crate::runtime::determinism::{Deterministic, Seed};
 
 pub const WORKSPACE_REGISTRY_SCHEMA_V1: &str = "ee.workspace.registry.v1";
 pub const WORKSPACE_ALIAS_SCHEMA_V1: &str = "ee.workspace.alias.v1";
@@ -755,6 +756,21 @@ pub(crate) fn stable_workspace_id(path: &Path) -> String {
     WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
 }
 
+#[allow(dead_code, reason = "N4.3 staged token-threaded workspace ID helper")]
+pub(crate) fn stable_workspace_id_seeded(
+    path: &Path,
+    determinism: &mut Deterministic<Seed>,
+) -> String {
+    let workspace_scope = determinism.child("ulid.workspace");
+    let seed_material = format!(
+        "{}:{}",
+        workspace_scope.seed().as_u64(),
+        path.to_string_lossy()
+    );
+    let mut path_token = Deterministic::from_persistent_seed(seed_material.as_bytes());
+    WorkspaceId::from_uuid(path_token.clock().next_uuid_v7()).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -789,6 +805,29 @@ mod tests {
         assert!(normalize_alias("..foo").is_err());
         assert!(normalize_alias(".bar.").is_err());
         assert!(normalize_alias("foo..").is_ok());
+    }
+
+    #[test]
+    fn stable_workspace_id_seeded_replays_with_same_seed_and_path() {
+        let path = Path::new("/tmp/ee-seeded-workspace");
+
+        let mut first_token = Deterministic::from_seed(44);
+        let first = stable_workspace_id_seeded(path, &mut first_token);
+        let second = stable_workspace_id_seeded(path, &mut first_token);
+
+        let mut replay_token = Deterministic::from_seed(44);
+        assert_eq!(first, stable_workspace_id_seeded(path, &mut replay_token));
+        assert_eq!(second, stable_workspace_id_seeded(path, &mut replay_token));
+
+        let mut other_seed = Deterministic::from_seed(45);
+        assert_ne!(first, stable_workspace_id_seeded(path, &mut other_seed));
+
+        let mut other_path = Deterministic::from_seed(44);
+        assert_ne!(
+            first,
+            stable_workspace_id_seeded(Path::new("/tmp/ee-other-workspace"), &mut other_path)
+        );
+        assert!(first.starts_with("wsp_"));
     }
 
     #[test]

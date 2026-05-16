@@ -83,22 +83,22 @@ pub const SEED_LABEL_REGISTRY: &[SeedLabelDefinition] = &[
     ),
     SeedLabelDefinition::new(
         "ulid.memory",
-        "src/models/id.rs:Id::now",
+        "src/models/id.rs:Id::now_seeded",
         "Memory UUIDv7 generation",
     ),
     SeedLabelDefinition::new(
         "ulid.audit",
-        "src/db/mod.rs:generate_audit_id",
+        "src/db/mod.rs:generate_audit_id_seeded",
         "Audit UUIDv7 generation",
     ),
     SeedLabelDefinition::new(
         "ulid.workspace",
-        "src/core/workspace.rs:stable_workspace_id",
+        "src/core/workspace.rs:stable_workspace_id_seeded",
         "Workspace UUIDv7 generation",
     ),
     SeedLabelDefinition::new(
         "ulid.pack",
-        "src/core/context.rs:persist_pack_record",
+        "src/core/context.rs:persist_pack_record_seeded",
         "Context pack UUIDv7 generation",
     ),
     SeedLabelDefinition::new(

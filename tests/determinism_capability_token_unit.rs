@@ -403,13 +403,16 @@ fn n4_3_threading_surfaces_have_seed_label_registry_rows() -> TestResult {
         ),
         ("src/core/search.rs:search_sync", "search.rerank"),
         ("src/pack/mod.rs:assemble_mmr_draft", "pack.mmr_tiebreak"),
-        ("src/models/id.rs:Id::now", "ulid.memory"),
-        ("src/db/mod.rs:generate_audit_id", "ulid.audit"),
+        ("src/models/id.rs:Id::now_seeded", "ulid.memory"),
+        ("src/db/mod.rs:generate_audit_id_seeded", "ulid.audit"),
         (
-            "src/core/workspace.rs:stable_workspace_id",
+            "src/core/workspace.rs:stable_workspace_id_seeded",
             "ulid.workspace",
         ),
-        ("src/core/context.rs:persist_pack_record", "ulid.pack"),
+        (
+            "src/core/context.rs:persist_pack_record_seeded",
+            "ulid.pack",
+        ),
     ] {
         let found = SEED_LABEL_REGISTRY.iter().any(|definition| {
             definition.producer_call_site == call_site && definition.label.contains(label_fragment)
