@@ -2,8 +2,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use asupersync::Cx;
 use fnx_classes::{Graph, digraph::DiGraph};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
+use crate::core::degraded_aggregation::{
+    AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
+};
 use crate::graph::algorithms::{DEFAULT_FOREGROUND_BUDGET, current_or_testing_cx, run_with_budget};
 use crate::graph::health::detect_louvain_communities;
 use crate::graph::{GraphError, GraphResult, MemoryGraphProjection};
@@ -59,6 +62,7 @@ pub struct PackDna {
     pub community_of_mass: Option<PackDnaCommunity>,
     pub ego_subgraph: Option<PackDnaEgoSubgraph>,
     pub ppr_neighbors: Vec<PackDnaPprNeighbor>,
+    #[serde(serialize_with = "serialize_pack_dna_degraded")]
     pub degraded: Vec<PackDnaDegradation>,
 }
 
@@ -69,6 +73,28 @@ pub struct PackDnaDegradation {
     pub severity: String,
     pub message: String,
     pub repair: String,
+}
+
+fn serialize_pack_dna_degraded<S>(
+    degraded: &[PackDnaDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_pack_dna_degraded(degraded).serialize(serializer)
+}
+
+fn aggregate_pack_dna_degraded(degraded: &[PackDnaDegradation]) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "pack_dna",
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry.repair.clone(),
+        )
+    }))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -568,6 +594,57 @@ mod tests {
         assert!(degraded.message.contains("trust anchor"));
         assert!(degraded.message.contains("dominator"));
         assert!(degraded.repair.contains("trust_class=human_explicit"));
+        Ok(())
+    }
+
+    #[test]
+    fn pack_dna_serializes_aggregated_degraded_entries() -> Result<(), String> {
+        let mut first = pack_dna_degradations(None)
+            .into_iter()
+            .next()
+            .ok_or_else(|| "expected no-dominator degradation".to_owned())?;
+        first.message = "first no-dominator warning".to_owned();
+        let mut second = pack_dna_degradations(None)
+            .into_iter()
+            .next()
+            .ok_or_else(|| "expected no-dominator degradation".to_owned())?;
+        second.message = "second no-dominator warning".to_owned();
+
+        let dna = PackDna {
+            schema: PACK_DNA_SCHEMA_V1,
+            snapshot_version: 9,
+            pack_memory_count: 0,
+            query_seed_count: 0,
+            trust_anchor_count: 0,
+            dominator: None,
+            community_of_mass: None,
+            ego_subgraph: None,
+            ppr_neighbors: Vec::new(),
+            degraded: vec![first, second],
+        };
+
+        let value = serde_json::to_value(dna).map_err(|error| error.to_string())?;
+        let degraded = value
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "serialized Pack DNA should include degraded array".to_owned())?;
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(
+            degraded[0].get("code"),
+            Some(&serde_json::json!(GRAPH_PACK_DNA_NO_DOMINATOR_CODE))
+        );
+        assert_eq!(degraded[0].get("severity"), Some(&serde_json::json!("low")));
+        assert_eq!(
+            degraded[0].get("repair"),
+            Some(&serde_json::json!(
+                "Seed a trusted source memory with `trust_class=human_explicit`."
+            ))
+        );
+        assert_eq!(
+            degraded[0].get("sources"),
+            Some(&serde_json::json!(["pack_dna"]))
+        );
         Ok(())
     }
 }

@@ -80,6 +80,7 @@ Current conventions:
 | `index_vacuum` | `ee index vacuum` derived-index preview and lock-state degradation. |
 | `model_status` | `ee model status` registry posture degradation. |
 | `model_list` | `ee model list` registry posture degradation. |
+| `pack_dna` | `ee context --explain` Pack DNA graph-explanation degradation. |
 | `perf_artifact_summary` | Normalized perf artifact summary degradation. |
 | `perf_budget_check` | `ee perf budget check` artifact-budget degradation. |
 | `perf_compare` | `ee perf compare` artifact comparison degradation. |
