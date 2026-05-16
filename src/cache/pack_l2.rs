@@ -6,6 +6,7 @@ use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ use serde_json::Value as JsonValue;
 
 pub const PACK_L2_CACHE_ENTRY_SCHEMA_V1: &str = "ee.pack.l2_cache.entry.v1";
 const DEFAULT_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackL2CacheOptions {
@@ -287,11 +289,13 @@ impl PackL2Cache {
 
     fn temp_path(&self, key: &str, stored_at_epoch_seconds: u64) -> PathBuf {
         let process_id = std::process::id();
+        let temp_counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
         self.root.join(format!(
-            ".{}.{}.{}.tmp",
+            ".{}.{}.{}.{}.tmp",
             cache_file_stem(key),
             process_id,
-            stored_at_epoch_seconds
+            stored_at_epoch_seconds,
+            temp_counter
         ))
     }
 }
