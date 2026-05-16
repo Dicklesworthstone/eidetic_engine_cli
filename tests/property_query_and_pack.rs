@@ -1,4 +1,8 @@
-use std::{fs, path::Path, str::FromStr};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 use ee::models::{MemoryId, ProvenanceUri, RedactionLevel, UnitScore};
 use ee::pack::{
@@ -193,6 +197,17 @@ fn regression_fixture_file_name(input_hash: &str) -> String {
 
 fn serialize_regression_fixture(fixture: &DeterminismRegressionFixture) -> Result<String, String> {
     Ok(serde_json::to_string_pretty(fixture).map_err(|error| error.to_string())? + "\n")
+}
+
+fn persist_regression_fixture(
+    dir: &Path,
+    fixture: &DeterminismRegressionFixture,
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+    let path = dir.join(regression_fixture_file_name(&fixture.input_hash));
+    fs::write(&path, serialize_regression_fixture(fixture)?)
+        .map_err(|error| format!("write {}: {error}", path.display()))?;
+    Ok(path)
 }
 
 fn load_regression_fixtures(dir: &Path) -> Result<Vec<DeterminismRegressionFixture>, String> {
@@ -429,6 +444,32 @@ fn determinism_regression_fixture_loader_tolerates_missing_dir() -> Result<(), S
 
     let loaded = load_regression_fixtures(missing)?;
     assert!(loaded.is_empty());
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_persists_to_stable_file_name() -> Result<(), String> {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let fixture = regression_fixture_for_mismatch(
+        123,
+        br#"{"query":"stable writeback","seed":123}"#,
+        br#"{"pack":{"items":["a"]}}"#,
+        br#"{"pack":{"items":["b"]}}"#,
+    )
+    .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+
+    let first_path = persist_regression_fixture(tempdir.path(), &fixture)?;
+    let second_path = persist_regression_fixture(tempdir.path(), &fixture)?;
+    let expected_name = regression_fixture_file_name(&fixture.input_hash);
+
+    assert_eq!(first_path, second_path);
+    assert_eq!(
+        first_path.file_name().and_then(|name| name.to_str()),
+        Some(expected_name.as_str())
+    );
+
+    let loaded = load_regression_fixtures(tempdir.path())?;
+    assert_eq!(loaded, vec![fixture]);
     Ok(())
 }
 
