@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value as JsonValue, json};
 use sqlmodel_core::{Row, Value};
 
+use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::db::{CreateCurationCandidateInput, DbConnection};
 use crate::models::causal::{
     CAUSAL_TRACE_SCHEMA_V1, CausalDecisionTrace, CausalEvidenceMethod, CausalEvidenceStrength,
@@ -336,23 +337,6 @@ impl std::fmt::Display for TraceDegradation {
     }
 }
 
-impl TraceDegradation {
-    #[must_use]
-    pub fn data_json(&self) -> JsonValue {
-        let mut value = json!({
-            "code": self.code,
-            "message": self.message,
-            "severity": self.severity,
-        });
-        if let Some(repair) = self.repair.as_ref()
-            && let Some(object) = value.as_object_mut()
-        {
-            object.insert("repair".to_string(), json!(repair));
-        }
-        value
-    }
-}
-
 fn trace_degradation(
     code: impl Into<String>,
     message: impl Into<String>,
@@ -378,6 +362,37 @@ fn trace_degradation_with_repair(
         severity: severity.into(),
         repair: Some(repair.into()),
     }
+}
+
+fn causal_degradations_data_json(
+    source: &'static str,
+    degradations: &[TraceDegradation],
+) -> Vec<JsonValue> {
+    aggregate_degraded_entries(degradations.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            source,
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry.repair.clone().unwrap_or_default(),
+        )
+    }))
+    .into_iter()
+    .map(|entry| {
+        let mut value = json!({
+            "code": entry.code,
+            "message": entry.message,
+            "severity": entry.severity,
+            "sources": entry.sources,
+        });
+        if !entry.repair.is_empty()
+            && let Some(object) = value.as_object_mut()
+        {
+            object.insert("repair".to_string(), json!(entry.repair));
+        }
+        value
+    })
+    .collect()
 }
 
 fn rounded_causal_metric(value: f64) -> f64 {
@@ -433,7 +448,7 @@ impl TraceReport {
                 "totalDecisions": self.total_decisions,
             },
             "filtersApplied": self.filters_applied,
-            "degradations": self.degradations.iter().map(TraceDegradation::data_json).collect::<Vec<_>>(),
+            "degradations": causal_degradations_data_json("causal_trace", &self.degradations),
             "dryRun": self.dry_run,
         })
     }
@@ -1271,7 +1286,7 @@ impl EstimateReport {
                 "methodUsed": self.method_used,
             },
             "filtersApplied": self.filters_applied,
-            "degradations": self.degradations.iter().map(TraceDegradation::data_json).collect::<Vec<_>>(),
+            "degradations": causal_degradations_data_json("causal_estimate", &self.degradations),
             "dryRun": self.dry_run,
         })
     }
@@ -1871,7 +1886,7 @@ impl CompareReport {
                 "methodUsed": self.method_used,
             },
             "filtersApplied": self.filters_applied,
-            "degradations": self.degradations.iter().map(TraceDegradation::data_json).collect::<Vec<_>>(),
+            "degradations": causal_degradations_data_json("causal_compare", &self.degradations),
             "dryRun": self.dry_run,
         })
     }
@@ -2564,7 +2579,7 @@ impl PromotePlanReport {
                 "methodUsed": self.method_used,
             },
             "filtersApplied": self.filters_applied,
-            "degradations": self.degradations.iter().map(TraceDegradation::data_json).collect::<Vec<_>>(),
+            "degradations": causal_degradations_data_json("causal_promote_plan", &self.degradations),
             "dryRun": self.dry_run,
         })
     }
@@ -3261,6 +3276,46 @@ mod tests {
         assert_eq!(json["command"], "causal trace");
         assert!(json["chains"].is_array());
         assert!(json["summary"]["totalChains"].is_number());
+    }
+
+    #[test]
+    fn trace_report_json_aggregates_duplicate_degradations() {
+        let report = TraceReport {
+            schema: CAUSAL_TRACE_SCHEMA_V1,
+            chains: Vec::new(),
+            total_exposures: 0,
+            total_decisions: 0,
+            filters_applied: vec!["pack:pack-001".to_string()],
+            degradations: vec![
+                TraceDegradation {
+                    code: "causal_evidence_unavailable".to_string(),
+                    message: "No evidence rows for the causal trace.".to_string(),
+                    severity: "low".to_string(),
+                    repair: Some("ee causal trace --workspace .".to_string()),
+                },
+                TraceDegradation {
+                    code: "causal_evidence_unavailable".to_string(),
+                    message: "No persisted causal evidence ledger rows are available.".to_string(),
+                    severity: "medium".to_string(),
+                    repair: Some("ee doctor --json".to_string()),
+                },
+            ],
+            dry_run: true,
+        };
+
+        let json = report.data_json();
+        let degradations = json["degradations"]
+            .as_array()
+            .expect("degradations should be an array");
+
+        assert_eq!(degradations.len(), 1);
+        assert_eq!(degradations[0]["code"], "causal_evidence_unavailable");
+        assert_eq!(degradations[0]["severity"], "medium");
+        assert_eq!(degradations[0]["repair"], "ee doctor --json");
+        assert_eq!(
+            degradations[0]["sources"],
+            serde_json::json!(["causal_trace"])
+        );
     }
 
     #[test]

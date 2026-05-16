@@ -68,6 +68,10 @@ Current conventions:
 | `hubs` | `ee insights --section hubs` HITS profile degradation. |
 | `authorities` | `ee insights --section authorities` HITS profile degradation. |
 | `causalBottlenecks` | `ee insights --section causalBottlenecks` degradation. |
+| `causal_trace` | `ee causal trace` degradation. |
+| `causal_estimate` | `ee causal estimate` degradation. |
+| `causal_compare` | `ee causal compare` degradation. |
+| `causal_promote_plan` | `ee causal promote-plan` degradation. |
 | `knowledgeSkyline` | `ee insights --section knowledgeSkyline` degradation. |
 | `loadBearingMemories` | `ee insights --section loadBearingMemories` degradation. |
 | `revisionFrontiers` | `ee insights --section revisionFrontiers` degradation. |
