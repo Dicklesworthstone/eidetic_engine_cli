@@ -241,6 +241,48 @@ exit 7
 }
 
 #[test]
+fn zsh_snippet_treats_preflight_exit_7_as_authoritative() -> TestResult {
+    let Some(zsh) = zsh_or_skip() else {
+        eprintln!("skipping: zsh not available on PATH");
+        return Ok(());
+    };
+    let temp = worker_local_tempdir("ee-preflight-zsh-")?;
+    let stub_path = write_stub_ee_binary(temp.path(), "medium", 7)?;
+    let (snippet_path, _) = write_snippet_to_temp(temp.path(), &stub_path)?;
+
+    let script = format!(
+        "PS1=test\nsource {snippet}\n\
+         __ee_preflight_hook_check 'rm -rf /tmp/test'",
+        snippet = snippet_path.display(),
+    );
+    let output = Command::new(&zsh)
+        .arg("-c")
+        .arg(&script)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    if !stderr.contains("severity=medium") {
+        return Err(format!(
+            "expected medium-severity exit-7 result to be surfaced; stderr={stderr}, stdout={stdout}"
+        ));
+    }
+    if output.status.success() {
+        return Err(format!(
+            "expected zsh hook to interrupt the shell on policy-denied exit 7; stdout={stdout}, stderr={stderr}"
+        ));
+    }
+    if !stderr.contains("Blocked by user.") {
+        return Err(format!(
+            "expected zsh hook to reach the default-block path; stdout={stdout}, stderr={stderr}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn zsh_snippet_is_byte_stable_across_runs_for_pinned_binary_path() -> TestResult {
     let pinned = PathBuf::from("/usr/local/bin/ee");
     let options = PreflightHookShellOptions {
@@ -275,7 +317,6 @@ fn zsh_snippet_carries_documented_contract_markers() -> TestResult {
         "#!/usr/bin/env zsh",
         "surface=trauma_guard_hook_helper",
         "EE_PREFLIGHT_HOOK_BINARY='/usr/local/bin/ee'",
-        "EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES='high critical'",
         "autoload -Uz add-zsh-hook",
         "__ee_preflight_hook_check()",
         "preflight check \\\n            --cmd \"$_ee_cmd\" --json",
@@ -289,6 +330,15 @@ fn zsh_snippet_carries_documented_contract_markers() -> TestResult {
     if !missing.is_empty() {
         return Err(format!(
             "zsh snippet missing required contract markers: {missing:?}\n----- snippet -----\n{}\n-------------------",
+            report.snippet
+        ));
+    }
+    if report
+        .snippet
+        .contains("EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES")
+    {
+        return Err(format!(
+            "zsh snippet must not embed a stale client-side severity allowlist:\n{}",
             report.snippet
         ));
     }

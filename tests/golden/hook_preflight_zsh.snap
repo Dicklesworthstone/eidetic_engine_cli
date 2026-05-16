@@ -2,7 +2,7 @@
 source: src/hooks/installer.rs
 bead: bd-3usjw.7
 surface: trauma_guard_hook_helper
-assertion: ee hook preflight-shell --shell zsh emits a deterministic, syntactically-valid zsh snippet that wires ee preflight check into the preexec hook and aborts the upcoming command line via SIGINT when severity is high|critical and the user declines the prompt
+assertion: ee hook preflight-shell --shell zsh emits a deterministic, syntactically-valid zsh snippet that wires ee preflight check into the preexec hook and aborts the upcoming command line via SIGINT when live preflight policy returns exit 7 and the user declines the prompt
 schema:
   envelope: ee.response.v1
   payload: ee.hooks.preflight_shell.v1
@@ -14,7 +14,7 @@ contracts:
   - snippet declines safely when /dev/tty is unreadable (defaults to N, blocks via SIGINT)
   - snippet allow-lists shell-internal builtins (cd, set, unset, trap, exit, return, fc, history) so they bypass the hook
   - version field is the first 16 hex chars of blake3(snippet) for upgrade detection
-  - severity_block enumerates the severities {high, critical} that trigger the prompt
+  - live `ee preflight check` exit code 7 is authoritative; the snippet does not embed a stale client-side severity allowlist
 evidence:
   - src/hooks/installer.rs::generate_preflight_shell_snippet
   - src/hooks/installer.rs::zsh_preflight_snippet

@@ -828,9 +828,10 @@ pub fn check_hook_status(options: &HookStatusOptions) -> Result<HookStatusReport
 /// Schema for the `ee hook preflight-shell` JSON envelope.
 pub const PREFLIGHT_HOOK_SHELL_SCHEMA_V1: &str = "ee.hooks.preflight_shell.v1";
 
-/// Severities at which the shell hook prompts and (on N) blocks the command.
-/// Lower severities still surface a warning at the source via `ee preflight
-/// check` but do not interrupt the shell flow.
+/// Informational severities historically surfaced in the JSON report for
+/// callers that want to describe the default policy-denied posture. Generated
+/// shell snippets must not use this as a client-side allowlist: exit code 7
+/// from `ee preflight check` is the live policy authority.
 const PREFLIGHT_HOOK_BLOCK_SEVERITIES: &str = " high critical ";
 
 /// Length of the version hash slice surfaced in the JSON envelope. The full
@@ -994,16 +995,14 @@ fn bash_preflight_snippet(ee_path_quoted: &str) -> String {
 # ee preflight hook (bash) — surface=trauma_guard_hook_helper
 #
 # Installs a DEBUG trap that calls `ee preflight check --json` before each
-# interactive command. When the check exits 7 with severity in
-# {{high, critical}}, the user is prompted on /dev/tty; declining the
-# prompt blocks the command via `shopt -s extdebug`.
+# interactive command. When the check exits 7, the user is prompted on
+# /dev/tty; declining the prompt blocks the command via `shopt -s extdebug`.
 #
 # Install:   source <install_path>   (see install_path in the JSON envelope)
 # Disable:   trap - DEBUG; shopt -u extdebug; unset EE_PREFLIGHT_HOOK_ACTIVE
 
 if [ -n "${{BASH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; then
     EE_PREFLIGHT_HOOK_BINARY={ee_path}
-    EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES='{severities}'
 
     __ee_preflight_hook_check() {{
         # Skip our own callbacks and shell builtins that have nothing to gate.
@@ -1023,10 +1022,6 @@ if [ -n "${{BASH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; the
 
         _ee_sev=$(printf '%s' "$_ee_out" | awk -F'"severity":"' \
             'NF>1{{split($2,a,"\""); print a[1]; exit}}')
-        case " $EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES " in
-            *" $_ee_sev "*) ;;
-            *) return 0 ;;
-        esac
         _ee_msg=$(printf '%s' "$_ee_out" | awk -F'"message":"' \
             'NF>1{{split($2,a,"\""); print a[1]; exit}}')
         printf '\n[ee preflight] %s (severity=%s)\n' "$_ee_msg" "$_ee_sev" >&2
@@ -1047,7 +1042,6 @@ if [ -n "${{BASH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; the
 fi
 "#,
         ee_path = ee_path_quoted,
-        severities = PREFLIGHT_HOOK_BLOCK_SEVERITIES.trim(),
     )
 }
 
@@ -1061,9 +1055,8 @@ fn zsh_preflight_snippet(ee_path_quoted: &str) -> String {
 # ee preflight hook (zsh) — surface=trauma_guard_hook_helper
 #
 # Installs a preexec function that calls `ee preflight check --json` before
-# each user command. When the check exits 7 with severity in
-# {{high, critical}}, the user is prompted on /dev/tty; declining the prompt
-# aborts the upcoming command by sending SIGINT to the shell. zsh preexec
+# each user command. When the check exits 7, the user is prompted on /dev/tty;
+# declining the prompt aborts the upcoming command by sending SIGINT to the shell. zsh preexec
 # cannot natively cancel a command, so SIGINT is the documented mechanism.
 #
 # Install:   source <install_path>   (see install_path in the JSON envelope)
@@ -1072,7 +1065,6 @@ fn zsh_preflight_snippet(ee_path_quoted: &str) -> String {
 
 if [ -n "${{ZSH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; then
     EE_PREFLIGHT_HOOK_BINARY={ee_path}
-    EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES='{severities}'
 
     autoload -Uz add-zsh-hook
 
@@ -1097,10 +1089,6 @@ if [ -n "${{ZSH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; then
 
         _ee_sev=$(printf '%s' "$_ee_out" | awk -F'"severity":"' \
             'NF>1{{split($2,a,"\""); print a[1]; exit}}')
-        case " $EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES " in
-            *" $_ee_sev "*) ;;
-            *) return 0 ;;
-        esac
         _ee_msg=$(printf '%s' "$_ee_out" | awk -F'"message":"' \
             'NF>1{{split($2,a,"\""); print a[1]; exit}}')
         print -u2 -- "\n[ee preflight] $_ee_msg (severity=$_ee_sev)"
@@ -1121,7 +1109,6 @@ if [ -n "${{ZSH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; then
 fi
 "#,
         ee_path = ee_path_quoted,
-        severities = PREFLIGHT_HOOK_BLOCK_SEVERITIES.trim(),
     )
 }
 
