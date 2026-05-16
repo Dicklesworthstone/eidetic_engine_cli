@@ -851,6 +851,15 @@ fn export_warnings(format: ProcedureExportFormat) -> Vec<String> {
 }
 
 fn write_export_file(path: &Path, content: &str) -> Result<(), DomainError> {
+    ensure_no_procedure_path_symlink_components(path, "write procedure export").map_err(
+        |error| DomainError::Storage {
+            message: format!(
+                "failed to create procedure export at {}: {error}",
+                path.display()
+            ),
+            repair: Some("choose a real output path without symlinked components".to_owned()),
+        },
+    )?;
     if path.exists() {
         return Err(DomainError::PolicyDenied {
             message: format!(
@@ -1778,12 +1787,23 @@ fn inspect_filesystem_verification_source(
     source_id: &str,
 ) -> Option<VerificationSourceResult> {
     for path in verification_source_candidate_paths(workspace, source_kind, source_id) {
-        if path.is_file() {
-            return Some(inspect_verification_json_file(
-                &path,
-                source_kind,
-                source_id,
-            ));
+        match procedure_path_is_file(&path) {
+            Ok(true) => {
+                return Some(inspect_verification_json_file(
+                    &path,
+                    source_kind,
+                    source_id,
+                ));
+            }
+            Ok(false) => {}
+            Err(error) => {
+                return Some(procedure_source_path_failure(
+                    &path,
+                    source_kind,
+                    source_id,
+                    error,
+                ));
+            }
         }
     }
 
@@ -1807,15 +1827,35 @@ fn inspect_repro_pack_source(
     source_id: &str,
 ) -> Option<VerificationSourceResult> {
     for path in verification_source_candidate_paths(&options.workspace, "repro_pack", source_id) {
-        if path.is_file() {
-            return Some(inspect_verification_json_file(
-                &path,
-                "repro_pack",
-                source_id,
-            ));
+        match procedure_path_is_file(&path) {
+            Ok(true) => {
+                return Some(inspect_verification_json_file(
+                    &path,
+                    "repro_pack",
+                    source_id,
+                ));
+            }
+            Ok(false) => {}
+            Err(error) => {
+                return Some(procedure_source_path_failure(
+                    &path,
+                    "repro_pack",
+                    source_id,
+                    error,
+                ));
+            }
         }
-        if path.is_dir() {
-            return Some(inspect_repro_pack_dir(&path, source_id));
+        match procedure_path_is_dir(&path) {
+            Ok(true) => return Some(inspect_repro_pack_dir(&path, source_id)),
+            Ok(false) => {}
+            Err(error) => {
+                return Some(procedure_source_path_failure(
+                    &path,
+                    "repro_pack",
+                    source_id,
+                    error,
+                ));
+            }
         }
     }
     None
@@ -1994,6 +2034,11 @@ fn inspect_verification_json_file(
     source_kind: &str,
     source_id: &str,
 ) -> VerificationSourceResult {
+    if let Err(error) =
+        ensure_no_procedure_path_symlink_components(path, "read verification source")
+    {
+        return procedure_source_path_failure(path, source_kind, source_id, error);
+    }
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) => {
@@ -2260,16 +2305,31 @@ fn normalize_verification_result(value: &str) -> Option<&'static str> {
 }
 
 fn inspect_repro_pack_dir(path: &Path, source_id: &str) -> VerificationSourceResult {
+    if let Err(error) = ensure_no_procedure_path_symlink_components(path, "inspect repro pack") {
+        return procedure_source_path_failure(path, "repro_pack", source_id, error);
+    }
     let required = ["env.json", "manifest.json", "repro.lock", "provenance.json"];
     let mut step_results = Vec::new();
     let mut failed = false;
     for (index, file_name) in required.iter().enumerate() {
         let file_path = path.join(file_name);
-        let result = if file_path.is_file() && valid_json_file(&file_path) {
-            "passed"
-        } else {
-            failed = true;
-            "failed"
+        let result = match procedure_path_is_file(&file_path) {
+            Ok(true) if valid_json_file(&file_path) => "passed",
+            Ok(_) => {
+                failed = true;
+                "failed"
+            }
+            Err(error) => {
+                failed = true;
+                step_results.push(StepVerificationResult {
+                    step_id: format!("repro_pack_{source_id}_{file_name}"),
+                    sequence: usize_to_u32_saturating(index + 1),
+                    result: "failed".to_owned(),
+                    expected: Some(format!("{file_name} exists and parses as JSON")),
+                    actual: Some(format!("{}: {error}", file_path.display())),
+                });
+                continue;
+            }
         };
         step_results.push(StepVerificationResult {
             step_id: format!("repro_pack_{source_id}_{file_name}"),
@@ -2289,6 +2349,9 @@ fn inspect_repro_pack_dir(path: &Path, source_id: &str) -> VerificationSourceRes
 }
 
 fn valid_json_file(path: &Path) -> bool {
+    if ensure_no_procedure_path_symlink_components(path, "read verification source").is_err() {
+        return false;
+    }
     fs::read_to_string(path)
         .ok()
         .and_then(|content| serde_json::from_str::<Value>(&content).ok())
@@ -2368,7 +2431,10 @@ fn find_eval_fixture_scenario(root: &Path, source_id: &str) -> Option<PathBuf> {
     let entries = fs::read_dir(fixture_root).ok()?;
     for entry in entries.flatten() {
         let path = entry.path().join("scenario.json");
-        if !path.is_file() {
+        let Ok(is_file) = procedure_path_is_file(&path) else {
+            continue;
+        };
+        if !is_file {
             continue;
         }
         let Ok(content) = fs::read_to_string(&path) else {
@@ -2391,6 +2457,89 @@ fn find_eval_fixture_scenario(root: &Path, source_id: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn procedure_source_path_failure(
+    path: &Path,
+    source_kind: &str,
+    source_id: &str,
+    error: std::io::Error,
+) -> VerificationSourceResult {
+    verification_source_result(
+        source_id,
+        source_kind,
+        "failed",
+        Some(format!(
+            "failed to inspect verification source {}: {error}",
+            path.display()
+        )),
+        Vec::new(),
+    )
+}
+
+fn procedure_path_is_file(path: &Path) -> Result<bool, std::io::Error> {
+    ensure_no_procedure_path_symlink_components(path, "inspect verification source")?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.file_type().is_file()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn procedure_path_is_dir(path: &Path) -> Result<bool, std::io::Error> {
+    ensure_no_procedure_path_symlink_components(path, "inspect verification source")?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.file_type().is_dir()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn ensure_no_procedure_path_symlink_components(
+    path: &Path,
+    operation: &'static str,
+) -> Result<(), std::io::Error> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "refusing to {operation} `{}` through symlinked path component `{}`",
+                        path.display(),
+                        current.display()
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn verification_source_result(
@@ -3673,6 +3822,37 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn export_rejects_symlinked_output_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_output_dir = temp.path().join("real-output");
+        fs::create_dir_all(&real_output_dir).map_err(|error| error.to_string())?;
+        symlink(&real_output_dir, temp.path().join("linked-output"))
+            .map_err(|error| error.to_string())?;
+        let options = ProcedureExportOptions {
+            procedure_id: "proc_test".to_owned(),
+            format: "markdown".to_owned(),
+            output_path: Some(temp.path().join("linked-output").join("procedure.md")),
+        };
+
+        let error = export_procedure_from_records(&options, &[procedure_record("candidate")])
+            .expect_err("symlinked output parent should reject export");
+        assert_eq!(error.code(), "storage");
+        assert!(
+            error.message().contains("symlinked path component"),
+            "unexpected symlink error: {}",
+            error.message()
+        );
+        assert!(
+            !real_output_dir.join("procedure.md").exists(),
+            "export must not write through symlinked output parent"
+        );
+        Ok(())
+    }
+
     #[test]
     fn promote_dry_run_returns_not_found_without_record() -> TestResult {
         let options = ProcedurePromoteOptions {
@@ -3812,6 +3992,50 @@ mod tests {
         assert_eq!(
             report.sources_checked[0].message.as_deref(),
             Some("inspected eval fixture different_fixture")
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_rejects_symlinked_named_eval_fixture_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = procedure_store_workspace()?;
+        let fixture_dir = workspace
+            .join(".ee")
+            .join("procedure-verification")
+            .join("eval_fixture");
+        fs::create_dir_all(&fixture_dir).map_err(|error| error.to_string())?;
+        let outside_fixture = workspace.join("outside-fixture.json");
+        fs::write(
+            &outside_fixture,
+            r#"{"schema":"ee.eval_fixture.v1","fixture_id":"fixture_link","coverage_state":"implemented","command_sequence":[{"step":1,"expected_exit_code":0,"stdout_schema":"ee.response.v2"}]}"#,
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(&outside_fixture, fixture_dir.join("fixture_link.json"))
+            .map_err(|error| error.to_string())?;
+
+        let report = verify_procedure(&ProcedureVerifyOptions {
+            workspace,
+            procedure_id: "proc_test".to_owned(),
+            source_kind: Some("eval_fixture".to_owned()),
+            source_ids: vec!["fixture_link".to_owned()],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.overall_result, "failed");
+        assert_eq!(report.fail_count, 1);
+        assert_eq!(report.sources_checked[0].result, "failed");
+        assert!(
+            report.sources_checked[0]
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("symlinked path component")),
+            "expected symlink failure, got {:?}",
+            report.sources_checked[0].message
         );
         Ok(())
     }

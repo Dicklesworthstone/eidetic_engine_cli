@@ -240,12 +240,24 @@ pub fn set_config(
 
     let would_write = before.as_deref() != Some(after.as_str());
     if !dry_run && would_write {
+        ensure_no_config_symlink_components(&path, "write").map_err(|source| {
+            ConfigSurfaceError::Write {
+                path: path.clone(),
+                source,
+            }
+        })?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|source| ConfigSurfaceError::Write {
                 path: path.clone(),
                 source,
             })?;
         }
+        ensure_no_config_symlink_components(&path, "write").map_err(|source| {
+            ConfigSurfaceError::Write {
+                path: path.clone(),
+                source,
+            }
+        })?;
         fs::write(&path, planned_toml.as_bytes()).map_err(|source| ConfigSurfaceError::Write {
             path: path.clone(),
             source,
@@ -293,6 +305,12 @@ fn read_project_config(
     expander: &PathExpander,
 ) -> Result<Option<ConfigFile>, ConfigSurfaceError> {
     let path = effective_config_path(&options.workspace_root, options.config_path.as_deref());
+    ensure_no_config_symlink_components(&path, "read").map_err(|source| {
+        ConfigSurfaceError::Read {
+            path: path.clone(),
+            source,
+        }
+    })?;
     match fs::read_to_string(&path) {
         Ok(contents) => ConfigFile::parse_with_expander(&contents, expander)
             .map(Some)
@@ -350,6 +368,12 @@ fn effective_config_path(workspace_root: &Path, config_path: Option<&Path>) -> P
 }
 
 fn read_optional_config(path: &Path) -> Result<(bool, String), ConfigSurfaceError> {
+    ensure_no_config_symlink_components(path, "read").map_err(|source| {
+        ConfigSurfaceError::Read {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
     match fs::read_to_string(path) {
         Ok(contents) => Ok((true, contents)),
         Err(source) if source.kind() == io::ErrorKind::NotFound => Ok((false, String::new())),
@@ -358,6 +382,39 @@ fn read_optional_config(path: &Path) -> Result<(bool, String), ConfigSurfaceErro
             source,
         }),
     }
+}
+
+fn ensure_no_config_symlink_components(
+    path: &Path,
+    operation: &'static str,
+) -> Result<(), io::Error> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "refusing to {operation} config `{}` through symlinked path component `{}`",
+                        path.display(),
+                        current.display()
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -617,6 +674,7 @@ fn set_toml_value(document: &mut DocumentMut, path: &[&str], value: TomlScalar) 
 #[cfg(test)]
 mod tests {
     use super::{ConfigSurfaceOptions, get_config, graph_config_keys, set_config, show_config};
+    use std::fs;
 
     type TestResult = Result<(), String>;
 
@@ -752,5 +810,54 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graph_set_rejects_symlinked_metadata_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = workspace()?;
+        let real_metadata = temp.path().join("real-ee");
+        fs::create_dir_all(&real_metadata).map_err(|error| error.to_string())?;
+        symlink(&real_metadata, temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let error = set_config(&options(temp.path()), "graph.ppr.alpha", "0.5", false)
+            .expect_err("symlinked .ee parent should reject config set")
+            .to_string();
+        if !error.contains("symlinked path component") {
+            return Err(format!("unexpected symlink error: {error}"));
+        }
+        if real_metadata.join("config.toml").exists() {
+            return Err("config set wrote through symlinked .ee parent".to_string());
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graph_get_rejects_symlinked_config_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = workspace()?;
+        let config_dir = temp.path().join(".ee");
+        fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        let outside_config = temp.path().join("outside-config.toml");
+        fs::write(
+            &outside_config,
+            "[graph.ppr]\nalpha = 0.9\n[graph.feature.ppr]\nenabled = true\n",
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(&outside_config, config_dir.join("config.toml"))
+            .map_err(|error| error.to_string())?;
+
+        let error = get_config(&options(temp.path()), "graph.ppr.alpha")
+            .expect_err("symlinked config file should reject config get")
+            .to_string();
+        if error.contains("symlinked path component") {
+            Ok(())
+        } else {
+            Err(format!("unexpected symlink error: {error}"))
+        }
     }
 }
