@@ -147,6 +147,8 @@ blocked. The count must be by reason and lane, not by secret-bearing payload.
 
 ## Verification Obligations
 
+The shared SRR6 verification matrix in `docs/mesh/verification_matrix.md`
+defines the logging, fixture, and closeout conventions for these tests.
 Later implementation beads must add executable proof for this contract:
 
 - Unit: same peer trusted in workspace A and unbound in workspace B cannot import

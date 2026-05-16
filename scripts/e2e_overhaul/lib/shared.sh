@@ -70,6 +70,9 @@ EPIC_NAME=""
 EPIC_SETUP_BASHPID=""
 EPIC_TMP_ROOT=""
 EPIC_RETENTION_MANIFEST=""
+MESH_SCENARIO_NAME=""
+MESH_SCENARIO_ROOT=""
+MESH_NODE_COUNT=0
 
 _epic_keep_workspace_enabled() {
     [ "${EE_E2E_KEEP_WORKSPACE:-0}" = "1" ]
@@ -226,6 +229,55 @@ seed_corpus() {
         return 1
     fi
     CORPUS_TOLERATE_REJECT=1 "$CORPUS_SEED" "$EPIC_WORKSPACE" >/dev/null 2>&1 || true
+}
+
+# ---------------------------------------------------------------------------
+# Mesh scenario helpers
+# ---------------------------------------------------------------------------
+
+mesh_phase_log() {
+    local phase="${1:?phase required}"
+    local node="${2:?node or scenario required}"
+    local message="${3:?message required}"
+    _e2e_emit_event "note" \
+        "phase" "$phase" \
+        "meshScenario" "${MESH_SCENARIO_NAME:-$EPIC_NAME}" \
+        "meshNode" "$node" \
+        "message" "$message"
+}
+
+mesh_scenario_setup() {
+    local scenario="${1:?scenario required}"
+    local node_count="${2:?node count required}"
+    MESH_SCENARIO_NAME="$scenario"
+    MESH_NODE_COUNT="$node_count"
+    MESH_SCENARIO_ROOT="$EPIC_WORKSPACE/mesh/$scenario"
+    export MESH_SCENARIO_NAME
+    export MESH_NODE_COUNT
+    export MESH_SCENARIO_ROOT
+
+    mkdir -p "$MESH_SCENARIO_ROOT"
+    mesh_phase_log "setup" "$scenario" "scenario_root=$MESH_SCENARIO_ROOT node_count=$MESH_NODE_COUNT"
+
+    local index node
+    index=1
+    while [ "$index" -le "$node_count" ]; do
+        node="$(printf 'node%02d' "$index")"
+        mkdir -p \
+            "$MESH_SCENARIO_ROOT/$node/workspace" \
+            "$MESH_SCENARIO_ROOT/$node/config" \
+            "$MESH_SCENARIO_ROOT/$node/logs" \
+            "$MESH_SCENARIO_ROOT/$node/goldens"
+        mesh_phase_log "setup" "$node" "node_workspace=$MESH_SCENARIO_ROOT/$node/workspace"
+        index=$((index + 1))
+    done
+}
+
+mesh_node_workspace() {
+    local node="${1:?node id required}"
+    local path="$MESH_SCENARIO_ROOT/$node/workspace"
+    mkdir -p "$path"
+    printf '%s\n' "$path"
 }
 
 # ---------------------------------------------------------------------------

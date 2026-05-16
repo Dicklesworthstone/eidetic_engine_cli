@@ -9,6 +9,7 @@ source "$SCRIPT_DIR/lib/shared.sh"
 require_jq
 export EE_MESH_ENABLED=0
 epic_setup "mesh_off_no_network"
+mesh_scenario_setup "mesh_off_no_network" 1
 
 json_codes() {
     jq -r '
@@ -53,8 +54,10 @@ listener_snapshot() {
     fi
 }
 
+mesh_phase_log "action" "node01" "status --json mesh capability probe"
 STATUS_JSON="$(ee_workspace status --json 2>/dev/null || true)"
 if printf '%s' "$STATUS_JSON" | jq . >/dev/null 2>&1; then
+    mesh_phase_log "assert" "node01" "status JSON parses and reports mesh capability posture"
     assert_jq_nonempty "$STATUS_JSON" '.data.capabilities.mesh // empty' "mesh_off_status_reports_mesh_capability"
     MESH_POSTURE="$(printf '%s' "$STATUS_JSON" | jq -r '.data.capabilities.mesh // empty')"
     case "$MESH_POSTURE" in
@@ -70,6 +73,7 @@ else
     e2e_log_assert_eq "false" "true" "mesh_off_status_json_parses"
 fi
 
+mesh_phase_log "action" "node01" "ordinary remember/search/context commands with mesh disabled"
 MEMORY_JSON="$(ee_workspace remember --level procedural --kind rule "Mesh-off e2e ordinary command fixture." --json 2>/dev/null || true)"
 SEARCH_JSON="$(ee_workspace search "mesh-off ordinary command fixture" --json 2>/dev/null || true)"
 CONTEXT_JSON="$(ee_workspace context "mesh-off ordinary command fixture" --max-tokens 500 --json 2>/dev/null || true)"
@@ -82,6 +86,7 @@ do
     label="${pair%%:*}"
     json="${pair#*:}"
     if printf '%s' "$json" | jq . >/dev/null 2>&1; then
+        mesh_phase_log "assert" "node01" "${label} JSON has no mesh degraded code or data key"
         assert_no_mesh_degradation "$json" "mesh_off_${label}_has_no_mesh_degradation"
         assert_no_mesh_data_key "$json" "mesh_off_${label}_has_no_mesh_data_key"
     else
@@ -91,6 +96,7 @@ do
 done
 
 if BEFORE_LISTENERS="$(listener_snapshot)"; then
+    mesh_phase_log "action" "node01" "listener snapshot around mesh-off status"
     ee_workspace status --json >/dev/null 2>&1 || true
     AFTER_LISTENERS="$(listener_snapshot || true)"
     NEW_MESH_LISTENERS="$(comm -13 <(printf '%s\n' "$BEFORE_LISTENERS") <(printf '%s\n' "$AFTER_LISTENERS") | grep -E 'ee|eidetic|mesh|tailscale' || true)"
@@ -104,6 +110,7 @@ else
     e2e_log_note "mesh_off_listener_snapshot_skipped reason=lsof_unavailable"
 fi
 
+mesh_phase_log "cleanup" "node01" "mesh_off_no_network_summary passed=${EE_TEST_LOG_ASSERTS_PASS} failed=${EE_TEST_LOG_ASSERTS_FAIL} node_count=${MESH_NODE_COUNT}"
 e2e_log_note "mesh_off_no_network_summary passed=${EE_TEST_LOG_ASSERTS_PASS} failed=${EE_TEST_LOG_ASSERTS_FAIL}"
 if [ "${EE_TEST_LOG_ASSERTS_FAIL:-0}" -gt 0 ]; then
     exit 1
