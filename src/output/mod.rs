@@ -10389,7 +10389,7 @@ pub fn render_lab_capture_toon(report: &CaptureReport) -> String {
 /// Render a lab replay report as JSON.
 #[must_use]
 pub fn render_lab_replay_json(report: &ReplayReport) -> String {
-    let degraded = lab_replay_degraded_json(report);
+    let degraded = lab_replay_degraded(report);
     let json = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V1,
         "success": true,
@@ -10412,19 +10412,22 @@ pub fn render_lab_replay_json(report: &ReplayReport) -> String {
     json.to_string()
 }
 
-fn lab_replay_degraded_json(report: &ReplayReport) -> Vec<serde_json::Value> {
+fn lab_replay_degraded(report: &ReplayReport) -> Vec<AggregatedDegradation> {
     if report
         .warnings
         .iter()
         .any(|warning| warning.contains("lab_replay_unavailable"))
     {
-        vec![lab_degradation_json("lab_replay_unavailable")]
+        aggregate_degraded_entries([lab_degradation_input(
+            "lab_replay",
+            "lab_replay_unavailable",
+        )])
     } else {
         Vec::new()
     }
 }
 
-fn lab_degradation_json(code: &str) -> serde_json::Value {
+fn lab_degradation_input(source: &'static str, code: &str) -> DegradationAggregationInput {
     let (severity, message, repair) = match code {
         "lab_replay_unavailable" => (
             "medium",
@@ -10442,12 +10445,7 @@ fn lab_degradation_json(code: &str) -> serde_json::Value {
             "Inspect the lab output and provide the missing replay evidence.",
         ),
     };
-    serde_json::json!({
-        "code": code,
-        "severity": severity,
-        "message": message,
-        "repair": repair,
-    })
+    DegradationAggregationInput::new(source, code, severity, message, repair)
 }
 
 /// Render a lab replay report as human-readable text.
@@ -10494,7 +10492,7 @@ pub fn render_lab_replay_toon(report: &ReplayReport) -> String {
 /// Render a lab counterfactual report as JSON.
 #[must_use]
 pub fn render_lab_counterfactual_json(report: &CounterfactualReport) -> String {
-    let degraded = lab_counterfactual_degraded_json(report);
+    let degraded = lab_counterfactual_degraded(report);
     let json = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V1,
         "success": true,
@@ -10526,12 +10524,13 @@ pub fn render_lab_counterfactual_json(report: &CounterfactualReport) -> String {
     json.to_string()
 }
 
-fn lab_counterfactual_degraded_json(report: &CounterfactualReport) -> Vec<serde_json::Value> {
-    report
-        .degradation_codes
-        .iter()
-        .map(|code| lab_degradation_json(code))
-        .collect()
+fn lab_counterfactual_degraded(report: &CounterfactualReport) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(
+        report
+            .degradation_codes
+            .iter()
+            .map(|code| lab_degradation_input("lab_counterfactual", code)),
+    )
 }
 
 /// Render a lab counterfactual report as human-readable text.

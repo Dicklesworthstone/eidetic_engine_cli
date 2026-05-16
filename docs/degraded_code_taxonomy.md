@@ -81,6 +81,8 @@ Current conventions:
 | `build` | Binary version and build-provenance degradation. |
 | `dependency_contract` | `ee diag dependencies` dependency-contract degradation. |
 | `integrity` | `ee diag integrity` database, schema, canary, or provenance-sample degradation. |
+| `lab_counterfactual` | `ee lab counterfactual` replay-evidence degradation. |
+| `lab_replay` | `ee lab replay` replay-evidence degradation. |
 | `quarantine` | `ee diag quarantine` trust or feedback quarantine degradation. |
 | `structural_health` | `ee health structural` graph-health degradation. |
 | `science_drift` | `ee analyze drift` science/evaluation drift degradation. |
