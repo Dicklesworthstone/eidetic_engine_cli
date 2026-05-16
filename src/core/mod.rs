@@ -23,6 +23,7 @@ pub mod completion_audit;
 pub mod config_surface;
 pub mod context;
 pub mod curate;
+pub mod degraded_aggregation;
 pub mod degraded_honesty;
 pub mod determinism;
 pub mod disk_pressure;
