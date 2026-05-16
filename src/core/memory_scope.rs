@@ -946,6 +946,19 @@ mod tests {
     }
 
     #[test]
+    fn mesh_display_provenance_redacts_path_like_producer_peer_label() {
+        let decision = decide_mesh_import(&mesh_input(MeshLane::Metadata), &[mesh_binding()]);
+        let mut input = mesh_display_input(&decision, Some("remote-beta"));
+        input.producer_peer_label = Some("/Users/alice/private/peer-agent");
+
+        let provenance = mesh_display_provenance(&input)
+            .expect("allowed mesh material should expose redacted provenance");
+
+        assert_eq!(provenance.producer_peer, "peer_builder_one");
+        assert_ne!(provenance.producer_peer, "/Users/alice/private/peer-agent");
+    }
+
+    #[test]
     fn mesh_display_provenance_uses_ledger_cursor_when_decision_id_is_absent() {
         let decision = decide_mesh_import(&mesh_input(MeshLane::Metadata), &[mesh_binding()]);
         let mut input = mesh_display_input(&decision, Some("remote-beta"));
