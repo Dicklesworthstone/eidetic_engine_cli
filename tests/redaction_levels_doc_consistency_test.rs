@@ -35,14 +35,25 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
 /// removing a level requires updating BOTH this constant AND the doc.
 const CANONICAL_LEVELS: &[&str] = &["none", "minimal", "standard", "strict", "paranoid"];
 
-/// The 4 surfaces with documented `--redaction` defaults (per the doc's
-/// per-surface defaults table). `ee why` is intentionally OUT of this
-/// list — it has no override.
-const SURFACES_WITH_DEFAULTS: &[(&str, &str)] = &[
-    ("ee export", "standard"),
-    ("ee handoff create", "standard"),
-    ("ee context --json", "minimal"),
-    ("ee support bundle", "paranoid"),
+/// The 4 redaction-bearing surfaces in the per-surface defaults table.
+/// `ee why` is intentionally out of this list: it has no override.
+const SURFACES_WITH_DEFAULTS: &[(&str, &str, &str)] = &[
+    ("ee export", "standard", "current `--redaction <level>`"),
+    (
+        "ee handoff create",
+        "standard",
+        "planned `--redaction <level>`",
+    ),
+    (
+        "ee context --json",
+        "minimal",
+        "planned `--redaction <level>`",
+    ),
+    (
+        "ee support bundle",
+        "paranoid",
+        "planned `--redaction <level>`",
+    ),
 ];
 
 #[test]
@@ -74,17 +85,18 @@ fn doc_declares_five_canonical_levels_in_order() -> TestResult {
 fn doc_declares_per_surface_defaults_in_canonical_table() -> TestResult {
     let doc = read_doc()?;
 
-    for (surface, default_level) in SURFACES_WITH_DEFAULTS {
+    for (surface, default_level, override_status) in SURFACES_WITH_DEFAULTS {
         let surface_backticked = format!("`{surface}`");
         let level_backticked = format!("`{default_level}`");
+        let matching_row = doc.lines().find(|line| {
+            line.contains(&surface_backticked)
+                && line.contains(&level_backticked)
+                && line.contains(override_status)
+        });
         ensure(
-            doc.contains(&surface_backticked),
-            format!("docs/redaction_levels.md missing surface entry `{surface}`"),
-        )?;
-        ensure(
-            doc.contains(&level_backticked),
+            matching_row.is_some(),
             format!(
-                "docs/redaction_levels.md missing default-level marker `{default_level}` (expected as the default for `{surface}`)"
+                "docs/redaction_levels.md missing canonical table row for `{surface}` with default `{default_level}` and override status `{override_status}`"
             ),
         )?;
     }
