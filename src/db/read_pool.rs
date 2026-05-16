@@ -6,11 +6,17 @@ use super::{DatabaseConfig, DbConnection, DbError, DbOperation, Result};
 
 const DEFAULT_MAX_SIZE: usize = 1;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_MAX_PIN_DURATION: Duration = Duration::from_secs(30);
+
+pub const SNAPSHOT_PIN_EXPIRED_CODE: &str = "snapshot_pin_expired";
+pub const SNAPSHOT_RELEASE_FAILED_CODE: &str = "snapshot_release_failed";
+pub const SNAPSHOT_PIN_FORCE_RELEASED_CODE: &str = "snapshot_pin_force_released";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PoolConfig {
     max_size: usize,
     idle_timeout: Duration,
+    max_pin_duration: Duration,
 }
 
 impl PoolConfig {
@@ -19,6 +25,7 @@ impl PoolConfig {
         Self {
             max_size,
             idle_timeout,
+            max_pin_duration: DEFAULT_MAX_PIN_DURATION,
         }
     }
 
@@ -27,7 +34,14 @@ impl PoolConfig {
         Self {
             max_size: DEFAULT_MAX_SIZE,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
+            max_pin_duration: DEFAULT_MAX_PIN_DURATION,
         }
+    }
+
+    #[must_use]
+    pub const fn with_max_pin_duration(mut self, max_pin_duration: Duration) -> Self {
+        self.max_pin_duration = max_pin_duration;
+        self
     }
 
     #[must_use]
@@ -48,6 +62,11 @@ impl PoolConfig {
     #[must_use]
     pub const fn idle_timeout(&self) -> Duration {
         self.idle_timeout
+    }
+
+    #[must_use]
+    pub const fn max_pin_duration(&self) -> Duration {
+        self.max_pin_duration
     }
 }
 
@@ -96,6 +115,8 @@ pub struct PooledReadConnection<'pool> {
 pub struct SnapshotPin<'pool> {
     connection: Option<PooledReadConnection<'pool>>,
     snapshot_active: bool,
+    acquired_at: Instant,
+    max_pin_duration: Duration,
 }
 
 impl ReadConnectionPool {
@@ -181,6 +202,8 @@ impl ReadConnectionPool {
         Ok(SnapshotPin {
             connection: Some(connection),
             snapshot_active: pin_snapshot,
+            acquired_at: Instant::now(),
+            max_pin_duration: self.config.max_pin_duration(),
         })
     }
 
@@ -216,6 +239,15 @@ impl ReadConnectionPool {
         drop_idle_connections(to_close.into_iter().collect());
     }
 
+    fn abandon(&self, connection: DbConnection) {
+        {
+            let mut state = self.lock_state();
+            state.active = state.active.saturating_sub(1);
+            state.drops = state.drops.saturating_add(1);
+        }
+        let _ = connection.close();
+    }
+
     fn lock_state(&self) -> MutexGuard<'_, PoolState> {
         self.state
             .lock()
@@ -227,6 +259,12 @@ impl PooledReadConnection<'_> {
     #[must_use]
     pub const fn slot_id(&self) -> u64 {
         self.slot_id
+    }
+
+    fn abandon(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            self.pool.abandon(connection);
+        }
     }
 }
 
@@ -241,12 +279,35 @@ impl SnapshotPin<'_> {
         self.connection().slot_id()
     }
 
+    #[must_use]
+    pub fn age(&self) -> Duration {
+        self.acquired_at.elapsed()
+    }
+
+    #[must_use]
+    pub fn is_expired(&self) -> bool {
+        self.age() >= self.max_pin_duration
+    }
+
     pub fn commit(mut self) -> Result<()> {
         if self.snapshot_active {
             self.connection().commit_read_snapshot()?;
             self.snapshot_active = false;
         }
         Ok(())
+    }
+
+    fn rollback_on_drop(&mut self) {
+        if !self.snapshot_active {
+            return;
+        }
+
+        self.snapshot_active = false;
+        if let Some(connection) = self.connection.as_mut() {
+            if connection.rollback_read_snapshot().is_err() {
+                connection.abandon();
+            }
+        }
     }
 
     fn connection(&self) -> &PooledReadConnection<'_> {
@@ -286,12 +347,7 @@ impl Drop for PooledReadConnection<'_> {
 
 impl Drop for SnapshotPin<'_> {
     fn drop(&mut self) {
-        if self.snapshot_active {
-            if let Some(connection) = self.connection.as_ref() {
-                let _ = connection.rollback_read_snapshot();
-            }
-            self.snapshot_active = false;
-        }
+        self.rollback_on_drop();
     }
 }
 
@@ -612,6 +668,38 @@ mod tests {
         let stats = pool.stats();
         assert_eq!(stats.active, 0);
         assert_eq!(stats.idle, 1);
+    }
+
+    #[test]
+    fn drop_snapshot_pin_abandons_connection_when_rollback_fails() {
+        let (_tempdir, _database_path, pool) = file_pool(1);
+        let pin = must(pool.pin_snapshot(), "snapshot pin opens");
+        must(
+            pin.connection().commit_read_snapshot(),
+            "test commits behind pin",
+        );
+
+        drop(pin);
+
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 0);
+        assert_eq!(stats.drops, 1);
+        let fresh = must(pool.acquire(), "fresh connection opens after abandon");
+        assert_ne!(fresh.slot_id(), 1);
+    }
+
+    #[test]
+    fn snapshot_pin_reports_age_and_expiry_against_configured_limit() {
+        let pool = ReadConnectionPool::new(
+            DatabaseConfig::memory(),
+            PoolConfig::new(1, Duration::from_secs(30))
+                .with_max_pin_duration(Duration::from_secs(60)),
+        );
+        let pin = must(pool.pin_snapshot(), "snapshot pin opens");
+
+        assert!(!pin.is_expired());
+        assert!(pin.age() < Duration::from_secs(60));
     }
 
     #[test]

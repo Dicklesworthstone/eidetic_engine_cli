@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "snapshot_release_failed",
+  "introduced_by": {
+    "bead": "bd-2caru.6",
+    "epic_letter": "SRR"
+  },
+  "surfaces": [
+    "context",
+    "status"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A read-pool SnapshotPin cannot cleanly roll back or release its read transaction.",
+    "setup_commands": [
+      "force a read-pool release failure by invalidating the underlying read transaction before SnapshotPin drop"
+    ],
+    "invocation": "ee context 'read-pool release failure probe' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "snapshot_release_failed",
+    "severity": "high",
+    "message_contains": [
+      "SnapshotPin",
+      "release"
+    ],
+    "repair_contains": "retry after the read-pool connection is dropped"
+  }
+}

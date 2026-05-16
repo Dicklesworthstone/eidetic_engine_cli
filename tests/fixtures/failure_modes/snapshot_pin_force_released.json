@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "snapshot_pin_force_released",
+  "introduced_by": {
+    "bead": "bd-2caru.6",
+    "epic_letter": "SRR"
+  },
+  "surfaces": [
+    "context",
+    "status"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Workspace shutdown or read-pool drain timeout force-poisons a still-active SnapshotPin.",
+    "setup_commands": [
+      "start a read-pool workflow that holds a SnapshotPin",
+      "close the workspace before the pin releases"
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "snapshot_pin_force_released",
+    "severity": "medium",
+    "message_contains": [
+      "SnapshotPin",
+      "force"
+    ],
+    "repair_contains": "rerun the interrupted read workflow"
+  }
+}

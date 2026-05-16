@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "snapshot_pin_expired",
+  "introduced_by": {
+    "bead": "bd-2caru.6",
+    "epic_letter": "SRR"
+  },
+  "surfaces": [
+    "context",
+    "status"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A read-pool SnapshotPin remains active beyond the configured max pin duration.",
+    "setup_commands": [
+      "ee config set storage.read_pool.max_pin_seconds 30",
+      "start a context/read-pool workflow that holds its read snapshot beyond the max pin duration"
+    ],
+    "invocation": "ee context 'long read-pool workflow' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "snapshot_pin_expired",
+    "severity": "medium",
+    "message_contains": [
+      "SnapshotPin",
+      "expired"
+    ],
+    "repair_contains": "reduce concurrent long-running reads"
+  }
+}

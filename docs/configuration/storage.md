@@ -24,6 +24,15 @@ read handles stay open. `pin_snapshot = true` keeps multi-step reads on a
 stable snapshot; set it to `false` only when a caller explicitly wants unpinned
 read visibility.
 
+Snapshot pins are explicit read transactions over pooled FrankenSQLite
+connections. A clean pin release returns the connection to the LIFO idle pool.
+If release fails, `ee` abandons that connection instead of returning a possibly
+dirty transaction state to later readers; this is reported through the
+`snapshot_release_failed` degradation family. The follow-up read-pool lifecycle
+work tracks max pin duration, watchdog poisoning, and workspace close drain
+timeouts so long-held snapshots cannot grow the WAL without a visible repair
+path.
+
 Environment overrides:
 
 | Config key | Env var |
