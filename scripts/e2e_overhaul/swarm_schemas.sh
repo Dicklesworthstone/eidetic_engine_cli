@@ -76,6 +76,11 @@ for schema_file in "$SCHEMA_DIR"/*.json; do
     emit_event "$schema_id" false 1 "schema examples missing"
     exit 1
   fi
+  if ! jq -e --arg schema_id "$schema_id" --slurpfile schema "$schema_file" \
+    '.examples[$schema_id] == $schema[0].examples[0]' "$FIXTURE" >/dev/null; then
+    emit_event "$schema_id" false 1 "fixture example does not match schema example"
+    exit 1
+  fi
   emit_event "$schema_id" true 0 "schema, status, and fixture rows present"
 done
 
