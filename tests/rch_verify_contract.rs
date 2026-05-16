@@ -936,6 +936,67 @@ fn synthetic_disk_full_retry_stops_when_quarantine_is_ignored() -> TestResult {
 }
 
 #[test]
+fn synthetic_disk_full_retry_respects_requested_workers() -> TestResult {
+    let (status, stdout, _stderr) = run_script_with_env(
+        &["--", "cargo", "test", "--lib", "qos"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "INFO Selected worker: css at ubuntu@css (8 slots, speed 50.0)\nrsync: write failed on \"/data/projects/eidetic_engine_cli/.beads/issues.jsonl\": No space left on device (28)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "20"),
+            ("RCH_VERIFY_HEALTHY_WORKERS", "css,trj,csd"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "css,trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "css,trj,csd"),
+            ("RCH_WORKERS", "trj"),
+            (
+                "RCH_VERIFY_FAKE_RETRY_OUTPUT",
+                "INFO Selected worker: trj at ubuntu@trj (4 slots, speed 50.0)\nremote test ok\n[RCH] remote trj (1.0s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_RETRY_EXIT_CODE", "0"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "requested-worker retry should succeed through trj\nstdout:\n{stdout}\n"
+        ));
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse requested retry: {error}"))?;
+    if report["status"] != "remote_pass" || report["worker_id"] != "trj" {
+        return Err(format!("unexpected requested retry report: {report}"));
+    }
+    if report["requested_workers"] != serde_json::json!(["trj"]) {
+        return Err(format!("requested worker list was not preserved: {report}"));
+    }
+    for expected in [
+        "rch_verify_worker_disk_full",
+        "rch_verify_retry_after_worker_disk_full",
+    ] {
+        if !degraded_contains(&report, expected)? {
+            return Err(format!("missing {expected} in degraded codes: {report}"));
+        }
+    }
+    if degraded_contains(&report, "rch_verify_worker_filter_ignored")? {
+        return Err(format!(
+            "successful requested-worker retry should not report filter ignored: {report}"
+        ));
+    }
+    let stdout_tail = report["stdout_tail"]
+        .as_str()
+        .ok_or_else(|| "missing stdout_tail".to_owned())?;
+    if !stdout_tail.contains("retrying once with RCH_WORKERS=trj")
+        || stdout_tail.contains("RCH_WORKERS=trj,csd")
+    {
+        return Err(format!(
+            "retry note did not stay constrained to requested worker: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn synthetic_worker_filter_ignored_reports_requested_and_configured_workers() -> TestResult {
     let (status, stdout, _stderr) = run_script_with_env(
         &[

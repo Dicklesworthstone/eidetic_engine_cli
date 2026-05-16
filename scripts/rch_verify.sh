@@ -402,7 +402,9 @@ PY
 
 healthy_alternate_workers() {
     local failed_worker="${1:?failed worker required}"
+    local allowed_workers="${2:-}"
     HEALTHY_WORKERS="${RCH_VERIFY_HEALTHY_WORKERS:-}" \
+    ALLOWED_WORKERS="$allowed_workers" \
     FAILED_WORKER="$failed_worker" \
     RCH_BIN_PATH="$RCH_BIN" \
     python3 - <<'PY'
@@ -412,11 +414,19 @@ import subprocess
 
 failed = os.environ["FAILED_WORKER"]
 explicit = os.environ.get("HEALTHY_WORKERS", "")
+allowed_raw = os.environ.get("ALLOWED_WORKERS", "")
+allowed = [
+    item.strip()
+    for item in allowed_raw.split(",")
+    if item.strip()
+]
 
 def emit(ids):
     seen = []
     for item in ids:
         item = item.strip()
+        if allowed and item not in allowed:
+            continue
         if item and item != failed and item not in seen:
             seen.append(item)
     print(",".join(seen))
@@ -1041,7 +1051,7 @@ if [ "$exit_code" -ne 0 ] \
     && [ -n "$worker_id" ] \
     && [ "${RCH_VERIFY_DISABLE_DISK_FULL_RETRY:-0}" != "1" ]; then
     disk_full_worker="$worker_id"
-    alternate_workers="$(healthy_alternate_workers "$disk_full_worker")"
+    alternate_workers="$(healthy_alternate_workers "$disk_full_worker" "${REQUESTED_WORKERS_CSV:-$CONFIGURED_WORKERS_CSV}")"
     if [ -n "$alternate_workers" ]; then
         retried_after_disk_full=1
         retry_note="[RCH_VERIFY] worker $disk_full_worker hit disk-full transfer failure; retrying once with RCH_WORKERS=$alternate_workers"
