@@ -117,3 +117,32 @@ fn bench_script_emits_perf_v1_operation_contract_fields() -> TestResult {
 
     Ok(())
 }
+
+#[test]
+fn host_calibration_harness_is_invoked_only_and_perf_v1_shaped() -> TestResult {
+    let source = fs::read_to_string("scripts/e2e_overhaul/host_calibration.sh")
+        .map_err(|error| format!("failed to read host calibration harness: {error}"))?;
+
+    for expected in [
+        "bd-1zb7k.12.2",
+        "ee.perf.v1",
+        "host_profile",
+        "index_rebuild",
+        "search_json",
+        "context_json",
+        "pack_query_file",
+        "graph_snapshot_dry_run",
+        "renderer_markdown",
+        "EE_HOST_CALIBRATION_ALLOW_STRESS",
+        "EE_HOST_CALIBRATION_REQUIRE_RCH",
+        "deterministic synthetic fixture only",
+        "samples_count",
+        "baseline_ref",
+    ] {
+        if !source.contains(expected) {
+            return Err(format!("host calibration harness missing `{expected}`"));
+        }
+    }
+
+    Ok(())
+}
