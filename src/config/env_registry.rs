@@ -56,6 +56,8 @@ pub enum EnvVar {
     MaxTokens,
     /// `EE_MESH_ENABLED`
     MeshEnabled,
+    /// `EE_MESH_MODE`
+    MeshMode,
     /// `EE_NO_COLOR`
     NoColor,
     /// `EE_OUTPUT_FORMAT`
@@ -116,6 +118,7 @@ impl EnvVar {
             Self::LogJson,
             Self::MaxTokens,
             Self::MeshEnabled,
+            Self::MeshMode,
             Self::NoColor,
             Self::OutputFormat,
             Self::PreflightBypassSecret,
@@ -161,6 +164,7 @@ impl EnvVar {
             Self::LogJson => "EE_LOG_JSON",
             Self::MaxTokens => "EE_MAX_TOKENS",
             Self::MeshEnabled => "EE_MESH_ENABLED",
+            Self::MeshMode => "EE_MESH_MODE",
             Self::NoColor => "EE_NO_COLOR",
             Self::OutputFormat => "EE_OUTPUT_FORMAT",
             Self::PreflightBypassSecret => "EE_PREFLIGHT_BYPASS_SECRET",
@@ -216,6 +220,7 @@ impl EnvVar {
             Self::LogJson => "Enable JSON command-start logs on stderr.",
             Self::MaxTokens => "Override the default context pack token budget.",
             Self::MeshEnabled => "Enable optional mesh-memory surfaces.",
+            Self::MeshMode => "Select the default mesh command mode.",
             Self::NoColor => "Disable colored diagnostics.",
             Self::OutputFormat => "Select the default output renderer.",
             Self::PreflightBypassSecret => "Supply preflight bypass secret material.",
@@ -244,6 +249,7 @@ impl EnvVar {
     #[must_use]
     pub const fn default_value(self) -> Option<&'static str> {
         match self {
+            Self::MeshMode => Some("off"),
             Self::MeshEnabled => Some("false"),
             Self::IndexPublishLockRetryAttempts => Some("200"),
             Self::RememberCurationSyncBudgetMs => Some("50"),
@@ -283,7 +289,7 @@ impl EnvVar {
             | Self::TestLogLevel
             | Self::TestLogPath
             | Self::TestLogTestId => "diagnostics",
-            Self::MeshEnabled => "mesh",
+            Self::MeshEnabled | Self::MeshMode => "mesh",
             Self::HarmfulBurstWindowSeconds
             | Self::HarmfulPerSourcePerHour
             | Self::L2PackCacheBytes

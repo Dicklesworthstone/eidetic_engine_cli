@@ -318,6 +318,7 @@ impl PackL2CacheConfig {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MeshConfig {
     pub enabled: Option<bool>,
+    pub command_mode: Option<MeshCommandMode>,
     pub peer_group_bindings: Option<Vec<MeshPeerGroupBinding>>,
 }
 
@@ -325,8 +326,48 @@ impl MeshConfig {
     fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
         Ok(Self {
             enabled: optional_bool(document, "mesh", "enabled")?,
+            command_mode: optional_mesh_command_mode(document, "mesh", "command_mode")?,
             peer_group_bindings: optional_peer_group_bindings(document)?,
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MeshCommandMode {
+    #[default]
+    Off,
+    Cache,
+    Revisable,
+    Blocking,
+}
+
+impl MeshCommandMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Cache => "cache",
+            Self::Revisable => "revisable",
+            Self::Blocking => "blocking",
+        }
+    }
+}
+
+impl FromStr for MeshCommandMode {
+    type Err = ConfigParseError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input {
+            "off" => Ok(Self::Off),
+            "cache" => Ok(Self::Cache),
+            "revisable" => Ok(Self::Revisable),
+            "blocking" => Ok(Self::Blocking),
+            other => Err(ConfigParseError::InvalidValue {
+                key: "mesh.command_mode".to_string(),
+                value: other.to_string(),
+                message: "expected one of `off`, `cache`, `revisable`, or `blocking`".to_string(),
+            }),
+        }
     }
 }
 
@@ -1209,6 +1250,17 @@ fn optional_search_speed(
     }
 }
 
+fn optional_mesh_command_mode(
+    document: &DocumentMut,
+    section: &str,
+    key: &str,
+) -> Result<Option<MeshCommandMode>, ConfigParseError> {
+    match optional_string(document, section, key)? {
+        Some(value) => value.parse().map(Some),
+        None => Ok(None),
+    }
+}
+
 fn optional_string_array(
     document: &DocumentMut,
     section: &str,
@@ -1435,8 +1487,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        ConfigFile, ConfigParseError, MeshLane, MeshLaneDecision, PathExpander, SearchSpeed,
-        optional_string_array,
+        ConfigFile, ConfigParseError, MeshCommandMode, MeshLane, MeshLaneDecision, PathExpander,
+        SearchSpeed, optional_string_array,
     };
 
     type TestResult = Result<(), String>;
@@ -1517,6 +1569,7 @@ max_age_days = 30
 
 [mesh]
 enabled = false
+command_mode = "off"
 
 [[mesh.peer_group_bindings]]
 workspace_id = "wsp_local_release_001"
@@ -1686,6 +1739,11 @@ prompt_injection_guard = true
             "pack L2 cache max age",
         )?;
         ensure_equal(&config.mesh.enabled, &Some(false), "mesh enabled")?;
+        ensure_equal(
+            &config.mesh.command_mode,
+            &Some(MeshCommandMode::Off),
+            "mesh command mode",
+        )?;
         let binding = config
             .mesh
             .peer_group_bindings
@@ -1898,6 +1956,7 @@ prompt_injection_guard = true
         )?;
         ensure_equal(&config.graph.ppr.alpha, &None, "graph ppr alpha")?;
         ensure_equal(&config.mesh.enabled, &None, "mesh enabled")?;
+        ensure_equal(&config.mesh.command_mode, &None, "mesh command mode")?;
         ensure_equal(
             &config.mesh.peer_group_bindings,
             &None,
@@ -2013,6 +2072,40 @@ metadata = "allow"
             ),
             &MeshLaneDecision::Deny,
             "workspace B without explicit binding must deny",
+        )
+    }
+
+    #[test]
+    fn mesh_command_mode_parses_all_stable_modes() -> TestResult {
+        for (raw, expected) in [
+            ("off", MeshCommandMode::Off),
+            ("cache", MeshCommandMode::Cache),
+            ("revisable", MeshCommandMode::Revisable),
+            ("blocking", MeshCommandMode::Blocking),
+        ] {
+            let config = ConfigFile::parse(&format!("[mesh]\ncommand_mode = \"{raw}\"\n"))
+                .map_err(|error| format!("mesh mode {raw} should parse: {error}"))?;
+            ensure_equal(
+                &config.mesh.command_mode,
+                &Some(expected),
+                "mesh command mode",
+            )?;
+            ensure_equal(&expected.as_str(), &raw, "mesh command mode string")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_command_mode_rejects_unknown_mode() -> TestResult {
+        let error = expect_config_error("[mesh]\ncommand_mode = \"auto\"\n")?;
+
+        ensure(
+            matches!(
+                error,
+                ConfigParseError::InvalidValue { ref key, .. }
+                    if key == "mesh.command_mode"
+            ),
+            format!("unexpected error: {error:?}"),
         )
     }
 

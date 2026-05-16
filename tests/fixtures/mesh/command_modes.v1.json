@@ -1,0 +1,58 @@
+{
+  "schema": "ee.mesh.command_modes.v1",
+  "bead": "bd-3omr5",
+  "defaultMode": "off",
+  "precedence": [
+    "command_flag",
+    "environment",
+    "config",
+    "built_in_default"
+  ],
+  "modes": [
+    {
+      "mode": "off",
+      "summary": "Strict local-only behavior.",
+      "network": "never",
+      "cache": "ignored",
+      "revisionTokens": "none",
+      "blockingPeerWait": false
+    },
+    {
+      "mode": "cache",
+      "summary": "Use already-authorized cached mesh material for the current workspace.",
+      "network": "never",
+      "cache": "authorized_current_workspace_only",
+      "revisionTokens": "none",
+      "blockingPeerWait": false
+    },
+    {
+      "mode": "revisable",
+      "summary": "Return promptly and expose explicit revision availability metadata.",
+      "network": "never_for_initial_response",
+      "cache": "authorized_current_workspace_only",
+      "revisionTokens": "required_when_known",
+      "blockingPeerWait": false
+    },
+    {
+      "mode": "blocking",
+      "summary": "Reserved opt-in for future hard-budget peer freshness.",
+      "network": "implementation_dependent",
+      "cache": "authorized_current_workspace_only",
+      "revisionTokens": "required",
+      "blockingPeerWait": true,
+      "currentRuntimeStatus": "unsupported_until_latency_budgeted_peer_query_lands"
+    }
+  ],
+  "surfaces": [
+    "search",
+    "context",
+    "pack",
+    "why",
+    "status"
+  ],
+  "redactionRules": [
+    "remote workspace paths are never emitted by default",
+    "denied or quarantined material never enters search/context/why outputs",
+    "status may expose counts by reason, lane, and namespace alias only"
+  ]
+}

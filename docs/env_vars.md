@@ -33,6 +33,7 @@ must not expose their current value.
 | `EE_LOG_JSON` | diagnostics | boolean flag | none | Enable JSON command-start logs on stderr. | Shortcut for JSON command logging. |
 | `EE_MAX_TOKENS` | tuning | integer tokens | none | Override the default context pack token budget. | Applies when a command does not pass an explicit token budget. |
 | `EE_MESH_ENABLED` | mesh | boolean flag | `false` | Enable optional mesh-memory surfaces. | Disabled by default; ordinary local-first commands must not open network listeners or require peer configuration when unset. |
+| `EE_MESH_MODE` | mesh | enum | `off` | Select the default mesh command mode. | Accepted values are `off`, `cache`, `revisable`, and `blocking`; explicit `--mesh` command flags take precedence. |
 | `EE_NO_COLOR` | output | boolean flag | none | Disable colored diagnostics. | Mirrors the behavior of `NO_COLOR` for ee-specific control. |
 | `EE_OUTPUT_FORMAT` | output | output format | none | Select the default output renderer. | Highest-priority environment output format selector. |
 | `EE_PREFLIGHT_BYPASS_SECRET` | policy | secret string | none | Supply preflight bypass secret material. | Capabilities must never expose this current value. |

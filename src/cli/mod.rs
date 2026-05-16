@@ -20,7 +20,7 @@ use crate::cass::{
 use crate::config::env_registry::{EnvVar, read, read_os};
 use crate::config::{
     GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY, GRAPH_FEATURE_PROXIMITY_ENABLED_KEY,
-    GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY,
+    GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY, MeshCommandMode,
 };
 use crate::core::VersionReport;
 use crate::core::agent_detect::{
@@ -787,6 +787,10 @@ pub struct StatusArgs {
     /// Emit the knowledge skyline status surface.
     #[arg(long, action = ArgAction::SetTrue)]
     pub skyline: bool,
+
+    /// Mesh command mode for status posture: off, cache, revisable, or blocking.
+    #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
+    pub mesh_mode: MeshCommandMode,
 }
 
 /// Subcommands for `ee artifact`.
@@ -1771,6 +1775,10 @@ pub struct ContextArgs {
     /// Fail closed when relevant evidence exists outside the requested memory scope.
     #[arg(long, action = ArgAction::SetTrue)]
     pub strict_scope: bool,
+
+    /// Mesh command mode: off, cache, revisable, or blocking.
+    #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
+    pub mesh_mode: MeshCommandMode,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -1926,6 +1934,10 @@ pub struct PackArgs {
     /// Include memories marked with stale validity status when present in index metadata.
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_stale: bool,
+
+    /// Mesh command mode: off, cache, revisable, or blocking.
+    #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
+    pub mesh_mode: MeshCommandMode,
 }
 
 /// Pack subcommands: build, replay, diff.
@@ -2028,6 +2040,10 @@ pub struct PackBuildArgs {
     /// Include memories marked with stale validity status when present in index metadata.
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_stale: bool,
+
+    /// Mesh command mode: off, cache, revisable, or blocking.
+    #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
+    pub mesh_mode: MeshCommandMode,
 }
 
 impl PackArgs {
@@ -2062,6 +2078,7 @@ impl PackArgs {
             include_expired: self.include_expired,
             include_future: self.include_future,
             include_stale: self.include_stale,
+            mesh_mode: self.mesh_mode,
             coordination_snapshot: self.coordination_snapshot.clone(),
             coordination_stale_after_ms: self.coordination_stale_after_ms,
         })
@@ -5506,6 +5523,10 @@ pub struct SearchArgs {
     /// Fail closed when relevant evidence exists outside the requested memory scope.
     #[arg(long, action = ArgAction::SetTrue)]
     pub strict_scope: bool,
+
+    /// Mesh command mode: off, cache, revisable, or blocking.
+    #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
+    pub mesh_mode: MeshCommandMode,
 }
 
 /// Arguments for `ee doctor`.
@@ -6426,6 +6447,10 @@ pub struct WhyArgs {
     /// Include causal ancestry and min-cost path evidence from the causal graph.
     #[arg(long, action = ArgAction::SetTrue)]
     pub causal_explain: bool,
+
+    /// Mesh command mode: off, cache, revisable, or blocking.
+    #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
+    pub mesh_mode: MeshCommandMode,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -22981,6 +23006,12 @@ fn parse_speed_mode_arg(value: &str) -> Result<crate::search::SpeedMode, String>
         .map_err(|error| error.to_string())
 }
 
+fn parse_mesh_command_mode_arg(value: &str) -> Result<MeshCommandMode, String> {
+    value.parse::<MeshCommandMode>().map_err(|_| {
+        format!("Invalid mesh mode '{value}'. Expected off, cache, revisable, or blocking.")
+    })
+}
+
 fn parse_search_source_mode_arg(value: &str) -> Result<SearchSourceMode, String> {
     match value {
         "lexical_only" => Ok(SearchSourceMode::LexicalOnly),
@@ -25554,6 +25585,7 @@ where
             include_expired: args.include_expired,
             include_future: args.include_future,
             include_stale: args.include_stale,
+            mesh_mode: args.mesh_mode,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
             coordination_snapshot: args.coordination_snapshot.clone(),
@@ -42956,6 +42988,11 @@ default_half_life_days = 45
                     &args.speed,
                     &crate::search::SpeedMode::Default,
                     "context default speed",
+                )?;
+                ensure_equal(
+                    &args.mesh_mode,
+                    &MeshCommandMode::Off,
+                    "context default mesh mode",
                 )
             }
             _ => Err("expected Context command".to_string()),
@@ -43032,6 +43069,103 @@ default_half_life_days = 45
             }
             _ => Err("expected Context command".to_string()),
         }
+    }
+
+    #[test]
+    fn mesh_command_mode_flags_parse_on_agent_facing_surfaces() -> TestResult {
+        let context = Cli::try_parse_from(["ee", "context", "test", "--mesh", "cache"])
+            .map_err(|e| format!("failed to parse context mesh mode: {:?}", e.kind()))?;
+        match context.command {
+            Some(Command::Context(ref args)) => {
+                ensure_equal(
+                    &args.mesh_mode,
+                    &MeshCommandMode::Cache,
+                    "context mesh mode",
+                )?;
+            }
+            _ => return Err("expected Context command".to_string()),
+        }
+
+        let pack = Cli::try_parse_from(["ee", "pack", "test", "--mesh", "revisable"])
+            .map_err(|e| format!("failed to parse pack mesh mode: {:?}", e.kind()))?;
+        match pack.command {
+            Some(Command::Pack(ref args)) => {
+                ensure_equal(
+                    &args.mesh_mode,
+                    &MeshCommandMode::Revisable,
+                    "pack mesh mode",
+                )?;
+            }
+            _ => return Err("expected Pack command".to_string()),
+        }
+
+        let pack_build = Cli::try_parse_from([
+            "ee",
+            "pack",
+            "build",
+            "--query-file",
+            "task.eeq.json",
+            "--mesh",
+            "blocking",
+        ])
+        .map_err(|e| format!("failed to parse pack build mesh mode: {:?}", e.kind()))?;
+        match pack_build.command {
+            Some(Command::Pack(ref args)) => match &args.command {
+                Some(PackCommand::Build(args)) => {
+                    ensure_equal(
+                        &args.mesh_mode,
+                        &MeshCommandMode::Blocking,
+                        "pack build mesh mode",
+                    )?;
+                }
+                _ => return Err("expected Pack Build command".to_string()),
+            },
+            _ => return Err("expected Pack command".to_string()),
+        }
+
+        let search = Cli::try_parse_from(["ee", "search", "test", "--mesh", "off"])
+            .map_err(|e| format!("failed to parse search mesh mode: {:?}", e.kind()))?;
+        match search.command {
+            Some(Command::Search(ref args)) => {
+                ensure_equal(&args.mesh_mode, &MeshCommandMode::Off, "search mesh mode")?;
+            }
+            _ => return Err("expected Search command".to_string()),
+        }
+
+        let status = Cli::try_parse_from(["ee", "status", "--mesh", "cache"])
+            .map_err(|e| format!("failed to parse status mesh mode: {:?}", e.kind()))?;
+        match status.command {
+            Some(Command::Status(ref args)) => {
+                ensure_equal(&args.mesh_mode, &MeshCommandMode::Cache, "status mesh mode")?;
+            }
+            _ => return Err("expected Status command".to_string()),
+        }
+
+        let why = Cli::try_parse_from(["ee", "why", "mem_001", "--mesh", "revisable"])
+            .map_err(|e| format!("failed to parse why mesh mode: {:?}", e.kind()))?;
+        match why.command {
+            Some(Command::Why(ref args)) => {
+                ensure_equal(
+                    &args.mesh_mode,
+                    &MeshCommandMode::Revisable,
+                    "why mesh mode",
+                )?;
+            }
+            _ => return Err("expected Why command".to_string()),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_command_mode_rejects_unknown_value() -> TestResult {
+        let error = Cli::try_parse_from(["ee", "search", "test", "--mesh", "auto"])
+            .expect_err("invalid mesh mode should fail");
+        ensure_equal(
+            &error.kind(),
+            &ErrorKind::ValueValidation,
+            "invalid mesh mode error",
+        )
     }
 
     #[test]

@@ -18,7 +18,7 @@ use super::file::{
     CacheConfig, CassConfig, ConfigFile, CurationConfig, FeedbackConfig, GraphCausalConfig,
     GraphConfig, GraphCurateConfig, GraphFeatureFlagsConfig, GraphGomoryHuConfig,
     GraphHealthConfig, GraphHitsConfig, GraphPackDnaConfig, GraphPprConfig, HandoffConfig,
-    LearnConfig, LearnDecayConfig, MeshConfig, OutputRedactionConfig, PackConfig,
+    LearnConfig, LearnDecayConfig, MeshCommandMode, MeshConfig, OutputRedactionConfig, PackConfig,
     PackL2CacheConfig, PolicyConfig, PrivacyConfig, ReadPoolConfig, RuntimeConfig, SearchConfig,
     SearchSpeed, SecretDetectorConfig, StorageConfig, TrustConfig,
 };
@@ -51,6 +51,7 @@ pub const CACHE_PACK_L2_DIRECTORY_KEY: &str = "cache.pack_l2.directory";
 pub const CACHE_PACK_L2_MAX_BYTES_KEY: &str = "cache.pack_l2.max_bytes";
 pub const CACHE_PACK_L2_MAX_AGE_DAYS_KEY: &str = "cache.pack_l2.max_age_days";
 pub const MESH_ENABLED_KEY: &str = "mesh.enabled";
+pub const MESH_COMMAND_MODE_KEY: &str = "mesh.command_mode";
 pub const MESH_PEER_GROUP_BINDINGS_KEY: &str = "mesh.peer_group_bindings";
 pub const GRAPH_PPR_ALPHA_KEY: &str = "graph.ppr.alpha";
 pub const GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY: &str = "graph.health.contradiction_threshold";
@@ -365,6 +366,13 @@ impl MergedConfig {
                 MESH_ENABLED_KEY,
                 enabled.to_string(),
                 self.source(MESH_ENABLED_KEY),
+            ));
+        }
+        if let Some(command_mode) = self.values.mesh.command_mode {
+            entries.push(ConfigShowEntry::new(
+                MESH_COMMAND_MODE_KEY,
+                command_mode.as_str().to_string(),
+                self.source(MESH_COMMAND_MODE_KEY),
             ));
         }
         if let Some(ref bindings) = self.values.mesh.peer_group_bindings {
@@ -772,6 +780,7 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
         },
         mesh: MeshConfig {
             enabled: Some(false),
+            command_mode: Some(MeshCommandMode::Off),
             peer_group_bindings: Some(Vec::new()),
         },
         graph: GraphConfig {
@@ -897,6 +906,7 @@ pub fn config_from_env(
         },
         mesh: MeshConfig {
             enabled: optional_env_bool(env, EnvVar::MeshEnabled.name())?,
+            command_mode: optional_env_mesh_command_mode(env, EnvVar::MeshMode.name())?,
             peer_group_bindings: None,
         },
         graph: GraphConfig::default(),
@@ -938,6 +948,10 @@ pub enum EnvironmentConfigError {
         variable: &'static str,
         value: String,
     },
+    InvalidMeshCommandMode {
+        variable: &'static str,
+        value: String,
+    },
     PathExpansion {
         variable: &'static str,
         source: PathExpansionError,
@@ -961,6 +975,10 @@ impl fmt::Display for EnvironmentConfigError {
                 formatter,
                 "environment variable `{variable}` must be `true` or `false`, got `{value}`"
             ),
+            Self::InvalidMeshCommandMode { variable, value } => write!(
+                formatter,
+                "environment variable `{variable}` must be one of `off`, `cache`, `revisable`, or `blocking`, got `{value}`"
+            ),
             Self::PathExpansion { variable, source } => {
                 write!(formatter, "failed to expand `{variable}`: {source}")
             }
@@ -974,7 +992,8 @@ impl std::error::Error for EnvironmentConfigError {
             Self::PathExpansion { source, .. } => Some(source),
             Self::InvalidUnicode { .. }
             | Self::InvalidUnsignedInteger { .. }
-            | Self::InvalidBoolean { .. } => None,
+            | Self::InvalidBoolean { .. }
+            | Self::InvalidMeshCommandMode { .. } => None,
         }
     }
 }
@@ -1234,6 +1253,15 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.mesh.enabled,
                 &layers.user.mesh.enabled,
                 &layers.defaults.mesh.enabled,
+            ),
+            command_mode: pick_field(
+                &mut sources,
+                MESH_COMMAND_MODE_KEY,
+                &layers.cli.mesh.command_mode,
+                &layers.environment.mesh.command_mode,
+                &layers.project.mesh.command_mode,
+                &layers.user.mesh.command_mode,
+                &layers.defaults.mesh.command_mode,
             ),
             peer_group_bindings: pick_field(
                 &mut sources,
@@ -1764,6 +1792,19 @@ fn optional_env_bool(
     }
 }
 
+fn optional_env_mesh_command_mode(
+    env: &BTreeMap<String, OsString>,
+    variable: &'static str,
+) -> Result<Option<MeshCommandMode>, EnvironmentConfigError> {
+    let Some(value) = optional_env_string(env, variable)? else {
+        return Ok(None);
+    };
+    match value.parse::<MeshCommandMode>() {
+        Ok(mode) => Ok(Some(mode)),
+        Err(_) => Err(EnvironmentConfigError::InvalidMeshCommandMode { variable, value }),
+    }
+}
+
 fn optional_env_path(
     env: &BTreeMap<String, OsString>,
     variable: &'static str,
@@ -1801,18 +1842,19 @@ mod tests {
         GRAPH_HITS_PROFILE_BOOST_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY, GRAPH_PACK_DNA_MAX_ITEMS_KEY,
         GRAPH_PPR_ALPHA_KEY, LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY,
         LEARN_DECAY_DEMOTE_THRESHOLD_KEY, LEARN_DECAY_PROCEDURAL_RULE_HALF_LIFE_DAYS_KEY,
-        MESH_ENABLED_KEY, MESH_PEER_GROUP_BINDINGS_KEY, PACK_DEFAULT_MAX_TOKENS_KEY,
-        PACK_DEFAULT_PROFILE_KEY, POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY,
-        SEARCH_DEFAULT_SPEED_KEY, STORAGE_DATABASE_PATH_KEY, STORAGE_INDEX_DIR_KEY,
+        MESH_COMMAND_MODE_KEY, MESH_ENABLED_KEY, MESH_PEER_GROUP_BINDINGS_KEY,
+        PACK_DEFAULT_MAX_TOKENS_KEY, PACK_DEFAULT_PROFILE_KEY,
+        POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY, SEARCH_DEFAULT_SPEED_KEY,
+        STORAGE_DATABASE_PATH_KEY, STORAGE_INDEX_DIR_KEY,
         STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY, STORAGE_READ_POOL_PIN_SNAPSHOT_KEY,
         STORAGE_READ_POOL_SIZE_KEY, built_in_config, config_from_env, merge_config,
     };
     use crate::config::{
         CacheConfig, ConfigFile, CurationConfig, GraphConfig, GraphCurateConfig,
         GraphFeatureFlagsConfig, GraphGomoryHuConfig, GraphHealthConfig, GraphPprConfig,
-        LearnConfig, LearnDecayConfig, MeshConfig, PackConfig, PackL2CacheConfig, PathExpander,
-        PolicyConfig, ReadPoolConfig, SearchConfig, SearchSpeed, SecretDetectorConfig,
-        StorageConfig,
+        LearnConfig, LearnDecayConfig, MeshCommandMode, MeshConfig, PackConfig, PackL2CacheConfig,
+        PathExpander, PolicyConfig, ReadPoolConfig, SearchConfig, SearchSpeed,
+        SecretDetectorConfig, StorageConfig,
     };
 
     type TestResult = Result<(), String>;
@@ -1903,6 +1945,11 @@ mod tests {
             "pack L2 cache max age",
         )?;
         ensure_equal(&defaults.mesh.enabled, &Some(false), "mesh default off")?;
+        ensure_equal(
+            &defaults.mesh.command_mode,
+            &Some(MeshCommandMode::Off),
+            "mesh default command mode",
+        )?;
         ensure_equal(&defaults.storage.read_pool.size, &Some(1), "read pool size")?;
         ensure_equal(
             &defaults.storage.read_pool.idle_timeout_seconds,
@@ -1983,6 +2030,7 @@ mod tests {
             OsString::from("true"),
         );
         env.insert("EE_MESH_ENABLED".to_string(), OsString::from("true"));
+        env.insert("EE_MESH_MODE".to_string(), OsString::from("cache"));
         env.insert("EE_PROFILE".to_string(), OsString::from("thorough"));
         env.insert("EE_MAX_TOKENS".to_string(), OsString::from("8192"));
 
@@ -2039,7 +2087,12 @@ mod tests {
             &Some(false),
             "env L2 pack cache disable inversion",
         )?;
-        ensure_equal(&parsed.mesh.enabled, &Some(true), "env mesh enabled")
+        ensure_equal(&parsed.mesh.enabled, &Some(true), "env mesh enabled")?;
+        ensure_equal(
+            &parsed.mesh.command_mode,
+            &Some(MeshCommandMode::Cache),
+            "env mesh command mode",
+        )
     }
 
     #[test]
@@ -2079,6 +2132,26 @@ mod tests {
                 value: "yes".to_string(),
             },
             "invalid bool error",
+        )
+    }
+
+    #[test]
+    fn environment_layer_rejects_invalid_mesh_mode() -> TestResult {
+        let mut env = BTreeMap::new();
+        env.insert("EE_MESH_MODE".to_string(), OsString::from("auto"));
+
+        let error = match config_from_env(&env, &expander()) {
+            Ok(config) => return Err(format!("expected env error, got {config:?}")),
+            Err(error) => error,
+        };
+
+        ensure_equal(
+            &error,
+            &EnvironmentConfigError::InvalidMeshCommandMode {
+                variable: "EE_MESH_MODE",
+                value: "auto".to_string(),
+            },
+            "invalid mesh mode",
         )
     }
 
@@ -2167,6 +2240,7 @@ mod tests {
             },
             mesh: MeshConfig {
                 enabled: Some(true),
+                command_mode: Some(MeshCommandMode::Cache),
                 peer_group_bindings: None,
             },
             ..ConfigFile::default()
@@ -2277,6 +2351,16 @@ mod tests {
             &merged.source(MESH_ENABLED_KEY),
             &Some(ConfigValueSource::Environment),
             "mesh enabled source",
+        )?;
+        ensure_equal(
+            &merged.values.mesh.command_mode,
+            &Some(MeshCommandMode::Cache),
+            "env mesh command mode",
+        )?;
+        ensure_equal(
+            &merged.source(MESH_COMMAND_MODE_KEY),
+            &Some(ConfigValueSource::Environment),
+            "mesh command mode source",
         )?;
         ensure_equal(
             &merged.values.graph.ppr.alpha,
@@ -2416,6 +2500,7 @@ mod tests {
             GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY,
             GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
             MESH_ENABLED_KEY,
+            MESH_COMMAND_MODE_KEY,
             MESH_PEER_GROUP_BINDINGS_KEY,
             STORAGE_READ_POOL_SIZE_KEY,
             STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY,
