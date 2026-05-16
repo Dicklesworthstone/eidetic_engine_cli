@@ -301,6 +301,11 @@ fn seed_workspace_with_causal_evidence() -> Result<(PathBuf, String, String, Str
             String::from_utf8_lossy(&init.stderr)
         ),
     )?;
+    fs::write(
+        workspace.join(".ee").join("config.toml"),
+        "[graph.feature.causal_explain]\nenabled = true\n",
+    )
+    .map_err(|error| error.to_string())?;
 
     let failure = remember(&workspace_arg, "Causal failure memory.")?;
     let bridge = remember(&workspace_arg, "Causal bridge memory.")?;
@@ -309,10 +314,10 @@ fn seed_workspace_with_causal_evidence() -> Result<(PathBuf, String, String, Str
     let database_path = workspace.join(".ee").join("ee.db");
     let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
     let workspace_id = connection
-        .get_memory(&failure)
+        .get_workspace_by_path(&workspace_arg)
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "failure memory should exist".to_string())?
-        .workspace_id;
+        .ok_or_else(|| "workspace row should exist after ee init".to_string())?
+        .id;
     connection
         .insert_causal_evidence(
             "cev_00000000000000000000000100",
