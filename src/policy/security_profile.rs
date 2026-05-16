@@ -325,6 +325,18 @@ fn check_file_permissions(path: &Path, max_mode: u32, file_type: &str) -> FilePe
         match std::fs::symlink_metadata(path) {
             Ok(metadata) => {
                 let mode = metadata.permissions().mode() & 0o777;
+                if !metadata.file_type().is_file() {
+                    return FilePermissionCheck::fail(
+                        path.display().to_string(),
+                        mode,
+                        max_mode,
+                        format!("{file_type} is not a regular file"),
+                        format!(
+                            "Replace {} with a regular file before re-running diagnostics.",
+                            path.display()
+                        ),
+                    );
+                }
                 let excess_bits = mode & !max_mode;
                 if excess_bits == 0 {
                     FilePermissionCheck::pass(path.display().to_string(), mode, max_mode)
@@ -364,7 +376,18 @@ fn check_file_permissions(path: &Path, max_mode: u32, file_type: &str) -> FilePe
     #[cfg(not(unix))]
     {
         match std::fs::symlink_metadata(path) {
-            Ok(_) => FilePermissionCheck::pass(path.display().to_string(), 0, max_mode),
+            Ok(metadata) if metadata.file_type().is_file() => {
+                FilePermissionCheck::pass(path.display().to_string(), 0, max_mode)
+            }
+            Ok(_) => FilePermissionCheck::fail_without_mode(
+                path.display().to_string(),
+                max_mode,
+                format!("{file_type} is not a regular file"),
+                format!(
+                    "Replace {} with a regular file before re-running diagnostics.",
+                    path.display()
+                ),
+            ),
             Err(error)
                 if matches!(
                     error.kind(),
@@ -399,6 +422,18 @@ fn check_directory_permissions(path: &Path, max_mode: u32, dir_type: &str) -> Fi
         match std::fs::symlink_metadata(path) {
             Ok(metadata) => {
                 let mode = metadata.permissions().mode() & 0o777;
+                if !metadata.file_type().is_dir() {
+                    return FilePermissionCheck::fail(
+                        path.display().to_string(),
+                        mode,
+                        max_dir_mode,
+                        format!("{dir_type} is not a directory"),
+                        format!(
+                            "Replace {} with a directory before re-running diagnostics.",
+                            path.display()
+                        ),
+                    );
+                }
                 let excess_bits = mode & !max_dir_mode;
                 if excess_bits == 0 {
                     FilePermissionCheck::pass(path.display().to_string(), mode, max_dir_mode)
@@ -438,7 +473,18 @@ fn check_directory_permissions(path: &Path, max_mode: u32, dir_type: &str) -> Fi
     #[cfg(not(unix))]
     {
         match std::fs::symlink_metadata(path) {
-            Ok(_) => FilePermissionCheck::pass(path.display().to_string(), 0, max_dir_mode),
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                FilePermissionCheck::pass(path.display().to_string(), 0, max_dir_mode)
+            }
+            Ok(_) => FilePermissionCheck::fail_without_mode(
+                path.display().to_string(),
+                max_dir_mode,
+                format!("{dir_type} is not a directory"),
+                format!(
+                    "Replace {} with a directory before re-running diagnostics.",
+                    path.display()
+                ),
+            ),
             Err(error)
                 if matches!(
                     error.kind(),
@@ -739,6 +785,74 @@ mod tests {
                 .issue
                 .as_deref()
                 .is_some_and(|issue| issue.contains("symbolic link"))
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_permission_report_fails_on_config_directory() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        let ee_dir = workspace.join(".ee");
+        let config_dir = ee_dir.join("config.toml");
+        std::fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        std::fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        std::fs::create_dir(&config_dir).map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o644))
+            .map_err(|error| error.to_string())?;
+
+        let report = check_workspace_permissions(&workspace, SecurityProfile::Default);
+
+        std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o755))
+            .map_err(|error| error.to_string())?;
+        assert!(!report.passed);
+        let config_check = report
+            .checks
+            .iter()
+            .find(|check| check.path.ends_with(".ee/config.toml"))
+            .ok_or_else(|| "config check missing".to_owned())?;
+        assert!(!config_check.passed);
+        assert!(
+            config_check
+                .issue
+                .as_deref()
+                .is_some_and(|issue| issue.contains("not a regular file"))
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_permission_report_fails_on_index_regular_file() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        let ee_dir = workspace.join(".ee");
+        let index_file = ee_dir.join("index");
+        std::fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        std::fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        std::fs::write(&index_file, b"not a directory").map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&index_file, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| error.to_string())?;
+
+        let report = check_workspace_permissions(&workspace, SecurityProfile::Default);
+
+        assert!(!report.passed);
+        let index_check = report
+            .checks
+            .iter()
+            .find(|check| check.path.ends_with(".ee/index"))
+            .ok_or_else(|| "index directory check missing".to_owned())?;
+        assert!(!index_check.passed);
+        assert!(
+            index_check
+                .issue
+                .as_deref()
+                .is_some_and(|issue| issue.contains("not a directory"))
         );
         Ok(())
     }
