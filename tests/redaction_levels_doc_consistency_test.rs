@@ -52,7 +52,7 @@ const SURFACES_WITH_DEFAULTS: &[(&str, &str, &str)] = &[
     (
         "ee support bundle",
         "paranoid",
-        "planned `--redaction <level>`",
+        "current `--redaction <level>`",
     ),
 ];
 
@@ -110,9 +110,9 @@ fn doc_distinguishes_current_and_planned_redaction_flags() -> TestResult {
 
     for required_phrase in [
         "current `--redaction <level>`",
-        "planned `--redaction <level>`",
-        "support bundle level flag is part of",
-        "not all live",
+        "`none`/`--include-raw` keeps collected diagnostics raw",
+        "`minimal` applies only the secret detector",
+        "`standard`/`strict`/`paranoid`",
     ] {
         ensure(
             doc.contains(required_phrase),
@@ -341,5 +341,48 @@ fn current_handoff_redaction_claim_matches_cli_wiring() -> TestResult {
     ensure(
         cli.contains("redaction_level: args.redaction.to_model()"),
         "handoff create must pass the parsed redaction level into HandoffCreateOptions",
+    )
+}
+
+#[test]
+fn current_support_bundle_redaction_claim_matches_cli_and_core_wiring() -> TestResult {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let doc = read_doc()?;
+    let cli = std::fs::read_to_string(manifest_dir.join("src/cli/mod.rs"))
+        .map_err(|e| format!("read src/cli/mod.rs: {e}"))?;
+    let support_bundle = std::fs::read_to_string(manifest_dir.join("src/core/support_bundle.rs"))
+        .map_err(|e| format!("read src/core/support_bundle.rs: {e}"))?;
+
+    ensure(
+        doc.lines().any(|line| {
+            line.contains("`ee support bundle`")
+                && line.contains("`paranoid`")
+                && line.contains("current `--redaction <level>`")
+        }),
+        "docs/redaction_levels.md must mark ee support bundle as a current paranoid-redaction surface",
+    )?;
+    ensure(
+        cli.contains("pub struct SupportBundleArgs"),
+        "src/cli/mod.rs must define SupportBundleArgs",
+    )?;
+    ensure(
+        cli.contains("default_value_t = BackupRedaction::Paranoid"),
+        "ee support bundle --redaction must default to the documented paranoid level",
+    )?;
+    ensure(
+        cli.contains("redaction_level: args.redaction.to_model()"),
+        "support bundle must pass the parsed redaction level into BundleOptions",
+    )?;
+    ensure(
+        support_bundle.contains("pub redaction_level: RedactionLevel"),
+        "BundleOptions must carry the requested redaction level",
+    )?;
+    ensure(
+        support_bundle.contains("pub const fn effective_redaction_level(&self) -> RedactionLevel"),
+        "BundleOptions must compute include_raw/raw effective redaction behavior",
+    )?;
+    ensure(
+        support_bundle.contains("redact_support_bundle_content(content, redaction_level)"),
+        "support bundle creation must apply the requested redaction level during final bundle writes",
     )
 }

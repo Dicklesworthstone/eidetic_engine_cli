@@ -65,15 +65,19 @@ Notes on the matrix:
 | `ee export`       | `standard`    | Round-trip safe; preserves shape for re-import.                  | current `--redaction <level>`   |
 | `ee handoff create`| `standard`   | Handoff capsules are redaction-safe artifacts.                 | current `--redaction <level>`   |
 | `ee context --json`| `minimal`    | Agent-facing; minimal interference with retrieval intent.        | current `--redaction <level>`   |
-| `ee support bundle`| `paranoid`   | Third-party-facing; max safety for bug-report uploads.           | planned `--redaction <level>`; current CLI exposes redacted/raw mode flags |
+| `ee support bundle`| `paranoid`   | Third-party-facing; max safety for bug-report uploads.           | current `--redaction <level>`   |
 | `ee why`          | `none`        | Forensic surface; must show the actual stored content.           | no override planned             |
 
 Current implementation note: as of this K6 slice, the canonical five-level
 `--redaction <level>` CLI vocabulary is implemented for export/backup-style
-JSONL artifacts, `ee handoff create`, and `ee context --json`. The support
-bundle level flag is part of the K6 acceptance target, but its public CLI
-override flag is not live yet. Documentation must keep this distinction visible
-until the implementation matrix catches up.
+JSONL artifacts, `ee handoff create`, `ee context --json`, and
+`ee support bundle`. Support bundles apply the level as a final diagnostic
+redaction pass: `none`/`--include-raw` keeps collected diagnostics raw,
+`minimal` applies only the secret detector, and `standard`/`strict`/`paranoid`
+apply the support-bundle diagnostic redactor for secret-like values and
+path-like segments. Some nested support-bundle sections are already
+summary-only before this final pass, so higher levels may have identical output
+when no additional path-like or secret-like text is present.
 
 The planned per-workspace override shape is:
 
