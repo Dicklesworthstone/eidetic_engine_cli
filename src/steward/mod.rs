@@ -3498,6 +3498,19 @@ impl ManualRunner {
             );
         }
 
+        let qos_decision = qos_throttle_decision_for_steward_job(
+            &self.normalized_workspace_path(),
+            JobType::CentralityRefresh,
+            budget,
+            u32::try_from(preflight.centrality.edge_count).unwrap_or(u32::MAX),
+            crate::core::qos::QosThrottleCheckpoint::BeforeExpensivePhase,
+            false,
+            current_epoch_millis(),
+        );
+        if let Some(adjusted) = qos_decision.adjusted_item_budget {
+            refresh_options.link_limit = Some(adjusted);
+        }
+
         refresh_options.dry_run = false;
         let report = match crate::graph::refresh_graph_snapshot(
             &connection,
@@ -3526,12 +3539,15 @@ impl ManualRunner {
             RunOutcome::Success,
             Some(usize_to_u64(report.centrality.edge_count)),
             None,
-            Some(graph_centrality_job_details(
-                &workspace_id,
-                &preflight,
-                Some(&report),
-                self.options.dry_run,
-                durable_mutation,
+            Some(with_qos_throttle_detail(
+                graph_centrality_job_details(
+                    &workspace_id,
+                    &preflight,
+                    Some(&report),
+                    self.options.dry_run,
+                    durable_mutation,
+                ),
+                &qos_decision,
             )),
         )
     }
@@ -7387,6 +7403,94 @@ mod tests {
             details["result"].is_null(),
             true,
             "cancelled before non-dry-run result",
+        )
+    }
+
+    #[test]
+    fn manual_runner_graph_centrality_qos_shrinks_link_limit_under_foreground_pressure()
+    -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("ee.db");
+        let workspace_identity = temp.path().display().to_string();
+        {
+            let connection =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            connection
+                .insert_workspace(
+                    SCORE_WORKSPACE_ID,
+                    &CreateWorkspaceInput {
+                        path: workspace_identity.clone(),
+                        name: Some("graph-centrality-qos".to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            for memory_id in [
+                SCORE_MEMORY_A,
+                SCORE_MEMORY_B,
+                SCORE_MEMORY_C,
+                SCORE_MEMORY_D,
+            ] {
+                insert_score_memory(&connection, memory_id, 0.8)?;
+            }
+            insert_score_memory_link(&connection, "qos-link-ab", SCORE_MEMORY_A, SCORE_MEMORY_B)?;
+            insert_score_memory_link(&connection, "qos-link-bc", SCORE_MEMORY_B, SCORE_MEMORY_C)?;
+            insert_score_memory_link(&connection, "qos-link-cd", SCORE_MEMORY_C, SCORE_MEMORY_D)?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
+        crate::core::qos::publish_qos_lane_record(
+            temp.path(),
+            &crate::core::qos::QosLaneRecordInput {
+                workspace_identity: &workspace_identity,
+                lane: crate::core::qos::QosLane::ForegroundRead,
+                command_class: "context",
+                process_id: Some(202),
+                profile_label: Some("balanced"),
+                budget_label: Some("interactive"),
+                request_text: Some("foreground graph query should be hashed"),
+                request_hash: None,
+                started_at_epoch_ms: current_epoch_millis(),
+                ttl_ms: 60_000,
+                status: crate::core::qos::QosLaneStatus::Active,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        let opts = RunnerOptions::new()
+            .with_database_path(database_path)
+            .with_workspace_path(temp.path())
+            .with_workspace_id(SCORE_WORKSPACE_ID)
+            .with_item_limit(10);
+        let mut runner = ManualRunner::new(opts);
+        let result = runner.run_job_type(
+            JobType::CentralityRefresh,
+            Some("graph qos pressure".to_owned()),
+        );
+
+        ensure(result.job_type, JobType::CentralityRefresh, "job type")?;
+        ensure(result.outcome, RunOutcome::Success, "outcome")?;
+        let details = result
+            .details
+            .ok_or_else(|| "graph qos details missing".to_owned())?;
+        ensure(
+            details["qosThrottle"]["action"].as_str(),
+            Some("shrink_item_budget"),
+            "qos action",
+        )?;
+        ensure(
+            details["qosThrottle"]["adjustedItemBudget"].as_u64(),
+            Some(1),
+            "qos adjusted link limit",
+        )?;
+        ensure(
+            details["preflight"]["graph"]["edgeCount"].as_u64(),
+            Some(3),
+            "preflight edge count",
+        )?;
+        ensure(
+            details["result"]["graph"]["edgeCount"].as_u64(),
+            Some(1),
+            "result edge count follows qos link limit",
         )
     }
 
