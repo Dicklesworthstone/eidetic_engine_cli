@@ -8,9 +8,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
+use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::models::DomainError;
 
 pub const QOS_ACTIVE_LANE_REGISTRY_SCHEMA_V1: &str = "ee.qos.active_lane_registry.v1";
@@ -122,6 +123,7 @@ pub struct QosLaneSummary {
     pub verification_active_count: u32,
     pub maintenance_active_count: u32,
     pub stale_ignored_count: u32,
+    #[serde(serialize_with = "serialize_qos_registry_degradations")]
     pub degraded: Vec<QosRegistryDegradation>,
 }
 
@@ -186,6 +188,30 @@ impl QosRegistryDegradation {
                 .to_owned(),
         }
     }
+}
+
+fn serialize_qos_registry_degradations<S>(
+    degraded: &[QosRegistryDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_qos_registry_degradations(degraded).serialize(serializer)
+}
+
+fn aggregate_qos_registry_degradations(
+    degraded: &[QosRegistryDegradation],
+) -> Vec<crate::core::degraded_aggregation::AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "qos_registry",
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry.repair.clone(),
+        )
+    }))
 }
 
 #[must_use]
@@ -831,6 +857,44 @@ mod tests {
         assert_eq!(decision.action, QosBackgroundThrottleAction::Continue);
         assert!(decision.foreground_pressure);
         assert_eq!(decision.reason, "qos_summary_degraded_fail_open");
+        Ok(())
+    }
+
+    #[test]
+    fn qos_summary_json_aggregates_duplicate_degraded_entries() -> TestResult {
+        let mut summary = summarize_qos_records("workspace-hash".to_owned(), Vec::new(), 500);
+        summary.degraded = vec![
+            QosRegistryDegradation {
+                code: QOS_REGISTRY_UNAVAILABLE_CODE.to_owned(),
+                severity: "low".to_owned(),
+                message: "low duplicate".to_owned(),
+                repair: "low repair".to_owned(),
+            },
+            QosRegistryDegradation {
+                code: QOS_REGISTRY_UNAVAILABLE_CODE.to_owned(),
+                severity: "high".to_owned(),
+                message: "high duplicate".to_owned(),
+                repair: "high repair".to_owned(),
+            },
+        ];
+
+        let value = serde_json::to_value(&summary)?;
+        let degraded = value
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("degraded array missing: {value}"))?;
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(
+            degraded[0]["code"].as_str(),
+            Some(QOS_REGISTRY_UNAVAILABLE_CODE)
+        );
+        assert_eq!(degraded[0]["severity"].as_str(), Some("high"));
+        assert_eq!(degraded[0]["repair"].as_str(), Some("high repair"));
+        assert_eq!(
+            degraded[0]["sources"].clone(),
+            serde_json::json!(["qos_registry"])
+        );
         Ok(())
     }
 
