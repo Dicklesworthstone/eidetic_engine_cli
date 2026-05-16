@@ -1,0 +1,25 @@
+{
+  "schema": "ee.rch.verify_control_plane_fixture.v1",
+  "name": "topology_refusal",
+  "kind": "rch_verify",
+  "bead_id": "bd-1h8ji.6",
+  "command": ["cargo", "test", "--test", "rch_verify_contract"],
+  "fake_output": "[RCH] local (dependency preflight RCH-E327: Path dependency topology policy failed.)\n[RCH] remote required; refusing local fallback (dependency preflight failed)\n",
+  "fake_exit_code": 1,
+  "fake_elapsed_ms": 42,
+  "expected_status_class": "rch_environment_failure",
+  "expected": {
+    "process_exit_code": 1,
+    "report_status": "rch_environment_failure",
+    "command_kind": "cargo_test",
+    "worker_id": null,
+    "error_codes": ["RCH-E327"],
+    "degraded_codes": [
+      "rch_verify_remote_command_failed",
+      "rch_verify_topology_blocked",
+      "rch_verify_local_fallback_refused",
+      "rch_verify_remote_marker_missing"
+    ],
+    "summary_markdown": "RCH verifier `cargo test --test rch_verify_contract` => `rch_environment_failure`.\n- bead_id: `bd-1h8ji.6`\n- command_kind: `cargo_test`\n- remote_required: `true`\n- would_offload: `true`\n- worker_id: `unknown`\n- exit_code: `1`\n- elapsed_ms: `42`\n- command_hash: `cd825533cce8c288f43e944a17349832354678ce98473de8add4a7832f908d07`\n- error_codes: `RCH-E327`\n- degraded_codes: `rch_verify_remote_command_failed`, `rch_verify_topology_blocked`, `rch_verify_local_fallback_refused`, `rch_verify_remote_marker_missing`"
+  }
+}

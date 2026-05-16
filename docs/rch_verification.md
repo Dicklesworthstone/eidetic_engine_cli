@@ -88,3 +88,41 @@ Routing decisions:
   `/data/projects/...` dependency rather than this repo.
 - `environment_failure`: the transcript is an RCH topology/local-fallback
   blocker or lacks an actionable compiler diagnostic.
+
+## Control-Plane Fixtures and E2E
+
+`bd-1h8ji.6` pins the verification control plane with a dedicated fixture
+catalog under `tests/fixtures/rch_verify_control_plane/`. Each fixture has
+schema `ee.rch.verify_control_plane_fixture.v1`, one `expected_status_class`,
+and an exact `summary_markdown` golden. The catalog covers remote Cargo success,
+focused test success, Rust compile failure, RCH-E327 topology refusal, worker
+capacity waits, daemon timeouts, and local-Cargo hook bypass detection.
+
+Run the focused contract through RCH:
+
+```bash
+scripts/rch_verify.sh --bead-id bd-1h8ji.6 --summary -- \
+  cargo test --test rch_verify_control_plane -- --nocapture
+```
+
+The CI-safe e2e driver is `scripts/e2e_overhaul/rch_verify_control_plane.sh`.
+Default mode uses deterministic fake RCH transcripts so it can verify JSON proof
+generation, explicit `rch exec` invocation shape, phase logs, and final summary
+rows without starting a heavy build:
+
+```bash
+scripts/e2e_overhaul/rch_verify_control_plane.sh
+```
+
+To run the optional heavyweight lane, opt in explicitly:
+
+```bash
+RCH_VERIFY_CONTROL_PLANE_LONG_BENCH=1 \
+  scripts/e2e_overhaul/rch_verify_control_plane.sh
+```
+
+The e2e emits one JSONL event per phase with schema `ee.test_event.v1`,
+`surface=rch_verification_control_plane`, `phase`, `status`, `elapsed_ms`,
+`command_hash`, `worker_id`, and `degraded_codes`. The cleanup phase does not
+delete files; it records `status=no_delete_by_policy` and leaves the temporary
+proof directory in `/tmp`.

@@ -1,0 +1,22 @@
+{
+  "schema": "ee.rch.verify_control_plane_fixture.v1",
+  "name": "remote_compile_error",
+  "kind": "rch_verify",
+  "bead_id": "bd-1h8ji.6",
+  "command": ["cargo", "test", "--lib", "output::streaming", "--", "--nocapture"],
+  "fake_output": "error[E0308]: mismatched types\n  --> src/output/streaming.rs:558:31\n   |\n558 |     pack_hash_from_batch(pack)\n[RCH] remote trj failed (exit 101)\n",
+  "fake_exit_code": 101,
+  "fake_elapsed_ms": 195000,
+  "expected_status_class": "remote_failure",
+  "expected": {
+    "process_exit_code": 101,
+    "report_status": "remote_failure",
+    "command_kind": "cargo_test",
+    "worker_id": "trj",
+    "first_error_file": "src/output/streaming.rs",
+    "first_error_line": 558,
+    "error_codes": ["E0308"],
+    "degraded_codes": ["rch_verify_remote_command_failed"],
+    "summary_markdown": "RCH verifier `cargo test --lib output::streaming -- --nocapture` => `remote_failure`.\n- bead_id: `bd-1h8ji.6`\n- command_kind: `cargo_test`\n- remote_required: `true`\n- would_offload: `true`\n- worker_id: `trj`\n- exit_code: `101`\n- elapsed_ms: `195000`\n- command_hash: `76d7070695b17e808edba855b0c31ecdad7538a14279ab3b217f802a6d6d8f49`\n- first_error: `src/output/streaming.rs:558`\n- error_codes: `E0308`\n- degraded_codes: `rch_verify_remote_command_failed`"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "schema": "ee.rch.verify_control_plane_fixture.v1",
+  "name": "remote_focused_test_pass",
+  "kind": "rch_verify",
+  "bead_id": "bd-1h8ji.6",
+  "command": ["cargo", "test", "--test", "rch_verify_contract", "--", "--nocapture"],
+  "fake_output": "running 12 tests\ntest synthetic_remote_transcript_extracts_worker_id ... ok\n[RCH] remote trj (12.3s)\n",
+  "fake_exit_code": 0,
+  "fake_elapsed_ms": 12300,
+  "expected_status_class": "remote_pass",
+  "expected": {
+    "process_exit_code": 0,
+    "report_status": "remote_pass",
+    "command_kind": "cargo_test",
+    "worker_id": "trj",
+    "degraded_codes": [],
+    "summary_markdown": "RCH verifier `cargo test --test rch_verify_contract -- --nocapture` => `remote_pass`.\n- bead_id: `bd-1h8ji.6`\n- command_kind: `cargo_test`\n- remote_required: `true`\n- would_offload: `true`\n- worker_id: `trj`\n- exit_code: `0`\n- elapsed_ms: `12300`\n- command_hash: `5ad4f984b07f41cef30eab334168a29b5be88aeac7165e38e9f3d6bcd2355e78`\n- degraded_codes: none"
+  }
+}

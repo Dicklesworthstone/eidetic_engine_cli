@@ -1,0 +1,16 @@
+{
+  "schema": "ee.rch.verify_control_plane_fixture.v1",
+  "name": "local_cargo_hook_bypass",
+  "kind": "tripwire",
+  "bead_id": "bd-1h8ji.6",
+  "command_text": "RCH_REQUIRE_REMOTE=1 cargo bench --bench graph_minhash_rank",
+  "expected_status_class": "local_cargo_hook_bypass",
+  "expected": {
+    "process_exit_code": 1,
+    "schema": "ee.rch_local_cargo_tripwire.v1",
+    "allowed": "denied",
+    "subcommand": "bench",
+    "detail_contains": "RCH_REQUIRE_REMOTE=1 was set but rch exec wrapper is absent",
+    "summary_markdown": "Local Cargo tripwire `RCH_REQUIRE_REMOTE=1 cargo bench --bench graph_minhash_rank` => `local_cargo_hook_bypass`.\n- schema: `ee.rch_local_cargo_tripwire.v1`\n- allowed: `denied`\n- subcommand: `bench`"
+  }
+}

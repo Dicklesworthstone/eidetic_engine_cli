@@ -1,0 +1,23 @@
+{
+  "schema": "ee.rch.verify_control_plane_fixture.v1",
+  "name": "daemon_timeout",
+  "kind": "rch_verify",
+  "bead_id": "bd-1h8ji.6",
+  "command": ["cargo", "test", "--test", "rch_verify_contract"],
+  "fake_output": "RCH_DAEMON_RESPONSE_TIMEOUT_SECS exceeded; timed out waiting for daemon response\n",
+  "fake_exit_code": 1,
+  "fake_elapsed_ms": 901000,
+  "expected_status_class": "capacity_or_timeout",
+  "expected": {
+    "process_exit_code": 1,
+    "report_status": "capacity_or_timeout",
+    "command_kind": "cargo_test",
+    "worker_id": null,
+    "degraded_codes": [
+      "rch_verify_remote_command_failed",
+      "rch_verify_capacity_or_timeout",
+      "rch_verify_remote_marker_missing"
+    ],
+    "summary_markdown": "RCH verifier `cargo test --test rch_verify_contract` => `capacity_or_timeout`.\n- bead_id: `bd-1h8ji.6`\n- command_kind: `cargo_test`\n- remote_required: `true`\n- would_offload: `true`\n- worker_id: `unknown`\n- exit_code: `1`\n- elapsed_ms: `901000`\n- command_hash: `cd825533cce8c288f43e944a17349832354678ce98473de8add4a7832f908d07`\n- degraded_codes: `rch_verify_remote_command_failed`, `rch_verify_capacity_or_timeout`, `rch_verify_remote_marker_missing`"
+  }
+}

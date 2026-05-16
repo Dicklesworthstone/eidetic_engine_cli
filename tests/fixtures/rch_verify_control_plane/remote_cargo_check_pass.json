@@ -1,0 +1,19 @@
+{
+  "schema": "ee.rch.verify_control_plane_fixture.v1",
+  "name": "remote_cargo_check_pass",
+  "kind": "rch_verify",
+  "bead_id": "bd-1h8ji.6",
+  "command": ["cargo", "check", "--all-targets"],
+  "fake_output": "checking eidetic_engine_cli\n[RCH] remote css (11.0s)\n",
+  "fake_exit_code": 0,
+  "fake_elapsed_ms": 11000,
+  "expected_status_class": "remote_pass",
+  "expected": {
+    "process_exit_code": 0,
+    "report_status": "remote_pass",
+    "command_kind": "cargo_check",
+    "worker_id": "css",
+    "degraded_codes": [],
+    "summary_markdown": "RCH verifier `cargo check --all-targets` => `remote_pass`.\n- bead_id: `bd-1h8ji.6`\n- command_kind: `cargo_check`\n- remote_required: `true`\n- would_offload: `true`\n- worker_id: `css`\n- exit_code: `0`\n- elapsed_ms: `11000`\n- command_hash: `4ed11b46c00e5a94e50233152efb00566d43325cced13e855d255e037333b949`\n- degraded_codes: none"
+  }
+}
