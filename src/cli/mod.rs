@@ -35554,11 +35554,9 @@ fn load_maintenance_decay_settings(
         return Ok(crate::policy::MemoryDecaySettings::default());
     };
     let config_path = workspace_path.join(".ee").join("config.toml");
-    let contents = match fs::read_to_string(&config_path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(crate::policy::MemoryDecaySettings::default());
-        }
+    let contents = match crate::config::read_workspace_config_contents(workspace_path) {
+        Ok(Some(contents)) => contents,
+        Ok(None) => return Ok(crate::policy::MemoryDecaySettings::default()),
         Err(error) => {
             return Err(MaintenanceConfigError {
                 code: "learn_decay_config_read_failed",
@@ -35589,8 +35587,8 @@ fn load_witness_retention_policy(
 ) -> Result<WitnessRetentionPolicy, MaintenanceConfigError> {
     let mut policy = WitnessRetentionPolicy::defaults();
     let config_path = workspace_path.join(".ee").join("config.toml");
-    match fs::read_to_string(&config_path) {
-        Ok(contents) => {
+    match crate::config::read_workspace_config_contents(workspace_path) {
+        Ok(Some(contents)) => {
             let config = crate::config::ConfigFile::parse(&contents).map_err(|error| {
                 MaintenanceConfigError {
                     code: "graph_witness_retention_config_invalid",
@@ -35603,7 +35601,7 @@ fn load_witness_retention_policy(
             })?;
             apply_graph_witness_config_to_policy(&mut policy, &config)?;
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Ok(None) => {}
         Err(error) => {
             return Err(MaintenanceConfigError {
                 code: "graph_witness_retention_config_read_failed",
@@ -44891,6 +44889,67 @@ default_half_life_days = 45
             "procedural rule half-life",
         )?;
         ensure_equal(&settings.half_lives.default, &45.0, "default half-life")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maintenance_decay_settings_ignore_symlinked_workspace_config() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::create_dir_all(workspace.path().join(".ee")).map_err(|error| error.to_string())?;
+        fs::write(
+            outside.path().join("config.toml"),
+            "[learn.decay]\ndemote_threshold = 0.01\nforget_threshold = 0.005\n",
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(
+            outside.path().join("config.toml"),
+            workspace.path().join(".ee").join("config.toml"),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let settings = load_maintenance_decay_settings(Some(workspace.path()))
+            .map_err(|error| error.message)?;
+
+        ensure_equal(
+            &settings,
+            &crate::policy::MemoryDecaySettings::default(),
+            "symlinked decay config falls back to defaults",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maintenance_witness_retention_policy_ignores_symlinked_workspace_config_parent() -> TestResult
+    {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::write(
+            outside.path().join("config.toml"),
+            "[graph.witnesses.algorithm_ttl_days]\nsymlink_only = 1\n",
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(outside.path(), workspace.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let policy = load_witness_retention_policy(
+            workspace.path(),
+            &MaintenanceGraphWitnessesPruneArgs {
+                database: None,
+                dry_run: true,
+                retention_days: None,
+                algorithm_ttl: Vec::new(),
+            },
+        )
+        .map_err(|error| error.message)?;
+
+        ensure(
+            !policy.per_algorithm_ttl_days.contains_key("symlink_only"),
+            "symlinked witness config parent must not contribute algorithm TTL",
+        )
     }
 
     #[test]
