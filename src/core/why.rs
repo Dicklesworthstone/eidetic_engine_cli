@@ -15,6 +15,7 @@ use std::{
 };
 
 use crate::config::GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY;
+use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::memory::{
     EvidenceFreshness, EvidenceFreshnessStatus, assess_memory_evidence_freshness, memory_validity,
 };
@@ -1104,6 +1105,16 @@ fn workspace_root_from_database_path(database_path: &Path) -> Option<PathBuf> {
 }
 
 fn revision_lineage_feature_disabled(memory_id: &str) -> serde_json::Value {
+    let degraded = aggregate_why_revision_lineage_degraded([DegradationAggregationInput::new(
+        "why_revision_lineage",
+        "graph_feature_disabled",
+        "medium",
+        format!(
+            "Revision dominance is disabled by {GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY}."
+        ),
+        format!("ee config set {GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY} true"),
+    )]);
+
     serde_json::json!({
         "sourceSchema": crate::graph::dominance::MEMORY_IMPACT_ANALYSIS_SCHEMA_V1,
         "memoryId": memory_id,
@@ -1113,15 +1124,26 @@ fn revision_lineage_feature_disabled(memory_id: &str) -> serde_json::Value {
         "dominanceFrontier": [],
         "ancestorsAtDepth": {},
         "validationStatus": "disabled",
-        "degraded": [{
-            "code": "graph_feature_disabled",
-            "severity": "medium",
-            "message": format!(
-                "Revision dominance is disabled by {GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY}."
-            ),
-            "repair": format!("ee config set {GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY} true"),
-        }],
+        "degraded": degraded,
     })
+}
+
+fn aggregate_why_revision_lineage_degraded<I>(entries: I) -> Vec<serde_json::Value>
+where
+    I: IntoIterator<Item = DegradationAggregationInput>,
+{
+    aggregate_degraded_entries(entries)
+        .into_iter()
+        .map(|entry| {
+            serde_json::json!({
+                "code": entry.code,
+                "severity": entry.severity,
+                "message": entry.message,
+                "repair": entry.repair,
+                "sources": entry.sources,
+            })
+        })
+        .collect()
 }
 
 fn revision_lineage_for_why(
@@ -2619,6 +2641,11 @@ mod tests {
             lineage["degraded"][0]["repair"].as_str(),
             Some("ee config set graph.feature.revision_dominance.enabled true"),
             "disabled repair",
+        )?;
+        ensure(
+            lineage["degraded"][0]["sources"][0].as_str(),
+            Some("why_revision_lineage"),
+            "disabled degraded source",
         )
     }
 

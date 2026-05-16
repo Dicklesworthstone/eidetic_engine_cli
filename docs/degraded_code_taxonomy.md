@@ -160,6 +160,7 @@ Current conventions:
 | `tailscale_status` | Nested `ee status` mesh/Tailscale local-probe degradation. |
 | `why` | Top-level `ee why` memory explanation degradation. |
 | `why_graph_retrieval` | `ee why` graph-retrieval feature degradation. |
+| `why_revision_lineage` | `ee why` revision-lineage sentinel degradation. |
 
 When adding a new renderer, prefer the most specific stable section, command,
 or algorithm label available. Do not include workspace paths, query text, or
