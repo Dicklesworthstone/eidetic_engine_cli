@@ -201,6 +201,7 @@ fn doc_cross_references_j6_failure_modes() -> TestResult {
         "redaction_pattern_matched",
         "redaction_level_invalid",
         "redaction_round_trip_marker_preserved",
+        "redaction_uncertain",
     ] {
         ensure(
             doc.contains(required_fixture),

@@ -143,7 +143,7 @@ secrets gone and tags hashed).
 
 ## Failure modes (composes with J6)
 
-Three failure-mode fixtures are pinned under
+Four failure-mode fixtures are pinned under
 `tests/fixtures/failure_modes/`:
 
 - **`redaction_pattern_matched.json`** (severity `medium`) — emitted
@@ -156,6 +156,10 @@ Three failure-mode fixtures are pinned under
   — emitted by `ee import` when one or more `redaction_markers[]` are
   preserved on import; informational confirmation of the round-trip
   property.
+- **`redaction_uncertain.json`** (severity `warning`) — emitted when
+  a redaction-sensitive surface cannot confidently prove whether a field
+  is safe, such as performance-forensics comparisons over redacted or
+  partially redacted artifacts.
 
 ## Test plan (target — implementation lands in a sub-bead)
 
