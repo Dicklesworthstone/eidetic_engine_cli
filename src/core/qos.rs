@@ -326,6 +326,16 @@ pub fn summarize_qos_records(
 }
 
 fn read_registry_document(path: &Path) -> Result<Option<QosActiveLaneRegistry>, DomainError> {
+    if let Some(symlink) = first_existing_symlink_component(path)? {
+        return Err(DomainError::Storage {
+            message: format!(
+                "refusing to read QoS active-lane registry through symlink '{}'",
+                symlink.display()
+            ),
+            repair: Some("replace the symlinked .ee/qos path with a real directory".to_owned()),
+        });
+    }
+
     match fs::read_to_string(path) {
         Ok(raw) => {
             let mut registry: QosActiveLaneRegistry =
@@ -625,6 +635,66 @@ mod tests {
         assert_eq!(summary.degraded.len(), 1);
         assert_eq!(summary.degraded[0].code, QOS_REGISTRY_UNAVAILABLE_CODE);
         assert_eq!(summary.degraded[0].severity, "medium");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_read_rejects_symlinked_registry_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir()?;
+        let workspace = tempdir.path().join("workspace");
+        let outside = tempdir.path().join("outside-active-lanes.json");
+        let path = qos_registry_path(&workspace);
+        fs::create_dir_all(path.parent().expect("registry parent"))?;
+        let registry = QosActiveLaneRegistry::new(vec![QosLaneRecord::from_input(&record_input(
+            QosLane::ForegroundRead,
+            "context",
+            "outside query",
+            100,
+        ))]);
+        fs::write(&outside, serde_json::to_string_pretty(&registry)?)?;
+        symlink(&outside, &path)?;
+
+        let summary = summarize_qos_lane_registry(&workspace, "/workspace/secret-project", 500);
+
+        assert!(summary.active_records.is_empty());
+        assert_eq!(summary.degraded.len(), 1);
+        assert_eq!(summary.degraded[0].code, QOS_REGISTRY_UNAVAILABLE_CODE);
+        assert!(summary.degraded[0].message.contains("symlink"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_read_rejects_symlinked_registry_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir()?;
+        let workspace = tempdir.path().join("workspace");
+        let ee_dir = workspace.join(".ee");
+        let outside_qos = tempdir.path().join("outside-qos");
+        fs::create_dir_all(&ee_dir)?;
+        fs::create_dir_all(&outside_qos)?;
+        let registry = QosActiveLaneRegistry::new(vec![QosLaneRecord::from_input(&record_input(
+            QosLane::VerificationRch,
+            "cargo-test",
+            "outside query",
+            100,
+        ))]);
+        fs::write(
+            outside_qos.join("active-lanes.json"),
+            serde_json::to_string_pretty(&registry)?,
+        )?;
+        symlink(&outside_qos, ee_dir.join("qos"))?;
+
+        let summary = summarize_qos_lane_registry(&workspace, "/workspace/secret-project", 500);
+
+        assert!(summary.active_records.is_empty());
+        assert_eq!(summary.degraded.len(), 1);
+        assert_eq!(summary.degraded[0].code, QOS_REGISTRY_UNAVAILABLE_CODE);
+        assert!(summary.degraded[0].message.contains("symlink"));
         Ok(())
     }
 
