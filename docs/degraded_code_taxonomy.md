@@ -219,7 +219,7 @@ memory bodies in `sources[]`.
 |------|----------|------|
 | `qos_registry_unavailable` | medium | bd-1zb7k.20.2 |
 
-#### Storage and runtime state (11)
+#### Storage and runtime state (14)
 | Code | Severity | Bead |
 |------|----------|------|
 | `db_migration_pending` | medium | bd-3usjw.1 (db inspect) |
@@ -232,6 +232,9 @@ memory bodies in `sources[]`.
 | `storage_not_initialized` | medium | bd-17c65.10.6 (J6) |
 | `storage_not_ready` | medium | bd-17c65.10.6 (J6) |
 | `memory_health_unavailable` | low | bd-17c65.10.6 (J6) |
+| `snapshot_pin_expired` | medium | bd-2caru.6 |
+| `snapshot_pin_force_released` | medium | bd-2caru.6 |
+| `snapshot_release_failed` | medium | bd-2caru.6 |
 | `wal_holds_orphaned` | high | bd-17c65.12.6 (derived backup assets) |
 
 #### Policy and detector (3)

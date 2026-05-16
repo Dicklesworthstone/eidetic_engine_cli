@@ -9,22 +9,23 @@
     "context",
     "status"
   ],
-  "severity": "high",
+  "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "A read-pool SnapshotPin cannot cleanly roll back or release its read transaction.",
+    "description": "A SnapshotPin cleanup path cannot commit or roll back the read transaction, so ee abandons the pooled connection instead of returning it to the idle pool.",
     "setup_commands": [
-      "force a read-pool release failure by invalidating the underlying read transaction before SnapshotPin drop"
+      "start a context/read-pool workflow with snapshot pinning enabled",
+      "inject a rollback or commit failure before the SnapshotPin is dropped"
     ],
-    "invocation": "ee context 'read-pool release failure probe' --workspace . --json"
+    "invocation": "ee status --workspace . --json"
   },
   "expected_emission": {
     "code": "snapshot_release_failed",
-    "severity": "high",
+    "severity": "medium",
     "message_contains": [
-      "SnapshotPin",
-      "release"
+      "snapshot",
+      "release failed"
     ],
-    "repair_contains": "retry after the read-pool connection is dropped"
+    "repair_contains": "ee doctor"
   }
 }

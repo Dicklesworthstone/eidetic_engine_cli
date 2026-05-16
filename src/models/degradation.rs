@@ -240,8 +240,46 @@ pub const ADVISORY_LOCK_TIMEOUT: DegradationCode = DegradationCode {
     repair: Some("ee diag advisory-lock --workspace . --json"),
 };
 
+pub const SNAPSHOT_PIN_EXPIRED: DegradationCode = DegradationCode {
+    id: "D104",
+    subsystem: DegradedSubsystem::Storage,
+    severity: DegradationSeverity::Warning,
+    description: "Read snapshot pin exceeded its configured lifetime",
+    behavior_change: "The stale read snapshot is poisoned so later reads fail cleanly",
+    auto_recoverable: true,
+    repair: Some(
+        "reduce concurrent read duration or increase storage.read_pool.max_pin_duration_seconds",
+    ),
+};
+
+pub const SNAPSHOT_RELEASE_FAILED: DegradationCode = DegradationCode {
+    id: "D105",
+    subsystem: DegradedSubsystem::Storage,
+    severity: DegradationSeverity::Warning,
+    description: "Read snapshot release failed",
+    behavior_change: "The affected pooled connection is abandoned instead of returned to the idle pool",
+    auto_recoverable: true,
+    repair: Some("ee doctor --workspace . --json"),
+};
+
+pub const SNAPSHOT_PIN_FORCE_RELEASED: DegradationCode = DegradationCode {
+    id: "D106",
+    subsystem: DegradedSubsystem::Storage,
+    severity: DegradationSeverity::Warning,
+    description: "Read snapshot pin was force-released during workspace close",
+    behavior_change: "The remaining pinned reader is poisoned so shutdown can complete without leaking WAL frames",
+    auto_recoverable: true,
+    repair: Some("retry the read workflow after workspace close completes"),
+};
+
 /// Response degraded code for advisory lock acquisition timeout.
 pub const ADVISORY_LOCK_TIMEOUT_CODE: &str = "advisory_lock_timeout";
+/// Response degraded code for read snapshot pins held beyond their max lifetime.
+pub const SNAPSHOT_PIN_EXPIRED_CODE: &str = "snapshot_pin_expired";
+/// Response degraded code for failed read snapshot rollback or commit cleanup.
+pub const SNAPSHOT_RELEASE_FAILED_CODE: &str = "snapshot_release_failed";
+/// Response degraded code for pins force-poisoned during workspace close.
+pub const SNAPSHOT_PIN_FORCE_RELEASED_CODE: &str = "snapshot_pin_force_released";
 
 // CASS degradations (D200 - D299)
 pub const CASS_NOT_FOUND: DegradationCode = DegradationCode {
@@ -444,6 +482,9 @@ pub const ALL_DEGRADATION_CODES: &[DegradationCode] = &[
     WAL_MODE_DISABLED,
     LARGE_DATABASE,
     ADVISORY_LOCK_TIMEOUT,
+    SNAPSHOT_PIN_EXPIRED,
+    SNAPSHOT_RELEASE_FAILED,
+    SNAPSHOT_PIN_FORCE_RELEASED,
     // CASS
     CASS_NOT_FOUND,
     CASS_VERSION_MISMATCH,

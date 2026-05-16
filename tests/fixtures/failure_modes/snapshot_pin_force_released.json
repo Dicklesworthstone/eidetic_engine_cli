@@ -6,16 +6,16 @@
     "epic_letter": "SRR"
   },
   "surfaces": [
-    "context",
-    "status"
+    "status",
+    "workspace close"
   ],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "Workspace shutdown or read-pool drain timeout force-poisons a still-active SnapshotPin.",
+    "description": "Workspace close waits for active read pins up to its drain timeout, then force-poisons any remaining SnapshotPin so writer shutdown can complete without leaking WAL readers.",
     "setup_commands": [
-      "start a read-pool workflow that holds a SnapshotPin",
-      "close the workspace before the pin releases"
+      "start a context/read-pool workflow that holds a SnapshotPin",
+      "close the workspace while the pin remains active past EE_WORKSPACE_CLOSE_DRAIN_TIMEOUT_S"
     ],
     "invocation": "ee status --workspace . --json"
   },
@@ -23,9 +23,9 @@
     "code": "snapshot_pin_force_released",
     "severity": "medium",
     "message_contains": [
-      "SnapshotPin",
-      "force"
+      "snapshot pin",
+      "force released"
     ],
-    "repair_contains": "rerun the interrupted read workflow"
+    "repair_contains": "retry"
   }
 }

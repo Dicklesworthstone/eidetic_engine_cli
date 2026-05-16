@@ -59,6 +59,9 @@ in the same commit, keeping the catalog complete by construction.
 | `storage_degraded` | status, health | medium | bd-17c65.10.6 (J6) |
 | `storage_not_ready` | health | medium | bd-17c65.10.6 (J6) |
 | `storage_unimplemented` | status | high | bd-17c65.10.6 (J6) |
+| `snapshot_pin_expired` | context, status | medium | bd-2caru.6 |
+| `snapshot_release_failed` | context, status | medium | bd-2caru.6 |
+| `snapshot_pin_force_released` | status, workspace close | medium | bd-2caru.6 |
 | `search_not_inspected` | status | low | bd-17c65.10.6 (J6) |
 | `search_waiting_for_storage` | status | medium | bd-17c65.10.6 (J6) |
 | `search_index_degraded` | status, health | medium | bd-17c65.10.6 (J6) |

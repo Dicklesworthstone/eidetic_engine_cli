@@ -12,20 +12,20 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "A read-pool SnapshotPin remains active beyond the configured max pin duration.",
+    "description": "A read-side SnapshotPin remains active longer than storage.read_pool.max_pin_duration_seconds, so the lifecycle watchdog poisons the pin and prevents stale reads from continuing silently.",
     "setup_commands": [
-      "ee config set storage.read_pool.max_pin_seconds 30",
+      "ee config set storage.read_pool.max_pin_duration_seconds 1",
       "start a context/read-pool workflow that holds its read snapshot beyond the max pin duration"
     ],
-    "invocation": "ee context 'long read-pool workflow' --workspace . --json"
+    "invocation": "ee context 'read with expired snapshot pin' --workspace . --json"
   },
   "expected_emission": {
     "code": "snapshot_pin_expired",
     "severity": "medium",
     "message_contains": [
-      "SnapshotPin",
+      "snapshot pin",
       "expired"
     ],
-    "repair_contains": "reduce concurrent long-running reads"
+    "repair_contains": "storage.read_pool.max_pin_duration_seconds"
   }
 }
