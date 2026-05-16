@@ -1476,6 +1476,13 @@ fn search_consensus_conflict_report(query: &str, hits: &[SearchHit]) -> Consensu
 }
 
 fn search_hit_pack_item(index: usize, hit: &SearchHit) -> Option<PackDraftItem> {
+    if matches!(
+        mesh_query_visibility(hit.metadata.as_ref()),
+        MeshQueryVisibility::Blocked
+    ) {
+        return None;
+    }
+
     let metadata = hit.metadata.as_ref()?;
     let content = metadata_string(metadata, SEARCH_ANALYSIS_CONTENT_KEY)
         .or_else(|| metadata_string(metadata, "content"))?
@@ -4080,6 +4087,59 @@ mod tests {
             degraded[0].message.contains("3 mesh-derived search hits"),
             "unexpected degradation message: {}",
             degraded[0].message
+        );
+    }
+
+    #[test]
+    fn search_pack_display_analysis_blocks_non_allowed_mesh_hits() {
+        let blocked_hit = SearchHit {
+            doc_id: "mem_30000000000000000000000001".to_string(),
+            score: 0.87,
+            source: ScoreSource::SemanticFast,
+            fast_score: Some(0.87),
+            quality_score: None,
+            lexical_score: None,
+            rerank_score: None,
+            metadata: Some(serde_json::json!({
+                "content": "Quarantined mesh evidence must not reach search display pack analysis.",
+                "level": "episodic",
+                "kind": "evidence",
+                "mesh": {
+                    "workspaceScopeDecision": "quarantine",
+                    "cachedMaterialId": "mesh_mat_quarantined",
+                    "originWorkspaceId": "wsp_remote_beta",
+                    "producerPeerId": "peer_builder_one",
+                    "materialLane": "curationSignal",
+                    "trustLane": "mesh_curation",
+                    "redactionPosture": "standard"
+                }
+            })),
+            explanation: None,
+        };
+
+        let local_hit = SearchHit {
+            doc_id: "mem_30000000000000000000000002".to_string(),
+            score: 0.91,
+            source: ScoreSource::SemanticFast,
+            fast_score: Some(0.91),
+            quality_score: None,
+            lexical_score: None,
+            rerank_score: None,
+            metadata: Some(serde_json::json!({
+                "content": "Local evidence remains eligible for search display pack analysis.",
+                "level": "episodic",
+                "kind": "evidence"
+            })),
+            explanation: None,
+        };
+
+        assert!(
+            search_hit_pack_item(0, &blocked_hit).is_none(),
+            "blocked mesh hits must not enter search consensus/display pack analysis"
+        );
+        assert!(
+            search_hit_pack_item(0, &local_hit).is_some(),
+            "local hits should remain eligible for search consensus/display pack analysis"
         );
     }
 
