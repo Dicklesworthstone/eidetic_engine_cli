@@ -1412,6 +1412,14 @@ fn search_metadata_key_is_internal(key: &str) -> bool {
                 | "trust_lane"
                 | "redactionPosture"
                 | "redaction_posture"
+                | "policyDecision"
+                | "policy_decision"
+                | "policyDecisionJson"
+                | "policy_decision_json"
+                | "policyFailureSurface"
+                | "policy_failure_surface"
+                | "policyFailureSurfaceJson"
+                | "policy_failure_surface_json"
         )
 }
 
@@ -4083,6 +4091,17 @@ mod tests {
                 lexical_score: None,
                 rerank_score: None,
                 metadata: Some(serde_json::json!({
+                    "policyDecision": {
+                        "schema": "ee.mesh.policy_decision.v1",
+                        "direction": "inbound",
+                        "action": "allow",
+                        "reason": "peer_policy_lane_allowed"
+                    },
+                    "policyFailureSurface": {
+                        "schema": "ee.mesh.policy_failure_surface.v1",
+                        "code": "mesh_peer_policy_denied",
+                        "reason": "peer_policy_redaction_denied"
+                    },
                     "mesh": {
                         "workspaceScopeDecision": "allow",
                         "workspaceId": "wsp_local_alpha",
@@ -4128,6 +4147,18 @@ mod tests {
         assert_eq!(provenance["trustLane"], "mesh_metadata");
         assert_eq!(provenance["redactionPosture"], "standard");
         assert!(json["results"][0]["metadata"].get("mesh").is_none());
+        assert!(
+            json["results"][0]["metadata"]
+                .get("policyDecision")
+                .is_none(),
+            "policy decision must remain internal"
+        );
+        assert!(
+            json["results"][0]["metadata"]
+                .get("policyFailureSurface")
+                .is_none(),
+            "policy failure surface must remain internal"
+        );
         assert!(
             !json["results"][0]["metadata"]
                 .to_string()
