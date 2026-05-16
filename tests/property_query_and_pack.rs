@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{fs, path::Path, str::FromStr};
 
 use ee::models::{MemoryId, ProvenanceUri, RedactionLevel, UnitScore};
 use ee::pack::{
@@ -9,7 +9,11 @@ use ee::pack::{
 use ee::runtime::determinism::Deterministic;
 use ee::search::parse_search_query;
 use proptest::prelude::*;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+const REGRESSION_FIXTURE_SCHEMA: &str = "ee.proptest.regression.v1";
+const REGRESSION_FIXTURE_CAPTURED_AT: &str = "1970-01-01T00:00:00Z";
 
 fn section_for(index: usize) -> PackSection {
     match index % 5 {
@@ -137,10 +141,11 @@ fn draft_bytes(draft: &PackDraft) -> Vec<u8> {
     format!("{draft:#?}").into_bytes()
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 struct DeterminismRegressionFixture {
-    schema: &'static str,
-    file_name: String,
+    schema: String,
+    captured_at: String,
+    last_verified_at: String,
     seed: u64,
     input_hash: String,
     expected_hash: String,
@@ -150,7 +155,7 @@ struct DeterminismRegressionFixture {
     first_diff_window: DeterminismDiffWindow,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 struct DeterminismDiffWindow {
     expected: String,
     observed: String,
@@ -164,12 +169,12 @@ fn regression_fixture_for_mismatch(
 ) -> Option<DeterminismRegressionFixture> {
     let first_diff_byte_offset = first_diff_byte_offset(expected, observed)?;
     let input_hash = hash_bytes(input);
-    let input_hash_hex = input_hash.trim_start_matches("blake3:");
     Some(DeterminismRegressionFixture {
-        schema: "ee.proptest.regression.v1",
-        file_name: format!("{}.json", &input_hash_hex[..16]),
+        schema: REGRESSION_FIXTURE_SCHEMA.to_string(),
+        captured_at: REGRESSION_FIXTURE_CAPTURED_AT.to_string(),
+        last_verified_at: REGRESSION_FIXTURE_CAPTURED_AT.to_string(),
         seed,
-        input_hash,
+        input_hash: input_hash.clone(),
         expected_hash: hash_bytes(expected),
         observed_hash_run1: hash_bytes(expected),
         observed_hash_run2: hash_bytes(observed),
@@ -179,6 +184,62 @@ fn regression_fixture_for_mismatch(
             observed: diff_window(observed, first_diff_byte_offset),
         },
     })
+}
+
+fn regression_fixture_file_name(input_hash: &str) -> String {
+    let input_hash_hex = input_hash.trim_start_matches("blake3:");
+    format!("{}.json", &input_hash_hex[..16])
+}
+
+fn serialize_regression_fixture(fixture: &DeterminismRegressionFixture) -> Result<String, String> {
+    Ok(serde_json::to_string_pretty(fixture).map_err(|error| error.to_string())? + "\n")
+}
+
+fn load_regression_fixtures(dir: &Path) -> Result<Vec<DeterminismRegressionFixture>, String> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|error| format!("read {}: {error}", dir.display()))? {
+        let entry = entry.map_err(|error| format!("read {} entry: {error}", dir.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("non-utf8 fixture path: {}", path.display()))?
+            .to_string();
+        let content = fs::read_to_string(&path)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        entries.push((file_name, content));
+    }
+
+    parse_regression_fixture_entries(entries)
+}
+
+fn parse_regression_fixture_entries(
+    mut entries: Vec<(String, String)>,
+) -> Result<Vec<DeterminismRegressionFixture>, String> {
+    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let mut fixtures = Vec::with_capacity(entries.len());
+    for (file_name, content) in entries {
+        if !file_name.ends_with(".json") {
+            continue;
+        }
+        let fixture: DeterminismRegressionFixture = serde_json::from_str(&content)
+            .map_err(|error| format!("parse {file_name}: {error}"))?;
+        if fixture.schema != REGRESSION_FIXTURE_SCHEMA {
+            return Err(format!(
+                "parse {file_name}: unsupported schema {}",
+                fixture.schema
+            ));
+        }
+        fixtures.push(fixture);
+    }
+    Ok(fixtures)
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
@@ -288,9 +349,12 @@ fn determinism_regression_fixture_metadata_is_stable() -> Result<(), String> {
 
     assert_eq!(first, replay);
     assert_eq!(first.schema, "ee.proptest.regression.v1");
+    assert_eq!(first.captured_at, REGRESSION_FIXTURE_CAPTURED_AT);
+    assert_eq!(first.last_verified_at, REGRESSION_FIXTURE_CAPTURED_AT);
     assert_eq!(first.seed, 42);
-    assert!(first.file_name.ends_with(".json"));
-    assert_eq!(first.file_name.len(), 21);
+    let file_name = regression_fixture_file_name(&first.input_hash);
+    assert!(file_name.ends_with(".json"));
+    assert_eq!(file_name.len(), 21);
     assert_ne!(first.expected_hash, first.observed_hash_run2);
     assert_eq!(first.expected_hash, first.observed_hash_run1);
     assert!(first.first_diff_byte_offset > 0);
@@ -312,6 +376,59 @@ fn determinism_regression_fixture_handles_prefix_drift() -> Result<(), String> {
     assert_eq!(fixture.first_diff_byte_offset, b"same-prefix-left".len());
     assert_eq!(fixture.first_diff_window.expected, "same-prefix-left");
     assert!(fixture.first_diff_window.observed.ends_with("-and-longer"));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_json_roundtrips() -> Result<(), String> {
+    let fixture = regression_fixture_for_mismatch(99, b"input", b"expected", b"observed")
+        .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    let rendered = serialize_regression_fixture(&fixture)?;
+    let parsed: DeterminismRegressionFixture =
+        serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+
+    assert_eq!(parsed, fixture);
+    assert!(rendered.ends_with('\n'));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_loader_replays_sorted_json_entries() -> Result<(), String> {
+    let first = regression_fixture_for_mismatch(1, b"first-input", b"expected-a", b"observed-a")
+        .ok_or_else(|| "first fixture should detect mismatch".to_owned())?;
+    let second = regression_fixture_for_mismatch(2, b"second-input", b"expected-b", b"observed-b")
+        .ok_or_else(|| "second fixture should detect mismatch".to_owned())?;
+    let first_name = regression_fixture_file_name(&first.input_hash);
+    let second_name = regression_fixture_file_name(&second.input_hash);
+    let mut expected = vec![
+        (first_name.clone(), first.clone()),
+        (second_name.clone(), second.clone()),
+    ];
+    expected.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let expected = expected
+        .into_iter()
+        .map(|(_, fixture)| fixture)
+        .collect::<Vec<_>>();
+
+    let loaded = parse_regression_fixture_entries(vec![
+        ("ignored.txt".to_string(), "{}".to_string()),
+        (second_name, serialize_regression_fixture(&second)?),
+        (first_name, serialize_regression_fixture(&first)?),
+    ])?;
+
+    assert_eq!(loaded, expected);
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_loader_tolerates_missing_dir() -> Result<(), String> {
+    let missing = Path::new("tests/fixtures/proptest_regressions");
+    if missing.exists() {
+        return Ok(());
+    }
+
+    let loaded = load_regression_fixtures(missing)?;
+    assert!(loaded.is_empty());
     Ok(())
 }
 
