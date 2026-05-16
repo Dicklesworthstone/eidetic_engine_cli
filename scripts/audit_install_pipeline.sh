@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bd-2gill — install pipeline audit (Phase 1: read-only inventory).
+# bd-3usjw.9 — install pipeline audit (read-only release-readiness inventory).
 #
 # Probes the three install paths advertised in README:
 #
@@ -435,10 +435,10 @@ readme_installation_status() {
     if grep -qE '^### Installation status$' "$readme" 2>/dev/null; then
         has_status=true
     fi
-    if grep -qF '| GitHub release installer | planned; no release assets published yet | `bd-2gill.3` |' "$readme" 2>/dev/null; then
+    if grep -qF '| GitHub release installer | planned; no release assets published yet | `bd-3usjw.9` |' "$readme" 2>/dev/null; then
         release_planned=true
     fi
-    if grep -qF '| Homebrew tap | planned; tap formula not published yet | `bd-2gill.2` |' "$readme" 2>/dev/null; then
+    if grep -qF '| Homebrew tap | planned; tap formula not published yet | `bd-3usjw.13` |' "$readme" 2>/dev/null; then
         homebrew_planned=true
     fi
     if grep -qF '| crates.io | planned; package name selected as `eidetic-engine`; binary remains `ee` | `bd-3usjw.10` |' "$readme" 2>/dev/null; then
@@ -1020,11 +1020,11 @@ jq -n \
                  "Run cargo install eidetic-engine in a clean ~/.cargo",
                  "Verify each artifact with cosign verify-blob against the sigstore bundle"]
             else
-                ["File bd-3usjw.11: Resolve dependency_resolution.required_crates before cargo publish",
-                 "File bd-3usjw.10: Publish eidetic-engine package with bin name ee",
-                 "File bd-2gill.B: Publish Dicklesworthstone/homebrew-tap with Formula/ee.rb pinned to v0.1.0",
-                 "File bd-2gill.C: Ship v0.1.0 GitHub release with full asset set (ee-{target}.tar.xz + .sha256 + sigstore.json + install.sh + install.ps1)",
-                 "Wire each followup as parent-child child of bd-2gill, label install-pipeline-followup"]
+                ["Track bd-3usjw.11: Resolve dependency_resolution.required_crates before cargo publish",
+                 "Track bd-3usjw.10: Publish eidetic-engine package with bin name ee",
+                 "Track bd-3usjw.13: Publish Dicklesworthstone/homebrew-tap with Formula/ee.rb pinned to v0.1.0",
+                 "Track bd-3usjw.9: Ship v0.1.0 GitHub release with full asset set (ee-{target}.tar.xz + .sha256 + sigstore.json + install.sh + install.ps1)",
+                 "Keep release-readiness followups under bd-3usjw with the release-readiness label"]
             end
         )
     }' > "$OUTPUT"

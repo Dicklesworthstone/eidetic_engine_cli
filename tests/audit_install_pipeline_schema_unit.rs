@@ -1,4 +1,4 @@
-//! bd-2gill — schema validator for `ee.audit.install_pipeline.v1`.
+//! bd-3usjw.9 — schema validator for `ee.audit.install_pipeline.v1`.
 //!
 //! Runs `scripts/audit_install_pipeline.sh` (or uses an existing
 //! `tests/audit_artifacts/latest_install_pipeline.json` symlink),
@@ -25,7 +25,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -38,11 +38,57 @@ fn audit_artifact_path() -> PathBuf {
         .join("latest_install_pipeline.json")
 }
 
-fn load_audit() -> Result<Option<Value>, String> {
-    let path = audit_artifact_path();
-    if !path.exists() {
-        return Ok(None);
+fn newest_audit_artifact_path(dir: &Path) -> Result<Option<PathBuf>, String> {
+    let entries =
+        std::fs::read_dir(dir).map_err(|error| format!("read {}: {error}", dir.display()))?;
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read entry in {}: {error}", dir.display()))?;
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if file_name.starts_with("install_pipeline_") && file_name.ends_with(".json") {
+            candidates.push(path);
+        }
     }
+    candidates.sort();
+    Ok(candidates.pop())
+}
+
+fn resolve_audit_artifact_path() -> Result<Option<PathBuf>, String> {
+    let path = audit_artifact_path();
+    if path.exists() {
+        return Ok(Some(path));
+    }
+
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("inspect {}: {error}", path.display())),
+    };
+
+    if metadata.file_type().is_symlink() {
+        let target = std::fs::read_link(&path)
+            .map_err(|error| format!("read symlink {}: {error}", path.display()))?;
+        eprintln!(
+            "audit: latest pointer {} is stale/broken (target `{}`); falling back to newest timestamped artifact",
+            path.display(),
+            target.display()
+        );
+        return newest_audit_artifact_path(
+            path.parent()
+                .ok_or_else(|| format!("audit artifact path {} has no parent", path.display()))?,
+        );
+    }
+
+    Ok(None)
+}
+
+fn load_audit() -> Result<Option<Value>, String> {
+    let Some(path) = resolve_audit_artifact_path()? else {
+        return Ok(None);
+    };
     let bytes =
         std::fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
     let value: Value = serde_json::from_slice(&bytes)
