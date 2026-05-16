@@ -20,11 +20,12 @@
 //! provenance` + insights sections) consume this same `BipartiteHits`
 //! shape.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use asupersync::Cx;
 use fnx_algorithms::hits_centrality;
 use fnx_runtime::CgseValue;
+use serde::Serialize;
 
 use crate::graph::Graph;
 use crate::graph::GraphResult;
@@ -102,6 +103,176 @@ fn partition_for<'a>(graph: &'a Graph, node: &str) -> Option<&'a str> {
         CgseValue::String(value) => Some(value.as_str()),
         _ => None,
     }
+}
+
+/// Stable schema tag for the rule-provenance ego-subgraph payload
+/// surfaced by the upcoming `ee rule provenance` command (bd-2jl2.3).
+pub const RULE_PROVENANCE_EGO_SCHEMA_V1: &str = "ee.graph.rule_provenance_ego.v1";
+
+/// One memory cited by the center rule in a rule-provenance ego graph.
+///
+/// `other_rule_count` counts how many *other* rules also cite this
+/// memory in the same bipartite projection (i.e. the size of the
+/// memory's neighbor set on the rule partition, minus the center
+/// rule). Memories with `other_rule_count == 0` are anchored solely by
+/// the center rule.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleProvenanceCitedMemory {
+    pub memory_id: String,
+    pub other_rule_count: usize,
+}
+
+/// One peer rule that shares at least one cited memory with the center
+/// rule. `shared_memory_ids` is the deterministic intersection of the
+/// peer rule's memory set with the center rule's memory set.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleProvenanceCoCitingRule {
+    pub rule_id: String,
+    pub shared_memory_count: usize,
+    pub shared_memory_ids: Vec<String>,
+}
+
+/// Bipartite ego subgraph for a single rule, formatted for the
+/// `ee rule provenance <rule_id>` surface (bd-2jl2.3 / G9.c).
+///
+/// `cited_memories` is sorted by memory ID, `co_citing_rules` is sorted
+/// by rule ID, and `shared_memory_ids` inside each peer is sorted by
+/// memory ID. Combined with the BTreeSet-backed traversal, this yields
+/// byte-identical JSON across runs (J7 determinism contract).
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleProvenanceEgo {
+    pub schema: &'static str,
+    pub rule_id: String,
+    pub status: RuleProvenanceEgoStatus,
+    pub cited_memories: Vec<RuleProvenanceCitedMemory>,
+    pub co_citing_rules: Vec<RuleProvenanceCoCitingRule>,
+}
+
+/// Honest enumeration of why an ego subgraph might be empty.
+///
+/// `Available` means the rule node was found and traversed (even if it
+/// cited nothing). `RuleNotFound` separates "this rule has no
+/// provenance edges yet" from "this rule isn't in the bipartite
+/// projection at all" — agents need that distinction to decide whether
+/// to retry after a steward refresh or to surface a structured error.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleProvenanceEgoStatus {
+    #[default]
+    Available,
+    RuleNotFound,
+    NotARuleNode,
+}
+
+/// Build the bipartite ego subgraph rooted at `rule_id`.
+///
+/// Walks the rule-provenance bipartite projection starting from
+/// `rule_id`: collects the memories the rule cites (the 1-hop ring),
+/// then walks each cited memory's other rule neighbors (the 2-hop
+/// ring) to surface peer rules that overlap on at least one memory.
+///
+/// All output collections are deterministically sorted; repeated calls
+/// against the same projection produce byte-identical JSON.
+///
+/// Returns a populated `RuleProvenanceEgo` even on the empty cases —
+/// callers distinguish "rule not found" / "node exists but isn't a
+/// rule" / "rule has zero citations" via `status` and the empty
+/// `cited_memories` / `co_citing_rules` collections rather than via
+/// `Result`.
+#[must_use]
+pub fn compute_rule_provenance_ego(graph: &Graph, rule_id: &str) -> RuleProvenanceEgo {
+    let mut ego = RuleProvenanceEgo {
+        schema: RULE_PROVENANCE_EGO_SCHEMA_V1,
+        rule_id: rule_id.to_owned(),
+        ..RuleProvenanceEgo::default()
+    };
+
+    match partition_for(graph, rule_id) {
+        Some(BIPARTITE_PARTITION_RULE) => {}
+        Some(_) => {
+            ego.status = RuleProvenanceEgoStatus::NotARuleNode;
+            return ego;
+        }
+        None => {
+            ego.status = RuleProvenanceEgoStatus::RuleNotFound;
+            return ego;
+        }
+    }
+
+    // 1-hop: memories cited by this rule. BTreeSet keeps the
+    // deterministic order independent of the underlying graph's
+    // adjacency iteration order.
+    let cited_memory_ids: BTreeSet<String> = match graph.neighbors_iter(rule_id) {
+        Some(iter) => iter
+            .filter(|node| matches!(partition_for(graph, node), Some(BIPARTITE_PARTITION_MEMORY)))
+            .map(str::to_owned)
+            .collect(),
+        None => BTreeSet::new(),
+    };
+
+    // 2-hop: for each cited memory, enumerate the other rules that
+    // also cite it. We track per-peer which memories overlap so the
+    // CLI can surface "rule X co-cites memories [a, b]" without a
+    // second pass.
+    let mut peer_to_shared: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for memory_id in &cited_memory_ids {
+        let memory_neighbor_iter = match graph.neighbors_iter(memory_id) {
+            Some(iter) => iter,
+            None => continue,
+        };
+        for peer in memory_neighbor_iter {
+            if peer == rule_id {
+                continue;
+            }
+            if !matches!(partition_for(graph, peer), Some(BIPARTITE_PARTITION_RULE)) {
+                continue;
+            }
+            peer_to_shared
+                .entry(peer.to_owned())
+                .or_default()
+                .insert(memory_id.clone());
+        }
+    }
+
+    // Project the 1-hop memories with their `other_rule_count`. Walk
+    // each memory's rule neighbors once more so we don't have to keep
+    // a full inverse index in memory; ego subgraphs are small enough
+    // that the second pass is cheap.
+    ego.cited_memories = cited_memory_ids
+        .iter()
+        .map(|memory_id| {
+            let other_rule_count = match graph.neighbors_iter(memory_id) {
+                Some(iter) => iter
+                    .filter(|peer| {
+                        *peer != rule_id
+                            && matches!(partition_for(graph, peer), Some(BIPARTITE_PARTITION_RULE))
+                    })
+                    .count(),
+                None => 0,
+            };
+            RuleProvenanceCitedMemory {
+                memory_id: memory_id.clone(),
+                other_rule_count,
+            }
+        })
+        .collect();
+
+    ego.co_citing_rules = peer_to_shared
+        .into_iter()
+        .map(|(peer_rule_id, shared)| {
+            let shared_memory_ids: Vec<String> = shared.into_iter().collect();
+            RuleProvenanceCoCitingRule {
+                rule_id: peer_rule_id,
+                shared_memory_count: shared_memory_ids.len(),
+                shared_memory_ids,
+            }
+        })
+        .collect();
+
+    ego
 }
 
 #[cfg(test)]
@@ -261,5 +432,137 @@ mod tests {
         let second = graph_result(compute_bipartite_hits(&graph))?;
         assert_eq!(result, second, "bipartite HITS must be deterministic");
         Ok(())
+    }
+
+    #[test]
+    fn rule_provenance_ego_unknown_rule_returns_rule_not_found() {
+        let graph = Graph::new(CompatibilityMode::Strict);
+
+        let ego = compute_rule_provenance_ego(&graph, "rule_missing");
+
+        assert_eq!(ego.schema, RULE_PROVENANCE_EGO_SCHEMA_V1);
+        assert_eq!(ego.rule_id, "rule_missing");
+        assert_eq!(ego.status, RuleProvenanceEgoStatus::RuleNotFound);
+        assert!(ego.cited_memories.is_empty());
+        assert!(ego.co_citing_rules.is_empty());
+    }
+
+    #[test]
+    fn rule_provenance_ego_memory_node_passed_as_rule_returns_not_a_rule_node() {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        add_memory(&mut graph, "mem_001");
+
+        let ego = compute_rule_provenance_ego(&graph, "mem_001");
+
+        assert_eq!(ego.status, RuleProvenanceEgoStatus::NotARuleNode);
+        assert!(ego.cited_memories.is_empty());
+        assert!(ego.co_citing_rules.is_empty());
+    }
+
+    #[test]
+    fn rule_provenance_ego_isolated_rule_yields_empty_rings() {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        add_rule(&mut graph, "rule_lonely");
+
+        let ego = compute_rule_provenance_ego(&graph, "rule_lonely");
+
+        assert_eq!(ego.status, RuleProvenanceEgoStatus::Available);
+        assert!(ego.cited_memories.is_empty());
+        assert!(ego.co_citing_rules.is_empty());
+    }
+
+    #[test]
+    fn rule_provenance_ego_collects_solo_and_shared_memory_citations() {
+        // rule_main cites mem_solo (only it) and mem_shared (also rule_peer).
+        // rule_peer also cites mem_isolated_to_peer (which the ego must NOT
+        // surface, because the center is rule_main).
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        add_rule(&mut graph, "rule_main");
+        add_rule(&mut graph, "rule_peer");
+        add_memory(&mut graph, "mem_solo");
+        add_memory(&mut graph, "mem_shared");
+        add_memory(&mut graph, "mem_isolated_to_peer");
+        link(&mut graph, "rule_main", "mem_solo");
+        link(&mut graph, "rule_main", "mem_shared");
+        link(&mut graph, "rule_peer", "mem_shared");
+        link(&mut graph, "rule_peer", "mem_isolated_to_peer");
+
+        let ego = compute_rule_provenance_ego(&graph, "rule_main");
+
+        assert_eq!(ego.status, RuleProvenanceEgoStatus::Available);
+
+        // Cited memories: sorted by memory ID, with correct other-rule counts.
+        let cited: Vec<_> = ego
+            .cited_memories
+            .iter()
+            .map(|m| (m.memory_id.as_str(), m.other_rule_count))
+            .collect();
+        assert_eq!(cited, vec![("mem_shared", 1), ("mem_solo", 0)]);
+
+        // Co-citing rules: only rule_peer (sharing mem_shared); the
+        // ego must NOT surface mem_isolated_to_peer because the center
+        // rule does not cite it.
+        assert_eq!(ego.co_citing_rules.len(), 1);
+        let peer = &ego.co_citing_rules[0];
+        assert_eq!(peer.rule_id, "rule_peer");
+        assert_eq!(peer.shared_memory_count, 1);
+        assert_eq!(peer.shared_memory_ids, vec!["mem_shared".to_string()]);
+    }
+
+    #[test]
+    fn rule_provenance_ego_is_deterministic_across_runs() {
+        // Same graph constructed twice in different add-order; the ego
+        // output must be byte-identical (J7 determinism).
+        fn build(order: &[(&str, &str, &str)]) -> Graph {
+            let mut graph = Graph::new(CompatibilityMode::Strict);
+            // Add all unique rules and memories first so partition tags
+            // exist when the edges land.
+            let mut seen_rules: BTreeSet<&str> = BTreeSet::new();
+            let mut seen_memories: BTreeSet<&str> = BTreeSet::new();
+            for (rule, memory, _) in order {
+                if seen_rules.insert(rule) {
+                    add_rule(&mut graph, rule);
+                }
+                if seen_memories.insert(memory) {
+                    add_memory(&mut graph, memory);
+                }
+            }
+            for (rule, memory, _) in order {
+                link(&mut graph, rule, memory);
+            }
+            graph
+        }
+
+        let order_a = vec![
+            ("rule_main", "mem_b", ""),
+            ("rule_peer", "mem_b", ""),
+            ("rule_main", "mem_a", ""),
+            ("rule_peer", "mem_a", ""),
+        ];
+        let mut order_b = order_a.clone();
+        order_b.reverse();
+
+        let ego_a = compute_rule_provenance_ego(&build(&order_a), "rule_main");
+        let ego_b = compute_rule_provenance_ego(&build(&order_b), "rule_main");
+
+        let json_a = serde_json::to_string(&ego_a).expect("ego A serializes");
+        let json_b = serde_json::to_string(&ego_b).expect("ego B serializes");
+        assert_eq!(
+            json_a, json_b,
+            "ego output must be insertion-order-invariant"
+        );
+
+        // Spot-check the schema content too.
+        let cited: Vec<_> = ego_a
+            .cited_memories
+            .iter()
+            .map(|m| m.memory_id.as_str())
+            .collect();
+        assert_eq!(cited, vec!["mem_a", "mem_b"]);
+        assert_eq!(ego_a.co_citing_rules.len(), 1);
+        assert_eq!(
+            ego_a.co_citing_rules[0].shared_memory_ids,
+            vec!["mem_a".to_string(), "mem_b".to_string()]
+        );
     }
 }
