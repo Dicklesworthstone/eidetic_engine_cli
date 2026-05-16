@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 pub const COMPLETION_AUDIT_CHECKLIST_SCHEMA_V1: &str = "ee.completion_audit.checklist.v1";
@@ -227,6 +229,166 @@ pub struct CompletionAuditReport {
     pub completion_verdict: CompletionVerdict,
 }
 
+#[must_use]
+pub fn build_completion_audit_report_for_workspace(
+    source_label: &str,
+    objective_text: &str,
+    workspace: &Path,
+    extra_evidence: Option<EvidenceBundle>,
+) -> CompletionAuditReport {
+    let checklist = extract_completion_checklist(source_label, objective_text);
+    let mut bundle = build_workspace_completion_evidence(workspace, &checklist);
+    if let Some(extra) = extra_evidence {
+        bundle.records.extend(extra.records);
+    }
+    bundle.records.sort();
+    bundle.records.dedup();
+    build_completion_audit_report(&checklist, &bundle)
+}
+
+#[must_use]
+pub fn build_workspace_completion_evidence(
+    workspace: &Path,
+    checklist: &CompletionChecklist,
+) -> EvidenceBundle {
+    let mut records = Vec::new();
+
+    records.push(evidence_record(
+        "completion_audit",
+        "prompt-to-artifact checklist",
+        "ee handoff completion-audit",
+        EvidenceRecordStatus::Pass,
+        "direct",
+        "completion audit command produced an objective-to-artifact checklist",
+    ));
+    records.push(evidence_record(
+        "completion_audit",
+        "explicit objective requirements",
+        "ee handoff completion-audit",
+        EvidenceRecordStatus::Pass,
+        "direct",
+        "completion audit command evaluated explicit objective requirements",
+    ));
+
+    for requirement in &checklist.requirements {
+        for expectation in &requirement.evidence_expectations {
+            push_static_workspace_evidence(&mut records, workspace, expectation);
+        }
+        for expectation in &requirement.verification_expectations {
+            let expectation = EvidenceExpectation {
+                kind: expectation.kind.clone(),
+                target: expectation.target.clone(),
+                strength: if expectation.required {
+                    "direct".to_owned()
+                } else {
+                    "supporting".to_owned()
+                },
+            };
+            push_static_workspace_evidence(&mut records, workspace, &expectation);
+        }
+    }
+
+    records.sort();
+    records.dedup();
+    EvidenceBundle { records }
+}
+
+fn evidence_record(
+    kind: &str,
+    target: &str,
+    source: &str,
+    status: EvidenceRecordStatus,
+    strength: &str,
+    summary: &str,
+) -> EvidenceRecord {
+    EvidenceRecord {
+        kind: kind.to_owned(),
+        target: target.to_owned(),
+        source: source.to_owned(),
+        status,
+        strength: strength.to_owned(),
+        summary: summary.to_owned(),
+    }
+}
+
+fn push_static_workspace_evidence(
+    records: &mut Vec<EvidenceRecord>,
+    workspace: &Path,
+    expectation: &EvidenceExpectation,
+) {
+    match expectation.kind.as_str() {
+        "file_read" if workspace.join(&expectation.target).is_file() => {
+            records.push(evidence_record(
+                "file_read",
+                &expectation.target,
+                &format!("{} exists", workspace.join(&expectation.target).display()),
+                EvidenceRecordStatus::StaticOnly,
+                "supporting",
+                "file exists, but this does not prove the agent read and applied it",
+            ));
+        }
+        "beads" if workspace.join(".beads").join("issues.jsonl").is_file() => {
+            records.push(evidence_record(
+                "beads",
+                ".beads/issues.jsonl",
+                ".beads/issues.jsonl exists",
+                EvidenceRecordStatus::StaticOnly,
+                "supporting",
+                "Beads store exists, but this does not prove status/comment evidence was updated",
+            ));
+        }
+        "code_inspection" if workspace.join("src").is_dir() => {
+            records.push(evidence_record(
+                "code_inspection",
+                "repository",
+                "src directory exists",
+                EvidenceRecordStatus::StaticOnly,
+                "supporting",
+                "source tree exists, but this does not prove a targeted architecture audit happened",
+            ));
+        }
+        "rch" if workspace.join("scripts").join("rch_verify.sh").is_file() => {
+            records.push(evidence_record(
+                "rch",
+                "remote build metadata",
+                "scripts/rch_verify.sh exists",
+                EvidenceRecordStatus::StaticOnly,
+                "supporting",
+                "RCH helper exists, but this does not prove a remote verifier passed",
+            ));
+        }
+        "file_or_path" if workspace.join(&expectation.target).exists() => {
+            records.push(evidence_record(
+                "file_or_path",
+                &expectation.target,
+                &format!("{} exists", workspace.join(&expectation.target).display()),
+                EvidenceRecordStatus::StaticOnly,
+                "supporting",
+                "path exists, but this does not prove it was inspected or changed correctly",
+            ));
+        }
+        "agent_mail" if agent_mail_archive_present() => {
+            records.push(evidence_record(
+                "agent_mail",
+                &expectation.target,
+                "agent mail archive present",
+                EvidenceRecordStatus::StaticOnly,
+                "supporting",
+                "Agent Mail storage exists, but this does not prove inbox handling or acknowledgements",
+            ));
+        }
+        _ => {}
+    }
+}
+
+fn agent_mail_archive_present() -> bool {
+    std::env::var_os("HOME").is_some_and(|home| {
+        std::path::PathBuf::from(home)
+            .join(".local/share/mcp_agent_mail")
+            .exists()
+    })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RequirementAccumulator {
     kind: RequirementKind,
@@ -448,29 +610,30 @@ fn classify_requirement_support(
     }
     if records
         .iter()
+        .any(|record| record.status == EvidenceRecordStatus::Inconclusive)
+    {
+        return RequirementSupport::Weak;
+    }
+    if missing.is_empty() {
+        if records.iter().any(|record| {
+            record.status == EvidenceRecordStatus::Pass && record.strength == "direct"
+        }) {
+            return RequirementSupport::Direct;
+        }
+        if records.iter().any(|record| {
+            record.status == EvidenceRecordStatus::Pass && record.strength == "supporting"
+        }) {
+            return RequirementSupport::Supporting;
+        }
+    }
+    if records
+        .iter()
         .any(|record| record.status == EvidenceRecordStatus::StaticOnly)
     {
         return RequirementSupport::Weak;
     }
     if !missing.is_empty() {
         return RequirementSupport::Missing;
-    }
-    if records
-        .iter()
-        .any(|record| record.status == EvidenceRecordStatus::Inconclusive)
-    {
-        return RequirementSupport::Weak;
-    }
-    if records
-        .iter()
-        .any(|record| record.status == EvidenceRecordStatus::Pass && record.strength == "direct")
-    {
-        return RequirementSupport::Direct;
-    }
-    if records.iter().any(|record| {
-        record.status == EvidenceRecordStatus::Pass && record.strength == "supporting"
-    }) {
-        return RequirementSupport::Supporting;
     }
     RequirementSupport::Missing
 }
@@ -1975,5 +2138,62 @@ mod tests {
                 .iter()
                 .any(|gap| gap.support == RequirementSupport::Missing)
         );
+    }
+
+    #[test]
+    fn workspace_completion_audit_is_conservative_without_direct_evidence() {
+        let report = build_completion_audit_report_for_workspace(
+            "objective",
+            "Read README.md, coordinate through Agent Mail, run all cargo builds and tests through RCH, and perform a completion audit.",
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            None,
+        );
+
+        assert_eq!(report.schema, COMPLETION_AUDIT_REPORT_SCHEMA_V1);
+        assert_eq!(report.completion_verdict, CompletionVerdict::Incomplete);
+        assert!(
+            report
+                .evidence_by_requirement
+                .iter()
+                .any(|item| item.support == RequirementSupport::Weak)
+        );
+        assert!(
+            report
+                .evidence_by_requirement
+                .iter()
+                .any(|item| item.support == RequirementSupport::Direct)
+        );
+    }
+
+    #[test]
+    fn explicit_direct_evidence_overrides_static_only_workspace_proxy() {
+        let bundle = EvidenceBundle {
+            records: vec![
+                record(
+                    "file_read",
+                    "README.md",
+                    "session transcript",
+                    EvidenceRecordStatus::Pass,
+                    "direct",
+                ),
+                record(
+                    "prompt_requirement",
+                    "README.md",
+                    "session transcript",
+                    EvidenceRecordStatus::Pass,
+                    "direct",
+                ),
+            ],
+        };
+
+        let report = build_completion_audit_report_for_workspace(
+            "objective",
+            "Read README.md.",
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            Some(bundle),
+        );
+
+        assert_eq!(report.completion_verdict, CompletionVerdict::Complete);
+        assert!(report.gaps.is_empty());
     }
 }

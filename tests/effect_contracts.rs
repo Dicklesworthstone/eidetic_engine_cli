@@ -808,6 +808,7 @@ fn effect_manifest_tracks_handoff_and_eval_as_real_surfaces() -> TestResult {
         "eval list",
         "eval report",
         "eval run",
+        "handoff completion-audit",
         "handoff inspect",
         "handoff preview",
         "handoff resume",

@@ -1045,6 +1045,10 @@ impl EffectManifest {
             CommandEffect::read_only("graph neighborhood", "Inspect graph neighborhood"),
             CommandEffect::read_only("graph pagerank", "Compute graph PageRank scores"),
             CommandEffect::read_only("graph path", "Find graph shortest path"),
+            CommandEffect::read_only(
+                "handoff completion-audit",
+                "Audit objective completion evidence without mutation",
+            ),
             CommandEffect::read_only("handoff inspect", "Inspect handoff capsule"),
             CommandEffect::read_only(
                 "handoff preview",

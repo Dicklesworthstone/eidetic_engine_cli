@@ -6790,6 +6790,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: completion_audit_checklist_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::completion_audit::COMPLETION_AUDIT_REPORT_SCHEMA_V1,
+            version: "1",
+            description: "Completion audit report response envelope",
+            category: "handoff",
+            definition: completion_audit_report_schema_definition,
+        },
+        SchemaEntry {
             id: MCP_MANIFEST_SCHEMA_V1,
             version: "1",
             description: "MCP adapter manifest generated from ee's public command and schema registries",
@@ -7086,6 +7093,10 @@ fn db_inspect_schema_definition() -> String {
 
 fn completion_audit_checklist_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.completion_audit.checklist.v1.json").to_string()
+}
+
+fn completion_audit_report_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.completion_audit.report.v1.json").to_string()
 }
 
 fn mcp_manifest_schema_definition() -> String {
@@ -11991,6 +12002,44 @@ pub fn render_audit_verify_toon(report: &AuditVerifyReport) -> String {
 // ============================================================================
 // Handoff Rendering
 // ============================================================================
+
+/// Render a completion audit report as a JSON response envelope.
+#[must_use]
+pub fn render_completion_audit_json(
+    report: &crate::core::completion_audit::CompletionAuditReport,
+) -> String {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": report,
+        "degraded": []
+    })
+    .to_string()
+}
+
+/// Render a completion audit report as human-readable text.
+#[must_use]
+pub fn render_completion_audit_human(
+    report: &crate::core::completion_audit::CompletionAuditReport,
+) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("Completion Audit: {:?}", report.completion_verdict));
+    lines.push(format!(
+        "Requirements: {}",
+        report.checklist.summary.requirement_count
+    ));
+    lines.push(format!("Gaps: {}", report.gaps.len()));
+    lines.push(format!("Residual risks: {}", report.residual_risks.len()));
+    if !report.recommended_next_actions.is_empty() {
+        lines.push(String::new());
+        lines.push("Recommended Next Actions:".to_owned());
+        for action in &report.recommended_next_actions {
+            lines.push(format!("  - {action}"));
+        }
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
 
 /// Render a handoff preview report as JSON.
 #[must_use]

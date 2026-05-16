@@ -138,6 +138,11 @@ pub const HANDOFF_SCHEMAS: &[SchemaEntry] = &[
         "ee.completion_audit.checklist.v1",
         SchemaCategory::Handoff,
     ),
+    SchemaEntry::new(
+        "completion_audit_report",
+        "ee.completion_audit.report.v1",
+        SchemaCategory::Handoff,
+    ),
 ];
 
 /// Context and search schemas.
@@ -1428,6 +1433,10 @@ mod tests {
         ensure(
             versions.contains(&"ee.handoff.resume.v1"),
             "handoff schemas must include resume",
+        )?;
+        ensure(
+            versions.contains(&"ee.completion_audit.report.v1"),
+            "handoff schemas must include completion audit report",
         )
     }
 

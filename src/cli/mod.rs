@@ -55,6 +55,7 @@ use crate::core::causal::{
     trace_causal_chains_from_store,
 };
 use crate::core::check::CheckReport;
+use crate::core::completion_audit::{EvidenceBundle, build_completion_audit_report_for_workspace};
 use crate::core::config_surface::{
     ConfigGetReport, ConfigSetReport, ConfigSurfaceError, ConfigSurfaceOptions, get_config,
     set_config, show_config,
@@ -3381,6 +3382,8 @@ pub struct UpdateArgs {
 /// Subcommands for `ee handoff`.
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum HandoffCommand {
+    /// Audit whether an objective has enough evidence to claim completion.
+    CompletionAudit(HandoffCompletionAuditArgs),
     /// Preview capsule contents without writing.
     Preview(HandoffPreviewArgs),
     /// Create a redacted continuity capsule.
@@ -3391,6 +3394,26 @@ pub enum HandoffCommand {
     Resume(HandoffResumeArgs),
     /// Rotate a capsule HMAC under fresh workspace key material.
     RotateKey(HandoffRotateKeyArgs),
+}
+
+/// Arguments for `ee handoff completion-audit`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct HandoffCompletionAuditArgs {
+    /// Objective text to audit.
+    #[arg(long, value_name = "TEXT", conflicts_with = "objective_file")]
+    pub objective: Option<String>,
+
+    /// Read objective text from a file.
+    #[arg(
+        long = "objective-file",
+        value_name = "PATH",
+        conflicts_with = "objective"
+    )]
+    pub objective_file: Option<PathBuf>,
+
+    /// Optional JSON evidence bundle to merge with static workspace evidence.
+    #[arg(long = "evidence-json", value_name = "PATH")]
+    pub evidence_json: Option<PathBuf>,
 }
 
 /// Arguments for `ee handoff preview`.
@@ -8341,6 +8364,45 @@ where
             }
         }
         Some(Command::Handoff(ref cmd)) => match cmd {
+            HandoffCommand::CompletionAudit(args) => {
+                let workspace_path = cli.resolve_workspace();
+                let objective = match read_completion_audit_objective(args) {
+                    Ok(objective) => objective,
+                    Err(error) => {
+                        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                    }
+                };
+                let evidence_bundle = match read_completion_audit_evidence_bundle(args) {
+                    Ok(bundle) => bundle,
+                    Err(error) => {
+                        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                    }
+                };
+                let report = build_completion_audit_report_for_workspace(
+                    "handoff completion-audit objective",
+                    &objective,
+                    &workspace_path,
+                    evidence_bundle,
+                );
+                match cli.renderer() {
+                    output::Renderer::Human | output::Renderer::Markdown => {
+                        write_stdout(stdout, &output::render_completion_audit_human(&report))
+                    }
+                    output::Renderer::Toon => write_stdout(
+                        stdout,
+                        &(output::render_toon_from_json(&output::render_completion_audit_json(
+                            &report,
+                        )) + "\n"),
+                    ),
+                    output::Renderer::Json
+                    | output::Renderer::Jsonl
+                    | output::Renderer::Compact
+                    | output::Renderer::Hook => write_stdout(
+                        stdout,
+                        &(output::render_completion_audit_json(&report) + "\n"),
+                    ),
+                }
+            }
             HandoffCommand::Preview(args) => {
                 let workspace_path = cli.resolve_workspace();
                 let profile = match args.profile {
@@ -29596,6 +29658,67 @@ fn graph_score_json_value(value: f64) -> serde_json::Value {
     serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)
 }
 
+fn read_completion_audit_objective(
+    args: &HandoffCompletionAuditArgs,
+) -> Result<String, DomainError> {
+    match (&args.objective, &args.objective_file) {
+        (Some(text), None) => Ok(text.clone()),
+        (None, Some(path)) => {
+            fs::read_to_string(path).map_err(|error| DomainError::Configuration {
+                message: format!(
+                    "Failed to read completion-audit objective file {}: {error}",
+                    path.display()
+                ),
+                repair: Some(
+                    "Pass --objective text or a readable --objective-file path.".to_owned(),
+                ),
+            })
+        }
+        (None, None) => Err(DomainError::Usage {
+            message: "handoff completion-audit requires --objective or --objective-file".to_owned(),
+            repair: Some(
+                "Run `ee handoff completion-audit --objective \"<goal>\" --json`.".to_owned(),
+            ),
+        }),
+        (Some(_), Some(_)) => Err(DomainError::Usage {
+            message: "Pass only one of --objective or --objective-file".to_owned(),
+            repair: Some(
+                "Use --objective for inline text or --objective-file for a file.".to_owned(),
+            ),
+        }),
+    }
+}
+
+fn read_completion_audit_evidence_bundle(
+    args: &HandoffCompletionAuditArgs,
+) -> Result<Option<EvidenceBundle>, DomainError> {
+    let Some(path) = &args.evidence_json else {
+        return Ok(None);
+    };
+    let text = fs::read_to_string(path).map_err(|error| DomainError::Configuration {
+        message: format!(
+            "Failed to read completion-audit evidence file {}: {error}",
+            path.display()
+        ),
+        repair: Some(
+            "Pass a readable JSON file shaped like {\"records\":[...]} or omit --evidence-json."
+                .to_owned(),
+        ),
+    })?;
+    serde_json::from_str::<EvidenceBundle>(&text).map(Some).map_err(|error| {
+        DomainError::Configuration {
+            message: format!(
+                "Failed to parse completion-audit evidence file {}: {error}",
+                path.display()
+            ),
+            repair: Some(
+                "Use the EvidenceBundle JSON shape: {\"records\":[{\"kind\":\"...\",\"target\":\"...\",\"source\":\"...\",\"status\":\"pass\",\"strength\":\"direct\",\"summary\":\"...\"}]}."
+                    .to_owned(),
+            ),
+        }
+    })
+}
+
 fn write_domain_error<W, E>(
     error: &DomainError,
     wants_json: bool,
@@ -36479,7 +36602,14 @@ const GRAPH_SUBCOMMANDS: &[&str] = &[
     "feature-enrichment",
     "neighborhood",
 ];
-const HANDOFF_SUBCOMMANDS: &[&str] = &["preview", "create", "inspect", "resume"];
+const HANDOFF_SUBCOMMANDS: &[&str] = &[
+    "completion-audit",
+    "preview",
+    "create",
+    "inspect",
+    "resume",
+    "rotate-key",
+];
 const IMPORT_SUBCOMMANDS: &[&str] = &["cass", "jsonl", "eidetic-legacy"];
 const INDEX_SUBCOMMANDS: &[&str] = &["rebuild", "reembed", "status"];
 const INSTALL_SUBCOMMANDS: &[&str] = &["check", "plan"];
@@ -36730,6 +36860,7 @@ impl NormalizedInvocation {
                     FocusCommand::Explain(_) => "focus explain".to_string(),
                 },
                 Command::Handoff(handoff) => match handoff {
+                    HandoffCommand::CompletionAudit(_) => "handoff completion-audit".to_string(),
                     HandoffCommand::Preview(_) => "handoff preview".to_string(),
                     HandoffCommand::Create(_) => "handoff create".to_string(),
                     HandoffCommand::Inspect(_) => "handoff inspect".to_string(),
@@ -42734,6 +42865,36 @@ mod tests {
                 "capsule path",
             ),
             _ => Err("expected handoff rotate-key command".to_string()),
+        }
+    }
+
+    #[test]
+    fn handoff_completion_audit_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "handoff",
+            "completion-audit",
+            "--objective",
+            "Read README.md and verify through RCH.",
+            "--evidence-json",
+            "evidence.json",
+        ])
+        .map_err(|e| format!("failed to parse handoff completion-audit: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Handoff(HandoffCommand::CompletionAudit(args))) => {
+                ensure_equal(
+                    &args.objective,
+                    &Some("Read README.md and verify through RCH.".to_owned()),
+                    "objective",
+                )?;
+                ensure_equal(
+                    &args.evidence_json,
+                    &Some(PathBuf::from("evidence.json")),
+                    "evidence json",
+                )
+            }
+            _ => Err("expected handoff completion-audit command".to_string()),
         }
     }
 
