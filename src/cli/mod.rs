@@ -179,7 +179,7 @@ use crate::core::rule::{
 use crate::core::search::{
     SearchDegradation, SearchOptions, SearchReport, SearchSourceMode, run_diag_search, run_search,
 };
-use crate::core::status::{StatusOptions, StatusReport};
+use crate::core::status::{StatusOptions, StatusReport, StatusSkylineReport};
 use crate::core::swarm_brief::{
     SwarmBriefCollectOptions, SwarmBriefReport, SwarmBriefSourceKind, SwarmBriefSourceStatus,
     SystemSwarmBriefCommandRunner, all_swarm_brief_sources, collect_swarm_brief,
@@ -735,7 +735,7 @@ pub enum Command {
     #[command(subcommand)]
     Situation(SituationCommand),
     /// Report workspace and subsystem readiness.
-    Status,
+    Status(StatusArgs),
     /// Create or inspect redacted diagnostic support bundles.
     #[command(subcommand)]
     Support(SupportCommand),
@@ -779,6 +779,14 @@ pub enum AgentCommand {
     Sources(AgentSourcesArgs),
     /// Scan and list probe paths for agent detection.
     Scan(AgentScanArgs),
+}
+
+/// Arguments for `ee status`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct StatusArgs {
+    /// Emit the knowledge skyline status surface.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub skyline: bool,
 }
 
 /// Subcommands for `ee artifact`.
@@ -9015,10 +9023,42 @@ where
         Some(Command::Situation(SituationCommand::Explain(ref args))) => {
             handle_situation_explain(&cli, args, stdout, stderr)
         }
-        Some(Command::Status) => {
+        Some(Command::Status(ref args)) => {
             let timing_capture = crate::models::TimingCapture::start();
             let (workspace_path, workspace_source) =
                 resolve_workspace_for_cli(cli.workspace.as_deref());
+            if args.skyline {
+                let workspace_for_skyline =
+                    if workspace_source == WorkspaceSource::Cwd && !workspace_path.join(".ee").is_dir()
+                    {
+                        None
+                    } else {
+                        Some(workspace_path.as_path())
+                    };
+                let report = StatusSkylineReport::gather_for_workspace(workspace_for_skyline);
+                return match cli.renderer() {
+                    output::Renderer::Human | output::Renderer::Markdown => {
+                        write_stdout(stdout, &output::render_status_skyline_human(&report))
+                    }
+                    output::Renderer::Toon => write_stdout(
+                        stdout,
+                        &(output::render_toon_from_json(&output::render_status_skyline_json(
+                            &report,
+                        )) + "\n"),
+                    ),
+                    output::Renderer::Json
+                    | output::Renderer::Jsonl
+                    | output::Renderer::Compact
+                    | output::Renderer::Hook => {
+                        let rendered = output::render_status_skyline_json(&report);
+                        let rendered = output::render_response_json_for_schema_version(
+                            &rendered,
+                            cli.response_schema_version(),
+                        );
+                        write_stdout(stdout, &(rendered + "\n"))
+                    }
+                };
+            }
             let report = if workspace_source == WorkspaceSource::Cwd
                 && !workspace_path.join(".ee").is_dir()
             {
@@ -36007,7 +36047,7 @@ impl NormalizedInvocation {
                     SituationCommand::Show(_) => "situation show".to_string(),
                     SituationCommand::Explain(_) => "situation explain".to_string(),
                 },
-                Command::Status => "status".to_string(),
+                Command::Status(_) => "status".to_string(),
                 Command::Support(sup) => match sup {
                     SupportCommand::Bundle(_) => "support bundle".to_string(),
                     SupportCommand::Inspect(_) => "support inspect".to_string(),
@@ -36979,12 +37019,12 @@ mod tests {
 
         ensure_equal(
             &before,
-            &(true, Some(Command::Status)),
+            &(true, Some(Command::Status(StatusArgs::default()))),
             "--json before status parse",
         )?;
         ensure_equal(
             &after,
-            &(true, Some(Command::Status)),
+            &(true, Some(Command::Status(StatusArgs::default()))),
             "--json after status parse",
         )
     }
@@ -39351,7 +39391,7 @@ mod tests {
 
         ensure_equal(
             &parsed,
-            &(true, true, Some(Command::Status)),
+            &(true, true, Some(Command::Status(StatusArgs::default()))),
             "workspace and no-color globals",
         )
     }

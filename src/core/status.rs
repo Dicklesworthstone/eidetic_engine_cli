@@ -483,6 +483,68 @@ pub struct StatusOptions {
     pub workspace_path: Option<PathBuf>,
 }
 
+/// Schema emitted by `ee status --skyline`.
+pub const STATUS_SKYLINE_SCHEMA_V1: &str = "ee.status.skyline.v1";
+
+/// Summary block for the status skyline surface.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StatusSkylineSummaryReport {
+    pub community_count: usize,
+    pub highest_risk_community_id: Option<String>,
+    pub load_bearing_memory_count: usize,
+    pub stale_community_count: usize,
+}
+
+/// One status-skyline community row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StatusSkylineCommunityReport {
+    pub community_id: String,
+    pub memory_count: usize,
+    pub mean_trust: f32,
+    pub mean_age_days: f32,
+    pub onion_layer: u32,
+    pub structural_health: String,
+}
+
+/// A schema-valid status skyline report.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StatusSkylineReport {
+    pub schema: &'static str,
+    pub snapshot_version: u64,
+    pub summary: StatusSkylineSummaryReport,
+    pub skyline: Vec<StatusSkylineCommunityReport>,
+    pub degraded: Vec<DegradationReport>,
+}
+
+impl StatusSkylineReport {
+    /// Gather the currently available status skyline posture for a workspace.
+    #[must_use]
+    pub fn gather_for_workspace(workspace_path: Option<&Path>) -> Self {
+        let skyline_feature_enabled = status_skyline_feature_enabled(workspace_path);
+        let skyline_community_count = if skyline_feature_enabled == Some(true) {
+            gather_status_skyline_community_count(workspace_path)
+        } else {
+            None
+        };
+        let mut degraded = Vec::new();
+        push_status_skyline_feature_disabled_degradation(&mut degraded, skyline_feature_enabled);
+        push_skyline_degenerate_communities_degradation(&mut degraded, skyline_community_count);
+
+        Self {
+            schema: STATUS_SKYLINE_SCHEMA_V1,
+            snapshot_version: 0,
+            summary: StatusSkylineSummaryReport {
+                community_count: skyline_community_count.unwrap_or(0),
+                highest_risk_community_id: None,
+                load_bearing_memory_count: 0,
+                stale_community_count: 0,
+            },
+            skyline: Vec::new(),
+            degraded,
+        }
+    }
+}
+
 /// Live graph algorithm readiness, independent of any persisted snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphComputeStatus {
@@ -929,7 +991,7 @@ impl FeedbackHealthReport {
 }
 
 /// A single degradation notice.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DegradationReport {
     pub code: &'static str,
     pub severity: &'static str,

@@ -32,7 +32,7 @@ use crate::core::rule::{
     RULE_SHOW_SCHEMA_V1, RULE_UPDATE_SCHEMA_V1, RuleAddReport, RuleListReport, RuleMarkReport,
     RuleProtectReport, RuleShowReport, RuleUpdateReport,
 };
-use crate::core::status::StatusReport;
+use crate::core::status::{StatusReport, StatusSkylineReport};
 use crate::core::why::WhyReport;
 use crate::core::{VERSION_PROVENANCE_SCHEMA_V1, VersionReport};
 use crate::eval::{EvaluationReport, EvaluationStatus, FixtureListEntry, ScenarioValidationResult};
@@ -3011,6 +3011,54 @@ pub fn render_status_json(report: &StatusReport) -> String {
     b.finish()
 }
 
+/// Render the status skyline report as JSON (ee.response.v1 envelope).
+#[must_use]
+pub fn render_status_skyline_json(report: &StatusSkylineReport) -> String {
+    let mut b = JsonBuilder::with_capacity(512);
+    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_bool("success", true);
+    b.field_object("data", |d| render_status_skyline_data_json(d, report));
+    b.finish()
+}
+
+fn render_status_skyline_data_json(parent: &mut JsonBuilder, report: &StatusSkylineReport) {
+    parent.field_str("command", "status --skyline");
+    parent.field_str("schema", report.schema);
+    parent.field_raw("snapshotVersion", &report.snapshot_version.to_string());
+    parent.field_object("summary", |summary| {
+        summary.field_raw(
+            "communityCount",
+            &report.summary.community_count.to_string(),
+        );
+        match report.summary.highest_risk_community_id.as_deref() {
+            Some(community_id) => summary.field_str("highestRiskCommunityId", community_id),
+            None => summary.field_raw("highestRiskCommunityId", "null"),
+        };
+        summary.field_raw(
+            "loadBearingMemoryCount",
+            &report.summary.load_bearing_memory_count.to_string(),
+        );
+        summary.field_raw(
+            "staleCommunityCount",
+            &report.summary.stale_community_count.to_string(),
+        );
+    });
+    parent.field_array_of_objects("skyline", &report.skyline, |obj, community| {
+        obj.field_str("communityId", &community.community_id);
+        obj.field_raw("memoryCount", &community.memory_count.to_string());
+        obj.field_raw("meanTrust", &score_json(community.mean_trust));
+        obj.field_raw("meanAgeDays", &score_json(community.mean_age_days));
+        obj.field_u32("onionLayer", community.onion_layer);
+        obj.field_str("structuralHealth", &community.structural_health);
+    });
+    parent.field_array_of_objects("degraded", &report.degraded, |obj, deg| {
+        obj.field_str("code", deg.code);
+        obj.field_str("severity", deg.severity);
+        obj.field_str("message", deg.message);
+        obj.field_str("repair", deg.repair);
+    });
+}
+
 fn render_status_posture_json(
     parent: &mut JsonBuilder,
     posture: &crate::models::posture::WorkspacePostureReport,
@@ -3569,6 +3617,73 @@ pub fn render_status_human(report: &StatusReport) -> String {
         report.runtime.engine,
         report.runtime.profile
     )
+}
+
+/// Render the status skyline report as compact human-readable text.
+#[must_use]
+pub fn render_status_skyline_human(report: &StatusSkylineReport) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output, "ee status --skyline");
+    let _ = writeln!(output);
+    let _ = writeln!(output, "schema: {}", report.schema);
+    let _ = writeln!(
+        output,
+        "communities: {}",
+        report.summary.community_count
+    );
+    let _ = writeln!(
+        output,
+        "load-bearing memories: {}",
+        report.summary.load_bearing_memory_count
+    );
+    let _ = writeln!(
+        output,
+        "stale communities: {}",
+        report.summary.stale_community_count
+    );
+    match report.summary.highest_risk_community_id.as_deref() {
+        Some(community_id) => {
+            let _ = writeln!(output, "highest-risk community: {community_id}");
+        }
+        None => {
+            let _ = writeln!(output, "highest-risk community: none");
+        }
+    }
+    let _ = writeln!(output);
+    let _ = writeln!(output, "Skyline:");
+    if report.skyline.is_empty() {
+        let _ = writeln!(output, "  [no skyline communities available]");
+    } else {
+        for community in &report.skyline {
+            let filled = usize::min(community.memory_count, 20);
+            let bar = "#".repeat(filled);
+            let empty = ".".repeat(20_usize.saturating_sub(filled));
+            let _ = writeln!(
+                output,
+                "  {} [{}{}] memories={} trust={:.2} age={:.1}d onion={} health={}",
+                community.community_id,
+                bar,
+                empty,
+                community.memory_count,
+                community.mean_trust,
+                community.mean_age_days,
+                community.onion_layer,
+                community.structural_health
+            );
+        }
+    }
+    if !report.degraded.is_empty() {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "Degraded:");
+        for degraded in &report.degraded {
+            let _ = writeln!(
+                output,
+                "  [{}] {}: {}",
+                degraded.severity, degraded.code, degraded.message
+            );
+        }
+    }
+    output
 }
 
 /// Render a status report as TOON (Terse Object Output Notation).
