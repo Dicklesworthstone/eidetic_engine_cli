@@ -108,6 +108,32 @@ fn git(workspace: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+fn git_status_porcelain_v2(workspace: &Path) -> Result<String, String> {
+    git(
+        workspace,
+        &[
+            "status",
+            "--porcelain=v2",
+            "--untracked-files=all",
+            "--ignored=no",
+        ],
+    )
+}
+
+fn assert_git_status_unchanged(
+    workspace: &Path,
+    before: &str,
+    context: &str,
+) -> Result<(), String> {
+    let after = git_status_porcelain_v2(workspace)?;
+    if after != before {
+        return Err(format!(
+            "{context} mutated caller checkout status\nbefore:\n{before}\nafter:\n{after}"
+        ));
+    }
+    Ok(())
+}
+
 fn seed_git_workspace(label: &str) -> Result<PathBuf, String> {
     let workspace = unique_tmp_path(label);
     fs::create_dir_all(&workspace)
@@ -448,6 +474,78 @@ fn strict_clean_tree_classifies_beads_scratch_and_secret_risk_paths() -> TestRes
         if !sample.iter().any(|entry| entry["path"] == expected_path) {
             return Err(format!("sample missing {expected_path}: {report}"));
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn strict_clean_tree_fake_rch_invokes_once_and_preserves_clean_checkout() -> TestResult {
+    let workspace = seed_git_workspace("rch-strict-clean-fake-rch")?;
+    let before_status = git_status_porcelain_v2(&workspace)?;
+    let invocation_log = unique_tmp_path("rch-fake-invocations");
+    let fake_rch = write_fake_rch(
+        "fake-rch-records-invocation.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+printf '[RCH] remote trj (0.1s)\n'
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--require-clean-tree",
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "strict_clean_tree_fake_rch_smoke",
+        ],
+        &[
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            (
+                "RCH_VERIFY_STATUS_JSON",
+                r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
+            ),
+        ],
+        &workspace,
+    )?;
+    assert_git_status_unchanged(&workspace, &before_status, "strict clean-tree fake RCH")?;
+    if !status.success() {
+        return Err(format!(
+            "strict clean fake RCH run failed with {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            status.code()
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse strict clean fake RCH: {error}"))?;
+    if report["status"] != "remote_pass"
+        || report["verification_attribution"] != "strict_clean_tree"
+        || report["worker_id"] != "trj"
+    {
+        return Err(format!("unexpected strict clean fake-RCH report: {report}"));
+    }
+    let invocations = fs::read_to_string(&invocation_log)
+        .map_err(|error| format!("read invocation log: {error}"))?;
+    let lines = invocations.lines().collect::<Vec<_>>();
+    if lines.len() != 1 {
+        return Err(format!(
+            "strict clean-tree should invoke fake RCH once, got {}: {lines:?}",
+            lines.len()
+        ));
+    }
+    if !lines[0].contains("exec -- env TMPDIR=/tmp CARGO_TARGET_DIR=/tmp/ee-rch-verify-target cargo test --lib strict_clean_tree_fake_rch_smoke") {
+        return Err(format!("fake RCH invocation did not preserve explicit remote command: {lines:?}"));
     }
     Ok(())
 }
