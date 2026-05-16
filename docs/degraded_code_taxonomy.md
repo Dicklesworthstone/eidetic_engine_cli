@@ -112,6 +112,7 @@ Current conventions:
 | `backup_restore` | `ee backup restore` import, side-path, or derived-asset degradation. |
 | `beads` | Swarm brief Beads source degradation. |
 | `build` | Binary version and build-provenance degradation. |
+| `build_admission` | `ee diag build-admission` disk-pressure and external-build-root admission degradation. |
 | `bv` | Swarm brief BV source degradation. |
 | `curate_candidates` | `ee curate candidates` queue listing degradation. |
 | `db_status` | `ee db status` migration or sidecar-file degradation. |
