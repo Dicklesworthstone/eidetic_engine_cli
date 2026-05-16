@@ -206,16 +206,26 @@ fn collect_proof_artifacts(
     kind: ProofArtifactKind,
     artifacts: &mut Vec<ProofArtifact>,
 ) -> io::Result<()> {
-    if !dir.exists() {
-        return Ok(());
+    ensure_no_proof_path_symlink_components(dir, "discover proof artifacts")?;
+    match fs::symlink_metadata(dir) {
+        Ok(metadata) if !metadata.file_type().is_dir() => return Ok(()),
+        Ok(_) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
     }
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_dir() {
-            continue;
-        }
-        if !is_proof_artifact(&path, kind) {
+        ensure_no_proof_path_symlink_components(&path, "discover proof artifact")?;
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_dir() || !is_proof_artifact(&path, kind) {
             continue;
         }
         artifacts.push(ProofArtifact {
@@ -235,6 +245,7 @@ fn is_proof_artifact(path: &Path, kind: ProofArtifactKind) -> bool {
 }
 
 fn extract_invariants(path: &Path) -> io::Result<Vec<String>> {
+    ensure_no_proof_path_symlink_components(path, "read proof artifact")?;
     let body = fs::read_to_string(path)?;
     let mut invariants = body
         .lines()
@@ -247,6 +258,36 @@ fn extract_invariants(path: &Path) -> io::Result<Vec<String>> {
     invariants.sort();
     invariants.dedup();
     Ok(invariants)
+}
+
+fn ensure_no_proof_path_symlink_components(path: &Path, operation: &'static str) -> io::Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "refusing to {operation} `{}` through symlinked path component `{}`",
+                        path.display(),
+                        current.display()
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn classify_status(kind: ProofArtifactKind, outcome: &ProofCommandOutcome) -> ProofCheckStatus {
@@ -285,6 +326,9 @@ fn tool_is_available(tool: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    type TestResult = Result<(), String>;
 
     #[derive(Clone, Debug)]
     struct FixedRunner {
@@ -382,5 +426,53 @@ mod tests {
         assert!(report.checks.iter().all(|check| {
             check.status == ProofCheckStatus::ToolMissing && !check.artifact.invariants.is_empty()
         }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_rejects_symlinked_proof_artifact() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let lean_dir = temp.path().join("lean4");
+        fs::create_dir_all(&lean_dir).map_err(|error| error.to_string())?;
+        let outside_proof = temp.path().join("outside.lean");
+        fs::write(&outside_proof, "-- invariant: outside proof\n")
+            .map_err(|error| error.to_string())?;
+        symlink(&outside_proof, lean_dir.join("linked.lean")).map_err(|error| error.to_string())?;
+
+        let error = discover_proof_artifacts(temp.path())
+            .expect_err("symlinked proof artifact should be rejected")
+            .to_string();
+        if error.contains("symlinked path component") {
+            Ok(())
+        } else {
+            Err(format!("unexpected symlink error: {error}"))
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_rejects_symlinked_proof_root() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_lean_dir = temp.path().join("real-lean4");
+        fs::create_dir_all(&real_lean_dir).map_err(|error| error.to_string())?;
+        fs::write(
+            real_lean_dir.join("proof.lean"),
+            "-- invariant: hidden through root symlink\n",
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(&real_lean_dir, temp.path().join("lean4")).map_err(|error| error.to_string())?;
+
+        let error = discover_proof_artifacts(temp.path())
+            .expect_err("symlinked proof root should be rejected")
+            .to_string();
+        if error.contains("symlinked path component") {
+            Ok(())
+        } else {
+            Err(format!("unexpected symlink error: {error}"))
+        }
     }
 }
