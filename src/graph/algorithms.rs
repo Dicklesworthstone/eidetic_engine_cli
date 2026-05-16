@@ -382,6 +382,12 @@ fn algorithm_cache_lock(cache_key: &str) -> Arc<Mutex<()>> {
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+        
+    // Periodically clean up unreferenced locks to prevent memory leaks
+    if locks.len() % 64 == 0 {
+        locks.retain(|_, v| Arc::strong_count(v) > 1);
+    }
+
     locks
         .entry(cache_key.to_owned())
         .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -450,17 +456,24 @@ where
     R: Clone + Send + Sync + 'static,
 {
     let expires_at = Instant::now().checked_add(Duration::from_secs(ttl_seconds));
-    IN_MEMORY_ALGORITHM_RESULTS
+    let mut cache = IN_MEMORY_ALGORITHM_RESULTS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(
-            cache_key.to_owned(),
-            InMemoryAlgorithmResult {
-                result: Arc::new(result.clone()),
-                expires_at,
-            },
-        );
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+        
+    // Periodic garbage collection of expired results
+    if cache.len() % 64 == 0 {
+        let now = Instant::now();
+        cache.retain(|_, v| !v.expires_at.is_some_and(|exp| exp <= now));
+    }
+        
+    cache.insert(
+        cache_key.to_owned(),
+        InMemoryAlgorithmResult {
+            result: Arc::new(result.clone()),
+            expires_at,
+        },
+    );
 }
 
 fn load_cached_algorithm_result<R>(
