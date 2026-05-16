@@ -68,6 +68,7 @@ const PACK_REPLAY_SUMMARY_FILE: &str = "pack_replay_summary.json";
 const MAX_PACK_REPLAY_SUMMARY_RECORDS: usize = 16;
 const SWARM_BRIEF_SUMMARY_FILE: &str = "swarm_brief_summary.json";
 const SINGLEFLIGHT_POSTURE_FILE: &str = "singleflight_posture.json";
+const QOS_LANE_SUMMARY_FILE: &str = "qos_lane_summary.json";
 const TRIAGE_SUMMARY_FILE: &str = "scale_triage_summary.json";
 const PERF_COMPARE_BUNDLE_SECTIONS: [(&str, &str); 8] = [
     ("profile_evidence", PROFILE_EVIDENCE_FILE),
@@ -230,6 +231,7 @@ struct CollectedDiagnostics {
     pack_replay_summary_json: String,
     swarm_brief_summary_json: String,
     singleflight_posture_json: String,
+    qos_lane_summary_json: String,
     triage_summary_json: String,
 }
 
@@ -332,6 +334,7 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
             SINGLEFLIGHT_POSTURE_FILE,
             &diagnostics.singleflight_posture_json,
         ),
+        (QOS_LANE_SUMMARY_FILE, &diagnostics.qos_lane_summary_json),
         (TRIAGE_SUMMARY_FILE, &diagnostics.triage_summary_json),
     ];
 
@@ -776,6 +779,7 @@ fn collect_diagnostics(
     let pack_replay_summary_json = pack_replay_summary_json(workspace);
     let swarm_brief_summary_json = swarm_brief_summary_json(workspace);
     let singleflight_posture_json = singleflight_posture_json();
+    let qos_lane_summary_json = qos_lane_summary_json(workspace);
     let triage_summary_json = triage_summary_json(&status, &swarm_reports);
 
     Ok(CollectedDiagnostics {
@@ -794,6 +798,7 @@ fn collect_diagnostics(
         pack_replay_summary_json,
         swarm_brief_summary_json,
         singleflight_posture_json,
+        qos_lane_summary_json,
         triage_summary_json,
     })
 }
@@ -1520,6 +1525,26 @@ fn singleflight_posture_json() -> String {
     )
 }
 
+fn qos_lane_summary_json(workspace: &Path) -> String {
+    let workspace_identity = workspace.to_string_lossy();
+    let now_epoch_ms = Utc::now().timestamp_millis().try_into().unwrap_or_default();
+    let value = serde_json::to_value(super::qos::summarize_qos_lane_registry(
+        workspace,
+        &workspace_identity,
+        now_epoch_ms,
+    ))
+    .map_or_else(
+        |error| {
+            json!({
+                "schema": "ee.support_bundle.serialization_error.v1",
+                "message": error.to_string(),
+            })
+        },
+        |value| value,
+    );
+    stable_json(&value)
+}
+
 fn collect_pack_replay_summary(workspace: &Path) -> Value {
     let database_path = workspace.join(".ee").join("ee.db");
     let mut database = json!({
@@ -2090,6 +2115,7 @@ fn planned_files() -> Vec<String> {
         PACK_REPLAY_SUMMARY_FILE.to_owned(),
         SWARM_BRIEF_SUMMARY_FILE.to_owned(),
         SINGLEFLIGHT_POSTURE_FILE.to_owned(),
+        QOS_LANE_SUMMARY_FILE.to_owned(),
         TRIAGE_SUMMARY_FILE.to_owned(),
         MANIFEST_FILE.to_owned(),
     ]
@@ -2460,12 +2486,71 @@ mod tests {
             PACK_REPLAY_SUMMARY_FILE,
             SWARM_BRIEF_SUMMARY_FILE,
             TRIAGE_SUMMARY_FILE,
+            QOS_LANE_SUMMARY_FILE,
         ] {
             assert!(
                 files.contains(&required.to_owned()),
                 "planned support-bundle files must include {required}"
             );
         }
+    }
+
+    #[test]
+    fn qos_lane_summary_collects_redacted_active_lane_counts() -> TestResult {
+        let workspace = unique_test_path("qos-lane-summary");
+        fs::create_dir_all(workspace.join(".ee"))
+            .map_err(|error| format!("failed to create workspace: {error}"))?;
+        let now = Utc::now()
+            .timestamp_millis()
+            .try_into()
+            .map_err(|error| format!("failed to convert timestamp: {error}"))?;
+
+        super::super::qos::publish_qos_lane_record(
+            &workspace,
+            &super::super::qos::QosLaneRecordInput {
+                workspace_identity: "/private/workspace/path",
+                lane: super::super::qos::QosLane::ForegroundRead,
+                command_class: "context",
+                process_id: Some(42),
+                profile_label: Some("portable"),
+                budget_label: Some("interactive"),
+                request_text: Some("summarize private task"),
+                request_hash: None,
+                started_at_epoch_ms: now,
+                ttl_ms: 60_000,
+                status: super::super::qos::QosLaneStatus::Active,
+            },
+        )
+        .map_err(|error| error.message())?;
+
+        let rendered = qos_lane_summary_json(&workspace);
+        let value: Value = serde_json::from_str(&rendered)
+            .map_err(|error| format!("failed to parse qos summary: {error}"))?;
+        assert_eq!(
+            value.get("schema"),
+            Some(&json!(super::super::qos::QOS_ACTIVE_LANE_SUMMARY_SCHEMA_V1))
+        );
+        assert_eq!(value.get("foregroundActiveCount"), Some(&json!(1)));
+        assert_eq!(value.get("backgroundActiveCount"), Some(&json!(0)));
+        let active_record = value
+            .get("activeRecords")
+            .and_then(Value::as_array)
+            .and_then(|records| records.first())
+            .ok_or_else(|| "expected one active QoS record".to_owned())?;
+        assert_eq!(active_record.get("lane"), Some(&json!("foreground_read")));
+        assert!(
+            active_record.get("requestHash").is_some(),
+            "support summary should include a redacted request hash"
+        );
+        assert!(
+            !rendered.contains("summarize private task"),
+            "support summary must not include raw request text"
+        );
+        assert!(
+            !rendered.contains("/private/workspace/path"),
+            "support summary must not include raw workspace path"
+        );
+        Ok(())
     }
 
     #[test]
