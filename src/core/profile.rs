@@ -1427,7 +1427,9 @@ fn cap_u32(requested: u32, cap: u64) -> (u32, bool) {
 }
 
 fn selected_profile_from_config(workspace_root: &Path) -> Option<OperatingProfile> {
-    let contents = fs::read_to_string(workspace_root.join(".ee").join("config.toml")).ok()?;
+    let path = workspace_root.join(".ee").join("config.toml");
+    ensure_no_profile_config_symlink_components(&path, "read").ok()?;
+    let contents = fs::read_to_string(path).ok()?;
     let document = contents.parse::<DocumentMut>().ok()?;
     document
         .as_table()
@@ -1507,12 +1509,24 @@ pub fn apply_profile_config(
     }
 
     let path = effective_config_path(&options.workspace_root, options.config_path.as_deref());
+    ensure_no_profile_config_symlink_components(&path, "write").map_err(|source| {
+        ProfileConfigError::Write {
+            path: path.clone(),
+            source,
+        }
+    })?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| ProfileConfigError::Write {
             path: path.clone(),
             source,
         })?;
     }
+    ensure_no_profile_config_symlink_components(&path, "write").map_err(|source| {
+        ProfileConfigError::Write {
+            path: path.clone(),
+            source,
+        }
+    })?;
     fs::write(&path, report.planned_toml.as_bytes()).map_err(|source| {
         ProfileConfigError::Write {
             path: path.clone(),
@@ -1627,6 +1641,12 @@ fn effective_config_path(workspace_root: &Path, config_path: Option<&Path>) -> P
 }
 
 fn read_optional_config(path: &Path) -> Result<(bool, String), ProfileConfigError> {
+    ensure_no_profile_config_symlink_components(path, "read").map_err(|source| {
+        ProfileConfigError::Read {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
     match fs::read_to_string(path) {
         Ok(contents) => Ok((true, contents)),
         Err(source) if source.kind() == io::ErrorKind::NotFound => Ok((false, String::new())),
@@ -1635,6 +1655,39 @@ fn read_optional_config(path: &Path) -> Result<(bool, String), ProfileConfigErro
             source,
         }),
     }
+}
+
+fn ensure_no_profile_config_symlink_components(
+    path: &Path,
+    operation: &'static str,
+) -> Result<(), io::Error> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "refusing to {operation} profile config `{}` through symlinked path component `{}`",
+                        path.display(),
+                        current.display()
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn profile_config_conflicts(document: &DocumentMut) -> Vec<ProfileConfigConflict> {
@@ -2516,6 +2569,60 @@ mod tests {
                 .iter()
                 .all(|edit| edit.status == "unchanged"),
             "planning after apply marks every edit unchanged",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_config_apply_rejects_symlinked_metadata_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_metadata = temp.path().join("real-ee");
+        fs::create_dir_all(&real_metadata).map_err(|error| error.to_string())?;
+        symlink(&real_metadata, temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let options = config_options(temp.path(), OperatingProfile::Swarm, false);
+        let error = apply_profile_config(&options)
+            .expect_err("symlinked .ee parent should reject profile config apply");
+        ensure_true(
+            error.to_string().contains("symlinked path component"),
+            "symlinked .ee error message",
+        )?;
+        ensure_true(
+            !real_metadata.join("config.toml").exists(),
+            "profile config apply must not write through symlinked .ee",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_config_plan_rejects_symlinked_config_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_dir = temp.path().join(".ee");
+        fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        let outside_config = temp.path().join("outside-config.toml");
+        fs::write(
+            &outside_config,
+            "[profile]\nselected = \"swarm\"\n[profile.budgets]\npack_max_tokens = 4096\n",
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(&outside_config, config_dir.join("config.toml"))
+            .map_err(|error| error.to_string())?;
+
+        let options = config_options(temp.path(), OperatingProfile::Portable, true);
+        let error = plan_profile_config(&options)
+            .expect_err("symlinked config file should reject profile config plan");
+        ensure_true(
+            error.to_string().contains("symlinked path component"),
+            "symlinked config error message",
+        )?;
+        ensure(
+            selected_profile_from_config(temp.path()),
+            None,
+            "runtime profile must not read symlinked config",
         )
     }
 
