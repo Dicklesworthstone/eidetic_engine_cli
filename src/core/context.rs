@@ -52,7 +52,7 @@ use crate::core::search::{
     SearchOptions, SearchReport, SearchStatus, elapsed_timing_json, performance_redaction_json,
     query_observation_json, run_search_with_read_connection_seeded, search_degraded_data_json,
 };
-use crate::db::read_pool::{PoolConfig, ReadConnectionPool};
+use crate::db::read_pool::{PoolConfig, ReadConnectionPool, SnapshotPin};
 use crate::db::{
     CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, DatabaseConfig,
     DbConnection, StoredAgentContextProfileForPack, StoredMemory,
@@ -1028,6 +1028,7 @@ fn run_context_pack_with_performance_inner(
     }
 
     let search_start = Instant::now();
+    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let mut search_report = match run_search_with_read_connection_seeded(
         &SearchOptions {
             workspace_path: options.workspace_path.clone(),
@@ -1051,7 +1052,7 @@ fn run_context_pack_with_performance_inner(
             memory_scope: options.memory_scope,
             strict_scope: options.strict_scope,
         },
-        &read_snapshot,
+        read_connection,
         determinism,
     ) {
         Ok(report) => report,
@@ -1070,8 +1071,9 @@ fn run_context_pack_with_performance_inner(
         search_report.status,
         SearchStatus::IndexError | SearchStatus::IndexNotFound
     ) {
+        let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
         let fallback_hits = lexical_memory_fallback_hits(
-            &read_snapshot,
+            read_connection,
             &options.workspace_path,
             &request.query,
             request.candidate_pool,
@@ -1136,8 +1138,9 @@ fn run_context_pack_with_performance_inner(
 
     let candidate_start = Instant::now();
     let candidate_filter_input_count = search_report.results.len();
+    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let (mut candidates, mut candidate_metrics) = candidates_from_search_with_metrics(
-        &read_snapshot,
+        read_connection,
         &options.workspace_path,
         &search_report,
         &effective_filters,
@@ -1206,8 +1209,9 @@ fn run_context_pack_with_performance_inner(
             ),
         );
     }
+    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let graph_metrics = apply_graph_hints(
-        &read_snapshot,
+        read_connection,
         &options.workspace_path,
         &effective_filters,
         options.include_tombstoned,
@@ -1226,8 +1230,9 @@ fn run_context_pack_with_performance_inner(
     match read_active_focus_state(&options.workspace_path) {
         Ok(Some(focus_state)) => {
             trace.focus_state_hits = trace.focus_state_hits.saturating_add(1);
+            let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
             let focus_candidates = focus_candidates_from_state(
-                &read_snapshot,
+                read_connection,
                 &options.workspace_path,
                 &focus_state,
                 options.include_tombstoned,
@@ -1254,8 +1259,9 @@ fn run_context_pack_with_performance_inner(
         options.memory_scope,
         options.strict_scope,
     );
+    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let scope_stats = filter_candidates_by_memory_scope(
-        &read_snapshot,
+        read_connection,
         &mut candidates,
         &scope_context,
         &mut degraded,
@@ -1306,8 +1312,9 @@ fn run_context_pack_with_performance_inner(
         );
     }
 
+    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let ppr_metrics = apply_personalized_pagerank_rerank(
-        &read_snapshot,
+        read_connection,
         &options.workspace_path,
         &search_report,
         &mut candidates,
@@ -1317,8 +1324,9 @@ fn run_context_pack_with_performance_inner(
     candidate_metrics.graph_boosted_candidates = candidate_metrics
         .graph_boosted_candidates
         .saturating_add(ppr_metrics.reranked_candidates);
+    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let proximity_metrics = apply_proximity_to_seed_scores(
-        &read_snapshot,
+        read_connection,
         &options.workspace_path,
         &search_report,
         &mut candidates,
@@ -1327,8 +1335,9 @@ fn run_context_pack_with_performance_inner(
     candidate_metrics.graph_boosted_candidates = candidate_metrics
         .graph_boosted_candidates
         .saturating_add(proximity_metrics.annotated_candidates);
+    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let mut agent_profile =
-        apply_agent_context_profile_bias(&read_snapshot, &options.workspace_path, &mut candidates);
+        apply_agent_context_profile_bias(read_connection, &options.workspace_path, &mut candidates);
     trace.candidate_resolution = candidate_metrics;
 
     sort_context_candidates(&mut candidates);
@@ -3689,6 +3698,16 @@ fn context_read_pool_config(
             (PoolConfig::default_single(), true)
         }
     }
+}
+
+fn checked_context_read_snapshot<'snapshot>(
+    read_pool: &ReadConnectionPool,
+    read_snapshot: &'snapshot SnapshotPin<'_>,
+) -> Result<&'snapshot DbConnection, ContextPackError> {
+    read_pool.expire_stale_pins();
+    read_snapshot
+        .checked_connection()
+        .map_err(|error| ContextPackError::Storage(format!("Read snapshot unavailable: {error}")))
 }
 
 fn push_ppr_feature_disabled_degradation(degraded: &mut Vec<ContextResponseDegradation>) {
@@ -7375,6 +7394,29 @@ mod tests {
                 "pool_size={pool_size} must preserve the pool_size=1 pack hash"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn checked_context_read_snapshot_returns_clean_error_after_pin_expiry() -> Result<(), String> {
+        let read_pool = ReadConnectionPool::new(
+            DatabaseConfig::memory(),
+            PoolConfig::new(1, Duration::from_secs(30)).with_max_pin_duration(Duration::ZERO),
+        );
+        let read_snapshot = read_pool
+            .pin_snapshot()
+            .map_err(|error| error.to_string())?;
+
+        let error = match super::checked_context_read_snapshot(&read_pool, &read_snapshot) {
+            Ok(_) => return Err("expired snapshot pin should not return a connection".to_string()),
+            Err(error) => error,
+        };
+
+        assert!(
+            format!("{error:?}").contains("Read snapshot unavailable"),
+            "expired pin should return a storage error with clean context, got {error:?}"
+        );
+        assert!(read_snapshot.is_poisoned());
         Ok(())
     }
 
