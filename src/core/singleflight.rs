@@ -184,7 +184,7 @@ where
                 completed: bool,
             }
             
-            impl<T> Drop for LeaderGuard<'_, T> {
+            impl<T: Clone> Drop for LeaderGuard<'_, T> {
                 fn drop(&mut self) {
                     if !self.completed {
                         let _ = self.group.remove_entry(&self.key_hash, &self.entry);

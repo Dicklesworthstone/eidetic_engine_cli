@@ -2727,7 +2727,7 @@ fn refresh_centrality_from_links(
     let total_start = Instant::now();
 
     if dry_run {
-        let projection = build_memory_graph_from_links(links)?;
+        let projection = build_memory_graph_from_links(links, 0)?;
         return Ok(CentralityRefreshReport {
             version: env!("CARGO_PKG_VERSION"),
             status: CentralityRefreshStatus::DryRun,
@@ -2744,7 +2744,7 @@ fn refresh_centrality_from_links(
         });
     }
 
-    let projection = build_memory_graph_from_links(links)?;
+    let projection = build_memory_graph_from_links(links, 0)?;
 
     if projection.node_count == 0 {
         return Ok(CentralityRefreshReport {
