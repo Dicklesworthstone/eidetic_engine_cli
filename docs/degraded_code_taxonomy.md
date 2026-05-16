@@ -119,6 +119,7 @@ Current conventions:
 | `build` | Binary version and build-provenance degradation. |
 | `build_admission` | `ee diag build-admission` disk-pressure and external-build-root admission degradation. |
 | `bv` | Swarm brief BV source degradation. |
+| `cluster_coherence` | `ee learn cluster` deterministic cluster-coherence degradation. |
 | `curate_apply` | `ee curate apply` candidate-application degradation. |
 | `curate_candidates` | `ee curate candidates` queue listing degradation. |
 | `curate_disposition` | `ee curate disposition` TTL-disposition degradation. |

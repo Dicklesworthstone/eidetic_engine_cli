@@ -8,7 +8,11 @@
 
 use std::cmp::Ordering;
 
-use serde::Serialize;
+use serde::{Serialize, Serializer};
+
+use crate::core::degraded_aggregation::{
+    AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
+};
 
 pub const DEFAULT_CLUSTER_COHERENCE_THRESHOLD: f64 = 0.55;
 pub const DEFAULT_CLUSTER_SILHOUETTE_CUTOFF: f64 = 0.40;
@@ -62,6 +66,7 @@ pub struct ClusterCoherenceReport {
     pub min_cluster_size: usize,
     pub input_count: usize,
     pub clusters: Vec<CoherentCluster>,
+    #[serde(serialize_with = "serialize_cluster_coherence_degraded")]
     pub degraded: Vec<ClusterCoherenceDegradation>,
 }
 
@@ -87,6 +92,30 @@ pub struct ClusterCoherenceDegradation {
     pub severity: String,
     pub message: String,
     pub repair: String,
+}
+
+fn serialize_cluster_coherence_degraded<S>(
+    degraded: &[ClusterCoherenceDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_cluster_coherence_degraded(degraded).serialize(serializer)
+}
+
+fn aggregate_cluster_coherence_degraded(
+    degraded: &[ClusterCoherenceDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "cluster_coherence",
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry.repair.clone(),
+        )
+    }))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -490,5 +519,65 @@ fn round_metric(value: f64) -> f64 {
         (value * 1000.0).round() / 1000.0
     } else {
         value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cluster_coherence_serializes_aggregated_degraded_entries() -> Result<(), String> {
+        let mut first = degradation(
+            CLUSTERING_INSUFFICIENT_DATA_CODE,
+            "warning",
+            "first insufficient-data warning",
+            "Collect at least three related memories before proposing a curation candidate.",
+        );
+        let mut second = degradation(
+            CLUSTERING_INSUFFICIENT_DATA_CODE,
+            "warning",
+            "second insufficient-data warning",
+            "Collect at least three related memories before proposing a curation candidate.",
+        );
+        first.repair = "Collect more related memories.".to_owned();
+        second.repair = "Collect more related memories.".to_owned();
+
+        let report = ClusterCoherenceReport {
+            method: "average_linkage_agglomerative".to_owned(),
+            threshold_used: 0.55,
+            silhouette_cutoff: 0.4,
+            min_cluster_size: 3,
+            input_count: 0,
+            clusters: Vec::new(),
+            degraded: vec![first, second],
+        };
+
+        let value = serde_json::to_value(report).map_err(|error| error.to_string())?;
+        let degraded = value
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                "serialized cluster coherence should include degraded array".to_owned()
+            })?;
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(
+            degraded[0].get("code"),
+            Some(&serde_json::json!(CLUSTERING_INSUFFICIENT_DATA_CODE))
+        );
+        assert_eq!(
+            degraded[0].get("severity"),
+            Some(&serde_json::json!("warning"))
+        );
+        assert_eq!(
+            degraded[0].get("repair"),
+            Some(&serde_json::json!("Collect more related memories."))
+        );
+        assert_eq!(
+            degraded[0].get("sources"),
+            Some(&serde_json::json!(["cluster_coherence"]))
+        );
+        Ok(())
     }
 }
