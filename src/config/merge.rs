@@ -1118,7 +1118,11 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                     &mut sources,
                     STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY,
                     &layers.cli.storage.read_pool.max_pin_duration_seconds,
-                    &layers.environment.storage.read_pool.max_pin_duration_seconds,
+                    &layers
+                        .environment
+                        .storage
+                        .read_pool
+                        .max_pin_duration_seconds,
                     &layers.project.storage.read_pool.max_pin_duration_seconds,
                     &layers.user.storage.read_pool.max_pin_duration_seconds,
                     &layers.defaults.storage.read_pool.max_pin_duration_seconds,
