@@ -192,6 +192,10 @@ pub fn build_features() -> Vec<BuildFeature> {
         BuildFeature::new("embed-fast", cfg!(feature = "embed-fast")),
         BuildFeature::new("lexical-bm25", cfg!(feature = "lexical-bm25")),
         BuildFeature::new("graph", cfg!(feature = "graph")),
+        BuildFeature::new(
+            "differential-networkx",
+            cfg!(feature = "differential-networkx"),
+        ),
         BuildFeature::new("mcp", cfg!(feature = "mcp")),
         BuildFeature::new("serve", cfg!(feature = "serve")),
         BuildFeature::new("science-analytics", cfg!(feature = "science-analytics")),
@@ -543,6 +547,7 @@ mod tests {
                 "embed-fast",
                 "lexical-bm25",
                 "graph",
+                "differential-networkx",
                 "mcp",
                 "serve",
                 "science-analytics",

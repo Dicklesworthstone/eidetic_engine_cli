@@ -45,6 +45,10 @@ embed-fast = ["frankensearch/model2vec"]
 lexical-bm25 = ["frankensearch/lexical"]
 # Active. Gates ~42 cfg-gated functions under src/graph/mod.rs. Default-on.
 graph = []
+# Active test-only gate for the heavyweight Python NetworkX differential suite.
+# This feature pulls no Rust dependencies and is intended for nightly CI or
+# explicit local/RCH runs where Python + networkx are available.
+differential-networkx = []
 # Active. Gates `pub mod mcp;` at src/lib.rs:23 (the full 2.6k-LOC MCP adapter).
 # Opt-in via `cargo install eidetic-engine --features mcp` per README.
 mcp = []
