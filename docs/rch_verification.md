@@ -10,6 +10,7 @@ Examples:
 scripts/rch_verify.sh --dry-run -- cargo test --lib output::streaming -- --nocapture
 scripts/rch_verify.sh -- cargo clippy --all-targets -- -D warnings
 scripts/rch_verify.sh -- cargo fmt --check
+scripts/rch_verify.sh --bead-id bd-123 --ledger .ee/derived/rch/runs.jsonl --summary -- cargo test --test mesh_off_no_network -- --nocapture
 ```
 
 Accepted verifier shapes are `cargo check`, `cargo test`, `cargo bench`,
@@ -33,5 +34,25 @@ The wrapper sets these remote-safe defaults:
 
 The JSON proof schema is `ee.rch.verify.v1` and includes the command kind,
 remote-required flag, planned or actual RCH invocation, worker id when observed,
-remote project root, remote target dir, exit code, elapsed time, output tail,
-and degradation codes.
+remote project root, remote target dir, exit code, elapsed time, command hash,
+first Rust compiler error location, output tail, and degradation codes.
+
+For bead closeout evidence, pass `--ledger <path>` to append one derived
+JSONL row with schema `ee.rch.verify.ledger.v1`, and pass `--summary` to include
+a Markdown summary in the proof. Use `--no-write` with `--ledger` when doing a
+read-only investigation that should render the proof without writing the
+derived ledger.
+
+Ledger rows include `verifier_id`, optional `bead_id`, `command`,
+`command_hash`, `started_at`, `completed_at`, `elapsed_ms`, `worker_id`,
+`remote_project_root`, `remote_target_dir`, `rch_location`, `exit_code`,
+`status`, `first_error_file`, `first_error_line`, `stdout_tail`, `stderr_tail`,
+and `transcript_path`. Retained tails redact private `/Users/<name>` prefixes and
+obvious `token=...` / `secret=...` / `password=...` fragments while preserving
+remote `/data/projects/...` and local `/Volumes/...` evidence.
+
+`status` is one of `dry_run`, `remote_pass`, `pass_without_remote_marker`,
+`remote_failure`, `rch_environment_failure`, `capacity_or_timeout`, or
+`refused`. Use `rch_environment_failure` for topology/local-fallback blockers
+and `capacity_or_timeout` for worker capacity, timeout, or all-workers-offline
+signals; those are not code failures.

@@ -13,6 +13,12 @@ fn script_path() -> PathBuf {
     repo_root().join("scripts/rch_verify.sh")
 }
 
+fn target_tmp_dir() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root().join("target/rch-verify-contract"))
+}
+
 fn run_script_with_env(
     args: &[&str],
     envs: &[(&str, &str)],
@@ -224,6 +230,188 @@ fn synthetic_remote_transcript_extracts_worker_id() -> TestResult {
         .any(|code| code == "rch_verify_remote_marker_missing")
     {
         return Err("remote marker was present but missing-marker degradation emitted".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn synthetic_local_fallback_refusal_is_not_worker_id() -> TestResult {
+    let (status, stdout, _stderr) = run_script_with_env(
+        &["--", "cargo", "test", "--test", "rch_verify_contract"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "[RCH] local (dependency preflight RCH-E327: Path dependency topology policy failed.)\n[RCH] remote required; refusing local fallback (dependency preflight failed)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "42"),
+        ],
+    )?;
+    if status.success() {
+        return Err("local fallback refusal should preserve non-zero exit".to_owned());
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse fallback: {error}"))?;
+    if !report["worker_id"].is_null() {
+        return Err(format!(
+            "fallback marker was misread as worker id: {report}"
+        ));
+    }
+    if report["status"] != "rch_environment_failure" {
+        return Err(format!(
+            "fallback should be an environment failure: {report}"
+        ));
+    }
+    let degraded = report["degraded_codes"]
+        .as_array()
+        .ok_or_else(|| "missing degraded codes".to_owned())?;
+    for expected in [
+        "rch_verify_topology_blocked",
+        "rch_verify_local_fallback_refused",
+        "rch_verify_remote_marker_missing",
+    ] {
+        if !degraded.iter().any(|code| code == expected) {
+            return Err(format!("missing {expected} in degraded codes: {report}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn synthetic_remote_transcript_writes_ledger_and_summary() -> TestResult {
+    let dir = target_tmp_dir().join(format!("rch-verify-ledger-{}", std::process::id()));
+    fs::create_dir_all(&dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+    let ledger = dir.join("runs.jsonl");
+    let ledger_arg = ledger.display().to_string();
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--bead-id",
+            "bd-test",
+            "--ledger",
+            &ledger_arg,
+            "--summary",
+            "--",
+            "cargo",
+            "test",
+            "--test",
+            "rch_verify_contract",
+        ],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "error[E0425]: cannot find value `stderr` in this scope\n  --> tests/rch_verify_contract.rs:42:9\nremote test ok\n[RCH] remote css (1.0s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "1000"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "ledger run failed with {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            status.code()
+        ));
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse report: {error}"))?;
+    if report["status"] != "remote_pass" || report["bead_id"] != "bd-test" {
+        return Err(format!("unexpected report status/bead: {report}"));
+    }
+    if report["command_hash"].as_str().map(str::len) != Some(64) {
+        return Err(format!("missing sha256 command hash: {report}"));
+    }
+    if report["first_error_file"] != "tests/rch_verify_contract.rs"
+        || report["first_error_line"] != 42
+    {
+        return Err(format!("first error location was not extracted: {report}"));
+    }
+    let error_codes = report["error_codes"]
+        .as_array()
+        .ok_or_else(|| "missing error codes".to_owned())?;
+    if !error_codes.iter().any(|code| code == "E0425") {
+        return Err(format!("missing rust error code: {report}"));
+    }
+    let summary = report["summary_markdown"]
+        .as_str()
+        .ok_or_else(|| "summary missing".to_owned())?;
+    if !summary.contains("worker_id: `css`")
+        || !summary.contains("bead_id: `bd-test`")
+        || !summary.contains("first_error: `tests/rch_verify_contract.rs:42`")
+    {
+        return Err(format!("summary missing expected fields: {summary}"));
+    }
+
+    let ledger_text =
+        fs::read_to_string(&ledger).map_err(|error| format!("read ledger: {error}"))?;
+    let rows = ledger_text.lines().collect::<Vec<_>>();
+    if rows.len() != 1 {
+        return Err(format!("expected one ledger row, got {}", rows.len()));
+    }
+    let row: Value =
+        serde_json::from_str(rows[0]).map_err(|error| format!("parse ledger row: {error}"))?;
+    if row["schema"] != "ee.rch.verify.ledger.v1"
+        || row["status"] != "remote_pass"
+        || row["worker_id"] != "css"
+        || row["first_error_file"] != "tests/rch_verify_contract.rs"
+        || row["first_error_line"] != 42
+    {
+        return Err(format!("unexpected ledger row: {row}"));
+    }
+    if row["command_hash"].as_str().map(str::len) != Some(64) {
+        return Err(format!("ledger row missing command hash: {row}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn ledger_no_write_renders_summary_without_appending() -> TestResult {
+    let dir = target_tmp_dir().join(format!("rch-verify-no-write-{}", std::process::id()));
+    fs::create_dir_all(&dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+    let ledger = dir.join("runs.jsonl");
+    let ledger_arg = ledger.display().to_string();
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--bead-id",
+            "bd-test",
+            "--ledger",
+            &ledger_arg,
+            "--summary",
+            "--no-write",
+            "--",
+            "cargo",
+            "test",
+            "--test",
+            "rch_verify_contract",
+        ],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "[RCH] local (dependency preflight RCH-E327: Path dependency topology policy failed.)\n[RCH] remote required; refusing local fallback (dependency preflight failed)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "20"),
+        ],
+    )?;
+    if status.success() {
+        return Err("no-write local fallback should preserve non-zero exit".to_owned());
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse report: {error}"))?;
+    if report["status"] != "rch_environment_failure" {
+        return Err(format!("unexpected no-write status: {report}"));
+    }
+    let degraded = report["degraded_codes"]
+        .as_array()
+        .ok_or_else(|| "missing degraded codes".to_owned())?;
+    if !degraded
+        .iter()
+        .any(|code| code == "rch_verify_ledger_write_suppressed")
+    {
+        return Err(format!("missing no-write degradation: {report}"));
+    }
+    if ledger.exists() {
+        return Err(format!(
+            "no-write should not create ledger file; stderr was {stderr}"
+        ));
     }
     Ok(())
 }

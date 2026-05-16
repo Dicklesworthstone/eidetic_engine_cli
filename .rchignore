@@ -70,3 +70,16 @@ perf.data.*
 # Volatile audit pointers can be transient/broken symlinks and are not inputs to
 # remote Cargo verification.
 tests/audit_artifacts/latest_*.json
+
+# bd-1h8ji.4 — AppleDouble / macOS Finder metadata. These files are created on
+# Mac when extended attributes are stored on filesystems that don't natively
+# support them (USB drives, ExFAT, network shares). They are NOT source inputs
+# to remote Cargo verification, and vendored C crates such as `zstd-sys` will
+# attempt to compile any `._foo.c` sibling next to `foo.c` if they end up in
+# the worker file set, poisoning the build. Excluding here keeps remote Linux
+# verification consistent regardless of which Mac filesystem the Mac-side
+# checkout lives on.
+._*
+**/._*
+.DS_Store
+**/.DS_Store

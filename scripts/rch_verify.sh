@@ -13,6 +13,10 @@ Usage: scripts/rch_verify.sh [options] -- <verifier command...>
 Options:
   --dry-run                 Do not execute; emit the planned explicit rch exec proof
   --allow-raw               Allow non-Cargo commands; still runs through rch exec
+  --bead-id <id>            Optional bead id for ledger rows and summaries
+  --ledger <path>           Append one derived JSONL evidence row
+  --summary                 Include bead-ready Markdown summary in the JSON proof
+  --no-write                Do not write --ledger; render proof/summary only
   --rch-bin <path>          RCH binary (default: $RCH_BIN or rch)
   --project-root <path>     Local project root (default: cwd)
   --json                    Accepted for symmetry; output is always JSON
@@ -29,6 +33,10 @@ EOF
 
 DRY_RUN=0
 ALLOW_RAW=0
+BEAD_ID=""
+LEDGER_PATH=""
+INCLUDE_SUMMARY=0
+NO_WRITE=0
 DEFAULT_RCH_BIN="/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch"
 if [ -z "${RCH_BIN:-}" ] && [ -x "$DEFAULT_RCH_BIN" ]; then
     RCH_BIN="$DEFAULT_RCH_BIN"
@@ -41,6 +49,10 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --dry-run) DRY_RUN=1; shift ;;
         --allow-raw) ALLOW_RAW=1; shift ;;
+        --bead-id) BEAD_ID="${2:?--bead-id requires a value}"; shift 2 ;;
+        --ledger) LEDGER_PATH="${2:?--ledger requires a value}"; shift 2 ;;
+        --summary) INCLUDE_SUMMARY=1; shift ;;
+        --no-write) NO_WRITE=1; shift ;;
         --rch-bin) RCH_BIN="${2:?--rch-bin requires a value}"; shift 2 ;;
         --project-root) PROJECT_ROOT="${2:?--project-root requires a value}"; shift 2 ;;
         --json) shift ;;
@@ -141,6 +153,8 @@ now_ms() {
     python3 -c 'import time; print(int(time.time() * 1000))'
 }
 
+RUN_STARTED_AT="$(now_iso)"
+
 emit_json() {
     local success="$1"
     local exit_code_json="$2"
@@ -156,9 +170,155 @@ emit_json() {
     command_text_json="$(json_quote "$(command_string "${COMMAND[@]}")")"
     stdout_json="$(json_quote "$stdout_tail")"
     stderr_json="$(json_quote "$stderr_tail")"
-    cat <<EOF
+    local json_payload
+    json_payload="$(cat <<EOF
 {"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json}
 EOF
+)"
+    JSON_PAYLOAD="$json_payload" \
+    BEAD_ID="$BEAD_ID" \
+    LEDGER_PATH="$LEDGER_PATH" \
+    INCLUDE_SUMMARY="$INCLUDE_SUMMARY" \
+    NO_WRITE="$NO_WRITE" \
+    RUN_STARTED_AT="$RUN_STARTED_AT" \
+    python3 - <<'PY'
+import hashlib
+import json
+import os
+import re
+from pathlib import Path
+
+proof = json.loads(os.environ["JSON_PAYLOAD"])
+bead_id = os.environ.get("BEAD_ID", "")
+ledger_path = os.environ.get("LEDGER_PATH", "")
+include_summary = os.environ.get("INCLUDE_SUMMARY") == "1"
+no_write = os.environ.get("NO_WRITE") == "1"
+started_at = os.environ.get("RUN_STARTED_AT") or proof.get("generated_at")
+
+def redact(text):
+    if not text:
+        return text
+    text = re.sub(r"/Users/[^/\s]+", "/Users/<redacted>", text)
+    text = re.sub(r"(?i)(token|secret|password|api[_-]?key)=\S+", r"\1=<redacted>", text)
+    return text
+
+def first_error_location(text):
+    if not text:
+        return (None, None)
+    for line in text.splitlines():
+        match = re.search(r"-->\s+([^:\s][^:]*):(\d+):\d+", line)
+        if match:
+            return (redact(match.group(1)), int(match.group(2)))
+    return (None, None)
+
+def error_codes(text):
+    if not text:
+        return []
+    return sorted(set(re.findall(r"\bE\d{4}\b|RCH-E\d{3}\b", text)))
+
+raw_stdout_tail = proof.get("stdout_tail") or ""
+raw_stderr_tail = proof.get("stderr_tail") or ""
+combined_tail = "\n".join(part for part in [raw_stdout_tail, raw_stderr_tail] if part)
+proof["stdout_tail"] = redact(raw_stdout_tail)
+proof["stderr_tail"] = redact(raw_stderr_tail)
+first_error_file, first_error_line = first_error_location(combined_tail)
+codes = error_codes(combined_tail)
+
+exit_code = proof.get("exit_code")
+degraded = list(proof.get("degraded_codes") or [])
+if proof.get("success") is not True:
+    status = "refused"
+elif exit_code is None:
+    status = "dry_run"
+elif exit_code == 0 and proof.get("worker_id"):
+    status = "remote_pass"
+elif exit_code == 0:
+    status = "pass_without_remote_marker"
+elif (
+    "rch_verify_topology_blocked" in degraded
+    or "rch_verify_local_fallback_refused" in degraded
+):
+    status = "rch_environment_failure"
+elif "rch_verify_capacity_or_timeout" in degraded:
+    status = "capacity_or_timeout"
+else:
+    status = "remote_failure"
+
+command_text = proof.get("command_text", "")
+command_hash = hashlib.sha256(command_text.encode("utf-8")).hexdigest()
+proof["status"] = status
+proof["command_hash"] = command_hash
+proof["started_at"] = started_at
+proof["completed_at"] = proof.get("generated_at")
+proof["first_error_file"] = first_error_file
+proof["first_error_line"] = first_error_line
+proof["error_codes"] = codes
+if bead_id:
+    proof["bead_id"] = bead_id
+
+summary_lines = [
+    f"RCH verifier `{command_text}` => `{status}`.",
+    f"- command_kind: `{proof.get('command_kind')}`",
+    f"- remote_required: `{str(proof.get('remote_required')).lower()}`",
+    f"- would_offload: `{str(proof.get('would_offload')).lower()}`",
+    f"- worker_id: `{proof.get('worker_id') or 'unknown'}`",
+    f"- exit_code: `{exit_code if exit_code is not None else 'not_run'}`",
+    f"- elapsed_ms: `{proof.get('elapsed_ms')}`",
+    f"- command_hash: `{command_hash}`",
+]
+if bead_id:
+    summary_lines.insert(1, f"- bead_id: `{bead_id}`")
+if first_error_file:
+    summary_lines.append(f"- first_error: `{first_error_file}:{first_error_line}`")
+if codes:
+    summary_lines.append("- error_codes: `" + "`, `".join(codes) + "`")
+if degraded:
+    summary_lines.append("- degraded_codes: `" + "`, `".join(degraded) + "`")
+else:
+    summary_lines.append("- degraded_codes: none")
+summary = "\n".join(summary_lines)
+
+if include_summary:
+    proof["summary_markdown"] = summary
+
+if ledger_path:
+    proof["ledger_path"] = ledger_path
+    if no_write:
+        proof.setdefault("degraded_codes", []).append("rch_verify_ledger_write_suppressed")
+    else:
+        row = {
+            "schema": "ee.rch.verify.ledger.v1",
+            "verifier_id": proof.get("generated_at"),
+            "bead_id": bead_id or None,
+            "command": proof.get("command"),
+            "command_text": proof.get("command_text"),
+            "command_hash": command_hash,
+            "command_kind": proof.get("command_kind"),
+            "started_at": started_at,
+            "completed_at": proof.get("generated_at"),
+            "elapsed_ms": proof.get("elapsed_ms"),
+            "worker_id": proof.get("worker_id"),
+            "remote_project_root": proof.get("remote_project_root"),
+            "remote_target_dir": proof.get("remote_target_dir"),
+            "rch_location": "explicit_rch_exec",
+            "exit_code": proof.get("exit_code"),
+            "status": status,
+            "first_error_file": first_error_file,
+            "first_error_line": first_error_line,
+            "stdout_tail": proof.get("stdout_tail"),
+            "stderr_tail": proof.get("stderr_tail"),
+            "transcript_path": None,
+            "degraded_codes": proof.get("degraded_codes") or [],
+            "error_codes": codes,
+            "summary_markdown": summary,
+        }
+        path = Path(ledger_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+
+print(json.dumps(proof, sort_keys=True, separators=(",", ":")))
+PY
 }
 
 COMMAND_KIND="$(classify_command)"
@@ -229,7 +389,9 @@ fi
 
 worker_id="$(
     printf '%s' "$combined_output" \
-        | sed -n 's/.*\[RCH\] remote \([^ ]*\).*/\1/p' \
+        | sed -n \
+            -e 's/^\[RCH\] remote \([A-Za-z0-9_.-][A-Za-z0-9_.-]*\) (.*/\1/p' \
+            -e 's/^\[RCH\] remote \([A-Za-z0-9_.-][A-Za-z0-9_.-]*\) failed.*/\1/p' \
         | tail -n 1
 )"
 if [ -n "$worker_id" ]; then
@@ -243,6 +405,15 @@ if [ "$exit_code" -ne 0 ]; then
 fi
 if [ "$COMMAND_KIND" = "raw" ]; then
     degraded+=("rch_verify_raw_command_may_not_offload")
+fi
+if printf '%s' "$combined_output" | grep -q "RCH-E327"; then
+    degraded+=("rch_verify_topology_blocked")
+fi
+if printf '%s' "$combined_output" | grep -q "remote required; refusing local fallback"; then
+    degraded+=("rch_verify_local_fallback_refused")
+fi
+if printf '%s' "$combined_output" | grep -Eiq "timed out|timeout|capacity|busy|no workers|workers_healthy: 0|all_workers_offline"; then
+    degraded+=("rch_verify_capacity_or_timeout")
 fi
 if printf '%s' "$combined_output" | grep -q "non-compilation command"; then
     degraded+=("rch_verify_not_offloaded")
