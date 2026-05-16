@@ -54,6 +54,28 @@ A degraded entry's `code` is classified into one of three buckets:
 6. Suffix `_filtered`, `_collapsed`, `_capped` is ALWAYS
    `response_time` (data-dependent).
 
+## Aggregation source labels
+
+Renderer-level aggregation collapses repeated degraded codes into one entry
+with `sources[]` naming the emitters. Source labels are stable snake-case
+surface or algorithm names, not user-facing prose.
+
+Current conventions:
+
+| Label | Use |
+|-------|-----|
+| `insights` | Whole-bundle `ee insights` degraded signals that are not owned by one section. |
+| `hubs` | `ee insights --section hubs` HITS profile degradation. |
+| `authorities` | `ee insights --section authorities` HITS profile degradation. |
+| `causalBottlenecks` | `ee insights --section causalBottlenecks` degradation. |
+| `knowledgeSkyline` | `ee insights --section knowledgeSkyline` degradation. |
+| `loadBearingMemories` | `ee insights --section loadBearingMemories` degradation. |
+| `revisionFrontiers` | `ee insights --section revisionFrontiers` degradation. |
+
+When adding a new renderer, prefer the most specific stable section, command,
+or algorithm label available. Do not include workspace paths, query text, or
+memory bodies in `sources[]`.
+
 ## Full code inventory
 
 > Sources of truth: `tests/fixtures/failure_modes/README.md` for the

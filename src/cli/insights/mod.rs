@@ -13,6 +13,8 @@ use crate::config::{
     GRAPH_FEATURE_SKYLINE_ENABLED_KEY,
 };
 use crate::core::config_surface::{ConfigSurfaceOptions, get_config};
+use crate::core::degraded_aggregation::{AggregatedDegradation, aggregate_degraded};
+use crate::core::status::DegradationReport;
 use crate::db::{DbConnection, StoredMemoryLink};
 use crate::graph::gomory_hu::{
     GOMORY_HU_WEIGHT_ATTR, PROXIMITY_SCHEMA_V1, build_gomory_hu_tree, query_proximity,
@@ -108,10 +110,11 @@ pub struct InsightsPagination {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InsightsDegradedSignal {
-    pub code: &'static str,
-    pub severity: &'static str,
-    pub message: &'static str,
-    pub repair: Option<&'static str>,
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    pub repair: Option<String>,
+    pub sources: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -151,8 +154,10 @@ struct HitsSectionSpec {
 
 struct BuiltSection {
     section: InsightsSection,
-    degraded_signal: Option<InsightsDegradedSignal>,
+    degraded_signal: Option<InsightsDegradedInput>,
 }
+
+type InsightsDegradedInput = (&'static str, DegradationReport);
 
 #[derive(Clone, Copy, Debug)]
 struct GraphFeatureGate {
@@ -274,11 +279,12 @@ pub fn build_insights_report_with_options(
     let explain_command = explain_memory_id
         .as_ref()
         .map(|memory_id| format!("ee why {memory_id} --json"));
-    let degraded_signals = if gated_degraded_signals.is_empty() {
+    let raw_degraded_signals = if gated_degraded_signals.is_empty() {
         degraded_signals_for_sections(&sections)
     } else {
         gated_degraded_signals
     };
+    let degraded_signals = aggregate_insights_degraded(raw_degraded_signals);
 
     Ok(InsightsReport {
         schema: INSIGHTS_SCHEMA_V1,
@@ -298,7 +304,7 @@ pub fn build_insights_report_with_options(
 }
 
 fn build_registry_section_with_runtime_gate(
-    display_name: &str,
+    display_name: &'static str,
     builder: SectionBuilder,
     workspace: Option<&Path>,
 ) -> Result<BuiltSection, DomainError> {
@@ -306,12 +312,15 @@ fn build_registry_section_with_runtime_gate(
         if !runtime_graph_feature_enabled(workspace, gate.key)? {
             return Ok(BuiltSection {
                 section: builder(),
-                degraded_signal: Some(InsightsDegradedSignal {
-                    code: "graph_feature_disabled",
-                    severity: "medium",
-                    message: gate.message,
-                    repair: Some(gate.repair),
-                }),
+                degraded_signal: Some((
+                    display_name,
+                    DegradationReport {
+                        code: "graph_feature_disabled",
+                        severity: "medium",
+                        message: gate.message,
+                        repair: gate.repair,
+                    },
+                )),
             });
         }
     }
@@ -398,16 +407,38 @@ fn runtime_graph_feature_enabled(
         })
 }
 
-fn degraded_signals_for_sections(sections: &[InsightsSection]) -> Vec<InsightsDegradedSignal> {
+fn degraded_signals_for_sections(sections: &[InsightsSection]) -> Vec<InsightsDegradedInput> {
     if sections.iter().any(|section| !section.items.is_empty()) {
         Vec::new()
     } else {
-        vec![InsightsDegradedSignal {
-            code: "graph.workspace_empty",
-            severity: "info",
-            message: "No graph memories are available for insights yet.",
-            repair: Some("run: ee remember --workspace . \"<memory>\" --json"),
-        }]
+        vec![(
+            "insights",
+            DegradationReport {
+                code: "graph.workspace_empty",
+                severity: "info",
+                message: "No graph memories are available for insights yet.",
+                repair: "run: ee remember --workspace . \"<memory>\" --json",
+            },
+        )]
+    }
+}
+
+fn aggregate_insights_degraded(entries: Vec<InsightsDegradedInput>) -> Vec<InsightsDegradedSignal> {
+    aggregate_degraded(entries)
+        .into_iter()
+        .map(InsightsDegradedSignal::from)
+        .collect()
+}
+
+impl From<AggregatedDegradation> for InsightsDegradedSignal {
+    fn from(entry: AggregatedDegradation) -> Self {
+        Self {
+            code: entry.code,
+            severity: entry.severity,
+            message: entry.message,
+            repair: Some(entry.repair),
+            sources: entry.sources,
+        }
     }
 }
 
@@ -1085,6 +1116,10 @@ mod tests {
         assert_eq!(report.degraded_signals.len(), 1);
         assert_eq!(report.degraded_signals[0].code, "graph.workspace_empty");
         assert_eq!(report.degraded_signals[0].severity, "info");
+        assert_eq!(
+            report.degraded_signals[0].sources,
+            vec!["insights".to_owned()]
+        );
         for section in &report.sections {
             assert!(section.items.is_empty());
         }
@@ -1230,10 +1265,46 @@ mod tests {
             assert_eq!(report.degraded_signals[0].code, "graph_feature_disabled");
             assert_eq!(report.degraded_signals[0].severity, "medium");
             assert_eq!(report.degraded_signals[0].message, message);
-            assert_eq!(report.degraded_signals[0].repair, Some(repair));
+            assert_eq!(report.degraded_signals[0].repair.as_deref(), Some(repair));
+            assert_eq!(report.degraded_signals[0].sources, vec![section.to_owned()]);
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn insights_degraded_signals_aggregate_same_code_sources() {
+        let aggregated = aggregate_insights_degraded(vec![
+            (
+                "hubs",
+                DegradationReport {
+                    code: "graph_feature_disabled",
+                    severity: "medium",
+                    message: "HITS profile insights are disabled by graph.feature.hits_profiles.enabled.",
+                    repair: "ee config set graph.feature.hits_profiles.enabled true",
+                },
+            ),
+            (
+                "authorities",
+                DegradationReport {
+                    code: "graph_feature_disabled",
+                    severity: "medium",
+                    message: "HITS profile insights are disabled by graph.feature.hits_profiles.enabled.",
+                    repair: "ee config set graph.feature.hits_profiles.enabled true",
+                },
+            ),
+        ]);
+
+        assert_eq!(aggregated.len(), 1);
+        assert_eq!(aggregated[0].code, "graph_feature_disabled");
+        assert_eq!(
+            aggregated[0].sources,
+            vec!["authorities".to_owned(), "hubs".to_owned()]
+        );
+        assert_eq!(
+            aggregated[0].repair.as_deref(),
+            Some("ee config set graph.feature.hits_profiles.enabled true")
+        );
     }
 
     #[test]
