@@ -355,6 +355,7 @@ impl EnvVar {
             | Self::ReadPoolDisablePin
             | Self::ReadPoolAcquireTimeoutMs
             | Self::ReadPoolIdleTimeoutSeconds
+            | Self::ReadPoolMaxPinSeconds
             | Self::ReadPoolSize
             | Self::DisableRememberSearchNeighbors
             | Self::IndexPublishLockRetryAttempts

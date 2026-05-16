@@ -11,6 +11,7 @@ jsonl_export = false
 [storage.read_pool]
 size = 1
 idle_timeout_seconds = 30
+max_pin_duration_seconds = 30
 pin_snapshot = true
 ```
 
@@ -20,7 +21,9 @@ derived search assets that can be rebuilt from storage.
 `[storage.read_pool]` controls read-side connection reuse for read-heavy
 surfaces. The default `size = 1` preserves the single-connection behavior until
 callers opt into more concurrency. `idle_timeout_seconds` bounds how long idle
-read handles stay open. `pin_snapshot = true` keeps multi-step reads on a
+read handles stay open. `max_pin_duration_seconds` bounds how long a read
+snapshot may remain pinned before lifecycle checks report `snapshot_pin_expired`.
+`pin_snapshot = true` keeps multi-step reads on a
 stable snapshot; set it to `false` only when a caller explicitly wants unpinned
 read visibility. The acquire timeout defaults to 5000 ms in the read-pool
 runtime and bounds how long a caller waits for a pooled read handle before `ee`
@@ -30,10 +33,10 @@ Snapshot pins are explicit read transactions over pooled FrankenSQLite
 connections. A clean pin release returns the connection to the LIFO idle pool.
 If release fails, `ee` abandons that connection instead of returning a possibly
 dirty transaction state to later readers; this is reported through the
-`snapshot_release_failed` degradation family. The follow-up read-pool lifecycle
-work tracks max pin duration, watchdog poisoning, and workspace close drain
-timeouts so long-held snapshots cannot grow the WAL without a visible repair
-path.
+`snapshot_release_failed` degradation family. Long-held pins are tracked against
+`max_pin_duration_seconds`; expired or force-released pins surface through
+`snapshot_pin_expired` and `snapshot_pin_force_released` so they cannot grow the
+WAL without a visible repair path.
 
 ## Acquire Backpressure And Bypass
 
@@ -70,5 +73,6 @@ Environment overrides:
 | --- | --- |
 | `storage.read_pool.size` | `EE_READ_POOL_SIZE` |
 | `storage.read_pool.idle_timeout_seconds` | `EE_READ_POOL_IDLE_TIMEOUT_S` |
+| `storage.read_pool.max_pin_duration_seconds` | `EE_READ_POOL_MAX_PIN_SECONDS` |
 | `storage.read_pool.pin_snapshot` | `EE_READ_POOL_DISABLE_PIN` inverts this value |
 | acquire timeout runtime override | `EE_READ_POOL_ACQUIRE_TIMEOUT_MS` |

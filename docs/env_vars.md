@@ -43,6 +43,7 @@ must not expose their current value.
 | `EE_READ_POOL_ACQUIRE_TIMEOUT_MS` | tuning | integer milliseconds | `5000` | Override the read-side connection pool acquire timeout in milliseconds. | When all pooled reads are active, context waits this long before opening a one-shot ad-hoc read connection. |
 | `EE_READ_POOL_DISABLE_PIN` | tuning | boolean flag | none | Disable read-side snapshot pinning. | Inverts `[storage.read_pool].pin_snapshot` for read-heavy status/context paths. |
 | `EE_READ_POOL_IDLE_TIMEOUT_S` | tuning | integer seconds | none | Override the read-side connection pool idle timeout in seconds. | Maps to `[storage.read_pool].idle_timeout_seconds`; idle pooled handles are closed after the configured age. |
+| `EE_READ_POOL_MAX_PIN_SECONDS` | tuning | integer seconds | `30` | Override the read-side snapshot pin maximum lifetime in seconds. | Maps to `[storage.read_pool].max_pin_duration_seconds`; expired pins are reported through the snapshot-pin degraded-code family. |
 | `EE_READ_POOL_SIZE` | tuning | integer count | none | Override the read-side connection pool size. | Maps to `[storage.read_pool].size`; pool construction normalizes zero to one connection. |
 | `EE_REMEMBER_CURATION_SYNC_BUDGET_MS` | tuning | integer milliseconds | `50` | Override remember-time curation sync budget in milliseconds. | Registry-defined default is used when unset. |
 | `EE_SECURITY_PROFILE` | policy | profile name | none | Select security profile. | Controls policy posture for security-sensitive operations. |
