@@ -1,0 +1,71 @@
+---
+source: tests/context_stream.rs
+expression: canonical_json(value)
+---
+[
+  {
+    "canonicalKeyHash": "blake3:context-stream-fixture-pack",
+    "kind": "header",
+    "packId": "pack_stream_fixture",
+    "query": "stream release guardrail",
+    "schema": "ee.pack.stream.v1"
+  },
+  {
+    "content": "Use stream frames when an agent can consume context incrementally.",
+    "estimatedTokens": 12,
+    "kind": "item",
+    "memoryId": "mem_0000000000000000000000000H",
+    "packId": "pack_stream_fixture",
+    "rank": 1,
+    "schema": "ee.pack.stream.v1",
+    "scores": {
+      "relevance": 0.91,
+      "utility": 0.7
+    },
+    "section": "procedural_rules",
+    "seq": 0,
+    "why": "stream fixture item selected for context emission"
+  },
+  {
+    "content": "Trailer hash must match the non-streaming context pack hash.",
+    "estimatedTokens": 12,
+    "kind": "item",
+    "memoryId": "mem_0000000000000000000000000J",
+    "packId": "pack_stream_fixture",
+    "rank": 2,
+    "schema": "ee.pack.stream.v1",
+    "scores": {
+      "relevance": 0.83,
+      "utility": 0.7
+    },
+    "section": "decisions",
+    "seq": 1,
+    "why": "stream fixture item selected for context emission"
+  },
+  {
+    "content": "Partial streams are not complete packs until a terminal frame arrives.",
+    "estimatedTokens": 12,
+    "kind": "item",
+    "memoryId": "mem_0000000000000000000000000K",
+    "packId": "pack_stream_fixture",
+    "rank": 3,
+    "schema": "ee.pack.stream.v1",
+    "scores": {
+      "relevance": 0.72,
+      "utility": 0.7
+    },
+    "section": "failures",
+    "seq": 2,
+    "why": "stream fixture item selected for context emission"
+  },
+  {
+    "degraded": [],
+    "kind": "trailer",
+    "packHash": "blake3:context-stream-fixture-pack",
+    "packId": "pack_stream_fixture",
+    "schema": "ee.pack.stream.v1",
+    "skippedTotal": 0,
+    "totalItems": 3,
+    "usedTokens": 36
+  }
+]
