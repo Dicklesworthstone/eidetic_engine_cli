@@ -292,6 +292,7 @@ impl StructuralHealthReport {
                 });
             }
         };
+        let links = health_visible_memory_links(links);
 
         let support_graph = relation_graph(&links, &memory_ids, MemoryLinkRelation::Supports);
         let contradiction_graph =
@@ -436,6 +437,15 @@ fn resolve_health_workspace_ids(
         candidates.insert(stable_workspace_id(&canonical));
     }
     candidates
+}
+
+fn health_visible_memory_links(links: Vec<StoredMemoryLink>) -> Vec<StoredMemoryLink> {
+    links
+        .into_iter()
+        .filter(|link| {
+            crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref())
+        })
+        .collect()
 }
 
 fn workspace_memory_ids(
@@ -816,6 +826,66 @@ mod tests {
         )
     }
 
+    #[test]
+    fn structural_health_ignores_denied_mesh_links() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_path = Path::new("/tmp/ee-health-mesh-filter-fixture");
+        let workspace_id = stable_workspace_id(workspace_path);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.to_string_lossy().to_string(),
+                    name: Some("health mesh filter".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let local_a = "mem_00000000000000000000008301";
+        let local_b = "mem_00000000000000000000008302";
+        let denied_c = "mem_00000000000000000000008303";
+        for memory_id in [local_a, local_b, denied_c] {
+            insert_test_memory(&connection, &workspace_id, memory_id)?;
+        }
+        insert_test_link(
+            &connection,
+            "link_00000000000000000000008301",
+            local_a,
+            local_b,
+            MemoryLinkRelation::Supports,
+        )?;
+        insert_test_link_with_metadata(
+            &connection,
+            "link_00000000000000000000008302",
+            local_b,
+            denied_c,
+            MemoryLinkRelation::Contradicts,
+            Some(health_denied_mesh_link_metadata()),
+        )?;
+
+        let report = StructuralHealthReport::gather_from_connection(&connection, workspace_path);
+
+        ensure(
+            report.k_truss.support_subgraph_memory_count,
+            2,
+            "visible support graph memory count",
+        )?;
+        ensure(
+            report.contradiction_clusters.len(),
+            0,
+            "denied mesh contradiction link must not create a cluster",
+        )?;
+        ensure(
+            report
+                .degraded
+                .iter()
+                .any(|degraded| degraded.code == GRAPH_HEALTH_NO_CONTRADICTIONS_CODE),
+            true,
+            "no-contradictions sentinel remains present",
+        )
+    }
+
     fn insert_test_memory(
         connection: &DbConnection,
         workspace_id: &str,
@@ -851,6 +921,24 @@ mod tests {
         dst_memory_id: &str,
         relation: MemoryLinkRelation,
     ) -> TestResult {
+        insert_test_link_with_metadata(
+            connection,
+            link_id,
+            src_memory_id,
+            dst_memory_id,
+            relation,
+            None,
+        )
+    }
+
+    fn insert_test_link_with_metadata(
+        connection: &DbConnection,
+        link_id: &str,
+        src_memory_id: &str,
+        dst_memory_id: &str,
+        relation: MemoryLinkRelation,
+        metadata_json: Option<String>,
+    ) -> TestResult {
         connection
             .insert_memory_link(
                 link_id,
@@ -865,9 +953,27 @@ mod tests {
                     last_reinforced_at: None,
                     source: MemoryLinkSource::Agent,
                     created_by: Some("health-test".to_owned()),
-                    metadata_json: None,
+                    metadata_json,
                 },
             )
             .map_err(|error| error.to_string())
+    }
+
+    fn health_denied_mesh_link_metadata() -> String {
+        serde_json::json!({
+            "mesh": {
+                "workspaceScopeDecision": "deny",
+                "materialLane": "graphSignal",
+                "cachedMaterialId": "mesh_health_denied",
+                "originWorkspaceId": "wsp_remote_private",
+                "originWorkspaceLabel": "/Users/alice/private/repo",
+                "producerPeerId": "peer_builder_one",
+                "producerPeerLabel": "/Users/alice/private/peer-agent",
+                "importDecisionId": "mesh_health_decision_denied",
+                "trustLane": "quarantined",
+                "redactionPosture": "metadata_only"
+            }
+        })
+        .to_string()
     }
 }
