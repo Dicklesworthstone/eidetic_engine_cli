@@ -1,7 +1,7 @@
 {
   "schema": "ee.perf.baseline.v1",
   "version": "swarmx-v0.1",
-  "description": "Swarm-X streaming context baseline for bd-1prrl.1.5. This pins the first-frame and first-item latency budgets for the batch-adapter stream path; direct assembler streaming should improve these values.",
+  "description": "Swarm-X baseline manifest for streamed context and per-agent profile evidence. It pins first-frame and first-item latency budgets for bd-1prrl.1.5 and the profile-read overhead budget for bd-1prrl.2.5.",
   "operations": {
     "ee_context_stream": {
       "p50_ms": 10.0,
@@ -21,6 +21,19 @@
         "full_stream_64_items": {
           "p50_ms": 25.0,
           "p99_ms": 80.0
+        }
+      }
+    },
+    "ee_agent_profile_read_1000": {
+      "p50_ms": 2.0,
+      "p99_ms": 5.0,
+      "tolerance_pct_p50": 0,
+      "tolerance_pct_p99": 50,
+      "unstable": false,
+      "scales": {
+        "list_1000_profiles": {
+          "p50_ms": 2.0,
+          "p99_ms": 5.0
         }
       }
     }
