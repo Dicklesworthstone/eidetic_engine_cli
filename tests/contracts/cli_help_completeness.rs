@@ -189,6 +189,9 @@ fn proximity_health_and_maintenance_flags_are_help_discoverable() -> TestResult 
     let health_help = help_for(&["ee", "health", "--help"])?;
     assert_contains_all(&health_help, &["--robot-insights"], "ee health --help")?;
 
+    let status_help = help_for(&["ee", "status", "--help"])?;
+    assert_contains_all(&status_help, &["--skyline"], "ee status --help")?;
+
     let maintenance_help = help_for(&["ee", "maintenance", "run", "--help"])?;
     assert_contains_all(
         &maintenance_help,
@@ -259,6 +262,7 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "--dry-run",
             "--json",
         ][..],
+        &["ee", "status", "--skyline", "--json"][..],
     ] {
         Cli::try_parse_from(args)
             .map_err(|error| format!("{} failed to parse: {:?}", args.join(" "), error.kind()))?;

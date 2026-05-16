@@ -76,6 +76,7 @@ ee context "prepare release" --workspace . --profile thorough \
 | `ee why <MEMORY_ID>` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Reads causal graph evidence for `--causal-explain`. |
 | `ee why <MEMORY_ID>` | `--confidence-threshold <THRESHOLD>` | `0.0..=1.0` | `0.5` | Filters causal explanation edges below the confidence floor. |
 | `ee health` | `--robot-insights` | boolean | false | Emits graph-derived structural health for robot consumers. |
+| `ee status` | `--skyline` | boolean | false | Emits the `ee.status.skyline.v1` status block in JSON and compact human output; full community scoring remains owned by G8.a composite skyline work. |
 
 Example:
 
@@ -83,6 +84,7 @@ Example:
 ee insights --section proximityHotspots --workspace . --limit 5 --json
 ee proximity mem_release_policy mem_rch_remote_required --workspace . --json
 ee why mem_failed_release --causal-explain --workspace . --json
+ee status --skyline --workspace . --json
 ```
 
 ## Graph Command Flags
@@ -177,5 +179,4 @@ surface in this checkout does not yet expose them as top-level flags:
 
 | Planned flag | Tracked surface | Current status |
 | --- | --- | --- |
-| `ee status --skyline` | `bd-mhc1.2` / `ee.status.skyline.v1` | Implemented. Emits a schema-valid skyline status surface in JSON and compact human output; full community scoring remains owned by the G8.a composite skyline work. |
 | `--allow-tombstone-load-bearing` | load-bearing curation policy | Not present in the current Clap structs. Use `--no-structural-decay` for the implemented opt-out surface. |
