@@ -195,4 +195,9 @@ mod tests {
     fn first_item_budget_matches_stream_acceptance() {
         assert!((super::TIME_TO_FIRST_ITEM_P50_MS_BUDGET - 10.0).abs() < f64::EPSILON);
     }
+
+    #[test]
+    fn compare_only_fixture_stays_within_latency_budget() {
+        super::assert_latency_budget(super::quick_stats(16));
+    }
 }
