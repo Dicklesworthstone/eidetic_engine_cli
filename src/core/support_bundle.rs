@@ -70,6 +70,16 @@ const SWARM_BRIEF_SUMMARY_FILE: &str = "swarm_brief_summary.json";
 const SINGLEFLIGHT_POSTURE_FILE: &str = "singleflight_posture.json";
 const QOS_LANE_SUMMARY_FILE: &str = "qos_lane_summary.json";
 const TRIAGE_SUMMARY_FILE: &str = "scale_triage_summary.json";
+const TAILSCALE_METADATA_FIELDS: &[&str] = &[
+    "selfNodeKey",
+    "selfTailscaleIp",
+    "selfMagicDnsName",
+    "tailnetId",
+    "tailnetDisplayName",
+    "selfAdvertisedTags",
+    "binaryVersionRaw",
+    "binaryAbsolutePath",
+];
 const PERF_COMPARE_BUNDLE_SECTIONS: [(&str, &str); 8] = [
     ("profile_evidence", PROFILE_EVIDENCE_FILE),
     ("benchmark_summary", SCALE_BENCHMARK_SUMMARY_FILE),
@@ -2022,13 +2032,18 @@ fn redact_support_bundle_content(text: &str, level: RedactionLevel) -> SupportDi
 
 fn redact_support_diagnostic_content(text: &str) -> SupportDiagnosticRedaction {
     let secret_redacted = redact_secret_like_content(text);
-    let path_redacted_content = redact_path_like_segments(&secret_redacted.content);
-    let path_redacted = path_redacted_content != secret_redacted.content;
+    let (tailscale_redacted_content, tailscale_redacted) =
+        redact_tailscale_metadata_segments(&secret_redacted.content);
+    let path_redacted_content = redact_path_like_segments(&tailscale_redacted_content);
+    let path_redacted = path_redacted_content != tailscale_redacted_content;
     let mut redacted_reasons = secret_redacted
         .redacted_reasons
         .iter()
         .map(|reason| (*reason).to_owned())
         .collect::<Vec<_>>();
+    if tailscale_redacted {
+        redacted_reasons.push("tailscale_metadata".to_owned());
+    }
     if path_redacted {
         redacted_reasons.push("path_like_segment".to_owned());
     }
@@ -2037,9 +2052,86 @@ fn redact_support_diagnostic_content(text: &str) -> SupportDiagnosticRedaction {
 
     SupportDiagnosticRedaction {
         content: path_redacted_content,
-        redacted: secret_redacted.redacted || path_redacted,
+        redacted: secret_redacted.redacted || tailscale_redacted || path_redacted,
         redacted_reasons,
     }
+}
+
+fn redact_tailscale_metadata_segments(input: &str) -> (String, bool) {
+    if let Ok(mut value) = serde_json::from_str::<Value>(input) {
+        if redact_tailscale_metadata_json_value(&mut value) {
+            return (stable_json(&value), true);
+        }
+        return (input.to_owned(), false);
+    }
+
+    redact_tailscale_metadata_json_lines(input)
+}
+
+fn redact_tailscale_metadata_json_lines(input: &str) -> (String, bool) {
+    let mut output = String::with_capacity(input.len());
+    let mut redacted = false;
+
+    for line in input.split_inclusive('\n') {
+        let (record, newline) = line
+            .strip_suffix('\n')
+            .map_or((line, ""), |record| (record, "\n"));
+        if record.trim().is_empty() {
+            output.push_str(line);
+            continue;
+        }
+        let Ok(mut value) = serde_json::from_str::<Value>(record) else {
+            output.push_str(line);
+            continue;
+        };
+        if redact_tailscale_metadata_json_value(&mut value) {
+            output.push_str(&stable_json(&value));
+            output.push_str(newline);
+            redacted = true;
+        } else {
+            output.push_str(line);
+        }
+    }
+
+    (output, redacted)
+}
+
+fn redact_tailscale_metadata_json_value(value: &mut Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            let mut redacted = false;
+            for (key, child) in map {
+                if is_tailscale_metadata_field(key) {
+                    let raw_value = stable_json(child);
+                    *child = Value::String(tailscale_metadata_placeholder(key, &raw_value));
+                    redacted = true;
+                } else if redact_tailscale_metadata_json_value(child) {
+                    redacted = true;
+                }
+            }
+            redacted
+        }
+        Value::Array(items) => {
+            let mut redacted = false;
+            for item in items {
+                if redact_tailscale_metadata_json_value(item) {
+                    redacted = true;
+                }
+            }
+            redacted
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+    }
+}
+
+fn is_tailscale_metadata_field(field: &str) -> bool {
+    TAILSCALE_METADATA_FIELDS.contains(&field)
+}
+
+fn tailscale_metadata_placeholder(field: &str, raw_value: &str) -> String {
+    let digest = blake3::hash(raw_value.as_bytes());
+    let hex = digest.to_hex();
+    format!("[REDACTED:tailscale_metadata:{field}:#{}]", &hex[..12])
 }
 
 fn redact_path_like_segments(input: &str) -> String {
@@ -2346,6 +2438,70 @@ mod tests {
                 .iter()
                 .any(|reason| reason == "path_like_segment"),
             "standard support bundle redaction should report path-like redaction"
+        );
+    }
+
+    #[test]
+    fn support_bundle_standard_redacts_tailscale_metadata_fields() -> TestResult {
+        let raw = r#"{"mesh":{"tailscale":{"selfNodeKey":"nodekey:selfalpha","selfTailscaleIp":"100.64.0.10","selfMagicDnsName":"ee-local.tailnet.test.","tailnetId":"tailnet-alpha","tailnetDisplayName":"alpha.example","selfAdvertisedTags":["tag:ee-mesh","tag:memory"],"binaryVersionRaw":"1.66.0\n  tailscale commit: abc","binaryAbsolutePath":"/opt/homebrew/bin/tailscale","probeMethod":"cli"}}}"#;
+
+        let report = redact_support_bundle_content(raw, RedactionLevel::Standard);
+
+        assert!(report.redacted);
+        assert!(
+            report
+                .redacted_reasons
+                .iter()
+                .any(|reason| reason == "tailscale_metadata"),
+            "support bundle redaction should report tailscale metadata redaction"
+        );
+        for raw_value in [
+            "nodekey:selfalpha",
+            "100.64.0.10",
+            "ee-local.tailnet.test.",
+            "tailnet-alpha",
+            "alpha.example",
+            "tag:ee-mesh",
+            "/opt/homebrew/bin/tailscale",
+        ] {
+            assert!(
+                !report.content.contains(raw_value),
+                "redacted content leaked {raw_value}: {}",
+                report.content
+            );
+        }
+        for field in TAILSCALE_METADATA_FIELDS {
+            let marker = format!("[REDACTED:tailscale_metadata:{field}:#");
+            assert!(
+                report.content.contains(&marker),
+                "redacted content missing marker {marker}: {}",
+                report.content
+            );
+        }
+        assert!(
+            report.content.contains(r#""probeMethod":"cli""#),
+            "non-sensitive Tailscale fields should remain intact"
+        );
+        serde_json::from_str::<Value>(&report.content).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn support_bundle_tailscale_metadata_respects_raw_and_minimal_levels() {
+        let raw = r#"{"selfNodeKey":"nodekey:selfalpha","binaryAbsolutePath":"/opt/homebrew/bin/tailscale"}"#;
+
+        let none = redact_support_bundle_content(raw, RedactionLevel::None);
+        let minimal = redact_support_bundle_content(raw, RedactionLevel::Minimal);
+
+        assert_eq!(none.content, raw);
+        assert!(!none.redacted);
+        assert!(minimal.content.contains("nodekey:selfalpha"));
+        assert!(minimal.content.contains("/opt/homebrew/bin/tailscale"));
+        assert!(
+            !minimal
+                .redacted_reasons
+                .iter()
+                .any(|reason| reason == "tailscale_metadata")
         );
     }
 
