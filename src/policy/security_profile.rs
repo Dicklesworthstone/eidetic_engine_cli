@@ -13,7 +13,7 @@
 //! have appropriate permissions (not world-readable, owned by current user, etc.).
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::config::env_registry::{EnvVar, read};
@@ -218,6 +218,25 @@ impl FilePermissionCheck {
         }
     }
 
+    /// Create a failing check result when a trustworthy mode could not be read.
+    #[must_use]
+    pub fn fail_without_mode(
+        path: impl Into<String>,
+        max_allowed: u32,
+        issue: impl Into<String>,
+        repair: impl Into<String>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            exists: true,
+            current_mode: None,
+            max_allowed_mode: max_allowed,
+            passed: false,
+            issue: Some(issue.into()),
+            repair: Some(repair.into()),
+        }
+    }
+
     /// Create a result for a file that doesn't exist.
     #[must_use]
     pub fn not_found(path: impl Into<String>, max_allowed: u32) -> Self {
@@ -284,7 +303,7 @@ pub fn check_workspace_permissions(
     ));
 
     let index_dir = workspace.join(".ee").join("index");
-    if index_dir.exists() {
+    if optional_directory_should_be_checked(&index_dir) {
         checks.push(check_directory_permissions(
             &index_dir,
             profile.max_db_permissions(),
@@ -296,14 +315,14 @@ pub fn check_workspace_permissions(
 }
 
 fn check_file_permissions(path: &Path, max_mode: u32, file_type: &str) -> FilePermissionCheck {
-    if !path.exists() {
-        return FilePermissionCheck::not_found(path.display().to_string(), max_mode);
+    if let Some(check) = check_path_symlink_components(path, max_mode, file_type) {
+        return check;
     }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        match std::fs::metadata(path) {
+        match std::fs::symlink_metadata(path) {
             Ok(metadata) => {
                 let mode = metadata.permissions().mode() & 0o777;
                 let excess_bits = mode & !max_mode;
@@ -322,6 +341,14 @@ fn check_file_permissions(path: &Path, max_mode: u32, file_type: &str) -> FilePe
                     )
                 }
             }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                FilePermissionCheck::not_found(path.display().to_string(), max_mode)
+            }
             Err(e) => FilePermissionCheck {
                 path: path.display().to_string(),
                 exists: true,
@@ -336,22 +363,42 @@ fn check_file_permissions(path: &Path, max_mode: u32, file_type: &str) -> FilePe
 
     #[cfg(not(unix))]
     {
-        FilePermissionCheck::pass(path.display().to_string(), 0, max_mode)
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => FilePermissionCheck::pass(path.display().to_string(), 0, max_mode),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                FilePermissionCheck::not_found(path.display().to_string(), max_mode)
+            }
+            Err(e) => FilePermissionCheck {
+                path: path.display().to_string(),
+                exists: true,
+                current_mode: None,
+                max_allowed_mode: max_mode,
+                passed: false,
+                issue: Some(format!("failed to read {} metadata: {}", file_type, e)),
+                repair: None,
+            },
+        }
     }
 }
 
 fn check_directory_permissions(path: &Path, max_mode: u32, dir_type: &str) -> FilePermissionCheck {
-    if !path.exists() {
-        return FilePermissionCheck::not_found(path.display().to_string(), max_mode);
+    let max_dir_mode = max_mode | 0o111;
+
+    if let Some(check) = check_path_symlink_components(path, max_dir_mode, dir_type) {
+        return check;
     }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        match std::fs::metadata(path) {
+        match std::fs::symlink_metadata(path) {
             Ok(metadata) => {
                 let mode = metadata.permissions().mode() & 0o777;
-                let max_dir_mode = max_mode | 0o111;
                 let excess_bits = mode & !max_dir_mode;
                 if excess_bits == 0 {
                     FilePermissionCheck::pass(path.display().to_string(), mode, max_dir_mode)
@@ -368,6 +415,14 @@ fn check_directory_permissions(path: &Path, max_mode: u32, dir_type: &str) -> Fi
                     )
                 }
             }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                FilePermissionCheck::not_found(path.display().to_string(), max_dir_mode)
+            }
             Err(e) => FilePermissionCheck {
                 path: path.display().to_string(),
                 exists: true,
@@ -382,8 +437,100 @@ fn check_directory_permissions(path: &Path, max_mode: u32, dir_type: &str) -> Fi
 
     #[cfg(not(unix))]
     {
-        FilePermissionCheck::pass(path.display().to_string(), 0, max_mode | 0o111)
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => FilePermissionCheck::pass(path.display().to_string(), 0, max_dir_mode),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                FilePermissionCheck::not_found(path.display().to_string(), max_dir_mode)
+            }
+            Err(e) => FilePermissionCheck {
+                path: path.display().to_string(),
+                exists: true,
+                current_mode: None,
+                max_allowed_mode: max_dir_mode,
+                passed: false,
+                issue: Some(format!("failed to read {} metadata: {}", dir_type, e)),
+                repair: None,
+            },
+        }
     }
+}
+
+fn optional_directory_should_be_checked(path: &Path) -> bool {
+    match first_existing_symlink_component(path) {
+        Ok(Some(_)) | Err(_) => true,
+        Ok(None) => std::fs::symlink_metadata(path).is_ok(),
+    }
+}
+
+fn check_path_symlink_components(
+    path: &Path,
+    max_mode: u32,
+    path_type: &str,
+) -> Option<FilePermissionCheck> {
+    match first_existing_symlink_component(path) {
+        Ok(Some(symlink_path)) => Some(FilePermissionCheck::fail_without_mode(
+            path.display().to_string(),
+            max_mode,
+            format!(
+                "{} path traverses symbolic link '{}' while checking '{}'",
+                path_type,
+                symlink_path.display(),
+                path.display()
+            ),
+            "Replace the symlink with a real workspace path before re-running diagnostics.",
+        )),
+        Ok(None) => None,
+        Err(error) => Some(FilePermissionCheck::fail_without_mode(
+            path.display().to_string(),
+            max_mode,
+            format!(
+                "failed to inspect {} path component '{}': {}",
+                path_type,
+                error.path.display(),
+                error.source
+            ),
+            "Choose a readable workspace path or re-run with corrected permissions.",
+        )),
+    }
+}
+
+#[derive(Debug)]
+struct SymlinkComponentInspectionError {
+    path: PathBuf,
+    source: std::io::Error,
+}
+
+fn first_existing_symlink_component(
+    path: &Path,
+) -> Result<Option<PathBuf>, SymlinkComponentInspectionError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(source) => {
+                return Err(SymlinkComponentInspectionError {
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Load security profile from environment or use default.
@@ -398,7 +545,9 @@ pub fn load_profile_from_env() -> SecurityProfile {
 mod tests {
     use std::str::FromStr;
 
-    use super::{FilePermissionCheck, FilePermissionReport, SecurityProfile};
+    use super::{
+        FilePermissionCheck, FilePermissionReport, SecurityProfile, check_workspace_permissions,
+    };
 
     type TestResult = Result<(), String>;
 
@@ -527,5 +676,70 @@ mod tests {
 
         assert!(report.passed);
         assert_eq!(report.issue_count, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_permission_report_fails_on_symlinked_ee_directory() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        let linked_ee = tempdir.path().join("linked-ee");
+        std::fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        std::fs::create_dir(&linked_ee).map_err(|error| error.to_string())?;
+        std::fs::write(linked_ee.join("ee.db"), b"db").map_err(|error| error.to_string())?;
+        symlink(&linked_ee, workspace.join(".ee")).map_err(|error| error.to_string())?;
+
+        let report = check_workspace_permissions(&workspace, SecurityProfile::Default);
+
+        assert!(!report.passed);
+        let db_check = report
+            .checks
+            .iter()
+            .find(|check| check.path.ends_with(".ee/ee.db"))
+            .ok_or_else(|| "database check missing".to_owned())?;
+        assert!(!db_check.passed);
+        assert_eq!(db_check.current_mode, None);
+        assert!(
+            db_check
+                .issue
+                .as_deref()
+                .is_some_and(|issue| issue.contains("symbolic link"))
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_permission_report_checks_symlinked_optional_index_dir() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        let ee_dir = workspace.join(".ee");
+        let linked_index = tempdir.path().join("linked-index");
+        std::fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        std::fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        std::fs::create_dir(&linked_index).map_err(|error| error.to_string())?;
+        symlink(&linked_index, ee_dir.join("index")).map_err(|error| error.to_string())?;
+
+        let report = check_workspace_permissions(&workspace, SecurityProfile::Default);
+
+        assert!(!report.passed);
+        let index_check = report
+            .checks
+            .iter()
+            .find(|check| check.path.ends_with(".ee/index"))
+            .ok_or_else(|| "index directory check missing".to_owned())?;
+        assert!(!index_check.passed);
+        assert_eq!(index_check.current_mode, None);
+        assert!(
+            index_check
+                .issue
+                .as_deref()
+                .is_some_and(|issue| issue.contains("symbolic link"))
+        );
+        Ok(())
     }
 }
