@@ -364,6 +364,25 @@ impl ReadConnectionPool {
         expired
     }
 
+    pub fn force_poison_active_pins(&self) -> Vec<ExpiredSnapshotPin> {
+        let now = Instant::now();
+        let state = self.lock_state();
+        let mut poisoned = Vec::new();
+
+        for (pin_id, record) in &state.active_pins {
+            record.poisoned.store(true, Ordering::Release);
+            poisoned.push(ExpiredSnapshotPin {
+                pin_id: *pin_id,
+                slot_id: record.slot_id,
+                age: now
+                    .checked_duration_since(record.acquired_at)
+                    .unwrap_or(Duration::ZERO),
+            });
+        }
+
+        poisoned
+    }
+
     fn register_pin(
         &self,
         slot_id: Option<u64>,
@@ -590,9 +609,11 @@ fn expired_pin_count(active_pins: &BTreeMap<u64, ActivePinRecord>) -> usize {
     active_pins
         .values()
         .filter(|record| {
-            now.checked_duration_since(record.acquired_at)
-                .unwrap_or(Duration::ZERO)
-                >= record.max_pin_duration
+            record.poisoned.load(Ordering::Acquire)
+                || now
+                    .checked_duration_since(record.acquired_at)
+                    .unwrap_or(Duration::ZERO)
+                    >= record.max_pin_duration
         })
         .count()
 }
@@ -1076,6 +1097,34 @@ mod tests {
         assert_eq!(stats.active, 0);
         assert_eq!(stats.idle, 1);
         assert_eq!(stats.active_pins, 0);
+    }
+
+    #[test]
+    fn workspace_close_force_poisons_pins_after_drain_timeout() {
+        let (_tempdir, _database_path, pool) = file_pool(2);
+        let first = must(pool.pin_snapshot(), "first snapshot pin opens");
+        let second = must(pool.pin_snapshot(), "second snapshot pin opens");
+        let first_slot = first.slot_id();
+        let second_slot = second.slot_id();
+
+        let poisoned = pool.force_poison_active_pins();
+
+        assert_eq!(poisoned.len(), 2);
+        assert_eq!(poisoned[0].slot_id, first_slot);
+        assert_eq!(poisoned[1].slot_id, second_slot);
+        assert!(poisoned[0].pin_id < poisoned[1].pin_id);
+        assert!(first.is_poisoned());
+        assert!(second.is_poisoned());
+        assert_eq!(pool.stats().active_pins, 2);
+        assert_eq!(pool.stats().expired_pins, 2);
+
+        drop(first);
+        drop(second);
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 2);
+        assert_eq!(stats.active_pins, 0);
+        assert_eq!(stats.expired_pins, 0);
     }
 
     #[test]
