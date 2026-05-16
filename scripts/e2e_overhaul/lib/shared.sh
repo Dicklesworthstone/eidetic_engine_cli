@@ -6,8 +6,8 @@
 #   - REPO_ROOT            absolute repo root
 #   - CORPUS_SEED          path to J2's corpus_2026_05_10_seed.sh
 #   - epic_setup           shared setup: tmp workspace + init + trap
-#   - epic_teardown        called via trap; emits e2e_log_end and handles
-#                          workspace cleanup or retention
+#   - epic_teardown        called via trap; emits e2e_log_end and retains
+#                          workspaces unless deletion is explicitly allowed
 #   - require_jq           bail out early if jq is missing
 #   - run_capture          runs `$EE …`, captures stdout+stderr, logs via J1,
 #                          and propagates exit code so set -e fires on failure
@@ -75,7 +75,11 @@ MESH_SCENARIO_ROOT=""
 MESH_NODE_COUNT=0
 
 _epic_keep_workspace_enabled() {
-    [ "${EE_E2E_KEEP_WORKSPACE:-0}" = "1" ]
+    [ "${EE_E2E_KEEP_WORKSPACE:-0}" = "1" ] || ! _epic_workspace_delete_enabled
+}
+
+_epic_workspace_delete_enabled() {
+    [ "${EE_E2E_ALLOW_WORKSPACE_DELETE:-0}" = "1" ]
 }
 
 _epic_keep_artifacts_enabled() {
@@ -152,8 +156,9 @@ PY
 
 # Usage: epic_setup <epic_name>
 #   Creates a temp workspace, calls `ee init`, and arms a teardown trap.
-#   The trap reports the asserts_pass/asserts_fail counters via J1 and either
-#   retains the workspace or removes only the temp workspace created here.
+#   The trap reports the asserts_pass/asserts_fail counters via J1 and retains
+#   the workspace by default. Set EE_E2E_ALLOW_WORKSPACE_DELETE=1, with
+#   EE_E2E_KEEP_WORKSPACE unset/0, to remove only the temp workspace created here.
 #
 # Note: `set -e` is intentionally relaxed inside per-epic scripts because the
 #   J1 assert helpers return non-zero on failure and we want every assertion
@@ -203,8 +208,12 @@ _epic_teardown() {
     e2e_log_end
     if [ -n "$EPIC_WORKSPACE" ] && [ -d "$EPIC_WORKSPACE" ]; then
         if _epic_keep_workspace_enabled; then
-            _epic_write_retention_manifest "retained_by_keep_workspace" "teardown"
-            e2e_log_note "epic_teardown_keep_workspace workspace=$EPIC_WORKSPACE"
+            local retention_policy="retained_by_default_no_delete_policy"
+            if [ "${EE_E2E_KEEP_WORKSPACE:-0}" = "1" ]; then
+                retention_policy="retained_by_keep_workspace"
+            fi
+            _epic_write_retention_manifest "$retention_policy" "teardown"
+            e2e_log_note "epic_teardown_keep_workspace workspace=$EPIC_WORKSPACE policy=$retention_policy"
             echo "j3: retained e2e workspace: $EPIC_WORKSPACE" >&2
             echo "j3: retention manifest: $EPIC_RETENTION_MANIFEST" >&2
             return "$code"
