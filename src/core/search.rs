@@ -2123,7 +2123,7 @@ fn dedupe_hits_on_doc_id(hits: Vec<SearchHit>) -> (Vec<SearchHit>, usize) {
 /// best-effort enrichment, not part of the read response contract.
 fn audit_append_best_effort(
     database_path: &Path,
-    audit_ids: &mut SearchAuditIdSource<'_>,
+    audit_ids: &mut SearchAuditIdSource,
     workspace_id: Option<&str>,
     action: &'static str,
     target_type: Option<&str>,
@@ -2154,18 +2154,16 @@ fn audit_append_best_effort(
     }
 }
 
-enum SearchAuditIdSource<'a> {
+enum SearchAuditIdSource {
     Ambient,
     Seeded(Deterministic<Seed>),
-    Borrowed(&'a mut Deterministic<Seed>),
 }
 
-impl SearchAuditIdSource<'_> {
+impl SearchAuditIdSource {
     fn next_audit_id(&mut self) -> String {
         match self {
             Self::Ambient => generate_audit_id(),
             Self::Seeded(determinism) => generate_audit_id_seeded(determinism),
-            Self::Borrowed(determinism) => generate_audit_id_seeded(*determinism),
         }
     }
 }
@@ -2206,7 +2204,7 @@ fn run_search_inner(
     options: &SearchOptions,
     read_connection: Option<&DbConnection>,
     determinism: &Deterministic<Seed>,
-    audit_ids: &mut SearchAuditIdSource<'_>,
+    audit_ids: &mut SearchAuditIdSource,
 ) -> Result<SearchReport, SearchError> {
     let start = Instant::now();
     let index_dir = options.resolve_index_dir();
@@ -3876,9 +3874,11 @@ mod tests {
     }
 
     fn seeded_search_audit_ids(seed: u64) -> Result<Vec<String>, String> {
-        let workspace = unique_test_dir("seeded-search-audit");
-        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
-        let database_path = workspace.join("ee.db");
+        let workspace = tempfile::Builder::new()
+            .prefix("ee-search-seeded-audit")
+            .tempdir_in("/tmp")
+            .map_err(|error| error.to_string())?;
+        let database_path = workspace.path().join("ee.db");
         let connection =
             DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
@@ -3887,14 +3887,13 @@ mod tests {
             .insert_workspace(
                 workspace_id,
                 &CreateWorkspaceInput {
-                    path: workspace.display().to_string(),
+                    path: workspace.path().display().to_string(),
                     name: Some("seeded-search-audit".to_owned()),
                 },
             )
             .map_err(|error| error.to_string())?;
 
-        let mut determinism = Deterministic::from_seed(seed);
-        let mut audit_ids = SearchAuditIdSource::Borrowed(&mut determinism);
+        let mut audit_ids = SearchAuditIdSource::Seeded(Deterministic::from_seed(seed));
         audit_append_best_effort(
             &database_path,
             &mut audit_ids,
