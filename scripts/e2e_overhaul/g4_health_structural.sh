@@ -10,6 +10,7 @@ require_jq
 START_SECONDS="$(python3 -c 'import time; print(time.monotonic())')"
 epic_setup "g4_health_structural"
 seed_corpus
+ee_workspace config set graph.feature.structural_health.enabled true --json >/dev/null
 
 remember_health_fixture() {
     local content="${1:?content required}"
