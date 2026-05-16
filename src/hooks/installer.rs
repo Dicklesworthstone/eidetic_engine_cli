@@ -232,6 +232,12 @@ fn is_ee_managed_hook(content: &str) -> bool {
 }
 
 fn read_existing_hook_content(path: &Path) -> Result<String, ExistingHookStatus> {
+    match first_existing_symlink_component(path) {
+        Ok(Some(_)) => return Err(ExistingHookStatus::Symlink),
+        Ok(None) => {}
+        Err(_) => return Err(ExistingHookStatus::Unreadable),
+    }
+
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() {
@@ -1731,6 +1737,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn check_existing_hook_detects_symlinked_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let real_dir = temp.path().join("real-hooks");
+        fs::create_dir(&real_dir).map_err(|e| e.to_string())?;
+        let target = real_dir.join("pre-task");
+        fs::write(
+            &target,
+            generate_hook_content(HookType::PreTask, &fixed_ee_binary()),
+        )
+        .map_err(|e| e.to_string())?;
+
+        let linked_dir = temp.path().join("linked-hooks");
+        symlink(&real_dir, &linked_dir).map_err(|e| e.to_string())?;
+
+        let status = check_existing_hook(&linked_dir.join("pre-task"));
+        assert_eq!(status, ExistingHookStatus::Symlink);
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn managed_hook_compare_does_not_read_symlink_target() -> TestResult {
         use std::os::unix::fs::symlink;
 
@@ -1757,6 +1787,42 @@ mod tests {
         assert!(
             reason.contains("symlink"),
             "managed hook comparison must reject symlinks before reading: {reason}"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_hook_compare_does_not_read_through_symlinked_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let real_dir = temp.path().join("real-hooks");
+        fs::create_dir(&real_dir).map_err(|e| e.to_string())?;
+        let target = real_dir.join("pre-task");
+        fs::write(
+            &target,
+            generate_hook_content(HookType::PreTask, &fixed_ee_binary()),
+        )
+        .map_err(|e| e.to_string())?;
+
+        let linked_dir = temp.path().join("linked-hooks");
+        symlink(&real_dir, &linked_dir).map_err(|e| e.to_string())?;
+        let linked_hook = linked_dir.join("pre-task");
+
+        let (action, reason) = determine_action(
+            &linked_hook,
+            ExistingHookStatus::ManagedByEe,
+            false,
+            true,
+            &generate_hook_content(HookType::PreTask, &fixed_ee_binary()),
+        );
+
+        assert_eq!(action, HookAction::Skip);
+        assert!(
+            reason.contains("symlink"),
+            "managed hook comparison must reject symlinked parents before reading: {reason}"
         );
 
         Ok(())
