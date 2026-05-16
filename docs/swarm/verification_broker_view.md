@@ -2,11 +2,12 @@
 
 Schema: `ee.verification.broker_view.v1`
 
-Tracking bead: `bd-6boyo.1`
+Tracking bead: `bd-6boyo.2`
 
-This planned schema defines the compact operator view that sits on top of
-existing `ee.verification.run.v1` ledger records. It does not replace the base
-verification ledger. It maps prior run evidence into agent-facing states:
+This schema defines the compact operator view emitted by
+`ee verify broker lookup --json`. It sits on top of retained
+`ee.verification.run.v1` records and does not replace the base verification
+ledger. It maps prior run evidence into agent-facing states:
 `reusable`, `stale`, `incompatible`, `in_progress`, `known_blocker`, and
 `unavailable`.
 
@@ -56,3 +57,11 @@ Stale reason codes explain why a prior run cannot be reused directly:
 - It does not mutate Beads, Agent Mail, Git, or the verification ledger.
 - It does not fork `ee.verification.run.v1`; it is a derived view.
 - It does not make `ee` an agent scheduler or build coordinator.
+
+## Lookup Inputs
+
+`ee verify broker lookup --json` accepts retained records from either
+`--records-json <path>` (a JSON array of `ee.verification.run.v1` records) or
+`--runs-jsonl <path>` (J1 test-event JSONL with artifact-manifest events). When
+neither source is supplied, it returns an `unavailable` broker view instead of
+launching a verifier.

@@ -88,7 +88,7 @@
   "x-ee-status": {
     "shipped": false,
     "available_in_build": false,
-    "tracking_bead": "bd-6boyo.1"
+    "tracking_bead": "bd-6boyo.2"
   },
   "x-ee-doc": "docs/swarm/verification_broker_view.md",
   "examples": [

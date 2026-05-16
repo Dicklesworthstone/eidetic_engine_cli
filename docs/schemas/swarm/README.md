@@ -13,10 +13,10 @@ The planned fallback ledger schema is
 until `bd-1zb7k.13.2` adds an ingest path, idempotent storage, and redacted
 support-bundle or `ee why` inclusion.
 
-The planned verification broker view schema is
-`ee.verification.broker_view.v1`. It is intentionally marked unshipped until
-`bd-6boyo.1` grows from the model/schema contract into a read-only operator
-lookup surface.
+The verification broker view schema is `ee.verification.broker_view.v1`.
+`ee verify broker lookup --json` emits it as the derived broker block over
+retained verification run records, but the schema remains marked unshipped
+until `bd-6boyo.2` is closed.
 
 Each schema carries `x-ee-status` so agents can distinguish implemented
 surfaces from documented future contracts. A schema with `"shipped": false`

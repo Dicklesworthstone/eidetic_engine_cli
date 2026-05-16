@@ -55,7 +55,7 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         id: "ee.verification.broker_view.v1",
         file_name: "ee.verification.broker_view.v1.json",
         doc_path: "docs/swarm/verification_broker_view.md",
-        tracking_bead: "bd-6boyo.1",
+        tracking_bead: "bd-6boyo.2",
         shipped: false,
     },
     SchemaCase {
@@ -165,7 +165,7 @@ const DRIFT_CASES: &[DriftCase] = &[
     },
     DriftCase {
         schema_id: "ee.verification.broker_view.v1",
-        command: "planned ee verify broker lookup --json",
+        command: "ee verify broker lookup --json",
         json_path: ".data.broker",
         fixture_manifest_key: "ee.verification.broker_view.v1",
     },

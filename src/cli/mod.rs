@@ -3889,9 +3889,62 @@ pub enum VerifyCommand {
     /// Legacy alias for `ingest`.
     #[command(hide = true)]
     Record(VerifyIngestArgs),
+    /// Query reusable verification evidence without launching a build.
+    #[command(subcommand)]
+    Broker(VerifyBrokerCommand),
     /// Evaluate whether recorded evidence satisfies bead closure gates.
     #[command(name = "closure-guidance")]
     ClosureGuidance(VerifyClosureGuidanceArgs),
+}
+
+/// Subcommands for `ee verify broker`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum VerifyBrokerCommand {
+    /// Look up reusable, stale, in-progress, or known-blocker verification evidence.
+    Lookup(VerifyBrokerLookupArgs),
+}
+
+/// Arguments for `ee verify broker lookup`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct VerifyBrokerLookupArgs {
+    /// Source tree fingerprint for the current checkout.
+    #[arg(long = "source-hash", value_name = "HASH")]
+    pub source_hash: Option<String>,
+    /// Normalized command fingerprint for the verification being considered.
+    #[arg(long = "command-hash", value_name = "HASH")]
+    pub command_hash: String,
+    /// Stable command class, such as cargo_test or cargo_check.
+    #[arg(long = "command-class", default_value = "cargo_test")]
+    pub command_class: String,
+    /// Fingerprint of normalized argv; defaults to --command-hash when omitted.
+    #[arg(long = "normalized-argv-hash", value_name = "HASH")]
+    pub normalized_argv_hash: Option<String>,
+    /// Execution substrate used by the evidence, such as rch or local_shell_static.
+    #[arg(long = "execution-substrate", default_value = "rch")]
+    pub execution_substrate: String,
+    /// Bead ID associated with the requested verification.
+    #[arg(long = "bead-id", value_name = "BEAD")]
+    pub bead_id: Option<String>,
+    /// Environment fingerprint class for compatibility checks.
+    #[arg(long = "env-fingerprint-class", value_name = "CLASS")]
+    pub env_fingerprint_class: Option<String>,
+    /// Target profile, such as debug or release.
+    #[arg(long = "target-profile", value_name = "PROFILE")]
+    pub target_profile: Option<String>,
+    /// JSON array of retained `ee.verification.run.v1` records.
+    #[arg(
+        long = "records-json",
+        value_name = "PATH",
+        conflicts_with = "runs_jsonl"
+    )]
+    pub records_json: Option<PathBuf>,
+    /// Retained J1 test-event JSONL containing artifact-manifest events.
+    #[arg(
+        long = "runs-jsonl",
+        value_name = "PATH",
+        conflicts_with = "records_json"
+    )]
+    pub runs_jsonl: Option<PathBuf>,
 }
 
 /// Arguments for `ee verification ingest`.
@@ -9024,6 +9077,9 @@ where
         Some(Command::Verify(VerifyCommand::Ingest(ref args))) => {
             handle_verification_ingest(&cli, args, stdout, stderr)
         }
+        Some(Command::Verify(VerifyCommand::Broker(VerifyBrokerCommand::Lookup(ref args)))) => {
+            handle_verify_broker_lookup(&cli, args, stdout, stderr)
+        }
         Some(Command::Verify(VerifyCommand::ClosureGuidance(ref args))) => {
             handle_verify_closure_guidance(&cli, args, stdout, stderr)
         }
@@ -9033,6 +9089,9 @@ where
         Some(Command::Verification(VerifyCommand::Ingest(ref args))) => {
             handle_verification_ingest(&cli, args, stdout, stderr)
         }
+        Some(Command::Verification(VerifyCommand::Broker(VerifyBrokerCommand::Lookup(
+            ref args,
+        )))) => handle_verify_broker_lookup(&cli, args, stdout, stderr),
         Some(Command::Verification(VerifyCommand::ClosureGuidance(ref args))) => {
             handle_verify_closure_guidance(&cli, args, stdout, stderr)
         }
@@ -10323,7 +10382,12 @@ fn pack_quality_provenance_density(
                 .is_some_and(|uri| !uri.trim().is_empty())
         })
         .count();
-    with_provenance as f64 / selected_memory_ids.len() as f64
+    
+    if selected_memory_ids.is_empty() {
+        0.0
+    } else {
+        with_provenance as f64 / selected_memory_ids.len() as f64
+    }
 }
 
 fn detect_pack_quality_redaction_leaks(
@@ -27792,6 +27856,117 @@ fn read_verification_evidence_input(args: &VerifyIngestArgs) -> Result<String, S
     }
 }
 
+fn handle_verify_broker_lookup<W, E>(
+    cli: &Cli,
+    args: &VerifyBrokerLookupArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let records = match read_verification_broker_records(args) {
+        Ok(records) => records,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error,
+                repair: Some(
+                    "pass --records-json <path> with ee.verification.run.v1 records or --runs-jsonl <path>"
+                        .to_owned(),
+                ),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let normalized_argv_hash = args
+        .normalized_argv_hash
+        .as_deref()
+        .unwrap_or(args.command_hash.as_str());
+    let request = crate::models::VerificationBrokerViewRequest {
+        bead_id: args.bead_id.as_deref(),
+        source_hash: args.source_hash.as_deref(),
+        command_hash: args.command_hash.as_str(),
+        command_class: args.command_class.as_str(),
+        normalized_argv_hash,
+        execution_substrate: args.execution_substrate.as_str(),
+        env_fingerprint_class: args.env_fingerprint_class.as_deref(),
+        target_profile: args.target_profile.as_deref(),
+    };
+    let broker = crate::models::verification_broker_view(request, &records);
+    let data = serde_json::json!({
+        "command": "verify broker lookup",
+        "schema": crate::models::VERIFICATION_BROKER_VIEW_SCHEMA_V1,
+        "broker": broker,
+        "evidenceCount": records.len(),
+        "source": verification_broker_source_label(args),
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_verify_broker_lookup_human(&data))
+        }
+        output::Renderer::Toon => {
+            let json = verification_response_json(data).to_string();
+            write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = verification_response_json(data);
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn read_verification_broker_records(
+    args: &VerifyBrokerLookupArgs,
+) -> Result<Vec<crate::models::VerificationRunRecord>, String> {
+    if let Some(path) = &args.records_json {
+        let input = fs::read_to_string(path).map_err(|error| {
+            format!(
+                "Failed to read verification broker records '{}': {error}",
+                path.display()
+            )
+        })?;
+        return serde_json::from_str::<Vec<crate::models::VerificationRunRecord>>(&input)
+            .map_err(|error| format!("Invalid verification broker records JSON: {error}"));
+    }
+    if let Some(path) = &args.runs_jsonl {
+        let input = fs::read_to_string(path).map_err(|error| {
+            format!(
+                "Failed to read verification run JSONL '{}': {error}",
+                path.display()
+            )
+        })?;
+        return crate::models::verification_run_records_from_j1_jsonl(&input)
+            .map_err(|error| format!("Invalid verification run JSONL: {error}"));
+    }
+    Ok(Vec::new())
+}
+
+fn verification_broker_source_label(args: &VerifyBrokerLookupArgs) -> &'static str {
+    if args.records_json.is_some() {
+        "records_json"
+    } else if args.runs_jsonl.is_some() {
+        "runs_jsonl"
+    } else {
+        "none"
+    }
+}
+
+fn render_verify_broker_lookup_human(data: &serde_json::Value) -> String {
+    let broker = &data["broker"];
+    let status = broker["status"].as_str().unwrap_or("unknown");
+    let action = broker["suggestedAction"].as_str().unwrap_or("inspect");
+    let matched = broker["matchedRunId"].as_str().unwrap_or("none");
+    let evidence_count = data["evidenceCount"].as_u64().unwrap_or(0);
+    format!(
+        "verification broker lookup\n  Status: {status}\n  Suggested action: {action}\n  Matched run: {matched}\n  Evidence records: {evidence_count}\n"
+    )
+}
+
 fn handle_verify_closure_guidance<W, E>(
     cli: &Cli,
     args: &VerifyClosureGuidanceArgs,
@@ -35429,7 +35604,7 @@ const SWARM_SUBCOMMANDS: &[&str] = &["brief"];
 const TASK_FRAME_SUBCOMMANDS: &[&str] = &["create", "show", "update", "close", "subgoal"];
 const TASK_FRAME_SUBGOAL_SUBCOMMANDS: &[&str] = &["add"];
 const TRIPWIRE_SUBCOMMANDS: &[&str] = &["list", "check"];
-const VERIFICATION_SUBCOMMANDS: &[&str] = &["ingest", "record", "closure-guidance"];
+const VERIFICATION_SUBCOMMANDS: &[&str] = &["ingest", "record", "broker", "closure-guidance"];
 const WORKSPACE_SUBCOMMANDS: &[&str] = &["resolve", "list", "alias"];
 
 /// Read-only normalized representation of a CLI invocation.
@@ -35865,11 +36040,17 @@ impl NormalizedInvocation {
                 Command::Verify(verify) => match verify {
                     VerifyCommand::Ingest(_) => "verify ingest".to_string(),
                     VerifyCommand::Record(_) => "verify record".to_string(),
+                    VerifyCommand::Broker(VerifyBrokerCommand::Lookup(_)) => {
+                        "verify broker lookup".to_string()
+                    }
                     VerifyCommand::ClosureGuidance(_) => "verify closure-guidance".to_string(),
                 },
                 Command::Verification(verify) => match verify {
                     VerifyCommand::Ingest(_) => "verification ingest".to_string(),
                     VerifyCommand::Record(_) => "verification record".to_string(),
+                    VerifyCommand::Broker(VerifyBrokerCommand::Lookup(_)) => {
+                        "verification broker lookup".to_string()
+                    }
                     VerifyCommand::ClosureGuidance(_) => {
                         "verification closure-guidance".to_string()
                     }
@@ -39579,6 +39760,190 @@ mod tests {
             &value["error"]["code"],
             &serde_json::json!("unsatisfied_degraded_mode"),
             "require-sources error code",
+        )
+    }
+
+    #[test]
+    fn verify_broker_lookup_json_reuses_retained_records_without_building() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let records_path = tempdir.path().join("verification-runs.json");
+        let records = crate::models::sample_verification_run_records();
+        let records_json = serde_json::to_string(&records)
+            .map_err(|error| format!("serialize broker records: {error}"))?;
+        fs::write(&records_path, records_json)
+            .map_err(|error| format!("write broker records fixture: {error}"))?;
+        let records_path = records_path.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "verify",
+            "broker",
+            "lookup",
+            "--records-json",
+            &records_path,
+            "--source-hash",
+            "blake3:source",
+            "--command-hash",
+            "blake3:rch-command",
+            "--normalized-argv-hash",
+            "blake3:rch-command-argv",
+            "--command-class",
+            "cargo_test",
+            "--execution-substrate",
+            "rch",
+            "--bead-id",
+            "bd-example",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "verify broker lookup JSON exit",
+        )?;
+        ensure(stderr.is_empty(), "verify broker lookup JSON stderr clean")?;
+        ensure_ends_with(&stdout, '\n', "verify broker lookup trailing newline")?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("verify broker stdout must parse: {error}"))?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "verify broker response schema",
+        )?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!("ee.verification.broker_view.v1"),
+            "verify broker data schema",
+        )?;
+        ensure_equal(
+            &value["data"]["broker"]["status"],
+            &serde_json::json!("reusable"),
+            "verify broker status",
+        )?;
+        ensure_equal(
+            &value["data"]["broker"]["matchedRunId"],
+            &serde_json::json!("vrun_rch_00000000000000000001"),
+            "verify broker matched run",
+        )?;
+        ensure_equal(
+            &value["data"]["broker"]["suggestedAction"],
+            &serde_json::json!("cite_existing_run"),
+            "verify broker suggested action",
+        )
+    }
+
+    #[test]
+    fn verify_broker_lookup_json_surfaces_stale_and_known_blocker_records() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let records_path = tempdir.path().join("verification-runs.json");
+        let records = crate::models::sample_verification_run_records();
+        let records_json = serde_json::to_string(&records)
+            .map_err(|error| format!("serialize broker records: {error}"))?;
+        fs::write(&records_path, records_json)
+            .map_err(|error| format!("write broker records fixture: {error}"))?;
+        let records_path = records_path.to_string_lossy().into_owned();
+
+        let stale = invoke(&[
+            "ee",
+            "--json",
+            "verify",
+            "broker",
+            "lookup",
+            "--records-json",
+            &records_path,
+            "--source-hash",
+            "blake3:new-source",
+            "--command-hash",
+            "blake3:rch-command",
+            "--normalized-argv-hash",
+            "blake3:rch-command-argv",
+        ]);
+        ensure_equal(
+            &stale.0,
+            &ProcessExitCode::Success,
+            "verify broker stale exit",
+        )?;
+        ensure(stale.2.is_empty(), "verify broker stale stderr clean")?;
+        let stale_json: serde_json::Value = serde_json::from_str(&stale.1)
+            .map_err(|error| format!("verify broker stale stdout must parse: {error}"))?;
+        ensure_equal(
+            &stale_json["data"]["broker"]["status"],
+            &serde_json::json!("stale"),
+            "verify broker stale status",
+        )?;
+        ensure_equal(
+            &stale_json["data"]["broker"]["suggestedAction"],
+            &serde_json::json!("rerun_current_source"),
+            "verify broker stale action",
+        )?;
+
+        let known_blocker = invoke(&[
+            "ee",
+            "--json",
+            "verify",
+            "broker",
+            "lookup",
+            "--records-json",
+            &records_path,
+            "--source-hash",
+            "blake3:source",
+            "--command-hash",
+            "blake3:failed-command",
+            "--normalized-argv-hash",
+            "blake3:failed-command-argv",
+        ]);
+        ensure_equal(
+            &known_blocker.0,
+            &ProcessExitCode::Success,
+            "verify broker known-blocker exit",
+        )?;
+        ensure(
+            known_blocker.2.is_empty(),
+            "verify broker known-blocker stderr clean",
+        )?;
+        let known_blocker_json: serde_json::Value = serde_json::from_str(&known_blocker.1)
+            .map_err(|error| format!("verify broker known-blocker stdout must parse: {error}"))?;
+        ensure_equal(
+            &known_blocker_json["data"]["broker"]["status"],
+            &serde_json::json!("known_blocker"),
+            "verify broker known-blocker status",
+        )?;
+        ensure_equal(
+            &known_blocker_json["data"]["broker"]["suggestedAction"],
+            &serde_json::json!("inspect_known_blocker"),
+            "verify broker known-blocker action",
+        )
+    }
+
+    #[test]
+    fn verify_broker_lookup_without_records_returns_unavailable() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "verify",
+            "broker",
+            "lookup",
+            "--source-hash",
+            "blake3:source",
+            "--command-hash",
+            "blake3:no-record",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "verify broker unavailable exit",
+        )?;
+        ensure(stderr.is_empty(), "verify broker unavailable stderr clean")?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("verify broker unavailable stdout must parse: {error}"))?;
+        ensure_equal(
+            &value["data"]["broker"]["status"],
+            &serde_json::json!("unavailable"),
+            "verify broker unavailable status",
+        )?;
+        ensure_equal(
+            &value["data"]["broker"]["suggestedAction"],
+            &serde_json::json!("import_or_run_verification"),
+            "verify broker unavailable action",
         )
     }
 
