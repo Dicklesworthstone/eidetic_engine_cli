@@ -126,3 +126,30 @@ The e2e emits one JSONL event per phase with schema `ee.test_event.v1`,
 `command_hash`, `worker_id`, and `degraded_codes`. The cleanup phase does not
 delete files; it records `status=no_delete_by_policy` and leaves the temporary
 proof directory in `/tmp`.
+
+## Runbook Command Example Lint
+
+`scripts/check-rch-doc-examples.py` keeps this page and
+`docs/rch_runbook.md` from drifting back to copy-pasteable local Cargo
+examples. It scans fenced shell blocks, allows commands wrapped through
+`scripts/rch_verify.sh` or explicit `rch exec`, and rejects direct
+`cargo build/check/test/bench/clippy` examples that would bypass RCH.
+RCH-specific fenced blocks in AGENTS.md and README.md are scanned too.
+
+```bash
+python3 scripts/check-rch-doc-examples.py --json
+```
+
+The copy-paste smoke harness extracts the first documented dry-run verifier
+example and executes that exact docs text. It expects an `ee.rch.verify.v1`
+proof with `status=dry_run` and an explicit `rch exec` invocation, so the
+default lane never starts local Cargo or a remote build.
+
+```bash
+scripts/e2e_overhaul/rch_runbook_docs_smoke.sh
+```
+
+Both surfaces emit deterministic machine output. The e2e emits
+`ee.test_event.v1` lines with `surface=rch_doc_examples`, `source_file`,
+`fenced_block_index`, `normalized_command`, `command_hash`, `phase`,
+`status`, `elapsed_ms`, `degraded_codes`, and `first_failure_diagnosis`.
