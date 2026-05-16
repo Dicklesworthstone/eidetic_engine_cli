@@ -359,8 +359,7 @@ impl ReadConnectionPool {
             let age = now
                 .checked_duration_since(record.acquired_at)
                 .unwrap_or(Duration::ZERO);
-            if age >= record.max_pin_duration {
-                record.poisoned.store(true, Ordering::Release);
+            if age >= record.max_pin_duration && !record.poisoned.swap(true, Ordering::AcqRel) {
                 expired.push(ExpiredSnapshotPin {
                     pin_id: *pin_id,
                     slot_id: record.slot_id,
@@ -1180,6 +1179,31 @@ mod tests {
         assert_eq!(stats.active, 0);
         assert_eq!(stats.idle, 1);
         assert_eq!(stats.active_pins, 0);
+    }
+
+    #[test]
+    fn watchdog_expired_pin_is_reported_once_until_released() {
+        let tempdir = must(tempfile::tempdir(), "tempdir creates");
+        let database_path = tempdir.path().join("read-pool-expired-pin-once.db");
+        seed_snapshot_database(&database_path);
+        let pool = ReadConnectionPool::new(
+            DatabaseConfig::file(database_path),
+            PoolConfig::new(1, Duration::from_secs(30)).with_max_pin_duration(Duration::ZERO),
+        );
+        let pin = must(pool.pin_snapshot(), "snapshot pin opens");
+
+        let first_scan = pool.expire_stale_pins();
+        let second_scan = pool.expire_stale_pins();
+
+        assert_eq!(first_scan.len(), 1);
+        assert!(second_scan.is_empty());
+        assert!(pin.is_poisoned());
+        assert_eq!(pool.stats().active_pins, 1);
+        assert_eq!(pool.stats().expired_pins, 1);
+
+        drop(pin);
+        assert_eq!(pool.stats().active_pins, 0);
+        assert_eq!(pool.stats().expired_pins, 0);
     }
 
     #[test]
