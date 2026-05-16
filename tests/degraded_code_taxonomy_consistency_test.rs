@@ -45,7 +45,20 @@ fn j6_fixture_codes(repo: &std::path::Path) -> Result<BTreeSet<String>, String> 
         let entry = entry.map_err(|e| format!("read entry: {e}"))?;
         let path = entry.path();
         if path.extension().is_some_and(|x| x == "json") {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            let content = std::fs::read_to_string(&path)
+                .map_err(|e| format!("read {}: {e}", path.display()))?;
+            let value: Value = serde_json::from_str(&content)
+                .map_err(|e| format!("parse {}: {e}", path.display()))?;
+            if value
+                .get("retired")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if let Some(code) = value.get("code").and_then(Value::as_str) {
+                codes.insert(code.to_owned());
+            } else if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                 codes.insert(stem.to_owned());
             }
         }

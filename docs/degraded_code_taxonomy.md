@@ -80,6 +80,7 @@ Current conventions:
 | `status` | Top-level `ee status` posture, capability, or subsystem degradation. |
 | `skyline` | `ee status --skyline` structural skyline degradation. |
 | `agent_detection` | Agent inventory and agent-status detection degradation. |
+| `artifact_register` | `ee artifact register` artifact metadata, redaction, or indexing degradation. |
 | `backup_create` | `ee backup create` export, redaction, index, or graph-cache degradation. |
 | `backup_inspect` | `ee backup inspect` manifest or artifact-inspection degradation. |
 | `backup_list` | `ee backup list` backup-root or manifest-listing degradation. |

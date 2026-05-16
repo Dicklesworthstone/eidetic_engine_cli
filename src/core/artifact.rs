@@ -9,6 +9,7 @@ use std::{fs, str::FromStr};
 
 use chrono::{SecondsFormat, Utc};
 
+use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::db::{
     CreateArtifactInput, CreateArtifactLinkInput, CreateAuditInput, CreateWorkspaceInput,
     DbConnection, StoredArtifact, StoredArtifactLink, audit_actions, generate_audit_id,
@@ -110,6 +111,32 @@ impl ArtifactDegradation {
     }
 }
 
+fn artifact_degraded_data_json(
+    source: &'static str,
+    degraded: &[ArtifactDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            source,
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry.repair.clone(),
+        )
+    }))
+    .into_iter()
+    .map(|entry| {
+        serde_json::json!({
+            "code": entry.code,
+            "severity": entry.severity,
+            "message": entry.message,
+            "repair": entry.repair,
+            "sources": entry.sources,
+        })
+    })
+    .collect()
+}
+
 /// Artifact row plus links in public command shape.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactView {
@@ -168,7 +195,7 @@ impl ArtifactRegisterReport {
             "artifact": self.artifact.data_json(),
             "auditId": self.audit_id,
             "indexStatus": self.index_status,
-            "degraded": self.degraded.iter().map(ArtifactDegradation::data_json).collect::<Vec<_>>(),
+            "degraded": artifact_degraded_data_json("artifact_register", &self.degraded),
         })
     }
 
@@ -1149,6 +1176,101 @@ mod tests {
 
     fn secret_assignment(value: &str) -> String {
         format!("{}={value}", secret_fixture(&["api", "_", "key"]))
+    }
+
+    fn stored_artifact_fixture() -> StoredArtifact {
+        StoredArtifact {
+            id: "art_00000000000000000000000001".to_owned(),
+            workspace_id: "wsp_00000000000000000000000001".to_owned(),
+            source_kind: "file".to_owned(),
+            artifact_type: "log".to_owned(),
+            original_path: Some("log.txt".to_owned()),
+            canonical_path: Some("/workspace/log.txt".to_owned()),
+            external_ref: None,
+            content_hash: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            media_type: Some("text/plain".to_owned()),
+            size_bytes: Some(12),
+            redaction_status: "none".to_owned(),
+            snippet: Some("hello".to_owned()),
+            snippet_hash: Some(
+                "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_owned(),
+            ),
+            provenance_uri: Some("ee-test://artifact".to_owned()),
+            metadata_json: "{}".to_owned(),
+            created_at: "2026-05-16T00:00:00Z".to_owned(),
+            updated_at: "2026-05-16T00:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn artifact_register_degraded_entries_are_aggregated() -> TestResult {
+        let report = ArtifactRegisterReport {
+            schema: ARTIFACT_REGISTER_SCHEMA_V1,
+            status: "degraded".to_owned(),
+            dry_run: false,
+            persisted: true,
+            artifact: ArtifactView {
+                artifact: stored_artifact_fixture(),
+                links: Vec::new(),
+            },
+            audit_id: Some("audit_00000000000000000000000001".to_owned()),
+            index_status: "queued".to_owned(),
+            degraded: vec![
+                ArtifactDegradation::new(
+                    "artifact_index_degraded",
+                    "warning",
+                    "artifact index enqueue was delayed",
+                    "run ee index rebuild --workspace .",
+                ),
+                ArtifactDegradation::new(
+                    "artifact_index_degraded",
+                    "high",
+                    "artifact index enqueue failed",
+                    "rerun ee artifact register after repairing the index",
+                ),
+            ],
+        };
+
+        let json = report.data_json();
+        let degraded = json
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "expected degraded array".to_owned())?;
+        ensure(
+            degraded.len() == 1,
+            format!("expected one aggregated degradation, got {degraded:?}"),
+        )?;
+        ensure(
+            degraded[0].get("code").and_then(serde_json::Value::as_str)
+                == Some("artifact_index_degraded"),
+            format!("unexpected code: {:?}", degraded[0]),
+        )?;
+        ensure(
+            degraded[0]
+                .get("severity")
+                .and_then(serde_json::Value::as_str)
+                == Some("high"),
+            format!("unexpected severity: {:?}", degraded[0]),
+        )?;
+        ensure(
+            degraded[0]
+                .get("repair")
+                .and_then(serde_json::Value::as_str)
+                == Some("rerun ee artifact register after repairing the index"),
+            format!("unexpected repair: {:?}", degraded[0]),
+        )?;
+        ensure(
+            degraded[0]
+                .get("sources")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|sources| {
+                    sources
+                        == [serde_json::Value::String("artifact_register".to_owned())].as_slice()
+                }),
+            format!("unexpected sources: {:?}", degraded[0]),
+        )
     }
 
     #[test]
