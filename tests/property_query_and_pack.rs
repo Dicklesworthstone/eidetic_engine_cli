@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 const REGRESSION_FIXTURE_SCHEMA: &str = "ee.proptest.regression.v1";
 const REGRESSION_FIXTURE_CAPTURED_AT: &str = "1970-01-01T00:00:00Z";
+const REGRESSION_FIXTURE_DIR: &str = "tests/fixtures/proptest_regressions";
 const PROPTEST_RUN_EVENT_SCHEMA: &str = "ee.test_event.v1";
 const PROPTEST_RUN_EVENT_KIND: &str = "proptest_run";
 const PROPTEST_AXIS_COUNT: usize = 6;
@@ -299,6 +300,27 @@ fn regression_fixture_for_pack_case_mismatch(
         expected,
         observed,
     ))
+}
+
+fn persist_pack_case_regression_if_mismatch(
+    dir: &Path,
+    query: String,
+    budget: TokenBudget,
+    profile: ContextPackProfile,
+    options: PackAssemblyOptions,
+    seed: u64,
+    specs: &[(u32, u16, u16, u8)],
+    expected: &[u8],
+    observed: &[u8],
+) -> Result<Option<PathBuf>, String> {
+    if expected == observed {
+        return Ok(None);
+    }
+    let fixture = regression_fixture_for_pack_case_mismatch(
+        query, budget, profile, options, seed, specs, expected, observed,
+    )?
+    .ok_or_else(|| "regression fixture mismatch unexpectedly had no byte diff".to_owned())?;
+    persist_regression_fixture(dir, &fixture).map(Some)
 }
 
 fn parse_regression_redaction_level(value: &str) -> Result<RedactionLevel, String> {
@@ -816,6 +838,67 @@ fn determinism_regression_fixture_replays_structured_pack_input() -> Result<(), 
 }
 
 #[test]
+fn determinism_regression_fixture_persists_pack_case_mismatches_only() -> Result<(), String> {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let specs = vec![(8, 900, 700, 1), (13, 500, 950, 3), (5, 650, 875, 2)];
+    let budget = TokenBudget::new(64).map_err(|error| format!("{error:?}"))?;
+    let options = PackAssemblyOptions {
+        include_coverage_fill: true,
+        output_redaction_enabled: true,
+        redaction_level: RedactionLevel::Strict,
+    };
+    let input = regression_input_for_pack_case(
+        "persisted mismatch".to_string(),
+        budget,
+        ContextPackProfile::Balanced,
+        options,
+        42,
+        &specs,
+    )?;
+    let expected = replay_pack_case_input_bytes(&input)?;
+
+    let no_mismatch = persist_pack_case_regression_if_mismatch(
+        tempdir.path(),
+        "persisted mismatch".to_string(),
+        budget,
+        ContextPackProfile::Balanced,
+        options,
+        42,
+        &specs,
+        &expected,
+        &expected,
+    )?;
+    assert!(no_mismatch.is_none());
+    assert!(load_regression_fixtures(tempdir.path())?.is_empty());
+
+    let path = persist_pack_case_regression_if_mismatch(
+        tempdir.path(),
+        "persisted mismatch".to_string(),
+        budget,
+        ContextPackProfile::Balanced,
+        options,
+        42,
+        &specs,
+        &expected,
+        b"synthetic nondeterministic output",
+    )?
+    .ok_or_else(|| "mismatched pack case should persist a regression fixture".to_owned())?;
+
+    assert_eq!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(
+            regression_fixture_file_name(&load_regression_fixtures(tempdir.path())?[0].input_hash)?
+                .as_str()
+        )
+    );
+    assert_eq!(
+        verify_loaded_regression_fixture_replays(tempdir.path())?,
+        vec![hash_bytes(&expected)]
+    );
+    Ok(())
+}
+
+#[test]
 fn determinism_regression_fixture_verifies_replayed_expected_hash() -> Result<(), String> {
     let specs = vec![(8, 900, 700, 1), (13, 500, 950, 3), (5, 650, 875, 2)];
     let budget = TokenBudget::new(64).map_err(|error| format!("{error:?}"))?;
@@ -1314,6 +1397,7 @@ proptest! {
     ) {
         let budget = TokenBudget::new(budget_raw)
             .map_err(|error| TestCaseError::fail(format!("{error:?}")))?;
+        let specs_for_fixture = specs.clone();
         let candidates = candidates_from_specs(specs).map_err(TestCaseError::fail)?;
         let query = format!("property pack determinism {query_suffix}");
         let profile = profile_for(profile_raw);
@@ -1345,8 +1429,36 @@ proptest! {
             &Deterministic::from_seed(seed),
         )
         .map_err(|error| TestCaseError::fail(format!("{error:?}")))?;
+        let first_bytes = draft_bytes(&first);
+        let replay_bytes = draft_bytes(&replay);
+        let reordered_bytes = draft_bytes(&reordered);
 
-        prop_assert_eq!(draft_bytes(&first), draft_bytes(&replay));
-        prop_assert_eq!(draft_bytes(&first), draft_bytes(&reordered));
+        persist_pack_case_regression_if_mismatch(
+            Path::new(REGRESSION_FIXTURE_DIR),
+            query.clone(),
+            budget,
+            profile,
+            options,
+            seed,
+            &specs_for_fixture,
+            &first_bytes,
+            &replay_bytes,
+        )
+        .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(&first_bytes, &replay_bytes);
+
+        persist_pack_case_regression_if_mismatch(
+            Path::new(REGRESSION_FIXTURE_DIR),
+            query,
+            budget,
+            profile,
+            options,
+            seed,
+            &specs_for_fixture,
+            &first_bytes,
+            &reordered_bytes,
+        )
+        .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(first_bytes, reordered_bytes);
     }
 }
