@@ -18,12 +18,13 @@ use crate::config::GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY;
 use crate::core::memory::{
     EvidenceFreshness, EvidenceFreshnessStatus, assess_memory_evidence_freshness, memory_validity,
 };
-use crate::db::DbConnection;
+use crate::db::{DbConnection, generate_audit_id, generate_audit_id_seeded};
 use crate::models::{
     AGENT_CONTEXT_PROFILE_SCHEMA_V1, AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_COLD_START_OUTCOMES,
     AgentContextProfileCounts, RationaleTrace, RationaleTraceVisibility,
     VerificationEvidenceRecord,
 };
+use crate::runtime::determinism::{Deterministic, Seed};
 use sqlmodel_core::{Row, Value};
 
 /// Why a memory was stored with certain characteristics.
@@ -803,6 +804,36 @@ fn trace_why_math_surfaces(
 /// Explains why a memory was stored, how it would be retrieved,
 /// and how it would be selected for context packs.
 pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
+    let mut audit_ids = WhyAuditIdSource::Ambient;
+    explain_memory_inner(options, &mut audit_ids)
+}
+
+pub fn explain_memory_seeded(
+    options: &WhyOptions<'_>,
+    determinism: &mut Deterministic<Seed>,
+) -> WhyReport {
+    let mut audit_ids = WhyAuditIdSource::Seeded(determinism);
+    explain_memory_inner(options, &mut audit_ids)
+}
+
+enum WhyAuditIdSource<'a> {
+    Ambient,
+    Seeded(&'a mut Deterministic<Seed>),
+}
+
+impl WhyAuditIdSource<'_> {
+    fn next_audit_id(&mut self) -> String {
+        match self {
+            Self::Ambient => generate_audit_id(),
+            Self::Seeded(determinism) => generate_audit_id_seeded(determinism),
+        }
+    }
+}
+
+fn explain_memory_inner(
+    options: &WhyOptions<'_>,
+    audit_ids: &mut WhyAuditIdSource<'_>,
+) -> WhyReport {
     let started = Instant::now();
     let target = resolve_why_target(options.memory_id);
     let memory_id = target.document_id;
@@ -1043,7 +1074,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
         target_id: Some(memory_id.to_owned()),
         details: Some(details),
     };
-    let _ = conn.insert_audit(&crate::db::generate_audit_id(), &audit_input);
+    let _ = conn.insert_audit(&audit_ids.next_audit_id(), &audit_input);
 
     report
 }
@@ -2325,6 +2356,88 @@ mod tests {
             evidence.verification_id.as_str(),
             "verification id",
         )
+    }
+
+    #[test]
+    fn explain_memory_seeded_replays_why_inspected_audit_id() -> TestResult {
+        fn run_seeded(seed: u64) -> Result<String, String> {
+            let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let database_path = temp.path().join(".ee").join("ee.db");
+            std::fs::create_dir_all(
+                database_path
+                    .parent()
+                    .ok_or("database path should have parent")?,
+            )
+            .map_err(|error| error.to_string())?;
+            let workspace_id = "wsp_00000000000000000000000001";
+            let memory_id = "mem_00000000000000000000000001";
+            let connection = crate::db::DbConnection::open_file(&database_path)
+                .map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            connection
+                .insert_workspace(
+                    workspace_id,
+                    &crate::db::CreateWorkspaceInput {
+                        path: temp.path().display().to_string(),
+                        name: Some("why-seeded".to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .insert_memory(
+                    memory_id,
+                    &crate::db::CreateMemoryInput {
+                        workspace_id: workspace_id.to_owned(),
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: "Use seeded why audit IDs in replay tests.".to_owned(),
+                        workflow_id: None,
+                        confidence: 0.8,
+                        utility: 0.7,
+                        importance: 0.6,
+                        provenance_uri: None,
+                        trust_class: "agent_assertion".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+
+            let mut determinism = Deterministic::from_seed(seed);
+            let report = explain_memory_seeded(
+                &WhyOptions {
+                    database_path: &database_path,
+                    memory_id,
+                    confidence_threshold: WhyOptions::DEFAULT_CONFIDENCE_THRESHOLD,
+                },
+                &mut determinism,
+            );
+
+            ensure(report.found, true, "why found memory")?;
+            let audits = connection
+                .list_audit_by_target("memory", memory_id, None)
+                .map_err(|error| error.to_string())?;
+            let why_audit_ids = audits
+                .iter()
+                .filter(|entry| entry.action == crate::db::audit_actions::WHY_INSPECTED)
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>();
+            ensure(why_audit_ids.len(), 1_usize, "why audit row count")?;
+            let audit_id = why_audit_ids
+                .first()
+                .ok_or_else(|| "why audit row missing".to_string())?
+                .clone();
+            ensure(audit_id.starts_with("audit_"), true, "audit id prefix")?;
+            Ok(audit_id)
+        }
+
+        let first = run_seeded(45_001)?;
+        let replay = run_seeded(45_001)?;
+        let other = run_seeded(45_002)?;
+        ensure(first.clone(), replay, "same seed replays why audit ID")?;
+        ensure(first == other, false, "different seed changes why audit ID")
     }
 
     #[test]
