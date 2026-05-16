@@ -329,6 +329,14 @@ fn load_regression_fixtures(dir: &Path) -> Result<Vec<DeterminismRegressionFixtu
     if !dir.exists() {
         return Ok(Vec::new());
     }
+    let dir_metadata = fs::symlink_metadata(dir)
+        .map_err(|error| format!("metadata {}: {error}", dir.display()))?;
+    if dir_metadata.file_type().is_symlink() {
+        return Err(format!(
+            "read {}: regression fixture directory is a symlink",
+            dir.display()
+        ));
+    }
 
     let mut entries = Vec::new();
     for entry in fs::read_dir(dir).map_err(|error| format!("read {}: {error}", dir.display()))? {
@@ -756,6 +764,25 @@ fn determinism_regression_fixture_loader_rejects_symlinked_fixture_file() -> Res
 
     assert!(error.contains("regression fixture path is a symlink"));
     assert!(error.contains(&symlink_path.display().to_string()));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn determinism_regression_fixture_loader_rejects_symlinked_fixture_dir() -> Result<(), String> {
+    use std::os::unix::fs::symlink;
+
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let real_dir = tempdir.path().join("real-fixtures");
+    fs::create_dir(&real_dir).map_err(|error| error.to_string())?;
+    let symlink_dir = tempdir.path().join("linked-fixtures");
+    symlink(&real_dir, &symlink_dir).map_err(|error| error.to_string())?;
+
+    let error = load_regression_fixtures(&symlink_dir)
+        .expect_err("symlinked fixture directories should not be followed");
+
+    assert!(error.contains("regression fixture directory is a symlink"));
+    assert!(error.contains(&symlink_dir.display().to_string()));
     Ok(())
 }
 
