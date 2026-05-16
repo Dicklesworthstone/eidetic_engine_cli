@@ -1480,6 +1480,7 @@ fn database_payload_hash_matches(record: &StoredCertificateRecord) -> Result<boo
         return Ok(false);
     };
     let payload_path = resolve_database_payload_path_no_symlinks(record, Path::new(payload_path))?;
+    ensure_certificate_payload_regular_file(&payload_path)?;
     let payload = fs::read(payload_path)?;
     let actual = match record.hash_algo.as_str() {
         "blake3" => format!("blake3:{}", blake3::hash(&payload).to_hex()),
@@ -1495,7 +1496,22 @@ fn database_payload_hash_matches(record: &StoredCertificateRecord) -> Result<boo
 
 fn read_manifest_payload(manifest_dir: &Path, payload_path: &Path) -> io::Result<Vec<u8>> {
     let payload_path = resolve_manifest_payload_path_no_symlinks(manifest_dir, payload_path)?;
+    ensure_certificate_payload_regular_file(&payload_path)?;
     fs::read(payload_path)
+}
+
+fn ensure_certificate_payload_regular_file(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "certificate payload path is not a regular file: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn resolve_database_payload_path_no_symlinks(
@@ -2712,6 +2728,64 @@ mod tests {
         ensure(
             report.message.contains("unsafe certificate payloadPath"),
             "unsafe payload path message",
+        )
+    }
+
+    #[test]
+    fn manifest_payload_read_rejects_non_regular_payload_path() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::create_dir(dir.path().join("payload.json")).map_err(|error| error.to_string())?;
+
+        let error = read_manifest_payload(dir.path(), Path::new("payload.json"))
+            .expect_err("directory payload path must be rejected");
+
+        ensure_equal(
+            &error.kind(),
+            &io::ErrorKind::InvalidInput,
+            "non-regular manifest payload error kind",
+        )?;
+        ensure(
+            error.to_string().contains("not a regular file"),
+            "non-regular manifest payload message",
+        )
+    }
+
+    #[test]
+    fn database_payload_hash_rejects_non_regular_payload_path() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::create_dir(dir.path().join("payload.json")).map_err(|error| error.to_string())?;
+        let manifest_path = dir.path().join("certificates.json");
+        let record = StoredCertificateRecord {
+            id: "cert_pack_directory_payload".to_owned(),
+            workspace_id: "workspace_main".to_owned(),
+            target_kind: "pack".to_owned(),
+            target_id: "pack_directory_payload".to_owned(),
+            hash_algo: "blake3".to_owned(),
+            content_hash: format!("blake3:{}", blake3::hash(b"payload").to_hex()),
+            signature: None,
+            signature_algorithm: None,
+            signer: None,
+            signed_at: None,
+            verified_at: None,
+            status: "valid".to_owned(),
+            manifest_path: Some(manifest_path.to_string_lossy().into_owned()),
+            payload_path: Some("payload.json".to_owned()),
+            metadata_json: "{}".to_owned(),
+            created_at: "2026-05-01T00:00:00Z".to_owned(),
+            updated_at: "2026-05-01T00:00:00Z".to_owned(),
+        };
+
+        let error = database_payload_hash_matches(&record)
+            .expect_err("directory database payload path must be rejected");
+
+        ensure_equal(
+            &error.kind(),
+            &io::ErrorKind::InvalidInput,
+            "non-regular database payload error kind",
+        )?;
+        ensure(
+            error.to_string().contains("not a regular file"),
+            "non-regular database payload message",
         )
     }
 
