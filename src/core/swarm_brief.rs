@@ -672,10 +672,29 @@ impl SwarmBriefCommandRunner for SystemSwarmBriefCommandRunner {
                 }
             })?;
 
+        let mut stdout_handle = child.stdout.take().ok_or_else(|| {
+            SwarmBriefCommandError::Unavailable("Failed to capture stdout pipe".to_string())
+        })?;
+        let mut stderr_handle = child.stderr.take().ok_or_else(|| {
+            SwarmBriefCommandError::Unavailable("Failed to capture stderr pipe".to_string())
+        })?;
+
+        let stdout_thread = thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut stdout_handle, &mut buf);
+            buf
+        });
+
+        let stderr_thread = thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut stderr_handle, &mut buf);
+            buf
+        });
+
         let started_at = Instant::now();
-        loop {
+        let status = loop {
             match child.try_wait() {
-                Ok(Some(_status)) => break,
+                Ok(Some(status)) => break status,
                 Ok(None) => {
                     let elapsed = started_at.elapsed();
                     if elapsed >= timeout {
@@ -691,22 +710,21 @@ impl SwarmBriefCommandRunner for SystemSwarmBriefCommandRunner {
                     return Err(SwarmBriefCommandError::Unavailable(error.to_string()));
                 }
             }
-        }
+        };
 
-        let output = child
-            .wait_with_output()
-            .map_err(|error| SwarmBriefCommandError::Unavailable(error.to_string()))?;
+        let stdout_bytes = stdout_thread.join().unwrap_or_default();
+        let stderr_bytes = stderr_thread.join().unwrap_or_default();
 
-        let stdout = String::from_utf8(output.stdout)
-            .map_err(|error| SwarmBriefCommandError::InvalidUtf8(error.to_string()))?;
-        let stderr = String::from_utf8(output.stderr)
-            .map_err(|error| SwarmBriefCommandError::InvalidUtf8(error.to_string()))?;
+        let stdout = String::from_utf8(stdout_bytes)
+            .unwrap_or_else(|_| String::from_utf8_lossy(b"Invalid UTF-8 stdout").into_owned());
+        let stderr = String::from_utf8(stderr_bytes)
+            .unwrap_or_else(|_| String::from_utf8_lossy(b"Invalid UTF-8 stderr").into_owned());
 
-        if output.status.success() {
+        if status.success() {
             Ok(SwarmBriefCommandOutput { stdout, stderr })
         } else {
             Err(SwarmBriefCommandError::Failed {
-                status: output.status.code(),
+                status: status.code(),
                 stderr,
             })
         }

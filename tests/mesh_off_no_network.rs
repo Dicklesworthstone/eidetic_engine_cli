@@ -8,6 +8,13 @@ use std::process::{Command, Output};
 
 type TestResult = Result<(), String>;
 
+fn temp_workspace() -> Result<tempfile::TempDir, String> {
+    tempfile::Builder::new()
+        .prefix("ee-mesh-off-no-network-")
+        .tempdir_in("/tmp")
+        .map_err(|error| format!("failed to create temp workspace under /tmp: {error}"))
+}
+
 fn run_ee(workspace: &str, args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
@@ -168,7 +175,7 @@ fn assert_no_new_mesh_listener(
 
 #[test]
 fn mesh_off_status_reports_capability_without_polluting_ordinary_json() -> TestResult {
-    let workspace_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace_dir = temp_workspace()?;
     let workspace = workspace_dir.path().to_string_lossy().into_owned();
 
     let init = run_ee(&workspace, &["init", "--json"])?;
