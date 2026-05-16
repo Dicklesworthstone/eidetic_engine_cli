@@ -45,6 +45,9 @@ fn ambient_env(_: &ee::runtime::determinism::Deterministic<Seed>) {
 fn hashmap_iteration(_: &ee::runtime::determinism::Deterministic<Seed>) {
     let map: HashMap<String, String> = HashMap::new();
     for _ in map.iter() {}
+    for _ in map.keys() {}
+    for _ in map.values() {}
+    for _ in map.into_iter() {}
 }
 
 #[determinism::required]

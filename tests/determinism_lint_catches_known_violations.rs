@@ -102,7 +102,7 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "iterate env only through a deterministic registered boundary",
             });
         }
-        if line.contains(".iter()") && nearby_lines_contain(&scan_lines, index, "HashMap") {
+        if hash_map_iteration_call(line) && nearby_lines_contain(&scan_lines, index, "HashMap") {
             findings.push(Finding {
                 line: line_no,
                 code: "hashmap_iteration",
@@ -304,6 +304,12 @@ fn nearby_lines_contain(lines: &[String], index: usize, needle: &str) -> bool {
         .any(|line| line.contains(needle))
 }
 
+fn hash_map_iteration_call(line: &str) -> bool {
+    [".iter()", ".keys()", ".values()", ".into_iter()"]
+        .iter()
+        .any(|needle| line.contains(needle))
+}
+
 fn render_report(findings: &[Finding]) -> String {
     let mut output = String::from("schema: ee.determinism_lint_fixture.v1\n");
     for finding in findings {
@@ -392,5 +398,20 @@ mod self_tests {
         assert!(report.contains("ambient_env_var_os"));
         assert!(report.contains("ambient_env_iteration"));
         assert!(report.contains("unsorted_read_dir"));
+    }
+
+    #[test]
+    fn hashmap_iteration_aliases_emit_known_violations() {
+        let fixture = r#"
+            use std::collections::HashMap;
+
+            fn ambient(map: HashMap<String, String>) {
+                for _ in map.keys() {}
+                for _ in map.values() {}
+                for _ in map.into_iter() {}
+            }
+        "#;
+        let report = render_report(&scan_fixture(fixture));
+        assert_eq!(report.matches("hashmap_iteration").count(), 3);
     }
 }

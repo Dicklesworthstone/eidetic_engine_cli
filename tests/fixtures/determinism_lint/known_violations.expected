@@ -9,5 +9,8 @@ line 39: ambient_env_var: read env through the registered config boundary
 line 40: ambient_env_var_os: read optional env through the registered config boundary
 line 41: ambient_env_iteration: iterate env only through a deterministic registered boundary
 line 47: hashmap_iteration: sort HashMap entries before deterministic output
-line 52: unsorted_read_dir: sort read_dir entries before deterministic output
-line 53: unsorted_read_dir: sort read_dir entries before deterministic output
+line 48: hashmap_iteration: sort HashMap entries before deterministic output
+line 49: hashmap_iteration: sort HashMap entries before deterministic output
+line 50: hashmap_iteration: sort HashMap entries before deterministic output
+line 55: unsorted_read_dir: sort read_dir entries before deterministic output
+line 56: unsorted_read_dir: sort read_dir entries before deterministic output
