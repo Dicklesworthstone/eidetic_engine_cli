@@ -141,6 +141,7 @@ fn pagerank_budgeted_wrapper_is_byte_stable_with_direct_policy_output() -> TestR
         node_count: 3,
         edge_count: 2,
         build_ms: 0.0,
+        snapshot_version: 0,
     };
     let wrapped =
         compute_pagerank_with_policy(&projection, policy).map_err(|error| error.to_string())?;

@@ -120,10 +120,17 @@ pub fn compute_pack_dna_with_cx(
 ) -> GraphResult<PackDna> {
     let cx_for_worker = cx.clone();
     let directed = projection.graph.clone();
+    let snapshot_version = projection.snapshot_version;
     let input = input.clone();
     run_with_budget(cx, "pack_dna", DEFAULT_FOREGROUND_BUDGET, move || {
         let undirected = undirected_from_directed(&directed)?;
-        compute_pack_dna_unbudgeted(&cx_for_worker, &directed, &undirected, &input)
+        compute_pack_dna_unbudgeted(
+            &cx_for_worker,
+            &directed,
+            &undirected,
+            &input,
+            snapshot_version,
+        )
     })?
 }
 
@@ -132,6 +139,7 @@ fn compute_pack_dna_unbudgeted(
     directed: &DiGraph,
     undirected: &Graph,
     input: &PackDnaInput,
+    snapshot_version: u64,
 ) -> GraphResult<PackDna> {
     let pack_ids = valid_memory_ids(&input.pack_memory_ids, directed);
     let query_seed_weights = valid_seed_weights(&input.query_seed_weights, directed);
@@ -148,7 +156,7 @@ fn compute_pack_dna_unbudgeted(
 
     Ok(PackDna {
         schema: PACK_DNA_SCHEMA_V1,
-        snapshot_version: 0,
+        snapshot_version,
         pack_memory_count: pack_ids.len(),
         query_seed_count: query_seed_weights.len(),
         trust_anchor_count: trust_anchors.len(),
@@ -410,6 +418,7 @@ mod tests {
             node_count,
             edge_count,
             build_ms: 1.0,
+            snapshot_version: 0,
         }
     }
 
@@ -432,6 +441,7 @@ mod tests {
             node_count,
             edge_count,
             build_ms: 1.0,
+            snapshot_version: 0,
         }
     }
 

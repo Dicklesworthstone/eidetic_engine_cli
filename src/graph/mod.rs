@@ -1110,6 +1110,14 @@ fn compare_autolink_candidates(
 // ---------------------------------------------------------------------------
 
 /// Result of building a memory graph projection.
+///
+/// `snapshot_version` is 0 for live projections built directly from the
+/// database via `build_memory_graph`. When a projection is restored from
+/// a persisted graph snapshot (see steward / graph snapshot loading code),
+/// this field carries the version recorded in that snapshot's manifest.
+/// This enables Pack DNA and other explanatory surfaces to correctly
+/// report which graph snapshot produced their results (critical for
+/// `pack replay`, determinism, and forensic analysis).
 #[derive(Debug, Clone)]
 pub struct MemoryGraphProjection {
     /// The directed graph of memory relationships.
@@ -1120,6 +1128,8 @@ pub struct MemoryGraphProjection {
     pub edge_count: usize,
     /// Elapsed time to build the projection in milliseconds.
     pub build_ms: f64,
+    /// Graph snapshot version this projection came from (0 = live build).
+    pub snapshot_version: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1188,7 +1198,8 @@ pub fn build_memory_graph(
     options: &ProjectionOptions,
 ) -> GraphResult<MemoryGraphProjection> {
     let links = graph_projection_links(conn, options)?;
-    build_memory_graph_from_links(&links)
+    // Live build from DB → version 0 (not from a persisted snapshot)
+    build_memory_graph_from_links(&links, 0)
 }
 
 /// Build the causal-evidence typed subgraph from persisted ledger rows.
@@ -1736,7 +1747,10 @@ fn revision_dag_has_cycle(
         .any(|memory_id| visit(memory_id, adjacency, &mut visiting, &mut visited))
 }
 
-fn build_memory_graph_from_links(links: &[StoredMemoryLink]) -> GraphResult<MemoryGraphProjection> {
+fn build_memory_graph_from_links(
+    links: &[StoredMemoryLink],
+    snapshot_version: u64,
+) -> GraphResult<MemoryGraphProjection> {
     use std::time::Instant;
 
     let start = Instant::now();
@@ -1794,6 +1808,7 @@ fn build_memory_graph_from_links(links: &[StoredMemoryLink]) -> GraphResult<Memo
         node_count,
         edge_count,
         build_ms,
+        snapshot_version,
     })
 }
 
