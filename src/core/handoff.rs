@@ -1429,6 +1429,7 @@ fn machine_salt_path(override_path: Option<&Path>) -> PathBuf {
 }
 
 fn read_or_create_secret(path: &Path) -> Result<[u8; 32], DomainError> {
+    reject_existing_symlink_component(path, "handoff HMAC key")?;
     match fs::read(path) {
         Ok(bytes) => bytes_to_32_byte_secret(&bytes, path),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -1450,6 +1451,7 @@ fn read_or_create_secret(path: &Path) -> Result<[u8; 32], DomainError> {
 }
 
 fn read_existing_secret(path: &Path, missing_code: &'static str) -> Result<[u8; 32], DomainError> {
+    reject_existing_symlink_component(path, "handoff HMAC key")?;
     let bytes = fs::read(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             handoff_hmac_error(
@@ -1493,6 +1495,7 @@ fn write_private_secret(path: &Path, secret: &[u8; 32]) -> Result<(), DomainErro
     use std::fs::OpenOptions;
     use std::os::unix::fs::OpenOptionsExt;
 
+    reject_existing_symlink_component(path, "handoff HMAC key")?;
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
@@ -1512,15 +1515,18 @@ fn write_private_secret(path: &Path, secret: &[u8; 32]) -> Result<(), DomainErro
         message: format!("Failed to sync handoff HMAC key: {error}"),
         repair: Some(format!("Check disk health for {}", path.display())),
     })?;
+    reject_existing_symlink_component(path, "handoff HMAC key")?;
     set_private_file_mode(path)
 }
 
 #[cfg(not(unix))]
 fn write_private_secret(path: &Path, secret: &[u8; 32]) -> Result<(), DomainError> {
+    reject_existing_symlink_component(path, "handoff HMAC key")?;
     fs::write(path, secret).map_err(|error| DomainError::Storage {
         message: format!("Failed to write handoff HMAC key: {error}"),
         repair: Some(format!("Check permissions for {}", path.display())),
     })?;
+    reject_existing_symlink_component(path, "handoff HMAC key")?;
     set_private_file_mode(path)
 }
 
@@ -1540,6 +1546,7 @@ fn rotate_workspace_secret(workspace: &Path) -> Result<[u8; 32], DomainError> {
 #[cfg(unix)]
 fn set_private_file_mode(path: &Path) -> Result<(), DomainError> {
     use std::os::unix::fs::PermissionsExt;
+    reject_existing_symlink_component(path, "handoff HMAC key")?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
         DomainError::Storage {
             message: format!("Failed to set handoff key permissions: {error}"),
@@ -2064,6 +2071,66 @@ fn handoff_path_segment_end(input: &str, start: usize) -> usize {
         .unwrap_or(input.len())
 }
 
+fn reject_existing_symlink_component(path: &Path, label: &str) -> Result<(), DomainError> {
+    let mut ancestors: Vec<&Path> = path.ancestors().collect();
+    ancestors.reverse();
+
+    for candidate in ancestors {
+        if candidate.as_os_str().is_empty() {
+            continue;
+        }
+        match fs::symlink_metadata(candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "{label} path contains a symlink component: {}",
+                        candidate.display()
+                    ),
+                    repair: Some(
+                        "Use a regular file path for handoff capsules and key material.".to_owned(),
+                    ),
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Failed to inspect {label} path component {}: {error}",
+                        candidate.display()
+                    ),
+                    repair: Some(format!("Check permissions for {}", candidate.display())),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn read_regular_file_no_symlinks(path: &Path, label: &str) -> Result<String, DomainError> {
+    reject_existing_symlink_component(path, label)?;
+    let content = fs::read_to_string(path).map_err(|error| DomainError::Storage {
+        message: format!("Failed to read {label}: {error}"),
+        repair: Some(format!("Verify {} exists and is readable", path.display())),
+    })?;
+    reject_existing_symlink_component(path, label)?;
+    Ok(content)
+}
+
+fn write_regular_file_no_symlinks(
+    path: &Path,
+    content: &str,
+    label: &str,
+) -> Result<(), DomainError> {
+    reject_existing_symlink_component(path, label)?;
+    fs::write(path, content).map_err(|error| DomainError::Storage {
+        message: format!("Failed to write {label}: {error}"),
+        repair: Some(format!("Check write permissions for {}", path.display())),
+    })?;
+    reject_existing_symlink_component(path, label)
+}
+
 fn add_task_frame_to_resume(report: &mut ResumeReport, task_frame: serde_json::Value) {
     let frame_id = task_frame
         .get("id")
@@ -2541,13 +2608,7 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
     report.canonical_content_hash = compute_canonical_capsule_hash(&capsule_content);
 
     if !options.dry_run {
-        std::fs::write(&options.output, &content_str).map_err(|e| DomainError::Storage {
-            message: format!("Failed to write capsule: {e}"),
-            repair: Some(format!(
-                "Check write permissions for {}",
-                options.output.display()
-            )),
-        })?;
+        write_regular_file_no_symlinks(&options.output, &content_str, "handoff capsule")?;
     }
 
     Ok(report)
@@ -2555,6 +2616,7 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
 
 /// Rotate the workspace HMAC key and update one handoff capsule in place.
 pub fn rotate_handoff_key(options: &RotateKeyOptions) -> Result<RotateKeyReport, DomainError> {
+    reject_existing_symlink_component(&options.capsule, "handoff capsule")?;
     if !options.capsule.exists() {
         return Err(DomainError::Storage {
             message: format!("Capsule not found: {}", options.capsule.display()),
@@ -2562,14 +2624,7 @@ pub fn rotate_handoff_key(options: &RotateKeyOptions) -> Result<RotateKeyReport,
         });
     }
 
-    let content =
-        std::fs::read_to_string(&options.capsule).map_err(|error| DomainError::Storage {
-            message: format!("Failed to read capsule: {error}"),
-            repair: Some(format!(
-                "Verify {} exists and is readable",
-                options.capsule.display()
-            )),
-        })?;
+    let content = read_regular_file_no_symlinks(&options.capsule, "handoff capsule")?;
     let capsule: serde_json::Value =
         serde_json::from_str(&content).map_err(|error| DomainError::Storage {
             message: format!("Failed to parse capsule: {error}"),
@@ -2646,13 +2701,11 @@ pub fn rotate_handoff_key(options: &RotateKeyOptions) -> Result<RotateKeyReport,
     let body_preserved = signed_body_before_bytes == rotated_body_bytes;
 
     let rotated_content = crate::core::serialize_pretty_or_error(&rotated_capsule);
-    std::fs::write(&options.capsule, rotated_content).map_err(|error| DomainError::Storage {
-        message: format!("Failed to write rotated capsule: {error}"),
-        repair: Some(format!(
-            "Check write permissions for {}",
-            options.capsule.display()
-        )),
-    })?;
+    write_regular_file_no_symlinks(
+        &options.capsule,
+        &rotated_content,
+        "rotated handoff capsule",
+    )?;
 
     let audit_id = record_handoff_hmac_rotate_audit(
         &options.workspace,
@@ -2688,6 +2741,7 @@ pub fn rotate_handoff_key(options: &RotateKeyOptions) -> Result<RotateKeyReport,
 pub fn inspect_handoff(options: &InspectOptions) -> Result<InspectReport, DomainError> {
     let mut report = InspectReport::new(options.path.clone());
 
+    reject_existing_symlink_component(&options.path, "handoff capsule")?;
     if !options.path.exists() {
         report.validation_status = ValidationStatus::Invalid.as_str().to_owned();
         report
@@ -2696,13 +2750,7 @@ pub fn inspect_handoff(options: &InspectOptions) -> Result<InspectReport, Domain
         return Ok(report);
     }
 
-    let content = std::fs::read_to_string(&options.path).map_err(|e| DomainError::Storage {
-        message: format!("Failed to read capsule: {e}"),
-        repair: Some(format!(
-            "Verify {} exists and is readable",
-            options.path.display()
-        )),
-    })?;
+    let content = read_regular_file_no_symlinks(&options.path, "handoff capsule")?;
 
     let capsule: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| DomainError::Storage {
@@ -2766,6 +2814,7 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
         options.path.clone()
     };
 
+    reject_existing_symlink_component(&path, "handoff capsule")?;
     if !path.exists() {
         return Err(DomainError::Storage {
             message: format!("Capsule not found: {}", path.display()),
@@ -2773,10 +2822,7 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
         });
     }
 
-    let content = std::fs::read_to_string(&path).map_err(|e| DomainError::Storage {
-        message: format!("Failed to read capsule: {e}"),
-        repair: Some(format!("Verify {} exists and is readable", path.display())),
-    })?;
+    let content = read_regular_file_no_symlinks(&path, "handoff capsule")?;
 
     let capsule: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| DomainError::Storage {
@@ -3730,6 +3776,16 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
+    fn ensure_symlink_error<T: Debug>(result: Result<T, DomainError>, context: &str) -> TestResult {
+        match result {
+            Ok(value) => Err(format!("{context}: expected symlink error, got {value:?}")),
+            Err(error) => ensure(
+                error.message().contains("symlink"),
+                format!("{context}: expected symlink error, got {}", error.message()),
+            ),
+        }
+    }
+
     #[test]
     fn capsule_profile_has_stable_string_representation() -> TestResult {
         ensure_equal(&CapsuleProfile::Compact.as_str(), &"compact", "compact")?;
@@ -4265,6 +4321,93 @@ mod tests {
         })
         .map_err(|error| error.message())?;
         Ok(output)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_create_rejects_symlinked_output_parent() -> TestResult {
+        let workspace = repo_tempdir()?;
+        let outside = repo_tempdir()?;
+        let link = workspace.path().join("capsule-link");
+        std::os::unix::fs::symlink(outside.path(), &link).map_err(|error| error.to_string())?;
+        let output = link.join("handoff.json");
+
+        ensure_symlink_error(
+            create_handoff(&CreateOptions {
+                workspace: workspace.path().to_path_buf(),
+                output,
+                profile: CapsuleProfile::Resume,
+                since: None,
+                dry_run: false,
+                task_frame_id: None,
+                bind_to_machine: false,
+                machine_salt_path: None,
+                redaction_level: RedactionLevel::Standard,
+            }),
+            "create handoff through symlinked parent",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_inspect_rejects_symlinked_capsule() -> TestResult {
+        let dir = repo_tempdir()?;
+        let output = create_test_capsule(dir.path(), false, None)?;
+        let link = dir.path().join("handoff-link.json");
+        std::os::unix::fs::symlink(&output, &link).map_err(|error| error.to_string())?;
+
+        ensure_symlink_error(
+            inspect_handoff(&InspectOptions {
+                path: link,
+                verify_hash: true,
+                check_evidence: true,
+            }),
+            "inspect symlinked handoff capsule",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_resume_rejects_symlinked_capsule() -> TestResult {
+        let dir = repo_tempdir()?;
+        let output = create_test_capsule(dir.path(), false, None)?;
+        let link = dir.path().join("handoff-link.json");
+        std::os::unix::fs::symlink(&output, &link).map_err(|error| error.to_string())?;
+
+        ensure_symlink_error(
+            resume_handoff(&ResumeOptions {
+                path: link,
+                use_latest: false,
+                workspace: dir.path().to_path_buf(),
+                max_sections: None,
+                task_frame_id: None,
+                bound_workspace_id: None,
+                bound_workspace_identity: None,
+                include_prompt_fragment: false,
+                require_fresh: false,
+                insecure_skip_hmac: false,
+                machine_salt_path: None,
+            }),
+            "resume symlinked handoff capsule",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_rotate_key_rejects_symlinked_capsule() -> TestResult {
+        let dir = repo_tempdir()?;
+        let output = create_test_capsule(dir.path(), false, None)?;
+        let link = dir.path().join("handoff-link.json");
+        std::os::unix::fs::symlink(&output, &link).map_err(|error| error.to_string())?;
+
+        ensure_symlink_error(
+            rotate_handoff_key(&RotateKeyOptions {
+                workspace: dir.path().to_path_buf(),
+                capsule: link,
+                machine_salt_path: None,
+            }),
+            "rotate symlinked handoff capsule",
+        )
     }
 
     fn capsule_integrity(path: &Path) -> Result<serde_json::Value, String> {
