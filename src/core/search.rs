@@ -875,6 +875,7 @@ impl SearchReport {
     #[must_use]
     pub fn human_summary(&self) -> String {
         let mut output = String::new();
+        let visible_results = search_display_visible_hits(&self.results);
 
         match self.status {
             SearchStatus::Success => {
@@ -891,7 +892,7 @@ impl SearchReport {
             }
         }
 
-        for (i, hit) in self.results.iter().enumerate() {
+        for (i, hit) in visible_results.iter().enumerate() {
             output.push_str(&format!(
                 "  {}. {} (score: {:.4}, source: {})\n",
                 i + 1,
@@ -910,7 +911,7 @@ impl SearchReport {
             }
         }
 
-        if self.results.is_empty() && self.status == SearchStatus::Success {
+        if visible_results.is_empty() && self.status == SearchStatus::Success {
             output.push_str("  (no matches)\n");
         }
 
@@ -936,7 +937,16 @@ impl SearchReport {
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         let output_redaction_enabled = self.output_redaction_enabled();
-        let mut metrics = self.retrieval_metrics().data_json();
+        let visible_results = search_display_visible_hits(&self.results);
+        let mut metrics = RetrievalMetrics::from_hits_with_floor(
+            self.requested_limit,
+            self.elapsed_ms,
+            &visible_results,
+            self.errors.len(),
+            self.relevance_floor_applied,
+            self.candidates_below_floor,
+        )
+        .data_json();
         if let Some(metrics_obj) = metrics.as_object_mut() {
             metrics_obj.insert(
                 "sourceModeRequested".to_string(),
@@ -963,8 +973,7 @@ impl SearchReport {
                 serde_json::json!(self.strict_scope),
             );
         }
-        let results: Vec<serde_json::Value> = self
-            .results
+        let results: Vec<serde_json::Value> = visible_results
             .iter()
             .map(|hit| {
                 let mut obj = serde_json::json!({
@@ -1061,7 +1070,7 @@ impl SearchReport {
                 obj
             })
             .collect();
-        let consensus_conflicts = search_consensus_conflict_report(&self.query, &self.results);
+        let consensus_conflicts = search_consensus_conflict_report(&self.query, &visible_results);
 
         serde_json::json!({
             "command": "search",
@@ -1077,7 +1086,7 @@ impl SearchReport {
             "results": results,
             "consensus": consensus_conflicts.consensus.iter().map(consensus_entry_data_json).collect::<Vec<_>>(),
             "conflicts": consensus_conflicts.conflicts.iter().map(conflict_entry_data_json).collect::<Vec<_>>(),
-            "resultCount": self.results.len(),
+            "resultCount": visible_results.len(),
             "elapsedMs": self.elapsed_ms,
             "metrics": metrics,
             "profileRuntime": self.runtime_profile.data_json(),
@@ -1473,6 +1482,18 @@ fn search_consensus_conflict_report(query: &str, hits: &[SearchHit]) -> Consensu
     };
 
     analyze_pack_consensus_conflicts(&draft)
+}
+
+fn search_display_visible_hits(hits: &[SearchHit]) -> Vec<SearchHit> {
+    hits.iter()
+        .filter(|hit| {
+            !matches!(
+                mesh_query_visibility(hit.metadata.as_ref()),
+                MeshQueryVisibility::Blocked
+            )
+        })
+        .cloned()
+        .collect()
 }
 
 fn search_hit_pack_item(index: usize, hit: &SearchHit) -> Option<PackDraftItem> {
@@ -4088,6 +4109,78 @@ mod tests {
             "unexpected degradation message: {}",
             degraded[0].message
         );
+    }
+
+    #[test]
+    fn search_report_data_json_blocks_non_allowed_mesh_hits_defensively() {
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "mesh query".to_string(),
+            requested_limit: 10,
+            results: vec![
+                SearchHit {
+                    doc_id: "mesh-quarantined".to_string(),
+                    score: 0.87,
+                    source: ScoreSource::SemanticFast,
+                    fast_score: Some(0.87),
+                    quality_score: None,
+                    lexical_score: None,
+                    rerank_score: None,
+                    metadata: Some(serde_json::json!({
+                        "content": "PRIVATE REMOTE MESH BODY MUST NOT RENDER",
+                        "mesh": {
+                            "workspaceScopeDecision": "quarantine",
+                            "cachedMaterialId": "mesh_mat_quarantined",
+                            "originWorkspaceId": "wsp_remote_beta",
+                            "originWorkspaceLabel": "/Users/alice/private/repo",
+                            "producerPeerId": "peer_builder_one",
+                            "materialLane": "curationSignal",
+                            "trustLane": "mesh_curation",
+                            "redactionPosture": "standard"
+                        }
+                    })),
+                    explanation: None,
+                },
+                SearchHit {
+                    doc_id: "local-doc".to_string(),
+                    score: 0.91,
+                    source: ScoreSource::SemanticFast,
+                    fast_score: Some(0.91),
+                    quality_score: None,
+                    lexical_score: None,
+                    rerank_score: None,
+                    metadata: Some(serde_json::json!({
+                        "content": "Local result remains visible.",
+                        "level": "semantic",
+                        "kind": "fact"
+                    })),
+                    explanation: None,
+                },
+            ],
+            elapsed_ms: 12.3,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        };
+
+        let json = report.data_json();
+
+        assert_eq!(json["resultCount"], 1);
+        assert_eq!(json["metrics"]["returnedCount"], 1);
+        assert_eq!(json["results"][0]["docId"], "local-doc");
+        let rendered = json.to_string();
+        assert!(!rendered.contains("mesh-quarantined"));
+        assert!(!rendered.contains("PRIVATE REMOTE MESH BODY MUST NOT RENDER"));
+        assert!(!rendered.contains("/Users/alice/private/repo"));
     }
 
     #[test]
