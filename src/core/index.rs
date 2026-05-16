@@ -2846,7 +2846,7 @@ mod tests {
             3,
             |_| Duration::ZERO,
         ) {
-            Ok(_) => panic!("held lock should exhaust retries"),
+            Ok(_) => return Err("held lock should exhaust retries".to_owned()),
             Err(e) => e,
         };
 
