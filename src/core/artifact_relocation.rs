@@ -487,6 +487,21 @@ fn write_manifest_no_overwrite(
 
 fn read_manifest(path: &Path) -> Result<ArtifactRelocationManifest, DomainError> {
     reject_existing_symlink_component(path)?;
+    let metadata = fs::symlink_metadata(path).map_err(|error| DomainError::Storage {
+        message: format!("failed to inspect manifest {}: {error}", path.display()),
+        repair: Some(
+            "Pass a relocation manifest created by `ee artifact relocate --apply`.".to_owned(),
+        ),
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(DomainError::Storage {
+            message: format!(
+                "refusing to read relocation manifest {} because it is not a regular file",
+                path.display()
+            ),
+            repair: Some("Pass a regular ee.artifact.relocation.v1 manifest file.".to_owned()),
+        });
+    }
     let text = fs::read_to_string(path).map_err(|error| DomainError::Storage {
         message: format!("failed to read manifest {}: {error}", path.display()),
         repair: Some(
@@ -974,6 +989,30 @@ mod tests {
             Ok(())
         } else {
             Err(format!("expected policy denial, got {result:?}"))
+        }
+    }
+
+    #[test]
+    fn relocation_restore_rejects_non_regular_manifest_path() -> TestResult {
+        let workspace = temp_path("restore-directory-manifest-workspace");
+        let manifest_path = temp_path("restore-directory-manifest").join("relocation.json");
+        fs::create_dir_all(&manifest_path).map_err(|error| error.to_string())?;
+
+        let result = relocate_artifacts(&ArtifactRelocationOptions {
+            workspace_path: &workspace,
+            source_path: None,
+            destination_root: None,
+            manifest_path: &manifest_path,
+            actor: Some("test"),
+            mode: ArtifactRelocationMode::Restore,
+            force_with_explicit_path: false,
+        });
+
+        match result {
+            Err(DomainError::Storage { message, .. }) if message.contains("regular file") => Ok(()),
+            other => Err(format!(
+                "expected regular-file storage error, got {other:?}"
+            )),
         }
     }
 
