@@ -93,6 +93,7 @@ Current conventions:
 | `bv` | Swarm brief BV source degradation. |
 | `db_status` | `ee db status` migration or sidecar-file degradation. |
 | `dependency_contract` | `ee diag dependencies` dependency-contract degradation. |
+| `focus` | `ee focus` passive focus-state degradation. |
 | `git` | Swarm brief Git source degradation. |
 | `graph_centrality_read` | `ee graph centrality` persisted centrality read degradation. |
 | `hits` | `ee graph hits` HITS algorithm degradation. |

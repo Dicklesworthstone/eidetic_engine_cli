@@ -15,6 +15,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
+use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::db::DbConnection;
 use crate::models::{
     DomainError, FOCUS_ITEM_SCHEMA_V1, FOCUS_STATE_SCHEMA_V1, FocusItem, FocusState,
@@ -249,6 +250,29 @@ impl FocusDegradation {
     }
 }
 
+fn focus_degraded_data_json(degraded: &[FocusDegradation]) -> Vec<JsonValue> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "focus",
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry.repair.clone().unwrap_or_default(),
+        )
+    }))
+    .into_iter()
+    .map(|entry| {
+        json!({
+            "code": entry.code,
+            "severity": entry.severity,
+            "message": entry.message,
+            "repair": entry.repair,
+            "sources": entry.sources,
+        })
+    })
+    .collect()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FocusReport {
     pub schema: &'static str,
@@ -314,11 +338,7 @@ impl FocusReport {
                 .iter()
                 .map(FocusExplanation::data_json)
                 .collect::<Vec<_>>(),
-            "degraded": self
-                .degraded
-                .iter()
-                .map(FocusDegradation::data_json)
-                .collect::<Vec<_>>(),
+            "degraded": focus_degraded_data_json(&self.degraded),
         })
     }
 }
@@ -1377,6 +1397,54 @@ mod tests {
                 .all(|status| status.status == FocusMemoryStatusKind::Unverified),
             true,
             "unverified statuses",
+        )
+    }
+
+    #[test]
+    fn focus_report_degraded_entries_are_aggregated() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut report = show_focus(&FocusShowOptions {
+            workspace_path: dir.path().to_path_buf(),
+        })
+        .map_err(|error| error.message())?;
+        report.degraded = vec![
+            FocusDegradation::low(
+                "focus_missing_memory",
+                "Focus state references memory IDs that are missing from the database.",
+                Some("ee focus remove <memory-id> --json".to_owned()),
+            ),
+            FocusDegradation {
+                code: "focus_missing_memory".to_owned(),
+                severity: "medium".to_owned(),
+                message: "Multiple focused memories are missing from the database.".to_owned(),
+                repair: Some("ee focus clear --json".to_owned()),
+            },
+        ];
+
+        let data = report.data_json();
+        let degraded = data["degraded"]
+            .as_array()
+            .ok_or_else(|| "expected degraded array".to_owned())?;
+        ensure(degraded.len(), 1, "aggregated degraded count")?;
+        ensure(
+            degraded[0]["code"].as_str(),
+            Some("focus_missing_memory"),
+            "aggregated code",
+        )?;
+        ensure(
+            degraded[0]["severity"].as_str(),
+            Some("medium"),
+            "severity escalates",
+        )?;
+        ensure(
+            degraded[0]["repair"].as_str(),
+            Some("ee focus clear --json"),
+            "repair follows highest severity",
+        )?;
+        ensure(
+            degraded[0]["sources"].clone(),
+            json!(["focus"]),
+            "focus source label",
         )
     }
 }
