@@ -152,7 +152,7 @@ fn plan_or_apply_relocation(
             repair: Some("Choose an existing artifact root or file.".to_owned()),
         });
     }
-    reject_symlink(&source)?;
+    reject_existing_symlink_component(&source)?;
     let source_allowed = source_allowed(options.workspace_path, &source);
     if !source_allowed && !options.force_with_explicit_path {
         return Err(DomainError::PolicyDenied {
@@ -826,6 +826,43 @@ mod tests {
         } else {
             Err(format!("expected policy denial, got {result:?}"))
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relocation_apply_rejects_symlinked_source_parent_even_with_force() -> TestResult {
+        let workspace = temp_path("symlink-source-workspace");
+        let real_source_parent = temp_path("symlink-source-real");
+        fs::create_dir_all(&real_source_parent).map_err(|error| error.to_string())?;
+        let source_parent = workspace.join("target/debug");
+        fs::create_dir_all(parent_dir(&source_parent)?).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&real_source_parent, &source_parent)
+            .map_err(|error| error.to_string())?;
+        let source = source_parent.join("sample.o");
+        fs::write(&source, "artifact bytes\n").map_err(|error| error.to_string())?;
+        let destination = temp_path("symlink-source-destination");
+        let manifest = temp_path("symlink-source-manifest").join("relocation.json");
+        let expected_copy = destination
+            .join(RELOCATION_DIR)
+            .join("target/debug/sample.o");
+
+        let result = relocate_artifacts(&ArtifactRelocationOptions {
+            workspace_path: &workspace,
+            source_path: Some(&source),
+            destination_root: Some(&destination),
+            manifest_path: &manifest,
+            actor: Some("test"),
+            mode: ArtifactRelocationMode::Apply,
+            force_with_explicit_path: true,
+        });
+
+        if !matches!(result, Err(DomainError::PolicyDenied { .. })) {
+            return Err(format!("expected policy denial, got {result:?}"));
+        }
+        if expected_copy.exists() {
+            return Err("copy happened through symlinked source parent".to_owned());
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
