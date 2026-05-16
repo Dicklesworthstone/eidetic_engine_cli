@@ -1421,7 +1421,7 @@ proptest! {
         .map_err(|error| TestCaseError::fail(format!("{error:?}")))?;
         let reordered = assemble_draft_with_profile_and_options_seeded(
             profile,
-            query,
+            query.clone(),
             budget,
             deterministic_reordered(candidates, seed),
             options,
