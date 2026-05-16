@@ -1,21 +1,29 @@
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
+use std::sync::{OnceLock, RwLock};
 
 use asupersync::Cx;
 use fnx_algorithms::{CentralityScore, ComplexityWitness, PageRankResult};
 use fnx_classes::digraph::DiGraph;
 
+use crate::config::env_registry::{self, EnvVar};
 use crate::db::DbConnection;
 use crate::graph::algorithms::{
     AlgorithmResultCacheRun, AlgorithmResultCacheSpec, DEFAULT_FOREGROUND_BUDGET,
     current_or_testing_cx, run_with_budget, run_with_result_cache,
 };
-use crate::graph::{ComplexityWitnessCounters, GraphResult, emit_complexity_witness};
+use crate::graph::ppr_prefetch_cache::{
+    PprPrefetchCache, PprPrefetchCacheKey, PprPrefetchCacheResultHit,
+};
+use crate::graph::{
+    ComplexityWitnessCounters, GraphResult, emit_complexity_witness, graph_algorithm_params_hash,
+};
 use crate::models::MemoryId;
 
 pub const DEFAULT_PERSONALIZED_PAGERANK_ALPHA: f64 = 0.85;
 pub const DEFAULT_PERSONALIZED_PAGERANK_MAX_ITERATIONS: usize = 50;
 pub const DEFAULT_PERSONALIZED_PAGERANK_TOLERANCE: f64 = 1.0e-6;
+pub const DEFAULT_PPR_PREFETCH_CACHE_ENTRIES: usize = 4096;
 
 const RELATION_WEIGHT_SUPPORTS: f64 = 1.0;
 const RELATION_WEIGHT_DERIVED_FROM: f64 = 0.8;
@@ -189,10 +197,80 @@ where
     F: FnOnce() -> GraphResult<DiGraph>,
 {
     let cx = current_or_testing_cx();
+    let prefetch_key = ppr_prefetch_cache_key(spec)?;
     run_with_result_cache(spec, || {
+        if let Some(hit) = load_ppr_prefetch_result(&prefetch_key) {
+            return Ok(hit.result);
+        }
         let graph = build_graph()?;
-        compute_personalized_pagerank_result_with_cx(&cx, &graph, seed_map, policy)
+        let result = compute_personalized_pagerank_result_with_cx(&cx, &graph, seed_map, policy)?;
+        store_ppr_prefetch_result(prefetch_key, &result);
+        Ok(result)
     })
+}
+
+fn ppr_prefetch_cache_key(spec: &AlgorithmResultCacheSpec<'_>) -> GraphResult<PprPrefetchCacheKey> {
+    let seed_set_hash =
+        graph_algorithm_params_hash(spec.algorithm, spec.snapshot_content_hash, spec.params)?;
+    Ok(PprPrefetchCacheKey::new(
+        seed_set_hash,
+        ppr_prefetch_snapshot_generation(spec.snapshot_content_hash),
+    ))
+}
+
+fn ppr_prefetch_snapshot_generation(snapshot_content_hash: &str) -> u64 {
+    let digest = blake3::hash(snapshot_content_hash.as_bytes());
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest.as_bytes()[..8]);
+    u64::from_le_bytes(bytes)
+}
+
+fn ppr_prefetch_cache() -> &'static RwLock<PprPrefetchCache> {
+    static CACHE: OnceLock<RwLock<PprPrefetchCache>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(PprPrefetchCache::new(ppr_prefetch_cache_capacity())))
+}
+
+fn ppr_prefetch_cache_capacity() -> usize {
+    env_registry::read_or_default(EnvVar::PprCacheEntries)
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_PPR_PREFETCH_CACHE_ENTRIES)
+}
+
+fn load_ppr_prefetch_result(key: &PprPrefetchCacheKey) -> Option<PprPrefetchCacheResultHit> {
+    let mut cache = ppr_prefetch_cache()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let hit = cache.get_result(key);
+    tracing::debug!(
+        target: "ee::graph",
+        surface = "ppr_cache",
+        seed_set_hash = %key.seed_set_hash,
+        snapshot_generation = key.snapshot_generation,
+        cache_hit = hit.is_some(),
+        cache_size = cache.len(),
+        eviction_count = 0_usize,
+        result_hash = hit.as_ref().map(|hit| hit.result_hash.as_str()).unwrap_or(""),
+        "personalized PageRank prefetch cache lookup"
+    );
+    hit
+}
+
+fn store_ppr_prefetch_result(key: PprPrefetchCacheKey, result: &PageRankResult) {
+    let mut cache = ppr_prefetch_cache()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let insert = cache.insert_result(key.clone(), result.clone());
+    tracing::debug!(
+        target: "ee::graph",
+        surface = "ppr_cache",
+        seed_set_hash = %key.seed_set_hash,
+        snapshot_generation = key.snapshot_generation,
+        cache_hit = false,
+        cache_size = cache.len(),
+        eviction_count = insert.evicted.len(),
+        result_hash = %insert.result_hash,
+        "personalized PageRank prefetch cache insert"
+    );
 }
 
 fn compute_personalized_pagerank_result_unbudgeted(
@@ -1134,6 +1212,102 @@ mod tests {
 
         assert!(!first.cache_hit);
         assert!(second.cache_hit);
+        assert_eq!(build_count.get(), 1);
+        assert_pagerank_results_equivalent(&first.result, &second.result);
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn personalized_pagerank_prefetch_skips_projection_across_snapshot_cache_rows() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let snapshot_a = "gsnap_0000000000000000000000523";
+        let snapshot_b = "gsnap_0000000000000000000000524";
+        let content_hash = "blake3:ppr-prefetch-lazy-graph";
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-ppr-prefetch-lazy-graph".to_owned(),
+                    name: Some("ppr prefetch lazy graph".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for snapshot_id in [snapshot_a, snapshot_b] {
+            connection
+                .insert_graph_snapshot(
+                    snapshot_id,
+                    &CreateGraphSnapshotInput {
+                        workspace_id: WORKSPACE_ID.to_owned(),
+                        snapshot_version: 14,
+                        schema_version: "ee.graph.snapshot.v1".to_owned(),
+                        graph_type: GraphSnapshotType::MemoryLinks,
+                        node_count: 2,
+                        edge_count: 1,
+                        metrics_json: r#"{"nodes":[],"edges":[]}"#.to_owned(),
+                        content_hash: content_hash.to_owned(),
+                        source_generation: 14,
+                        expires_at: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        let mut graph = DiGraph::strict();
+        let a = memory_id(81);
+        let b = memory_id(82);
+        graph
+            .add_edge_with_attrs(
+                a.to_string(),
+                b.to_string(),
+                edge_attrs("supports", 1.0, 1.0),
+            )
+            .map_err(|error| error.to_string())?;
+        let seeds = BTreeMap::from([(a.to_string(), 1.0)]);
+        let params =
+            personalized_pagerank_cache_params(PersonalizedPageRankPolicy::default(), &seeds);
+        let spec_a = AlgorithmResultCacheSpec {
+            conn: &connection,
+            workspace_id: WORKSPACE_ID,
+            snapshot_id: snapshot_a,
+            snapshot_content_hash: content_hash,
+            algorithm: "personalized_pagerank",
+            params: &params,
+            ttl_seconds: 300,
+        };
+        let spec_b = AlgorithmResultCacheSpec {
+            conn: &connection,
+            workspace_id: WORKSPACE_ID,
+            snapshot_id: snapshot_b,
+            snapshot_content_hash: content_hash,
+            algorithm: "personalized_pagerank",
+            params: &params,
+            ttl_seconds: 300,
+        };
+        let build_count = std::cell::Cell::new(0_usize);
+
+        let first = graph_result(compute_personalized_pagerank_result_cached_with_graph(
+            &spec_a,
+            &seeds,
+            PersonalizedPageRankPolicy::default(),
+            || {
+                build_count.set(build_count.get() + 1);
+                Ok(graph.clone())
+            },
+        ))?;
+        let second = graph_result(compute_personalized_pagerank_result_cached_with_graph(
+            &spec_b,
+            &seeds,
+            PersonalizedPageRankPolicy::default(),
+            || {
+                build_count.set(build_count.get() + 1);
+                Ok(DiGraph::strict())
+            },
+        ))?;
+
+        assert!(!first.cache_hit);
+        assert!(!second.cache_hit);
         assert_eq!(build_count.get(), 1);
         assert_pagerank_results_equivalent(&first.result, &second.result);
 

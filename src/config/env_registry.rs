@@ -66,6 +66,8 @@ pub enum EnvVar {
     PreflightBypassSecret,
     /// `EE_PROFILE`
     Profile,
+    /// `EE_PPR_CACHE_ENTRIES`
+    PprCacheEntries,
     /// `EE_READ_POOL_DISABLE_PIN`
     ReadPoolDisablePin,
     /// `EE_READ_POOL_IDLE_TIMEOUT_S`
@@ -129,6 +131,7 @@ impl EnvVar {
             Self::OutputFormat,
             Self::PreflightBypassSecret,
             Self::Profile,
+            Self::PprCacheEntries,
             Self::ReadPoolDisablePin,
             Self::ReadPoolIdleTimeoutSeconds,
             Self::ReadPoolSize,
@@ -178,6 +181,7 @@ impl EnvVar {
             Self::OutputFormat => "EE_OUTPUT_FORMAT",
             Self::PreflightBypassSecret => "EE_PREFLIGHT_BYPASS_SECRET",
             Self::Profile => "EE_PROFILE",
+            Self::PprCacheEntries => "EE_PPR_CACHE_ENTRIES",
             Self::ReadPoolDisablePin => "EE_READ_POOL_DISABLE_PIN",
             Self::ReadPoolIdleTimeoutSeconds => "EE_READ_POOL_IDLE_TIMEOUT_S",
             Self::ReadPoolSize => "EE_READ_POOL_SIZE",
@@ -237,6 +241,7 @@ impl EnvVar {
             Self::OutputFormat => "Select the default output renderer.",
             Self::PreflightBypassSecret => "Supply preflight bypass secret material.",
             Self::Profile => "Override the default context pack profile.",
+            Self::PprCacheEntries => "Override the in-process PPR prefetch cache entry cap.",
             Self::ReadPoolDisablePin => "Disable read-side snapshot pinning.",
             Self::ReadPoolIdleTimeoutSeconds => {
                 "Override the read-side connection pool idle timeout in seconds."
@@ -271,6 +276,7 @@ impl EnvVar {
             Self::MeshMode => Some("off"),
             Self::MeshEnabled => Some("false"),
             Self::TailscaleProbeTimeoutMs => Some("1500"),
+            Self::PprCacheEntries => Some("4096"),
             Self::IndexPublishLockRetryAttempts => Some("200"),
             Self::RememberCurationSyncBudgetMs => Some("50"),
             _ => None,
@@ -320,6 +326,7 @@ impl EnvVar {
             | Self::L2PackCacheDisable
             | Self::MaxTokens
             | Self::Profile
+            | Self::PprCacheEntries
             | Self::ReadPoolDisablePin
             | Self::ReadPoolIdleTimeoutSeconds
             | Self::ReadPoolSize

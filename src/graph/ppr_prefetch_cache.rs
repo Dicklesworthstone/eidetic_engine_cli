@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use fnx_algorithms::CentralityScore;
+use fnx_algorithms::{CentralityScore, PageRankResult};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PprPrefetchCacheKey {
@@ -24,6 +24,12 @@ pub struct PprPrefetchCacheHit {
     pub result_hash: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct PprPrefetchCacheResultHit {
+    pub result: PageRankResult,
+    pub result_hash: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PprPrefetchCacheInsert {
     pub result_hash: String,
@@ -42,8 +48,18 @@ pub struct PprPrefetchCacheDebugEntry {
 #[derive(Clone, Debug)]
 struct PprPrefetchCacheEntry {
     scores: Vec<CentralityScore>,
+    result: Option<PageRankResult>,
     result_hash: String,
     last_used_sequence: u64,
+}
+
+impl PprPrefetchCacheEntry {
+    fn scores(&self) -> &[CentralityScore] {
+        self.result
+            .as_ref()
+            .map(|result| result.scores.as_slice())
+            .unwrap_or(&self.scores)
+    }
 }
 
 #[derive(Debug)]
@@ -97,6 +113,38 @@ impl PprPrefetchCache {
             key,
             PprPrefetchCacheEntry {
                 scores,
+                result: None,
+                result_hash: result_hash.clone(),
+                last_used_sequence,
+            },
+        );
+        let evicted = self.evict_to_capacity();
+        PprPrefetchCacheInsert {
+            result_hash,
+            evicted,
+        }
+    }
+
+    pub fn insert_result(
+        &mut self,
+        key: PprPrefetchCacheKey,
+        result: PageRankResult,
+    ) -> PprPrefetchCacheInsert {
+        let result_hash = ppr_prefetch_page_rank_result_hash(&key, &result);
+        if self.capacity == 0 {
+            self.entries.clear();
+            return PprPrefetchCacheInsert {
+                result_hash,
+                evicted: Vec::new(),
+            };
+        }
+
+        let last_used_sequence = self.next_access_sequence();
+        self.entries.insert(
+            key,
+            PprPrefetchCacheEntry {
+                scores: result.scores.clone(),
+                result: Some(result),
                 result_hash: result_hash.clone(),
                 last_used_sequence,
             },
@@ -109,9 +157,7 @@ impl PprPrefetchCache {
     }
 
     pub fn get(&mut self, key: &PprPrefetchCacheKey) -> Option<PprPrefetchCacheHit> {
-        let entry = self.entries.get(key)?;
-        let actual_hash = ppr_prefetch_result_hash(key, &entry.scores);
-        if actual_hash != entry.result_hash {
+        if !self.entry_hash_is_valid(key) {
             self.entries.remove(key);
             return None;
         }
@@ -123,7 +169,26 @@ impl PprPrefetchCache {
             .expect("entry exists after hash validation");
         entry.last_used_sequence = last_used_sequence;
         Some(PprPrefetchCacheHit {
-            scores: entry.scores.clone(),
+            scores: entry.scores().to_vec(),
+            result_hash: entry.result_hash.clone(),
+        })
+    }
+
+    pub fn get_result(&mut self, key: &PprPrefetchCacheKey) -> Option<PprPrefetchCacheResultHit> {
+        if !self.entry_hash_is_valid(key) {
+            self.entries.remove(key);
+            return None;
+        }
+
+        let last_used_sequence = self.next_access_sequence();
+        let entry = self
+            .entries
+            .get_mut(key)
+            .expect("entry exists after hash validation");
+        let result = entry.result.clone()?;
+        entry.last_used_sequence = last_used_sequence;
+        Some(PprPrefetchCacheResultHit {
+            result,
             result_hash: entry.result_hash.clone(),
         })
     }
@@ -152,7 +217,7 @@ impl PprPrefetchCache {
                 seed_set_hash: key.seed_set_hash.clone(),
                 snapshot_generation: key.snapshot_generation,
                 result_hash: entry.result_hash.clone(),
-                score_count: entry.scores.len(),
+                score_count: entry.scores().len(),
                 last_used_sequence: entry.last_used_sequence,
             })
             .collect()
@@ -187,12 +252,29 @@ impl PprPrefetchCache {
             .map(|(key, _)| key.clone())
     }
 
+    fn entry_hash_is_valid(&self, key: &PprPrefetchCacheKey) -> bool {
+        let Some(entry) = self.entries.get(key) else {
+            return false;
+        };
+        let actual_hash = match &entry.result {
+            Some(result) => ppr_prefetch_page_rank_result_hash(key, result),
+            None => ppr_prefetch_result_hash(key, &entry.scores),
+        };
+        actual_hash == entry.result_hash
+    }
+
     #[cfg(test)]
     fn corrupt_score_for_test(&mut self, key: &PprPrefetchCacheKey, score: f64) {
-        if let Some(entry) = self.entries.get_mut(key)
-            && let Some(first) = entry.scores.first_mut()
-        {
-            first.score = score;
+        if let Some(entry) = self.entries.get_mut(key) {
+            if let Some(result) = &mut entry.result
+                && let Some(first) = result.scores.first_mut()
+            {
+                first.score = score;
+                return;
+            }
+            if let Some(first) = entry.scores.first_mut() {
+                first.score = score;
+            }
         }
     }
 }
@@ -206,6 +288,31 @@ pub fn ppr_prefetch_result_hash(key: &PprPrefetchCacheKey, scores: &[CentralityS
     hasher.update(&key.snapshot_generation.to_le_bytes());
     hasher.update(&(scores.len() as u64).to_le_bytes());
     for score in scores {
+        hasher.update(&(score.node.len() as u64).to_le_bytes());
+        hasher.update(score.node.as_bytes());
+        hasher.update(&score.score.to_le_bytes());
+    }
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+#[must_use]
+pub fn ppr_prefetch_page_rank_result_hash(
+    key: &PprPrefetchCacheKey,
+    result: &PageRankResult,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.graph.ppr_prefetch_cache.page_rank_result.v1");
+    hasher.update(&(key.seed_set_hash.len() as u64).to_le_bytes());
+    hasher.update(key.seed_set_hash.as_bytes());
+    hasher.update(&key.snapshot_generation.to_le_bytes());
+    hasher.update(&[u8::from(result.converged)]);
+    hasher.update(result.witness.algorithm.as_bytes());
+    hasher.update(result.witness.complexity_claim.as_bytes());
+    hasher.update(&result.witness.nodes_touched.to_le_bytes());
+    hasher.update(&result.witness.edges_scanned.to_le_bytes());
+    hasher.update(&result.witness.queue_peak.to_le_bytes());
+    hasher.update(&(result.scores.len() as u64).to_le_bytes());
+    for score in &result.scores {
         hasher.update(&(score.node.len() as u64).to_le_bytes());
         hasher.update(score.node.as_bytes());
         hasher.update(&score.score.to_le_bytes());
@@ -234,6 +341,20 @@ mod tests {
             .collect()
     }
 
+    fn page_rank_result(nodes: &[(&str, f64)]) -> PageRankResult {
+        PageRankResult {
+            scores: scores(nodes),
+            converged: true,
+            witness: fnx_algorithms::ComplexityWitness {
+                algorithm: "personalized_pagerank_power_iteration".to_owned(),
+                complexity_claim: "O(k * (|V| + |E|))".to_owned(),
+                nodes_touched: 3,
+                edges_scanned: 2,
+                queue_peak: 0,
+            },
+        }
+    }
+
     #[test]
     fn empty_cache_misses() {
         let mut cache = PprPrefetchCache::new(2);
@@ -256,6 +377,23 @@ mod tests {
         assert_eq!(
             hit.result_hash,
             ppr_prefetch_result_hash(&key, &expected_scores)
+        );
+    }
+
+    #[test]
+    fn insert_result_then_hit_returns_full_result() {
+        let mut cache = PprPrefetchCache::new(2);
+        let key = key("seed-a", 1);
+        let expected = page_rank_result(&[("mem-a", 0.7), ("mem-b", 0.3)]);
+        let insert = cache.insert_result(key.clone(), expected.clone());
+
+        let hit = cache.get_result(&key).expect("cache hit");
+
+        assert_eq!(hit.result, expected);
+        assert_eq!(hit.result_hash, insert.result_hash);
+        assert_eq!(
+            hit.result_hash,
+            ppr_prefetch_page_rank_result_hash(&key, &expected)
         );
     }
 

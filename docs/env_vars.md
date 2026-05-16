@@ -38,6 +38,7 @@ must not expose their current value.
 | `EE_OUTPUT_FORMAT` | output | output format | none | Select the default output renderer. | Highest-priority environment output format selector. |
 | `EE_PREFLIGHT_BYPASS_SECRET` | policy | secret string | none | Supply preflight bypass secret material. | Capabilities must never expose this current value. |
 | `EE_PROFILE` | tuning | profile name | none | Override the default context pack profile. | Applies when pack/context profile is not specified explicitly. |
+| `EE_PPR_CACHE_ENTRIES` | tuning | integer count | `4096` | Override the in-process PPR prefetch cache entry cap. | Set to `0` to disable prefetch entries while keeping the algorithm result cache intact. |
 | `EE_READ_POOL_DISABLE_PIN` | tuning | boolean flag | none | Disable read-side snapshot pinning. | Inverts `[storage.read_pool].pin_snapshot` for read-heavy status/context paths. |
 | `EE_READ_POOL_IDLE_TIMEOUT_S` | tuning | integer seconds | none | Override the read-side connection pool idle timeout in seconds. | Maps to `[storage.read_pool].idle_timeout_seconds`; idle pooled handles are closed after the configured age. |
 | `EE_READ_POOL_SIZE` | tuning | integer count | none | Override the read-side connection pool size. | Maps to `[storage.read_pool].size`; pool construction normalizes zero to one connection. |
