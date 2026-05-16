@@ -13,9 +13,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::core::graph_telemetry::{
-    AlgorithmCancelledEvent, AlgorithmComputeEvent, AlgorithmTimeoutEvent, CacheOutcomeEvent,
-    emit_algorithm_cancelled, emit_algorithm_compute, emit_algorithm_timeout, emit_cache_hit,
-    emit_cache_miss,
+    AlgorithmCancelledEvent, AlgorithmComputeEvent, AlgorithmTimeoutEvent, CacheEvictEvent,
+    CacheEvictReason, CacheOutcomeEvent, emit_algorithm_cancelled, emit_algorithm_compute,
+    emit_algorithm_timeout, emit_cache_evict, emit_cache_hit, emit_cache_miss,
 };
 use crate::db::{CreateGraphAlgorithmResultInput, DbConnection, StoredGraphAlgorithmResult};
 use crate::graph::{GraphError, GraphResult, graph_algorithm_params_hash};
@@ -584,6 +584,10 @@ where
         .is_some_and(|expires_at| expires_at <= Instant::now())
     {
         cache.remove(cache_key);
+        emit_cache_evict(CacheEvictEvent {
+            reason: CacheEvictReason::TtlExpired,
+            count: 1,
+        });
         return None;
     }
     Arc::clone(&entry.result)
@@ -606,8 +610,13 @@ where
 
     // Periodic garbage collection of expired results
     if CLEANUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 64 == 0 {
-        let now = Instant::now();
-        cache.retain(|_, v| v.expires_at.is_none_or(|exp| exp > now));
+        let evicted_count = evict_expired_in_memory_algorithm_results(&mut cache, Instant::now());
+        if evicted_count > 0 {
+            emit_cache_evict(CacheEvictEvent {
+                reason: CacheEvictReason::TtlExpired,
+                count: usize_to_u32_saturating(evicted_count),
+            });
+        }
     }
 
     cache.insert(
@@ -617,6 +626,15 @@ where
             expires_at,
         },
     );
+}
+
+fn evict_expired_in_memory_algorithm_results(
+    cache: &mut HashMap<String, InMemoryAlgorithmResult>,
+    now: Instant,
+) -> usize {
+    let before = cache.len();
+    cache.retain(|_, entry| entry.expires_at.is_none_or(|expires_at| expires_at > now));
+    before.saturating_sub(cache.len())
 }
 
 fn load_cached_algorithm_result<R>(
@@ -892,6 +910,10 @@ fn duration_millis_saturating(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
+fn usize_to_u32_saturating(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 pub(crate) fn check_cancelled(cx: &Cx, name: &'static str) -> GraphResult<()> {
     if cx.checkpoint().is_ok() && !cx.is_cancel_requested() {
         return Ok(());
@@ -933,7 +955,7 @@ mod tests {
 
     use crate::core::graph_telemetry::{
         ALGORITHM_CANCELLED_EVENT, ALGORITHM_COMPUTE_EVENT, ALGORITHM_TIMEOUT_EVENT,
-        CACHE_HIT_EVENT, CACHE_MISS_EVENT,
+        CACHE_EVICT_EVENT, CACHE_HIT_EVENT, CACHE_MISS_EVENT,
     };
     use crate::db::{
         CreateGraphSnapshotInput, CreateWorkspaceInput, DbConnection, GraphSnapshotType,
@@ -1570,6 +1592,61 @@ mod tests {
         );
 
         connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn expired_in_memory_cache_load_emits_cache_evict_telemetry() -> TestResult {
+        let cache_key = "expired_in_memory_cache_load_emits_cache_evict_telemetry";
+        store_in_memory_algorithm_result(cache_key, &123_u64, 0);
+
+        let mut loaded = Some(123_u64);
+        let events = capture_graph_events(|| {
+            loaded = load_in_memory_algorithm_result::<u64>(cache_key);
+        });
+
+        assert_eq!(loaded, None);
+        let evicts = events_with_target(&events, CACHE_EVICT_EVENT);
+        assert_eq!(evicts.len(), 1);
+        assert_eq!(
+            evicts[0].fields.get("reason").map(String::as_str),
+            Some("ttl_expired")
+        );
+        assert_eq!(evicts[0].fields.get("count").map(String::as_str), Some("1"));
+        Ok(())
+    }
+
+    #[test]
+    fn expired_in_memory_cache_cleanup_counts_only_expired_rows() {
+        let now = Instant::now();
+        let mut cache = HashMap::new();
+        cache.insert(
+            "expired".to_owned(),
+            InMemoryAlgorithmResult {
+                result: Arc::new(1_u64),
+                expires_at: now.checked_sub(Duration::from_millis(1)),
+            },
+        );
+        cache.insert(
+            "fresh".to_owned(),
+            InMemoryAlgorithmResult {
+                result: Arc::new(2_u64),
+                expires_at: now.checked_add(Duration::from_secs(60)),
+            },
+        );
+        cache.insert(
+            "persistent".to_owned(),
+            InMemoryAlgorithmResult {
+                result: Arc::new(3_u64),
+                expires_at: None,
+            },
+        );
+
+        let evicted = evict_expired_in_memory_algorithm_results(&mut cache, now);
+
+        assert_eq!(evicted, 1);
+        assert!(!cache.contains_key("expired"));
+        assert!(cache.contains_key("fresh"));
+        assert!(cache.contains_key("persistent"));
     }
 
     #[test]
