@@ -15,6 +15,7 @@ use super::test_log::{EventKind, TestEvent, log_event, test_id_or};
 pub const VOLATILE_FIELD_NAMES: &[&str] = &[
     "generatedAt",
     "generated_at",
+    "created_at",
     "computed_at",
     "last_accessed",
     "last_accessed_at",
@@ -212,6 +213,7 @@ mod tests {
     #[test]
     fn registry_predicate_matches_list() {
         assert!(is_volatile_field_name("generatedAt"));
+        assert!(is_volatile_field_name("created_at"));
         assert!(is_volatile_field_name("last_accessed_at"));
         assert!(is_volatile_field_name("capsule_id"));
         assert!(is_volatile_field_name("integrity"));

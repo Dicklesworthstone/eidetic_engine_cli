@@ -560,6 +560,117 @@ check_implementation_unit_test_obligation() {
         "no src/ file in FILE SURFACE has #[cfg(test)] mod tests with >=3 non-ignored #[test] fns and assertion coverage (first declared src path: ${first_path:-<none>})"
 }
 
+# bd-3usjw.61 — audit_row_obligation_part_ii helpers.
+#
+# Beads whose surface mutates durable state must document their audit-row
+# emission contract: README L181-193 promises "no silent memory mutation".
+# This rule mirrors Rule 7's "validate-when-declared" semantics: if a bead
+# description carries an `AUDIT EMISSION:` block, its required fields and
+# referenced audit test file must all be present. Beads without an
+# `AUDIT EMISSION:` block are out of scope for this rule (the bulk
+# retrofit + the durable_write-classification gate are separate
+# follow-up beads).
+
+# Returns 0 (true) when the bead description contains an explicit
+# `AUDIT EMISSION:` block introducer at the start of a line. Matched
+# leniently with leading whitespace allowed.
+bead_declares_audit_emission_block() {
+    local bead_id="$1"
+    jq -r --arg bead_id "$bead_id" '
+        select(.id == $bead_id)
+        | (.description // "")
+    ' "$BEADS_FILE" 2>/dev/null |
+        grep -qE '^[[:space:]]*AUDIT EMISSION:'
+}
+
+# Whole-description text for the bead (decoded). Reused below for each
+# component check so we walk the JSONL once per assertion rather than
+# re-shelling per token.
+bead_description_text() {
+    local bead_id="$1"
+    jq -r --arg bead_id "$bead_id" '
+        select(.id == $bead_id)
+        | (.description // "")
+    ' "$BEADS_FILE" 2>/dev/null
+}
+
+# Whether an explicit `event_type=` literal appears anywhere in the
+# description. Accepts `event_type=foo.bar.baz` or `event_type="foo"`.
+# Required so the audit-row contract carries a concrete emission name.
+bead_audit_block_has_event_type() {
+    local bead_id="$1"
+    bead_description_text "$bead_id" |
+        grep -qE 'event_type[[:space:]]*='
+}
+
+# Whether the description names the chain-continuity acceptance criterion.
+# We accept either a literal `chain_continuity:` phrase, a `chain_hash`
+# token (the column name on the audit rows), or "chain-hash continuity"
+# prose (which appears in the bd-3usjw.61 source bead itself).
+bead_audit_block_has_chain_continuity() {
+    local bead_id="$1"
+    bead_description_text "$bead_id" |
+        grep -qEi 'chain_continuity|chain_hash|chain-hash continuity'
+}
+
+# Whether the description references at least one Rust test file whose
+# basename matches `*_audit.rs` AND that file exists on disk. The audit-
+# row contract demands an actual test that calls the surface and asserts
+# the row landed + verified; the referenced file is the load-bearing
+# evidence pointer.
+#
+# Returns the path on stdout when found (empty otherwise).
+bead_audit_block_audit_test_file_path() {
+    local bead_id="$1"
+    local reference
+    for reference in $(bead_referenced_test_paths "$bead_id"); do
+        case "$reference" in
+            *_audit.rs|*_audit_*.rs)
+                if [ -f "$reference" ]; then
+                    printf '%s\n' "$reference"
+                    return 0
+                fi
+                ;;
+            *_audit*/*.rs)
+                # Directory-rooted audit fixture path (rare); allow file
+                # existence to confirm.
+                if [ -f "$reference" ]; then
+                    printf '%s\n' "$reference"
+                    return 0
+                fi
+                ;;
+        esac
+    done
+    return 1
+}
+
+# Rule 8: validate AUDIT EMISSION block shape when declared.
+#
+# Fires per-component (event_type / chain_continuity / audit test file)
+# so retrofitted beads with a partial block get specific guidance rather
+# than a single opaque "block is incomplete" error.
+check_audit_emission_block_shape() {
+    local bead_id="$1"
+    local surface="$2"
+
+    bead_declares_audit_emission_block "$bead_id" || return 0
+
+    if ! bead_audit_block_has_event_type "$bead_id"; then
+        add_violation "$bead_id" "implements-surface" "$surface" \
+            "AUDIT EMISSION block declared but missing event_type= literal (missing: event_type)"
+    fi
+
+    if ! bead_audit_block_has_chain_continuity "$bead_id"; then
+        add_violation "$bead_id" "implements-surface" "$surface" \
+            "AUDIT EMISSION block declared but missing chain_continuity acceptance criterion (missing: chain_continuity)"
+    fi
+
+    if ! bead_audit_block_audit_test_file_path "$bead_id" >/dev/null; then
+        add_violation "$bead_id" "implements-surface" "$surface" \
+            "AUDIT EMISSION block declared but no *_audit.rs test file is referenced and on disk (missing: audit_test_file)"
+    fi
+}
+
 check_referenced_rust_test_file() {
     local bead_id="$1"
     local surface="$2"
@@ -1121,6 +1232,14 @@ for bead_id in $BEAD_IDS; do
             # #[cfg(test)] unit-test coverage per AGENTS.md L300-302
             # (bd-3usjw.62).
             check_implementation_unit_test_obligation "$bead_id" "$surface"
+
+            # Rule 8: Closed implements-surface beads that declare an
+            # AUDIT EMISSION: block must spell out the audit-row contract
+            # — event_type, chain-hash continuity criterion, and a real
+            # *_audit.rs test file. Validates shape WHEN PRESENT only;
+            # the durable_write enforcement gate is a follow-up child.
+            # (bd-3usjw.61)
+            check_audit_emission_block_shape "$bead_id" "$surface"
         done
     fi
 
