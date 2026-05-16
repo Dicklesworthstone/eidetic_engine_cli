@@ -174,7 +174,9 @@ fn hits_iteration_count(node_count: usize, result: &HitsCentralityResult) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fnx_algorithms::{CentralityScore, ComplexityWitness};
+    use std::collections::BTreeSet;
+
+    use fnx_algorithms::{CentralityScore, ComplexityWitness, pagerank_directed};
     use fnx_runtime::CompatibilityMode;
 
     type TestResult = Result<(), String>;
@@ -191,6 +193,89 @@ mod tests {
         graph
             .add_edge(source, target)
             .unwrap_or_else(|error| panic!("test edge {source}->{target} should add: {error:?}"));
+    }
+
+    fn add_reciprocal_edge(edges: &mut BTreeSet<(String, String)>, left: &str, right: &str) {
+        if left == right {
+            return;
+        }
+        edges.insert((left.to_owned(), right.to_owned()));
+        edges.insert((right.to_owned(), left.to_owned()));
+    }
+
+    fn rank_map_from_scores<I>(scores: I) -> BTreeMap<String, usize>
+    where
+        I: IntoIterator<Item = (String, f64)>,
+    {
+        let mut scores = scores.into_iter().collect::<Vec<_>>();
+        scores.sort_by(|left, right| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        scores
+            .into_iter()
+            .enumerate()
+            .map(|(index, (node, _score))| (node, index + 1))
+            .collect()
+    }
+
+    fn spearman_correlation(
+        left: &BTreeMap<String, usize>,
+        right: &BTreeMap<String, usize>,
+    ) -> f64 {
+        let shared = left
+            .iter()
+            .filter_map(|(node, left_rank)| {
+                right.get(node).map(|right_rank| (*left_rank, *right_rank))
+            })
+            .collect::<Vec<_>>();
+        let n = shared.len();
+        if n < 2 {
+            return 1.0;
+        }
+        let d_squared_sum = shared
+            .iter()
+            .map(|(left_rank, right_rank)| {
+                let delta = *left_rank as f64 - *right_rank as f64;
+                delta * delta
+            })
+            .sum::<f64>();
+        let n = n as f64;
+        1.0 - (6.0 * d_squared_sum) / (n * (n * n - 1.0))
+    }
+
+    fn reciprocal_degree_varied_graph() -> DiGraph {
+        let mut graph = empty_digraph();
+        let nodes = (0_usize..50)
+            .map(|index| format!("mem_{index:02}"))
+            .collect::<Vec<_>>();
+        for node in &nodes {
+            graph.add_node(node);
+        }
+
+        let mut edges = BTreeSet::new();
+        for index in 0..nodes.len() {
+            add_reciprocal_edge(&mut edges, &nodes[index], &nodes[(index + 1) % nodes.len()]);
+        }
+        for target in nodes.iter().skip(1) {
+            add_reciprocal_edge(&mut edges, &nodes[0], target);
+        }
+        for target in nodes.iter().skip(2).step_by(2) {
+            add_reciprocal_edge(&mut edges, &nodes[1], target);
+        }
+        for target in nodes.iter().skip(3).step_by(3) {
+            add_reciprocal_edge(&mut edges, &nodes[2], target);
+        }
+        for target in nodes.iter().skip(4).step_by(5) {
+            add_reciprocal_edge(&mut edges, &nodes[3], target);
+        }
+
+        for (source, target) in edges {
+            add_edge(&mut graph, &source, &target);
+        }
+        graph
     }
 
     #[test]
@@ -300,6 +385,30 @@ mod tests {
                 "complete graph must have uniform authority scores: {value} vs {first_authority}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn hits_authorities_correlate_with_pagerank_on_reciprocal_graph() -> TestResult {
+        let graph = reciprocal_degree_varied_graph();
+
+        let hits = graph_result(compute_hits(&graph))?;
+        let pagerank = pagerank_directed(&graph);
+        let hits_ranks = rank_map_from_scores(hits.authorities);
+        let pagerank_ranks = rank_map_from_scores(
+            pagerank
+                .scores
+                .into_iter()
+                .map(|score| (score.node, score.score)),
+        );
+        let correlation = spearman_correlation(&pagerank_ranks, &hits_ranks);
+
+        assert_eq!(hits_ranks.len(), 50);
+        assert_eq!(pagerank_ranks.len(), 50);
+        assert!(
+            correlation > 0.70,
+            "HITS authority ranks should correlate with PageRank ranks on reciprocal fixture; got {correlation}"
+        );
         Ok(())
     }
 
