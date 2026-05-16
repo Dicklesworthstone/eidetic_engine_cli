@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::{Instant, SystemTime};
 
 use rand::Rng;
+use uuid::Uuid;
 
 #[determinism::required]
 fn missing_seed_token() {}
@@ -10,6 +11,16 @@ fn missing_seed_token() {}
 fn ambient_rng(_: &ee::runtime::determinism::Deterministic<Seed>) {
     let mut rng = rand::thread_rng();
     let _: u64 = rng.r#gen();
+}
+
+#[determinism::required]
+fn ambient_random(_: &ee::runtime::determinism::Deterministic<Seed>) {
+    let _: u64 = rand::random();
+}
+
+#[determinism::required]
+fn ambient_uuid_v4(_: &ee::runtime::determinism::Deterministic<Seed>) {
+    let _ = Uuid::new_v4();
 }
 
 #[determinism::required]

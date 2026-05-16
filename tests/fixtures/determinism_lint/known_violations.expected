@@ -1,8 +1,10 @@
 schema: ee.determinism_lint_fixture.v1
-line 6: missing_seed_param: #[determinism::required] requires a Deterministic<Seed> parameter
-line 11: ambient_thread_rng: use Deterministic<Seed> instead of rand::thread_rng
-line 17: ambient_instant_now: inject timing at the boundary instead of calling Instant::now
-line 22: ambient_system_time_now: inject wall-clock time at the boundary instead of calling SystemTime::now
-line 27: ambient_env_var: read env through the registered config boundary
-line 33: hashmap_iteration: sort HashMap entries before deterministic output
-line 38: unsorted_read_dir: sort read_dir entries before deterministic output
+line 7: missing_seed_param: #[determinism::required] requires a Deterministic<Seed> parameter
+line 12: ambient_thread_rng: use Deterministic<Seed> instead of rand::thread_rng
+line 18: ambient_rand_random: use Deterministic<Seed> instead of rand::random
+line 23: ambient_uuid_v4: use DeterministicClock/seeded ID helpers instead of Uuid::new_v4
+line 28: ambient_instant_now: inject timing at the boundary instead of calling Instant::now
+line 33: ambient_system_time_now: inject wall-clock time at the boundary instead of calling SystemTime::now
+line 38: ambient_env_var: read env through the registered config boundary
+line 44: hashmap_iteration: sort HashMap entries before deterministic output
+line 49: unsorted_read_dir: sort read_dir entries before deterministic output

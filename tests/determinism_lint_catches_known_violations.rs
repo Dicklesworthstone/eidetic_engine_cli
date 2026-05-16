@@ -52,6 +52,20 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "use Deterministic<Seed> instead of rand::thread_rng",
             });
         }
+        if line.contains("rand::random::<") || line.contains("rand::random(") {
+            findings.push(Finding {
+                line: line_no,
+                code: "ambient_rand_random",
+                message: "use Deterministic<Seed> instead of rand::random",
+            });
+        }
+        if line.contains("Uuid::new_v4(") || line.contains("uuid::Uuid::new_v4(") {
+            findings.push(Finding {
+                line: line_no,
+                code: "ambient_uuid_v4",
+                message: "use DeterministicClock/seeded ID helpers instead of Uuid::new_v4",
+            });
+        }
         if line.contains("Instant::now(") {
             findings.push(Finding {
                 line: line_no,
