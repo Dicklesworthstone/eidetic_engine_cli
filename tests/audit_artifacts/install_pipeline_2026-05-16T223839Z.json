@@ -1,0 +1,456 @@
+{
+  "schema": "ee.audit.install_pipeline.v1",
+  "generated_at": "2026-05-16T22:38:39Z",
+  "src_commit": "655dbab23d43349f0af18916b5ff61aa8659bb35",
+  "decided_path": "path_b_pre_release",
+  "decision_inputs": {
+    "crates_package_name": "eidetic-engine",
+    "dep_resolution_ready": false,
+    "unresolved_dependency_count": 6,
+    "release_tag": "",
+    "release_version": "",
+    "gh_releases": false,
+    "latest_release_published": false,
+    "release_assets_complete": false,
+    "crates_name_claimed": false,
+    "crates_points_at_project": false,
+    "crates_version_matches_release": false,
+    "tap_formula_present": false,
+    "tap_version_matches_release": false
+  },
+  "github_releases": {
+    "probe_status": "no_releases",
+    "releases": []
+  },
+  "github_release_assets": {
+    "probe_status": "no_release",
+    "tag": "",
+    "expected_assets": [],
+    "asset_names": [],
+    "missing_assets": [],
+    "asset_matrix_complete": false
+  },
+  "crates_io": {
+    "probe_status": "unreachable",
+    "name_claimed": null
+  },
+  "dependency_resolution": {
+    "probe_status": "ok",
+    "dep_resolution_ready": false,
+    "unresolved_count": 6,
+    "required_count": 31,
+    "required_crates": [
+      {
+        "crate_name": "asupersync",
+        "required_version": "0.3.1",
+        "role": "direct",
+        "source": "Cargo.toml dependencies",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.3.1",
+        "repository": "https://github.com/Dicklesworthstone/asupersync"
+      },
+      {
+        "crate_name": "franken-agent-detection",
+        "required_version": "0.1.3",
+        "role": "direct",
+        "source": "Cargo.toml dependencies",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.1.7",
+        "repository": "https://github.com/Dicklesworthstone/franken_agent_detection"
+      },
+      {
+        "crate_name": "frankensearch",
+        "required_version": "0.3.0",
+        "role": "direct",
+        "source": "Cargo.toml dependencies",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.3.0",
+        "repository": "https://github.com/Dicklesworthstone/frankensearch"
+      },
+      {
+        "crate_name": "fnx-algorithms",
+        "required_version": "0.1.0",
+        "role": "direct",
+        "source": "Cargo.toml dependencies",
+        "strategy": "graph_feature_or_publish",
+        "status": "unreachable",
+        "latest_version": "",
+        "repository": ""
+      },
+      {
+        "crate_name": "fnx-classes",
+        "required_version": "0.1.0",
+        "role": "direct",
+        "source": "Cargo.toml dependencies",
+        "strategy": "graph_feature_or_publish",
+        "status": "unreachable",
+        "latest_version": "",
+        "repository": ""
+      },
+      {
+        "crate_name": "fnx-runtime",
+        "required_version": "0.1.0",
+        "role": "direct",
+        "source": "Cargo.toml dependencies",
+        "strategy": "graph_feature_or_publish",
+        "status": "unreachable",
+        "latest_version": "",
+        "repository": ""
+      },
+      {
+        "crate_name": "sqlmodel-core",
+        "required_version": "0.2.2",
+        "role": "direct",
+        "source": "Cargo.toml dependencies",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.2.2",
+        "repository": "https://github.com/sqlmodel/sqlmodel-rust"
+      },
+      {
+        "crate_name": "sqlmodel-frankensqlite",
+        "required_version": "0.2.2",
+        "role": "direct",
+        "source": "Cargo.toml dependencies",
+        "strategy": "must_be_published",
+        "status": "crate_exists_version_missing",
+        "latest_version": "0.2.1",
+        "repository": "https://github.com/sqlmodel/sqlmodel-rust"
+      },
+      {
+        "crate_name": "tru",
+        "required_version": "0.2.2",
+        "role": "direct",
+        "source": "Cargo.toml dependencies",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.2.3",
+        "repository": "https://github.com/Dicklesworthstone/toon_rust"
+      },
+      {
+        "crate_name": "fsqlite",
+        "required_version": "0.1.2",
+        "role": "transitive",
+        "source": "sqlmodel-frankensqlite dependency",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.1.3",
+        "repository": "https://github.com/Dicklesworthstone/frankensqlite"
+      },
+      {
+        "crate_name": "fsqlite-core",
+        "required_version": "0.1.2",
+        "role": "transitive",
+        "source": "sqlmodel-frankensqlite dependency",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.1.3",
+        "repository": "https://github.com/Dicklesworthstone/frankensqlite"
+      },
+      {
+        "crate_name": "fsqlite-error",
+        "required_version": "0.1.2",
+        "role": "transitive",
+        "source": "sqlmodel-frankensqlite dependency",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.1.3",
+        "repository": "https://github.com/Dicklesworthstone/frankensqlite"
+      },
+      {
+        "crate_name": "fsqlite-types",
+        "required_version": "0.1.2",
+        "role": "transitive",
+        "source": "sqlmodel-frankensqlite dependency",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.1.3",
+        "repository": "https://github.com/Dicklesworthstone/frankensqlite"
+      },
+      {
+        "crate_name": "fsqlite-func",
+        "required_version": "0.1.2",
+        "role": "transitive",
+        "source": "frankensqlite feature surface",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.1.3",
+        "repository": "https://github.com/Dicklesworthstone/frankensqlite"
+      },
+      {
+        "crate_name": "fsqlite-ext-fts5",
+        "required_version": "0.1.2",
+        "role": "transitive",
+        "source": "frankensqlite feature surface",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.1.3",
+        "repository": "https://github.com/Dicklesworthstone/frankensqlite"
+      },
+      {
+        "crate_name": "fsqlite-ext-json",
+        "required_version": "0.1.2",
+        "role": "transitive",
+        "source": "frankensqlite feature surface",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.1.3",
+        "repository": "https://github.com/Dicklesworthstone/frankensqlite"
+      },
+      {
+        "crate_name": "fsqlite-ast",
+        "required_version": "0.1.2",
+        "role": "transitive",
+        "source": "frankensqlite feature surface",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.1.3",
+        "repository": "https://github.com/Dicklesworthstone/frankensqlite"
+      },
+      {
+        "crate_name": "fsqlite-btree",
+        "required_version": "0.1.2",
+        "role": "transitive",
+        "source": "frankensqlite feature surface",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.1.3",
+        "repository": "https://github.com/Dicklesworthstone/frankensqlite"
+      },
+      {
+        "crate_name": "fsqlite-pager",
+        "required_version": "0.1.2",
+        "role": "transitive",
+        "source": "frankensqlite feature surface",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.1.3",
+        "repository": "https://github.com/Dicklesworthstone/frankensqlite"
+      },
+      {
+        "crate_name": "fsqlite-parser",
+        "required_version": "0.1.2",
+        "role": "transitive",
+        "source": "frankensqlite feature surface",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.1.3",
+        "repository": "https://github.com/Dicklesworthstone/frankensqlite"
+      },
+      {
+        "crate_name": "fsqlite-planner",
+        "required_version": "0.1.2",
+        "role": "transitive",
+        "source": "frankensqlite feature surface",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.1.3",
+        "repository": "https://github.com/Dicklesworthstone/frankensqlite"
+      },
+      {
+        "crate_name": "fsqlite-vdbe",
+        "required_version": "0.1.2",
+        "role": "transitive",
+        "source": "frankensqlite feature surface",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.1.3",
+        "repository": "https://github.com/Dicklesworthstone/frankensqlite"
+      },
+      {
+        "crate_name": "fsqlite-vfs",
+        "required_version": "0.1.2",
+        "role": "transitive",
+        "source": "frankensqlite feature surface",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.1.4",
+        "repository": "https://github.com/Dicklesworthstone/frankensqlite"
+      },
+      {
+        "crate_name": "fsqlite-wal",
+        "required_version": "0.1.2",
+        "role": "transitive",
+        "source": "frankensqlite feature surface",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.1.3",
+        "repository": "https://github.com/Dicklesworthstone/frankensqlite"
+      },
+      {
+        "crate_name": "fsqlite-mvcc",
+        "required_version": "0.1.2",
+        "role": "transitive",
+        "source": "frankensqlite feature surface",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.1.3",
+        "repository": "https://github.com/Dicklesworthstone/frankensqlite"
+      },
+      {
+        "crate_name": "fsqlite-observability",
+        "required_version": "0.1.2",
+        "role": "transitive",
+        "source": "frankensqlite feature surface",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.1.3",
+        "repository": "https://github.com/Dicklesworthstone/frankensqlite"
+      },
+      {
+        "crate_name": "frankensearch-core",
+        "required_version": "0.2.0",
+        "role": "transitive",
+        "source": "frankensearch 0.3.0 workspace dependency",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.2.0",
+        "repository": "https://github.com/Dicklesworthstone/frankensearch"
+      },
+      {
+        "crate_name": "frankensearch-embed",
+        "required_version": "0.2.0",
+        "role": "transitive",
+        "source": "frankensearch 0.3.0 workspace dependency",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.2.0",
+        "repository": "https://github.com/Dicklesworthstone/frankensearch"
+      },
+      {
+        "crate_name": "frankensearch-index",
+        "required_version": "0.2.0",
+        "role": "transitive",
+        "source": "frankensearch 0.3.0 workspace dependency",
+        "strategy": "must_be_published",
+        "status": "version_available",
+        "latest_version": "0.2.0",
+        "repository": "https://github.com/Dicklesworthstone/frankensearch"
+      },
+      {
+        "crate_name": "fnx-cgse",
+        "required_version": "0.1.0",
+        "role": "transitive",
+        "source": "franken_networkx feature surface",
+        "strategy": "graph_feature_or_publish",
+        "status": "unreachable",
+        "latest_version": "",
+        "repository": ""
+      },
+      {
+        "crate_name": "fnx-convert",
+        "required_version": "0.1.0",
+        "role": "transitive",
+        "source": "franken_networkx feature surface",
+        "strategy": "graph_feature_or_publish",
+        "status": "unreachable",
+        "latest_version": "",
+        "repository": ""
+      }
+    ]
+  },
+  "homebrew_tap": {
+    "probe_status": "unreachable",
+    "formula_present": null
+  },
+  "release_workflow": {
+    "path": ".github/workflows/release.yml",
+    "targets_csv": "aarch64-apple-darwin,aarch64-unknown-linux-gnu,x86_64-apple-darwin,x86_64-pc-windows-msvc,x86_64-unknown-linux-gnu,x86_64-unknown-linux-musl",
+    "asset_categories": [
+      "tar.xz",
+      "tar.xz.sha256",
+      "sigstore",
+      "install.sh",
+      "install.ps1"
+    ],
+    "cosign_installer_present": true,
+    "tag_trigger_present": true,
+    "cosign_bundle_present": true,
+    "cosign_identity_bound": true,
+    "release_verifies_sigstore_before_publish": true,
+    "smoke_containers": [
+      "debian:bookworm-slim",
+      "ubuntu:24.04"
+    ],
+    "macos_smoke_present": true,
+    "smoke_uses_release_tag": true,
+    "smoke_uses_release_installer_asset": true,
+    "release_notes_use_release_assets": true,
+    "release_notes_pin_installer_version": true,
+    "release_notes_no_expanding_heredoc": true,
+    "release_notes_git_log_pipe_safe": true,
+    "release_notes_checkout_full_history": true,
+    "smoke_runs_doctor": true,
+    "release_publish_idempotent": true,
+    "homebrew_after_smoke": true,
+    "homebrew_missing_token_skip_present": true,
+    "homebrew_pr_idempotent": true,
+    "release_concurrency_present": true,
+    "job_timeouts_present": true,
+    "critical_bash_steps_strict": true,
+    "release_requires_downloaded_artifacts": true,
+    "smoke_version_assertions_present": true,
+    "smoke_version_context_available": true
+  },
+  "readme_installation": {
+    "probe_status": "ok",
+    "installation_status_section": true,
+    "release_installer_marked_planned": true,
+    "homebrew_marked_planned": true,
+    "cargo_marked_planned": true,
+    "source_build_marked_available": true,
+    "release_installer_uses_release_assets": true,
+    "release_installer_pins_version": true,
+    "planned_markers_present": true
+  },
+  "installer_assets": {
+    "probe_status": "ok",
+    "installer_examples_use_release_assets": true,
+    "unix_installer_supports_musl_asset": true,
+    "unix_installer_normalizes_version_tag": true,
+    "unix_installer_fails_on_bad_sigstore": true,
+    "unix_installer_requires_sigstore_bundle_with_cosign": true,
+    "unix_installer_requires_sha256_tool": true,
+    "unix_installer_binds_sigstore_identity": true,
+    "windows_installer_supports_x64_asset": true,
+    "windows_installer_rejects_unbuilt_i686": true,
+    "windows_installer_rejects_unbuilt_arm64": true,
+    "windows_installer_normalizes_version_tag": true,
+    "windows_installer_fails_on_bad_sigstore": true,
+    "windows_installer_requires_sigstore_bundle_with_cosign": true,
+    "windows_installer_binds_sigstore_identity": true,
+    "homebrew_formula_tests_doctor_json": true,
+    "homebrew_formula_fetches_sha_strictly": true,
+    "homebrew_formula_normalizes_version_tag": true,
+    "installer_targets_match_release_matrix": true
+  },
+  "ci_workflow": {
+    "probe_status": "ok",
+    "schedule_present": true,
+    "workflow_dispatch_present": true,
+    "verify_not_scheduled": true,
+    "install_pipeline_smoke_present": true,
+    "linux_runner_present": true,
+    "macos_runner_present": true,
+    "path_a_gate_present": true,
+    "linux_docker_smoke_present": true,
+    "pre_release_skip_present": true,
+    "audit_artifact_upload_present": true,
+    "smoke_uses_latest_release_tag": true,
+    "smoke_uses_release_installer_asset": true,
+    "homebrew_smoke_present": true,
+    "cargo_smoke_present": true,
+    "smoke_version_assertions_present": true,
+    "weekly_smoke_ready": true
+  },
+  "next_actions": [
+    "Track bd-3usjw.11: Resolve dependency_resolution.required_crates before cargo publish",
+    "Track bd-3usjw.10: Publish eidetic-engine package with bin name ee",
+    "Track bd-3usjw.13: Publish Dicklesworthstone/homebrew-tap with Formula/ee.rb pinned to v0.1.0",
+    "Track bd-3usjw.9: Ship v0.1.0 GitHub release with full asset set (ee-{target}.tar.xz + .sha256 + sigstore.json + install.sh + install.ps1)",
+    "Keep release-readiness followups under bd-3usjw with the release-readiness label"
+  ]
+}
