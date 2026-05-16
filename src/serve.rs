@@ -371,6 +371,7 @@ pub fn daemon_status_report(
 
 pub fn load_daemon_job_rows(workspace_path: &Path) -> Result<Vec<DaemonJobRow>, String> {
     let table_path = daemon_job_table_path(workspace_path);
+    ensure_daemon_job_table_path_is_not_symlink(&table_path)?;
     if !table_path.exists() {
         return Ok(Vec::new());
     }
@@ -401,6 +402,7 @@ fn append_daemon_job_rows(table_path: &Path, rows: &[DaemonJobRow]) -> Result<()
     if rows.is_empty() {
         return Ok(());
     }
+    ensure_daemon_job_table_path_is_not_symlink(table_path)?;
     let parent = table_path
         .parent()
         .ok_or_else(|| "Daemon job table path has no parent directory".to_owned())?;
@@ -411,21 +413,58 @@ fn append_daemon_job_rows(table_path: &Path, rows: &[DaemonJobRow]) -> Result<()
         .append(true)
         .open(table_path)
         .map_err(|error| format!("Failed to open daemon job table for append: {error}"))?;
-    
+
     let mut buffer = Vec::new();
     for row in rows {
         serde_json::to_writer(&mut buffer, row)
             .map_err(|error| format!("Failed to serialize daemon job row: {error}"))?;
         buffer.push(b'\n');
     }
-    
+
     file.write_all(&buffer)
         .map_err(|error| format!("Failed to write daemon job rows: {error}"))?;
-        
+
     file.flush()
         .map_err(|error| format!("Failed to flush daemon job table: {error}"))?;
     file.sync_data()
         .map_err(|error| format!("Failed to sync daemon job table: {error}"))
+}
+
+fn ensure_daemon_job_table_path_is_not_symlink(table_path: &Path) -> Result<(), String> {
+    if let Some(symlink_path) = first_existing_symlink_component(table_path)? {
+        return Err(format!(
+            "Refusing to access daemon job table '{}': path traverses symbolic link '{}'",
+            table_path.display(),
+            symlink_path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, String> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect daemon job table path component '{}': {error}",
+                    current.display()
+                ));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn latest_daemon_rows(rows: &[DaemonJobRow]) -> Vec<DaemonJobRow> {
@@ -630,6 +669,77 @@ mod tests {
             error.contains("Failed to parse daemon job row 1"),
             true,
             "malformed table parse error",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_job_table_rejects_symlinked_ee_directory_before_write() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_ee = temp.path().join("real-ee");
+        fs::create_dir_all(&real_ee).map_err(|error| error.to_string())?;
+        symlink(&real_ee, temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let mut options = DaemonForegroundOptions::new(temp.path().to_string_lossy().into_owned());
+        options.interval_ms = 0;
+        options.job_types = vec![JobType::HealthCheck];
+
+        let error = match record_daemon_foreground_start(temp.path(), &options) {
+            Ok(plan) => return Err(format!("symlinked .ee directory should fail, got {plan:?}")),
+            Err(error) => error,
+        };
+        ensure(
+            error.contains("path traverses symbolic link"),
+            true,
+            "symlinked .ee rejection",
+        )?;
+        ensure(
+            real_ee.join("daemon-jobs.jsonl").exists(),
+            false,
+            "daemon job table must not be written through symlinked .ee",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_job_table_rejects_symlinked_table_before_read_or_write() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ee_dir = temp.path().join(".ee");
+        fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let target = temp.path().join("outside-daemon-jobs.jsonl");
+        fs::write(&target, "").map_err(|error| error.to_string())?;
+        symlink(&target, daemon_job_table_path(temp.path())).map_err(|error| error.to_string())?;
+
+        let read_error = match load_daemon_job_rows(temp.path()) {
+            Ok(rows) => return Err(format!("symlinked table read should fail, got {rows:?}")),
+            Err(error) => error,
+        };
+        ensure(
+            read_error.contains("path traverses symbolic link"),
+            true,
+            "symlinked table read rejection",
+        )?;
+
+        let mut options = DaemonForegroundOptions::new(temp.path().to_string_lossy().into_owned());
+        options.interval_ms = 0;
+        options.job_types = vec![JobType::HealthCheck];
+        let write_error = match record_daemon_foreground_start(temp.path(), &options) {
+            Ok(plan) => return Err(format!("symlinked table write should fail, got {plan:?}")),
+            Err(error) => error,
+        };
+        ensure(
+            write_error.contains("path traverses symbolic link"),
+            true,
+            "symlinked table write rejection",
+        )?;
+        ensure(
+            fs::read_to_string(&target).map_err(|error| error.to_string())?,
+            String::new(),
+            "symlink target must not receive daemon rows",
         )
     }
 }
