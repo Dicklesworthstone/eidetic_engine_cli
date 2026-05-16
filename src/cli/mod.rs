@@ -7781,6 +7781,10 @@ pub struct SupportBundleArgs {
     #[arg(long, action = ArgAction::SetTrue, default_value_t = true)]
     pub redacted: bool,
 
+    /// Redaction level for diagnostic bundle content.
+    #[arg(long, value_enum, default_value_t = BackupRedaction::Paranoid)]
+    pub redaction: BackupRedaction,
+
     /// Include raw unredacted content (requires explicit opt-in).
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_raw: bool,
@@ -35778,6 +35782,7 @@ where
         output_dir: args.out.clone(),
         dry_run: args.dry_run,
         redacted: args.redacted && !args.include_raw,
+        redaction_level: args.redaction.to_model(),
         include_raw: args.include_raw,
         audit_limit: 100,
     };
