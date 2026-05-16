@@ -2165,6 +2165,8 @@ pub enum DiagCommand {
     GraphSnapshot(DiagGraphSnapshotArgs),
     /// Verify database, provenance-chain, and canary-memory integrity.
     Integrity(DiagIntegrityArgs),
+    /// Replay a synthetic swarm incident fixture without touching live services.
+    Incident(DiagIncidentArgs),
     /// Skew memory temporal validity metadata for diagnostic fixture replay.
     MemoryValidity(DiagMemoryValidityArgs),
     /// Seed a deterministic model registry entry for diagnostic fixture replay.
@@ -2681,6 +2683,14 @@ pub struct DiagIntegrityArgs {
     /// Plan the canary write without mutating the database.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+}
+
+/// Arguments for `ee diag incident`.
+#[derive(Clone, Debug, Eq, PartialEq, Parser)]
+pub struct DiagIncidentArgs {
+    /// Synthetic incident fixture path.
+    #[arg(long, value_name = "PATH")]
+    pub fixture: PathBuf,
 }
 
 /// Arguments for `ee diag search`.
@@ -8221,6 +8231,7 @@ where
                 handle_diag_graph_snapshot(&cli, args, stdout, stderr)
             }
             DiagCommand::Integrity(args) => handle_diag_integrity(&cli, args, stdout),
+            DiagCommand::Incident(args) => handle_diag_incident(&cli, args, stdout, stderr),
             DiagCommand::MemoryValidity(args) => {
                 handle_diag_memory_validity(&cli, args, stdout, stderr)
             }
@@ -17810,6 +17821,296 @@ where
             &(output::render_integrity_diagnostics_json(&report) + "\n"),
         ),
     }
+}
+
+fn handle_diag_incident<W, E>(
+    cli: &Cli,
+    args: &DiagIncidentArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let raw = match fs::read_to_string(&args.fixture) {
+        Ok(raw) => raw,
+        Err(error) => {
+            let domain_error = incident_fixture_error(
+                "incident_fixture_unreadable",
+                format!("Failed to read incident fixture: {error}"),
+                Some(
+                    "Pass --fixture <path> pointing at a readable ee.swarm_incident.v1 JSON file.",
+                ),
+                &args.fixture,
+                None,
+            );
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let fixture = match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(value) => value,
+        Err(error) => {
+            let domain_error = incident_fixture_error(
+                "incident_fixture_parse_failed",
+                format!("Incident fixture is not valid JSON: {error}"),
+                Some("Regenerate or repair the fixture before replaying it."),
+                &args.fixture,
+                None,
+            );
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let Some(object) = fixture.as_object() else {
+        let domain_error = incident_fixture_error(
+            "incident_fixture_invalid",
+            "Incident fixture must be a JSON object.",
+            Some("Use an ee.swarm_incident.v1 object fixture."),
+            &args.fixture,
+            None,
+        );
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    };
+    let found_schema = object.get("schema").and_then(serde_json::Value::as_str);
+    if found_schema != Some("ee.swarm_incident.v1") {
+        let domain_error = incident_fixture_error(
+            "unsupported_fixture_schema",
+            format!(
+                "Unsupported incident fixture schema: {}.",
+                found_schema.unwrap_or("<missing>")
+            ),
+            Some("Migrate the fixture to schema ee.swarm_incident.v1 before replay."),
+            &args.fixture,
+            found_schema,
+        );
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    if let Some(missing_field) = incident_missing_required_field(&fixture) {
+        let domain_error = incident_fixture_error(
+            "incident_fixture_invalid",
+            format!("Incident fixture is missing required field `{missing_field}`."),
+            Some("Regenerate the fixture from docs/schemas/swarm/ee.swarm_incident.v1.json."),
+            &args.fixture,
+            found_schema,
+        );
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let response = diag_incident_response(&args.fixture, &fixture);
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &format!(
+                "incident fixture replay\n\nscenario: {}\nposture: {}\ndominant status: {}\nrecovery actions: {}\n",
+                response["data"]["fixture"]["scenarioId"]
+                    .as_str()
+                    .unwrap_or("unknown"),
+                response["data"]["posture"].as_str().unwrap_or("unknown"),
+                response["data"]["dominantStatus"]
+                    .as_str()
+                    .unwrap_or("unknown"),
+                response["data"]["recoveryActions"]
+                    .as_array()
+                    .map_or(0, Vec::len)
+            ),
+        ),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    }
+}
+
+fn incident_fixture_error(
+    code: &'static str,
+    message: impl Into<String>,
+    repair: Option<&'static str>,
+    fixture: &Path,
+    found_schema: Option<&str>,
+) -> DomainError {
+    DomainError::UsageCodeWithDetails {
+        code,
+        message: message.into(),
+        repair: repair.map(str::to_string),
+        details_json: serde_json::json!({
+            "fixturePath": fixture.display().to_string(),
+            "expectedSchema": "ee.swarm_incident.v1",
+            "foundSchema": found_schema,
+            "recovery": [
+                {
+                    "priority": 1,
+                    "kind": "migration",
+                    "command": null,
+                    "rationale": "Update the incident fixture to the supported ee.swarm_incident.v1 schema before replay."
+                }
+            ]
+        })
+        .to_string(),
+    }
+}
+
+fn diag_incident_response(fixture_path: &Path, fixture: &serde_json::Value) -> serde_json::Value {
+    let substrate_posture = incident_substrate_posture(fixture);
+    let status_counts = incident_status_counts(&substrate_posture);
+    let dominant_status = incident_dominant_status(&substrate_posture);
+    let posture = incident_global_posture(dominant_status);
+
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "schema": "ee.diag.incident.replay.v1",
+            "command": "diag incident",
+            "version": env!("CARGO_PKG_VERSION"),
+            "fixture": {
+                "path": fixture_path.display().to_string(),
+                "schema": fixture.get("schema").cloned().unwrap_or(serde_json::Value::Null),
+                "scenarioId": fixture.get("scenarioId").cloned().unwrap_or(serde_json::Value::Null),
+                "fixedClock": fixture.get("fixedClock").cloned().unwrap_or(serde_json::Value::Null),
+                "purpose": fixture.get("purpose").cloned().unwrap_or(serde_json::Value::Null)
+            },
+            "sideEffectFree": true,
+            "mutationPolicy": "read_only_fixture_replay_no_live_services_no_mutation",
+            "posture": posture,
+            "dominantStatus": dominant_status,
+            "substratePosture": substrate_posture,
+            "statusCounts": status_counts,
+            "substrates": fixture.get("substrates").cloned().unwrap_or_else(|| serde_json::json!({})),
+            "degraded": fixture.get("expectedDegraded").cloned().unwrap_or_else(|| serde_json::json!([])),
+            "recoveryActions": incident_recovery_actions(fixture),
+            "redactionExpectations": fixture.get("redactionExpectations").cloned().unwrap_or_else(|| serde_json::json!({})),
+            "assertions": fixture.get("assertions").cloned().unwrap_or_else(|| serde_json::json!({})),
+            "artifacts": fixture.get("artifacts").cloned().unwrap_or_else(|| serde_json::json!([]))
+        }
+    })
+}
+
+fn incident_missing_required_field(fixture: &serde_json::Value) -> Option<&'static str> {
+    [
+        "schema",
+        "scenarioId",
+        "fixedClock",
+        "purpose",
+        "substrates",
+        "expectedDegraded",
+        "expectedRecoveryActions",
+        "redactionExpectations",
+        "assertions",
+        "artifacts",
+    ]
+    .into_iter()
+    .find(|field| fixture.get(*field).is_none())
+}
+
+fn incident_substrate_posture(fixture: &serde_json::Value) -> serde_json::Value {
+    let mut posture = serde_json::Map::new();
+    if let Some(substrates) = fixture
+        .get("substrates")
+        .and_then(serde_json::Value::as_object)
+    {
+        for name in ["agentMail", "beads", "rch", "disk", "hotPath"] {
+            if let Some(status) = substrates
+                .get(name)
+                .and_then(|substrate| substrate.get("status"))
+                .and_then(serde_json::Value::as_str)
+            {
+                posture.insert(
+                    name.to_string(),
+                    serde_json::Value::String(status.to_string()),
+                );
+            }
+        }
+    }
+    serde_json::Value::Object(posture)
+}
+
+fn incident_status_counts(substrate_posture: &serde_json::Value) -> serde_json::Value {
+    let mut counts = BTreeMap::<String, u32>::new();
+    if let Some(postures) = substrate_posture.as_object() {
+        for status in postures.values().filter_map(serde_json::Value::as_str) {
+            *counts.entry(status.to_string()).or_insert(0) += 1;
+        }
+    }
+    serde_json::json!(counts)
+}
+
+fn incident_dominant_status(substrate_posture: &serde_json::Value) -> &'static str {
+    substrate_posture
+        .as_object()
+        .into_iter()
+        .flat_map(|postures| postures.values())
+        .filter_map(serde_json::Value::as_str)
+        .max_by_key(|status| incident_status_rank(status))
+        .unwrap_or("ok")
+        .match_status()
+}
+
+trait IncidentStatusMatch {
+    fn match_status(self) -> &'static str;
+}
+
+impl IncidentStatusMatch for &str {
+    fn match_status(self) -> &'static str {
+        match self {
+            "blocked" => "blocked",
+            "unavailable" => "unavailable",
+            "stale" => "stale",
+            "degraded" => "degraded",
+            "ok" => "ok",
+            "not_applicable" => "not_applicable",
+            _ => "unknown",
+        }
+    }
+}
+
+fn incident_status_rank(status: &str) -> u8 {
+    match status {
+        "blocked" => 5,
+        "unavailable" => 4,
+        "stale" => 3,
+        "degraded" => 2,
+        "ok" => 1,
+        "not_applicable" => 0,
+        _ => 0,
+    }
+}
+
+fn incident_global_posture(dominant_status: &str) -> &'static str {
+    match dominant_status {
+        "blocked" => "blocked",
+        "unavailable" | "stale" | "degraded" => "degraded_recoverable",
+        _ => "ok",
+    }
+}
+
+fn incident_recovery_actions(fixture: &serde_json::Value) -> serde_json::Value {
+    let actions = fixture
+        .get("expectedRecoveryActions")
+        .and_then(serde_json::Value::as_array);
+    let Some(actions) = actions else {
+        return serde_json::json!([]);
+    };
+    serde_json::Value::Array(
+        actions
+            .iter()
+            .map(|action| {
+                serde_json::json!({
+                    "priority": action.get("priority").cloned().unwrap_or(serde_json::Value::Null),
+                    "kind": action.get("kind").cloned().unwrap_or(serde_json::Value::Null),
+                    "summary": action.get("summary").cloned().unwrap_or(serde_json::Value::Null),
+                    "command": action.get("command").cloned().unwrap_or(serde_json::Value::Null),
+                    "manualStep": action.get("manualStep").cloned().unwrap_or(serde_json::Value::Null),
+                    "evidence": action.get("evidence").cloned().unwrap_or_else(|| serde_json::json!([])),
+                    "destructive": action.get("destructive").cloned().unwrap_or(serde_json::Value::Bool(false)),
+                    "preconditions": action.get("preconditions").cloned().unwrap_or_else(|| serde_json::json!([]))
+                })
+            })
+            .collect(),
+    )
 }
 
 fn handle_diag_graph<W>(cli: &Cli, stdout: &mut W) -> ProcessExitCode
@@ -36295,6 +36596,7 @@ impl NormalizedInvocation {
                     DiagCommand::HostProfile(_) => "diag host-profile".to_string(),
                     DiagCommand::GraphSnapshot(_) => "diag graph-snapshot".to_string(),
                     DiagCommand::Integrity(_) => "diag integrity".to_string(),
+                    DiagCommand::Incident(_) => "diag incident".to_string(),
                     DiagCommand::MemoryValidity(_) => "diag memory-validity".to_string(),
                     DiagCommand::ModelRegistry(_) => "diag model-registry".to_string(),
                     DiagCommand::PackLatest(_) => "diag pack-latest".to_string(),
@@ -37737,6 +38039,290 @@ mod tests {
             &value["error"]["code"],
             &serde_json::json!("unsatisfied_degraded_mode"),
             "required-source JSON error code",
+        )
+    }
+
+    fn swarm_incident_fixture_path(name: &str) -> String {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("swarm_incidents")
+            .join(format!("{name}.json"))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn assert_diag_incident_action_shape(action: &serde_json::Value, context: &str) -> TestResult {
+        for field in [
+            "priority",
+            "kind",
+            "summary",
+            "command",
+            "manualStep",
+            "evidence",
+            "destructive",
+            "preconditions",
+        ] {
+            ensure(
+                action.get(field).is_some(),
+                format!("{context}: recovery action missing {field}"),
+            )?;
+        }
+        ensure_equal(&action["destructive"], &serde_json::json!(false), context)
+    }
+
+    #[test]
+    fn parser_accepts_diag_incident_fixture() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "diag",
+            "incident",
+            "--fixture",
+            "tests/fixtures/swarm_incidents/rch_topology_blocked.json",
+        ])
+        .map_err(|error| format!("failed to parse diag incident: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::Incident(args))) => ensure_equal(
+                &args.fixture,
+                &PathBuf::from("tests/fixtures/swarm_incidents/rch_topology_blocked.json"),
+                "diag incident fixture path",
+            ),
+            other => Err(format!("expected diag incident command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn diag_incident_replays_existing_substrate_fixtures() -> TestResult {
+        let cases = [
+            (
+                "agent_mail_unavailable",
+                "agentMail",
+                "unavailable",
+                "degraded_recoverable",
+                "unavailable",
+            ),
+            (
+                "beads_jsonl_ahead_of_db",
+                "beads",
+                "stale",
+                "degraded_recoverable",
+                "stale",
+            ),
+            (
+                "disk_pressure_external_target_ok",
+                "disk",
+                "degraded",
+                "degraded_recoverable",
+                "degraded",
+            ),
+            (
+                "hot_path_burst_admission",
+                "hotPath",
+                "degraded",
+                "degraded_recoverable",
+                "degraded",
+            ),
+            (
+                "rch_topology_blocked",
+                "rch",
+                "blocked",
+                "blocked",
+                "blocked",
+            ),
+        ];
+
+        for (scenario, substrate, status, posture, dominant_status) in cases {
+            let fixture = swarm_incident_fixture_path(scenario);
+            let (exit, stdout, stderr) =
+                invoke(&["ee", "--json", "diag", "incident", "--fixture", &fixture]);
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::Success,
+                &format!("{scenario} exit"),
+            )?;
+            ensure(
+                stderr.is_empty(),
+                format!("{scenario}: JSON replay should not write stderr"),
+            )?;
+            let value: serde_json::Value =
+                serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+            ensure_equal(
+                &value["schema"],
+                &serde_json::json!(crate::models::RESPONSE_SCHEMA_V1),
+                &format!("{scenario} response schema"),
+            )?;
+            ensure_equal(
+                &value["data"]["schema"],
+                &serde_json::json!("ee.diag.incident.replay.v1"),
+                &format!("{scenario} data schema"),
+            )?;
+            ensure_equal(
+                &value["data"]["sideEffectFree"],
+                &serde_json::json!(true),
+                &format!("{scenario} side-effect free"),
+            )?;
+            ensure_equal(
+                &value["data"]["posture"],
+                &serde_json::json!(posture),
+                &format!("{scenario} posture"),
+            )?;
+            ensure_equal(
+                &value["data"]["dominantStatus"],
+                &serde_json::json!(dominant_status),
+                &format!("{scenario} dominant status"),
+            )?;
+            ensure_equal(
+                &value["data"]["substratePosture"][substrate],
+                &serde_json::json!(status),
+                &format!("{scenario} substrate posture"),
+            )?;
+            ensure_equal(
+                &value["data"]["assertions"]["noLiveServices"],
+                &serde_json::json!(true),
+                &format!("{scenario} no live services assertion"),
+            )?;
+            let actions = value["data"]["recoveryActions"]
+                .as_array()
+                .ok_or_else(|| format!("{scenario}: recoveryActions must be an array"))?;
+            ensure(!actions.is_empty(), format!("{scenario}: recovery actions"))?;
+            for action in actions {
+                assert_diag_incident_action_shape(action, scenario)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn diag_incident_empty_and_unknown_fixture_errors_are_structured() -> TestResult {
+        let dir = unique_temp_workspace("diag-incident-errors")?;
+        fs::create_dir_all(&dir).map_err(|error| format!("create temp dir: {error}"))?;
+        let empty_fixture = Path::new(&dir).join("empty.json");
+        fs::write(&empty_fixture, "").map_err(|error| format!("write empty fixture: {error}"))?;
+        let empty_fixture = empty_fixture.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "diag",
+            "incident",
+            "--fixture",
+            &empty_fixture,
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "empty fixture exit")?;
+        ensure(stderr.is_empty(), "empty fixture JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "empty fixture error schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("incident_fixture_parse_failed"),
+            "empty fixture error code",
+        )?;
+
+        let unknown_fixture = Path::new(&dir).join("future.json");
+        fs::write(
+            &unknown_fixture,
+            r#"{"schema":"ee.swarm_incident.v99","scenarioId":"future"}"#,
+        )
+        .map_err(|error| format!("write unknown fixture: {error}"))?;
+        let unknown_fixture = unknown_fixture.to_string_lossy().into_owned();
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "diag",
+            "incident",
+            "--fixture",
+            &unknown_fixture,
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "unknown schema exit")?;
+        ensure(stderr.is_empty(), "unknown schema JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("unsupported_fixture_schema"),
+            "unknown schema error code",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["expectedSchema"],
+            &serde_json::json!("ee.swarm_incident.v1"),
+            "unknown schema expected schema",
+        )
+    }
+
+    #[test]
+    fn diag_incident_combined_fixture_is_deterministic() -> TestResult {
+        let fixture_path = swarm_incident_fixture_path("rch_topology_blocked");
+        let mut fixture: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&fixture_path).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        fixture["scenarioId"] = serde_json::json!("combined_swarm_incident");
+        fixture["substrates"]["agentMail"]["status"] = serde_json::json!("unavailable");
+        fixture["substrates"]["agentMail"]["degradedCodes"] =
+            serde_json::json!(["agent_mail_unavailable"]);
+        fixture["substrates"]["beads"]["status"] = serde_json::json!("stale");
+        fixture["substrates"]["beads"]["degradedCodes"] =
+            serde_json::json!(["beads_tracker_stale"]);
+        fixture["substrates"]["disk"]["status"] = serde_json::json!("degraded");
+        fixture["substrates"]["disk"]["degradedCodes"] =
+            serde_json::json!(["build_admission_denied"]);
+
+        let dir = unique_temp_workspace("diag-incident-combined")?;
+        fs::create_dir_all(&dir).map_err(|error| format!("create temp dir: {error}"))?;
+        let combined_path = Path::new(&dir).join("combined.json");
+        fs::write(&combined_path, fixture.to_string())
+            .map_err(|error| format!("write combined fixture: {error}"))?;
+        let combined_path = combined_path.to_string_lossy().into_owned();
+
+        let mut outputs = Vec::new();
+        for _ in 0..3 {
+            let (exit, stdout, stderr) = invoke(&[
+                "ee",
+                "--json",
+                "diag",
+                "incident",
+                "--fixture",
+                &combined_path,
+            ]);
+            ensure_equal(&exit, &ProcessExitCode::Success, "combined replay exit")?;
+            ensure(stderr.is_empty(), "combined replay JSON stderr clean")?;
+            outputs.push(stdout);
+        }
+        ensure_equal(&outputs[0], &outputs[1], "combined run 1 equals run 2")?;
+        ensure_equal(&outputs[1], &outputs[2], "combined run 2 equals run 3")?;
+
+        let value: serde_json::Value =
+            serde_json::from_str(&outputs[0]).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["data"]["posture"],
+            &serde_json::json!("blocked"),
+            "combined posture",
+        )?;
+        ensure_equal(
+            &value["data"]["dominantStatus"],
+            &serde_json::json!("blocked"),
+            "combined dominant status",
+        )?;
+        ensure_equal(
+            &value["data"]["substratePosture"]["agentMail"],
+            &serde_json::json!("unavailable"),
+            "combined mail posture",
+        )?;
+        ensure_equal(
+            &value["data"]["substratePosture"]["beads"],
+            &serde_json::json!("stale"),
+            "combined beads posture",
+        )?;
+        ensure_equal(
+            &value["data"]["substratePosture"]["disk"],
+            &serde_json::json!("degraded"),
+            "combined disk posture",
         )
     }
 
