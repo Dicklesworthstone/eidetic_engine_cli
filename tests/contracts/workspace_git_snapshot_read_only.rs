@@ -269,6 +269,101 @@ fn workspace_git_snapshot_provider_is_read_only_for_clean_repo() -> TestResult {
 }
 
 #[test]
+fn workspace_git_snapshot_provider_uses_repo_root_from_nested_workspace() -> TestResult {
+    let temp = tempfile::Builder::new()
+        .prefix("ee-workspace-git-nested-readonly-")
+        .tempdir()
+        .map_err(|error| format!("tempdir: {error}"))?;
+    let workspace = temp.path();
+
+    run_git(workspace, &["init", "-q", "-b", "main"])?;
+    run_git(
+        workspace,
+        &["config", "user.email", "ee-test@example.invalid"],
+    )?;
+    run_git(workspace, &["config", "user.name", "ee test"])?;
+
+    fs::create_dir_all(workspace.join("nested/tool"))
+        .map_err(|error| format!("create nested/tool: {error}"))?;
+    fs::create_dir_all(workspace.join("src")).map_err(|error| format!("create src: {error}"))?;
+    write_file(
+        &workspace.join("src/lib.rs"),
+        "pub fn value() -> u8 { 1 }\n",
+    )?;
+    write_file(
+        &workspace.join("nested/tool/config.toml"),
+        "enabled = true\n",
+    )?;
+    run_git(workspace, &["add", "src/lib.rs", "nested/tool/config.toml"])?;
+    run_git(workspace, &["commit", "-q", "-m", "seed"])?;
+
+    write_file(
+        &workspace.join("src/lib.rs"),
+        "pub fn value() -> u8 { 2 }\n",
+    )?;
+    write_file(&workspace.join("nested/tool/generated.txt"), "scratch\n")?;
+
+    let nested_workspace = workspace.join("nested/tool");
+    let before_status = status_digest(workspace)?;
+    let before_files = file_state_digest(workspace)?;
+
+    let options = WorkspaceGitSnapshotOptions::for_workspace(&nested_workspace);
+    let started = Instant::now();
+    let snapshot = collect_workspace_git_snapshot(&options, &SystemSwarmBriefCommandRunner)
+        .map_err(|error| format!("collect nested workspace git snapshot: {error:?}"))?;
+    let elapsed_ms = started.elapsed().as_millis();
+
+    let after_status = status_digest(workspace)?;
+    let after_files = file_state_digest(workspace)?;
+    let log = read_only_e2e_log(
+        "nested_workspace",
+        workspace,
+        elapsed_ms,
+        &before_status,
+        &after_status,
+        &before_files,
+        &after_files,
+    );
+    assert_read_only_e2e_log(&log, "nested_workspace")?;
+    assert_eq!(
+        after_status, before_status,
+        "provider must not change git status when invoked from a subdirectory"
+    );
+    assert_eq!(
+        after_files, before_files,
+        "provider must not change files when invoked from a subdirectory"
+    );
+
+    assert_eq!(snapshot.repository_root, workspace.display().to_string());
+    let entry_paths = snapshot
+        .entries
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(entry_paths, vec!["nested/tool/generated.txt", "src/lib.rs"]);
+
+    let root_file = entry_by_path(&snapshot.entries, "src/lib.rs")?;
+    assert_eq!(root_file.entry_kind, "ordinary");
+    assert_eq!(root_file.staged, ".");
+    assert_eq!(root_file.unstaged, "M");
+    assert!(root_file.metadata.as_ref().is_some_and(|metadata| {
+        metadata.exists && metadata.file_type == "file" && !metadata.large_file
+    }));
+
+    let nested_untracked = entry_by_path(&snapshot.entries, "nested/tool/generated.txt")?;
+    assert_eq!(nested_untracked.entry_kind, "untracked");
+    assert_eq!(nested_untracked.staged, "?");
+    assert_eq!(nested_untracked.unstaged, "?");
+    assert!(nested_untracked.metadata.as_ref().is_some_and(|metadata| {
+        metadata.exists
+            && metadata.file_type == "file"
+            && metadata.size_bytes == Some("scratch\n".len() as u64)
+    }));
+
+    Ok(())
+}
+
+#[test]
 fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
     let temp = tempfile::Builder::new()
         .prefix("ee-workspace-git-readonly-")
