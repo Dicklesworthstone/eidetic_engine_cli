@@ -122,17 +122,42 @@ fn try_acquire_pack_slot(
 ) -> PackSlotAcquisition {
     let budget = profile.budget_class();
     let slots_dir = workspace_path.join(".ee").join("pack-slots");
+    if let Err(message) = ensure_pack_slot_path_is_not_symlink(&slots_dir, "pack slot directory") {
+        return PackSlotAcquisition::Unavailable {
+            path: slots_dir,
+            message,
+        };
+    }
     if let Err(error) = std::fs::create_dir_all(&slots_dir) {
         return PackSlotAcquisition::Unavailable {
             path: slots_dir,
             message: format!("Failed to create pack slot directory: {error}"),
         };
     }
+    if let Err(message) = ensure_pack_slot_path_is_not_symlink(&slots_dir, "pack slot directory") {
+        return PackSlotAcquisition::Unavailable {
+            path: slots_dir,
+            message,
+        };
+    }
 
     for slot_index in 0..budget.concurrent_pack_max {
         let slot_path = slots_dir.join(format!("{}-{slot_index:02}.lock", profile.as_str()));
+        if let Err(message) = ensure_pack_slot_path_is_not_symlink(&slot_path, "pack slot lock") {
+            return PackSlotAcquisition::Unavailable {
+                path: slot_path,
+                message,
+            };
+        }
         if !try_acquire_pack_slot_process_gate(&slot_path) {
             continue;
+        }
+        if let Err(message) = ensure_pack_slot_path_is_not_symlink(&slot_path, "pack slot lock") {
+            release_pack_slot_process_gate(&slot_path);
+            return PackSlotAcquisition::Unavailable {
+                path: slot_path,
+                message,
+            };
         }
 
         let file = match OpenOptions::new()
@@ -173,6 +198,44 @@ fn try_acquire_pack_slot(
     PackSlotAcquisition::LimitReached {
         retry_after_ms: PACK_SLOT_RETRY_AFTER_MS,
     }
+}
+
+fn ensure_pack_slot_path_is_not_symlink(path: &Path, path_type: &str) -> Result<(), String> {
+    if let Some(symlink_path) = first_existing_pack_slot_symlink_component(path)? {
+        return Err(format!(
+            "Refusing to use {} '{}': path traverses symbolic link '{}'",
+            path_type,
+            path.display(),
+            symlink_path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn first_existing_pack_slot_symlink_component(path: &Path) -> Result<Option<PathBuf>, String> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect pack slot path component '{}': {error}",
+                    current.display()
+                ));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Per-subsystem permission level. `None < Read < Write` under the
@@ -5369,6 +5432,67 @@ mod tests {
             PackSlotAcquisition::Acquired(_guard) => Ok(()),
             other => Err(format!(
                 "lean pack slot should be available after guard drop: {other:?}"
+            )),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pack_slot_guard_rejects_symlinked_metadata_parent() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        let real_metadata = tempdir.path().join("real-ee");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&real_metadata).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&real_metadata, workspace.join(".ee"))
+            .map_err(|error| error.to_string())?;
+
+        match try_acquire_pack_slot(&workspace, PackResourceProfile::Lean) {
+            PackSlotAcquisition::Unavailable { message, .. } => {
+                assert!(
+                    message.contains("symbolic link"),
+                    "expected symlink rejection, got: {message}"
+                );
+                assert!(
+                    !real_metadata.join("pack-slots").exists(),
+                    "pack slot creation must not follow symlinked .ee parent"
+                );
+                Ok(())
+            }
+            other => Err(format!(
+                "symlinked .ee parent should make pack slot unavailable: {other:?}"
+            )),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pack_slot_guard_rejects_symlinked_lock_file() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        let slots_dir = workspace.join(".ee").join("pack-slots");
+        std::fs::create_dir_all(&slots_dir).map_err(|error| error.to_string())?;
+        let outside_lock = tempdir.path().join("outside.lock");
+        std::fs::write(&outside_lock, b"outside").map_err(|error| error.to_string())?;
+        let slot_path = slots_dir.join(format!("{}-00.lock", PackResourceProfile::Lean.as_str()));
+        std::os::unix::fs::symlink(&outside_lock, &slot_path).map_err(|error| error.to_string())?;
+
+        match try_acquire_pack_slot(&workspace, PackResourceProfile::Lean) {
+            PackSlotAcquisition::Unavailable { message, .. } => {
+                assert!(
+                    message.contains("symbolic link"),
+                    "expected symlink rejection, got: {message}"
+                );
+                let outside =
+                    std::fs::read_to_string(&outside_lock).map_err(|error| error.to_string())?;
+                assert_eq!(
+                    outside, "outside",
+                    "pack slot lock open must not follow or mutate symlink target"
+                );
+                Ok(())
+            }
+            other => Err(format!(
+                "symlinked pack slot lock should be unavailable: {other:?}"
             )),
         }
     }
