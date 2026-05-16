@@ -4016,6 +4016,12 @@ mod tests {
 
     #[test]
     fn memory_graph_generation_ignores_denied_mesh_links() -> TestResult {
+        const MEMORY_A: &str = "mem_00000000000000000000000001";
+        const MEMORY_B: &str = "mem_00000000000000000000000002";
+        const MEMORY_C: &str = "mem_00000000000000000000000003";
+        const LOCAL_LINK: &str = "link_00000000000000000000000001";
+        const DENIED_LINK: &str = "link_00000000000000000000000002";
+
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
         let workspace_path = Path::new("/tmp/ee-status-graph-mesh-filter");
@@ -4030,9 +4036,9 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
         for (memory_id, content) in [
-            ("mem_status_mesh_a", "Local graph source A"),
-            ("mem_status_mesh_b", "Local graph source B"),
-            ("mem_status_mesh_c", "Denied mesh graph source C"),
+            (MEMORY_A, "Local graph source A"),
+            (MEMORY_B, "Local graph source B"),
+            (MEMORY_C, "Denied mesh graph source C"),
         ] {
             connection
                 .insert_memory(
@@ -4058,10 +4064,10 @@ mod tests {
         }
         connection
             .insert_memory_link(
-                "link_status_mesh_local",
+                LOCAL_LINK,
                 &crate::db::CreateMemoryLinkInput {
-                    src_memory_id: "mem_status_mesh_a".to_owned(),
-                    dst_memory_id: "mem_status_mesh_b".to_owned(),
+                    src_memory_id: MEMORY_A.to_owned(),
+                    dst_memory_id: MEMORY_B.to_owned(),
                     relation: crate::db::MemoryLinkRelation::Supports,
                     weight: 1.0,
                     confidence: 1.0,
@@ -4076,10 +4082,10 @@ mod tests {
             .map_err(|error| error.to_string())?;
         connection
             .insert_memory_link(
-                "link_status_mesh_denied",
+                DENIED_LINK,
                 &crate::db::CreateMemoryLinkInput {
-                    src_memory_id: "mem_status_mesh_b".to_owned(),
-                    dst_memory_id: "mem_status_mesh_c".to_owned(),
+                    src_memory_id: MEMORY_B.to_owned(),
+                    dst_memory_id: MEMORY_C.to_owned(),
                     relation: crate::db::MemoryLinkRelation::Supports,
                     weight: 1.0,
                     confidence: 1.0,
