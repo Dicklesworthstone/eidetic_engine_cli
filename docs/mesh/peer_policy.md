@@ -61,6 +61,12 @@ redaction-safe peer/workspace aliases. Raw remote workspace paths, memory
 bodies, embeddings, and secrets do not belong in status, support bundle, or
 handoff output unless a later explicit grant permits that lane.
 
+The same policy is checked before outbound sharing. A lane grant alone is not
+enough for body or embedding payloads: if the redaction posture is `deny`, the
+payload must not leave the node; if the posture is `redact`, only an already
+redacted payload can be exported. Raw body or embedding payloads require both
+`allow` on the lane and `share` on the matching redaction posture.
+
 ## Config Registry
 
 Workspace-local peer policies are registered in `.ee/config.toml` under

@@ -256,6 +256,42 @@ impl MeshPeerPolicyDecision {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshOutboundPolicyDecisionInput<'a> {
+    pub local_workspace_id: &'a str,
+    pub target_peer_id: &'a str,
+    pub origin_workspace_id: &'a str,
+    pub material_lane: MeshLane,
+    pub payload_is_redacted: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshOutboundPolicyDecision {
+    pub action: MeshImportDecisionKind,
+    pub policy_id: Option<String>,
+    pub trust_lane: Option<MeshTrustLane>,
+    pub material_lane: MeshLane,
+    pub redaction: MeshRedactionDecision,
+    pub reason: &'static str,
+}
+
+impl MeshOutboundPolicyDecision {
+    #[must_use]
+    pub fn permits_payload_export(&self) -> bool {
+        self.action == MeshImportDecisionKind::Allow
+    }
+
+    #[must_use]
+    pub fn permits_raw_payload_export(&self) -> bool {
+        self.permits_payload_export() && self.redaction == MeshRedactionDecision::Share
+    }
+
+    #[must_use]
+    pub fn requires_redacted_payload(&self) -> bool {
+        self.permits_payload_export() && self.redaction == MeshRedactionDecision::Redact
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MeshImportDecision {
     pub workspace_scope_decision: MeshImportDecisionKind,
     pub workspace_id: String,
@@ -798,6 +834,121 @@ pub fn decide_mesh_peer_policy(
     }
 }
 
+#[must_use]
+pub fn decide_mesh_outbound_policy(
+    input: &MeshOutboundPolicyDecisionInput<'_>,
+    policy: Option<&MeshPeerPolicy>,
+) -> MeshOutboundPolicyDecision {
+    let Some(policy) = policy else {
+        return mesh_outbound_policy_decision(
+            input,
+            None,
+            MeshImportDecisionKind::Deny,
+            "missing_peer_policy",
+            None,
+            MeshRedactionDecision::Deny,
+        );
+    };
+
+    let policy_id = Some(policy.policy_id.clone());
+    if policy.default_action != MeshLaneDecision::Deny {
+        return mesh_outbound_policy_decision(
+            input,
+            policy_id,
+            MeshImportDecisionKind::Reject,
+            "non_deny_default_action",
+            Some(policy.trust_lane),
+            MeshRedactionDecision::Deny,
+        );
+    }
+    if policy.workspace_id != input.local_workspace_id {
+        return mesh_outbound_policy_decision(
+            input,
+            policy_id,
+            MeshImportDecisionKind::Deny,
+            "peer_policy_workspace_mismatch",
+            Some(policy.trust_lane),
+            MeshRedactionDecision::Deny,
+        );
+    }
+    if policy.peer_id != input.target_peer_id {
+        return mesh_outbound_policy_decision(
+            input,
+            policy_id,
+            MeshImportDecisionKind::Deny,
+            "peer_policy_peer_mismatch",
+            Some(policy.trust_lane),
+            MeshRedactionDecision::Deny,
+        );
+    }
+    if !policy
+        .origin_workspace_ids
+        .iter()
+        .any(|origin| origin == input.origin_workspace_id)
+    {
+        return mesh_outbound_policy_decision(
+            input,
+            policy_id,
+            MeshImportDecisionKind::Deny,
+            "peer_policy_origin_workspace_mismatch",
+            Some(policy.trust_lane),
+            MeshRedactionDecision::Deny,
+        );
+    }
+
+    let redaction = policy.redaction.decision_for_lane(input.material_lane);
+    if redaction == MeshRedactionDecision::Deny {
+        return mesh_outbound_policy_decision(
+            input,
+            policy_id,
+            MeshImportDecisionKind::Deny,
+            "outbound_redaction_denied",
+            Some(policy.trust_lane),
+            redaction,
+        );
+    }
+    if matches!(input.material_lane, MeshLane::Body | MeshLane::Embedding)
+        && redaction == MeshRedactionDecision::Redact
+        && !input.payload_is_redacted
+    {
+        return mesh_outbound_policy_decision(
+            input,
+            policy_id,
+            MeshImportDecisionKind::Deny,
+            "outbound_payload_requires_redaction",
+            Some(policy.trust_lane),
+            redaction,
+        );
+    }
+
+    match policy.allowed_lanes.decision(input.material_lane) {
+        MeshLaneDecision::Allow => mesh_outbound_policy_decision(
+            input,
+            policy_id,
+            MeshImportDecisionKind::Allow,
+            "outbound_lane_allowed",
+            Some(policy.trust_lane),
+            redaction,
+        ),
+        MeshLaneDecision::Quarantine => mesh_outbound_policy_decision(
+            input,
+            policy_id,
+            MeshImportDecisionKind::Quarantine,
+            "outbound_lane_quarantined",
+            Some(policy.trust_lane),
+            redaction,
+        ),
+        MeshLaneDecision::Deny => mesh_outbound_policy_decision(
+            input,
+            policy_id,
+            MeshImportDecisionKind::Deny,
+            "outbound_lane_denied",
+            Some(policy.trust_lane),
+            redaction,
+        ),
+    }
+}
+
 impl MemoryScopeContext {
     #[must_use]
     pub fn for_workspace(workspace_path: &Path, scope: MemoryScope, strict_scope: bool) -> Self {
@@ -958,6 +1109,24 @@ fn mesh_peer_policy_decision(
         import_trust_class,
         redaction,
         body_fetch_allowed,
+    }
+}
+
+fn mesh_outbound_policy_decision(
+    input: &MeshOutboundPolicyDecisionInput<'_>,
+    policy_id: Option<String>,
+    action: MeshImportDecisionKind,
+    reason: &'static str,
+    trust_lane: Option<MeshTrustLane>,
+    redaction: MeshRedactionDecision,
+) -> MeshOutboundPolicyDecision {
+    MeshOutboundPolicyDecision {
+        action,
+        policy_id,
+        trust_lane,
+        material_lane: input.material_lane,
+        redaction,
+        reason,
     }
 }
 
@@ -1275,6 +1444,16 @@ mod tests {
         }
     }
 
+    fn outbound_policy_input(lane: MeshLane) -> MeshOutboundPolicyDecisionInput<'static> {
+        MeshOutboundPolicyDecisionInput {
+            local_workspace_id: "wsp_local_alpha",
+            origin_workspace_id: "wsp_remote_beta",
+            target_peer_id: "peer_builder_one",
+            material_lane: lane,
+            payload_is_redacted: false,
+        }
+    }
+
     #[test]
     fn mesh_import_allows_authorized_metadata_side_effects_only_for_allow() {
         let decision = decide_mesh_import(&mesh_input(MeshLane::Metadata), &[mesh_binding()]);
@@ -1506,6 +1685,91 @@ max_bytes = 0
             Some(TrustClass::AgentValidated)
         );
         assert!(!decision.permits_import_as_human_explicit());
+    }
+
+    #[test]
+    fn mesh_outbound_policy_allows_metadata_share_for_authorized_peer() {
+        let decision = decide_mesh_outbound_policy(
+            &outbound_policy_input(MeshLane::Metadata),
+            Some(&peer_policy()),
+        );
+
+        assert_eq!(decision.action, MeshImportDecisionKind::Allow);
+        assert_eq!(decision.reason, "outbound_lane_allowed");
+        assert_eq!(decision.policy_id.as_deref(), Some("pol_alpha_mesh_policy"));
+        assert_eq!(decision.trust_lane, Some(MeshTrustLane::PeerAgent));
+        assert_eq!(decision.redaction, MeshRedactionDecision::Share);
+        assert!(decision.permits_payload_export());
+        assert!(decision.permits_raw_payload_export());
+        assert!(!decision.requires_redacted_payload());
+    }
+
+    #[test]
+    fn mesh_outbound_policy_denies_body_and_embedding_by_default() {
+        let body = decide_mesh_outbound_policy(
+            &outbound_policy_input(MeshLane::Body),
+            Some(&peer_policy()),
+        );
+        assert_eq!(body.action, MeshImportDecisionKind::Deny);
+        assert_eq!(body.reason, "outbound_redaction_denied");
+        assert_eq!(body.redaction, MeshRedactionDecision::Deny);
+        assert!(!body.permits_payload_export());
+
+        let embedding = decide_mesh_outbound_policy(
+            &outbound_policy_input(MeshLane::Embedding),
+            Some(&peer_policy()),
+        );
+        assert_eq!(embedding.action, MeshImportDecisionKind::Deny);
+        assert_eq!(embedding.reason, "outbound_redaction_denied");
+        assert_eq!(embedding.redaction, MeshRedactionDecision::Deny);
+        assert!(!embedding.permits_payload_export());
+    }
+
+    #[test]
+    fn mesh_outbound_policy_allows_only_redacted_body_when_redaction_is_required() {
+        let mut policy = peer_policy();
+        policy.allowed_lanes.body = Some(MeshLaneDecision::Allow);
+        policy.redaction.body = MeshRedactionDecision::Redact;
+
+        let raw =
+            decide_mesh_outbound_policy(&outbound_policy_input(MeshLane::Body), Some(&policy));
+        assert_eq!(raw.action, MeshImportDecisionKind::Deny);
+        assert_eq!(raw.reason, "outbound_payload_requires_redaction");
+        assert!(!raw.permits_payload_export());
+
+        let mut redacted_input = outbound_policy_input(MeshLane::Body);
+        redacted_input.payload_is_redacted = true;
+        let redacted = decide_mesh_outbound_policy(&redacted_input, Some(&policy));
+        assert_eq!(redacted.action, MeshImportDecisionKind::Allow);
+        assert_eq!(redacted.reason, "outbound_lane_allowed");
+        assert_eq!(redacted.redaction, MeshRedactionDecision::Redact);
+        assert!(redacted.permits_payload_export());
+        assert!(!redacted.permits_raw_payload_export());
+        assert!(redacted.requires_redacted_payload());
+    }
+
+    #[test]
+    fn mesh_outbound_policy_requires_embedding_grant_and_redaction_posture() {
+        let mut policy = peer_policy();
+        policy.allowed_lanes.embedding = Some(MeshLaneDecision::Allow);
+        policy.redaction.embedding = MeshRedactionDecision::Redact;
+
+        let raw =
+            decide_mesh_outbound_policy(&outbound_policy_input(MeshLane::Embedding), Some(&policy));
+        assert_eq!(raw.action, MeshImportDecisionKind::Deny);
+        assert_eq!(raw.reason, "outbound_payload_requires_redaction");
+
+        let mut redacted_input = outbound_policy_input(MeshLane::Embedding);
+        redacted_input.payload_is_redacted = true;
+        let redacted = decide_mesh_outbound_policy(&redacted_input, Some(&policy));
+        assert_eq!(redacted.action, MeshImportDecisionKind::Allow);
+        assert_eq!(redacted.redaction, MeshRedactionDecision::Redact);
+        assert!(redacted.requires_redacted_payload());
+
+        policy.allowed_lanes.embedding = Some(MeshLaneDecision::Deny);
+        let denied = decide_mesh_outbound_policy(&redacted_input, Some(&policy));
+        assert_eq!(denied.action, MeshImportDecisionKind::Deny);
+        assert_eq!(denied.reason, "outbound_lane_denied");
     }
 
     #[test]
