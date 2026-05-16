@@ -12,6 +12,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
+const GOLDEN_RENDERINGS: &str =
+    include_str!("../golden/workspace_hygiene_secret_risk_renderings.json");
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +96,58 @@ fn report_support_summary(report: &WorkspaceSecretRiskReport) -> String {
     )
 }
 
+fn normalized_renderings(report: &WorkspaceSecretRiskReport) -> Result<String, String> {
+    let mut rendered_json = report_json(report).to_string();
+    let mut rendered_human = report_human(report);
+    let mut support_summary = report_support_summary(report);
+
+    for hash_prefix in report
+        .evidence
+        .iter()
+        .filter_map(|evidence| evidence.hash_prefix.as_deref())
+    {
+        rendered_json = rendered_json.replace(hash_prefix, "<hash-prefix-12>");
+        rendered_human = rendered_human.replace(hash_prefix, "<hash-prefix-12>");
+        support_summary = support_summary.replace(hash_prefix, "<hash-prefix-12>");
+    }
+
+    serde_json::to_string_pretty(&json!({
+        "human": rendered_human,
+        "json": serde_json::from_str::<Value>(&rendered_json)
+            .map_err(|error| format!("normalize rendered JSON: {error}"))?,
+        "supportSummary": support_summary,
+    }))
+    .map(|mut rendered| {
+        rendered.push('\n');
+        rendered
+    })
+    .map_err(|error| format!("render normalized golden JSON: {error}"))
+}
+
+fn assert_stable_golden(actual: &str) -> TestResult {
+    if actual != GOLDEN_RENDERINGS {
+        return Err(format!(
+            "workspace secret-risk rendering golden drifted\n--- expected\n{GOLDEN_RENDERINGS}+++ actual\n{actual}"
+        ));
+    }
+    Ok(())
+}
+
+fn assert_hash_prefixes_are_short_hex(report: &WorkspaceSecretRiskReport) -> TestResult {
+    for evidence in &report.evidence {
+        let hash = evidence
+            .hash_prefix
+            .as_deref()
+            .ok_or_else(|| format!("missing hash prefix for {evidence:?}"))?;
+        if hash.len() != 12 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(format!(
+                "hash prefix should be 12 hex characters for {evidence:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn assert_no_raw_secret(surface: &str, rendered: &str, raw_secret: &str) -> TestResult {
     if rendered.contains(raw_secret) {
         return Err(format!("{surface} leaked raw synthetic secret: {rendered}"));
@@ -135,6 +189,7 @@ fn workspace_secret_risk_renderings_do_not_leak_raw_fixture_secret() -> TestResu
                 .as_ref()
                 .is_some_and(|hash| hash.len() == 12)
     }));
+    assert_hash_prefixes_are_short_hex(&report)?;
 
     let rendered_json = report_json(&report).to_string();
     let rendered_human = report_human(&report);
@@ -158,6 +213,13 @@ fn workspace_secret_risk_renderings_do_not_leak_raw_fixture_secret() -> TestResu
         support_summary.contains("workspaceSecretRisk")
             && !support_summary.contains(&fixture.benign_lookalike),
         "support summary should be compact and omit non-secret content"
+    );
+    let normalized = normalized_renderings(&report)?;
+    assert_stable_golden(&normalized)?;
+    assert_no_raw_secret("golden", GOLDEN_RENDERINGS, &fixture.raw_secret)?;
+    assert!(
+        !GOLDEN_RENDERINGS.contains(&fixture.benign_lookalike),
+        "golden should not preserve benign lookalike content either"
     );
 
     Ok(())
