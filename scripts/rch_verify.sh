@@ -164,6 +164,35 @@ json_quote() {
     python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$1"
 }
 
+csv_json_array() {
+    CSV_INPUT="${1:-}" python3 - <<'PY'
+import json
+import os
+
+seen = []
+for item in os.environ.get("CSV_INPUT", "").split(","):
+    item = item.strip()
+    if item and item not in seen:
+        seen.append(item)
+print(json.dumps(seen, separators=(",", ":")))
+PY
+}
+
+csv_contains() {
+    CSV_INPUT="${1:-}" CSV_NEEDLE="${2:-}" python3 - <<'PY'
+import os
+import sys
+
+needle = os.environ.get("CSV_NEEDLE", "").strip()
+items = {
+    item.strip()
+    for item in os.environ.get("CSV_INPUT", "").split(",")
+    if item.strip()
+}
+sys.exit(0 if needle and needle in items else 1)
+PY
+}
+
 tail_text() {
     python3 -c 'import sys; text=sys.stdin.read(); print(text[-4000:])'
 }
@@ -178,6 +207,125 @@ extract_worker_id() {
 
 is_worker_disk_full_output() {
     grep -Eiq "No space left on device|disk full|ENOSPC"
+}
+
+configured_workers() {
+    CONFIGURED_WORKERS="${RCH_VERIFY_CONFIGURED_WORKERS:-}" \
+    FAKE_OUTPUT_PRESENT="${RCH_VERIFY_FAKE_OUTPUT:+1}" \
+    RCH_BIN_PATH="$RCH_BIN" \
+    python3 - <<'PY'
+import json
+import os
+import subprocess
+
+explicit = os.environ.get("CONFIGURED_WORKERS", "")
+
+def emit(ids):
+    seen = []
+    for item in ids:
+        item = item.strip()
+        if item and item not in seen:
+            seen.append(item)
+    print(",".join(seen))
+
+if explicit:
+    emit(explicit.split(","))
+    raise SystemExit(0)
+
+if os.environ.get("FAKE_OUTPUT_PRESENT"):
+    print("")
+    raise SystemExit(0)
+
+try:
+    listed = subprocess.run(
+        [os.environ["RCH_BIN_PATH"], "workers", "list", "--json"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=10,
+    )
+    payload = json.loads(listed.stdout)
+    workers = payload.get("data", {}).get("workers", [])
+    emit(worker.get("id", "") for worker in workers)
+except Exception:
+    print("")
+PY
+}
+
+daemon_workers() {
+    DAEMON_WORKERS="${RCH_VERIFY_DAEMON_WORKERS:-}" \
+    FAKE_OUTPUT_PRESENT="${RCH_VERIFY_FAKE_OUTPUT:+1}" \
+    RCH_BIN_PATH="$RCH_BIN" \
+    python3 - <<'PY'
+import json
+import os
+import subprocess
+
+explicit = os.environ.get("DAEMON_WORKERS", "")
+
+def emit(ids):
+    seen = []
+    for item in ids:
+        item = item.strip()
+        if item and item not in seen:
+            seen.append(item)
+    print(",".join(seen))
+
+if explicit:
+    emit(explicit.split(","))
+    raise SystemExit(0)
+
+if os.environ.get("FAKE_OUTPUT_PRESENT"):
+    print("")
+    raise SystemExit(0)
+
+try:
+    status = subprocess.run(
+        [os.environ["RCH_BIN_PATH"], "status", "--workers", "--jobs", "--json"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=10,
+    )
+    payload = json.loads(status.stdout)
+    workers = payload.get("data", {}).get("daemon", {}).get("workers", [])
+    emit(worker.get("id", "") for worker in workers)
+except Exception:
+    print("")
+PY
+}
+
+stale_disk_full_daemon_workers() {
+    CONFIGURED_WORKERS="${1:-}" \
+    DAEMON_WORKERS="${2:-}" \
+    DISK_FULL_WORKERS="${3:-}" \
+    python3 - <<'PY'
+import os
+
+configured = {
+    item.strip()
+    for item in os.environ.get("CONFIGURED_WORKERS", "").split(",")
+    if item.strip()
+}
+daemon = [
+    item.strip()
+    for item in os.environ.get("DAEMON_WORKERS", "").split(",")
+    if item.strip()
+]
+disk_full = {
+    item.strip()
+    for item in os.environ.get("DISK_FULL_WORKERS", "").split(",")
+    if item.strip()
+}
+stale = [
+    item
+    for item in daemon
+    if item not in configured and item in disk_full
+]
+print(",".join(dict.fromkeys(stale)))
+PY
 }
 
 healthy_alternate_workers() {
@@ -383,16 +531,19 @@ emit_json() {
     shift 5
     local degraded_codes_json
     degraded_codes_json="$(json_array "$@")"
-    local command_json rch_invocation_json command_text_json remote_env_json stdout_json stderr_json
+    local command_json rch_invocation_json command_text_json remote_env_json stdout_json stderr_json requested_workers_json configured_workers_json daemon_workers_json
     command_json="$(json_array "${COMMAND[@]}")"
     rch_invocation_json="$(json_array "${RCH_INVOCATION[@]}")"
     remote_env_json="$(json_array "${ENV_OVERRIDES[@]}")"
     command_text_json="$(json_quote "$(command_string "${ENV_OVERRIDES[@]}" "${COMMAND[@]}")")"
     stdout_json="$(json_quote "$stdout_tail")"
     stderr_json="$(json_quote "$stderr_tail")"
+    requested_workers_json="$(csv_json_array "${REQUESTED_WORKERS_CSV:-}")"
+    configured_workers_json="$(csv_json_array "${CONFIGURED_WORKERS_CSV:-}")"
+    daemon_workers_json="$(csv_json_array "${DAEMON_WORKERS_CSV:-}")"
     local json_payload
     json_payload="$(cat <<EOF
-{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json}
+{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json}
 EOF
 )"
     JSON_PAYLOAD="$json_payload" \
@@ -418,6 +569,7 @@ started_at = os.environ.get("RUN_STARTED_AT") or proof.get("generated_at")
 def redact(text):
     if not text:
         return text
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)
     text = re.sub(r"/Users/[^/\s]+", "/Users/<redacted>", text)
     text = re.sub(r"(?i)(token|secret|password|api[_-]?key)=\S+", r"\1=<redacted>", text)
     return text
@@ -459,6 +611,7 @@ elif (
     or "rch_verify_local_fallback_refused" in degraded
     or "rch_verify_worker_disk_full" in degraded
     or "rch_verify_worker_quarantine_ignored" in degraded
+    or "rch_verify_worker_filter_ignored" in degraded
     or "rch_verify_remote_checkout_incomplete" in degraded
 ):
     status = "rch_environment_failure"
@@ -490,6 +643,10 @@ summary_lines = [
     f"- elapsed_ms: `{proof.get('elapsed_ms')}`",
     f"- command_hash: `{command_hash}`",
 ]
+for key in ("requested_workers", "configured_workers", "daemon_workers"):
+    workers = proof.get(key) or []
+    if workers:
+        summary_lines.append(f"- {key}: `{', '.join(workers)}`")
 if bead_id:
     summary_lines.insert(1, f"- bead_id: `{bead_id}`")
 if first_error_file:
@@ -553,6 +710,9 @@ REMOTE_PROJECT_ROOT="/data/projects/eidetic_engine_cli"
 REMOTE_TARGET_DIR="/tmp/ee-rch-verify-target"
 REMOTE_PROJECT_ROOT_JSON="$(json_quote "$REMOTE_PROJECT_ROOT")"
 REMOTE_TARGET_DIR_JSON="$(json_quote "$REMOTE_TARGET_DIR")"
+REQUESTED_WORKERS_CSV="${RCH_WORKERS:-}"
+CONFIGURED_WORKERS_CSV=""
+DAEMON_WORKERS_CSV=""
 
 if contains_forbidden_text "${COMMAND[@]}"; then
     RCH_INVOCATION=()
@@ -592,6 +752,24 @@ if [ "$DRY_RUN" -eq 1 ]; then
     exit 0
 fi
 
+CONFIGURED_WORKERS_CSV="$(configured_workers)"
+DAEMON_WORKERS_CSV="$(daemon_workers)"
+REQUESTED_WORKERS_CSV="${RCH_WORKERS:-}"
+
+if [ "${RCH_VERIFY_FAIL_FAST_STALE_WORKER:-1}" = "1" ]; then
+    stale_workers="$(stale_disk_full_daemon_workers "$CONFIGURED_WORKERS_CSV" "$DAEMON_WORKERS_CSV" "${RCH_VERIFY_DISK_FULL_WORKERS:-}")"
+    if [ -n "$stale_workers" ]; then
+        first_stale_worker="${stale_workers%%,*}"
+        WORKER_ID_JSON="$(json_quote "$first_stale_worker")"
+        preflight_note="[RCH_VERIFY] stale daemon worker(s) excluded from configured workers and recently disk-full: $stale_workers"
+        emit_json true 1 0 "$preflight_note" "" \
+            "rch_verify_remote_command_failed" \
+            "rch_verify_worker_disk_full" \
+            "rch_verify_worker_filter_ignored"
+        exit 1
+    fi
+fi
+
 start_ms="$(now_ms)"
 set +e
 combined_output="$(run_rch_invocation_once)"
@@ -607,6 +785,7 @@ worker_id="$(printf '%s' "$combined_output" | extract_worker_id)"
 disk_full_worker=""
 retried_after_disk_full=0
 retry_worker=""
+worker_filter_ignored=0
 if [ "$exit_code" -ne 0 ] \
     && printf '%s' "$combined_output" | is_worker_disk_full_output \
     && [ -n "$worker_id" ] \
@@ -635,6 +814,10 @@ ${retry_output}"
 fi
 if [ -n "$worker_id" ]; then
     WORKER_ID_JSON="$(json_quote "$worker_id")"
+    allowed_workers_csv="${REQUESTED_WORKERS_CSV:-$CONFIGURED_WORKERS_CSV}"
+    if [ -n "$allowed_workers_csv" ] && ! csv_contains "$allowed_workers_csv" "$worker_id"; then
+        worker_filter_ignored=1
+    fi
 fi
 
 remote_checkout_missing_paths="$(remote_checkout_missing_tracked_paths "$combined_output")"
@@ -656,6 +839,9 @@ if [ "$retried_after_disk_full" -eq 1 ]; then
 fi
 if [ -n "$disk_full_worker" ] && [ "${retry_worker:-}" = "$disk_full_worker" ]; then
     degraded+=("rch_verify_worker_quarantine_ignored")
+fi
+if [ "$worker_filter_ignored" -eq 1 ]; then
+    degraded+=("rch_verify_worker_filter_ignored")
 fi
 if [ -n "$remote_checkout_missing_paths" ]; then
     degraded+=("rch_verify_remote_checkout_incomplete")

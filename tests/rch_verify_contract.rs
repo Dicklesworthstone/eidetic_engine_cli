@@ -437,6 +437,126 @@ fn synthetic_disk_full_retry_stops_when_quarantine_is_ignored() -> TestResult {
 }
 
 #[test]
+fn synthetic_worker_filter_ignored_reports_requested_and_configured_workers() -> TestResult {
+    let (status, stdout, _stderr) = run_script_with_env(
+        &[
+            "--bead-id",
+            "bd-filter",
+            "--summary",
+            "--no-write",
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "serve_foreground",
+        ],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "INFO Selected worker: csd at ubuntu@csd (8 slots, speed 50.0)\nrsync: write failed on \"/data/projects/eidetic_engine_cli/.rchignore\": No space left on device (28)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "44"),
+            ("RCH_VERIFY_DISABLE_DISK_FULL_RETRY", "1"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "css,trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "css,trj,csd"),
+            ("RCH_WORKERS", "css,trj"),
+        ],
+    )?;
+    if status.success() {
+        return Err("filtered-out worker failure should preserve non-zero exit".to_owned());
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse filter report: {error}"))?;
+    if report["status"] != "rch_environment_failure" || report["worker_id"] != "csd" {
+        return Err(format!("unexpected worker-filter status: {report}"));
+    }
+    for expected in [
+        "rch_verify_worker_disk_full",
+        "rch_verify_worker_filter_ignored",
+    ] {
+        if !degraded_contains(&report, expected)? {
+            return Err(format!("missing {expected} in degraded codes: {report}"));
+        }
+    }
+    if report["requested_workers"] != serde_json::json!(["css", "trj"])
+        || report["configured_workers"] != serde_json::json!(["css", "trj"])
+        || report["daemon_workers"] != serde_json::json!(["css", "trj", "csd"])
+    {
+        return Err(format!(
+            "worker inventory arrays were not emitted: {report}"
+        ));
+    }
+    let summary = report["summary_markdown"]
+        .as_str()
+        .ok_or_else(|| "summary missing".to_owned())?;
+    for expected in [
+        "requested_workers: `css, trj`",
+        "configured_workers: `css, trj`",
+        "daemon_workers: `css, trj, csd`",
+    ] {
+        if !summary.contains(expected) {
+            return Err(format!("summary missing {expected}: {summary}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn synthetic_stale_daemon_disk_full_preflight_does_not_run_cargo() -> TestResult {
+    let (status, stdout, _stderr) = run_script_with_env(
+        &[
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "log_event_to_rejects_symlinked",
+        ],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "INFO Selected worker: css at ubuntu@css (8 slots, speed 50.0)\n[RCH] remote css (1.0s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "css,trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "css,trj,csd"),
+            ("RCH_VERIFY_DISK_FULL_WORKERS", "csd"),
+        ],
+    )?;
+    if status.success() {
+        return Err("stale daemon preflight should fail before Cargo".to_owned());
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse preflight: {error}"))?;
+    if report["status"] != "rch_environment_failure" || report["worker_id"] != "csd" {
+        return Err(format!("unexpected preflight report: {report}"));
+    }
+    for expected in [
+        "rch_verify_remote_command_failed",
+        "rch_verify_worker_disk_full",
+        "rch_verify_worker_filter_ignored",
+    ] {
+        if !degraded_contains(&report, expected)? {
+            return Err(format!("missing {expected} in degraded codes: {report}"));
+        }
+    }
+    let stdout_tail = report["stdout_tail"]
+        .as_str()
+        .ok_or_else(|| "missing stdout tail".to_owned())?;
+    if !stdout_tail.contains("stale daemon worker(s)") || stdout_tail.contains("[RCH] remote css") {
+        return Err(format!(
+            "preflight did not short-circuit fake Cargo run: {report}"
+        ));
+    }
+    if report["elapsed_ms"] != 0 {
+        return Err(format!(
+            "preflight should not measure remote execution: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn synthetic_compile_error_is_not_worker_disk_full() -> TestResult {
     let (status, stdout, _stderr) = run_script_with_env(
         &["--", "cargo", "test", "--lib", "support_bundle"],
