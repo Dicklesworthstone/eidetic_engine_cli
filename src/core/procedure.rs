@@ -3833,6 +3833,7 @@ mod tests {
         symlink(&real_output_dir, temp.path().join("linked-output"))
             .map_err(|error| error.to_string())?;
         let options = ProcedureExportOptions {
+            workspace: PathBuf::new(),
             procedure_id: "proc_test".to_owned(),
             format: "markdown".to_owned(),
             output_path: Some(temp.path().join("linked-output").join("procedure.md")),

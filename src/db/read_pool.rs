@@ -2,21 +2,27 @@ use std::ops::Deref;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use super::{DatabaseConfig, DbConnection, DbError, DbOperation, Result};
+use super::{DatabaseConfig, DbConnection, Result};
 
 const DEFAULT_MAX_SIZE: usize = 1;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_PIN_DURATION: Duration = Duration::from_secs(30);
+const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+const ACQUIRE_WAIT_SAMPLE_CAP: usize = 1024;
+const ACQUIRE_SLEEP_STEP: Duration = Duration::from_millis(1);
 
 pub const SNAPSHOT_PIN_EXPIRED_CODE: &str = "snapshot_pin_expired";
 pub const SNAPSHOT_RELEASE_FAILED_CODE: &str = "snapshot_release_failed";
 pub const SNAPSHOT_PIN_FORCE_RELEASED_CODE: &str = "snapshot_pin_force_released";
+pub const READ_POOL_ACQUIRE_TIMEOUT_CODE: &str = "read_pool_acquire_timeout";
+pub const READ_POOL_UNDERSIZED_CODE: &str = "read_pool_undersized";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PoolConfig {
     max_size: usize,
     idle_timeout: Duration,
     max_pin_duration: Duration,
+    acquire_timeout: Duration,
 }
 
 impl PoolConfig {
@@ -26,6 +32,7 @@ impl PoolConfig {
             max_size,
             idle_timeout,
             max_pin_duration: DEFAULT_MAX_PIN_DURATION,
+            acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
         }
     }
 
@@ -35,12 +42,19 @@ impl PoolConfig {
             max_size: DEFAULT_MAX_SIZE,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             max_pin_duration: DEFAULT_MAX_PIN_DURATION,
+            acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
         }
     }
 
     #[must_use]
     pub const fn with_max_pin_duration(mut self, max_pin_duration: Duration) -> Self {
         self.max_pin_duration = max_pin_duration;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_acquire_timeout(mut self, acquire_timeout: Duration) -> Self {
+        self.acquire_timeout = acquire_timeout;
         self
     }
 
@@ -68,6 +82,11 @@ impl PoolConfig {
     pub const fn max_pin_duration(&self) -> Duration {
         self.max_pin_duration
     }
+
+    #[must_use]
+    pub const fn acquire_timeout(&self) -> Duration {
+        self.acquire_timeout
+    }
 }
 
 impl Default for PoolConfig {
@@ -83,7 +102,16 @@ pub struct PoolStats {
     pub max_size: usize,
     pub max_seen: usize,
     pub drops: u64,
+    pub ad_hoc_bypass_count: u64,
+    pub acquire_wait: AcquireWaitStats,
     pub size_was_zero: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AcquireWaitStats {
+    pub samples: usize,
+    pub p50_ns: u128,
+    pub p99_ns: u128,
 }
 
 pub struct ReadConnectionPool {
@@ -95,9 +123,11 @@ pub struct ReadConnectionPool {
 struct PoolState {
     active: usize,
     idle: Vec<IdleConnection>,
+    acquire_wait_ns: Vec<u128>,
     next_slot_id: u64,
     max_seen: usize,
     drops: u64,
+    ad_hoc_bypass_count: u64,
 }
 
 struct IdleConnection {
@@ -107,8 +137,8 @@ struct IdleConnection {
 }
 
 pub struct PooledReadConnection<'pool> {
-    pool: &'pool ReadConnectionPool,
-    slot_id: u64,
+    pool: Option<&'pool ReadConnectionPool>,
+    slot_id: Option<u64>,
     connection: Option<DbConnection>,
 }
 
@@ -128,61 +158,83 @@ impl ReadConnectionPool {
             state: Mutex::new(PoolState {
                 active: 0,
                 idle: Vec::new(),
+                acquire_wait_ns: Vec::with_capacity(ACQUIRE_WAIT_SAMPLE_CAP),
                 next_slot_id: 1,
                 max_seen: 0,
                 drops: 0,
+                ad_hoc_bypass_count: 0,
             }),
         }
     }
 
     pub fn acquire(&self) -> Result<PooledReadConnection<'_>> {
         let max_size = self.config.max_size();
-        let mut state = self.lock_state();
-        let stale = evict_expired_idle(&mut state, self.config.idle_timeout());
+        let started = Instant::now();
 
-        if let Some(idle) = state.idle.pop() {
-            state.active = state.active.saturating_add(1);
-            state.max_seen = state
-                .max_seen
-                .max(state.active.saturating_add(state.idle.len()));
-            drop(state);
-            drop_idle_connections(stale);
-            return Ok(PooledReadConnection {
-                pool: self,
-                slot_id: idle.slot_id,
-                connection: Some(idle.connection),
-            });
-        }
+        loop {
+            let mut state = self.lock_state();
+            let stale = evict_expired_idle(&mut state, self.config.idle_timeout());
 
-        if state.active.saturating_add(state.idle.len()) >= max_size {
-            drop(state);
-            drop_idle_connections(stale);
-            return Err(DbError::MalformedRow {
-                operation: DbOperation::OpenReadWrite,
-                message: format!("read connection pool exhausted at max_size={max_size}"),
-            });
-        }
-
-        let slot_id = state.next_slot_id;
-        state.next_slot_id = state.next_slot_id.saturating_add(1);
-        state.active = state.active.saturating_add(1);
-        state.max_seen = state
-            .max_seen
-            .max(state.active.saturating_add(state.idle.len()));
-        drop(state);
-
-        drop_idle_connections(stale);
-        match DbConnection::open(self.database.clone()) {
-            Ok(connection) => Ok(PooledReadConnection {
-                pool: self,
-                slot_id,
-                connection: Some(connection),
-            }),
-            Err(error) => {
-                let mut state = self.lock_state();
-                state.active = state.active.saturating_sub(1);
-                Err(error)
+            if let Some(idle) = state.idle.pop() {
+                state.active = state.active.saturating_add(1);
+                state.max_seen = state
+                    .max_seen
+                    .max(state.active.saturating_add(state.idle.len()));
+                record_acquire_wait(&mut state, started.elapsed());
+                drop(state);
+                drop_idle_connections(stale);
+                return Ok(PooledReadConnection {
+                    pool: Some(self),
+                    slot_id: Some(idle.slot_id),
+                    connection: Some(idle.connection),
+                });
             }
+
+            if state.active.saturating_add(state.idle.len()) < max_size {
+                let slot_id = state.next_slot_id;
+                state.next_slot_id = state.next_slot_id.saturating_add(1);
+                state.active = state.active.saturating_add(1);
+                state.max_seen = state
+                    .max_seen
+                    .max(state.active.saturating_add(state.idle.len()));
+                record_acquire_wait(&mut state, started.elapsed());
+                drop(state);
+
+                drop_idle_connections(stale);
+                return match DbConnection::open(self.database.clone()) {
+                    Ok(connection) => Ok(PooledReadConnection {
+                        pool: Some(self),
+                        slot_id: Some(slot_id),
+                        connection: Some(connection),
+                    }),
+                    Err(error) => {
+                        let mut state = self.lock_state();
+                        state.active = state.active.saturating_sub(1);
+                        Err(error)
+                    }
+                };
+            }
+
+            let elapsed = started.elapsed();
+            if elapsed >= self.config.acquire_timeout() {
+                state.ad_hoc_bypass_count = state.ad_hoc_bypass_count.saturating_add(1);
+                record_acquire_wait(&mut state, elapsed);
+                drop(state);
+                drop_idle_connections(stale);
+                return DbConnection::open(self.database.clone()).map(|connection| {
+                    PooledReadConnection {
+                        pool: None,
+                        slot_id: None,
+                        connection: Some(connection),
+                    }
+                });
+            }
+
+            drop(state);
+            drop_idle_connections(stale);
+            let remaining = self.config.acquire_timeout().saturating_sub(elapsed);
+            std::thread::yield_now();
+            std::thread::sleep(remaining.min(ACQUIRE_SLEEP_STEP));
         }
     }
 
@@ -216,6 +268,8 @@ impl ReadConnectionPool {
             max_size: self.config.max_size(),
             max_seen: state.max_seen,
             drops: state.drops,
+            ad_hoc_bypass_count: state.ad_hoc_bypass_count,
+            acquire_wait: acquire_wait_stats(&state.acquire_wait_ns),
             size_was_zero: self.config.size_was_zero(),
         }
     }
@@ -257,13 +311,22 @@ impl ReadConnectionPool {
 
 impl PooledReadConnection<'_> {
     #[must_use]
-    pub const fn slot_id(&self) -> u64 {
+    pub const fn slot_id(&self) -> Option<u64> {
         self.slot_id
+    }
+
+    #[must_use]
+    pub const fn is_ad_hoc(&self) -> bool {
+        self.pool.is_none()
     }
 
     fn abandon(&mut self) {
         if let Some(connection) = self.connection.take() {
-            self.pool.abandon(connection);
+            if let Some(pool) = self.pool {
+                pool.abandon(connection);
+            } else {
+                let _ = connection.close();
+            }
         }
     }
 }
@@ -275,7 +338,7 @@ impl SnapshotPin<'_> {
     }
 
     #[must_use]
-    pub fn slot_id(&self) -> u64 {
+    pub fn slot_id(&self) -> Option<u64> {
         self.connection().slot_id()
     }
 
@@ -340,7 +403,12 @@ impl Deref for SnapshotPin<'_> {
 impl Drop for PooledReadConnection<'_> {
     fn drop(&mut self) {
         if let Some(connection) = self.connection.take() {
-            self.pool.release(self.slot_id, connection);
+            match (self.pool, self.slot_id) {
+                (Some(pool), Some(slot_id)) => pool.release(slot_id, connection),
+                _ => {
+                    let _ = connection.close();
+                }
+            }
         }
     }
 }
@@ -374,6 +442,29 @@ fn evict_expired_idle(state: &mut PoolState, idle_timeout: Duration) -> Vec<DbCo
 
     state.idle = retained;
     expired
+}
+
+fn record_acquire_wait(state: &mut PoolState, duration: Duration) {
+    if state.acquire_wait_ns.len() == ACQUIRE_WAIT_SAMPLE_CAP {
+        state.acquire_wait_ns.remove(0);
+    }
+    state.acquire_wait_ns.push(duration.as_nanos());
+}
+
+fn acquire_wait_stats(samples: &[u128]) -> AcquireWaitStats {
+    if samples.is_empty() {
+        return AcquireWaitStats::default();
+    }
+
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let p50_index = sorted.len() / 2;
+    let p99_index = sorted.len().saturating_mul(99).saturating_sub(1) / 100;
+    AcquireWaitStats {
+        samples: sorted.len(),
+        p50_ns: sorted[p50_index],
+        p99_ns: sorted[p99_index.min(sorted.len() - 1)],
+    }
 }
 
 fn drop_idle_connections(connections: Vec<DbConnection>) {
@@ -563,7 +654,10 @@ mod tests {
 
     #[test]
     fn happy_path_pool_acquire_returns_distinct_connections_up_to_cap() {
-        let pool = memory_pool(2, Duration::from_secs(30));
+        let pool = ReadConnectionPool::new(
+            DatabaseConfig::memory(),
+            PoolConfig::new(2, Duration::from_secs(30)).with_acquire_timeout(Duration::ZERO),
+        );
 
         let first = must(pool.acquire(), "first connection opens");
         let second = must(pool.acquire(), "second connection opens");
@@ -577,19 +671,15 @@ mod tests {
                 max_size: 2,
                 max_seen: 2,
                 drops: 0,
+                ad_hoc_bypass_count: 0,
+                acquire_wait: pool.stats().acquire_wait,
                 size_was_zero: false,
             }
         );
 
-        let error = match pool.acquire() {
-            Ok(_) => panic!("cap should reject third acquire"),
-            Err(error) => error,
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("read connection pool exhausted at max_size=2")
-        );
+        let third = must(pool.acquire(), "cap timeout opens ad-hoc connection");
+        assert!(third.is_ad_hoc());
+        assert_eq!(pool.stats().ad_hoc_bypass_count, 1);
     }
 
     #[test]
@@ -686,7 +776,7 @@ mod tests {
         assert_eq!(stats.idle, 0);
         assert_eq!(stats.drops, 1);
         let fresh = must(pool.acquire(), "fresh connection opens after abandon");
-        assert_ne!(fresh.slot_id(), 1);
+        assert_ne!(fresh.slot_id(), Some(1));
     }
 
     #[test]
@@ -709,9 +799,13 @@ mod tests {
         assert_eq!(config.max_size(), 1);
         assert!(config.size_was_zero());
 
-        let pool = ReadConnectionPool::new(DatabaseConfig::memory(), config);
+        let pool = ReadConnectionPool::new(
+            DatabaseConfig::memory(),
+            config.with_acquire_timeout(Duration::ZERO),
+        );
         let _first = must(pool.acquire(), "normalized first acquire opens");
-        assert!(pool.acquire().is_err());
+        let second = must(pool.acquire(), "normalized pool opens ad-hoc on timeout");
+        assert!(second.is_ad_hoc());
 
         let stats = pool.stats();
         assert_eq!(stats.max_size, 1);
@@ -788,7 +882,12 @@ mod tests {
             .collect();
         let mut records: Vec<(u64, i64)> = pins
             .iter()
-            .map(|pin| (pin.slot_id(), snapshot_item_count(pin)))
+            .map(|pin| {
+                (
+                    pin.slot_id().expect("fanout pins are pooled"),
+                    snapshot_item_count(pin),
+                )
+            })
             .collect();
         records.sort_by_key(|(slot_id, _)| *slot_id);
 
@@ -817,25 +916,64 @@ mod tests {
     }
 
     #[test]
-    fn in_process_fanout_pool_size_one_rejects_second_concurrent_snapshot() {
-        let (_tempdir, _database_path, pool) = file_pool(1);
+    fn acquire_timeout_emits_stats_and_serves_via_ad_hoc_connection() {
+        let tempdir = must(tempfile::tempdir(), "tempdir creates");
+        let database_path = tempdir.path().join("read-pool-ad-hoc.db");
+        seed_snapshot_database(&database_path);
+        let pool = ReadConnectionPool::new(
+            DatabaseConfig::file(database_path),
+            PoolConfig::new(1, Duration::from_secs(30)).with_acquire_timeout(Duration::ZERO),
+        );
         let first = must(pool.pin_snapshot(), "first snapshot pin opens");
 
-        let error = match pool.pin_snapshot() {
-            Ok(_) => panic!("pool_size=1 should reject concurrent snapshot fanout"),
-            Err(error) => error,
-        };
-
-        assert!(
-            error
-                .to_string()
-                .contains("read connection pool exhausted at max_size=1")
+        let second = must(
+            pool.pin_snapshot(),
+            "pool_size=1 timeout should open ad-hoc snapshot",
         );
+        assert_eq!(second.slot_id(), None);
+        assert!(second.connection().is_ad_hoc());
+        assert_eq!(snapshot_item_count(&second), 1);
         assert_eq!(pool.stats().active, 1);
+        assert_eq!(pool.stats().ad_hoc_bypass_count, 1);
+        assert_eq!(pool.stats().acquire_wait.samples, 2);
 
         drop(first);
+        drop(second);
         assert_eq!(pool.stats().active, 0);
         assert_eq!(pool.stats().idle, 1);
+    }
+
+    #[test]
+    fn acquire_timeout_ad_hoc_connection_is_dropped_after_use() {
+        let tempdir = must(tempfile::tempdir(), "tempdir creates");
+        let database_path = tempdir.path().join("read-pool-ad-hoc-drop.db");
+        seed_snapshot_database(&database_path);
+        let pool = ReadConnectionPool::new(
+            DatabaseConfig::file(database_path),
+            PoolConfig::new(1, Duration::from_secs(30)).with_acquire_timeout(Duration::ZERO),
+        );
+        let first = must(pool.acquire(), "first pooled connection opens");
+        let ad_hoc = must(pool.acquire(), "ad-hoc connection opens");
+        assert!(ad_hoc.is_ad_hoc());
+        drop(ad_hoc);
+
+        let stats = pool.stats();
+        assert_eq!(stats.active, 1);
+        assert_eq!(stats.idle, 0);
+        assert_eq!(stats.drops, 0);
+        assert_eq!(stats.ad_hoc_bypass_count, 1);
+
+        drop(first);
+        assert_eq!(pool.stats().idle, 1);
+    }
+
+    #[test]
+    fn metrics_acquire_wait_histogram_records_p50_and_p99() {
+        let samples = acquire_wait_stats(&[10, 30, 20, 50, 40]);
+
+        assert_eq!(samples.samples, 5);
+        assert_eq!(samples.p50_ns, 30);
+        assert_eq!(samples.p99_ns, 50);
     }
 
     #[test]

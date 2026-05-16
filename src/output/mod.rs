@@ -3421,6 +3421,15 @@ fn render_read_pool_status_json(
         pool.field_raw("idle", &report.idle.to_string());
         pool.field_raw("max_seen", &report.max_seen.to_string());
         pool.field_raw("drops", &report.drops.to_string());
+        pool.field_raw(
+            "ad_hoc_bypass_count",
+            &report.ad_hoc_bypass_count.to_string(),
+        );
+        pool.field_object("acquire_wait", |wait| {
+            wait.field_raw("samples", &report.acquire_wait.samples.to_string());
+            wait.field_raw("p50_ns", &report.acquire_wait.p50_ns.to_string());
+            wait.field_raw("p99_ns", &report.acquire_wait.p99_ns.to_string());
+        });
     });
 }
 

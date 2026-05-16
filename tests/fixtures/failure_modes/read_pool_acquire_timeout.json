@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "read_pool_acquire_timeout",
+  "introduced_by": {
+    "bead": "bd-2caru.7",
+    "epic_letter": "SRR"
+  },
+  "surfaces": [
+    "context",
+    "status"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "All pooled read connections remain active beyond the configured acquire timeout, so ee serves the read through a one-shot ad-hoc connection.",
+    "setup_commands": [
+      "ee config set storage.read_pool.size 1",
+      "ee config set storage.read_pool.acquire_timeout_ms 5000",
+      "start one context/read-pool workflow that holds its read connection beyond the acquire timeout"
+    ],
+    "invocation": "ee context 'second concurrent read' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "read_pool_acquire_timeout",
+    "severity": "medium",
+    "message_contains": [
+      "read pool",
+      "acquire timeout"
+    ],
+    "repair_contains": "increase storage.read_pool.size"
+  }
+}

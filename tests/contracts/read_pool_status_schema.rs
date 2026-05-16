@@ -1,6 +1,6 @@
 //! Contract checks for `data.read_pool` in the `ee status --json` surface
-//! (bd-2caru.4 acceptance). Locks the four counters (`active`, `idle`,
-//! `max_seen`, `drops`) against the schema definition at
+//! (bd-2caru.4 / bd-2caru.7 acceptance). Locks the counters and acquire-wait
+//! summary against the schema definition at
 //! `docs/schemas/ee.status.v1.json` so the read-pool report cannot drift
 //! between the Rust type, the JSON renderer, and the published schema.
 
@@ -14,7 +14,15 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 const STATUS_SCHEMA_PATH: &str = "docs/schemas/ee.status.v1.json";
-const READ_POOL_FIELDS: &[&str] = &["active", "idle", "max_seen", "drops"];
+const READ_POOL_FIELDS: &[&str] = &[
+    "active",
+    "idle",
+    "max_seen",
+    "drops",
+    "ad_hoc_bypass_count",
+    "acquire_wait",
+];
+const ACQUIRE_WAIT_FIELDS: &[&str] = &["samples", "p50_ns", "p99_ns"];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -100,7 +108,7 @@ fn ensure_u64_eq(json: &Value, pointer: &str, expected: u64) -> TestResult {
 }
 
 #[test]
-fn read_pool_status_schema_declares_all_four_counters() -> TestResult {
+fn read_pool_status_schema_declares_counters_and_wait_summary() -> TestResult {
     let schema = read_json(STATUS_SCHEMA_PATH)?;
 
     // `read_pool` must appear in the envelope's `data.required` list so the
@@ -121,8 +129,8 @@ fn read_pool_status_schema_declares_all_four_counters() -> TestResult {
     )?;
 
     // The `$defs/readPoolStatus` definition must enforce the exact
-    // counter shape: object, no additional properties, all four
-    // counters required, every counter typed as a non-negative integer.
+    // counter shape: object, no additional properties, counters required,
+    // and every scalar counter typed as a non-negative integer.
     ensure_str_eq(&schema, "/$defs/readPoolStatus/type", "object")?;
     ensure_bool_eq(&schema, "/$defs/readPoolStatus/additionalProperties", false)?;
     for counter in READ_POOL_FIELDS {
@@ -133,9 +141,22 @@ fn read_pool_status_schema_declares_all_four_counters() -> TestResult {
         "/$defs/readPoolStatus/properties",
         READ_POOL_FIELDS,
     )?;
-    for counter in READ_POOL_FIELDS {
+    for counter in ["active", "idle", "max_seen", "drops", "ad_hoc_bypass_count"] {
         let type_pointer = format!("/$defs/readPoolStatus/properties/{counter}/type");
         let minimum_pointer = format!("/$defs/readPoolStatus/properties/{counter}/minimum");
+        ensure_str_eq(&schema, &type_pointer, "integer")?;
+        ensure_u64_eq(&schema, &minimum_pointer, 0)?;
+    }
+    ensure_object_keys_eq(
+        &schema,
+        "/$defs/readPoolStatus/properties/acquire_wait/properties",
+        ACQUIRE_WAIT_FIELDS,
+    )?;
+    for counter in ACQUIRE_WAIT_FIELDS {
+        let type_pointer =
+            format!("/$defs/readPoolStatus/properties/acquire_wait/properties/{counter}/type");
+        let minimum_pointer =
+            format!("/$defs/readPoolStatus/properties/acquire_wait/properties/{counter}/minimum");
         ensure_str_eq(&schema, &type_pointer, "integer")?;
         ensure_u64_eq(&schema, &minimum_pointer, 0)?;
     }
@@ -146,7 +167,15 @@ fn read_pool_status_schema_declares_all_four_counters() -> TestResult {
 #[test]
 fn read_pool_status_report_default_emits_zero_counters() -> TestResult {
     let report = ReadPoolStatusReport::default();
-    if report.active != 0 || report.idle != 0 || report.max_seen != 0 || report.drops != 0 {
+    if report.active != 0
+        || report.idle != 0
+        || report.max_seen != 0
+        || report.drops != 0
+        || report.ad_hoc_bypass_count != 0
+        || report.acquire_wait.samples != 0
+        || report.acquire_wait.p50_ns != 0
+        || report.acquire_wait.p99_ns != 0
+    {
         return Err(format!(
             "ReadPoolStatusReport::default must zero every counter; got {report:?}"
         ));
@@ -166,19 +195,19 @@ fn read_pool_status_report_default_emits_zero_counters() -> TestResult {
 }
 
 #[test]
-fn rendered_status_json_includes_read_pool_with_all_four_counters() -> TestResult {
+fn rendered_status_json_includes_read_pool_with_all_counters() -> TestResult {
     let status = StatusReport::gather();
     let rendered = render_status_json(&status);
     let parsed: Value = serde_json::from_str(&rendered)
         .map_err(|error| format!("status JSON did not parse: {error}"))?;
 
     // The renderer must place `read_pool` under `data` exactly as the schema
-    // says, with the four counters present and each non-negative.
+    // says, with counters and the acquire wait summary present.
     let read_pool = parsed
         .pointer("/data/read_pool")
         .ok_or_else(|| format!("data.read_pool missing from rendered status JSON: {parsed}"))?;
     ensure_object_keys_eq(&parsed, "/data/read_pool", READ_POOL_FIELDS)?;
-    for counter in READ_POOL_FIELDS {
+    for counter in ["active", "idle", "max_seen", "drops", "ad_hoc_bypass_count"] {
         let pointer = format!("/data/read_pool/{counter}");
         let value = read_pool
             .pointer(&format!("/{counter}"))
@@ -187,6 +216,14 @@ fn rendered_status_json_includes_read_pool_with_all_four_counters() -> TestResul
         if value > usize::MAX as u64 {
             return Err(format!("{pointer} overflowed usize range: {value}"));
         }
+    }
+    ensure_object_keys_eq(&parsed, "/data/read_pool/acquire_wait", ACQUIRE_WAIT_FIELDS)?;
+    for counter in ACQUIRE_WAIT_FIELDS {
+        let pointer = format!("/data/read_pool/acquire_wait/{counter}");
+        read_pool
+            .pointer(&format!("/acquire_wait/{counter}"))
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("{pointer} not a u64"))?;
     }
 
     Ok(())

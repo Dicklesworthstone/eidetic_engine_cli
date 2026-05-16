@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "read_pool_undersized",
+  "introduced_by": {
+    "bead": "bd-2caru.7",
+    "epic_letter": "SRR"
+  },
+  "surfaces": [
+    "status"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "Read-pool acquire wait p99 remains above the tuning threshold over the observation window, indicating sustained contention.",
+    "setup_commands": [
+      "ee config set storage.read_pool.size 1",
+      "run concurrent read-heavy ee context workflows until acquire_wait samples are populated"
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "read_pool_undersized",
+    "severity": "low",
+    "message_contains": [
+      "read pool",
+      "undersized"
+    ],
+    "repair_contains": "increase storage.read_pool.size"
+  }
+}

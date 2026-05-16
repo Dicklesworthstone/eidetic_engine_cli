@@ -902,6 +902,16 @@ pub struct ReadPoolStatusReport {
     pub idle: usize,
     pub max_seen: usize,
     pub drops: u64,
+    pub ad_hoc_bypass_count: u64,
+    pub acquire_wait: ReadPoolAcquireWaitReport,
+}
+
+/// Sliding-window read-pool acquire wait summary exposed by `ee status --json`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReadPoolAcquireWaitReport {
+    pub samples: usize,
+    pub p50_ns: u128,
+    pub p99_ns: u128,
 }
 
 impl ReadPoolStatusReport {
@@ -912,6 +922,12 @@ impl ReadPoolStatusReport {
             idle: 0,
             max_seen: 0,
             drops: 0,
+            ad_hoc_bypass_count: 0,
+            acquire_wait: ReadPoolAcquireWaitReport {
+                samples: 0,
+                p50_ns: 0,
+                p99_ns: 0,
+            },
         }
     }
 }

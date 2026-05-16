@@ -60,13 +60,24 @@
   "$defs": {
     "readPoolStatus": {
       "type": "object",
-      "required": ["active", "idle", "max_seen", "drops"],
+      "required": ["active", "idle", "max_seen", "drops", "ad_hoc_bypass_count", "acquire_wait"],
       "additionalProperties": false,
       "properties": {
         "active": {"type": "integer", "minimum": 0},
         "idle": {"type": "integer", "minimum": 0},
         "max_seen": {"type": "integer", "minimum": 0},
-        "drops": {"type": "integer", "minimum": 0}
+        "drops": {"type": "integer", "minimum": 0},
+        "ad_hoc_bypass_count": {"type": "integer", "minimum": 0},
+        "acquire_wait": {
+          "type": "object",
+          "required": ["samples", "p50_ns", "p99_ns"],
+          "additionalProperties": false,
+          "properties": {
+            "samples": {"type": "integer", "minimum": 0},
+            "p50_ns": {"type": "integer", "minimum": 0},
+            "p99_ns": {"type": "integer", "minimum": 0}
+          }
+        }
       }
     },
     "singleFlightStatus": {
