@@ -7435,9 +7435,24 @@ mod tests {
             ] {
                 insert_score_memory(&connection, memory_id, 0.8)?;
             }
-            insert_score_memory_link(&connection, "qos-link-ab", SCORE_MEMORY_A, SCORE_MEMORY_B)?;
-            insert_score_memory_link(&connection, "qos-link-bc", SCORE_MEMORY_B, score_memory_c)?;
-            insert_score_memory_link(&connection, "qos-link-cd", score_memory_c, score_memory_d)?;
+            insert_score_memory_link(
+                &connection,
+                "link_00000000000000000000000161",
+                SCORE_MEMORY_A,
+                SCORE_MEMORY_B,
+            )?;
+            insert_score_memory_link(
+                &connection,
+                "link_00000000000000000000000162",
+                SCORE_MEMORY_B,
+                score_memory_c,
+            )?;
+            insert_score_memory_link(
+                &connection,
+                "link_00000000000000000000000163",
+                score_memory_c,
+                score_memory_d,
+            )?;
             connection.close().map_err(|error| error.to_string())?;
         }
         crate::core::qos::publish_qos_lane_record(
