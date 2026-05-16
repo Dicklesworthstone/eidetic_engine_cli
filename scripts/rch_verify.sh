@@ -20,6 +20,7 @@ Options:
   --rch-bin <path>          RCH binary (default: $RCH_BIN or rch)
   --project-root <path>     Local project root (default: cwd)
   --env <NAME=VALUE>        Pass an explicit environment override to the remote verifier command
+  --require-clean-tree      Refuse before RCH when the git checkout is dirty
   --json                    Accepted for symmetry; output is always JSON
   -h, --help                Show this help
 
@@ -39,6 +40,7 @@ LEDGER_PATH=""
 INCLUDE_SUMMARY=0
 NO_WRITE=0
 ENV_OVERRIDES=()
+REQUIRE_CLEAN_TREE=0
 DEFAULT_RCH_BIN="/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch"
 if [ -z "${RCH_BIN:-}" ] && [ -x "$DEFAULT_RCH_BIN" ]; then
     RCH_BIN="$DEFAULT_RCH_BIN"
@@ -82,6 +84,7 @@ while [ "$#" -gt 0 ]; do
         --rch-bin) RCH_BIN="${2:?--rch-bin requires a value}"; shift 2 ;;
         --project-root) PROJECT_ROOT="${2:?--project-root requires a value}"; shift 2 ;;
         --env) ENV_OVERRIDES+=("$(validate_env_override "${2:?--env requires NAME=VALUE}")"); shift 2 ;;
+        --require-clean-tree) REQUIRE_CLEAN_TREE=1; shift ;;
         --json) shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;
@@ -506,6 +509,122 @@ for path in sorted(critical):
 PY
 }
 
+compute_source_state_json() {
+    PROJECT_ROOT_PATH="$PROJECT_ROOT" \
+    REQUIRE_CLEAN_TREE="$REQUIRE_CLEAN_TREE" \
+    python3 - <<'PY'
+import hashlib
+import json
+import os
+import subprocess
+
+project_root = os.environ["PROJECT_ROOT_PATH"]
+require_clean = os.environ.get("REQUIRE_CLEAN_TREE") == "1"
+
+def git(args):
+    try:
+        return subprocess.run(
+            ["git", "-C", project_root, *args],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return None
+
+def git_stdout(args):
+    result = git(args)
+    if result is None or result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+def path_from_porcelain_v2(line):
+    if line.startswith("? ") or line.startswith("! "):
+        return line[2:].strip()
+    if line.startswith("#"):
+        return ""
+    if "\t" in line:
+        return line.rsplit("\t", 1)[-1].strip()
+    parts = line.split()
+    return parts[-1] if parts else ""
+
+def status_kind(line, path):
+    if path == ".beads/issues.jsonl" or path.startswith(".beads/"):
+        return "beads"
+    if line.startswith("? "):
+        name = path.rsplit("/", 1)[-1]
+        if (
+            path in {"--help", ".plan-drift-report.json", "critical.json", "functions.txt"}
+            or name.startswith("ubs")
+            or name.startswith("test_ln_")
+            or name.startswith("test_multibyte")
+        ):
+            return "scratch"
+        if any(token in path.lower() for token in ("secret", "token", "credential", "password")):
+            return "secret_risk"
+        return "untracked"
+    if line.startswith("! "):
+        return "ignored"
+    return "tracked"
+
+head = git_stdout(["rev-parse", "HEAD"])
+tree = git_stdout(["rev-parse", "HEAD^{tree}"]) if head else None
+status = git(["status", "--porcelain=v2", "--untracked-files=all", "--ignored=no"])
+status_lines = []
+if status is not None and status.returncode == 0:
+    status_lines = [line.rstrip("\n") for line in status.stdout.splitlines() if line.strip()]
+
+normalized = "\n".join(sorted(status_lines))
+dirty_hash = "sha256:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+summary = {
+    "total": 0,
+    "tracked": 0,
+    "untracked": 0,
+    "beads": 0,
+    "scratch": 0,
+    "secret_risk": 0,
+    "ignored": 0,
+    "unknown": 0,
+}
+sample = []
+for line in sorted(status_lines):
+    path = path_from_porcelain_v2(line)
+    if not path:
+        continue
+    kind = status_kind(line, path)
+    if kind not in summary:
+        kind = "unknown"
+    summary["total"] += 1
+    summary[kind] += 1
+    if len(sample) < 12:
+        sample.append({"path": path, "kind": kind})
+
+source_codes = []
+if require_clean and summary["total"]:
+    source_codes.append("rch_verify_dirty_tree_refused")
+    if summary["tracked"]:
+        source_codes.append("rch_verify_dirty_tracked_paths")
+    if summary["beads"]:
+        source_codes.append("rch_verify_dirty_beads_metadata")
+    if summary["scratch"]:
+        source_codes.append("rch_verify_dirty_untracked_scratch")
+    if summary["untracked"] or summary["secret_risk"] or summary["unknown"]:
+        source_codes.append("rch_verify_dirty_untracked_paths")
+
+print(json.dumps({
+    "verification_attribution": "strict_clean_tree" if require_clean and not summary["total"] else "live_dirty_checkout",
+    "git_head": head,
+    "git_tree": tree,
+    "dirty_status_hash": dirty_hash,
+    "dirty_summary": summary,
+    "dirty_paths_sample": sample,
+    "source_state_degraded_codes": source_codes,
+}, sort_keys=True, separators=(",", ":")))
+PY
+}
+
 remote_checkout_missing_tracked_paths() {
     CHECKOUT_OUTPUT="${1:-}" \
     CRITICAL_MANIFEST="$(critical_checkout_manifest)" \
@@ -611,9 +730,11 @@ emit_json() {
     requested_workers_json="$(csv_json_array "${REQUESTED_WORKERS_CSV:-}")"
     configured_workers_json="$(csv_json_array "${CONFIGURED_WORKERS_CSV:-}")"
     daemon_workers_json="$(csv_json_array "${DAEMON_WORKERS_CSV:-}")"
+    local source_state_json
+    source_state_json="${SOURCE_STATE_JSON:-{\"verification_attribution\":\"live_dirty_checkout\",\"git_head\":null,\"git_tree\":null,\"dirty_status_hash\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"dirty_summary\":{\"total\":0,\"tracked\":0,\"untracked\":0,\"beads\":0,\"scratch\":0,\"secret_risk\":0,\"ignored\":0,\"unknown\":0},\"dirty_paths_sample\":[],\"source_state_degraded_codes\":[]}}"
     local json_payload
     json_payload="$(cat <<EOF
-{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json}
+{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"source_state":$source_state_json}
 EOF
 )"
     JSON_PAYLOAD="$json_payload" \
@@ -630,6 +751,17 @@ import re
 from pathlib import Path
 
 proof = json.loads(os.environ["JSON_PAYLOAD"])
+source_state = proof.pop("source_state", {})
+for key in (
+    "verification_attribution",
+    "git_head",
+    "git_tree",
+    "dirty_status_hash",
+    "dirty_summary",
+    "dirty_paths_sample",
+    "source_state_degraded_codes",
+):
+    proof[key] = source_state.get(key)
 bead_id = os.environ.get("BEAD_ID", "")
 ledger_path = os.environ.get("LEDGER_PATH", "")
 include_summary = os.environ.get("INCLUDE_SUMMARY") == "1"
@@ -677,6 +809,10 @@ elif exit_code == 0 and proof.get("worker_id"):
 elif exit_code == 0:
     status = "pass_without_remote_marker"
 elif (
+    "rch_verify_dirty_tree_refused" in degraded
+):
+    status = "source_state_refused"
+elif (
     "rch_verify_topology_blocked" in degraded
     or "rch_verify_local_fallback_refused" in degraded
     or "rch_verify_worker_disk_full" in degraded
@@ -705,6 +841,10 @@ if bead_id:
 summary_lines = [
     f"RCH verifier `{command_text}` => `{status}`.",
     f"- command_kind: `{proof.get('command_kind')}`",
+    f"- verification_attribution: `{proof.get('verification_attribution')}`",
+    f"- git_head: `{proof.get('git_head') or 'unknown'}`",
+    f"- git_tree: `{proof.get('git_tree') or 'unknown'}`",
+    f"- dirty_status_hash: `{proof.get('dirty_status_hash') or 'unknown'}`",
     f"- remote_env: `{', '.join(proof.get('remote_env') or []) or 'none'}`",
     f"- remote_required: `{str(proof.get('remote_required')).lower()}`",
     f"- would_offload: `{str(proof.get('would_offload')).lower()}`",
@@ -727,6 +867,9 @@ if degraded:
     summary_lines.append("- degraded_codes: `" + "`, `".join(degraded) + "`")
 else:
     summary_lines.append("- degraded_codes: none")
+source_degraded = proof.get("source_state_degraded_codes") or []
+if source_degraded:
+    summary_lines.append("- source_state_degraded_codes: `" + "`, `".join(source_degraded) + "`")
 summary = "\n".join(summary_lines)
 
 if include_summary:
@@ -799,6 +942,23 @@ if [ "$COMMAND_KIND" = "rejected" ]; then
     RCH_INVOCATION=()
     emit_json false null 0 "" "unsupported verification command; pass --allow-raw for an explicitly raw remote command" "rch_verify_refused_unknown_command"
     exit 2
+fi
+
+SOURCE_STATE_JSON="$(compute_source_state_json)"
+SOURCE_STATE_DEGRADED_CODES="$(
+    SOURCE_STATE_JSON="$SOURCE_STATE_JSON" python3 - <<'PY'
+import json
+import os
+state = json.loads(os.environ["SOURCE_STATE_JSON"])
+for code in state.get("source_state_degraded_codes") or []:
+    print(code)
+PY
+)"
+if [ "$REQUIRE_CLEAN_TREE" -eq 1 ] && [ -n "$SOURCE_STATE_DEGRADED_CODES" ]; then
+    RCH_INVOCATION=()
+    mapfile -t source_degraded_array <<<"$SOURCE_STATE_DEGRADED_CODES"
+    emit_json true 1 0 "strict clean-tree preflight refused dirty checkout" "" "${source_degraded_array[@]}"
+    exit 1
 fi
 
 if [ "$COMMAND_KIND" = "raw" ] || [ "$COMMAND_KIND" = "cargo_fmt_check" ]; then
