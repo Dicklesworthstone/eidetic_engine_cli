@@ -15,6 +15,25 @@ subcommand="${1:-}"
 shift || true
 
 case "$subcommand" in
+    --version)
+        case "${FAKE_TAILSCALE_VERSION_MODE:-valid}" in
+            valid)
+                cat <<'VERSION'
+1.66.0
+  tailscale commit: 0123456789abcdef0123456789abcdef01234567
+  other commit: 89abcdef0123456789abcdef0123456789abcdef
+  go version: go1.22.3
+VERSION
+                ;;
+            malformed)
+                printf 'fake tailscale shim\n'
+                ;;
+            *)
+                echo "fake tailscale shim: unsupported FAKE_TAILSCALE_VERSION_MODE: ${FAKE_TAILSCALE_VERSION_MODE}" >&2
+                exit 2
+                ;;
+        esac
+        ;;
     status)
         json=false
         self_only=false
@@ -57,6 +76,21 @@ PY
             for arg in "$@"; do printf ' %s' "$arg"; done
             printf '\n'
         } >> "$up_log"
+        ;;
+    debug)
+        if [ "${1:-}" != "localapi" ] || [ "${2:-}" != "/localapi/v0/prefs" ]; then
+            echo "fake tailscale shim: unsupported debug args: $*" >&2
+            exit 1
+        fi
+        python3 - "$scenario_dir/state.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+state = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+payload = {"ShieldsUp": bool(state.get("self", {}).get("shields_up", False))}
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
         ;;
     *)
         echo "fake tailscale shim: unsupported subcommand: ${subcommand:-<missing>}" >&2

@@ -441,6 +441,10 @@ run_stage "Graph Determinism E2E (F4.a)" "./scripts/e2e_overhaul/graph_determini
 # e2e scripts import this library, so this self-test runs before those surfaces.
 run_stage "Fake Tailscale Harness E2E (SRR6.46.10)" "./scripts/e2e_overhaul/lib/test_fake_tailscale.sh"
 
+# Gate 6.8: Local Tailscale probe status harness (SRR6.46.1). This keeps the
+# no-network status surface covered by the deterministic fake Tailscale CLI.
+run_stage "Tailscale Local Probe E2E (SRR6.46.1)" "./scripts/e2e_overhaul/tailscale_local_probe.sh"
+
 # Gate 7: Advanced End-to-End
 run_stage "Advanced E2E Scripts" "./scripts/e2e_advanced.sh"
 

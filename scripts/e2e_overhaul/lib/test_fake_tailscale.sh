@@ -47,6 +47,13 @@ ft_shim_path > "$WORK_DIR/shim-dir.txt"
 shim_dir="$(cat "$WORK_DIR/shim-dir.txt")"
 [ -x "$shim_dir/tailscale" ] || fail "shim path did not expose executable tailscale"
 
+version_path="$WORK_DIR/version.txt"
+tailscale --version > "$version_path"
+grep -q '^1\.66\.0$' "$version_path" || fail "version shim missing semver line"
+grep -q 'tailscale commit:' "$version_path" || fail "version shim missing tailscale commit"
+grep -q 'go version:' "$version_path" || fail "version shim missing go version"
+ft_emit_event "probe" "true" "tailscale version shim returned authentic-looking output" "$(_ft_hash "$(cat "$version_path")")"
+
 status_path="$WORK_DIR/status.json"
 tailscale status --json > "$status_path"
 [ "$(json_get "$status_path" BackendState)" = "Running" ] || fail "status BackendState was not Running"
@@ -61,6 +68,17 @@ self_path="$WORK_DIR/status-self.json"
 tailscale status --json --self=true --peers=true > "$self_path"
 grep -q '"Self"' "$self_path" || fail "narrowed status missing Self"
 grep -q '"Peer"' "$self_path" || fail "narrowed status missing Peer"
+
+prefs_path="$WORK_DIR/prefs.json"
+tailscale debug localapi /localapi/v0/prefs > "$prefs_path"
+[ "$(json_get "$prefs_path" ShieldsUp)" = "False" ] || fail "prefs did not default ShieldsUp false"
+ft_set_shields_up true
+tailscale debug localapi /localapi/v0/prefs > "$prefs_path"
+[ "$(json_get "$prefs_path" ShieldsUp)" = "True" ] || fail "prefs did not reflect ShieldsUp true"
+tailscale status --json --self=true > "$self_path"
+[ "$(json_get "$self_path" Self.ShieldsUp)" = "True" ] || fail "status self did not reflect ShieldsUp true"
+ft_set_shields_up false
+ft_emit_event "prefs" "true" "tailscale debug localapi prefs reflected shields-up state" "$(_ft_hash "$(cat "$prefs_path")")"
 
 tailscale up --accept-dns=false
 [ -s "$WORK_DIR/scenario/tailscale_up.log" ] || fail "tailscale up shim did not log"

@@ -116,6 +116,7 @@ status = {
         "TailnetName": self_node["display_name"],
         "Authenticated": authenticated,
         "Platform": self_node.get("platform", "linux"),
+        "ShieldsUp": bool(self_node.get("shields_up", False)),
     },
     "Peer": peer_map,
 }
@@ -193,6 +194,7 @@ state = {
         "display_name": "ee-local",
         "platform": "linux",
         "authenticated": True,
+        "shields_up": False,
     },
     "peers": [],
 }
@@ -211,15 +213,17 @@ ft_set_self() {
     shift 4
     local platform="linux"
     local authenticated="true"
+    local shields_up="false"
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --platform=*) platform="${1#*=}"; shift ;;
             --authenticated=*) authenticated="${1#*=}"; shift ;;
+            --shields_up=*|--shields-up=*) shields_up="${1#*=}"; shift ;;
             *) echo "fake_tailscale: unknown ft_set_self arg: $1" >&2; return 2 ;;
         esac
     done
     NODE_KEY="$node_key" IP="$ip" TAILNET_ID="$tailnet_id" DISPLAY_NAME="$display_name" \
-    PLATFORM="$platform" AUTHENTICATED="$authenticated" \
+    PLATFORM="$platform" AUTHENTICATED="$authenticated" SHIELDS_UP="$shields_up" \
     python3 - "$(_ft_state_path)" <<'PY'
 import json
 import os
@@ -235,7 +239,25 @@ state["self"] = {
     "display_name": os.environ["DISPLAY_NAME"],
     "platform": os.environ["PLATFORM"],
     "authenticated": os.environ["AUTHENTICATED"].lower() == "true",
+    "shields_up": os.environ["SHIELDS_UP"].lower() == "true",
 }
+path.write_text(json.dumps(state, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+PY
+    _ft_rewrite_status
+}
+
+ft_set_shields_up() {
+    _ft_require_scenario
+    local enabled="${1:?enabled required}"
+    SHIELDS_UP="$enabled" python3 - "$(_ft_state_path)" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+state = json.loads(path.read_text(encoding="utf-8"))
+state["self"]["shields_up"] = os.environ["SHIELDS_UP"].lower() == "true"
 path.write_text(json.dumps(state, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 PY
     _ft_rewrite_status
