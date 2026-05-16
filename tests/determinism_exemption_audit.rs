@@ -8,10 +8,6 @@ use std::path::{Path, PathBuf};
 
 const BASELINE: &str =
     include_str!("fixtures/determinism_disallowed_methods_exemption_baseline.txt");
-const EXEMPTION_PATTERNS: &[&str] = &[
-    "#[allow(clippy::disallowed_methods)]",
-    "#[expect(clippy::disallowed_methods)]",
-];
 const JUSTIFICATION_MARKERS: &[&str] = &["why:", "because", "justification:", "determinism:"];
 
 #[derive(Debug)]
@@ -23,8 +19,7 @@ struct Exemption {
 #[test]
 fn disallowed_methods_exemptions_are_justified_and_counted() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let src_dir = manifest_dir.join("src");
-    let exemptions = collect_exemptions(&src_dir);
+    let exemptions = collect_exemptions(&[manifest_dir.join("src"), manifest_dir.join("tests")]);
     let baseline = parse_baseline(Baseline::raw());
 
     let unjustified = exemptions
@@ -60,9 +55,16 @@ fn parse_baseline(raw: &str) -> usize {
         .expect("determinism exemption baseline must be a usize")
 }
 
-fn collect_exemptions(root: &Path) -> Vec<Exemption> {
+fn collect_exemptions(roots: &[PathBuf]) -> Vec<Exemption> {
     let mut exemptions = Vec::new();
-    collect_exemptions_from_dir(root, &mut exemptions);
+    for root in roots {
+        collect_exemptions_from_dir(root, &mut exemptions);
+    }
+    exemptions.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.line.cmp(&right.line))
+    });
     exemptions
 }
 
@@ -72,8 +74,13 @@ fn collect_exemptions_from_dir(dir: &Path, exemptions: &mut Vec<Exemption>) {
         Err(_) => return,
     };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
+    let mut paths = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    paths.sort();
+
+    for path in paths {
         if path.is_dir() {
             collect_exemptions_from_dir(&path, exemptions);
         } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
@@ -89,16 +96,24 @@ fn collect_exemptions_from_file(path: &Path, exemptions: &mut Vec<Exemption>) {
     };
 
     for (index, line) in source.lines().enumerate() {
-        if EXEMPTION_PATTERNS
-            .iter()
-            .any(|pattern| line.contains(pattern))
-        {
+        if line_is_disallowed_methods_exemption(line) {
             exemptions.push(Exemption {
                 path: path.to_path_buf(),
                 line: index + 1,
             });
         }
     }
+}
+
+fn line_is_disallowed_methods_exemption(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    matches!(
+        trimmed,
+        "#[allow(clippy::disallowed_methods)]"
+            | "#![allow(clippy::disallowed_methods)]"
+            | "#[expect(clippy::disallowed_methods)]"
+            | "#![expect(clippy::disallowed_methods)]"
+    )
 }
 
 fn has_nearby_justification(exemption: &Exemption) -> bool {
@@ -121,10 +136,26 @@ fn has_nearby_justification(exemption: &Exemption) -> bool {
 
 #[cfg(test)]
 mod self_tests {
-    use super::parse_baseline;
+    use super::{line_is_disallowed_methods_exemption, parse_baseline};
 
     #[test]
     fn parses_zero_baseline() {
         assert_eq!(parse_baseline("allowed_exemptions = 0\n"), 0);
+    }
+
+    #[test]
+    fn exemption_detector_ignores_string_literals() {
+        assert!(line_is_disallowed_methods_exemption(
+            "#[allow(clippy::disallowed_methods)]"
+        ));
+        assert!(line_is_disallowed_methods_exemption(
+            "    #![expect(clippy::disallowed_methods)]"
+        ));
+        assert!(!line_is_disallowed_methods_exemption(
+            "const TEXT: &str = \"#[allow(clippy::disallowed_methods)]\";"
+        ));
+        assert!(!line_is_disallowed_methods_exemption(
+            "#[allow(clippy::needless_collect)]"
+        ));
     }
 }
