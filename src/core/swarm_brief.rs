@@ -640,7 +640,18 @@ pub struct WorkspaceGitStatusEntry {
     pub unstaged: String,
     pub entry_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub submodule_state: Option<WorkspaceGitSubmoduleState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<WorkspaceGitPathMetadata>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceGitSubmoduleState {
+    pub raw: String,
+    pub commit_changed: bool,
+    pub tracked_changes: bool,
+    pub untracked_changes: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
@@ -3163,20 +3174,20 @@ fn parse_workspace_git_status_porcelain_v2_line(line: &str) -> Option<WorkspaceG
     if let Some(rest) = line.strip_prefix("1 ") {
         let mut parts = rest.splitn(8, ' ');
         let xy = parts.next()?;
-        let _submodule = parts.next()?;
+        let submodule = parts.next()?;
         let _head_mode = parts.next()?;
         let _index_mode = parts.next()?;
         let _worktree_mode = parts.next()?;
         let _head_hash = parts.next()?;
         let _index_hash = parts.next()?;
         let path = normalize_workspace_git_path(parts.next()?)?;
-        return workspace_git_status_entry("ordinary", xy, path, None);
+        return workspace_git_status_entry("ordinary", xy, submodule, path, None);
     }
 
     if let Some(rest) = line.strip_prefix("2 ") {
         let mut parts = rest.splitn(9, ' ');
         let xy = parts.next()?;
-        let _submodule = parts.next()?;
+        let submodule = parts.next()?;
         let _head_mode = parts.next()?;
         let _index_mode = parts.next()?;
         let _worktree_mode = parts.next()?;
@@ -3191,13 +3202,13 @@ fn parse_workspace_git_status_porcelain_v2_line(line: &str) -> Option<WorkspaceG
             });
         let path = normalize_workspace_git_path(path)?;
         let original_path = original_path.and_then(normalize_workspace_git_path);
-        return workspace_git_status_entry("renamed_or_copied", xy, path, original_path);
+        return workspace_git_status_entry("renamed_or_copied", xy, submodule, path, original_path);
     }
 
     if let Some(rest) = line.strip_prefix("u ") {
         let mut parts = rest.splitn(10, ' ');
         let xy = parts.next()?;
-        let _submodule = parts.next()?;
+        let submodule = parts.next()?;
         let _stage1_mode = parts.next()?;
         let _stage2_mode = parts.next()?;
         let _stage3_mode = parts.next()?;
@@ -3206,12 +3217,12 @@ fn parse_workspace_git_status_porcelain_v2_line(line: &str) -> Option<WorkspaceG
         let _stage2_hash = parts.next()?;
         let _stage3_hash = parts.next()?;
         let path = normalize_workspace_git_path(parts.next()?)?;
-        return workspace_git_status_entry("unmerged", xy, path, None);
+        return workspace_git_status_entry("unmerged", xy, submodule, path, None);
     }
 
     if let Some(path) = line.strip_prefix("? ") {
         let path = normalize_workspace_git_path(path)?;
-        return workspace_git_status_entry("untracked", "??", path, None);
+        return workspace_git_status_entry("untracked", "??", "N...", path, None);
     }
 
     None
@@ -3220,6 +3231,7 @@ fn parse_workspace_git_status_porcelain_v2_line(line: &str) -> Option<WorkspaceG
 fn workspace_git_status_entry(
     entry_kind: &str,
     xy: &str,
+    submodule: &str,
     path: String,
     original_path: Option<String>,
 ) -> Option<WorkspaceGitStatusEntry> {
@@ -3232,7 +3244,27 @@ fn workspace_git_status_entry(
         staged,
         unstaged,
         entry_kind: entry_kind.to_string(),
+        submodule_state: workspace_git_submodule_state(submodule),
         metadata: None,
+    })
+}
+
+fn workspace_git_submodule_state(raw: &str) -> Option<WorkspaceGitSubmoduleState> {
+    if raw == "N..." || raw.is_empty() {
+        return None;
+    }
+    let mut chars = raw.chars();
+    if chars.next()? != 'S' {
+        return None;
+    }
+    let commit = chars.next();
+    let tracked = chars.next();
+    let untracked = chars.next();
+    Some(WorkspaceGitSubmoduleState {
+        raw: raw.to_string(),
+        commit_changed: commit == Some('C'),
+        tracked_changes: tracked == Some('M'),
+        untracked_changes: untracked == Some('U'),
     })
 }
 
@@ -5358,6 +5390,46 @@ mod tests {
         ));
 
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn workspace_git_porcelain_v2_parser_preserves_submodule_state() {
+        let entries = parse_workspace_git_status_porcelain_v2(concat!(
+            "1 .M S..U 160000 160000 160000 abc def vendor/untracked-submodule\n",
+            "2 R. SCM. 160000 160000 160000 abc def R100 vendor/new\tvendor/old\n",
+            "u UU S.M. 160000 160000 160000 160000 aaa bbb ccc vendor/conflict\n",
+            "? ordinary-untracked.txt\n",
+        ));
+
+        let states = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.path.as_str(),
+                    entry.submodule_state.as_ref().map(|state| {
+                        (
+                            state.raw.as_str(),
+                            state.commit_changed,
+                            state.tracked_changes,
+                            state.untracked_changes,
+                        )
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            states,
+            vec![
+                ("ordinary-untracked.txt", None),
+                ("vendor/conflict", Some(("S.M.", false, true, false))),
+                ("vendor/new", Some(("SCM.", true, true, false))),
+                (
+                    "vendor/untracked-submodule",
+                    Some(("S..U", false, false, true))
+                ),
+            ]
+        );
     }
 
     #[test]
