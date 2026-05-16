@@ -28,6 +28,25 @@ const DENSITY_SKETCH_MASK: u64 = (1_u64 << DENSITY_EXACT_SHIFT) - 1;
 const NODE_HASH_SEED: u64 =
     fnv1a_update_const(0xcbf2_9ce4_8422_2325_u64, b"ee.graph.minhash_rank.node.v1");
 
+fn trace_minhash_rank_checkpoint(
+    phase: &'static str,
+    elapsed_ms: u64,
+    candidate_count: usize,
+    degraded_codes: &[&str],
+) {
+    tracing::info!(
+        workspace_id = "graph",
+        request_id = "minhash_rank_centrality",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-3usjw.46"),
+        surface = "minhash_rank_centrality",
+        phase,
+        elapsed_ms,
+        candidate_count,
+        degraded_codes = ?degraded_codes,
+        "minhash rank centrality checkpoint"
+    );
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MinHashRankPolicy {
@@ -93,10 +112,13 @@ pub fn compute_minhash_rank_with_cx(
 ) -> GraphResult<MinHashRankResult> {
     const ALGORITHM_NAME: &str = "minhash_rank_centrality";
 
+    trace_minhash_rank_checkpoint("input", 0, graph.node_count(), &[]);
     check_cancelled(cx, ALGORITHM_NAME)?;
+    trace_minhash_rank_checkpoint("dependency_check", 0, graph.node_count(), &[]);
     let input = MinHashRankInput::from_graph(graph);
     let result = compute_minhash_rank_unbudgeted(graph, input, policy.normalized());
     check_cancelled(cx, ALGORITHM_NAME)?;
+    trace_minhash_rank_checkpoint("response", 0, result.scores.len(), &[]);
     Ok(result)
 }
 
@@ -166,11 +188,29 @@ fn compute_minhash_rank_unbudgeted(
             .then_with(|| right.outgoing_edge_count.cmp(&left.outgoing_edge_count))
             .then_with(|| nodes[left.node_index].cmp(nodes[right.node_index]))
     });
-    candidates.truncate(policy.top_k);
+
+    // Correct top-K selection for composite key (primary=exact density + secondary=sketch).
+    // We sort cheaply on primary only, then identify the marginal density at position top_k.
+    // We compute expensive sketches for *all* nodes sharing that marginal primary density
+    // (plus all strictly better) so the final selection+sort by full signature_density is
+    // the true top-K. This preserves the defer-to-top-K perf win for low-degree nodes
+    // while guaranteeing determinism and correctness even on dense tie groups at the cutoff.
+    let top_k = policy.top_k;
+    let compute_limit = if candidates.len() <= top_k {
+        candidates.len()
+    } else {
+        let marginal_density = candidates[top_k - 1].signature_density;
+        let mut lim = top_k;
+        while lim < candidates.len() && candidates[lim].signature_density == marginal_density {
+            lim += 1;
+        }
+        lim
+    };
 
     let mut signature_edges_scanned = 0usize;
     let mut rows: Vec<MinHashRankScore> = candidates
         .into_iter()
+        .take(compute_limit)
         .map(|candidate| {
             let target_name = nodes[candidate.node_index];
             let target_hash = stable_node_hash(target_name);
@@ -215,6 +255,7 @@ fn compute_minhash_rank_unbudgeted(
             .then_with(|| right.outgoing_edge_count.cmp(&left.outgoing_edge_count))
             .then_with(|| left.node.cmp(&right.node))
     });
+    rows.truncate(top_k);
     for (index, row) in rows.iter_mut().enumerate() {
         row.rank = index + 1;
     }
@@ -224,7 +265,7 @@ fn compute_minhash_rank_unbudgeted(
         policy,
         witness: ComplexityWitness {
             algorithm: "minhash_rank_centrality".to_owned(),
-            complexity_claim: "O(|V| + k * |E_top|) integer minhash top-K over incoming edge sets"
+            complexity_claim: "O(|V| + m * |E_marginal|) integer minhash top-K (m >= k is marginal density group size at cutoff for exact composite-key selection)"
                 .to_owned(),
             nodes_touched: node_count,
             edges_scanned: edge_count.saturating_add(signature_edges_scanned),
