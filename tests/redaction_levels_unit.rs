@@ -25,7 +25,18 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
 }
 
 fn api_key_fixture() -> String {
-    "API_KEY=sk-FAKEabc123def456ghi789jkl012".to_owned()
+    let fixture = include_str!("fixtures/secrets/pre_redaction.jsonl");
+    let line = fixture
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("pre_redaction fixture should contain at least one JSONL row");
+    let value: JsonValue =
+        serde_json::from_str(line).expect("pre_redaction fixture row should be valid JSON");
+    value
+        .get("content")
+        .and_then(JsonValue::as_str)
+        .expect("pre_redaction fixture row should contain string content")
+        .to_owned()
 }
 
 fn memory_record(content: &str) -> ExportMemoryRecord {
@@ -52,6 +63,7 @@ fn tag_record() -> ExportRecord {
 }
 
 fn audit_record() -> ExportAuditRecord {
+    let secret = api_key_fixture();
     ExportAuditRecord::builder()
         .audit_id("audit-redaction-matrix-001234567890")
         .operation("memory.update")
@@ -60,11 +72,44 @@ fn audit_record() -> ExportAuditRecord {
         .performed_at("2026-05-16T00:00:00Z")
         .performed_by("agent-redaction-matrix")
         .details(serde_json::json!({
-            "secret": api_key_fixture(),
+            "secret": secret,
             "reason": "redaction matrix fixture"
         }))
         .build()
         .expect("audit fixture has required fields")
+}
+
+#[test]
+fn pre_redaction_fixture_is_jsonl_and_carries_api_key_pattern() -> TestResult {
+    let fixture = include_str!("fixtures/secrets/pre_redaction.jsonl");
+    let mut rows = 0usize;
+    for (line_index, line) in fixture.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        rows += 1;
+        let value: JsonValue = serde_json::from_str(line).map_err(|error| {
+            format!(
+                "tests/fixtures/secrets/pre_redaction.jsonl line {} is not valid JSON: {error}",
+                line_index + 1
+            )
+        })?;
+        ensure(
+            value.get("expected_class").and_then(JsonValue::as_str) == Some("api_key"),
+            "pre_redaction fixture must name the expected api_key detector class",
+        )?;
+        ensure(
+            value
+                .get("content")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|content| content.contains("sk-FAKE")),
+            "pre_redaction fixture must carry a secret-shaped API key sample",
+        )?;
+    }
+    ensure(
+        rows > 0,
+        "tests/fixtures/secrets/pre_redaction.jsonl must contain at least one fixture row",
+    )
 }
 
 #[test]
