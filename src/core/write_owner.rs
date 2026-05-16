@@ -118,6 +118,12 @@ pub fn workspace_write_replay_required(workspace_path: &Path) -> bool {
     if recovery_state_path_has_symlink_component(&path).unwrap_or(true) {
         return false;
     }
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return false;
+    };
+    if !metadata.file_type().is_file() {
+        return false;
+    }
     let Ok(raw) = fs::read_to_string(path) else {
         return false;
     };
@@ -1721,6 +1727,20 @@ mod tests {
         assert!(
             !workspace_write_replay_required(temp.path()),
             "status must not trust a symlinked recovery marker file"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_write_replay_required_ignores_marker_directory() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::create_dir_all(write_spool_recovery_state_path(temp.path()))
+            .map_err(|error| error.to_string())?;
+
+        assert!(
+            !workspace_write_replay_required(temp.path()),
+            "status must not trust a non-regular recovery marker path"
         );
 
         Ok(())
