@@ -142,6 +142,9 @@ mod graph_config_behavior;
 #[path = "contracts/peer_group_binding_schema.rs"]
 mod peer_group_binding_schema;
 
+#[path = "contracts/mesh_peer_policy_schema.rs"]
+mod mesh_peer_policy_schema;
+
 #[path = "contracts/cli_help_completeness.rs"]
 mod cli_help_completeness;
 

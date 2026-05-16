@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.peer_policy.v1.json",
+  "title": "ee.mesh.peer_policy.v1",
+  "description": "Workspace-scoped authorization and redaction policy for an optional mesh memory peer.",
+  "type": "object",
+  "required": [
+    "schema",
+    "policyId",
+    "workspaceId",
+    "peerId",
+    "originWorkspaceIds",
+    "trustLane",
+    "importTrustClass",
+    "allowedLanes",
+    "redaction",
+    "bodyFetch",
+    "defaultAction"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.peer_policy.v1"
+    },
+    "policyId": {
+      "$ref": "#/$defs/policyId"
+    },
+    "workspaceId": {
+      "$ref": "#/$defs/workspaceId"
+    },
+    "workspaceAlias": {
+      "$ref": "#/$defs/redactedAlias"
+    },
+    "peerId": {
+      "$ref": "#/$defs/peerId"
+    },
+    "peerAlias": {
+      "$ref": "#/$defs/redactedAlias"
+    },
+    "originWorkspaceIds": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/workspaceId"
+      }
+    },
+    "trustLane": {
+      "$ref": "#/$defs/trustLane"
+    },
+    "importTrustClass": {
+      "description": "Local trust class assigned to imported peer material. Peer material must never import as human_explicit.",
+      "type": "string",
+      "enum": ["agent_assertion", "agent_validated"]
+    },
+    "allowedLanes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "metadata",
+        "body",
+        "embedding",
+        "graphLink",
+        "revisionNotice",
+        "curationSignal"
+      ],
+      "properties": {
+        "metadata": {
+          "$ref": "#/$defs/laneDecision"
+        },
+        "body": {
+          "$ref": "#/$defs/laneDecision"
+        },
+        "embedding": {
+          "$ref": "#/$defs/laneDecision"
+        },
+        "graphLink": {
+          "$ref": "#/$defs/laneDecision"
+        },
+        "revisionNotice": {
+          "$ref": "#/$defs/laneDecision"
+        },
+        "curationSignal": {
+          "$ref": "#/$defs/laneDecision"
+        }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metadata", "preview", "body", "embedding"],
+      "properties": {
+        "metadata": {
+          "$ref": "#/$defs/redactionDecision"
+        },
+        "preview": {
+          "$ref": "#/$defs/redactionDecision"
+        },
+        "body": {
+          "$ref": "#/$defs/redactionDecision"
+        },
+        "embedding": {
+          "$ref": "#/$defs/redactionDecision"
+        }
+      }
+    },
+    "bodyFetch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed", "requiresConsent"],
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "requiresConsent": {
+          "type": "boolean"
+        },
+        "maxBytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "defaultAction": {
+      "type": "string",
+      "const": "deny"
+    },
+    "createdAt": {
+      "$ref": "#/$defs/rfc3339"
+    },
+    "updatedAt": {
+      "$ref": "#/$defs/rfc3339"
+    }
+  },
+  "$defs": {
+    "policyId": {
+      "type": "string",
+      "pattern": "^pol_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "workspaceId": {
+      "type": "string",
+      "pattern": "^wsp_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "peerId": {
+      "type": "string",
+      "pattern": "^peer_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "redactedAlias": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "trustLane": {
+      "type": "string",
+      "enum": [
+        "localHuman",
+        "peerHumanViaPeer",
+        "peerAgent",
+        "peerDerived",
+        "untrusted"
+      ]
+    },
+    "laneDecision": {
+      "type": "string",
+      "enum": ["allow", "quarantine", "deny"]
+    },
+    "redactionDecision": {
+      "type": "string",
+      "enum": ["share", "redact", "deny"]
+    },
+    "rfc3339": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "schema": "ee.mesh.peer_policy.v1",
+  "policyId": "pol_metadata_only_001",
+  "workspaceId": "wsp_local_release_001",
+  "workspaceAlias": "local-release",
+  "peerId": "peer_builder_host_001",
+  "peerAlias": "builder-host",
+  "originWorkspaceIds": ["wsp_remote_release_001"],
+  "trustLane": "peerHumanViaPeer",
+  "importTrustClass": "agent_assertion",
+  "allowedLanes": {
+    "metadata": "allow",
+    "body": "deny",
+    "embedding": "deny",
+    "graphLink": "quarantine",
+    "revisionNotice": "allow",
+    "curationSignal": "deny"
+  },
+  "redaction": {
+    "metadata": "share",
+    "preview": "redact",
+    "body": "deny",
+    "embedding": "deny"
+  },
+  "bodyFetch": {
+    "allowed": false,
+    "requiresConsent": true,
+    "maxBytes": 0
+  },
+  "defaultAction": "deny",
+  "createdAt": "2026-05-16T00:00:00Z",
+  "updatedAt": "2026-05-16T00:00:00Z"
+}
