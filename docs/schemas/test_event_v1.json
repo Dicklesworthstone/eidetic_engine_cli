@@ -37,7 +37,8 @@
         "field_selector",
         "bench_iteration",
         "artifact_manifest",
-        "lint_determinism"
+        "lint_determinism",
+        "redaction_apply"
       ]
     },
     "command": {
@@ -232,6 +233,25 @@
               "exemptions_with_justification",
               "ui_tests_passed",
               "ui_tests_failed"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "redaction_apply"}}},
+      "then": {
+        "properties": {
+          "fields": {
+            "type": "object",
+            "required": [
+              "level",
+              "surface",
+              "fields_redacted_count",
+              "patterns_matched",
+              "tokens_truncated",
+              "content_hash_original",
+              "audit_row_id"
             ]
           }
         }

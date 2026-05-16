@@ -165,12 +165,56 @@ fn doc_cross_references_j6_failure_modes() -> TestResult {
 #[test]
 fn doc_cross_references_test_event_kind() -> TestResult {
     let doc = read_doc()?;
+    let schema_text = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/schemas/test_event_v1.json"),
+    )
+    .map_err(|e| format!("read docs/schemas/test_event_v1.json: {e}"))?;
     ensure(
         doc.contains("\"kind\": \"redaction_apply\"")
             || doc.contains("kind: \"redaction_apply\"")
             || doc.contains("`redaction_apply`"),
         "docs/redaction_levels.md must declare the canonical test-event `kind: \"redaction_apply\"`",
-    )
+    )?;
+    for required_schema_token in [
+        "\"redaction_apply\"",
+        "\"level\"",
+        "\"surface\"",
+        "\"fields_redacted_count\"",
+        "\"patterns_matched\"",
+        "\"tokens_truncated\"",
+        "\"content_hash_original\"",
+        "\"audit_row_id\"",
+    ] {
+        ensure(
+            schema_text.contains(required_schema_token),
+            format!(
+                "docs/schemas/test_event_v1.json must pin redaction_apply token `{required_schema_token}`"
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn doc_test_event_example_matches_schema_required_fields() -> TestResult {
+    let doc = read_doc()?;
+    for required_field in [
+        "\"level\"",
+        "\"surface\"",
+        "\"fields_redacted_count\"",
+        "\"patterns_matched\"",
+        "\"tokens_truncated\"",
+        "\"content_hash_original\"",
+        "\"audit_row_id\"",
+    ] {
+        ensure(
+            doc.contains(required_field),
+            format!(
+                "docs/redaction_levels.md redaction_apply example missing schema-required field `{required_field}`"
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]
