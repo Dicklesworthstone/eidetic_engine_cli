@@ -12,6 +12,11 @@ use fnx_runtime::{CgsePolicyEngine, CgseValue, CompatibilityMode};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::core::graph_telemetry::{
+    AlgorithmCancelledEvent, AlgorithmComputeEvent, AlgorithmTimeoutEvent, CacheOutcomeEvent,
+    emit_algorithm_cancelled, emit_algorithm_compute, emit_algorithm_timeout, emit_cache_hit,
+    emit_cache_miss,
+};
 use crate::db::{CreateGraphAlgorithmResultInput, DbConnection, StoredGraphAlgorithmResult};
 use crate::graph::{GraphError, GraphResult, graph_algorithm_params_hash};
 
@@ -24,6 +29,8 @@ pub const DEFAULT_FOREGROUND_BUDGET: Duration = Duration::from_millis(250);
 pub const DEFAULT_BACKGROUND_BUDGET: Duration = Duration::from_millis(2_000);
 pub const DEFAULT_CGSE_MODE: CompatibilityMode = CompatibilityMode::Strict;
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const UNTRACKED_GRAPH_SNAPSHOT_ID: &str = "untracked";
+const UNTRACKED_GRAPH_PARAMS_HASH: &str = "untracked";
 
 #[must_use]
 pub fn current_or_testing_cx() -> Cx {
@@ -35,7 +42,37 @@ where
     R: Send + 'static,
     F: FnOnce() -> R + Send + 'static,
 {
-    check_cancelled(cx, name)?;
+    run_with_budget_observed(
+        cx,
+        name,
+        budget,
+        BudgetTelemetry {
+            snapshot_id: UNTRACKED_GRAPH_SNAPSHOT_ID,
+            params_hash: UNTRACKED_GRAPH_PARAMS_HASH,
+            emit_compute: true,
+            cache_hit: false,
+            sampling_used: false,
+        },
+        f,
+    )
+}
+
+fn run_with_budget_observed<R, F>(
+    cx: &Cx,
+    name: &'static str,
+    budget: Duration,
+    telemetry: BudgetTelemetry<'_>,
+    f: F,
+) -> GraphResult<R>
+where
+    R: Send + 'static,
+    F: FnOnce() -> R + Send + 'static,
+{
+    let started = Instant::now();
+    if let Err(error) = check_cancelled(cx, name) {
+        emit_budget_failure_telemetry(name, budget, started, telemetry, &error);
+        return Err(error);
+    }
 
     let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
         .thread_name_prefix("ee-graph-budget")
@@ -49,8 +86,6 @@ where
         let mut worker = std::pin::pin!(asupersync::runtime::spawn_blocking(move || {
             std::panic::catch_unwind(AssertUnwindSafe(f))
         }));
-        let started = Instant::now();
-
         loop {
             check_cancelled(cx, name)?;
             let Some(remaining) = budget.checked_sub(started.elapsed()) else {
@@ -79,15 +114,66 @@ where
         }
     });
 
-    match outcome? {
-        Ok(result) => Ok(result),
-        Err(payload) => Err(GraphError::GraphEngine {
+    let result = match outcome {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(payload)) => Err(GraphError::GraphEngine {
             operation: name,
             source: format!(
                 "graph algorithm worker panicked: {}",
                 panic_payload_to_string(payload)
             ),
         }),
+        Err(error) => Err(error),
+    };
+
+    match &result {
+        Ok(_) if telemetry.emit_compute => {
+            emit_algorithm_compute(AlgorithmComputeEvent {
+                algorithm: name,
+                snapshot_id: telemetry.snapshot_id,
+                params_hash: telemetry.params_hash,
+                elapsed_ms: duration_millis_saturating(started.elapsed()),
+                cache_hit: telemetry.cache_hit,
+                sampling_used: telemetry.sampling_used,
+            });
+        }
+        Err(error) => emit_budget_failure_telemetry(name, budget, started, telemetry, error),
+        Ok(_) => {}
+    }
+
+    result
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BudgetTelemetry<'a> {
+    snapshot_id: &'a str,
+    params_hash: &'a str,
+    emit_compute: bool,
+    cache_hit: bool,
+    sampling_used: bool,
+}
+
+fn emit_budget_failure_telemetry(
+    name: &'static str,
+    budget: Duration,
+    started: Instant,
+    telemetry: BudgetTelemetry<'_>,
+    error: &GraphError,
+) {
+    match error {
+        GraphError::AlgorithmTimeout { .. } => emit_algorithm_timeout(AlgorithmTimeoutEvent {
+            algorithm: name,
+            snapshot_id: telemetry.snapshot_id,
+            budget_ms: duration_millis_saturating(budget),
+            elapsed_ms: duration_millis_saturating(started.elapsed()),
+        }),
+        GraphError::AlgorithmCancelled { .. } => {
+            emit_algorithm_cancelled(AlgorithmCancelledEvent {
+                algorithm: name,
+                elapsed_ms: duration_millis_saturating(started.elapsed()),
+            });
+        }
+        _ => {}
     }
 }
 
@@ -102,7 +188,33 @@ where
     R: Clone + DeserializeOwned + Send + Serialize + Sync + 'static,
     F: FnOnce() -> R + Send + 'static,
 {
-    run_with_result_cache(spec, || run_with_budget(cx, name, budget, f))
+    let params_hash =
+        graph_algorithm_params_hash(spec.algorithm, spec.snapshot_content_hash, spec.params)?;
+    let started = Instant::now();
+    let run = run_with_result_cache_with_params_hash(spec, &params_hash, || {
+        run_with_budget_observed(
+            cx,
+            name,
+            budget,
+            BudgetTelemetry {
+                snapshot_id: spec.snapshot_id,
+                params_hash: &params_hash,
+                emit_compute: false,
+                cache_hit: false,
+                sampling_used: false,
+            },
+            f,
+        )
+    })?;
+    emit_algorithm_compute(AlgorithmComputeEvent {
+        algorithm: name,
+        snapshot_id: spec.snapshot_id,
+        params_hash: &run.params_hash,
+        elapsed_ms: duration_millis_saturating(started.elapsed()),
+        cache_hit: run.cache_hit,
+        sampling_used: false,
+    });
+    Ok(run)
 }
 
 pub fn with_cgse_mode<R, F>(mode: CompatibilityMode, f: F) -> R
@@ -320,20 +432,47 @@ where
 {
     let params_hash =
         graph_algorithm_params_hash(spec.algorithm, spec.snapshot_content_hash, spec.params)?;
+    run_with_result_cache_with_params_hash(spec, &params_hash, compute)
+}
+
+fn run_with_result_cache_with_params_hash<R, Compute>(
+    spec: &AlgorithmResultCacheSpec<'_>,
+    params_hash: &str,
+    compute: Compute,
+) -> GraphResult<AlgorithmResultCacheRun<R>>
+where
+    R: Clone + DeserializeOwned + Send + Serialize + Sync + 'static,
+    Compute: FnOnce() -> GraphResult<R>,
+{
     let cache_key = format!(
         "{}\0{}\0{}\0{}",
         spec.workspace_id, spec.snapshot_id, spec.algorithm, params_hash
     );
     let cached = compute_or_load_algorithm_result(
         &cache_key,
-        || load_cached_algorithm_result_with_memory(spec, &params_hash, &cache_key),
-        compute,
-        |result| store_cached_algorithm_result_with_memory(spec, &params_hash, &cache_key, result),
+        || {
+            let loaded = load_cached_algorithm_result_with_memory(spec, params_hash, &cache_key)?;
+            if loaded.is_some() {
+                emit_cache_hit(CacheOutcomeEvent {
+                    algorithm: spec.algorithm,
+                    params_hash,
+                });
+            }
+            Ok(loaded)
+        },
+        || {
+            emit_cache_miss(CacheOutcomeEvent {
+                algorithm: spec.algorithm,
+                params_hash,
+            });
+            compute()
+        },
+        |result| store_cached_algorithm_result_with_memory(spec, params_hash, &cache_key, result),
     )?;
 
     Ok(AlgorithmResultCacheRun {
         result: cached.result,
-        params_hash,
+        params_hash: params_hash.to_owned(),
         cache_hit: cached.cache_hit,
     })
 }
@@ -786,6 +925,16 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use asupersync::CancelReason;
+    use tracing::subscriber::with_default;
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::registry::Registry;
+
+    use crate::core::graph_telemetry::{
+        ALGORITHM_CANCELLED_EVENT, ALGORITHM_COMPUTE_EVENT, ALGORITHM_TIMEOUT_EVENT,
+        CACHE_HIT_EVENT, CACHE_MISS_EVENT,
+    };
     use crate::db::{
         CreateGraphSnapshotInput, CreateWorkspaceInput, DbConnection, GraphSnapshotType,
     };
@@ -795,6 +944,83 @@ mod tests {
 
     fn graph_result<T>(result: GraphResult<T>) -> Result<T, String> {
         result.map_err(|error| error.to_string())
+    }
+
+    #[derive(Clone, Debug)]
+    struct CapturedEvent {
+        target: String,
+        fields: BTreeMap<String, String>,
+    }
+
+    #[derive(Default, Clone)]
+    struct CaptureLayer {
+        events: Arc<Mutex<Vec<CapturedEvent>>>,
+    }
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            let mut captured = CapturedEvent {
+                target: event.metadata().target().to_owned(),
+                fields: BTreeMap::new(),
+            };
+            let mut visitor = CaptureVisitor {
+                fields: &mut captured.fields,
+            };
+            event.record(&mut visitor);
+            self.events.lock().expect("capture lock").push(captured);
+        }
+    }
+
+    struct CaptureVisitor<'a> {
+        fields: &'a mut BTreeMap<String, String>,
+    }
+
+    impl tracing::field::Visit for CaptureVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_owned(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_owned());
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_string());
+        }
+
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_string());
+        }
+
+        fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_string());
+        }
+    }
+
+    fn capture_graph_events<F: FnOnce()>(thunk: F) -> Vec<CapturedEvent> {
+        let layer = CaptureLayer::default();
+        let events = Arc::clone(&layer.events);
+        let subscriber = Registry::default()
+            .with(layer)
+            .with(tracing_subscriber::filter::LevelFilter::TRACE);
+        with_default(subscriber, thunk);
+        let guard = events.lock().expect("capture lock");
+        guard.clone()
+    }
+
+    fn events_with_target<'a>(events: &'a [CapturedEvent], target: &str) -> Vec<&'a CapturedEvent> {
+        events
+            .iter()
+            .filter(|event| event.target == target)
+            .collect()
     }
 
     #[test]
@@ -808,6 +1034,42 @@ mod tests {
         ))?;
 
         assert_eq!(result, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn run_with_budget_emits_algorithm_compute_telemetry() -> TestResult {
+        let cx = Cx::for_testing();
+        let mut result = Ok(());
+        let events = capture_graph_events(|| {
+            result = graph_result(run_with_budget(
+                &cx,
+                "telemetry_compute_fixture",
+                DEFAULT_FOREGROUND_BUDGET,
+                || 42_u64,
+            ))
+            .map(|_| ());
+        });
+        result?;
+
+        let compute = events_with_target(&events, ALGORITHM_COMPUTE_EVENT);
+        assert_eq!(compute.len(), 1);
+        assert_eq!(
+            compute[0].fields.get("algorithm").map(String::as_str),
+            Some("telemetry_compute_fixture")
+        );
+        assert_eq!(
+            compute[0].fields.get("snapshot_id").map(String::as_str),
+            Some(UNTRACKED_GRAPH_SNAPSHOT_ID)
+        );
+        assert_eq!(
+            compute[0].fields.get("params_hash").map(String::as_str),
+            Some(UNTRACKED_GRAPH_PARAMS_HASH)
+        );
+        assert_eq!(
+            compute[0].fields.get("cache_hit").map(String::as_str),
+            Some("false")
+        );
         Ok(())
     }
 
@@ -834,6 +1096,56 @@ mod tests {
                 return Err(format!("expected AlgorithmTimeout, got {other:?}"));
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn run_with_budget_emits_timeout_telemetry() -> TestResult {
+        let cx = Cx::for_testing();
+        let events = capture_graph_events(|| {
+            let _ = run_with_budget(
+                &cx,
+                "telemetry_timeout_fixture",
+                Duration::from_millis(5),
+                || {
+                    thread::sleep(Duration::from_millis(25));
+                    7_u64
+                },
+            );
+        });
+
+        let timeout = events_with_target(&events, ALGORITHM_TIMEOUT_EVENT);
+        assert_eq!(timeout.len(), 1);
+        assert_eq!(
+            timeout[0].fields.get("algorithm").map(String::as_str),
+            Some("telemetry_timeout_fixture")
+        );
+        assert_eq!(
+            timeout[0].fields.get("budget_ms").map(String::as_str),
+            Some("5")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn run_with_budget_emits_cancelled_telemetry() -> TestResult {
+        let cx = Cx::for_testing();
+        cx.set_cancel_reason(CancelReason::timeout().with_message("telemetry cancellation"));
+        let events = capture_graph_events(|| {
+            let _ = run_with_budget(
+                &cx,
+                "telemetry_cancelled_fixture",
+                DEFAULT_FOREGROUND_BUDGET,
+                || 7_u64,
+            );
+        });
+
+        let cancelled = events_with_target(&events, ALGORITHM_CANCELLED_EVENT);
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(
+            cancelled[0].fields.get("algorithm").map(String::as_str),
+            Some("telemetry_cancelled_fixture")
+        );
         Ok(())
     }
 
@@ -1157,6 +1469,105 @@ mod tests {
         assert!(second.cache_hit);
         assert_eq!(first.result, second.result);
         assert_eq!(compute_count.load(Ordering::SeqCst), 1);
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn run_with_cached_budget_emits_cache_and_compute_telemetry() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_8123456789abcdef0123456790";
+        let snapshot_id = "gsnap_8123456789abcdef012345679";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: "/workspace/algorithm-cached-budget-telemetry".to_owned(),
+                    name: Some("algorithm-cached-budget-telemetry".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_graph_snapshot(
+                snapshot_id,
+                &CreateGraphSnapshotInput {
+                    workspace_id: workspace_id.to_owned(),
+                    snapshot_version: 1,
+                    schema_version: "ee.graph.snapshot.v1".to_owned(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 2,
+                    edge_count: 1,
+                    metrics_json: r#"{"nodes":[],"edges":[]}"#.to_owned(),
+                    content_hash: "blake3:algorithm-cached-budget-telemetry-snapshot".to_owned(),
+                    source_generation: 0,
+                    expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let params = serde_json::json!({"algorithm": "pagerank", "alpha": 0.30});
+        let spec = AlgorithmResultCacheSpec {
+            conn: &connection,
+            workspace_id,
+            snapshot_id,
+            snapshot_content_hash: "blake3:algorithm-cached-budget-telemetry-snapshot",
+            algorithm: "pagerank",
+            params: &params,
+            ttl_seconds: 300,
+        };
+        let cx = Cx::for_testing();
+        let mut first = None;
+        let mut second = None;
+        let events = capture_graph_events(|| {
+            first = Some(graph_result(run_with_cached_budget(
+                &cx,
+                &spec,
+                "pagerank",
+                DEFAULT_FOREGROUND_BUDGET,
+                || serde_json::json!({"scores":[["mem_a",0.75]]}),
+            )));
+            second = Some(graph_result(run_with_cached_budget(
+                &cx,
+                &spec,
+                "pagerank",
+                DEFAULT_FOREGROUND_BUDGET,
+                || serde_json::json!({"scores":[["mem_a",0.25]]}),
+            )));
+        });
+
+        let first = first.expect("first run recorded")?;
+        let second = second.expect("second run recorded")?;
+        assert!(!first.cache_hit);
+        assert!(second.cache_hit);
+        assert_eq!(first.params_hash, second.params_hash);
+
+        let miss = events_with_target(&events, CACHE_MISS_EVENT);
+        let hit = events_with_target(&events, CACHE_HIT_EVENT);
+        let compute = events_with_target(&events, ALGORITHM_COMPUTE_EVENT);
+        assert_eq!(miss.len(), 1);
+        assert_eq!(hit.len(), 1);
+        assert_eq!(compute.len(), 2);
+        assert_eq!(
+            miss[0].fields.get("params_hash").map(String::as_str),
+            Some(first.params_hash.as_str())
+        );
+        assert_eq!(
+            hit[0].fields.get("params_hash").map(String::as_str),
+            Some(first.params_hash.as_str())
+        );
+        assert_eq!(
+            compute[0].fields.get("snapshot_id").map(String::as_str),
+            Some(snapshot_id)
+        );
+        assert_eq!(
+            compute[0].fields.get("cache_hit").map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(
+            compute[1].fields.get("cache_hit").map(String::as_str),
+            Some("true")
+        );
 
         connection.close().map_err(|error| error.to_string())
     }
