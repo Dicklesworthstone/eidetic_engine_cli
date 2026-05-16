@@ -118,14 +118,16 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force -Path C:\data\projects | Out-Null
-          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git C:\data\projects\asupersync
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git C:\data\projects\franken_agent_detection
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_networkx.git C:\data\projects\franken_networkx
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensearch.git C:\data\projects\frankensearch
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git C:\data\projects\frankensqlite
-          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git C:\data\projects\sqlmodel_rust
-          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git C:\data\projects\toon_rust
+          $workspaceDrive = (Get-Location).Path.Substring(0, 2)
+          $projectRoot = Join-Path $workspaceDrive "\data\projects"
+          New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
+          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git (Join-Path $projectRoot "asupersync")
+          git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git (Join-Path $projectRoot "franken_agent_detection")
+          git clone --depth 1 https://github.com/Dicklesworthstone/franken_networkx.git (Join-Path $projectRoot "franken_networkx")
+          git clone --depth 1 https://github.com/Dicklesworthstone/frankensearch.git (Join-Path $projectRoot "frankensearch")
+          git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git (Join-Path $projectRoot "frankensqlite")
+          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git (Join-Path $projectRoot "sqlmodel_rust")
+          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git (Join-Path $projectRoot "toon_rust")
 
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@nightly
@@ -156,14 +158,16 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force -Path C:\data\projects | Out-Null
-          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git C:\data\projects\asupersync
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git C:\data\projects\franken_agent_detection
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_networkx.git C:\data\projects\franken_networkx
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensearch.git C:\data\projects\frankensearch
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git C:\data\projects\frankensqlite
-          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git C:\data\projects\sqlmodel_rust
-          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git C:\data\projects\toon_rust
+          $workspaceDrive = (Get-Location).Path.Substring(0, 2)
+          $projectRoot = Join-Path $workspaceDrive "\data\projects"
+          New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
+          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git (Join-Path $projectRoot "asupersync")
+          git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git (Join-Path $projectRoot "franken_agent_detection")
+          git clone --depth 1 https://github.com/Dicklesworthstone/franken_networkx.git (Join-Path $projectRoot "franken_networkx")
+          git clone --depth 1 https://github.com/Dicklesworthstone/frankensearch.git (Join-Path $projectRoot "frankensearch")
+          git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git (Join-Path $projectRoot "frankensqlite")
+          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git (Join-Path $projectRoot "sqlmodel_rust")
+          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git (Join-Path $projectRoot "toon_rust")
 
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@nightly
