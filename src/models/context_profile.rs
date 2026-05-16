@@ -14,6 +14,7 @@ pub const CONTEXT_PROFILE_SCHEMA_V1: &str = "ee.context.profile.v1";
 /// Schema identifier for the context profile schema catalog.
 pub const CONTEXT_PROFILE_SCHEMA_CATALOG_V1: &str = "ee.context.profile.schemas.v1";
 pub const AGENT_CONTEXT_PROFILE_SCHEMA_V1: &str = "ee.context.agent_profile.v1";
+pub const AGENT_PROFILE_COLD_START_CODE: &str = "agent_profile_cold_start";
 
 const JSON_SCHEMA_DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 const TOTAL_BASIS_POINTS: u16 = 10_000;

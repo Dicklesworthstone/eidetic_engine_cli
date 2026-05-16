@@ -70,10 +70,10 @@ pub use claims::{
     validate_manifest_structure,
 };
 pub use context_profile::{
-    AGENT_CONTEXT_PROFILE_SCHEMA_V1, AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_COLD_START_OUTCOMES,
-    AgentContextProfileBias, AgentContextProfileCounts, AgentContextProfileDecayedCounts,
-    CONTEXT_PROFILE_SCHEMA_CATALOG_V1, CONTEXT_PROFILE_SCHEMA_V1, ContextProfile,
-    ContextProfileFieldSchema, ContextProfileName, ContextProfileObjectSchema,
+    AGENT_CONTEXT_PROFILE_SCHEMA_V1, AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_COLD_START_CODE,
+    AGENT_PROFILE_COLD_START_OUTCOMES, AgentContextProfileBias, AgentContextProfileCounts,
+    AgentContextProfileDecayedCounts, CONTEXT_PROFILE_SCHEMA_CATALOG_V1, CONTEXT_PROFILE_SCHEMA_V1,
+    ContextProfile, ContextProfileFieldSchema, ContextProfileName, ContextProfileObjectSchema,
     ContextProfileObjective, ContextProfileSection, ContextProfileSectionMix,
     ContextProfileValidationError, context_profile_schema_catalog_json, context_profile_schemas,
     decay_factor,

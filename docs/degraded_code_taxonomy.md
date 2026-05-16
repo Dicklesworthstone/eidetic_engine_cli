@@ -144,6 +144,7 @@ memory bodies in `sources[]`.
 | `conflict_direct` | medium | bd-1zb7k.9 (S8) |
 | `conflict_trust_mismatch` | high | bd-1zb7k.9 (S8) |
 | `consensus_no_clusters` | low | bd-1zb7k.9 (S8) |
+| `agent_profile_cold_start` | info | bd-1prrl.2.5 |
 | `coordination_source_stale` | low | bd-1zb7k.4 (S3) |
 | `coordination_source_unavailable` | medium | bd-1zb7k.4 (S3) |
 | `context_evidence_freshness_changed_source` | low | bd-17c65.1.2 (A2) |
@@ -187,6 +188,11 @@ memory bodies in `sources[]`.
 | `build_admission_denied` | medium | bd-1zb7k.11.4 (P4) |
 | `cargo_target_not_external` | warning | bd-1zb7k.11.4 (P4) |
 | `tmpdir_not_external` | warning | bd-1zb7k.11.4 (P4) |
+
+#### Swarm coordination and QoS (1)
+| Code | Severity | Bead |
+|------|----------|------|
+| `qos_registry_unavailable` | medium | bd-1zb7k.20.2 |
 
 #### Storage and runtime state (11)
 | Code | Severity | Bead |
