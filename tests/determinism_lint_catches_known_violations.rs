@@ -227,8 +227,9 @@ fn strip_rust_noise(source: &str) -> Vec<String> {
                     lines.push(String::new());
                     index += 1;
                 } else if raw_string_end(&chars, index, *hashes) {
+                    let delimiter_len = *hashes;
                     state = StripState::Normal;
-                    index += 1 + *hashes;
+                    index += 1 + delimiter_len;
                 } else {
                     index += 1;
                 }
