@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use toml_edit::{DocumentMut, Item};
 
+use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::tripwire::glob_match;
 use crate::db::StoredMemory;
 use crate::models::DomainError;
@@ -778,7 +779,7 @@ impl PreflightGuardReport {
                 "resolution": m.resolution.as_str(),
             })).collect::<Vec<_>>(),
             "matchedMemories": self.matched_memories,
-            "degraded": self.degraded,
+            "degraded": preflight_guard_degraded_json(&self.degraded),
         })
     }
 
@@ -877,6 +878,29 @@ pub fn run_preflight_guard(
         &degraded_codes,
     );
     report
+}
+
+fn preflight_guard_degraded_json(degraded: &[PreflightGuardDegradation]) -> Vec<JsonValue> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "preflight_guard",
+            entry.code,
+            entry.severity,
+            entry.message.clone(),
+            entry.repair.clone(),
+        )
+    }))
+    .into_iter()
+    .map(|entry| {
+        json!({
+            "code": entry.code,
+            "severity": entry.severity,
+            "message": entry.message,
+            "repair": entry.repair,
+            "sources": entry.sources,
+        })
+    })
+    .collect()
 }
 
 pub fn match_trauma_guard_memories(
@@ -1417,5 +1441,45 @@ action = "explode"
         assert_eq!(m0["ruleId"].as_str(), Some("r1"));
         assert_eq!(m0["action"].as_str(), Some("halt"));
         assert_eq!(m0["resolution"].as_str(), Some("enforced"));
+    }
+
+    #[test]
+    fn json_output_aggregates_duplicate_degraded_codes() {
+        let mut report =
+            run_preflight_guard(&PreflightGuardRegistry::with_builtins(), &opts("echo ok"));
+        report.degraded = vec![
+            PreflightGuardDegradation {
+                code: PREFLIGHT_PATTERNS_UNAVAILABLE_CODE,
+                severity: "info",
+                message: "First pattern catalog warning.".to_owned(),
+                repair: "ee preflight check --cmd \"echo ok\" --json".to_owned(),
+            },
+            PreflightGuardDegradation {
+                code: PREFLIGHT_PATTERNS_UNAVAILABLE_CODE,
+                severity: "medium",
+                message: "Second pattern catalog warning.".to_owned(),
+                repair: "Check preflight rule sources.".to_owned(),
+            },
+        ];
+
+        let json = report.to_json();
+        let degraded = json["degraded"]
+            .as_array()
+            .expect("degraded array should be present");
+        assert_eq!(
+            degraded.len(),
+            1,
+            "expected one aggregated degradation, got {degraded:?}",
+        );
+        assert_eq!(
+            degraded[0]["code"].as_str(),
+            Some(PREFLIGHT_PATTERNS_UNAVAILABLE_CODE)
+        );
+        assert_eq!(degraded[0]["severity"].as_str(), Some("medium"));
+        assert_eq!(
+            degraded[0]["repair"].as_str(),
+            Some("Check preflight rule sources.")
+        );
+        assert_eq!(degraded[0]["sources"][0].as_str(), Some("preflight_guard"));
     }
 }
