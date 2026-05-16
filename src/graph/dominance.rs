@@ -31,8 +31,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use asupersync::Cx;
 use fnx_algorithms::{all_pairs_lowest_common_ancestor, dominance_frontiers, immediate_dominators};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
+use crate::core::degraded_aggregation::{
+    AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
+};
 use crate::graph::DiGraph;
 use crate::graph::GraphResult;
 use crate::graph::algorithms::{DEFAULT_BACKGROUND_BUDGET, current_or_testing_cx, run_with_budget};
@@ -63,6 +66,7 @@ pub struct MemoryImpactAnalysisReport {
     pub revision_lineage: Vec<RevisionLineageItem>,
     pub impact_analysis: RevisionImpactAnalysis,
     pub frontiers: Vec<RevisionFrontierItem>,
+    #[serde(serialize_with = "serialize_dominance_degraded")]
     pub degraded: Vec<DominanceDegradation>,
 }
 
@@ -108,6 +112,31 @@ pub struct DominanceDegradation {
     pub severity: String,
     pub message: String,
     pub repair: Option<String>,
+}
+
+fn serialize_dominance_degraded<S>(
+    degraded: &[DominanceDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_dominance_degraded(degraded).serialize(serializer)
+}
+
+fn aggregate_dominance_degraded(degraded: &[DominanceDegradation]) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "graph_dominance",
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry
+                .repair
+                .clone()
+                .unwrap_or_else(|| "Refresh graph dominance diagnostics.".to_owned()),
+        )
+    }))
 }
 
 /// Compute immediate dominators starting from `start`. Returns an
@@ -577,6 +606,56 @@ mod tests {
         assert!(degraded.message.contains("revision chain"));
         assert!(degraded.message.contains("logical_id"));
         assert_eq!(degraded.repair, None);
+        Ok(())
+    }
+
+    #[test]
+    fn memory_impact_report_serializes_aggregated_degraded_entries() -> TestResult {
+        let mut first = dominance_no_revision_chain_degradation("mem_standalone");
+        first.message = "first missing-chain warning".to_owned();
+        let mut second = dominance_no_revision_chain_degradation("mem_standalone");
+        second.message = "second missing-chain warning".to_owned();
+
+        let report = MemoryImpactAnalysisReport {
+            schema: MEMORY_IMPACT_ANALYSIS_SCHEMA_V1,
+            memory_id: "mem_standalone".to_owned(),
+            snapshot_version: 11,
+            revision_lineage: Vec::new(),
+            impact_analysis: RevisionImpactAnalysis {
+                immediate_dominator: None,
+                dominance_frontier: Vec::new(),
+                affected_memory_count: 0,
+                validation_status: "unavailable".to_owned(),
+            },
+            frontiers: Vec::new(),
+            degraded: vec![first, second],
+        };
+
+        let value = serde_json::to_value(report).map_err(|error| error.to_string())?;
+        let degraded = value
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                "serialized memory impact report should include degraded array".to_owned()
+            })?;
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(
+            degraded[0].get("code"),
+            Some(&serde_json::json!(GRAPH_DOMINANCE_NO_REVISION_CHAIN_CODE))
+        );
+        assert_eq!(
+            degraded[0].get("severity"),
+            Some(&serde_json::json!("info"))
+        );
+        assert_eq!(
+            degraded[0].get("repair"),
+            Some(&serde_json::json!("Refresh graph dominance diagnostics."))
+        );
+        assert_eq!(
+            degraded[0].get("sources"),
+            Some(&serde_json::json!(["graph_dominance"]))
+        );
         Ok(())
     }
 
