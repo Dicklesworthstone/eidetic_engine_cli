@@ -6,6 +6,9 @@
 //! interpretation layer.
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -19,7 +22,7 @@ pub const TAILSCALE_SHIELDS_UP_CODE: &str = "tailscale_shields_up";
 pub const TAILSCALE_PROBE_UNAVAILABLE_CODE: &str = "tailscale_probe_unavailable";
 pub const TAILSCALE_PROBE_TIMEOUT_CODE: &str = "tailscale_probe_timeout";
 
-const DEFAULT_PROBE_TIMEOUT_MS: u64 = 1_500;
+pub const DEFAULT_TAILSCALE_PROBE_TIMEOUT_MS: u64 = 1_500;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TailscaleProbeMethod {
@@ -177,8 +180,37 @@ impl TailscaleLocalReport {
         report.degradations.push(TailscaleProbeDegradation::new(
             TAILSCALE_PROBE_TIMEOUT_CODE,
             "warning",
-            format!("Tailscale probe exceeded the {DEFAULT_PROBE_TIMEOUT_MS}ms default budget."),
+            format!(
+                "Tailscale probe exceeded the {DEFAULT_TAILSCALE_PROBE_TIMEOUT_MS}ms default budget."
+            ),
             "Run tailscale status directly or raise EE_TAILSCALE_PROBE_TIMEOUT_MS.",
+        ));
+        report
+    }
+
+    #[must_use]
+    pub fn binary_inauthentic(
+        path: PathBuf,
+        version_raw: impl Into<String>,
+        elapsed_ms: u64,
+        detail: impl Into<String>,
+    ) -> Self {
+        let mut report = Self::base(
+            TailscaleProbeMethod::Cli,
+            elapsed_ms,
+            TailscalePlatform::Other,
+        );
+        report.installed = true;
+        report.binary_absolute_path = Some(path);
+        report.binary_version_raw = Some(version_raw.into());
+        report.degradations.push(TailscaleProbeDegradation::new(
+            TAILSCALE_BINARY_INAUTHENTIC_CODE,
+            "high",
+            format!(
+                "Tailscale binary authenticity check failed: {}",
+                detail.into()
+            ),
+            "Run which tailscale, verify provenance, and reinstall Tailscale if needed.",
         ));
         report
     }
@@ -220,6 +252,188 @@ pub struct TailscaleStatusProbeInput<'a> {
     pub method: TailscaleProbeMethod,
     pub elapsed_ms: u64,
     pub platform_hint: TailscalePlatform,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TailscaleCliProbeConfig {
+    pub mesh_enabled: bool,
+    pub binary_override: Option<PathBuf>,
+    pub binary_candidates: Vec<PathBuf>,
+    pub timeout_ms: u64,
+    pub platform_hint: TailscalePlatform,
+}
+
+impl TailscaleCliProbeConfig {
+    #[must_use]
+    pub fn mesh_disabled() -> Self {
+        Self {
+            mesh_enabled: false,
+            binary_override: None,
+            binary_candidates: default_tailscale_binary_candidates(),
+            timeout_ms: DEFAULT_TAILSCALE_PROBE_TIMEOUT_MS,
+            platform_hint: TailscalePlatform::Other,
+        }
+    }
+
+    #[must_use]
+    pub fn mesh_enabled() -> Self {
+        Self {
+            mesh_enabled: true,
+            binary_override: None,
+            binary_candidates: default_tailscale_binary_candidates(),
+            timeout_ms: DEFAULT_TAILSCALE_PROBE_TIMEOUT_MS,
+            platform_hint: TailscalePlatform::Other,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TailscaleCliCommandOutput {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub success: bool,
+    pub timed_out: bool,
+    pub elapsed_ms: u64,
+}
+
+impl TailscaleCliCommandOutput {
+    #[must_use]
+    pub fn success(stdout: impl AsRef<[u8]>, elapsed_ms: u64) -> Self {
+        Self {
+            stdout: stdout.as_ref().to_vec(),
+            stderr: Vec::new(),
+            success: true,
+            timed_out: false,
+            elapsed_ms,
+        }
+    }
+
+    #[must_use]
+    pub fn failure(stderr: impl AsRef<[u8]>, elapsed_ms: u64) -> Self {
+        Self {
+            stdout: Vec::new(),
+            stderr: stderr.as_ref().to_vec(),
+            success: false,
+            timed_out: false,
+            elapsed_ms,
+        }
+    }
+
+    #[must_use]
+    pub fn timeout(elapsed_ms: u64) -> Self {
+        Self {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            success: false,
+            timed_out: true,
+            elapsed_ms,
+        }
+    }
+}
+
+pub trait TailscaleCliProbeRunner {
+    fn binary_exists(&self, path: &Path) -> bool;
+    fn run(&mut self, path: &Path, args: &[&str], timeout_ms: u64) -> TailscaleCliCommandOutput;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemTailscaleCliProbeRunner;
+
+impl TailscaleCliProbeRunner for SystemTailscaleCliProbeRunner {
+    fn binary_exists(&self, path: &Path) -> bool {
+        path.is_file()
+    }
+
+    fn run(&mut self, path: &Path, args: &[&str], timeout_ms: u64) -> TailscaleCliCommandOutput {
+        run_system_tailscale_command(path, args, timeout_ms)
+    }
+}
+
+#[must_use]
+pub fn tailscale_probe_timeout_ms_from_env_value(value: Option<&str>) -> u64 {
+    value
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_TAILSCALE_PROBE_TIMEOUT_MS)
+}
+
+pub fn probe_tailscale_cli_with_runner<R: TailscaleCliProbeRunner>(
+    config: &TailscaleCliProbeConfig,
+    runner: &mut R,
+) -> TailscaleLocalReport {
+    if !config.mesh_enabled {
+        return TailscaleLocalReport::mesh_disabled();
+    }
+
+    let Some(binary_path) = resolve_tailscale_binary(config, runner) else {
+        return TailscaleLocalReport::not_installed(TailscaleProbeMethod::Cli, 0);
+    };
+    if let Err(degradation) = validate_binary_path(&binary_path) {
+        let mut report =
+            TailscaleLocalReport::base(TailscaleProbeMethod::Cli, 0, config.platform_hint);
+        report.installed = true;
+        report.binary_absolute_path = Some(binary_path);
+        report.degradations.push(degradation);
+        return report;
+    }
+
+    let version_output = runner.run(&binary_path, &["--version"], config.timeout_ms);
+    if version_output.timed_out {
+        return TailscaleLocalReport::timed_out(
+            TailscaleProbeMethod::Cli,
+            version_output.elapsed_ms,
+        );
+    }
+    let version_raw = String::from_utf8_lossy(&version_output.stdout).to_string();
+    let binary = classify_binary(binary_path.clone(), version_raw.clone());
+    if !version_output.success || !binary.authentic {
+        let detail = if version_output.success {
+            "version output did not match expected Tailscale format".to_owned()
+        } else {
+            command_error_detail(&version_output)
+        };
+        return TailscaleLocalReport::binary_inauthentic(
+            binary_path,
+            version_raw,
+            version_output.elapsed_ms,
+            detail,
+        );
+    }
+
+    let status_output = runner.run(
+        &binary_path,
+        &["status", "--json", "--self=true", "--peers=true"],
+        config.timeout_ms,
+    );
+    if status_output.timed_out {
+        return TailscaleLocalReport::timed_out(
+            TailscaleProbeMethod::Cli,
+            status_output.elapsed_ms,
+        );
+    }
+    if !status_output.success {
+        return TailscaleLocalReport::daemon_unreachable(
+            TailscaleProbeMethod::Cli,
+            status_output.elapsed_ms,
+            command_error_detail(&status_output),
+        );
+    }
+
+    let prefs_output = runner.run(
+        &binary_path,
+        &["debug", "localapi", "/localapi/v0/prefs"],
+        config.timeout_ms,
+    );
+    let prefs_json =
+        (prefs_output.success && !prefs_output.timed_out).then_some(prefs_output.stdout.as_slice());
+    classify_status_payload(TailscaleStatusProbeInput {
+        status_json: &status_output.stdout,
+        prefs_json,
+        binary: Some(binary),
+        method: TailscaleProbeMethod::Cli,
+        elapsed_ms: version_output.elapsed_ms + status_output.elapsed_ms + prefs_output.elapsed_ms,
+        platform_hint: config.platform_hint,
+    })
 }
 
 #[must_use]
@@ -350,6 +564,105 @@ pub fn validate_binary_path(path: &Path) -> Result<(), TailscaleProbeDegradation
         ),
         "Use an absolute Tailscale binary path from the trusted install location.",
     ))
+}
+
+fn resolve_tailscale_binary<R: TailscaleCliProbeRunner>(
+    config: &TailscaleCliProbeConfig,
+    runner: &R,
+) -> Option<PathBuf> {
+    if let Some(path) = &config.binary_override {
+        return Some(path.clone());
+    }
+    config
+        .binary_candidates
+        .iter()
+        .find(|path| path.is_absolute() && runner.binary_exists(path))
+        .cloned()
+}
+
+fn command_error_detail(output: &TailscaleCliCommandOutput) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() {
+        "command exited unsuccessfully without stderr".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn run_system_tailscale_command(
+    path: &Path,
+    args: &[&str],
+    timeout_ms: u64,
+) -> TailscaleCliCommandOutput {
+    let start = Instant::now();
+    let mut child = match Command::new(path)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            return TailscaleCliCommandOutput::failure(
+                error.to_string().into_bytes(),
+                elapsed_ms_since(start),
+            );
+        }
+    };
+
+    let timeout = Duration::from_millis(timeout_ms);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                return match child.wait_with_output() {
+                    Ok(output) => TailscaleCliCommandOutput {
+                        stdout: output.stdout,
+                        stderr: output.stderr,
+                        success: output.status.success(),
+                        timed_out: false,
+                        elapsed_ms: elapsed_ms_since(start),
+                    },
+                    Err(error) => TailscaleCliCommandOutput::failure(
+                        error.to_string().into_bytes(),
+                        elapsed_ms_since(start),
+                    ),
+                };
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return TailscaleCliCommandOutput::timeout(elapsed_ms_since(start));
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return TailscaleCliCommandOutput::failure(
+                    error.to_string().into_bytes(),
+                    elapsed_ms_since(start),
+                );
+            }
+        }
+    }
+}
+
+fn elapsed_ms_since(start: Instant) -> u64 {
+    start.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn default_tailscale_binary_candidates() -> Vec<PathBuf> {
+    [
+        "/usr/bin/tailscale",
+        "/usr/local/bin/tailscale",
+        "/opt/homebrew/bin/tailscale",
+        "C:\\Program Files\\Tailscale\\tailscale.exe",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect()
 }
 
 fn parse_tailscale_version(raw: &str) -> Option<String> {

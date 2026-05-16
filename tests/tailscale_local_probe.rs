@@ -3,17 +3,76 @@ use std::path::Path;
 use ee::core::tailscale_probe::{
     TAILSCALE_BINARY_INAUTHENTIC_CODE, TAILSCALE_DAEMON_UNREACHABLE_CODE,
     TAILSCALE_LOCAL_SCHEMA_V1, TAILSCALE_NOT_AUTHENTICATED_CODE, TAILSCALE_PROBE_TIMEOUT_CODE,
-    TailscaleBinaryReport, TailscaleLocalReport, TailscalePlatform, TailscaleProbeMethod,
-    TailscaleStatusProbeInput, classify_binary, classify_status_payload, validate_binary_path,
+    TAILSCALE_PROBE_UNAVAILABLE_CODE, TailscaleBinaryReport, TailscaleCliCommandOutput,
+    TailscaleCliProbeConfig, TailscaleCliProbeRunner, TailscaleLocalReport, TailscalePlatform,
+    TailscaleProbeMethod, TailscaleStatusProbeInput, classify_binary, classify_status_payload,
+    probe_tailscale_cli_with_runner, tailscale_probe_timeout_ms_from_env_value,
+    validate_binary_path,
 };
 
 type TestResult = Result<(), String>;
 
+#[derive(Clone, Debug, Default)]
+struct FakeCliRunner {
+    existing_paths: Vec<String>,
+    version: Option<TailscaleCliCommandOutput>,
+    status: Option<TailscaleCliCommandOutput>,
+    prefs: Option<TailscaleCliCommandOutput>,
+    calls: Vec<String>,
+}
+
+impl FakeCliRunner {
+    fn with_existing(path: &str) -> Self {
+        Self {
+            existing_paths: vec![path.to_owned()],
+            ..Self::default()
+        }
+    }
+}
+
+impl TailscaleCliProbeRunner for FakeCliRunner {
+    fn binary_exists(&self, path: &Path) -> bool {
+        self.existing_paths
+            .iter()
+            .any(|candidate| Path::new(candidate) == path)
+    }
+
+    fn run(&mut self, _path: &Path, args: &[&str], _timeout_ms: u64) -> TailscaleCliCommandOutput {
+        self.calls.push(args.join(" "));
+        match args {
+            ["--version"] => self
+                .version
+                .clone()
+                .unwrap_or_else(|| TailscaleCliCommandOutput::failure("missing version", 1)),
+            ["status", "--json", "--self=true", "--peers=true"] => self
+                .status
+                .clone()
+                .unwrap_or_else(|| TailscaleCliCommandOutput::failure("missing status", 1)),
+            ["debug", "localapi", "/localapi/v0/prefs"] => self
+                .prefs
+                .clone()
+                .unwrap_or_else(|| TailscaleCliCommandOutput::failure("missing prefs", 1)),
+            _ => TailscaleCliCommandOutput::failure("unexpected args", 1),
+        }
+    }
+}
+
 fn good_binary() -> TailscaleBinaryReport {
-    classify_binary(
-        "/opt/homebrew/bin/tailscale",
-        "1.66.0\n  tailscale commit: 0123456789abcdef0123456789abcdef01234567\n  other commit: 89abcdef0123456789abcdef0123456789abcdef\n  go version: go1.22.3\n",
-    )
+    classify_binary("/opt/homebrew/bin/tailscale", good_version_output())
+}
+
+fn good_version_output() -> &'static str {
+    "1.66.0\n  tailscale commit: 0123456789abcdef0123456789abcdef01234567\n  other commit: 89abcdef0123456789abcdef0123456789abcdef\n  go version: go1.22.3\n"
+}
+
+fn cli_probe_config(binary_path: &str) -> TailscaleCliProbeConfig {
+    TailscaleCliProbeConfig {
+        mesh_enabled: true,
+        binary_override: None,
+        binary_candidates: vec![Path::new(binary_path).to_path_buf()],
+        timeout_ms: 1_500,
+        platform_hint: TailscalePlatform::Linux,
+    }
 }
 
 fn healthy_status() -> &'static [u8] {
@@ -175,6 +234,171 @@ fn local_probe_reports_shields_up_when_prefs_shields_up_true() -> TestResult {
             .degradations
             .iter()
             .any(|entry| entry.code == "tailscale_shields_up")
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_probe_short_circuits_without_runner_calls_when_mesh_disabled() -> TestResult {
+    let mut runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
+    let report =
+        probe_tailscale_cli_with_runner(&TailscaleCliProbeConfig::mesh_disabled(), &mut runner);
+
+    assert_eq!(report.probe_method, TailscaleProbeMethod::Skipped);
+    assert!(runner.calls.is_empty());
+    assert_eq!(
+        report.degradations[0].code,
+        TAILSCALE_PROBE_UNAVAILABLE_CODE
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_probe_reports_not_installed_when_no_binary_candidate_exists() -> TestResult {
+    let mut runner = FakeCliRunner::default();
+    let report = probe_tailscale_cli_with_runner(
+        &cli_probe_config("/opt/homebrew/bin/tailscale"),
+        &mut runner,
+    );
+
+    assert!(!report.installed);
+    assert!(runner.calls.is_empty());
+    assert_eq!(report.degradations[0].code, "tailscale_not_installed");
+    Ok(())
+}
+
+#[test]
+fn cli_probe_rejects_relative_override_without_running_it() -> TestResult {
+    let mut runner = FakeCliRunner::with_existing("tailscale");
+    let mut config = cli_probe_config("/opt/homebrew/bin/tailscale");
+    config.binary_override = Some(Path::new("tailscale").to_path_buf());
+    let report = probe_tailscale_cli_with_runner(&config, &mut runner);
+
+    assert!(report.installed);
+    assert!(runner.calls.is_empty());
+    assert_eq!(
+        report.degradations[0].code,
+        TAILSCALE_BINARY_INAUTHENTIC_CODE
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_probe_reports_timeout_when_version_command_times_out() -> TestResult {
+    let mut runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
+    runner.version = Some(TailscaleCliCommandOutput::timeout(1_501));
+
+    let report = probe_tailscale_cli_with_runner(
+        &cli_probe_config("/opt/homebrew/bin/tailscale"),
+        &mut runner,
+    );
+
+    assert_eq!(report.degradations[0].code, TAILSCALE_PROBE_TIMEOUT_CODE);
+    assert_eq!(runner.calls, vec!["--version"]);
+    Ok(())
+}
+
+#[test]
+fn cli_probe_reports_timeout_when_status_command_times_out() -> TestResult {
+    let mut runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
+    runner.version = Some(TailscaleCliCommandOutput::success(good_version_output(), 3));
+    runner.status = Some(TailscaleCliCommandOutput::timeout(1_501));
+
+    let report = probe_tailscale_cli_with_runner(
+        &cli_probe_config("/opt/homebrew/bin/tailscale"),
+        &mut runner,
+    );
+
+    assert_eq!(report.degradations[0].code, TAILSCALE_PROBE_TIMEOUT_CODE);
+    assert_eq!(
+        runner.calls,
+        vec!["--version", "status --json --self=true --peers=true"]
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_probe_reports_binary_inauthentic_when_version_output_is_malformed() -> TestResult {
+    let mut runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
+    runner.version = Some(TailscaleCliCommandOutput::success("not tailscale", 3));
+
+    let report = probe_tailscale_cli_with_runner(
+        &cli_probe_config("/opt/homebrew/bin/tailscale"),
+        &mut runner,
+    );
+
+    assert_eq!(
+        report.degradations[0].code,
+        TAILSCALE_BINARY_INAUTHENTIC_CODE
+    );
+    assert_eq!(report.binary_version_raw.as_deref(), Some("not tailscale"));
+    assert_eq!(runner.calls, vec!["--version"]);
+    Ok(())
+}
+
+#[test]
+fn cli_probe_reports_daemon_unreachable_when_status_command_fails() -> TestResult {
+    let mut runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
+    runner.version = Some(TailscaleCliCommandOutput::success(good_version_output(), 3));
+    runner.status = Some(TailscaleCliCommandOutput::failure("daemon offline", 4));
+
+    let report = probe_tailscale_cli_with_runner(
+        &cli_probe_config("/opt/homebrew/bin/tailscale"),
+        &mut runner,
+    );
+
+    assert_eq!(
+        report.degradations[0].code,
+        TAILSCALE_DAEMON_UNREACHABLE_CODE
+    );
+    assert!(report.degradations[0].message.contains("daemon offline"));
+    Ok(())
+}
+
+#[test]
+fn cli_probe_classifies_healthy_status_and_prefs_payloads() -> TestResult {
+    let mut runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
+    runner.version = Some(TailscaleCliCommandOutput::success(good_version_output(), 3));
+    runner.status = Some(TailscaleCliCommandOutput::success(healthy_status(), 4));
+    runner.prefs = Some(TailscaleCliCommandOutput::success(
+        br#"{"ShieldsUp": false}"#.as_slice(),
+        5,
+    ));
+
+    let report = probe_tailscale_cli_with_runner(
+        &cli_probe_config("/opt/homebrew/bin/tailscale"),
+        &mut runner,
+    );
+
+    assert!(report.installed);
+    assert!(report.daemon_reachable);
+    assert!(report.authenticated);
+    assert!(report.binary_authentic);
+    assert_eq!(report.shields_up, Some(false));
+    assert_eq!(report.probe_elapsed_ms, 12);
+    assert_eq!(
+        runner.calls,
+        vec![
+            "--version",
+            "status --json --self=true --peers=true",
+            "debug localapi /localapi/v0/prefs"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_probe_timeout_env_parser_uses_default_for_missing_or_invalid_values() -> TestResult {
+    assert_eq!(tailscale_probe_timeout_ms_from_env_value(None), 1_500);
+    assert_eq!(tailscale_probe_timeout_ms_from_env_value(Some("")), 1_500);
+    assert_eq!(tailscale_probe_timeout_ms_from_env_value(Some("0")), 1_500);
+    assert_eq!(
+        tailscale_probe_timeout_ms_from_env_value(Some("abc")),
+        1_500
+    );
+    assert_eq!(
+        tailscale_probe_timeout_ms_from_env_value(Some("2500")),
+        2_500
     );
     Ok(())
 }

@@ -86,6 +86,8 @@ pub enum EnvVar {
     TestLogTestId,
     /// `EE_TAILSCALE_BINARY_OVERRIDE`
     TailscaleBinaryOverride,
+    /// `EE_TAILSCALE_PROBE_TIMEOUT_MS`
+    TailscaleProbeTimeoutMs,
     /// `EE_TAILSCALE_PROBE_SOCKET_OVERRIDE`
     TailscaleProbeSocketOverride,
     /// `EE_WORKSPACE`
@@ -137,6 +139,7 @@ impl EnvVar {
             Self::TestLogPath,
             Self::TestLogTestId,
             Self::TailscaleBinaryOverride,
+            Self::TailscaleProbeTimeoutMs,
             Self::TailscaleProbeSocketOverride,
             Self::Workspace,
             Self::WorkspaceRegistry,
@@ -185,6 +188,7 @@ impl EnvVar {
             Self::TestLogPath => "EE_TEST_LOG_PATH",
             Self::TestLogTestId => "EE_TEST_LOG_TEST_ID",
             Self::TailscaleBinaryOverride => "EE_TAILSCALE_BINARY_OVERRIDE",
+            Self::TailscaleProbeTimeoutMs => "EE_TAILSCALE_PROBE_TIMEOUT_MS",
             Self::TailscaleProbeSocketOverride => "EE_TAILSCALE_PROBE_SOCKET_OVERRIDE",
             Self::Workspace => "EE_WORKSPACE",
             Self::WorkspaceRegistry => "EE_WORKSPACE_REGISTRY",
@@ -251,6 +255,7 @@ impl EnvVar {
             Self::TailscaleBinaryOverride => {
                 "Test-only override for the tailscale binary used by fake-tailnet harnesses."
             }
+            Self::TailscaleProbeTimeoutMs => "Override the local Tailscale probe timeout budget.",
             Self::TailscaleProbeSocketOverride => {
                 "Test-only override for fake mesh hello responder socket discovery."
             }
@@ -265,6 +270,7 @@ impl EnvVar {
         match self {
             Self::MeshMode => Some("off"),
             Self::MeshEnabled => Some("false"),
+            Self::TailscaleProbeTimeoutMs => Some("1500"),
             Self::IndexPublishLockRetryAttempts => Some("200"),
             Self::RememberCurationSyncBudgetMs => Some("50"),
             _ => None,
@@ -306,6 +312,7 @@ impl EnvVar {
             Self::MeshEnabled
             | Self::MeshMode
             | Self::TailscaleBinaryOverride
+            | Self::TailscaleProbeTimeoutMs
             | Self::TailscaleProbeSocketOverride => "mesh",
             Self::HarmfulBurstWindowSeconds
             | Self::HarmfulPerSourcePerHour
