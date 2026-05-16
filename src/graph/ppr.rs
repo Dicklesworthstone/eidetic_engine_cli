@@ -542,19 +542,25 @@ fn personalized_pagerank_decision_path_hash(
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"ee.graph.personalized_pagerank.decision.v1");
     hash_json_value(&mut hasher, params);
-    hasher.update(result.witness.algorithm.as_bytes());
-    hasher.update(result.witness.complexity_claim.as_bytes());
+    update_hash_with_len_prefixed_str(&mut hasher, &result.witness.algorithm);
+    update_hash_with_len_prefixed_str(&mut hasher, &result.witness.complexity_claim);
     hasher.update(&result.witness.nodes_touched.to_le_bytes());
     hasher.update(&result.witness.edges_scanned.to_le_bytes());
     hasher.update(&result.witness.queue_peak.to_le_bytes());
     hasher.update(&[u8::from(result.converged)]);
     let mut scores = result.scores.clone();
     scores.sort_unstable_by(|left, right| left.node.cmp(&right.node));
+    hasher.update(&(scores.len() as u64).to_le_bytes());
     for score in scores {
-        hasher.update(score.node.as_bytes());
+        update_hash_with_len_prefixed_str(&mut hasher, &score.node);
         hasher.update(&score.score.to_le_bytes());
     }
     format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn update_hash_with_len_prefixed_str(hasher: &mut blake3::Hasher, value: &str) {
+    hasher.update(&(value.len() as u64).to_le_bytes());
+    hasher.update(value.as_bytes());
 }
 
 fn hash_json_value(hasher: &mut blake3::Hasher, value: &serde_json::Value) {
@@ -567,10 +573,11 @@ fn hash_json_value(hasher: &mut blake3::Hasher, value: &serde_json::Value) {
         }
         serde_json::Value::String(value) => {
             hasher.update(b"s");
-            hasher.update(value.as_bytes())
+            update_hash_with_len_prefixed_str(hasher, value)
         }
         serde_json::Value::Array(items) => {
             hasher.update(b"[");
+            hasher.update(&(items.len() as u64).to_le_bytes());
             for item in items {
                 hash_json_value(hasher, item);
             }
@@ -578,10 +585,11 @@ fn hash_json_value(hasher: &mut blake3::Hasher, value: &serde_json::Value) {
         }
         serde_json::Value::Object(fields) => {
             hasher.update(b"{");
+            hasher.update(&(fields.len() as u64).to_le_bytes());
             let mut keys = fields.keys().collect::<Vec<_>>();
             keys.sort();
             for key in keys {
-                hasher.update(key.as_bytes());
+                update_hash_with_len_prefixed_str(hasher, key);
                 if let Some(value) = fields.get(key) {
                     hash_json_value(hasher, value);
                 }
@@ -926,6 +934,39 @@ mod tests {
         );
 
         connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn personalized_pagerank_decision_hash_length_prefixes_witness_strings() {
+        let params = serde_json::json!({"alpha": 0.85, "seedCount": 1});
+        let left = PageRankResult {
+            scores: vec![CentralityScore {
+                node: "mem-a".to_owned(),
+                score: 1.0,
+            }],
+            converged: true,
+            witness: ComplexityWitness {
+                algorithm: "ab".to_owned(),
+                complexity_claim: "c".to_owned(),
+                nodes_touched: 1,
+                edges_scanned: 0,
+                queue_peak: 1,
+            },
+        };
+        let right = PageRankResult {
+            witness: ComplexityWitness {
+                algorithm: "a".to_owned(),
+                complexity_claim: "bc".to_owned(),
+                ..left.witness.clone()
+            },
+            ..left.clone()
+        };
+
+        assert_ne!(
+            personalized_pagerank_decision_path_hash(&params, &left),
+            personalized_pagerank_decision_path_hash(&params, &right),
+            "decision hash must not let adjacent witness strings collide by concatenation"
+        );
     }
 
     #[test]
