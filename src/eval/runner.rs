@@ -908,7 +908,9 @@ fn expand_source_id_range(
 fn stable_numeric_suffix(value: &str) -> Option<(&str, u64, usize)> {
     let split_at = value
         .rfind(|ch: char| !ch.is_ascii_digit())
-        .map_or(0, |index| index + value[index..].chars().next().unwrap().len_utf8());
+        .map_or(0, |index| {
+            index + value[index..].chars().next().map_or(0, |ch| ch.len_utf8())
+        });
     let digits = value.get(split_at..)?;
     if digits.is_empty() {
         return None;
