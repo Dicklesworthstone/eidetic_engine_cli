@@ -1364,6 +1364,49 @@ mod tests {
     }
 
     #[test]
+    fn causal_bottleneck_reports_preserve_centrality_scores() -> TestResult {
+        let reports = causal_bottleneck_reports_from_scores(&[
+            CentralityScore {
+                node: "mem_bridge".to_owned(),
+                score: 0.625,
+            },
+            CentralityScore {
+                node: "mem_root".to_owned(),
+                score: 0.125,
+            },
+        ]);
+
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].memory_id, "mem_bridge");
+        assert_eq!(reports[0].betweenness, 0.625);
+        assert_eq!(reports[0].snapshot_version, 0);
+        assert_eq!(reports[1].memory_id, "mem_root");
+        assert_eq!(reports[1].betweenness, 0.125);
+        assert_eq!(reports[1].snapshot_version, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn causal_bottlenecks_empty_reports_keep_section_contract() -> TestResult {
+        let section = causal_bottlenecks_section_from_reports(&[]);
+
+        assert_eq!(section.name, "causalBottlenecks");
+        assert_eq!(section.title, "Causal Bottlenecks");
+        assert_eq!(
+            section.summary,
+            "High-betweenness memories in causal-evidence subgraphs."
+        );
+        assert!(section.items.is_empty());
+        assert_eq!(
+            section.next_commands,
+            vec!["ee insights --section causalBottlenecks --workspace . --json"]
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn hubs_and_authorities_order_by_score_then_memory_id() -> TestResult {
         let scores = HitsScores {
             hubs: std::collections::BTreeMap::from([
