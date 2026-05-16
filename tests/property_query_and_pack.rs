@@ -19,6 +19,9 @@ use uuid::Uuid;
 
 const REGRESSION_FIXTURE_SCHEMA: &str = "ee.proptest.regression.v1";
 const REGRESSION_FIXTURE_CAPTURED_AT: &str = "1970-01-01T00:00:00Z";
+const PROPTEST_RUN_EVENT_SCHEMA: &str = "ee.test_event.v1";
+const PROPTEST_RUN_EVENT_KIND: &str = "proptest_run";
+const PROPTEST_AXIS_COUNT: usize = 6;
 
 fn section_for(index: usize) -> PackSection {
     match index % 5 {
@@ -167,6 +170,20 @@ struct DeterminismDiffWindow {
     observed: String,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+struct DeterminismProptestRunEvent {
+    schema: String,
+    kind: String,
+    axes_count: usize,
+    cases_sampled: usize,
+    cases_passed: usize,
+    cases_failed: usize,
+    new_regressions: Vec<String>,
+    stale_regressions_flagged: Vec<String>,
+    elapsed_seconds: f64,
+    budget_seconds: f64,
+}
+
 fn regression_fixture_for_mismatch(
     seed: u64,
     input: &[u8],
@@ -288,6 +305,47 @@ fn parse_fixture_timestamp(label: &str, value: &str) -> Result<DateTime<Utc>, St
     DateTime::parse_from_rfc3339(value)
         .map(|timestamp| timestamp.with_timezone(&Utc))
         .map_err(|error| format!("parse {label} timestamp {value:?}: {error}"))
+}
+
+fn proptest_run_event(
+    cases_sampled: usize,
+    cases_failed: usize,
+    new_regressions: &[DeterminismRegressionFixture],
+    mut stale_regressions_flagged: Vec<String>,
+    elapsed_seconds: f64,
+    budget_seconds: f64,
+) -> Result<DeterminismProptestRunEvent, String> {
+    if cases_failed > cases_sampled {
+        return Err(format!(
+            "cases_failed {cases_failed} exceeds cases_sampled {cases_sampled}"
+        ));
+    }
+    if !elapsed_seconds.is_finite() || elapsed_seconds < 0.0 {
+        return Err(format!("invalid elapsed_seconds {elapsed_seconds}"));
+    }
+    if !budget_seconds.is_finite() || budget_seconds < 0.0 {
+        return Err(format!("invalid budget_seconds {budget_seconds}"));
+    }
+
+    let mut new_regressions = new_regressions
+        .iter()
+        .map(|fixture| fixture.input_hash.clone())
+        .collect::<Vec<_>>();
+    new_regressions.sort();
+    stale_regressions_flagged.sort();
+
+    Ok(DeterminismProptestRunEvent {
+        schema: PROPTEST_RUN_EVENT_SCHEMA.to_string(),
+        kind: PROPTEST_RUN_EVENT_KIND.to_string(),
+        axes_count: PROPTEST_AXIS_COUNT,
+        cases_sampled,
+        cases_passed: cases_sampled - cases_failed,
+        cases_failed,
+        new_regressions,
+        stale_regressions_flagged,
+        elapsed_seconds,
+        budget_seconds,
+    })
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
@@ -538,6 +596,56 @@ fn determinism_regression_fixture_staleness_rejects_invalid_timestamp() -> Resul
         .expect_err("invalid fixture timestamp should be rejected");
 
     assert!(error.contains("not-a-date"));
+    Ok(())
+}
+
+#[test]
+fn determinism_proptest_run_event_is_stable_and_sorted() -> Result<(), String> {
+    let second =
+        regression_fixture_for_mismatch(2, b"second", b"expected-second", b"observed-second")
+            .ok_or_else(|| "second fixture should detect mismatch".to_owned())?;
+    let first = regression_fixture_for_mismatch(1, b"first", b"expected-first", b"observed-first")
+        .ok_or_else(|| "first fixture should detect mismatch".to_owned())?;
+
+    let event = proptest_run_event(
+        1024,
+        2,
+        &[second.clone(), first.clone()],
+        vec![second.input_hash.clone(), first.input_hash.clone()],
+        12.5,
+        60.0,
+    )?;
+    let rendered = serde_json::to_string(&event).map_err(|error| error.to_string())?;
+    let replay: DeterminismProptestRunEvent =
+        serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+
+    let mut expected_hashes = vec![first.input_hash, second.input_hash];
+    expected_hashes.sort();
+    assert_eq!(event, replay);
+    assert_eq!(event.schema, "ee.test_event.v1");
+    assert_eq!(event.kind, "proptest_run");
+    assert_eq!(event.axes_count, 6);
+    assert_eq!(event.cases_sampled, 1024);
+    assert_eq!(event.cases_passed, 1022);
+    assert_eq!(event.cases_failed, 2);
+    assert_eq!(event.new_regressions, expected_hashes);
+    assert_eq!(event.stale_regressions_flagged, event.new_regressions);
+    Ok(())
+}
+
+#[test]
+fn determinism_proptest_run_event_rejects_impossible_counts_and_times() -> Result<(), String> {
+    let count_error = proptest_run_event(1, 2, &[], Vec::new(), 0.0, 60.0)
+        .expect_err("failed cases above sampled cases should be rejected");
+    assert!(count_error.contains("cases_failed 2 exceeds cases_sampled 1"));
+
+    let elapsed_error = proptest_run_event(1, 0, &[], Vec::new(), f64::NAN, 60.0)
+        .expect_err("non-finite elapsed time should be rejected");
+    assert!(elapsed_error.contains("invalid elapsed_seconds"));
+
+    let budget_error = proptest_run_event(1, 0, &[], Vec::new(), 1.0, -1.0)
+        .expect_err("negative budget should be rejected");
+    assert!(budget_error.contains("invalid budget_seconds"));
     Ok(())
 }
 
