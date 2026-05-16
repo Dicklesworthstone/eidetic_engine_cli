@@ -171,6 +171,14 @@ pub struct ExpiredSnapshotPin {
     pub age: Duration,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SnapshotDrainReport {
+    pub drained: bool,
+    pub waited: Duration,
+    pub active_pins_remaining: usize,
+    pub force_poisoned: Vec<ExpiredSnapshotPin>,
+}
+
 impl ReadConnectionPool {
     #[must_use]
     pub fn new(database: DatabaseConfig, config: PoolConfig) -> Self {
@@ -381,6 +389,36 @@ impl ReadConnectionPool {
         }
 
         poisoned
+    }
+
+    pub fn drain_snapshot_pins(&self, timeout: Duration) -> SnapshotDrainReport {
+        let started = Instant::now();
+
+        loop {
+            let active_pins = self.lock_state().active_pins.len();
+            if active_pins == 0 {
+                return SnapshotDrainReport {
+                    drained: true,
+                    waited: started.elapsed(),
+                    active_pins_remaining: 0,
+                    force_poisoned: Vec::new(),
+                };
+            }
+
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                let force_poisoned = self.force_poison_active_pins();
+                return SnapshotDrainReport {
+                    drained: false,
+                    waited: elapsed,
+                    active_pins_remaining: self.lock_state().active_pins.len(),
+                    force_poisoned,
+                };
+            }
+
+            std::thread::yield_now();
+            std::thread::sleep(timeout.saturating_sub(elapsed).min(ACQUIRE_SLEEP_STEP));
+        }
     }
 
     fn register_pin(
@@ -1141,6 +1179,60 @@ mod tests {
         assert_eq!(stats.idle, 2);
         assert_eq!(stats.active_pins, 0);
         assert_eq!(stats.expired_pins, 0);
+    }
+
+    #[test]
+    fn workspace_close_drains_readers_before_writer_shutdown() {
+        let tempdir = must(tempfile::tempdir(), "tempdir creates");
+        let database_path = tempdir.path().join("read-pool-drain.db");
+        seed_snapshot_database(&database_path);
+        let pool = Arc::new(ReadConnectionPool::new(
+            DatabaseConfig::file(database_path),
+            PoolConfig::new(1, Duration::from_secs(30)),
+        ));
+        let pin_acquired = Arc::new(Barrier::new(2));
+
+        let reader = {
+            let pool = Arc::clone(&pool);
+            let pin_acquired = Arc::clone(&pin_acquired);
+            thread::spawn(move || {
+                let pin = must(pool.pin_snapshot(), "reader snapshot pin opens");
+                assert_eq!(snapshot_item_count(&pin), 1);
+                pin_acquired.wait();
+                thread::sleep(Duration::from_millis(10));
+                drop(pin);
+            })
+        };
+
+        pin_acquired.wait();
+        let report = pool.drain_snapshot_pins(Duration::from_secs(1));
+        must(reader.join().map_err(|_| "reader panicked"), "reader joins");
+
+        assert!(report.drained);
+        assert_eq!(report.active_pins_remaining, 0);
+        assert!(report.force_poisoned.is_empty());
+        assert_eq!(pool.stats().active_pins, 0);
+        assert_eq!(pool.stats().active, 0);
+        assert_eq!(pool.stats().idle, 1);
+    }
+
+    #[test]
+    fn workspace_close_force_poisons_pins_when_drain_timeout_elapses() {
+        let (_tempdir, _database_path, pool) = file_pool(1);
+        let pin = must(pool.pin_snapshot(), "snapshot pin opens");
+        let slot_id = pin.slot_id();
+
+        let report = pool.drain_snapshot_pins(Duration::ZERO);
+
+        assert!(!report.drained);
+        assert_eq!(report.active_pins_remaining, 1);
+        assert_eq!(report.force_poisoned.len(), 1);
+        assert_eq!(report.force_poisoned[0].slot_id, slot_id);
+        assert!(pin.is_poisoned());
+        assert_eq!(pool.stats().expired_pins, 1);
+
+        drop(pin);
+        assert_eq!(pool.stats().active_pins, 0);
     }
 
     #[test]
