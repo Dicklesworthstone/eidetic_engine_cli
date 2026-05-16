@@ -1121,16 +1121,7 @@ pub fn restore_backup_to_side_path(
     let workspace_path = normalize_path(&options.workspace_path);
     let backup_path = normalize_path(&options.backup_path);
     let side_path = normalize_path(&options.side_path);
-    if workspace_path == side_path {
-        return Err(DomainError::PolicyDenied {
-            message: format!(
-                "side path '{}' must differ from source workspace '{}'",
-                side_path.display(),
-                workspace_path.display()
-            ),
-            repair: Some("choose a separate --side-path target".to_owned()),
-        });
-    }
+    ensure_side_path_outside_workspace(&workspace_path, &side_path)?;
 
     let inspect = inspect_backup(&BackupInspectOptions {
         backup_path: backup_path.clone(),
@@ -3102,6 +3093,30 @@ fn ensure_side_path_is_isolated(side_path: &Path) -> Result<(), DomainError> {
     Ok(())
 }
 
+fn ensure_side_path_outside_workspace(
+    workspace_path: &Path,
+    side_path: &Path,
+) -> Result<(), DomainError> {
+    let absolute_side_path = if side_path.is_absolute() {
+        side_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|current_dir| current_dir.join(side_path))
+            .unwrap_or_else(|_| side_path.to_path_buf())
+    };
+    if absolute_side_path.starts_with(workspace_path) {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "side path '{}' must be outside source workspace '{}'",
+                side_path.display(),
+                workspace_path.display()
+            ),
+            repair: Some("choose a separate --side-path target outside the workspace".to_owned()),
+        });
+    }
+    Ok(())
+}
+
 fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, DomainError> {
     let mut current = PathBuf::new();
     for component in path.components() {
@@ -4404,6 +4419,51 @@ mod tests {
             ),
             other => Err(format!("expected storage error, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn restore_backup_rejects_side_path_inside_workspace() -> TestResult {
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let out = workspace.join("backups");
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(out),
+            label: Some("restore-inside-workspace".to_owned()),
+            redaction_level: RedactionLevel::None,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let side_path = workspace.join("restore-side-path");
+
+        let result = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace.clone(),
+            backup_path: PathBuf::from(&created.backup_path),
+            side_path: side_path.clone(),
+            restore_graph_cache: true,
+            dry_run: false,
+        });
+
+        match result {
+            Err(DomainError::PolicyDenied { message, repair }) => {
+                ensure(
+                    message.contains("outside source workspace"),
+                    "workspace-contained side path is rejected",
+                )?;
+                ensure_equal(
+                    repair.as_deref(),
+                    Some("choose a separate --side-path target outside the workspace"),
+                    "workspace-contained side path repair",
+                )?;
+            }
+            other => return Err(format!("expected policy denied error, got {other:?}")),
+        }
+        ensure(
+            !side_path.exists(),
+            "restore must not create a side path inside the source workspace",
+        )
     }
 
     #[cfg(unix)]
