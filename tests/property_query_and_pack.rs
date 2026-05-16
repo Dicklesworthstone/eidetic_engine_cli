@@ -375,6 +375,16 @@ fn verify_regression_fixture_replay(
     Ok(replayed_hash)
 }
 
+fn verify_loaded_regression_fixture_replays(dir: &Path) -> Result<Vec<String>, String> {
+    let fixtures = load_regression_fixtures(dir)?;
+    let mut replay_hashes = Vec::with_capacity(fixtures.len());
+    for fixture in &fixtures {
+        replay_hashes.push(verify_regression_fixture_replay(fixture)?);
+    }
+    replay_hashes.sort();
+    Ok(replay_hashes)
+}
+
 fn regression_fixture_file_name(input_hash: &str) -> Result<String, String> {
     let input_hash_hex = input_hash.trim_start_matches("blake3:");
     if input_hash_hex.len() < 16 {
@@ -843,6 +853,50 @@ fn determinism_regression_fixture_verifies_replayed_expected_hash() -> Result<()
 
     assert!(error.contains("expected_hash"));
     assert!(error.contains(&fixture.input_hash));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_verifies_loaded_replay_hashes() -> Result<(), String> {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let specs = vec![(8, 900, 700, 1), (13, 500, 950, 3), (5, 650, 875, 2)];
+    let input = regression_input_for_pack_case(
+        "loaded structured replay".to_string(),
+        TokenBudget::new(64).map_err(|error| format!("{error:?}"))?,
+        ContextPackProfile::Balanced,
+        PackAssemblyOptions {
+            include_coverage_fill: true,
+            output_redaction_enabled: true,
+            redaction_level: RedactionLevel::Strict,
+        },
+        42,
+        &specs,
+    )?;
+    let input_bytes = serde_json::to_vec(&input).map_err(|error| error.to_string())?;
+    let replayed = replay_pack_case_input_bytes(&input)?;
+    let mut fixture = regression_fixture_for_mismatch(
+        42,
+        &input_bytes,
+        &replayed,
+        b"synthetic nondeterministic output",
+    )
+    .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    let expected_hash = fixture.expected_hash.clone();
+
+    persist_regression_fixture(tempdir.path(), &fixture)?;
+    assert_eq!(
+        verify_loaded_regression_fixture_replays(tempdir.path())?,
+        vec![expected_hash.clone()]
+    );
+
+    fixture.expected_hash = hash_bytes(b"wrong expected bytes");
+    persist_regression_fixture(tempdir.path(), &fixture)?;
+    let error = verify_loaded_regression_fixture_replays(tempdir.path())
+        .expect_err("loaded fixtures should reject replay hash drift");
+
+    assert!(error.contains("expected_hash"));
+    assert!(error.contains(&fixture.input_hash));
+    assert_ne!(expected_hash, fixture.expected_hash);
     Ok(())
 }
 
