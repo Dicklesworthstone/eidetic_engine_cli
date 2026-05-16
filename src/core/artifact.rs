@@ -707,6 +707,18 @@ fn prepare_file_artifact(
             ),
             repair: Some("Check artifact file permissions and retry.".to_string()),
         })?;
+    if !resolved_metadata.file_type().is_file() {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "Artifact path is not a regular file: {}",
+                canonical_path.display()
+            ),
+            repair: Some(
+                "Register a regular file, log, command output, fixture, or bundle artifact."
+                    .to_string(),
+            ),
+        });
+    }
     if resolved_metadata.len() > max_bytes {
         return Err(DomainError::PolicyDenied {
             message: format!(
@@ -1331,6 +1343,47 @@ mod tests {
                 .iter()
                 .any(|entry| entry.code == "artifact_secret_redacted"),
             "secret degradation",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_non_regular_artifact_after_canonicalization() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path();
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let artifact_dir = workspace.join("artifact-dir");
+        std::fs::create_dir(&artifact_dir).map_err(|error| error.to_string())?;
+        let linked_artifact = workspace.join("artifact-link");
+        symlink(&artifact_dir, &linked_artifact).map_err(|error| error.to_string())?;
+        let options = ArtifactRegisterOptions {
+            workspace_path: workspace,
+            database_path: Some(&ee_dir.join("ee.db")),
+            path: Some(Path::new("artifact-link")),
+            external_ref: None,
+            content_hash: None,
+            size_bytes: None,
+            artifact_type: "file",
+            title: None,
+            provenance_uri: None,
+            max_bytes: Some(DEFAULT_MAX_ARTIFACT_BYTES),
+            snippet_chars: Some(DEFAULT_SNIPPET_CHARS),
+            dry_run: true,
+            memory_links: Vec::new(),
+            pack_links: Vec::new(),
+        };
+
+        let error = match register_artifact(&options) {
+            Ok(report) => return Err(format!("unexpected artifact report: {report:?}")),
+            Err(error) => error,
+        };
+
+        ensure(
+            error.message().contains("regular file"),
+            "non-regular artifact error",
         )
     }
 
