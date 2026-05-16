@@ -428,22 +428,46 @@ fn workspace_redaction_defaults_claim_matches_config_parser() -> TestResult {
 }
 
 #[test]
-fn doc_declares_remaining_response_metadata_gap() -> TestResult {
+fn doc_declares_live_source_aware_response_metadata() -> TestResult {
     let doc = read_doc()?;
+    let cli =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/cli/mod.rs"))
+            .map_err(|e| format!("read src/cli/mod.rs: {e}"))?;
 
     for required_phrase in [
         "Response metadata status",
-        "source-aware response block remains K6 acceptance work",
         "\"level_applied\"",
         "\"level_source\"",
         "\"fields_redacted\"",
         "\"patterns_matched\"",
-        "Do not close K6 on `redactionLevel` alone",
+        "`cli`, `workspace_config`, or `built_in_default`",
+        "surfaces that cannot yet produce field-level detail emit an empty array",
+        "callers should prefer the `redaction.level_applied` and",
     ] {
         ensure(
             doc.contains(required_phrase),
             format!(
-                "docs/redaction_levels.md missing response-metadata gap marker: `{required_phrase}`"
+                "docs/redaction_levels.md missing live response-metadata marker: `{required_phrase}`"
+            ),
+        )?;
+    }
+
+    for required_implementation in [
+        "enum RedactionLevelSource",
+        "\"cli\"",
+        "\"workspace_config\"",
+        "\"built_in_default\"",
+        "fn redaction_metadata_json",
+        "\"level_applied\"",
+        "\"level_source\"",
+        "\"fields_redacted\"",
+        "\"patterns_matched\"",
+        "json_with_redaction_metadata",
+    ] {
+        ensure(
+            cli.contains(required_implementation),
+            format!(
+                "src/cli/mod.rs missing redaction metadata implementation marker: `{required_implementation}`"
             ),
         )?;
     }

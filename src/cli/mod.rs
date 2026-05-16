@@ -1073,16 +1073,172 @@ impl BackupRedaction {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RedactionLevelSource {
+    Cli,
+    WorkspaceConfig,
+    BuiltInDefault,
+}
+
+impl RedactionLevelSource {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cli => "cli",
+            Self::WorkspaceConfig => "workspace_config",
+            Self::BuiltInDefault => "built_in_default",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct EffectiveRedactionLevel {
+    level: RedactionLevel,
+    source: RedactionLevelSource,
+}
+
 fn effective_redaction_level(
     workspace_path: &std::path::Path,
     cli_level: Option<BackupRedaction>,
     surface: crate::config::RedactionDefaultSurface,
     built_in: RedactionLevel,
-) -> RedactionLevel {
-    cli_level.map_or_else(
-        || crate::config::workspace_redaction_default(workspace_path, surface, built_in),
-        BackupRedaction::to_model,
-    )
+) -> EffectiveRedactionLevel {
+    if let Some(cli_level) = cli_level {
+        return EffectiveRedactionLevel {
+            level: cli_level.to_model(),
+            source: RedactionLevelSource::Cli,
+        };
+    }
+
+    if let Some(level) = configured_redaction_default(workspace_path, surface) {
+        return EffectiveRedactionLevel {
+            level,
+            source: RedactionLevelSource::WorkspaceConfig,
+        };
+    }
+
+    EffectiveRedactionLevel {
+        level: built_in,
+        source: RedactionLevelSource::BuiltInDefault,
+    }
+}
+
+fn configured_redaction_default(
+    workspace_path: &std::path::Path,
+    surface: crate::config::RedactionDefaultSurface,
+) -> Option<RedactionLevel> {
+    let config_path = workspace_path.join(".ee").join("config.toml");
+    let contents = std::fs::read_to_string(config_path).ok()?;
+    let config = crate::config::ConfigFile::parse(&contents).ok()?;
+    match surface {
+        crate::config::RedactionDefaultSurface::Export => config.redaction.defaults.export,
+        crate::config::RedactionDefaultSurface::HandoffCreate => {
+            config.redaction.defaults.handoff_create
+        }
+        crate::config::RedactionDefaultSurface::ContextJson => {
+            config.redaction.defaults.context_json
+        }
+        crate::config::RedactionDefaultSurface::SupportBundle => {
+            config.redaction.defaults.support_bundle
+        }
+    }
+}
+
+fn redaction_metadata_json(
+    effective: &EffectiveRedactionLevel,
+    fields_redacted: Vec<String>,
+    patterns_matched: Vec<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "level_applied": effective.level.as_str(),
+        "level_source": effective.source.as_str(),
+        "fields_redacted": fields_redacted,
+        "patterns_matched": patterns_matched,
+    })
+}
+
+fn attach_redaction_metadata(
+    data: &mut serde_json::Value,
+    effective: &EffectiveRedactionLevel,
+    fields_redacted: Vec<String>,
+    patterns_matched: Vec<String>,
+) {
+    data["redaction"] = redaction_metadata_json(effective, fields_redacted, patterns_matched);
+}
+
+fn backup_redaction_patterns(report: &BackupCreateReport) -> Vec<String> {
+    let mut patterns = report
+        .degraded
+        .iter()
+        .filter(|entry| entry.code == "redaction_pattern_matched")
+        .filter_map(|entry| entry.message.split('`').nth(1))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    patterns.sort();
+    patterns.dedup();
+    patterns
+}
+
+fn backup_redaction_fields(report: &BackupCreateReport) -> Vec<String> {
+    if backup_redaction_patterns(report).is_empty() {
+        Vec::new()
+    } else {
+        vec!["records.jsonl".to_owned()]
+    }
+}
+
+fn support_bundle_redaction_patterns(
+    report: &crate::core::support_bundle::BundleReport,
+) -> Vec<String> {
+    let mut patterns = report.redaction_summary.reasons.clone();
+    patterns.sort();
+    patterns.dedup();
+    patterns
+}
+
+fn support_bundle_redaction_fields(
+    report: &crate::core::support_bundle::BundleReport,
+) -> Vec<String> {
+    if report.redaction_summary.total_redactions == 0 {
+        Vec::new()
+    } else {
+        vec!["diagnostics[*].content".to_owned()]
+    }
+}
+
+fn context_redaction_fields_and_patterns(response: &ContextResponse) -> (Vec<String>, Vec<String>) {
+    let mut fields = Vec::new();
+    let mut patterns = Vec::new();
+    for (index, item) in response.data.pack.items.iter().enumerate() {
+        if item.redactions.is_empty() {
+            continue;
+        }
+        fields.push(format!("pack.items[{index}].content"));
+        for redaction in &item.redactions {
+            patterns.push(redaction.reason.to_owned());
+        }
+    }
+    fields.sort();
+    fields.dedup();
+    patterns.sort();
+    patterns.dedup();
+    (fields, patterns)
+}
+
+fn json_with_redaction_metadata(
+    raw_json: String,
+    effective: &EffectiveRedactionLevel,
+    fields_redacted: Vec<String>,
+    patterns_matched: Vec<String>,
+) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw_json) else {
+        return raw_json;
+    };
+    if let Some(data) = value.get_mut("data") {
+        attach_redaction_metadata(data, effective, fields_redacted, patterns_matched);
+    } else {
+        attach_redaction_metadata(&mut value, effective, fields_redacted, patterns_matched);
+    }
+    value.to_string()
 }
 
 /// Arguments for `ee export`.
@@ -8500,7 +8656,7 @@ where
             }
             HandoffCommand::Create(args) => {
                 let workspace_path = cli.resolve_workspace();
-                let redaction_level = effective_redaction_level(
+                let redaction = effective_redaction_level(
                     &workspace_path,
                     args.redaction,
                     crate::config::RedactionDefaultSurface::HandoffCreate,
@@ -8520,7 +8676,7 @@ where
                     task_frame_id: None,
                     bind_to_machine: args.bind_to_machine,
                     machine_salt_path: None,
-                    redaction_level,
+                    redaction_level: redaction.level,
                 };
                 match create_handoff(&options) {
                     Ok(report) => match cli.renderer() {
@@ -8529,14 +8685,24 @@ where
                         }
                         output::Renderer::Toon => write_stdout(
                             stdout,
-                            &(output::render_handoff_create_toon(&report) + "\n"),
+                            &(output::render_toon_from_json(&json_with_redaction_metadata(
+                                output::render_handoff_create_json(&report),
+                                &redaction,
+                                Vec::new(),
+                                Vec::new(),
+                            )) + "\n"),
                         ),
                         output::Renderer::Json
                         | output::Renderer::Jsonl
                         | output::Renderer::Compact
                         | output::Renderer::Hook => write_stdout(
                             stdout,
-                            &(output::render_handoff_create_json(&report) + "\n"),
+                            &(json_with_redaction_metadata(
+                                output::render_handoff_create_json(&report),
+                                &redaction,
+                                Vec::new(),
+                                Vec::new(),
+                            ) + "\n"),
                         ),
                     },
                     Err(e) => write_domain_error(&e, cli.wants_json(), stdout, stderr),
@@ -11671,7 +11837,7 @@ where
     E: Write,
 {
     let workspace_path = cli.resolve_workspace();
-    let redaction_level = effective_redaction_level(
+    let redaction = effective_redaction_level(
         &workspace_path,
         args.redaction,
         crate::config::RedactionDefaultSurface::Export,
@@ -11682,7 +11848,7 @@ where
         database_path: args.database.clone(),
         output_dir: args.output_dir.clone(),
         label: args.label.clone(),
-        redaction_level,
+        redaction_level: redaction.level,
         include_derived: args.include_derived,
         include_graph_cache: args.include_graph_cache,
         dry_run: args.dry_run,
@@ -11698,10 +11864,17 @@ where
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => {
+                let mut data = report.data_json();
+                attach_redaction_metadata(
+                    &mut data,
+                    &redaction,
+                    backup_redaction_fields(&report),
+                    backup_redaction_patterns(&report),
+                );
                 let json = serde_json::json!({
                     "schema": crate::models::RESPONSE_SCHEMA_V1,
                     "success": true,
-                    "data": report.data_json(),
+                    "data": data,
                 });
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
@@ -11721,7 +11894,7 @@ where
     E: Write,
 {
     let workspace_path = cli.resolve_workspace();
-    let redaction_level = effective_redaction_level(
+    let redaction = effective_redaction_level(
         &workspace_path,
         args.redaction,
         crate::config::RedactionDefaultSurface::Export,
@@ -11732,19 +11905,24 @@ where
         database_path: args.database.clone(),
         output_dir: args.output_dir.clone(),
         label: args.label.clone(),
-        redaction_level,
+        redaction_level: redaction.level,
         include_derived: false,
         include_graph_cache: false,
         dry_run: args.dry_run,
     };
 
     match create_backup(&options) {
-        Ok(report) => write_export_report(cli, &report, stdout),
+        Ok(report) => write_export_report(cli, &report, &redaction, stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
 
-fn write_export_report<W>(cli: &Cli, report: &BackupCreateReport, stdout: &mut W) -> ProcessExitCode
+fn write_export_report<W>(
+    cli: &Cli,
+    report: &BackupCreateReport,
+    redaction: &EffectiveRedactionLevel,
+    stdout: &mut W,
+) -> ProcessExitCode
 where
     W: Write,
 {
@@ -11753,7 +11931,13 @@ where
             write_stdout(stdout, &export_report_human(report))
         }
         output::Renderer::Toon => {
-            let data = export_report_data(report);
+            let mut data = export_report_data(report);
+            attach_redaction_metadata(
+                &mut data,
+                redaction,
+                backup_redaction_fields(report),
+                backup_redaction_patterns(report),
+            );
             write_stdout(
                 stdout,
                 &(output::render_toon_from_json(&data.to_string()) + "\n"),
@@ -11763,7 +11947,13 @@ where
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
-            let data = export_report_data(report);
+            let mut data = export_report_data(report);
+            attach_redaction_metadata(
+                &mut data,
+                redaction,
+                backup_redaction_fields(report),
+                backup_redaction_patterns(report),
+            );
             let json = serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V1,
                 "success": true,
@@ -23690,6 +23880,7 @@ fn write_context_response<W>(
     renderer: output::Renderer,
     requested_format: OutputFormat,
     response: &ContextResponse,
+    redaction: Option<&EffectiveRedactionLevel>,
     render_options: output::ContextJsonRenderOptions,
     stdout: &mut W,
 ) -> ProcessExitCode
@@ -23698,10 +23889,32 @@ where
 {
     let rendered = match renderer {
         output::Renderer::Human => output::render_context_response_human(response),
-        output::Renderer::Toon => output::render_context_response_toon(response) + "\n",
-        output::Renderer::Json => {
-            output::render_context_response_json_with_options(response, render_options) + "\n"
-        }
+        output::Renderer::Toon => match redaction {
+            Some(redaction) => {
+                let (fields, patterns) = context_redaction_fields_and_patterns(response);
+                output::render_toon_from_json(&json_with_redaction_metadata(
+                    output::render_context_response_json_with_options(response, render_options),
+                    redaction,
+                    fields,
+                    patterns,
+                )) + "\n"
+            }
+            None => output::render_context_response_toon(response) + "\n",
+        },
+        output::Renderer::Json => match redaction {
+            Some(redaction) => {
+                let (fields, patterns) = context_redaction_fields_and_patterns(response);
+                json_with_redaction_metadata(
+                    output::render_context_response_json_with_options(response, render_options),
+                    redaction,
+                    fields,
+                    patterns,
+                ) + "\n"
+            }
+            None => {
+                output::render_context_response_json_with_options(response, render_options) + "\n"
+            }
+        },
         output::Renderer::Jsonl => output::render_context_response_jsonl(response) + "\n",
         output::Renderer::Compact => output::render_context_response_compact(response) + "\n",
         output::Renderer::Hook => output::render_context_response_hook(response) + "\n",
@@ -24064,7 +24277,7 @@ where
         args.no_meta,
         args.include_non_affecting_degradations,
     );
-    let redaction_level = effective_redaction_level(
+    let redaction = effective_redaction_level(
         &workspace_path,
         args.redaction,
         crate::config::RedactionDefaultSurface::ContextJson,
@@ -24090,7 +24303,7 @@ where
         include_expired: args.include_expired,
         include_future: args.include_future,
         include_stale: args.include_stale,
-        redaction_level,
+        redaction_level: redaction.level,
         memory_scope: args.memory_scope,
         strict_scope: args.strict_scope,
         ppr_weight: args.ppr_weight,
@@ -24141,6 +24354,7 @@ where
                 cli.context_renderer(),
                 cli.format,
                 &response,
+                Some(&redaction),
                 output::ContextJsonRenderOptions::from(output_options),
                 stdout,
             )
@@ -26538,6 +26752,7 @@ where
                 renderer,
                 cli.format,
                 &response,
+                None,
                 output::ContextJsonRenderOptions::from(output_options),
                 stdout,
             )
@@ -36211,7 +36426,7 @@ where
         .workspace
         .clone()
         .unwrap_or_else(|| cli.resolve_workspace());
-    let redaction_level = effective_redaction_level(
+    let redaction = effective_redaction_level(
         &workspace_path,
         args.redaction,
         crate::config::RedactionDefaultSurface::SupportBundle,
@@ -36223,7 +36438,7 @@ where
         output_dir: args.out.clone(),
         dry_run: args.dry_run,
         redacted: args.redacted && !args.include_raw,
-        redaction_level,
+        redaction_level: redaction.level,
         include_raw: args.include_raw,
         audit_limit: 100,
     };
@@ -36263,10 +36478,17 @@ where
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => {
+                let mut data = report.data_json();
+                attach_redaction_metadata(
+                    &mut data,
+                    &redaction,
+                    support_bundle_redaction_fields(&report),
+                    support_bundle_redaction_patterns(&report),
+                );
                 let response = serde_json::json!({
                     "schema": crate::models::RESPONSE_SCHEMA_V1,
                     "success": true,
-                    "data": report.data_json()
+                    "data": data
                 });
                 write_stdout(stdout, &(response.to_string() + "\n"))
             }
@@ -38176,14 +38398,14 @@ mod tests {
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction, Cli,
         Command, CurateCommand, DaemonCommand, DiagCommand, DiagQuarantineCommand, DomainError,
-        EconomyCommand, FieldsLevel, FocusCommand, GRAPH_FEATURE_PROXIMITY_ENABLED_KEY,
-        GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY, GraphCommand, GraphSnapshotCommand,
-        HandoffCommand, HealthArgs, ImportCommand, JobCommand, LearnCommand,
-        LearnExperimentCommand, MaintenanceCommand, MemoryCommand, OutcomeQuarantineCommand,
-        OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand, RuleCommand,
-        SERVE_UNAVAILABLE_CODE, ShadowMode, SituationCommand, StatusArgs, SwarmBriefArgs,
-        SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand, VerifyCommand, WorkflowCommand,
-        decay_settings_from_config, run, write_index_rebuild_error,
+        EconomyCommand, EffectiveRedactionLevel, FieldsLevel, FocusCommand,
+        GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY,
+        GraphCommand, GraphSnapshotCommand, HandoffCommand, HealthArgs, ImportCommand, JobCommand,
+        LearnCommand, LearnExperimentCommand, MaintenanceCommand, MemoryCommand,
+        OutcomeQuarantineCommand, OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand,
+        RedactionLevelSource, RuleCommand, SERVE_UNAVAILABLE_CODE, ShadowMode, SituationCommand,
+        StatusArgs, SwarmBriefArgs, SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand,
+        VerifyCommand, WorkflowCommand, decay_settings_from_config, run, write_index_rebuild_error,
     };
     use crate::config::MeshCommandMode;
     use crate::core::index::IndexRebuildError;
@@ -40335,35 +40557,83 @@ mod tests {
         )
         .map_err(|error| format!("write config: {error}"))?;
 
+        let config_default = super::effective_redaction_level(
+            &workspace,
+            None,
+            crate::config::RedactionDefaultSurface::ContextJson,
+            RedactionLevel::Minimal,
+        );
         ensure_equal(
-            &super::effective_redaction_level(
-                &workspace,
-                None,
-                crate::config::RedactionDefaultSurface::ContextJson,
-                RedactionLevel::Minimal,
-            ),
-            &RedactionLevel::Strict,
+            &config_default,
+            &EffectiveRedactionLevel {
+                level: RedactionLevel::Strict,
+                source: RedactionLevelSource::WorkspaceConfig,
+            },
             "config default",
         )?;
+
+        let cli_override = super::effective_redaction_level(
+            &workspace,
+            Some(BackupRedaction::None),
+            crate::config::RedactionDefaultSurface::ContextJson,
+            RedactionLevel::Minimal,
+        );
         ensure_equal(
-            &super::effective_redaction_level(
-                &workspace,
-                Some(BackupRedaction::None),
-                crate::config::RedactionDefaultSurface::ContextJson,
-                RedactionLevel::Minimal,
-            ),
-            &RedactionLevel::None,
+            &cli_override,
+            &EffectiveRedactionLevel {
+                level: RedactionLevel::None,
+                source: RedactionLevelSource::Cli,
+            },
             "CLI override",
         )?;
+
+        let built_in = super::effective_redaction_level(
+            &workspace,
+            None,
+            crate::config::RedactionDefaultSurface::HandoffCreate,
+            RedactionLevel::Standard,
+        );
         ensure_equal(
-            &super::effective_redaction_level(
-                &workspace,
-                None,
-                crate::config::RedactionDefaultSurface::HandoffCreate,
-                RedactionLevel::Standard,
-            ),
-            &RedactionLevel::Standard,
+            &built_in,
+            &EffectiveRedactionLevel {
+                level: RedactionLevel::Standard,
+                source: RedactionLevelSource::BuiltInDefault,
+            },
             "built-in fallback",
+        )
+    }
+
+    #[test]
+    fn redaction_metadata_json_reports_level_source_fields_and_patterns() -> TestResult {
+        let effective = EffectiveRedactionLevel {
+            level: RedactionLevel::Strict,
+            source: RedactionLevelSource::WorkspaceConfig,
+        };
+        let value = super::redaction_metadata_json(
+            &effective,
+            vec!["pack.items[0].content".to_owned()],
+            vec!["api_key".to_owned()],
+        );
+
+        ensure_equal(
+            &value["level_applied"],
+            &serde_json::json!("strict"),
+            "level applied",
+        )?;
+        ensure_equal(
+            &value["level_source"],
+            &serde_json::json!("workspace_config"),
+            "level source",
+        )?;
+        ensure_equal(
+            &value["fields_redacted"],
+            &serde_json::json!(["pack.items[0].content"]),
+            "fields redacted",
+        )?;
+        ensure_equal(
+            &value["patterns_matched"],
+            &serde_json::json!(["api_key"]),
+            "patterns matched",
         )
     }
 
