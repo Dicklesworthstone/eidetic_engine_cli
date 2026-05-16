@@ -157,6 +157,8 @@ Every essential feature works as a one-shot CLI command. The daemon (`ee daemon`
 
 Given the same database, indexes, config, profile, budget, seed, and query, the JSON output is byte-stable, ranking ties resolve deterministically, and context pack hashes reproduce exactly. Golden tests assert this.
 
+Mechanized proof artifacts now live alongside the test suite: [`proofs/lean4/pack_determinism.lean`](proofs/lean4/pack_determinism.lean) models the pack-hash determinism invariant, and [`proofs/tla/agent_mail_coordination.tla`](proofs/tla/agent_mail_coordination.tla) models exclusive Agent Mail reservation safety. The proof-check report schema is registered as `ee.proof_check.v1`; the `ee verify proofs` CLI surface and non-blocking `verify.sh` stage are tracked under `bd-nnfq4`.
+
 ### 5. Explainable Retrieval
 
 Every returned memory answers six questions:
