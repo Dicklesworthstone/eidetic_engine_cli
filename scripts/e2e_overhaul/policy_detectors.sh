@@ -6,7 +6,7 @@
 # C1 + C3 fixes accept meta-policy phrases and dot/colon tags while still
 # rejecting real value-shape secrets.
 #
-# Shipped (real assertions):  C1, C2, C3, C4, C5, B10
+# Shipped (real assertions):  C1, C2, C3, C4, C5, B10, K6
 # Not yet shipped (todo):     none
 
 set -euo pipefail
@@ -189,6 +189,72 @@ assert_jq "$B10_DISABLED_CONTEXT_JSON" \
     "true" "b10_disabled_context_returns_raw_content"
 assert_jq "$B10_DISABLED_CONTEXT_JSON" '.data.pack.items[0].contentRedacted // false' "false" \
     "b10_disabled_context_has_no_redaction_flag"
+
+# ------------------------------------------------------------
+# K6 (shipped) — redaction-level vocabulary and source-aware
+# response metadata must work across the current redaction surfaces.
+# ------------------------------------------------------------
+
+printf '%s\n' \
+    '[policy.secret_detector]' \
+    'allow_phrases = ["OAuth refresh token"]' \
+    > "$EPIC_WORKSPACE/.ee/config.toml"
+
+K6_LEVELS="none minimal standard strict paranoid"
+for level in $K6_LEVELS; do
+    K6_EXPORT_DIR="$EPIC_WORKSPACE/k6-export-$level"
+    K6_EXPORT_JSON=$(ee_workspace export \
+        --output-dir "$K6_EXPORT_DIR" \
+        --redaction "$level" \
+        --json 2>/dev/null || true)
+    assert_jq "$K6_EXPORT_JSON" '.success // false' "true" \
+        "k6_export_${level}_succeeds"
+    assert_jq "$K6_EXPORT_JSON" '.data.redactionLevel // empty' "$level" \
+        "k6_export_${level}_reports_legacy_level"
+    assert_jq "$K6_EXPORT_JSON" '.data.redaction.level_applied // empty' "$level" \
+        "k6_export_${level}_reports_level_applied"
+    assert_jq "$K6_EXPORT_JSON" '.data.redaction.level_source // empty' "cli" \
+        "k6_export_${level}_reports_cli_source"
+    assert_jq_nonempty "$K6_EXPORT_JSON" '.data.recordsPath // empty' \
+        "k6_export_${level}_records_path_present"
+
+    K6_CONTEXT_JSON=$(ee_workspace context \
+        "Document redacted sample" \
+        --redaction "$level" \
+        --json 2>/dev/null || true)
+    assert_jq "$K6_CONTEXT_JSON" '.success // false' "true" \
+        "k6_context_${level}_succeeds"
+    assert_jq "$K6_CONTEXT_JSON" '.data.redaction.level_applied // empty' "$level" \
+        "k6_context_${level}_reports_level_applied"
+    assert_jq "$K6_CONTEXT_JSON" '.data.redaction.level_source // empty' "cli" \
+        "k6_context_${level}_reports_cli_source"
+
+    K6_HANDOFF_JSON=$(ee_workspace handoff create \
+        --out "$EPIC_WORKSPACE/k6-handoff-$level.json" \
+        --redaction "$level" \
+        --dry-run \
+        --json 2>/dev/null || true)
+    assert_jq "$K6_HANDOFF_JSON" '.success // false' "true" \
+        "k6_handoff_${level}_succeeds"
+    assert_jq "$K6_HANDOFF_JSON" '.data.redaction.level_applied // empty' "$level" \
+        "k6_handoff_${level}_reports_level_applied"
+    assert_jq "$K6_HANDOFF_JSON" '.data.redaction.level_source // empty' "cli" \
+        "k6_handoff_${level}_reports_cli_source"
+
+    K6_SUPPORT_JSON=$(ee_workspace support bundle \
+        --out "$EPIC_WORKSPACE/k6-support-$level" \
+        --redaction "$level" \
+        --dry-run \
+        --json 2>/dev/null || true)
+    assert_jq "$K6_SUPPORT_JSON" '.success // false' "true" \
+        "k6_support_${level}_succeeds"
+    assert_jq "$K6_SUPPORT_JSON" '.data.redactionLevel // empty' "$level" \
+        "k6_support_${level}_reports_legacy_level"
+    assert_jq "$K6_SUPPORT_JSON" '.data.redaction.level_applied // empty' "$level" \
+        "k6_support_${level}_reports_level_applied"
+    assert_jq "$K6_SUPPORT_JSON" '.data.redaction.level_source // empty' "cli" \
+        "k6_support_${level}_reports_cli_source"
+done
 
 # ------------------------------------------------------------
 # C4 (shipped) — programmatic error.details for tag and content rejection.
