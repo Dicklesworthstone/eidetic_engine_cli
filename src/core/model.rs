@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::db::{DbConnection, DbError, StoredModelRegistryEntry};
 use crate::models::DomainError;
 use crate::search::HashEmbedder;
@@ -158,17 +159,6 @@ pub struct ModelDegradation {
     pub repair: &'static str,
 }
 
-impl ModelDegradation {
-    fn data_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "code": self.code,
-            "severity": self.severity,
-            "message": self.message,
-            "repair": self.repair,
-        })
-    }
-}
-
 const DEG_NO_REGISTRY_ENTRIES: ModelDegradation = ModelDegradation {
     code: "model_registry_empty",
     severity: "low",
@@ -214,11 +204,7 @@ impl ModelStatusReport {
             "active": self.active.data_json(),
             "registeredCount": self.registered_count,
             "availableCount": self.available_count,
-            "degradations": self
-                .degradations
-                .iter()
-                .map(ModelDegradation::data_json)
-                .collect::<Vec<_>>(),
+            "degradations": model_degradations_data_json("model_status", &self.degradations),
         })
     }
 
@@ -284,11 +270,7 @@ impl ModelListReport {
                 .iter()
                 .map(ModelRegistryEntryView::data_json)
                 .collect::<Vec<_>>(),
-            "degradations": self
-                .degradations
-                .iter()
-                .map(ModelDegradation::data_json)
-                .collect::<Vec<_>>(),
+            "degradations": model_degradations_data_json("model_list", &self.degradations),
         })
     }
 
@@ -329,6 +311,32 @@ impl ModelListReport {
         }
         output
     }
+}
+
+fn model_degradations_data_json(
+    source: &'static str,
+    degradations: &[ModelDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_degraded_entries(degradations.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            source,
+            entry.code,
+            entry.severity,
+            entry.message,
+            entry.repair,
+        )
+    }))
+    .into_iter()
+    .map(|entry| {
+        serde_json::json!({
+            "code": entry.code,
+            "severity": entry.severity,
+            "message": entry.message,
+            "repair": entry.repair,
+            "sources": entry.sources,
+        })
+    })
+    .collect()
 }
 
 fn resolve_workspace_path(path: &Path) -> Result<PathBuf, DomainError> {
@@ -743,6 +751,68 @@ mod tests {
         ensure(
             report.degradations[0].code == "model_registry_no_available_entry",
             "degradation code",
+        )
+    }
+
+    #[test]
+    fn status_json_aggregates_duplicate_model_degradations() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        let report = ModelStatusReport {
+            schema: MODEL_STATUS_SCHEMA_V1,
+            workspace_path: workspace_path.clone(),
+            database_path: workspace_path.join(".ee").join("ee.db"),
+            active: ModelStatusActive {
+                fast_model_id: "hash:deterministic".to_string(),
+                fast_dimension: 384,
+                quality_model_id: None,
+                quality_dimension: None,
+                semantic: false,
+                deterministic: true,
+                source: "unit_fixture".to_string(),
+                selected_registry_entry: None,
+            },
+            registered_count: 2,
+            available_count: 0,
+            degradations: vec![
+                ModelDegradation {
+                    code: "model_registry_no_available_entry",
+                    severity: "low",
+                    message: "No available model entry.",
+                    repair: "ee model list --workspace . --json",
+                },
+                ModelDegradation {
+                    code: "model_registry_no_available_entry",
+                    severity: "medium",
+                    message: "Model registry has no available semantic model.",
+                    repair: "ee doctor --json",
+                },
+            ],
+        };
+
+        let json = report.data_json();
+        let degraded = json["degradations"]
+            .as_array()
+            .ok_or_else(|| "model status degradations should be an array".to_string())?;
+
+        ensure(
+            degraded.len() == 1,
+            format!("duplicate model degradations should collapse: {degraded:?}"),
+        )?;
+        ensure(
+            degraded[0]["code"] == "model_registry_no_available_entry",
+            "aggregate should preserve the model degraded code",
+        )?;
+        ensure(
+            degraded[0]["severity"] == "medium",
+            "aggregate should escalate to the worst severity",
+        )?;
+        ensure(
+            degraded[0]["repair"] == "ee doctor --json",
+            "aggregate should keep the highest-severity repair hint",
+        )?;
+        ensure(
+            degraded[0]["sources"] == serde_json::json!(["model_status"]),
+            "aggregate should expose the model status source label",
         )
     }
 

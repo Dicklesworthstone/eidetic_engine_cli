@@ -74,6 +74,8 @@ Current conventions:
 | `context` | General `ee context` response degradation without a narrower subsystem owner. |
 | `pack` | Context pack assembly, advisory, consensus, or conflict degradation. |
 | `index_vacuum` | `ee index vacuum` derived-index preview and lock-state degradation. |
+| `model_status` | `ee model status` registry posture degradation. |
+| `model_list` | `ee model list` registry posture degradation. |
 | `preflight_guard` | `ee preflight check --cmd` command-guard degradation. |
 | `preflight_run` | `ee preflight run` risk-evidence degradation. |
 | `preflight_show` | `ee preflight show` persisted-run or risk-evidence degradation. |
