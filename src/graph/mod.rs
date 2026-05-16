@@ -37,6 +37,7 @@ pub mod minhash_rank;
 pub mod pack_dna;
 pub mod ppr;
 pub mod ppr_prefetch_cache;
+pub mod skyline;
 
 pub const SUBSYSTEM: &str = "graph";
 pub const MODULE_CONTRACT: &str = GRAPH_MODULE_SCHEMA_V1;
