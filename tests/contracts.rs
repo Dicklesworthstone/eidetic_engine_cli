@@ -201,3 +201,6 @@ mod read_pool_status_schema;
 
 #[path = "contracts/mesh_command_modes_contract.rs"]
 mod mesh_command_modes_contract;
+
+#[path = "contracts/workspace_git_snapshot_read_only.rs"]
+mod workspace_git_snapshot_read_only;
