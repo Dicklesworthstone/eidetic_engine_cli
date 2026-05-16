@@ -1429,29 +1429,33 @@ fn machine_salt_path(override_path: Option<&Path>) -> PathBuf {
 }
 
 fn read_or_create_secret(path: &Path) -> Result<[u8; 32], DomainError> {
-    reject_existing_symlink_component(path, "handoff HMAC key")?;
-    match fs::read(path) {
-        Ok(bytes) => bytes_to_32_byte_secret(&bytes, path),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let secret = random_secret()?;
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
-                    message: format!("Failed to create handoff key directory: {error}"),
-                    repair: Some(format!("Check permissions for {}", parent.display())),
-                })?;
-            }
-            write_private_secret(path, &secret)?;
-            Ok(secret)
-        }
-        Err(error) => Err(DomainError::Storage {
+    if handoff_read_path_is_regular_file(path, "handoff HMAC key")? {
+        let bytes = fs::read(path).map_err(|error| DomainError::Storage {
             message: format!("Failed to read handoff HMAC key: {error}"),
             repair: Some(format!("Check permissions for {}", path.display())),
-        }),
+        })?;
+        bytes_to_32_byte_secret(&bytes, path)
+    } else {
+        let secret = random_secret()?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
+                message: format!("Failed to create handoff key directory: {error}"),
+                repair: Some(format!("Check permissions for {}", parent.display())),
+            })?;
+        }
+        write_private_secret(path, &secret)?;
+        Ok(secret)
     }
 }
 
 fn read_existing_secret(path: &Path, missing_code: &'static str) -> Result<[u8; 32], DomainError> {
-    reject_existing_symlink_component(path, "handoff HMAC key")?;
+    if !handoff_read_path_is_regular_file(path, "handoff HMAC key")? {
+        return Err(handoff_hmac_error(
+            missing_code,
+            "Required handoff HMAC key material is missing.",
+            "Resume on the machine/workspace that created the capsule, or recreate the capsule.",
+        ));
+    }
     let bytes = fs::read(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             handoff_hmac_error(
@@ -2109,13 +2113,39 @@ fn reject_existing_symlink_component(path: &Path, label: &str) -> Result<(), Dom
 }
 
 fn read_regular_file_no_symlinks(path: &Path, label: &str) -> Result<String, DomainError> {
-    reject_existing_symlink_component(path, label)?;
+    if !handoff_read_path_is_regular_file(path, label)? {
+        return Err(DomainError::Storage {
+            message: format!("Failed to read {label}: No such file or directory"),
+            repair: Some(format!("Verify {} exists and is readable", path.display())),
+        });
+    }
     let content = fs::read_to_string(path).map_err(|error| DomainError::Storage {
         message: format!("Failed to read {label}: {error}"),
         repair: Some(format!("Verify {} exists and is readable", path.display())),
     })?;
     reject_existing_symlink_component(path, label)?;
     Ok(content)
+}
+
+fn handoff_read_path_is_regular_file(path: &Path, label: &str) -> Result<bool, DomainError> {
+    reject_existing_symlink_component(path, label)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to read {label} from non-regular path: {}",
+                path.display()
+            ),
+            repair: Some(
+                "Use a regular file path for handoff capsules and key material.".to_owned(),
+            ),
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(DomainError::Storage {
+            message: format!("Failed to inspect {label} path {}: {error}", path.display()),
+            repair: Some(format!("Check permissions for {}", path.display())),
+        }),
+    }
 }
 
 fn write_regular_file_no_symlinks(
@@ -4441,6 +4471,56 @@ memories_revised = 3
                 check_evidence: true,
             }),
             "inspect symlinked handoff capsule",
+        )
+    }
+
+    #[test]
+    fn handoff_inspect_rejects_non_regular_capsule() -> TestResult {
+        let dir = repo_tempdir()?;
+        let capsule_dir = dir.path().join("handoff-dir.json");
+        fs::create_dir(&capsule_dir).map_err(|error| error.to_string())?;
+
+        let error = match inspect_handoff(&InspectOptions {
+            path: capsule_dir,
+            verify_hash: true,
+            check_evidence: true,
+        }) {
+            Ok(report) => return Err(format!("unexpected inspect report: {report:?}")),
+            Err(error) => error,
+        };
+
+        ensure(
+            error.to_string().contains("non-regular path"),
+            true,
+            "non-regular capsule error",
+        )
+    }
+
+    #[test]
+    fn handoff_create_rejects_non_regular_machine_salt_path() -> TestResult {
+        let dir = repo_tempdir()?;
+        let machine_salt_dir = dir.path().join("machine-salt");
+        fs::create_dir(&machine_salt_dir).map_err(|error| error.to_string())?;
+
+        let error = match create_handoff(&CreateOptions {
+            workspace: dir.path().to_path_buf(),
+            output: dir.path().join("handoff.json"),
+            profile: CapsuleProfile::Resume,
+            since: None,
+            dry_run: false,
+            task_frame_id: None,
+            bind_to_machine: true,
+            machine_salt_path: Some(machine_salt_dir),
+            redaction_level: RedactionLevel::Standard,
+        }) {
+            Ok(report) => return Err(format!("unexpected handoff report: {report:?}")),
+            Err(error) => error,
+        };
+
+        ensure(
+            error.to_string().contains("non-regular path"),
+            true,
+            "non-regular machine salt error",
         )
     }
 
