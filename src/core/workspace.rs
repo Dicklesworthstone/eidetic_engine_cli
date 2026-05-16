@@ -943,7 +943,10 @@ mod tests {
         symlink(&outside_parent, &linked_parent).map_err(|error| error.to_string())?;
         let registry = linked_parent.join("registry.db");
 
-        let error = open_registry_write(&registry).expect_err("symlinked parent must be rejected");
+        let error = match open_registry_write(&registry) {
+            Ok(_) => return Err("symlinked parent must be rejected".to_string()),
+            Err(error) => error,
+        };
         assert!(
             error.message().contains("symlink component"),
             "unexpected error: {}",
@@ -969,8 +972,10 @@ mod tests {
         let registry = temp.path().join("registry.db");
         symlink(&outside_registry, &registry).map_err(|error| error.to_string())?;
 
-        let error =
-            open_registry_read_only(&registry).expect_err("symlinked registry must be rejected");
+        let error = match open_registry_read_only(&registry) {
+            Ok(_) => return Err("symlinked registry must be rejected".to_string()),
+            Err(error) => error,
+        };
         assert!(
             error.message().contains("symlink component"),
             "unexpected error: {}",
