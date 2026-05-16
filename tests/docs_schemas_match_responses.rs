@@ -51,6 +51,10 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
         "ee.graph.snapshot_prune.v1",
         "ee.graph.snapshot_prune.v1.json",
     ),
+    (
+        ee::core::witness_retention::WITNESS_PRUNE_REPORT_SCHEMA_V1,
+        "ee.graph.witness_prune_report.v1.json",
+    ),
     ("ee.db.inspect.v1", "ee.db.inspect.v1.json"),
     (
         COMPLETION_AUDIT_CHECKLIST_SCHEMA_V1,
@@ -275,6 +279,71 @@ fn graph_snapshot_prune_schema_documents_archived_row_safety() -> TestResult {
         .ok_or_else(|| "graph snapshot prune schema must include an example".to_owned())?;
     validate_json_schema(example, &schema, &schema, "$.examples[0]")
         .map_err(|error| format!("graph snapshot prune example invalid: {error}"))?;
+
+    Ok(())
+}
+
+#[test]
+fn graph_witness_prune_schema_documents_active_snapshot_safety() -> TestResult {
+    let schema_id = ee::core::witness_retention::WITNESS_PRUNE_REPORT_SCHEMA_V1;
+    let schema = read_json(&schema_path("ee.graph.witness_prune_report.v1.json"))?;
+
+    ensure_json_str(
+        &schema,
+        "/$schema",
+        "https://json-schema.org/draft/2020-12/schema",
+    )?;
+    ensure_json_str(&schema, "/title", schema_id)?;
+    ensure_json_bool(&schema, "/additionalProperties", false)?;
+    ensure_field_presets(schema_id, &schema)?;
+    ensure_json_str(&schema, "/properties/schema/const", schema_id)?;
+    ensure_json_str(
+        &schema,
+        "/properties/command/const",
+        "maintenance graph-witnesses-prune",
+    )?;
+    ensure_json_str(
+        &schema,
+        "/properties/report/$ref",
+        "#/$defs/witnessPruneReport",
+    )?;
+    ensure_json_str(
+        &schema,
+        "/properties/summary/$ref",
+        "#/$defs/witnessPruneSummaryWithDelete",
+    )?;
+    ensure_json_str(
+        &schema,
+        "/$defs/activeSnapshotReason/properties/code/const",
+        "active_snapshot",
+    )?;
+    ensure_json_str(&schema, "/$defs/pruneAction/properties/kind/const", "prune")?;
+
+    let required = schema
+        .pointer("/required")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "graph witness prune required must be an array".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for field in [
+        "workspaceId",
+        "dryRun",
+        "durableMutation",
+        "deletedCount",
+        "report",
+        "summary",
+    ] {
+        if !required.contains(&field) {
+            return Err(format!("graph witness prune required missing {field}"));
+        }
+    }
+
+    let example = schema
+        .pointer("/examples/0")
+        .ok_or_else(|| "graph witness prune schema must include an example".to_owned())?;
+    validate_json_schema(example, &schema, &schema, "$.examples[0]")
+        .map_err(|error| format!("graph witness prune example invalid: {error}"))?;
 
     Ok(())
 }

@@ -242,6 +242,10 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
         SupportedSchema::new("status_skyline", "ee.status.skyline.v1"),
         SupportedSchema::new("memory_impact_analysis", "ee.memory.impact_analysis.v1"),
         SupportedSchema::new("proximity", "ee.proximity.v1"),
+        SupportedSchema::new(
+            "graph_witness_prune",
+            witness_retention::WITNESS_PRUNE_REPORT_SCHEMA_V1,
+        ),
         SupportedSchema::new("why_augmented", "ee.why.v1"),
         SupportedSchema::new("context_augmented", "ee.context.v1"),
         SupportedSchema::new("mesh_event", MESH_EVENT_SCHEMA_V1),
@@ -601,6 +605,7 @@ mod tests {
                 "status_skyline",
                 "memory_impact_analysis",
                 "proximity",
+                "graph_witness_prune",
                 "why_augmented",
                 "context_augmented",
                 "mesh_event",

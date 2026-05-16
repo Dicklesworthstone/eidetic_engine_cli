@@ -6857,6 +6857,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: graph_snapshot_prune_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::witness_retention::WITNESS_PRUNE_REPORT_SCHEMA_V1,
+            version: "1",
+            description: "Graph algorithm witness prune report",
+            category: "graph",
+            definition: graph_witness_prune_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.db.inspect.v1",
             version: "1",
             description: "Read-only database inspection response envelope",
@@ -7178,6 +7185,10 @@ fn graph_export_response_schema_definition() -> String {
 
 fn graph_snapshot_prune_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.graph.snapshot_prune.v1.json").to_string()
+}
+
+fn graph_witness_prune_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.graph.witness_prune_report.v1.json").to_string()
 }
 
 fn db_inspect_schema_definition() -> String {
