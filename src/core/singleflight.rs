@@ -176,7 +176,36 @@ where
 
         if is_leader {
             let leader_started = Instant::now();
+            
+            struct LeaderGuard<'a, T> {
+                group: &'a SingleFlightGroup<T>,
+                key_hash: String,
+                entry: Arc<SingleFlightEntry<T>>,
+                completed: bool,
+            }
+            
+            impl<T> Drop for LeaderGuard<'_, T> {
+                fn drop(&mut self) {
+                    if !self.completed {
+                        let _ = self.group.remove_entry(&self.key_hash, &self.entry);
+                        if let Ok(mut state) = self.entry.state.lock() {
+                            *state = SingleFlightState::Completed(Err("leader panicked".to_owned()));
+                            self.entry.ready.notify_all();
+                        }
+                    }
+                }
+            }
+            
+            let mut guard = LeaderGuard {
+                group: self,
+                key_hash: key_hash.clone(),
+                entry: Arc::clone(&entry),
+                completed: false,
+            };
+            
             let result = operation();
+            guard.completed = true;
+            
             self.complete_leader(&key_hash, &entry, leader_started, result)
         } else {
             self.counters.follower_joins.fetch_add(1, Ordering::SeqCst);
