@@ -1620,21 +1620,10 @@ struct SecretDetectorAllowConfig {
 fn load_secret_detector_allow_config(
     workspace_path: &Path,
 ) -> Result<SecretDetectorAllowConfig, DomainError> {
-    let path = workspace_path.join(".ee").join("config.toml");
-    let contents = match fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(SecretDetectorAllowConfig::default());
-        }
-        Err(error) => {
-            return Err(DomainError::Configuration {
-                message: format!(
-                    "Failed to read workspace config {}: {error}",
-                    path.display()
-                ),
-                repair: Some("Fix or remove .ee/config.toml.".to_owned()),
-            });
-        }
+    let Some((path, contents)) =
+        read_workspace_config_if_present(workspace_path, "workspace config")?
+    else {
+        return Ok(SecretDetectorAllowConfig::default());
     };
     let config = ConfigFile::parse(&contents).map_err(|error| DomainError::Configuration {
         message: format!(
@@ -1655,6 +1644,84 @@ fn load_secret_detector_allow_config(
             .allow_regex
             .unwrap_or_default(),
     })
+}
+
+fn read_workspace_config_if_present(
+    workspace_path: &Path,
+    purpose: &str,
+) -> Result<Option<(PathBuf, String)>, DomainError> {
+    let path = workspace_path.join(".ee").join("config.toml");
+    ensure_workspace_config_path_is_not_symlink(&path, purpose)?;
+    match fs::read_to_string(&path) {
+        Ok(contents) => Ok(Some((path, contents))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(DomainError::Configuration {
+            message: format!("Failed to read {purpose} {}: {error}", path.display()),
+            repair: Some("Fix or remove .ee/config.toml.".to_owned()),
+        }),
+    }
+}
+
+fn ensure_workspace_config_path_is_not_symlink(
+    path: &Path,
+    purpose: &str,
+) -> Result<(), DomainError> {
+    if let Some(symlink_path) =
+        first_existing_symlink_component(path).map_err(|error| DomainError::Configuration {
+            message: format!(
+                "Failed to inspect {purpose} path component {}: {}",
+                error.path.display(),
+                error.source
+            ),
+            repair: Some("Fix or remove .ee/config.toml.".to_owned()),
+        })?
+    {
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Refusing to read {purpose} {} through symlinked path component {}.",
+                path.display(),
+                symlink_path.display()
+            ),
+            repair: Some(
+                "Replace .ee/config.toml with a regular file inside the workspace.".to_owned(),
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct SymlinkComponentInspectionError {
+    path: PathBuf,
+    source: std::io::Error,
+}
+
+fn first_existing_symlink_component(
+    path: &Path,
+) -> Result<Option<PathBuf>, SymlinkComponentInspectionError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(source) => {
+                return Err(SymlinkComponentInspectionError {
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn configured_bypass_kind(matches: &[RememberPolicyBypassMatch]) -> &'static str {
@@ -2723,35 +2790,23 @@ fn remember_candidate_coherent_cluster(
 fn remember_cluster_coherence_config(
     workspace_path: &Path,
 ) -> Result<ClusterCoherenceConfig, DomainError> {
-    let config_path = workspace_path.join(".ee").join("config.toml");
-    let threshold = match fs::read_to_string(&config_path) {
-        Ok(contents) => {
-            let config =
-                ConfigFile::parse(&contents).map_err(|error| DomainError::Configuration {
-                    message: format!(
-                        "Failed to parse workspace learn config {}: {error}",
-                        config_path.display()
-                    ),
-                    repair: Some("Fix [learn] in .ee/config.toml.".to_owned()),
-                })?;
-            config
-                .learn
-                .cluster_coherence_threshold
-                .unwrap_or(crate::curate::cluster_coherence::DEFAULT_CLUSTER_COHERENCE_THRESHOLD)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            crate::curate::cluster_coherence::DEFAULT_CLUSTER_COHERENCE_THRESHOLD
-        }
-        Err(error) => {
-            return Err(DomainError::Configuration {
-                message: format!(
-                    "Failed to read workspace learn config {}: {error}",
-                    config_path.display()
-                ),
-                repair: Some("Check .ee/config.toml and retry `ee remember`.".to_owned()),
-            });
-        }
-    };
+    let threshold =
+        match read_workspace_config_if_present(workspace_path, "workspace learn config")? {
+            Some((config_path, contents)) => {
+                let config =
+                    ConfigFile::parse(&contents).map_err(|error| DomainError::Configuration {
+                        message: format!(
+                            "Failed to parse workspace learn config {}: {error}",
+                            config_path.display()
+                        ),
+                        repair: Some("Fix [learn] in .ee/config.toml.".to_owned()),
+                    })?;
+                config.learn.cluster_coherence_threshold.unwrap_or(
+                    crate::curate::cluster_coherence::DEFAULT_CLUSTER_COHERENCE_THRESHOLD,
+                )
+            }
+            None => crate::curate::cluster_coherence::DEFAULT_CLUSTER_COHERENCE_THRESHOLD,
+        };
     if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
         return Err(DomainError::Configuration {
             message: format!(
@@ -8670,6 +8725,63 @@ mod tests {
     fn dedupe_check_report_version_matches_package() -> TestResult {
         let report = DedupeCheckReport::no_duplicates(0);
         ensure(report.version, env!("CARGO_PKG_VERSION"), "version")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn memory_config_reads_reject_symlinked_metadata_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        let real_metadata = temp.path().join("real-ee");
+        fs::create_dir(&real_metadata).map_err(|error| error.to_string())?;
+        fs::write(
+            real_metadata.join("config.toml"),
+            "[policy.secret_detector]\nallow_phrases = [\"safe\"]\n",
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(&real_metadata, workspace.join(".ee")).map_err(|error| error.to_string())?;
+
+        let error = match load_secret_detector_allow_config(&workspace) {
+            Ok(config) => return Err(format!("expected symlink rejection, got {config:?}")),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("symlinked path component"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cluster_config_read_rejects_symlinked_config_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("workspace");
+        let metadata = workspace.join(".ee");
+        fs::create_dir_all(&metadata).map_err(|error| error.to_string())?;
+        let outside_config = temp.path().join("outside-config.toml");
+        fs::write(
+            &outside_config,
+            "[learn]\ncluster_coherence_threshold = 0.9\n",
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(&outside_config, metadata.join("config.toml"))
+            .map_err(|error| error.to_string())?;
+
+        let error = match remember_cluster_coherence_config(&workspace) {
+            Ok(config) => return Err(format!("expected symlink rejection, got {config:?}")),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("symlinked path component"),
+            "unexpected error: {error}"
+        );
+        Ok(())
     }
 
     // ========================================================================
