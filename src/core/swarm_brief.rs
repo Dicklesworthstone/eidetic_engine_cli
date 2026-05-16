@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -603,6 +604,56 @@ pub struct SwarmBriefCommandOutput {
     pub stderr: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceGitSnapshotOptions {
+    pub workspace: PathBuf,
+    pub command_timeout_ms: u64,
+    pub large_file_threshold_bytes: u64,
+}
+
+impl WorkspaceGitSnapshotOptions {
+    #[must_use]
+    pub fn for_workspace(workspace: impl Into<PathBuf>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            command_timeout_ms: 1_500,
+            large_file_threshold_bytes: 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceGitSnapshot {
+    pub repository_root: String,
+    pub entries: Vec<WorkspaceGitStatusEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceGitStatusEntry {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_path: Option<String>,
+    pub staged: String,
+    pub unstaged: String,
+    pub entry_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<WorkspaceGitPathMetadata>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceGitPathMetadata {
+    pub exists: bool,
+    pub file_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    pub large_file: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
+}
+
 /// Error returned by a read-only command runner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SwarmBriefCommandError {
@@ -634,6 +685,55 @@ impl SwarmBriefCommandError {
         };
         SwarmBriefDegradation::warning(source, code, message, Some(repair.to_string()))
     }
+}
+
+pub fn collect_workspace_git_snapshot(
+    options: &WorkspaceGitSnapshotOptions,
+    runner: &impl SwarmBriefCommandRunner,
+) -> Result<WorkspaceGitSnapshot, SwarmBriefCommandError> {
+    let root_output = runner.run(
+        "git",
+        &["rev-parse", "--show-toplevel"],
+        &options.workspace,
+        options.command_timeout_ms,
+    )?;
+    let repository_root = root_output
+        .stdout
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .ok_or_else(|| {
+            SwarmBriefCommandError::Unavailable(
+                "git rev-parse --show-toplevel returned no repository root".to_string(),
+            )
+        })?;
+    let repository_root_path = PathBuf::from(repository_root);
+
+    let status_output = runner.run(
+        "git",
+        &[
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "--untracked-files=all",
+        ],
+        &options.workspace,
+        options.command_timeout_ms,
+    )?;
+    let mut entries = parse_workspace_git_status_porcelain_v2(&status_output.stdout);
+    attach_workspace_git_metadata(
+        &mut entries,
+        &repository_root_path,
+        options.large_file_threshold_bytes,
+    );
+    entries.sort();
+    entries.dedup();
+
+    Ok(WorkspaceGitSnapshot {
+        repository_root: redact_path_label(&repository_root_path),
+        entries,
+    })
 }
 
 /// Read-only command runner abstraction used by external source adapters.
@@ -3000,6 +3100,170 @@ pub fn parse_git_status_short(input: &str) -> Vec<SwarmBriefDirtyFile> {
 }
 
 #[must_use]
+pub fn parse_workspace_git_status_porcelain_v2(input: &str) -> Vec<WorkspaceGitStatusEntry> {
+    let mut entries = input
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(parse_workspace_git_status_porcelain_v2_line)
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries.dedup();
+    entries
+}
+
+fn parse_workspace_git_status_porcelain_v2_line(line: &str) -> Option<WorkspaceGitStatusEntry> {
+    if let Some(rest) = line.strip_prefix("1 ") {
+        let mut parts = rest.splitn(8, ' ');
+        let xy = parts.next()?;
+        let _submodule = parts.next()?;
+        let _head_mode = parts.next()?;
+        let _index_mode = parts.next()?;
+        let _worktree_mode = parts.next()?;
+        let _head_hash = parts.next()?;
+        let _index_hash = parts.next()?;
+        let path = normalize_workspace_git_path(parts.next()?)?;
+        return workspace_git_status_entry("ordinary", xy, path, None);
+    }
+
+    if let Some(rest) = line.strip_prefix("2 ") {
+        let mut parts = rest.splitn(9, ' ');
+        let xy = parts.next()?;
+        let _submodule = parts.next()?;
+        let _head_mode = parts.next()?;
+        let _index_mode = parts.next()?;
+        let _worktree_mode = parts.next()?;
+        let _head_hash = parts.next()?;
+        let _index_hash = parts.next()?;
+        let _rename_score = parts.next()?;
+        let paths = parts.next()?;
+        let (path, original_path) = paths
+            .split_once('\t')
+            .map_or((paths, None), |(destination, source)| {
+                (destination, Some(source))
+            });
+        let path = normalize_workspace_git_path(path)?;
+        let original_path = original_path.and_then(normalize_workspace_git_path);
+        return workspace_git_status_entry("renamed_or_copied", xy, path, original_path);
+    }
+
+    if let Some(rest) = line.strip_prefix("u ") {
+        let mut parts = rest.splitn(10, ' ');
+        let xy = parts.next()?;
+        let _submodule = parts.next()?;
+        let _stage1_mode = parts.next()?;
+        let _stage2_mode = parts.next()?;
+        let _stage3_mode = parts.next()?;
+        let _worktree_mode = parts.next()?;
+        let _stage1_hash = parts.next()?;
+        let _stage2_hash = parts.next()?;
+        let _stage3_hash = parts.next()?;
+        let path = normalize_workspace_git_path(parts.next()?)?;
+        return workspace_git_status_entry("unmerged", xy, path, None);
+    }
+
+    if let Some(path) = line.strip_prefix("? ") {
+        let path = normalize_workspace_git_path(path)?;
+        return workspace_git_status_entry("untracked", "??", path, None);
+    }
+
+    None
+}
+
+fn workspace_git_status_entry(
+    entry_kind: &str,
+    xy: &str,
+    path: String,
+    original_path: Option<String>,
+) -> Option<WorkspaceGitStatusEntry> {
+    let mut chars = xy.chars();
+    let staged = chars.next()?.to_string();
+    let unstaged = chars.next()?.to_string();
+    Some(WorkspaceGitStatusEntry {
+        path,
+        original_path,
+        staged,
+        unstaged,
+        entry_kind: entry_kind.to_string(),
+        metadata: None,
+    })
+}
+
+fn normalize_workspace_git_path(path: &str) -> Option<String> {
+    let trimmed = path.trim();
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(trimmed);
+    if unquoted.is_empty() {
+        return None;
+    }
+    let path = Path::new(unquoted);
+    if path.is_absolute() {
+        return None;
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    Some(redact_path_label(path))
+}
+
+fn attach_workspace_git_metadata(
+    entries: &mut [WorkspaceGitStatusEntry],
+    repository_root: &Path,
+    large_file_threshold_bytes: u64,
+) {
+    for entry in entries {
+        entry.metadata = Some(workspace_git_path_metadata(
+            repository_root,
+            &entry.path,
+            large_file_threshold_bytes,
+        ));
+    }
+}
+
+fn workspace_git_path_metadata(
+    repository_root: &Path,
+    path: &str,
+    large_file_threshold_bytes: u64,
+) -> WorkspaceGitPathMetadata {
+    let full_path = repository_root.join(path);
+    let metadata = match fs::symlink_metadata(&full_path) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            return WorkspaceGitPathMetadata {
+                exists: false,
+                file_type: "missing".to_string(),
+                size_bytes: None,
+                large_file: false,
+                skip_reason: Some("metadata_unavailable".to_string()),
+            };
+        }
+    };
+    let file_type = metadata.file_type();
+    let kind = if file_type.is_symlink() {
+        "symlink"
+    } else if metadata.is_dir() {
+        "directory"
+    } else if metadata.is_file() {
+        "file"
+    } else {
+        "other"
+    };
+    let size_bytes = metadata.is_file().then_some(metadata.len());
+    let large_file = size_bytes.is_some_and(|bytes| bytes > large_file_threshold_bytes);
+    WorkspaceGitPathMetadata {
+        exists: true,
+        file_type: kind.to_string(),
+        size_bytes: if large_file { None } else { size_bytes },
+        large_file,
+        skip_reason: large_file.then(|| "large_file_metadata_only".to_string()),
+    }
+}
+
+#[must_use]
 pub fn parse_git_log(input: &str) -> Vec<SwarmBriefCommit> {
     let mut commits = input
         .lines()
@@ -4890,6 +5154,151 @@ mod tests {
                     status: "M".to_string(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn workspace_git_porcelain_v2_parser_preserves_states_and_renames() {
+        let entries = parse_workspace_git_status_porcelain_v2(concat!(
+            "# branch.head main\n",
+            "1 .M N... 100644 100644 100644 abc def src/z.rs\n",
+            "? src/a.rs\n",
+            "2 R. N... 100644 100644 100644 abc def R100 src/new.rs\tsrc/old.rs\n",
+            "u UU N... 100644 100644 100644 100644 aaa bbb ccc src/conflict.rs\n",
+            "! ignored.log\n",
+        ));
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (
+                    entry.path.as_str(),
+                    entry.original_path.as_deref(),
+                    entry.staged.as_str(),
+                    entry.unstaged.as_str(),
+                    entry.entry_kind.as_str(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("src/a.rs", None, "?", "?", "untracked"),
+                ("src/conflict.rs", None, "U", "U", "unmerged"),
+                (
+                    "src/new.rs",
+                    Some("src/old.rs"),
+                    "R",
+                    ".",
+                    "renamed_or_copied"
+                ),
+                ("src/z.rs", None, ".", "M", "ordinary"),
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_git_porcelain_v2_parser_handles_boundary_states_deterministically() {
+        assert!(parse_workspace_git_status_porcelain_v2("# branch.head main\n").is_empty());
+
+        let entries = parse_workspace_git_status_porcelain_v2(concat!(
+            "1 MM N... 100644 100644 100644 abc def src/both.rs\n",
+            "1 D. N... 100644 000000 000000 abc 000 deleted/staged.rs\n",
+            "1 .D N... 100644 100644 000000 abc def deleted/worktree.rs\n",
+            "? src/both.rs\n",
+            "1 MM N... 100644 100644 100644 abc def ../outside.rs\n",
+            "1 MM N... 100644 100644 100644 abc def /abs/outside.rs\n",
+        ));
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (
+                    entry.path.as_str(),
+                    entry.staged.as_str(),
+                    entry.unstaged.as_str(),
+                    entry.entry_kind.as_str(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("deleted/staged.rs", "D", ".", "ordinary"),
+                ("deleted/worktree.rs", ".", "D", "ordinary"),
+                ("src/both.rs", "?", "?", "untracked"),
+                ("src/both.rs", "M", "M", "ordinary"),
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_git_snapshot_provider_uses_only_read_only_git_status_commands() {
+        let workspace = Path::new("/repo/subdir");
+        let runner = FakeRunner::default()
+            .with_output("git", &["rev-parse", "--show-toplevel"], "/repo\n")
+            .with_output(
+                "git",
+                &[
+                    "status",
+                    "--porcelain=v2",
+                    "--branch",
+                    "--untracked-files=all",
+                ],
+                "? scratch.txt\n1 M. N... 100644 100644 100644 abc def src/lib.rs\n",
+            );
+        let mut options = WorkspaceGitSnapshotOptions::for_workspace(workspace);
+        options.large_file_threshold_bytes = 8;
+
+        let snapshot = match collect_workspace_git_snapshot(&options, &runner) {
+            Ok(snapshot) => snapshot,
+            Err(error) => panic!("workspace git snapshot should parse: {error:?}"),
+        };
+
+        assert_eq!(snapshot.repository_root, "/repo");
+        assert_eq!(
+            snapshot
+                .entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["scratch.txt", "src/lib.rs"]
+        );
+        assert!(
+            snapshot
+                .entries
+                .iter()
+                .all(|entry| entry.metadata.as_ref().is_some_and(|metadata| {
+                    !metadata.exists
+                        && metadata.skip_reason.as_deref() == Some("metadata_unavailable")
+                }))
+        );
+        assert_eq!(
+            runner.calls(),
+            vec![
+                "git rev-parse --show-toplevel".to_string(),
+                "git status --porcelain=v2 --branch --untracked-files=all".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_git_metadata_classifies_existing_source_file_without_following_content() {
+        let metadata =
+            workspace_git_path_metadata(Path::new("."), "src/core/swarm_brief.rs", u64::MAX);
+
+        assert!(metadata.exists);
+        assert_eq!(metadata.file_type, "file");
+        assert!(metadata.size_bytes.is_some_and(|bytes| bytes > 0));
+        assert!(!metadata.large_file);
+        assert_eq!(metadata.skip_reason, None);
+    }
+
+    #[test]
+    fn workspace_git_metadata_marks_large_files_without_reporting_size() {
+        let metadata = workspace_git_path_metadata(Path::new("."), "src/core/swarm_brief.rs", 1);
+
+        assert!(metadata.exists);
+        assert_eq!(metadata.file_type, "file");
+        assert_eq!(metadata.size_bytes, None);
+        assert!(metadata.large_file);
+        assert_eq!(
+            metadata.skip_reason.as_deref(),
+            Some("large_file_metadata_only")
         );
     }
 
