@@ -120,19 +120,25 @@ pub fn workspace_redaction_default(
     surface: RedactionDefaultSurface,
     built_in: RedactionLevel,
 ) -> RedactionLevel {
+    configured_workspace_redaction_default(workspace_path, surface).unwrap_or(built_in)
+}
+
+pub(crate) fn configured_workspace_redaction_default(
+    workspace_path: &Path,
+    surface: RedactionDefaultSurface,
+) -> Option<RedactionLevel> {
     let Some(contents) = workspace_config_contents(workspace_path) else {
-        return built_in;
+        return None;
     };
     let Ok(config) = ConfigFile::parse(&contents) else {
-        return built_in;
+        return None;
     };
-    let configured = match surface {
+    match surface {
         RedactionDefaultSurface::Export => config.redaction.defaults.export,
         RedactionDefaultSurface::HandoffCreate => config.redaction.defaults.handoff_create,
         RedactionDefaultSurface::ContextJson => config.redaction.defaults.context_json,
         RedactionDefaultSurface::SupportBundle => config.redaction.defaults.support_bundle,
-    };
-    configured.unwrap_or(built_in)
+    }
 }
 
 fn workspace_config_contents(workspace_path: &Path) -> Option<String> {

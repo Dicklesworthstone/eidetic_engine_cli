@@ -1113,7 +1113,9 @@ fn effective_redaction_level(
         };
     }
 
-    if let Some(level) = configured_redaction_default(workspace_path, surface) {
+    if let Some(level) =
+        crate::config::configured_workspace_redaction_default(workspace_path, surface)
+    {
         return EffectiveRedactionLevel {
             level,
             source: RedactionLevelSource::WorkspaceConfig,
@@ -1121,29 +1123,8 @@ fn effective_redaction_level(
     }
 
     EffectiveRedactionLevel {
-        level: built_in,
+        level: crate::config::workspace_redaction_default(workspace_path, surface, built_in),
         source: RedactionLevelSource::BuiltInDefault,
-    }
-}
-
-fn configured_redaction_default(
-    workspace_path: &std::path::Path,
-    surface: crate::config::RedactionDefaultSurface,
-) -> Option<RedactionLevel> {
-    let config_path = workspace_path.join(".ee").join("config.toml");
-    let contents = std::fs::read_to_string(config_path).ok()?;
-    let config = crate::config::ConfigFile::parse(&contents).ok()?;
-    match surface {
-        crate::config::RedactionDefaultSurface::Export => config.redaction.defaults.export,
-        crate::config::RedactionDefaultSurface::HandoffCreate => {
-            config.redaction.defaults.handoff_create
-        }
-        crate::config::RedactionDefaultSurface::ContextJson => {
-            config.redaction.defaults.context_json
-        }
-        crate::config::RedactionDefaultSurface::SupportBundle => {
-            config.redaction.defaults.support_bundle
-        }
     }
 }
 
@@ -40973,6 +40954,73 @@ mod tests {
                 source: RedactionLevelSource::BuiltInDefault,
             },
             "built-in fallback",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn effective_redaction_level_ignores_symlinked_workspace_config() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::create_dir_all(workspace.path().join(".ee")).map_err(|error| error.to_string())?;
+        fs::write(
+            outside.path().join("config.toml"),
+            "[redaction.defaults]\ncontext_json = \"strict\"\n",
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(
+            outside.path().join("config.toml"),
+            workspace.path().join(".ee").join("config.toml"),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let effective = super::effective_redaction_level(
+            workspace.path(),
+            None,
+            crate::config::RedactionDefaultSurface::ContextJson,
+            RedactionLevel::Minimal,
+        );
+
+        ensure_equal(
+            &effective,
+            &EffectiveRedactionLevel {
+                level: RedactionLevel::Minimal,
+                source: RedactionLevelSource::BuiltInDefault,
+            },
+            "symlinked CLI redaction config fallback",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn effective_redaction_level_ignores_symlinked_workspace_config_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::write(
+            outside.path().join("config.toml"),
+            "[redaction.defaults]\ncontext_json = \"strict\"\n",
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(outside.path(), workspace.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let effective = super::effective_redaction_level(
+            workspace.path(),
+            None,
+            crate::config::RedactionDefaultSurface::ContextJson,
+            RedactionLevel::Minimal,
+        );
+
+        ensure_equal(
+            &effective,
+            &EffectiveRedactionLevel {
+                level: RedactionLevel::Minimal,
+                source: RedactionLevelSource::BuiltInDefault,
+            },
+            "symlinked CLI redaction config parent fallback",
         )
     }
 
