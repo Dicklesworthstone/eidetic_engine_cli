@@ -24,8 +24,11 @@ use std::collections::BTreeMap;
 
 use asupersync::Cx;
 use fnx_algorithms::{HitsCentralityResult, hits_centrality_directed};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
+use crate::core::degraded_aggregation::{
+    AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
+};
 use crate::graph::DiGraph;
 use crate::graph::GraphResult;
 use crate::graph::algorithms::{DEFAULT_BACKGROUND_BUDGET, current_or_testing_cx, run_with_budget};
@@ -53,6 +56,7 @@ pub struct HitsScores {
 pub struct HitsReport {
     pub schema: &'static str,
     pub scores: HitsScores,
+    #[serde(serialize_with = "serialize_hits_degraded")]
     pub degraded: Vec<HitsDegradation>,
 }
 
@@ -62,6 +66,31 @@ pub struct HitsDegradation {
     pub severity: &'static str,
     pub message: String,
     pub repair: Option<String>,
+}
+
+fn serialize_hits_degraded<S>(
+    degraded: &[HitsDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_hits_degraded(degraded).serialize(serializer)
+}
+
+fn aggregate_hits_degraded(degraded: &[HitsDegradation]) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "hits",
+            entry.code.clone(),
+            entry.severity,
+            entry.message.clone(),
+            entry
+                .repair
+                .clone()
+                .unwrap_or_else(|| "Refresh graph HITS diagnostics.".to_owned()),
+        )
+    }))
 }
 
 /// Compute HITS hub/authority scores on a memory-link directed graph.
@@ -339,5 +368,35 @@ mod tests {
             "message should explain the convergence cap: {}",
             degraded[0].message
         );
+    }
+
+    #[test]
+    fn hits_report_degraded_entries_are_aggregated() {
+        let report = HitsReport {
+            schema: HITS_REPORT_SCHEMA_V1,
+            scores: HitsScores::default(),
+            degraded: vec![
+                HitsDegradation {
+                    code: GRAPH_HITS_CONVERGENCE_FAILURE_CODE.to_owned(),
+                    severity: "warning",
+                    message: "HITS convergence warning.".to_owned(),
+                    repair: Some("Refresh HITS snapshot.".to_owned()),
+                },
+                HitsDegradation {
+                    code: GRAPH_HITS_CONVERGENCE_FAILURE_CODE.to_owned(),
+                    severity: "medium",
+                    message: "HITS convergence failed at the cap.".to_owned(),
+                    repair: Some("Rebuild HITS snapshot.".to_owned()),
+                },
+            ],
+        };
+
+        let value = serde_json::to_value(&report).expect("hits report serializes");
+        let degraded = value["degraded"].as_array().expect("degraded array");
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0]["code"], GRAPH_HITS_CONVERGENCE_FAILURE_CODE);
+        assert_eq!(degraded[0]["severity"], "medium");
+        assert_eq!(degraded[0]["sources"], serde_json::json!(["hits"]));
     }
 }
