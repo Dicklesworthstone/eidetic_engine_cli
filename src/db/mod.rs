@@ -4031,6 +4031,147 @@ CREATE INDEX idx_agent_context_profiles_pack_covering
     "blake3:v051_agent_context_profile_pack_index_2026_05_16",
 );
 
+/// V052: Store optional mesh peer cursors, import ledger rows, and cache metadata.
+pub const V052_MESH_STORAGE: Migration = Migration::new(
+    52,
+    "mesh_storage",
+    r#"
+CREATE TABLE mesh_peers (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    peer_id TEXT NOT NULL CHECK (peer_id GLOB 'peer_*' AND length(trim(peer_id)) > 6),
+    origin_node_id TEXT NOT NULL CHECK (origin_node_id GLOB 'node_*' AND length(trim(origin_node_id)) > 6),
+    display_name TEXT CHECK (display_name IS NULL OR length(trim(display_name)) > 0),
+    policy_summary_json TEXT CHECK (policy_summary_json IS NULL OR json_valid(policy_summary_json)),
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+    last_seen_at TEXT NOT NULL CHECK (length(trim(last_seen_at)) > 0),
+    PRIMARY KEY (workspace_id, peer_id),
+    UNIQUE (workspace_id, origin_node_id)
+);
+
+CREATE INDEX idx_mesh_peers_origin_node
+    ON mesh_peers(workspace_id, origin_node_id);
+CREATE INDEX idx_mesh_peers_enabled
+    ON mesh_peers(workspace_id, enabled, peer_id);
+
+CREATE TABLE mesh_peer_cursors (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    peer_id TEXT NOT NULL,
+    origin_node_id TEXT NOT NULL CHECK (origin_node_id GLOB 'node_*' AND length(trim(origin_node_id)) > 6),
+    origin_workspace_id TEXT NOT NULL CHECK (origin_workspace_id GLOB 'wsp_*' AND length(trim(origin_workspace_id)) > 6),
+    last_seq INTEGER NOT NULL DEFAULT 0 CHECK (last_seq >= 0),
+    tip_event_hash TEXT CHECK (tip_event_hash IS NULL OR tip_event_hash GLOB 'blake3:*'),
+    tip_audit_hash TEXT CHECK (tip_audit_hash IS NULL OR tip_audit_hash GLOB 'blake3:*'),
+    status TEXT NOT NULL DEFAULT 'unknown' CHECK (
+        status IN ('unknown', 'current', 'behind', 'blocked', 'quarantined')
+    ),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    PRIMARY KEY (workspace_id, peer_id, origin_workspace_id),
+    FOREIGN KEY (workspace_id, peer_id) REFERENCES mesh_peers(workspace_id, peer_id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_mesh_peer_cursors_origin
+    ON mesh_peer_cursors(workspace_id, origin_node_id, origin_workspace_id);
+CREATE INDEX idx_mesh_peer_cursors_status
+    ON mesh_peer_cursors(workspace_id, status, updated_at);
+
+CREATE TABLE mesh_import_ledger (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    event_id TEXT NOT NULL CHECK (event_id GLOB 'mesh_evt_*' AND length(trim(event_id)) > 9),
+    origin_node_id TEXT NOT NULL CHECK (origin_node_id GLOB 'node_*' AND length(trim(origin_node_id)) > 6),
+    origin_workspace_id TEXT NOT NULL CHECK (origin_workspace_id GLOB 'wsp_*' AND length(trim(origin_workspace_id)) > 6),
+    producer_peer_id TEXT CHECK (producer_peer_id IS NULL OR (producer_peer_id GLOB 'peer_*' AND length(trim(producer_peer_id)) > 6)),
+    seq INTEGER NOT NULL CHECK (seq > 0),
+    prev_event_hash TEXT CHECK (prev_event_hash IS NULL OR prev_event_hash GLOB 'blake3:*'),
+    event_hash TEXT NOT NULL CHECK (event_hash GLOB 'blake3:*'),
+    event_kind TEXT NOT NULL CHECK (
+        event_kind IN ('create', 'revise', 'tombstone', 'trust', 'validity', 'bodyAvailable')
+    ),
+    logical_memory_id TEXT NOT NULL CHECK (logical_memory_id GLOB 'mem_*' AND length(trim(logical_memory_id)) > 6),
+    content_hash TEXT NOT NULL CHECK (content_hash GLOB 'blake3:*'),
+    material_lane TEXT NOT NULL CHECK (
+        material_lane IN ('metadata', 'body', 'embedding', 'graphLink', 'revisionNotice', 'curationSignal')
+    ),
+    redaction_class TEXT NOT NULL CHECK (
+        redaction_class IN ('metadataOnly', 'preview', 'body', 'embedding', 'secretDenied')
+    ),
+    trust_lane TEXT NOT NULL CHECK (
+        trust_lane IN ('localHuman', 'peerHumanViaPeer', 'peerAgent', 'peerDerived', 'untrusted')
+    ),
+    import_decision TEXT NOT NULL CHECK (import_decision IN ('allow', 'quarantine', 'deny')),
+    local_memory_id TEXT REFERENCES memories(id) ON DELETE SET NULL,
+    body_cache_key TEXT CHECK (body_cache_key IS NULL OR length(trim(body_cache_key)) > 0),
+    event_json TEXT NOT NULL CHECK (json_valid(event_json)),
+    imported_at TEXT NOT NULL CHECK (length(trim(imported_at)) > 0),
+    PRIMARY KEY (workspace_id, origin_node_id, origin_workspace_id, seq),
+    UNIQUE (workspace_id, event_hash),
+    UNIQUE (workspace_id, event_id)
+);
+
+CREATE INDEX idx_mesh_import_ledger_origin_tip
+    ON mesh_import_ledger(workspace_id, origin_node_id, origin_workspace_id, seq);
+CREATE INDEX idx_mesh_import_ledger_content_hash
+    ON mesh_import_ledger(workspace_id, content_hash);
+CREATE INDEX idx_mesh_import_ledger_local_memory
+    ON mesh_import_ledger(local_memory_id)
+    WHERE local_memory_id IS NOT NULL;
+CREATE INDEX idx_mesh_import_ledger_import_decision
+    ON mesh_import_ledger(workspace_id, import_decision, imported_at);
+
+CREATE TABLE mesh_memory_mappings (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    origin_node_id TEXT NOT NULL CHECK (origin_node_id GLOB 'node_*' AND length(trim(origin_node_id)) > 6),
+    origin_workspace_id TEXT NOT NULL CHECK (origin_workspace_id GLOB 'wsp_*' AND length(trim(origin_workspace_id)) > 6),
+    logical_memory_id TEXT NOT NULL CHECK (logical_memory_id GLOB 'mem_*' AND length(trim(logical_memory_id)) > 6),
+    local_memory_id TEXT REFERENCES memories(id) ON DELETE SET NULL,
+    latest_event_hash TEXT NOT NULL CHECK (latest_event_hash GLOB 'blake3:*'),
+    content_hash TEXT NOT NULL CHECK (content_hash GLOB 'blake3:*'),
+    trust_lane TEXT NOT NULL CHECK (
+        trust_lane IN ('peerHumanViaPeer', 'peerAgent', 'peerDerived', 'untrusted')
+    ),
+    redaction_class TEXT NOT NULL CHECK (
+        redaction_class IN ('metadataOnly', 'preview', 'body', 'embedding', 'secretDenied')
+    ),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    PRIMARY KEY (workspace_id, origin_node_id, origin_workspace_id, logical_memory_id)
+);
+
+CREATE INDEX idx_mesh_memory_mappings_local
+    ON mesh_memory_mappings(local_memory_id)
+    WHERE local_memory_id IS NOT NULL;
+CREATE INDEX idx_mesh_memory_mappings_content
+    ON mesh_memory_mappings(workspace_id, content_hash);
+CREATE INDEX idx_mesh_memory_mappings_updated
+    ON mesh_memory_mappings(workspace_id, updated_at);
+
+CREATE TABLE mesh_body_cache_metadata (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    body_cache_key TEXT NOT NULL CHECK (length(trim(body_cache_key)) > 0),
+    origin_node_id TEXT NOT NULL CHECK (origin_node_id GLOB 'node_*' AND length(trim(origin_node_id)) > 6),
+    origin_workspace_id TEXT NOT NULL CHECK (origin_workspace_id GLOB 'wsp_*' AND length(trim(origin_workspace_id)) > 6),
+    logical_memory_id TEXT NOT NULL CHECK (logical_memory_id GLOB 'mem_*' AND length(trim(logical_memory_id)) > 6),
+    content_hash TEXT NOT NULL CHECK (content_hash GLOB 'blake3:*'),
+    body_ref_json TEXT CHECK (body_ref_json IS NULL OR json_valid(body_ref_json)),
+    preview_hash TEXT CHECK (preview_hash IS NULL OR preview_hash GLOB 'blake3:*'),
+    size_bytes INTEGER CHECK (size_bytes IS NULL OR size_bytes >= 0),
+    cache_status TEXT NOT NULL DEFAULT 'metadata_only' CHECK (
+        cache_status IN ('metadata_only', 'available', 'quarantined', 'evicted', 'expired')
+    ),
+    local_body_hash TEXT CHECK (local_body_hash IS NULL OR local_body_hash GLOB 'blake3:*'),
+    cached_at TEXT NOT NULL CHECK (length(trim(cached_at)) > 0),
+    expires_at TEXT CHECK (expires_at IS NULL OR length(trim(expires_at)) > 0),
+    PRIMARY KEY (workspace_id, body_cache_key)
+);
+
+CREATE INDEX idx_mesh_body_cache_origin
+    ON mesh_body_cache_metadata(workspace_id, origin_node_id, origin_workspace_id, logical_memory_id);
+CREATE INDEX idx_mesh_body_cache_content
+    ON mesh_body_cache_metadata(workspace_id, content_hash);
+CREATE INDEX idx_mesh_body_cache_status
+    ON mesh_body_cache_metadata(workspace_id, cache_status, expires_at);
+"#,
+    "blake3:v052_mesh_storage_2026_05_16",
+);
+
 /// V042: Allow every pack omission reason emitted by the packer.
 pub const V042_PACK_OMISSION_REASONS: Migration = Migration::new(
     42,
@@ -4198,6 +4339,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V049_PREFLIGHT_BYPASS_TOKENS,
     V050_AGENT_CONTEXT_PROFILES,
     V051_AGENT_CONTEXT_PROFILE_PACK_INDEX,
+    V052_MESH_STORAGE,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -6412,6 +6554,182 @@ pub struct StoredAgentContextProfileForPack {
     pub weight_cached: f64,
 }
 
+/// Input for upserting one optional mesh peer known to a workspace.
+#[derive(Debug, Clone)]
+pub struct UpsertMeshPeerInput {
+    pub workspace_id: String,
+    pub peer_id: String,
+    pub origin_node_id: String,
+    pub display_name: Option<String>,
+    pub policy_summary_json: Option<String>,
+    pub enabled: bool,
+    pub last_seen_at: Option<String>,
+}
+
+/// Stored mesh_peers row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredMeshPeer {
+    pub workspace_id: String,
+    pub peer_id: String,
+    pub origin_node_id: String,
+    pub display_name: Option<String>,
+    pub policy_summary_json: Option<String>,
+    pub enabled: bool,
+    pub last_seen_at: String,
+}
+
+/// Input for upserting a per-peer anti-entropy cursor.
+#[derive(Debug, Clone)]
+pub struct UpsertMeshPeerCursorInput {
+    pub workspace_id: String,
+    pub peer_id: String,
+    pub origin_node_id: String,
+    pub origin_workspace_id: String,
+    pub last_seq: u64,
+    pub tip_event_hash: Option<String>,
+    pub tip_audit_hash: Option<String>,
+    pub status: String,
+    pub updated_at: Option<String>,
+}
+
+/// Stored mesh_peer_cursors row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredMeshPeerCursor {
+    pub workspace_id: String,
+    pub peer_id: String,
+    pub origin_node_id: String,
+    pub origin_workspace_id: String,
+    pub last_seq: u64,
+    pub tip_event_hash: Option<String>,
+    pub tip_audit_hash: Option<String>,
+    pub status: String,
+    pub updated_at: String,
+}
+
+/// Input for recording an imported mesh event.
+#[derive(Debug, Clone)]
+pub struct InsertMeshImportLedgerEventInput {
+    pub workspace_id: String,
+    pub event_id: String,
+    pub origin_node_id: String,
+    pub origin_workspace_id: String,
+    pub producer_peer_id: Option<String>,
+    pub seq: u64,
+    pub prev_event_hash: Option<String>,
+    pub event_hash: String,
+    pub event_kind: String,
+    pub logical_memory_id: String,
+    pub content_hash: String,
+    pub material_lane: String,
+    pub redaction_class: String,
+    pub trust_lane: String,
+    pub import_decision: String,
+    pub local_memory_id: Option<String>,
+    pub body_cache_key: Option<String>,
+    pub event_json: String,
+    pub imported_at: Option<String>,
+}
+
+/// Stored mesh_import_ledger row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredMeshImportLedgerEvent {
+    pub workspace_id: String,
+    pub event_id: String,
+    pub origin_node_id: String,
+    pub origin_workspace_id: String,
+    pub producer_peer_id: Option<String>,
+    pub seq: u64,
+    pub prev_event_hash: Option<String>,
+    pub event_hash: String,
+    pub event_kind: String,
+    pub logical_memory_id: String,
+    pub content_hash: String,
+    pub material_lane: String,
+    pub redaction_class: String,
+    pub trust_lane: String,
+    pub import_decision: String,
+    pub local_memory_id: Option<String>,
+    pub body_cache_key: Option<String>,
+    pub event_json: String,
+    pub imported_at: String,
+}
+
+/// Input for upserting the origin-to-local memory mapping.
+#[derive(Debug, Clone)]
+pub struct UpsertMeshMemoryMappingInput {
+    pub workspace_id: String,
+    pub origin_node_id: String,
+    pub origin_workspace_id: String,
+    pub logical_memory_id: String,
+    pub local_memory_id: Option<String>,
+    pub latest_event_hash: String,
+    pub content_hash: String,
+    pub trust_lane: String,
+    pub redaction_class: String,
+    pub updated_at: Option<String>,
+}
+
+/// Stored mesh_memory_mappings row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredMeshMemoryMapping {
+    pub workspace_id: String,
+    pub origin_node_id: String,
+    pub origin_workspace_id: String,
+    pub logical_memory_id: String,
+    pub local_memory_id: Option<String>,
+    pub latest_event_hash: String,
+    pub content_hash: String,
+    pub trust_lane: String,
+    pub redaction_class: String,
+    pub updated_at: String,
+}
+
+/// Input for upserting policy-gated cached body metadata.
+#[derive(Debug, Clone)]
+pub struct UpsertMeshBodyCacheMetadataInput {
+    pub workspace_id: String,
+    pub body_cache_key: String,
+    pub origin_node_id: String,
+    pub origin_workspace_id: String,
+    pub logical_memory_id: String,
+    pub content_hash: String,
+    pub body_ref_json: Option<String>,
+    pub preview_hash: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub cache_status: String,
+    pub local_body_hash: Option<String>,
+    pub cached_at: Option<String>,
+    pub expires_at: Option<String>,
+}
+
+/// Stored mesh_body_cache_metadata row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredMeshBodyCacheMetadata {
+    pub workspace_id: String,
+    pub body_cache_key: String,
+    pub origin_node_id: String,
+    pub origin_workspace_id: String,
+    pub logical_memory_id: String,
+    pub content_hash: String,
+    pub body_ref_json: Option<String>,
+    pub preview_hash: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub cache_status: String,
+    pub local_body_hash: Option<String>,
+    pub cached_at: String,
+    pub expires_at: Option<String>,
+}
+
+/// Redaction-safe mesh storage posture for status/doctor surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeshStorageStatus {
+    pub peer_count: u32,
+    pub cursor_count: u32,
+    pub imported_event_count: u32,
+    pub mapped_memory_count: u32,
+    pub cached_body_count: u32,
+}
+
 /// Input for creating a learning observation ledger row.
 #[derive(Debug, Clone)]
 pub struct CreateLearningObservationInput {
@@ -6806,6 +7124,515 @@ impl DbConnection {
                 })?;
         *cache = None;
         Ok(())
+    }
+
+    /// Insert or update an optional mesh peer without enabling mesh behavior.
+    pub fn upsert_mesh_peer(&self, input: &UpsertMeshPeerInput) -> Result<StoredMeshPeer> {
+        let last_seen_at = input
+            .last_seen_at
+            .clone()
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO mesh_peers (
+                workspace_id, peer_id, origin_node_id, display_name,
+                policy_summary_json, enabled, last_seen_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(workspace_id, peer_id) DO UPDATE SET
+                origin_node_id = excluded.origin_node_id,
+                display_name = excluded.display_name,
+                policy_summary_json = excluded.policy_summary_json,
+                enabled = excluded.enabled,
+                last_seen_at = excluded.last_seen_at",
+            &[
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.peer_id.clone()),
+                Value::Text(input.origin_node_id.clone()),
+                input
+                    .display_name
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .policy_summary_json
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::BigInt(if input.enabled { 1 } else { 0 }),
+                Value::Text(last_seen_at),
+            ],
+        )?;
+        self.get_mesh_peer(&input.workspace_id, &input.peer_id)?
+            .ok_or_else(|| DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "mesh peer row could not be reloaded after upsert".to_owned(),
+            })
+    }
+
+    /// Get one optional mesh peer by local workspace and peer id.
+    pub fn get_mesh_peer(
+        &self,
+        workspace_id: &str,
+        peer_id: &str,
+    ) -> Result<Option<StoredMeshPeer>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, peer_id, origin_node_id, display_name,
+                    policy_summary_json, enabled, last_seen_at
+             FROM mesh_peers
+             WHERE workspace_id = ?1 AND peer_id = ?2",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(peer_id.to_owned()),
+            ],
+        )?;
+        rows.first().map(stored_mesh_peer_from_row).transpose()
+    }
+
+    /// Insert or update a per-peer anti-entropy cursor.
+    pub fn upsert_mesh_peer_cursor(
+        &self,
+        input: &UpsertMeshPeerCursorInput,
+    ) -> Result<StoredMeshPeerCursor> {
+        let updated_at = input
+            .updated_at
+            .clone()
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        let last_seq = i64::try_from(input.last_seq).map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "mesh peer cursor last_seq must fit i64".to_owned(),
+        })?;
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO mesh_peer_cursors (
+                workspace_id, peer_id, origin_node_id, origin_workspace_id,
+                last_seq, tip_event_hash, tip_audit_hash, status, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(workspace_id, peer_id, origin_workspace_id) DO UPDATE SET
+                origin_node_id = excluded.origin_node_id,
+                last_seq = excluded.last_seq,
+                tip_event_hash = excluded.tip_event_hash,
+                tip_audit_hash = excluded.tip_audit_hash,
+                status = excluded.status,
+                updated_at = excluded.updated_at",
+            &[
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.peer_id.clone()),
+                Value::Text(input.origin_node_id.clone()),
+                Value::Text(input.origin_workspace_id.clone()),
+                Value::BigInt(last_seq),
+                input
+                    .tip_event_hash
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .tip_audit_hash
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(input.status.clone()),
+                Value::Text(updated_at),
+            ],
+        )?;
+        self.get_mesh_peer_cursor(
+            &input.workspace_id,
+            &input.peer_id,
+            &input.origin_workspace_id,
+        )?
+        .ok_or_else(|| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "mesh peer cursor row could not be reloaded after upsert".to_owned(),
+        })
+    }
+
+    /// Get one anti-entropy cursor.
+    pub fn get_mesh_peer_cursor(
+        &self,
+        workspace_id: &str,
+        peer_id: &str,
+        origin_workspace_id: &str,
+    ) -> Result<Option<StoredMeshPeerCursor>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, peer_id, origin_node_id, origin_workspace_id,
+                    last_seq, tip_event_hash, tip_audit_hash, status, updated_at
+             FROM mesh_peer_cursors
+             WHERE workspace_id = ?1 AND peer_id = ?2 AND origin_workspace_id = ?3",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(peer_id.to_owned()),
+                Value::Text(origin_workspace_id.to_owned()),
+            ],
+        )?;
+        rows.first()
+            .map(stored_mesh_peer_cursor_from_row)
+            .transpose()
+    }
+
+    /// Insert one mesh event into the replay ledger idempotently.
+    pub fn insert_mesh_import_ledger_event(
+        &self,
+        input: &InsertMeshImportLedgerEventInput,
+    ) -> Result<StoredMeshImportLedgerEvent> {
+        if let Some(existing) = self.get_mesh_import_ledger_event(
+            &input.workspace_id,
+            &input.origin_node_id,
+            &input.origin_workspace_id,
+            input.seq,
+        )? {
+            if existing.event_hash == input.event_hash
+                && existing.content_hash == input.content_hash
+            {
+                return Ok(existing);
+            }
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!(
+                    "mesh import replay conflict for {}/{}/{}: existing event_hash={} content_hash={}, incoming event_hash={} content_hash={}",
+                    input.origin_node_id,
+                    input.origin_workspace_id,
+                    input.seq,
+                    existing.event_hash,
+                    existing.content_hash,
+                    input.event_hash,
+                    input.content_hash
+                ),
+            });
+        }
+
+        let seq = i64::try_from(input.seq).map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "mesh import ledger seq must fit i64".to_owned(),
+        })?;
+        let imported_at = input
+            .imported_at
+            .clone()
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO mesh_import_ledger (
+                workspace_id, event_id, origin_node_id, origin_workspace_id,
+                producer_peer_id, seq, prev_event_hash, event_hash, event_kind,
+                logical_memory_id, content_hash, material_lane, redaction_class,
+                trust_lane, import_decision, local_memory_id, body_cache_key,
+                event_json, imported_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
+            )",
+            &[
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.event_id.clone()),
+                Value::Text(input.origin_node_id.clone()),
+                Value::Text(input.origin_workspace_id.clone()),
+                input
+                    .producer_peer_id
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::BigInt(seq),
+                input
+                    .prev_event_hash
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(input.event_hash.clone()),
+                Value::Text(input.event_kind.clone()),
+                Value::Text(input.logical_memory_id.clone()),
+                Value::Text(input.content_hash.clone()),
+                Value::Text(input.material_lane.clone()),
+                Value::Text(input.redaction_class.clone()),
+                Value::Text(input.trust_lane.clone()),
+                Value::Text(input.import_decision.clone()),
+                input
+                    .local_memory_id
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .body_cache_key
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(input.event_json.clone()),
+                Value::Text(imported_at),
+            ],
+        )?;
+        self.get_mesh_import_ledger_event(
+            &input.workspace_id,
+            &input.origin_node_id,
+            &input.origin_workspace_id,
+            input.seq,
+        )?
+        .ok_or_else(|| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "mesh import ledger row could not be reloaded after insert".to_owned(),
+        })
+    }
+
+    /// Get one mesh import replay ledger row.
+    pub fn get_mesh_import_ledger_event(
+        &self,
+        workspace_id: &str,
+        origin_node_id: &str,
+        origin_workspace_id: &str,
+        seq: u64,
+    ) -> Result<Option<StoredMeshImportLedgerEvent>> {
+        let seq = i64::try_from(seq).map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "mesh import ledger seq must fit i64".to_owned(),
+        })?;
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, event_id, origin_node_id, origin_workspace_id,
+                    producer_peer_id, seq, prev_event_hash, event_hash, event_kind,
+                    logical_memory_id, content_hash, material_lane, redaction_class,
+                    trust_lane, import_decision, local_memory_id, body_cache_key,
+                    event_json, imported_at
+             FROM mesh_import_ledger
+             WHERE workspace_id = ?1
+               AND origin_node_id = ?2
+               AND origin_workspace_id = ?3
+               AND seq = ?4",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(origin_node_id.to_owned()),
+                Value::Text(origin_workspace_id.to_owned()),
+                Value::BigInt(seq),
+            ],
+        )?;
+        rows.first()
+            .map(stored_mesh_import_ledger_event_from_row)
+            .transpose()
+    }
+
+    /// List imported mesh events for one origin stream in deterministic order.
+    pub fn list_mesh_import_ledger_events(
+        &self,
+        workspace_id: &str,
+        origin_node_id: &str,
+        origin_workspace_id: &str,
+    ) -> Result<Vec<StoredMeshImportLedgerEvent>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, event_id, origin_node_id, origin_workspace_id,
+                    producer_peer_id, seq, prev_event_hash, event_hash, event_kind,
+                    logical_memory_id, content_hash, material_lane, redaction_class,
+                    trust_lane, import_decision, local_memory_id, body_cache_key,
+                    event_json, imported_at
+             FROM mesh_import_ledger
+             WHERE workspace_id = ?1
+               AND origin_node_id = ?2
+               AND origin_workspace_id = ?3
+             ORDER BY seq ASC, event_hash ASC",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(origin_node_id.to_owned()),
+                Value::Text(origin_workspace_id.to_owned()),
+            ],
+        )?;
+        rows.iter()
+            .map(stored_mesh_import_ledger_event_from_row)
+            .collect()
+    }
+
+    /// Insert or update an origin-to-local mesh memory mapping.
+    pub fn upsert_mesh_memory_mapping(
+        &self,
+        input: &UpsertMeshMemoryMappingInput,
+    ) -> Result<StoredMeshMemoryMapping> {
+        let updated_at = input
+            .updated_at
+            .clone()
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO mesh_memory_mappings (
+                workspace_id, origin_node_id, origin_workspace_id, logical_memory_id,
+                local_memory_id, latest_event_hash, content_hash, trust_lane,
+                redaction_class, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(workspace_id, origin_node_id, origin_workspace_id, logical_memory_id)
+            DO UPDATE SET
+                local_memory_id = excluded.local_memory_id,
+                latest_event_hash = excluded.latest_event_hash,
+                content_hash = excluded.content_hash,
+                trust_lane = excluded.trust_lane,
+                redaction_class = excluded.redaction_class,
+                updated_at = excluded.updated_at",
+            &[
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.origin_node_id.clone()),
+                Value::Text(input.origin_workspace_id.clone()),
+                Value::Text(input.logical_memory_id.clone()),
+                input
+                    .local_memory_id
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(input.latest_event_hash.clone()),
+                Value::Text(input.content_hash.clone()),
+                Value::Text(input.trust_lane.clone()),
+                Value::Text(input.redaction_class.clone()),
+                Value::Text(updated_at),
+            ],
+        )?;
+        self.get_mesh_memory_mapping(
+            &input.workspace_id,
+            &input.origin_node_id,
+            &input.origin_workspace_id,
+            &input.logical_memory_id,
+        )?
+        .ok_or_else(|| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "mesh memory mapping row could not be reloaded after upsert".to_owned(),
+        })
+    }
+
+    /// Get one origin-to-local mesh memory mapping.
+    pub fn get_mesh_memory_mapping(
+        &self,
+        workspace_id: &str,
+        origin_node_id: &str,
+        origin_workspace_id: &str,
+        logical_memory_id: &str,
+    ) -> Result<Option<StoredMeshMemoryMapping>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, origin_node_id, origin_workspace_id, logical_memory_id,
+                    local_memory_id, latest_event_hash, content_hash, trust_lane,
+                    redaction_class, updated_at
+             FROM mesh_memory_mappings
+             WHERE workspace_id = ?1
+               AND origin_node_id = ?2
+               AND origin_workspace_id = ?3
+               AND logical_memory_id = ?4",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(origin_node_id.to_owned()),
+                Value::Text(origin_workspace_id.to_owned()),
+                Value::Text(logical_memory_id.to_owned()),
+            ],
+        )?;
+        rows.first()
+            .map(stored_mesh_memory_mapping_from_row)
+            .transpose()
+    }
+
+    /// Insert or update cached body metadata without storing the body itself.
+    pub fn upsert_mesh_body_cache_metadata(
+        &self,
+        input: &UpsertMeshBodyCacheMetadataInput,
+    ) -> Result<StoredMeshBodyCacheMetadata> {
+        let size_bytes = input
+            .size_bytes
+            .map(|value| {
+                i64::try_from(value).map_err(|_| DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "mesh body cache size_bytes must fit i64".to_owned(),
+                })
+            })
+            .transpose()?;
+        let cached_at = input
+            .cached_at
+            .clone()
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO mesh_body_cache_metadata (
+                workspace_id, body_cache_key, origin_node_id, origin_workspace_id,
+                logical_memory_id, content_hash, body_ref_json, preview_hash,
+                size_bytes, cache_status, local_body_hash, cached_at, expires_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ON CONFLICT(workspace_id, body_cache_key) DO UPDATE SET
+                origin_node_id = excluded.origin_node_id,
+                origin_workspace_id = excluded.origin_workspace_id,
+                logical_memory_id = excluded.logical_memory_id,
+                content_hash = excluded.content_hash,
+                body_ref_json = excluded.body_ref_json,
+                preview_hash = excluded.preview_hash,
+                size_bytes = excluded.size_bytes,
+                cache_status = excluded.cache_status,
+                local_body_hash = excluded.local_body_hash,
+                cached_at = excluded.cached_at,
+                expires_at = excluded.expires_at",
+            &[
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.body_cache_key.clone()),
+                Value::Text(input.origin_node_id.clone()),
+                Value::Text(input.origin_workspace_id.clone()),
+                Value::Text(input.logical_memory_id.clone()),
+                Value::Text(input.content_hash.clone()),
+                input
+                    .body_ref_json
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .preview_hash
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                size_bytes.map_or(Value::Null, Value::BigInt),
+                Value::Text(input.cache_status.clone()),
+                input
+                    .local_body_hash
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(cached_at),
+                input
+                    .expires_at
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+            ],
+        )?;
+        self.get_mesh_body_cache_metadata(&input.workspace_id, &input.body_cache_key)?
+            .ok_or_else(|| DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "mesh body cache metadata row could not be reloaded after upsert"
+                    .to_owned(),
+            })
+    }
+
+    /// Get one cached body metadata row.
+    pub fn get_mesh_body_cache_metadata(
+        &self,
+        workspace_id: &str,
+        body_cache_key: &str,
+    ) -> Result<Option<StoredMeshBodyCacheMetadata>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, body_cache_key, origin_node_id, origin_workspace_id,
+                    logical_memory_id, content_hash, body_ref_json, preview_hash,
+                    size_bytes, cache_status, local_body_hash, cached_at, expires_at
+             FROM mesh_body_cache_metadata
+             WHERE workspace_id = ?1 AND body_cache_key = ?2",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(body_cache_key.to_owned()),
+            ],
+        )?;
+        rows.first()
+            .map(stored_mesh_body_cache_metadata_from_row)
+            .transpose()
+    }
+
+    /// Return redaction-safe mesh storage posture counts for status surfaces.
+    pub fn mesh_storage_status(&self, workspace_id: &str) -> Result<MeshStorageStatus> {
+        Ok(MeshStorageStatus {
+            peer_count: self.count_mesh_rows("mesh_peers", workspace_id)?,
+            cursor_count: self.count_mesh_rows("mesh_peer_cursors", workspace_id)?,
+            imported_event_count: self.count_mesh_rows("mesh_import_ledger", workspace_id)?,
+            mapped_memory_count: self.count_mesh_rows("mesh_memory_mappings", workspace_id)?,
+            cached_body_count: self.count_mesh_rows("mesh_body_cache_metadata", workspace_id)?,
+        })
+    }
+
+    fn count_mesh_rows(&self, table_name: &str, workspace_id: &str) -> Result<u32> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            &format!("SELECT COUNT(*) FROM {table_name} WHERE workspace_id = ?1"),
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        required_u32(
+            rows.first().ok_or_else(|| DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: format!("mesh status count for {table_name} returned no rows"),
+            })?,
+            0,
+            DbOperation::Query,
+            "count",
+        )
     }
 
     /// Insert a learning observation ledger row idempotently.
@@ -7822,6 +8649,97 @@ fn stored_agent_context_profile_for_pack_from_row(
         ),
         last_seen_at: required_text(row, 4, DbOperation::Query, "last_seen_at")?.to_string(),
         weight_cached: required_f64(row, 5, DbOperation::Query, "weight_cached")?,
+    })
+}
+
+fn stored_mesh_peer_from_row(row: &Row) -> Result<StoredMeshPeer> {
+    Ok(StoredMeshPeer {
+        workspace_id: required_text(row, 0, DbOperation::Query, "workspace_id")?.to_string(),
+        peer_id: required_text(row, 1, DbOperation::Query, "peer_id")?.to_string(),
+        origin_node_id: required_text(row, 2, DbOperation::Query, "origin_node_id")?.to_string(),
+        display_name: optional_text(row, 3)?.map(str::to_string),
+        policy_summary_json: optional_text(row, 4)?.map(str::to_string),
+        enabled: required_sqlite_bool(row, 5, DbOperation::Query, "enabled")?,
+        last_seen_at: required_text(row, 6, DbOperation::Query, "last_seen_at")?.to_string(),
+    })
+}
+
+fn stored_mesh_peer_cursor_from_row(row: &Row) -> Result<StoredMeshPeerCursor> {
+    Ok(StoredMeshPeerCursor {
+        workspace_id: required_text(row, 0, DbOperation::Query, "workspace_id")?.to_string(),
+        peer_id: required_text(row, 1, DbOperation::Query, "peer_id")?.to_string(),
+        origin_node_id: required_text(row, 2, DbOperation::Query, "origin_node_id")?.to_string(),
+        origin_workspace_id: required_text(row, 3, DbOperation::Query, "origin_workspace_id")?
+            .to_string(),
+        last_seq: required_u64(row, 4, DbOperation::Query, "last_seq")?,
+        tip_event_hash: optional_text(row, 5)?.map(str::to_string),
+        tip_audit_hash: optional_text(row, 6)?.map(str::to_string),
+        status: required_text(row, 7, DbOperation::Query, "status")?.to_string(),
+        updated_at: required_text(row, 8, DbOperation::Query, "updated_at")?.to_string(),
+    })
+}
+
+fn stored_mesh_import_ledger_event_from_row(row: &Row) -> Result<StoredMeshImportLedgerEvent> {
+    Ok(StoredMeshImportLedgerEvent {
+        workspace_id: required_text(row, 0, DbOperation::Query, "workspace_id")?.to_string(),
+        event_id: required_text(row, 1, DbOperation::Query, "event_id")?.to_string(),
+        origin_node_id: required_text(row, 2, DbOperation::Query, "origin_node_id")?.to_string(),
+        origin_workspace_id: required_text(row, 3, DbOperation::Query, "origin_workspace_id")?
+            .to_string(),
+        producer_peer_id: optional_text(row, 4)?.map(str::to_string),
+        seq: required_u64(row, 5, DbOperation::Query, "seq")?,
+        prev_event_hash: optional_text(row, 6)?.map(str::to_string),
+        event_hash: required_text(row, 7, DbOperation::Query, "event_hash")?.to_string(),
+        event_kind: required_text(row, 8, DbOperation::Query, "event_kind")?.to_string(),
+        logical_memory_id: required_text(row, 9, DbOperation::Query, "logical_memory_id")?
+            .to_string(),
+        content_hash: required_text(row, 10, DbOperation::Query, "content_hash")?.to_string(),
+        material_lane: required_text(row, 11, DbOperation::Query, "material_lane")?.to_string(),
+        redaction_class: required_text(row, 12, DbOperation::Query, "redaction_class")?.to_string(),
+        trust_lane: required_text(row, 13, DbOperation::Query, "trust_lane")?.to_string(),
+        import_decision: required_text(row, 14, DbOperation::Query, "import_decision")?.to_string(),
+        local_memory_id: optional_text(row, 15)?.map(str::to_string),
+        body_cache_key: optional_text(row, 16)?.map(str::to_string),
+        event_json: required_text(row, 17, DbOperation::Query, "event_json")?.to_string(),
+        imported_at: required_text(row, 18, DbOperation::Query, "imported_at")?.to_string(),
+    })
+}
+
+fn stored_mesh_memory_mapping_from_row(row: &Row) -> Result<StoredMeshMemoryMapping> {
+    Ok(StoredMeshMemoryMapping {
+        workspace_id: required_text(row, 0, DbOperation::Query, "workspace_id")?.to_string(),
+        origin_node_id: required_text(row, 1, DbOperation::Query, "origin_node_id")?.to_string(),
+        origin_workspace_id: required_text(row, 2, DbOperation::Query, "origin_workspace_id")?
+            .to_string(),
+        logical_memory_id: required_text(row, 3, DbOperation::Query, "logical_memory_id")?
+            .to_string(),
+        local_memory_id: optional_text(row, 4)?.map(str::to_string),
+        latest_event_hash: required_text(row, 5, DbOperation::Query, "latest_event_hash")?
+            .to_string(),
+        content_hash: required_text(row, 6, DbOperation::Query, "content_hash")?.to_string(),
+        trust_lane: required_text(row, 7, DbOperation::Query, "trust_lane")?.to_string(),
+        redaction_class: required_text(row, 8, DbOperation::Query, "redaction_class")?.to_string(),
+        updated_at: required_text(row, 9, DbOperation::Query, "updated_at")?.to_string(),
+    })
+}
+
+fn stored_mesh_body_cache_metadata_from_row(row: &Row) -> Result<StoredMeshBodyCacheMetadata> {
+    Ok(StoredMeshBodyCacheMetadata {
+        workspace_id: required_text(row, 0, DbOperation::Query, "workspace_id")?.to_string(),
+        body_cache_key: required_text(row, 1, DbOperation::Query, "body_cache_key")?.to_string(),
+        origin_node_id: required_text(row, 2, DbOperation::Query, "origin_node_id")?.to_string(),
+        origin_workspace_id: required_text(row, 3, DbOperation::Query, "origin_workspace_id")?
+            .to_string(),
+        logical_memory_id: required_text(row, 4, DbOperation::Query, "logical_memory_id")?
+            .to_string(),
+        content_hash: required_text(row, 5, DbOperation::Query, "content_hash")?.to_string(),
+        body_ref_json: optional_text(row, 6)?.map(str::to_string),
+        preview_hash: optional_text(row, 7)?.map(str::to_string),
+        size_bytes: optional_u64(row, 8, DbOperation::Query, "size_bytes")?,
+        cache_status: required_text(row, 9, DbOperation::Query, "cache_status")?.to_string(),
+        local_body_hash: optional_text(row, 10)?.map(str::to_string),
+        cached_at: required_text(row, 11, DbOperation::Query, "cached_at")?.to_string(),
+        expires_at: optional_text(row, 12)?.map(str::to_string),
     })
 }
 
@@ -15680,6 +16598,26 @@ mod tests {
             table_names.contains(&"ee_advisory_locks"),
             "ee_advisory_locks table must exist",
         )?;
+        ensure(
+            table_names.contains(&"mesh_peers"),
+            "mesh_peers table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"mesh_peer_cursors"),
+            "mesh_peer_cursors table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"mesh_import_ledger"),
+            "mesh_import_ledger table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"mesh_memory_mappings"),
+            "mesh_memory_mappings table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"mesh_body_cache_metadata"),
+            "mesh_body_cache_metadata table must exist",
+        )?;
 
         connection.close()?;
         Ok(())
@@ -16765,6 +17703,38 @@ mod tests {
             "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_01234567890123456789012345', '/tmp/test', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
         )?;
         Ok(())
+    }
+
+    fn hash(ch: char) -> String {
+        format!("blake3:{}", ch.to_string().repeat(64))
+    }
+
+    fn mesh_import_event_input(
+        seq: u64,
+        event_hash: String,
+        content_hash: String,
+    ) -> super::InsertMeshImportLedgerEventInput {
+        super::InsertMeshImportLedgerEventInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            event_id: format!("mesh_evt_{seq:064x}"),
+            origin_node_id: "node_alpha_000001".to_string(),
+            origin_workspace_id: "wsp_remote_000001".to_string(),
+            producer_peer_id: Some("peer_alpha_000001".to_string()),
+            seq,
+            prev_event_hash: None,
+            event_hash,
+            event_kind: "create".to_string(),
+            logical_memory_id: "mem_remote_release_rule".to_string(),
+            content_hash,
+            material_lane: "metadata".to_string(),
+            redaction_class: "metadataOnly".to_string(),
+            trust_lane: "peerAgent".to_string(),
+            import_decision: "allow".to_string(),
+            local_memory_id: None,
+            body_cache_key: None,
+            event_json: r#"{"schema":"ee.mesh.event.v1","eventKind":"create"}"#.to_string(),
+            imported_at: Some("2026-05-16T15:22:00Z".to_string()),
+        }
     }
 
     fn seed_memory(connection: &DbConnection, memory_id: &str) -> TestResult {
@@ -18349,6 +19319,223 @@ mod tests {
             ),
             "cached weight beyond cap is rejected before storage",
         )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_storage_status_starts_empty_after_migration() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let status = connection.mesh_storage_status("wsp_01234567890123456789012345")?;
+        ensure_equal(&status.peer_count, &0, "mesh peer count")?;
+        ensure_equal(&status.cursor_count, &0, "mesh cursor count")?;
+        ensure_equal(
+            &status.imported_event_count,
+            &0,
+            "mesh imported event count",
+        )?;
+        ensure_equal(&status.mapped_memory_count, &0, "mesh mapped memory count")?;
+        ensure_equal(&status.cached_body_count, &0, "mesh cached body count")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_peers_and_cursors_upsert_by_peer_and_origin_workspace() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let peer = connection.upsert_mesh_peer(&super::UpsertMeshPeerInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            peer_id: "peer_alpha_000001".to_string(),
+            origin_node_id: "node_alpha_000001".to_string(),
+            display_name: Some("alpha".to_string()),
+            policy_summary_json: Some(r#"{"metadata":true,"body":false}"#.to_string()),
+            enabled: true,
+            last_seen_at: Some("2026-05-16T15:20:00Z".to_string()),
+        })?;
+        ensure_equal(&peer.enabled, &true, "peer enabled")?;
+        ensure_equal(
+            &peer.policy_summary_json,
+            &Some(r#"{"metadata":true,"body":false}"#.to_string()),
+            "peer policy summary",
+        )?;
+
+        let cursor = connection.upsert_mesh_peer_cursor(&super::UpsertMeshPeerCursorInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            peer_id: "peer_alpha_000001".to_string(),
+            origin_node_id: "node_alpha_000001".to_string(),
+            origin_workspace_id: "wsp_remote_000001".to_string(),
+            last_seq: 7,
+            tip_event_hash: Some(hash('a')),
+            tip_audit_hash: Some(hash('b')),
+            status: "behind".to_string(),
+            updated_at: Some("2026-05-16T15:21:00Z".to_string()),
+        })?;
+        ensure_equal(&cursor.last_seq, &7, "cursor seq")?;
+        ensure_equal(&cursor.status.as_str(), &"behind", "cursor status")?;
+
+        let updated = connection.upsert_mesh_peer_cursor(&super::UpsertMeshPeerCursorInput {
+            last_seq: 9,
+            status: "current".to_string(),
+            updated_at: Some("2026-05-16T15:22:00Z".to_string()),
+            ..super::UpsertMeshPeerCursorInput {
+                workspace_id: "wsp_01234567890123456789012345".to_string(),
+                peer_id: "peer_alpha_000001".to_string(),
+                origin_node_id: "node_alpha_000001".to_string(),
+                origin_workspace_id: "wsp_remote_000001".to_string(),
+                last_seq: 7,
+                tip_event_hash: Some(hash('a')),
+                tip_audit_hash: Some(hash('b')),
+                status: "behind".to_string(),
+                updated_at: Some("2026-05-16T15:21:00Z".to_string()),
+            }
+        })?;
+        ensure_equal(&updated.last_seq, &9, "cursor seq updates")?;
+        ensure_equal(
+            &updated.status.as_str(),
+            &"current",
+            "cursor status updates",
+        )?;
+
+        let status = connection.mesh_storage_status("wsp_01234567890123456789012345")?;
+        ensure_equal(&status.peer_count, &1, "one peer")?;
+        ensure_equal(&status.cursor_count, &1, "one cursor")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_import_ledger_is_idempotent_and_rejects_seq_hash_conflicts() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = mesh_import_event_input(1, hash('1'), hash('2'));
+        let first = connection.insert_mesh_import_ledger_event(&input)?;
+        let replay = connection.insert_mesh_import_ledger_event(&input)?;
+        ensure_equal(&first, &replay, "idempotent replay returns same row")?;
+
+        let conflicting = super::InsertMeshImportLedgerEventInput {
+            event_id: "mesh_evt_conflicting".to_string(),
+            event_hash: hash('3'),
+            content_hash: hash('4'),
+            ..input
+        };
+        let result = connection.insert_mesh_import_ledger_event(&conflicting);
+        ensure(
+            matches!(
+                result,
+                Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "same origin seq with different event/content hash must be rejected",
+        )?;
+
+        let rows = connection.list_mesh_import_ledger_events(
+            "wsp_01234567890123456789012345",
+            "node_alpha_000001",
+            "wsp_remote_000001",
+        )?;
+        ensure_equal(&rows.len(), &1_usize, "conflict preserves one ledger row")?;
+        ensure_equal(&rows[0].seq, &1, "ledger list ordered by seq")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_mapping_and_body_metadata_update_without_local_truth_masquerade() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        seed_memory(&connection, "mem_local_mesh_cache_000000001")?;
+
+        let mapping =
+            connection.upsert_mesh_memory_mapping(&super::UpsertMeshMemoryMappingInput {
+                workspace_id: "wsp_01234567890123456789012345".to_string(),
+                origin_node_id: "node_alpha_000001".to_string(),
+                origin_workspace_id: "wsp_remote_000001".to_string(),
+                logical_memory_id: "mem_remote_release_rule".to_string(),
+                local_memory_id: Some("mem_local_mesh_cache_000000001".to_string()),
+                latest_event_hash: hash('5'),
+                content_hash: hash('6'),
+                trust_lane: "peerAgent".to_string(),
+                redaction_class: "preview".to_string(),
+                updated_at: Some("2026-05-16T15:23:00Z".to_string()),
+            })?;
+        ensure_equal(
+            &mapping.trust_lane.as_str(),
+            &"peerAgent",
+            "peer trust lane",
+        )?;
+        ensure(
+            mapping.trust_lane != "localHuman",
+            "remote mapping must not masquerade as local human trust",
+        )?;
+
+        let updated =
+            connection.upsert_mesh_memory_mapping(&super::UpsertMeshMemoryMappingInput {
+                latest_event_hash: hash('7'),
+                content_hash: hash('8'),
+                redaction_class: "metadataOnly".to_string(),
+                updated_at: Some("2026-05-16T15:24:00Z".to_string()),
+                ..super::UpsertMeshMemoryMappingInput {
+                    workspace_id: "wsp_01234567890123456789012345".to_string(),
+                    origin_node_id: "node_alpha_000001".to_string(),
+                    origin_workspace_id: "wsp_remote_000001".to_string(),
+                    logical_memory_id: "mem_remote_release_rule".to_string(),
+                    local_memory_id: Some("mem_local_mesh_cache_000000001".to_string()),
+                    latest_event_hash: hash('5'),
+                    content_hash: hash('6'),
+                    trust_lane: "peerAgent".to_string(),
+                    redaction_class: "preview".to_string(),
+                    updated_at: Some("2026-05-16T15:23:00Z".to_string()),
+                }
+            })?;
+        ensure_equal(
+            &updated.content_hash,
+            &hash('8'),
+            "mapping content hash updates",
+        )?;
+        ensure_equal(
+            &updated.redaction_class.as_str(),
+            &"metadataOnly",
+            "mapping redaction updates",
+        )?;
+
+        let body = connection.upsert_mesh_body_cache_metadata(
+            &super::UpsertMeshBodyCacheMetadataInput {
+                workspace_id: "wsp_01234567890123456789012345".to_string(),
+                body_cache_key: "mesh-body-alpha-1".to_string(),
+                origin_node_id: "node_alpha_000001".to_string(),
+                origin_workspace_id: "wsp_remote_000001".to_string(),
+                logical_memory_id: "mem_remote_release_rule".to_string(),
+                content_hash: hash('8'),
+                body_ref_json: Some(r#"{"kind":"remoteAvailable","sizeBytes":128}"#.to_string()),
+                preview_hash: Some(hash('9')),
+                size_bytes: Some(128),
+                cache_status: "available".to_string(),
+                local_body_hash: Some(hash('a')),
+                cached_at: Some("2026-05-16T15:25:00Z".to_string()),
+                expires_at: Some("2026-05-17T15:25:00Z".to_string()),
+            },
+        )?;
+        ensure_equal(&body.cache_status.as_str(), &"available", "body status")?;
+        ensure_equal(&body.size_bytes, &Some(128), "body size")?;
+
+        let status = connection.mesh_storage_status("wsp_01234567890123456789012345")?;
+        ensure_equal(&status.mapped_memory_count, &1, "one mapping")?;
+        ensure_equal(&status.cached_body_count, &1, "one body metadata row")?;
 
         connection.close()?;
         Ok(())
