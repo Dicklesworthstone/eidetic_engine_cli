@@ -14,6 +14,9 @@ use crate::core::curate::{
     CurateApplyReport, CurateCandidatesReport, CurateDispositionReport, CurateReviewReport,
     CurateValidateReport,
 };
+use crate::core::degraded_aggregation::{
+    AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
+};
 use crate::core::doctor::{
     DependencyBlockedFeature, DependencyContractEntry, DependencyDiagnosticsReport,
     DependencyFeatureProfile, DependencyOptionalFeatureProfile, DependencySource, DoctorReport,
@@ -42,10 +45,10 @@ use crate::models::{
     RESPONSE_SCHEMA_V0, RESPONSE_SCHEMA_V1, RecoveryAction, RecoveryKind,
 };
 use crate::pack::{
-    ConflictEntry, ConsensusEntry, ConsensusProducer, ContextResponse, PackAdvisoryBanner,
-    PackAdvisoryNote, PackAssemblySlo, PackItemProvenance, PackOmission, PackOmissionMetrics,
-    PackQualityMetrics, PackSectionMetric, PackSelectedItem, PackSelectionAudit, PackSelectionStep,
-    RenderedPackProvenance,
+    ConflictEntry, ConsensusEntry, ConsensusProducer, ContextResponse, ContextResponseDegradation,
+    ContextResponseSeverity, PackAdvisoryBanner, PackAdvisoryNote, PackAssemblySlo,
+    PackItemProvenance, PackOmission, PackOmissionMetrics, PackQualityMetrics, PackSectionMetric,
+    PackSelectedItem, PackSelectionAudit, PackSelectionStep, RenderedPackProvenance,
 };
 use crate::steward::{
     MAINTENANCE_JOB_LIST_SCHEMA_V1, MAINTENANCE_JOB_ROW_SCHEMA_V1, MAINTENANCE_JOB_SHOW_SCHEMA_V1,
@@ -2167,7 +2170,8 @@ pub fn render_context_response_json_with_options(
                     build_pack_assembly_slo(slo_obj, slo);
                 });
             }
-            let advisory_banner = response.data.advisory_banner();
+            let advisory_response = context_response_with_aggregated_degraded(response);
+            let advisory_banner = advisory_response.data.advisory_banner();
             pack.field_object("advisoryBanner", |banner| {
                 build_pack_advisory_banner(banner, &advisory_banner);
             });
@@ -2384,23 +2388,16 @@ pub fn render_context_response_json_with_options(
         // workspace-state conditions are filtered out unless the
         // caller passes --include-non-affecting-degradations
         // (options.include_non_affecting_degradations).
-        let filtered_degraded: Vec<&crate::pack::ContextResponseDegradation> = response
+        let filtered_degraded = response
             .data
             .degraded
             .iter()
             .filter(|d| {
                 options.include_non_affecting_degradations
                     || d.category().included_by_default()
-            })
-            .collect();
-        d.field_array_of_objects("degraded", &filtered_degraded, |obj, degraded| {
-            obj.field_str("code", &degraded.code);
-            obj.field_str("severity", degraded.severity.as_str());
-            obj.field_str("message", &degraded.message);
-            if let Some(repair) = &degraded.repair {
-                obj.field_str("repair", repair);
-            }
-        });
+            });
+        let degraded = aggregate_context_degraded(filtered_degraded);
+        d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     });
     b.finish()
 }
@@ -2465,7 +2462,8 @@ pub fn render_context_response_human(response: &ContextResponse) -> String {
         context_pack_hash(response)
     ));
 
-    let advisory_banner = response.data.advisory_banner();
+    let advisory_response = context_response_with_aggregated_degraded(response);
+    let advisory_banner = advisory_response.data.advisory_banner();
     output.push_str(&format!(
         "Advisory: {} — {}\n\n",
         advisory_banner.status.as_str(),
@@ -2499,13 +2497,15 @@ pub fn render_context_response_human(response: &ContextResponse) -> String {
         }
     }
 
-    if !response.data.degraded.is_empty() {
+    let degraded = aggregate_context_degraded(response.data.degraded.iter());
+    if !degraded.is_empty() {
         output.push_str("\nDegraded:\n");
-        for d in &response.data.degraded {
-            output.push_str(&format!("  [{}] {}\n", d.severity.as_str(), d.message));
-            if let Some(repair) = &d.repair {
-                output.push_str(&format!("    Next: {repair}\n"));
+        for d in &degraded {
+            output.push_str(&format!("  [{}] {}\n", d.severity, d.message));
+            if !d.repair.is_empty() {
+                output.push_str(&format!("    Next: {}\n", d.repair));
             }
+            output.push_str(&format!("    Sources: {}\n", d.sources.join(", ")));
         }
     }
 
@@ -2564,7 +2564,8 @@ pub fn render_context_response_jsonl(response: &ContextResponse) -> String {
         "skippedTotal",
         &response.data.pack.skipped_total().to_string(),
     );
-    footer.field_raw("degradedCount", &response.data.degraded.len().to_string());
+    let degraded = aggregate_context_degraded(response.data.degraded.iter());
+    footer.field_raw("degradedCount", &degraded.len().to_string());
     lines.push(footer.finish());
 
     lines.join("\n")
@@ -2602,20 +2603,13 @@ pub fn render_context_response_hook(response: &ContextResponse) -> String {
     // by. Hook callers that need the verbose surface should pipe the
     // raw `ee context --json --include-non-affecting-degradations`
     // instead of the hook envelope.
-    let filtered_hook_degraded: Vec<&crate::pack::ContextResponseDegradation> = response
+    let filtered_hook_degraded = response
         .data
         .degraded
         .iter()
-        .filter(|d| d.category().included_by_default())
-        .collect();
-    b.field_array_of_objects("degraded", &filtered_hook_degraded, |obj, degraded| {
-        obj.field_str("code", &degraded.code);
-        obj.field_str("severity", degraded.severity.as_str());
-        obj.field_str("message", &degraded.message);
-        if let Some(repair) = &degraded.repair {
-            obj.field_str("repair", repair);
-        }
-    });
+        .filter(|d| d.category().included_by_default());
+    let degraded = aggregate_context_degraded(filtered_hook_degraded);
+    b.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     b.finish()
 }
 
@@ -2666,11 +2660,94 @@ pub fn render_context_response_mermaid(response: &ContextResponse) -> String {
 /// pack section, with provenance and why explanations preserved.
 #[must_use]
 pub fn render_context_response_markdown(response: &ContextResponse) -> String {
-    crate::pack::render_context_response_markdown(response)
+    let aggregated_response = context_response_with_aggregated_degraded(response);
+    crate::pack::render_context_response_markdown(&aggregated_response)
 }
 
 fn context_pack_hash(response: &ContextResponse) -> &str {
     response.data.pack.hash.as_deref().unwrap_or("absent")
+}
+
+fn context_response_with_aggregated_degraded(response: &ContextResponse) -> ContextResponse {
+    let mut aggregated_response = response.clone();
+    aggregated_response.data.degraded =
+        aggregate_context_degraded_as_response(response.data.degraded.iter());
+    aggregated_response
+}
+
+fn aggregate_context_degraded<'a, I>(degraded: I) -> Vec<AggregatedDegradation>
+where
+    I: IntoIterator<Item = &'a ContextResponseDegradation>,
+{
+    aggregate_degraded_entries(degraded.into_iter().map(|entry| {
+        DegradationAggregationInput::new(
+            context_degradation_source(&entry.code),
+            entry.code.clone(),
+            entry.severity.as_str(),
+            entry.message.clone(),
+            entry.repair.clone().unwrap_or_default(),
+        )
+    }))
+}
+
+fn aggregate_context_degraded_as_response<'a, I>(degraded: I) -> Vec<ContextResponseDegradation>
+where
+    I: IntoIterator<Item = &'a ContextResponseDegradation>,
+{
+    aggregate_context_degraded(degraded)
+        .into_iter()
+        .filter_map(|entry| {
+            ContextResponseDegradation::new(
+                entry.code,
+                context_severity_from_str(&entry.severity),
+                entry.message,
+                (!entry.repair.is_empty()).then_some(entry.repair),
+            )
+            .ok()
+        })
+        .collect()
+}
+
+fn build_aggregated_degradation(obj: &mut JsonBuilder, degraded: &AggregatedDegradation) {
+    obj.field_str("code", &degraded.code);
+    obj.field_str("severity", &degraded.severity);
+    obj.field_str("message", &degraded.message);
+    if !degraded.repair.is_empty() {
+        obj.field_str("repair", &degraded.repair);
+    }
+    obj.field_raw(
+        "sources",
+        &string_array_json(degraded.sources.iter().map(String::as_str)),
+    );
+}
+
+fn context_degradation_source(code: &str) -> &'static str {
+    if matches!(code, "deprecated_alias" | "query_unknown_field") {
+        "request"
+    } else if code.starts_with("index_")
+        || code.starts_with("search_")
+        || code.contains("_recall")
+        || code.contains("_filtered")
+    {
+        "search"
+    } else if code.starts_with("pack_")
+        || code.starts_with("consensus_")
+        || code.starts_with("conflict_")
+    {
+        "pack"
+    } else {
+        "context"
+    }
+}
+
+fn context_severity_from_str(severity: &str) -> ContextResponseSeverity {
+    match severity {
+        "info" => ContextResponseSeverity::Info,
+        "low" | "warning" => ContextResponseSeverity::Low,
+        "medium" => ContextResponseSeverity::Medium,
+        "high" | "critical" => ContextResponseSeverity::High,
+        _ => ContextResponseSeverity::Info,
+    }
 }
 
 fn top_context_item_ids(response: &ContextResponse) -> String {

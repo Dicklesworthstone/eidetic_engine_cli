@@ -148,5 +148,9 @@ data:
       memoryCount: 2
       sourceCount: 2
       schemes[2]: cass-session,file
-  degraded[1]{code,severity,message,repair}:
-    renderer_parity_fixture,low,Renderer parity fixture warning.,No repair; this is a deterministic test fixture.
+  degraded[1]:
+    - code: renderer_parity_fixture
+      severity: low
+      message: Renderer parity fixture warning.
+      repair: No repair; this is a deterministic test fixture.
+      sources[1]: context

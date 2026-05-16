@@ -889,6 +889,13 @@ fn make_context_response_fixture() -> ContextResponse {
             Some("No repair; this is a deterministic test fixture.".to_owned()),
         )
         .expect("valid degradation fixture"),
+        ContextResponseDegradation::new(
+            "renderer_parity_fixture",
+            ContextResponseSeverity::Low,
+            "Renderer parity fixture warning.",
+            Some("No repair; this is a deterministic test fixture.".to_owned()),
+        )
+        .expect("valid duplicate degradation fixture"),
     ];
 
     ContextResponse::new(request, draft, degraded).expect("valid response fixture")
@@ -963,6 +970,37 @@ fn context_pack_full_renderer_matrix_honors_canonical_fields_and_omissions() -> 
             failures.join("\n"),
         ))
     }
+}
+
+#[test]
+fn context_pack_degraded_renderers_aggregate_duplicate_codes() -> TestResult {
+    let response = make_context_response_fixture();
+    if response.data.degraded.len() != 2 {
+        return Err("fixture should start with duplicate degraded codes".to_string());
+    }
+
+    let json = ee::output::render_context_response_json(&response);
+    let hook = ee::output::render_context_response_hook(&response);
+    let jsonl = ee::output::render_context_response_jsonl(&response);
+
+    if json.matches("\"code\":\"renderer_parity_fixture\"").count() != 1 {
+        return Err(format!("json degraded code was not aggregated: {json}"));
+    }
+    if !json.contains("\"sources\":[\"context\"]") {
+        return Err(format!(
+            "json degraded sources missing aggregation label: {json}"
+        ));
+    }
+    if hook.matches("\"code\":\"renderer_parity_fixture\"").count() != 1 {
+        return Err(format!("hook degraded code was not aggregated: {hook}"));
+    }
+    if !jsonl.contains("\"degradedCount\":1") {
+        return Err(format!(
+            "jsonl degradedCount should use aggregate count: {jsonl}"
+        ));
+    }
+
+    Ok(())
 }
 
 #[test]

@@ -18,6 +18,7 @@ Items:
 Degraded:
   [low] Renderer parity fixture warning.
     Next: No repair; this is a deterministic test fixture.
+    Sources: context
 
 Next:
   ee context --json "<query>"

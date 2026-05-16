@@ -65,13 +65,47 @@ pub struct AggregatedDegradation {
     pub sources: Vec<String>,
 }
 
+/// Owned input row for degraded aggregation.
+///
+/// Most status/graph surfaces use static [`DegradationReport`] rows,
+/// but renderers such as `ee context` carry owned strings. This type
+/// lets those renderers reuse the same aggregation algorithm without
+/// leaking strings or duplicating the rules.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DegradationAggregationInput {
+    pub source: String,
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    pub repair: String,
+}
+
+impl DegradationAggregationInput {
+    #[must_use]
+    pub fn new(
+        source: impl Into<String>,
+        code: impl Into<String>,
+        severity: impl Into<String>,
+        message: impl Into<String>,
+        repair: impl Into<String>,
+    ) -> Self {
+        Self {
+            source: source.into(),
+            code: code.into(),
+            severity: severity.into(),
+            message: message.into(),
+            repair: repair.into(),
+        }
+    }
+}
+
 struct AggregatedAccumulator {
-    code: &'static str,
-    severity: &'static str,
+    code: String,
+    severity: String,
     severity_rank: u8,
-    message: &'static str,
-    repair: &'static str,
-    sources: Vec<&'static str>,
+    message: String,
+    repair: String,
+    sources: Vec<String>,
 }
 
 /// Aggregate `(source, DegradationReport)` pairs into a deterministic
@@ -105,45 +139,63 @@ pub fn aggregate_degraded<I>(entries: I) -> Vec<AggregatedDegradation>
 where
     I: IntoIterator<Item = (&'static str, DegradationReport)>,
 {
-    let mut by_code: BTreeMap<&'static str, AggregatedAccumulator> = BTreeMap::new();
-    for (source, report) in entries {
+    aggregate_degraded_entries(entries.into_iter().map(|(source, report)| {
+        DegradationAggregationInput::new(
+            source,
+            report.code,
+            report.severity,
+            report.message,
+            report.repair,
+        )
+    }))
+}
+
+/// Aggregate owned degraded entries into a deterministic vector of
+/// [`AggregatedDegradation`].
+#[must_use]
+pub fn aggregate_degraded_entries<I>(entries: I) -> Vec<AggregatedDegradation>
+where
+    I: IntoIterator<Item = DegradationAggregationInput>,
+{
+    let mut by_code: BTreeMap<String, AggregatedAccumulator> = BTreeMap::new();
+    for report in entries {
         let acc = by_code
-            .entry(report.code)
+            .entry(report.code.clone())
             .or_insert_with(|| AggregatedAccumulator {
-                code: report.code,
-                severity: report.severity,
-                severity_rank: severity_rank_for(report.severity),
-                message: report.message,
-                repair: report.repair,
+                code: report.code.clone(),
+                severity: report.severity.clone(),
+                severity_rank: severity_rank_for(&report.severity),
+                message: report.message.clone(),
+                repair: report.repair.clone(),
                 sources: Vec::new(),
             });
-        let report_rank = severity_rank_for(report.severity);
+        let report_rank = severity_rank_for(&report.severity);
         if report_rank > acc.severity_rank {
-            acc.severity = report.severity;
+            acc.severity = report.severity.clone();
             acc.severity_rank = report_rank;
             // Use the message and repair from the highest-severity
             // emitter, since that one is the load-bearing one for
             // remediation. Lower-severity hints would otherwise
             // mask the urgent action.
-            acc.message = report.message;
-            acc.repair = report.repair;
+            acc.message = report.message.clone();
+            acc.repair = report.repair.clone();
         }
-        if !acc.sources.iter().any(|s| *s == source) {
-            acc.sources.push(source);
+        if !acc.sources.iter().any(|s| *s == report.source) {
+            acc.sources.push(report.source);
         }
     }
 
     let mut aggregates: Vec<AggregatedDegradation> = by_code
         .into_iter()
         .map(|(_, acc)| {
-            let mut sources: Vec<String> = acc.sources.into_iter().map(str::to_owned).collect();
+            let mut sources = acc.sources;
             sources.sort_unstable();
             sources.dedup();
             AggregatedDegradation {
-                code: acc.code.to_owned(),
-                severity: acc.severity.to_owned(),
-                message: acc.message.to_owned(),
-                repair: acc.repair.to_owned(),
+                code: acc.code,
+                severity: acc.severity,
+                message: acc.message,
+                repair: acc.repair,
                 sources,
             }
         })

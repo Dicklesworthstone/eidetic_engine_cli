@@ -71,6 +71,10 @@ Current conventions:
 | `knowledgeSkyline` | `ee insights --section knowledgeSkyline` degradation. |
 | `loadBearingMemories` | `ee insights --section loadBearingMemories` degradation. |
 | `revisionFrontiers` | `ee insights --section revisionFrontiers` degradation. |
+| `context` | General `ee context` response degradation without a narrower subsystem owner. |
+| `pack` | Context pack assembly, advisory, consensus, or conflict degradation. |
+| `request` | Request parsing, compatibility, or ignored-query-field degradation. |
+| `search` | Search, index, recall, filtering, or visibility degradation carried into context output. |
 
 When adding a new renderer, prefer the most specific stable section, command,
 or algorithm label available. Do not include workspace paths, query text, or
