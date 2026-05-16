@@ -18,6 +18,7 @@ use std::time::Instant;
 use ee::core::swarm_brief::{
     SwarmBriefCommandError, SystemSwarmBriefCommandRunner, WorkspaceGitSnapshotOptions,
     WorkspaceGitStatusEntry, collect_workspace_git_snapshot,
+    parse_workspace_git_status_porcelain_v2,
 };
 use serde_json::{Value, json};
 
@@ -209,6 +210,26 @@ fn entry_by_path<'a>(
         .iter()
         .find(|entry| entry.path == path)
         .ok_or_else(|| format!("missing git snapshot entry for {path}: {entries:#?}"))
+}
+
+#[test]
+fn workspace_git_porcelain_v2_parser_preserves_copied_paths() -> TestResult {
+    let entries = parse_workspace_git_status_porcelain_v2(
+        "2 C. N... 100644 100644 100644 abc def C100 src/copy.rs\tsrc/source.rs\n",
+    );
+
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected one copied-path entry: {entries:#?}"
+    );
+    let copied = entry_by_path(&entries, "src/copy.rs")?;
+    assert_eq!(copied.entry_kind, "renamed_or_copied");
+    assert_eq!(copied.original_path.as_deref(), Some("src/source.rs"));
+    assert_eq!(copied.staged, "C");
+    assert_eq!(copied.unstaged, ".");
+
+    Ok(())
 }
 
 #[test]
