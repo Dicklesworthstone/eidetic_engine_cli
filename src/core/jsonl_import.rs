@@ -771,6 +771,14 @@ fn validate_header_and_footer(parsed: &mut ParsedJsonlImport, first_schema: Opti
         )),
     }
 
+    if parsed.footer.is_none() {
+        parsed.issues.push(JsonlImportIssue::error(
+            None,
+            "missing_footer",
+            "JSONL import requires an ee.export.footer.v1 footer record",
+        ));
+    }
+
     if let Some((line, schema)) = first_schema {
         if schema != EXPORT_HEADER_SCHEMA_V1 {
             parsed.issues.push(JsonlImportIssue::error(
@@ -1288,6 +1296,27 @@ mod tests {
                 .any(|issue| issue.code == "missing_header"),
             true,
             "missing header issue",
+        )
+    }
+
+    #[test]
+    fn parse_jsonl_source_rejects_missing_footer() -> TestResult {
+        let input = sample_jsonl()
+            .lines()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed = parse_jsonl_source(&input);
+
+        ensure(parsed.has_errors(), true, "has errors")?;
+        ensure(parsed.footer.is_none(), true, "footer absent")?;
+        ensure(
+            parsed
+                .issues
+                .iter()
+                .any(|issue| issue.code == "missing_footer"),
+            true,
+            "missing footer issue",
         )
     }
 
