@@ -1353,7 +1353,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use proptest::test_runner::{Config as ProptestConfig, TestCaseError};
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
     #[derive(Clone, Debug)]
     struct ScheduledSpoolWrite {
@@ -1379,6 +1379,520 @@ mod tests {
                     cancel_before_drain,
                 }
             },
+        )
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Srr3CancellationPoint {
+        None,
+        BeforeEnqueue,
+        AfterEnqueueBeforeCommit,
+        DuringBatchAssembly,
+        AfterCommit,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Srr3ScheduledWrite {
+        producer_id: u8,
+        kind: WriteSpoolIntentKind,
+        payload_bytes: usize,
+        cancellation_point: Srr3CancellationPoint,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Srr3PropertySchedule {
+        max_batch_size: usize,
+        writes: Vec<Srr3ScheduledWrite>,
+        fsync_failure_batches: BTreeSet<u64>,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct Srr3WriteMetadata {
+        producer_id: u8,
+        producer_sequence: u16,
+        kind: WriteSpoolIntentKind,
+        payload_bytes: usize,
+        cancellation_point: Srr3CancellationPoint,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct Srr3DurableRow {
+        request_id: u64,
+        producer_id: u8,
+        producer_sequence: u16,
+        batch_id: u64,
+        kind: WriteSpoolIntentKind,
+        payload_bytes: usize,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct Srr3ModeledResult {
+        durable_rows: Vec<Srr3DurableRow>,
+        audit_chain_hashes: Vec<String>,
+        published_snapshots: Vec<u64>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Srr3ReferenceRecord {
+        request_id: u64,
+        metadata: Srr3WriteMetadata,
+        durability: WriteSpoolDurability,
+        audit_subject: String,
+        status: WriteSpoolRecordStatus,
+        batch_id: Option<u64>,
+    }
+
+    impl Srr3ReferenceRecord {
+        fn kind(&self) -> WriteSpoolIntentKind {
+            self.metadata.kind
+        }
+    }
+
+    fn srr3_property_schedule_strategy() -> impl Strategy<Value = Srr3PropertySchedule> {
+        (1_u8..=32, 0_usize..=1000, 1_usize..=64).prop_flat_map(
+            |(producer_count, write_count, max_batch_size)| {
+                let write = (0_u8..producer_count, 0_u8..4, 1_usize..256, 0_u8..5).prop_map(
+                    |(producer_id, kind_index, payload_bytes, cancellation_index)| {
+                        let kind = match kind_index {
+                            0 => WriteSpoolIntentKind::Remember,
+                            1 => WriteSpoolIntentKind::Outcome,
+                            2 => WriteSpoolIntentKind::Import,
+                            _ => WriteSpoolIntentKind::Recorder,
+                        };
+                        let cancellation_point = match cancellation_index {
+                            0 => Srr3CancellationPoint::None,
+                            1 => Srr3CancellationPoint::BeforeEnqueue,
+                            2 => Srr3CancellationPoint::AfterEnqueueBeforeCommit,
+                            3 => Srr3CancellationPoint::DuringBatchAssembly,
+                            _ => Srr3CancellationPoint::AfterCommit,
+                        };
+                        Srr3ScheduledWrite {
+                            producer_id,
+                            kind,
+                            payload_bytes,
+                            cancellation_point,
+                        }
+                    },
+                );
+
+                (
+                    prop::collection::vec(write, write_count),
+                    prop::collection::btree_set(1_u64..=1000, 0..32),
+                )
+                    .prop_map(move |(writes, fsync_failure_batches)| {
+                        Srr3PropertySchedule {
+                            max_batch_size,
+                            writes,
+                            fsync_failure_batches,
+                        }
+                    })
+            },
+        )
+    }
+
+    fn srr3_intent(
+        kind: WriteSpoolIntentKind,
+        producer_id: u8,
+        producer_sequence: u16,
+        payload_bytes: usize,
+    ) -> WriteSpoolIntent {
+        WriteSpoolIntent::new(
+            kind,
+            "workspace",
+            format!("p{producer_id:02}-s{producer_sequence:04}"),
+            payload_bytes,
+        )
+    }
+
+    fn srr3_audit_chain_hash(
+        previous: &str,
+        batch_id: u64,
+        outcome: &str,
+        request_ids: &[u64],
+        audit_subjects: &[String],
+    ) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(previous.as_bytes());
+        hasher.update(&batch_id.to_be_bytes());
+        hasher.update(outcome.as_bytes());
+        for request_id in request_ids {
+            hasher.update(&request_id.to_be_bytes());
+        }
+        for audit_subject in audit_subjects {
+            hasher.update(audit_subject.as_bytes());
+            hasher.update(b"\0");
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
+    fn srr3_outcome(
+        failed: bool,
+        committed_count: usize,
+        cancelled_count: usize,
+        row_count: usize,
+    ) -> &'static str {
+        if failed {
+            "failed"
+        } else if committed_count > 0 {
+            "committed"
+        } else if cancelled_count == row_count {
+            "cancelled"
+        } else {
+            "empty"
+        }
+    }
+
+    fn srr3_batch_key_matches(
+        record: &Srr3ReferenceRecord,
+        workspace_id: &str,
+        kind: WriteSpoolIntentKind,
+        durability: WriteSpoolDurability,
+    ) -> bool {
+        record.status == WriteSpoolRecordStatus::Pending
+            && record.kind() == kind
+            && record.durability == durability
+            && workspace_id == "workspace"
+    }
+
+    fn srr3_durable_rows_from_reference(records: &[Srr3ReferenceRecord]) -> Vec<Srr3DurableRow> {
+        records
+            .iter()
+            .filter(|record| record.status == WriteSpoolRecordStatus::Committed)
+            .filter_map(|record| {
+                Some(Srr3DurableRow {
+                    request_id: record.request_id,
+                    producer_id: record.metadata.producer_id,
+                    producer_sequence: record.metadata.producer_sequence,
+                    batch_id: record.batch_id?,
+                    kind: record.metadata.kind,
+                    payload_bytes: record.metadata.payload_bytes,
+                })
+            })
+            .collect()
+    }
+
+    fn srr3_durable_rows_from_spool(
+        records: &[WriteSpoolRecord],
+        metadata: &BTreeMap<u64, Srr3WriteMetadata>,
+    ) -> Vec<Srr3DurableRow> {
+        records
+            .iter()
+            .filter(|record| record.status == WriteSpoolRecordStatus::Committed)
+            .filter_map(|record| {
+                let metadata = metadata.get(&record.request_id)?;
+                Some(Srr3DurableRow {
+                    request_id: record.request_id,
+                    producer_id: metadata.producer_id,
+                    producer_sequence: metadata.producer_sequence,
+                    batch_id: record.batch_id?,
+                    kind: metadata.kind,
+                    payload_bytes: metadata.payload_bytes,
+                })
+            })
+            .collect()
+    }
+
+    fn interpret_srr3_reference(schedule: &Srr3PropertySchedule) -> Srr3ModeledResult {
+        let mut producer_sequences = BTreeMap::<u8, u16>::new();
+        let mut records = Vec::<Srr3ReferenceRecord>::new();
+        let mut pending_order = VecDeque::<u64>::new();
+        let mut next_request_id = 1_u64;
+
+        for write in &schedule.writes {
+            let sequence = producer_sequences.entry(write.producer_id).or_default();
+            let producer_sequence = *sequence;
+            *sequence = sequence.saturating_add(1);
+
+            if write.cancellation_point == Srr3CancellationPoint::BeforeEnqueue {
+                continue;
+            }
+
+            let intent = srr3_intent(
+                write.kind,
+                write.producer_id,
+                producer_sequence,
+                write.payload_bytes,
+            );
+            let request_id = next_request_id;
+            next_request_id = next_request_id.saturating_add(1);
+            let metadata = Srr3WriteMetadata {
+                producer_id: write.producer_id,
+                producer_sequence,
+                kind: write.kind,
+                payload_bytes: write.payload_bytes,
+                cancellation_point: write.cancellation_point,
+            };
+            records.push(Srr3ReferenceRecord {
+                request_id,
+                metadata,
+                durability: intent.durability,
+                audit_subject: intent.audit_subject,
+                status: WriteSpoolRecordStatus::Pending,
+                batch_id: None,
+            });
+            pending_order.push_back(request_id);
+
+            if write.cancellation_point == Srr3CancellationPoint::AfterEnqueueBeforeCommit {
+                pending_order.retain(|queued_id| *queued_id != request_id);
+                if let Some(record) = records
+                    .iter_mut()
+                    .find(|record| record.request_id == request_id)
+                {
+                    record.status = WriteSpoolRecordStatus::Cancelled;
+                }
+            }
+        }
+
+        let mut next_batch_id = 1_u64;
+        let mut audit_chain_hashes = Vec::<String>::new();
+        let mut previous_audit_hash = String::new();
+        let mut published_snapshots = Vec::<u64>::new();
+        let mut snapshot_generation = 0_u64;
+
+        while let Some(first_id) = pending_order.pop_front() {
+            let Some(first) = records
+                .iter()
+                .find(|record| {
+                    record.request_id == first_id
+                        && record.status == WriteSpoolRecordStatus::Pending
+                })
+                .cloned()
+            else {
+                continue;
+            };
+
+            let mut selected = vec![first_id];
+            if first.durability == WriteSpoolDurability::Batched {
+                let mut retained = VecDeque::with_capacity(pending_order.len());
+                while let Some(request_id) = pending_order.pop_front() {
+                    let should_batch = selected.len() < schedule.max_batch_size.max(1)
+                        && records
+                            .iter()
+                            .find(|record| record.request_id == request_id)
+                            .is_some_and(|record| {
+                                srr3_batch_key_matches(
+                                    record,
+                                    "workspace",
+                                    first.kind(),
+                                    first.durability,
+                                )
+                            });
+                    if should_batch {
+                        selected.push(request_id);
+                    } else {
+                        retained.push_back(request_id);
+                    }
+                }
+                pending_order = retained;
+            }
+
+            let batch_id = next_batch_id;
+            next_batch_id = next_batch_id.saturating_add(1);
+            let mut audit_subjects = Vec::with_capacity(selected.len());
+            for request_id in &selected {
+                if let Some(record) = records
+                    .iter_mut()
+                    .find(|record| record.request_id == *request_id)
+                {
+                    record.batch_id = Some(batch_id);
+                    audit_subjects.push(record.audit_subject.clone());
+                    if record.metadata.cancellation_point
+                        == Srr3CancellationPoint::DuringBatchAssembly
+                    {
+                        record.status = WriteSpoolRecordStatus::Cancelled;
+                    }
+                }
+            }
+
+            let failed = schedule.fsync_failure_batches.contains(&batch_id)
+                && selected.iter().any(|request_id| {
+                    records.iter().any(|record| {
+                        record.request_id == *request_id
+                            && record.status == WriteSpoolRecordStatus::Pending
+                    })
+                });
+            let mut committed_count = 0_usize;
+            let mut cancelled_count = 0_usize;
+            for request_id in &selected {
+                let Some(record) = records
+                    .iter_mut()
+                    .find(|record| record.request_id == *request_id)
+                else {
+                    continue;
+                };
+                match record.status {
+                    WriteSpoolRecordStatus::Pending if failed => {
+                        record.status = WriteSpoolRecordStatus::Failed;
+                    }
+                    WriteSpoolRecordStatus::Pending => {
+                        record.status = WriteSpoolRecordStatus::Committed;
+                        committed_count = committed_count.saturating_add(1);
+                    }
+                    WriteSpoolRecordStatus::Cancelled => {
+                        cancelled_count = cancelled_count.saturating_add(1);
+                    }
+                    WriteSpoolRecordStatus::Committed | WriteSpoolRecordStatus::Failed => {}
+                }
+            }
+
+            let outcome = srr3_outcome(failed, committed_count, cancelled_count, selected.len());
+            previous_audit_hash = srr3_audit_chain_hash(
+                &previous_audit_hash,
+                batch_id,
+                outcome,
+                &selected,
+                &audit_subjects,
+            );
+            audit_chain_hashes.push(previous_audit_hash.clone());
+
+            if committed_count > 0 {
+                snapshot_generation = snapshot_generation.saturating_add(1);
+                published_snapshots.push(snapshot_generation);
+            }
+        }
+
+        Srr3ModeledResult {
+            durable_rows: srr3_durable_rows_from_reference(&records),
+            audit_chain_hashes,
+            published_snapshots,
+        }
+    }
+
+    fn interpret_srr3_write_spool(schedule: &Srr3PropertySchedule) -> Srr3ModeledResult {
+        let mut spool = WriteSpool::new(
+            WriteSpoolConfig::new(
+                schedule.writes.len().max(1),
+                schedule.max_batch_size,
+                usize::MAX / 4,
+                30_000,
+            ),
+            0,
+        );
+        let mut producer_sequences = BTreeMap::<u8, u16>::new();
+        let mut metadata = BTreeMap::<u64, Srr3WriteMetadata>::new();
+
+        for (arrival_index, write) in schedule.writes.iter().enumerate() {
+            let sequence = producer_sequences.entry(write.producer_id).or_default();
+            let producer_sequence = *sequence;
+            *sequence = sequence.saturating_add(1);
+
+            if write.cancellation_point == Srr3CancellationPoint::BeforeEnqueue {
+                continue;
+            }
+
+            let ticket = spool
+                .enqueue(
+                    srr3_intent(
+                        write.kind,
+                        write.producer_id,
+                        producer_sequence,
+                        write.payload_bytes,
+                    ),
+                    u64::try_from(arrival_index).unwrap_or(u64::MAX),
+                )
+                .expect("generated SRR3 schedule should fit configured spool budgets");
+            metadata.insert(
+                ticket.request_id,
+                Srr3WriteMetadata {
+                    producer_id: write.producer_id,
+                    producer_sequence,
+                    kind: write.kind,
+                    payload_bytes: write.payload_bytes,
+                    cancellation_point: write.cancellation_point,
+                },
+            );
+
+            if write.cancellation_point == Srr3CancellationPoint::AfterEnqueueBeforeCommit {
+                assert!(spool.cancel_pending(
+                    ticket.request_id,
+                    u64::try_from(arrival_index.saturating_add(1_000)).unwrap_or(u64::MAX),
+                ));
+            }
+        }
+
+        let mut audit_chain_hashes = Vec::<String>::new();
+        let mut previous_audit_hash = String::new();
+        let mut published_snapshots = Vec::<u64>::new();
+        let mut snapshot_generation = 0_u64;
+
+        while let Some(batch) = spool.next_batch() {
+            for request_id in &batch.request_ids {
+                if metadata.get(request_id).is_some_and(|metadata| {
+                    metadata.cancellation_point == Srr3CancellationPoint::DuringBatchAssembly
+                }) {
+                    assert!(spool.cancel_pending(*request_id, 20_000 + batch.batch_id));
+                }
+            }
+
+            let failed = schedule.fsync_failure_batches.contains(&batch.batch_id)
+                && batch.request_ids.iter().any(|request_id| {
+                    spool
+                        .record(*request_id)
+                        .is_some_and(|record| record.status == WriteSpoolRecordStatus::Pending)
+                });
+            let committed_count = if failed {
+                spool.mark_batch_failed(batch.batch_id, 30_000 + batch.batch_id, "fsync")
+            } else {
+                spool.mark_batch_committed(batch.batch_id, 30_000 + batch.batch_id)
+            };
+            let cancelled_count = batch
+                .request_ids
+                .iter()
+                .filter(|request_id| {
+                    spool
+                        .record(**request_id)
+                        .is_some_and(|record| record.status == WriteSpoolRecordStatus::Cancelled)
+                })
+                .count();
+
+            for request_id in &batch.request_ids {
+                if metadata.get(request_id).is_some_and(|metadata| {
+                    metadata.cancellation_point == Srr3CancellationPoint::AfterCommit
+                }) {
+                    let _ = spool.cancel_pending(*request_id, 40_000 + batch.batch_id);
+                }
+            }
+
+            let outcome = srr3_outcome(
+                failed,
+                committed_count,
+                cancelled_count,
+                batch.request_ids.len(),
+            );
+            previous_audit_hash = srr3_audit_chain_hash(
+                &previous_audit_hash,
+                batch.batch_id,
+                outcome,
+                &batch.request_ids,
+                &batch.audit_subjects,
+            );
+            audit_chain_hashes.push(previous_audit_hash.clone());
+
+            if committed_count > 0 {
+                snapshot_generation = snapshot_generation.saturating_add(1);
+                published_snapshots.push(snapshot_generation);
+            }
+        }
+
+        Srr3ModeledResult {
+            durable_rows: srr3_durable_rows_from_spool(&spool.recovery_records(), &metadata),
+            audit_chain_hashes,
+            published_snapshots,
+        }
+    }
+
+    fn srr3_failure_context(
+        schedule: &Srr3PropertySchedule,
+        expected: &Srr3ModeledResult,
+        actual: &Srr3ModeledResult,
+    ) -> String {
+        format!(
+            "schedule writes={} max_batch_size={} fsync_failures={:?}\nexpected={:#?}\nactual={:#?}",
+            schedule.writes.len(),
+            schedule.max_batch_size,
+            schedule.fsync_failure_batches,
+            expected,
+            actual
         )
     }
 
@@ -2084,6 +2598,29 @@ mod tests {
             schedule in prop::collection::vec(scheduled_spool_write_strategy(), 0..64),
         ) {
             assert_write_spool_schedule_invariants(&schedule)?;
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(16))]
+
+        #[test]
+        fn srr3_property_generators_match_reference_interpreter(
+            schedule in srr3_property_schedule_strategy(),
+        ) {
+            let expected = interpret_srr3_reference(&schedule);
+            let actual = interpret_srr3_write_spool(&schedule);
+            prop_assert_eq!(
+                &actual,
+                &expected,
+                "{}",
+                srr3_failure_context(&schedule, &expected, &actual)
+            );
+            prop_assert!(
+                actual.published_snapshots.windows(2).all(|window| window[0] < window[1]),
+                "published snapshots must be monotone: {}",
+                srr3_failure_context(&schedule, &expected, &actual)
+            );
         }
     }
 }
