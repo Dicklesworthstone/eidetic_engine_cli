@@ -848,7 +848,20 @@ pub fn decide_mesh_peer_policy(
         );
     }
 
-    if input.material_lane == MeshLane::Body || input.requested_body_bytes.is_some() {
+    if input.requested_body_bytes.is_some() && input.material_lane != MeshLane::Body {
+        return mesh_peer_policy_decision(
+            &import_input,
+            policy_id,
+            MeshImportDecisionKind::Deny,
+            "body_fetch_requires_body_lane",
+            Some(policy.trust_lane),
+            Some(policy.import_trust_class),
+            MeshRedactionDecision::Deny,
+            false,
+        );
+    }
+
+    if input.material_lane == MeshLane::Body {
         if !policy.body_fetch.allowed {
             return mesh_peer_policy_decision(
                 &import_input,
@@ -1714,6 +1727,31 @@ mod tests {
             MeshImportDecisionKind::Deny
         );
         assert_eq!(size_decision.import.reason, "body_fetch_too_large");
+    }
+
+    #[test]
+    fn mesh_peer_policy_rejects_body_fetch_smuggled_through_metadata_lane() {
+        let mut policy = peer_policy();
+        policy.allowed_lanes.body = Some(MeshLaneDecision::Allow);
+        policy.redaction.body = MeshRedactionDecision::Share;
+        policy.body_fetch = MeshBodyFetchPolicy {
+            allowed: true,
+            requires_consent: false,
+            max_bytes: Some(512),
+        };
+        let mut input = peer_policy_input(MeshLane::Metadata);
+        input.requested_body_bytes = Some(128);
+
+        let decision = decide_mesh_peer_policy(&input, Some(&policy));
+
+        assert_eq!(
+            decision.import.workspace_scope_decision,
+            MeshImportDecisionKind::Deny
+        );
+        assert_eq!(decision.import.reason, "body_fetch_requires_body_lane");
+        assert_eq!(decision.redaction, MeshRedactionDecision::Deny);
+        assert!(!decision.permits_body_fetch());
+        assert!(!decision.import.retains_payload());
     }
 
     #[test]
