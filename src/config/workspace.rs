@@ -1142,7 +1142,7 @@ pub fn discover_from_current_dir() -> Result<Option<WorkspaceLocation>, Workspac
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::io::Write;
+    use std::io::{self, Write};
     use std::path::{Path, PathBuf};
 
     use super::{

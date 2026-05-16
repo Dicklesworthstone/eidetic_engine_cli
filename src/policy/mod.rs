@@ -1948,6 +1948,7 @@ mod tests {
         TRUST_PROMOTION_EVIDENCE_REJECTED_CODE, detect_instruction_like_content,
         redact_secret_like_content, redaction_placeholder, subsystem_name,
         validate_trust_promotion_evidence, workspace_secret_risk_evidence,
+        workspace_secret_risk_overrides_safe_classification,
     };
 
     #[test]

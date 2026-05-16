@@ -204,7 +204,7 @@ mod tests {
 
     use super::{
         RedactionDefaultSurface, subsystem_name, trace_minhash_rank_centrality_config,
-        workspace_redaction_default,
+        workspace_output_redaction_enabled, workspace_redaction_default,
     };
     use crate::models::RedactionLevel;
 

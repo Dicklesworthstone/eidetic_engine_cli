@@ -4491,7 +4491,6 @@ memories_revised = 3
 
         ensure(
             error.to_string().contains("non-regular path"),
-            true,
             "non-regular capsule error",
         )
     }

@@ -38753,11 +38753,13 @@ mod tests {
         EconomyCommand, EffectiveRedactionLevel, FieldsLevel, FocusCommand,
         GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY,
         GraphCommand, GraphSnapshotCommand, HandoffCommand, HealthArgs, ImportCommand, JobCommand,
-        LearnCommand, LearnExperimentCommand, MaintenanceCommand, MemoryCommand,
-        OutcomeQuarantineCommand, OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand,
-        RedactionLevelSource, RuleCommand, SERVE_UNAVAILABLE_CODE, ShadowMode, SituationCommand,
-        StatusArgs, SwarmBriefArgs, SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand,
-        VerifyCommand, WorkflowCommand, decay_settings_from_config, run, write_index_rebuild_error,
+        LearnCommand, LearnExperimentCommand, MaintenanceCommand,
+        MaintenanceGraphWitnessesPruneArgs, MemoryCommand, OutcomeQuarantineCommand, OutputFormat,
+        PackCommand, PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, RuleCommand,
+        SERVE_UNAVAILABLE_CODE, ShadowMode, SituationCommand, StatusArgs, SupportCommand,
+        SwarmBriefArgs, SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand, VerifyCommand,
+        WorkflowCommand, decay_settings_from_config, load_maintenance_decay_settings,
+        load_witness_retention_policy, run, write_index_rebuild_error,
     };
     use crate::config::MeshCommandMode;
     use crate::core::index::IndexRebuildError;
