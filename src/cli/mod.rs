@@ -19913,7 +19913,7 @@ where
                         "reportSchema": report.schema,
                         "hubs": graph_score_map_json(&report.scores.hubs, args.limit),
                         "authorities": graph_score_map_json(&report.scores.authorities, args.limit),
-                        "degraded": report.degraded,
+                        "degraded": graph_hits_degraded_json(&report.degraded),
                     }),
                 );
                 write_graph_surface_data(cli, stdout, data)
@@ -21462,6 +21462,20 @@ fn graph_centrality_read_degraded_json(
             entry.severity,
             entry.message.clone(),
             entry.repair.clone(),
+        )
+    }))
+}
+
+fn graph_hits_degraded_json(
+    degraded: &[crate::graph::hits::HitsDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_cli_degraded_json(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "hits",
+            entry.code.as_str(),
+            entry.severity,
+            entry.message.as_str(),
+            entry.repair.as_deref().unwrap_or_default(),
         )
     }))
 }
@@ -44230,6 +44244,42 @@ default_half_life_days = 45
             &rendered[0]["sources"],
             &serde_json::json!(["graph_centrality_read"]),
             "source label",
+        )
+    }
+
+    #[test]
+    fn graph_hits_degraded_entries_are_aggregated() -> TestResult {
+        let degraded = vec![
+            crate::graph::hits::HitsDegradation {
+                code: "graph_hits_convergence_failure".to_string(),
+                severity: "low",
+                message: "HITS convergence witness unavailable.".to_string(),
+                repair: Some("ee graph snapshot refresh".to_string()),
+            },
+            crate::graph::hits::HitsDegradation {
+                code: "graph_hits_convergence_failure".to_string(),
+                severity: "warning",
+                message: "HITS reached the iteration cap before convergence.".to_string(),
+                repair: Some("ee graph snapshot refresh --workspace .".to_string()),
+            },
+        ];
+
+        let rendered = super::graph_hits_degraded_json(&degraded);
+        ensure_equal(&rendered.len(), &1, "aggregated HITS degradation count")?;
+        ensure_equal(
+            &rendered[0]["code"],
+            &serde_json::json!("graph_hits_convergence_failure"),
+            "aggregated HITS code",
+        )?;
+        ensure_equal(
+            &rendered[0]["severity"],
+            &serde_json::json!("warning"),
+            "HITS severity escalates",
+        )?;
+        ensure_equal(
+            &rendered[0]["sources"],
+            &serde_json::json!(["hits"]),
+            "HITS source label",
         )
     }
 
