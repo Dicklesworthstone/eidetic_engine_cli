@@ -140,6 +140,25 @@ pub mod audit_actions {
     pub const WHY_INSPECTED: &str = "why.inspected";
     /// A read surface redacted secret-like content before returning output.
     pub const REDACT_AT_OUTPUT: &str = "redact_at_output";
+
+    // ----------------------------------------------------------------------
+    // Mesh auto-enrollment actions (SRR6.46.5 / bd-36bbk.1.5).
+    //
+    // Both emitted on every attempted auto-enrollment so the audit timeline
+    // can reconstruct every materialized / dry-run / refused attempt:
+    //
+    // - INTENDED  : emitted FIRST by SRR6.46.5, before any peer-group write.
+    //               details JSON is `ee.mesh.auto_enrollment_summary.v1`.
+    //               SRR6.46.3 fails closed if this insert fails.
+    // - OUTCOME_RECORDED : back-fill emitted once SRR6.46.3 knows whether
+    //               the peer-group write succeeded, was rolled back, was
+    //               dry-run, or was audit-only. References the prior
+    //               INTENDED row's audit id via details.previousAuditId.
+    //               Schema: `ee.mesh.auto_enrollment_outcome.v1`.
+    // ----------------------------------------------------------------------
+    pub const MESH_AUTO_ENROLLMENT_INTENDED: &str = "mesh.auto_enrollment_intended";
+    pub const MESH_AUTO_ENROLLMENT_OUTCOME_RECORDED: &str =
+        "mesh.auto_enrollment_outcome_recorded";
 }
 
 const MIGRATION_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS ee_schema_migrations (

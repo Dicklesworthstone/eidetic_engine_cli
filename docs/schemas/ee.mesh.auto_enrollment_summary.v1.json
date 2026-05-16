@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.auto_enrollment_summary.v1.json",
+  "title": "ee.mesh.auto_enrollment_summary.v1",
+  "description": "Forensic audit-row payload emitted by SRR6.46.5 before any durable auto-enrollment write. Always emitted (even on dry-run and on already-complete paths) so the audit log records every attempted enrollment.",
+  "type": "object",
+  "required": [
+    "schema",
+    "workspaceId",
+    "tailnetId",
+    "intendedPeers",
+    "intendedLanePolicy",
+    "triggerReason",
+    "intendedPeerSetHash",
+    "reversalCommand",
+    "summaryHash",
+    "materializationOutcome"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.auto_enrollment_summary.v1"
+    },
+    "workspaceId": {
+      "$ref": "#/$defs/workspaceId"
+    },
+    "tailnetId": {
+      "$ref": "#/$defs/tailnetId"
+    },
+    "tailnetDisplayName": {
+      "type": ["string", "null"],
+      "description": "Optional, human-friendly tailnet name. Redacted under the tailscale_metadata redaction class for support bundles."
+    },
+    "intendedPeers": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "$ref": "#/$defs/intendedPeer"
+      }
+    },
+    "intendedLanePolicy": {
+      "type": "object",
+      "description": "Default-deny conservative lane policy emitted by SRR6.46.3. Lanes not listed are interpreted as deny.",
+      "additionalProperties": false,
+      "properties": {
+        "metadata": { "$ref": "#/$defs/laneDecision" },
+        "body": { "$ref": "#/$defs/laneDecision" },
+        "embedding": { "$ref": "#/$defs/laneDecision" },
+        "graphLink": { "$ref": "#/$defs/laneDecision" },
+        "revisionNotice": { "$ref": "#/$defs/laneDecision" },
+        "curationSignal": { "$ref": "#/$defs/laneDecision" }
+      }
+    },
+    "triggerReason": {
+      "type": "string",
+      "enum": [
+        "first_run",
+        "manual_invoke",
+        "steward_pass",
+        "drift_reconciliation",
+        "tailnet_changed_refusal",
+        "dry_run_preview"
+      ]
+    },
+    "previousPeerGroupId": {
+      "type": ["string", "null"],
+      "description": "Set when this summary overwrites a prior materialization."
+    },
+    "previousPeerSetHash": {
+      "type": ["string", "null"],
+      "description": "blake3 hash of the prior materialization's peer-set + lane policy."
+    },
+    "intendedPeerSetHash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$",
+      "description": "blake3 of sorted peer-id list joined with the canonical-JSON lane policy."
+    },
+    "reversalCommand": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Literal shell command the user can copy-paste to undo this materialization. Always references the absolute workspace path."
+    },
+    "summaryHash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$",
+      "description": "blake3 of the canonical-JSON serialization of the entire summary struct (excluding this field itself). Used for forensic correlation across audit chains, handoff capsules, support bundles."
+    },
+    "materializationOutcome": {
+      "type": "string",
+      "enum": ["pending", "materialized", "rolled_back", "dry_run", "audit_only"],
+      "description": "Back-filled by SRR6.46.3 on the same audit row to record what actually happened. 'pending' is the initial value at emit time; subsequent updates patch the audit row's details JSON."
+    }
+  },
+  "$defs": {
+    "workspaceId": {
+      "type": "string",
+      "pattern": "^wsp_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "tailnetId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Stable Tailnet identifier (NOT the display name). Redacted under the tailscale_metadata redaction class for support bundles."
+    },
+    "intendedPeer": {
+      "type": "object",
+      "required": ["nodeKey", "tailscaleIp", "hostname", "eeProtocolVersion", "discoveryPolicyDecision"],
+      "additionalProperties": false,
+      "properties": {
+        "nodeKey": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable tailscale node identifier. Redacted under the tailscale_metadata class."
+        },
+        "tailscaleIp": {
+          "type": "string",
+          "description": "100.x.y.z address. Redacted under the tailscale_metadata class."
+        },
+        "magicDnsName": {
+          "type": ["string", "null"],
+          "description": "MagicDNS hostname when available. Redacted under the tailscale_metadata class."
+        },
+        "hostname": {
+          "type": "string",
+          "description": "Operating system hostname as reported by tailscale status. Redacted under tailscale_metadata."
+        },
+        "eeProtocolVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "description": "Semver of the ee.mesh.hello.v1 protocol version the peer reports."
+        },
+        "discoveryPolicyDecision": {
+          "type": "string",
+          "enum": ["auto_admit", "service_tag_match", "allowlisted"],
+          "description": "Which SRR6.46.7 policy mode admitted this peer."
+        }
+      }
+    },
+    "laneDecision": {
+      "type": "string",
+      "enum": ["allow", "quarantine", "deny"]
+    }
+  }
+}

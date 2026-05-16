@@ -11,6 +11,7 @@ pub mod db;
 pub mod eval;
 pub mod graph;
 pub mod hooks;
+pub mod mesh;
 pub mod models;
 pub mod obs;
 pub mod output;
