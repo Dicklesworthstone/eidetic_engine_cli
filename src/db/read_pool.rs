@@ -305,7 +305,10 @@ fn evict_expired_idle(state: &mut PoolState, idle_timeout: Duration) -> Vec<DbCo
     let mut expired = Vec::new();
 
     for idle in state.idle.drain(..) {
-        if now.duration_since(idle.returned_at) >= idle_timeout {
+        let age = now
+            .checked_duration_since(idle.returned_at)
+            .unwrap_or(Duration::ZERO);
+        if age >= idle_timeout {
             state.drops = state.drops.saturating_add(1);
             expired.push(idle.connection);
         } else {
