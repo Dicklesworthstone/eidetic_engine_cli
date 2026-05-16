@@ -38748,8 +38748,9 @@ mod tests {
     use clap::{Parser, error::ErrorKind};
 
     use super::{
-        AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction, Cli,
-        Command, CurateCommand, DaemonCommand, DiagCommand, DiagQuarantineCommand, DomainError,
+        AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction,
+        COORDINATION_FALLBACK_INGEST_SCHEMA_V1, COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command,
+        CurateCommand, DaemonCommand, DiagCommand, DiagQuarantineCommand, DomainError,
         EconomyCommand, EffectiveRedactionLevel, FieldsLevel, FocusCommand,
         GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY,
         GraphCommand, GraphSnapshotCommand, HandoffCommand, HealthArgs, ImportCommand, JobCommand,
