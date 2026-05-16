@@ -78,6 +78,7 @@ impl PackL2Cache {
         now_epoch_seconds: u64,
     ) -> Result<PackL2CacheLookup, PackL2CacheError> {
         let path = self.entry_path(key);
+        ensure_no_symlink_components(&path, "inspect_entry")?;
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -177,6 +178,8 @@ impl PackL2Cache {
             source,
         })?;
         let temp_path = self.temp_path(key, stored_at_epoch_seconds);
+        ensure_no_symlink_components(&path, "inspect_entry")?;
+        ensure_no_symlink_components(&temp_path, "inspect_temp")?;
 
         write_synced_file(&temp_path, &bytes)?;
         fs::rename(&temp_path, &path).map_err(|source| {
@@ -206,6 +209,7 @@ impl PackL2Cache {
         &self,
         now_epoch_seconds: u64,
     ) -> Result<PackL2EvictionReport, PackL2CacheError> {
+        ensure_no_symlink_components(&self.root, "inspect_root")?;
         let mut report = PackL2EvictionReport::default();
         let mut candidates = Vec::new();
         let entries = match fs::read_dir(&self.root) {
@@ -229,13 +233,21 @@ impl PackL2Cache {
             if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
                 continue;
             }
-            let Ok(metadata) = entry.metadata() else {
+            let Ok(file_type) = entry.file_type() else {
                 report.skipped = report.skipped.saturating_add(1);
                 continue;
             };
-            if !metadata.is_file() {
+            if file_type.is_symlink() {
+                report.skipped = report.skipped.saturating_add(1);
                 continue;
             }
+            if !file_type.is_file() {
+                continue;
+            }
+            let Ok(metadata) = fs::metadata(&path) else {
+                report.skipped = report.skipped.saturating_add(1);
+                continue;
+            };
             let byte_len = metadata.len();
             report.bytes_before = report.bytes_before.saturating_add(byte_len);
             let fallback_epoch_seconds = metadata
@@ -445,6 +457,13 @@ fn system_time_seconds(time: SystemTime) -> Result<u64, PackL2CacheError> {
 }
 
 fn cache_entry_stored_at(path: &Path) -> Option<u64> {
+    if first_existing_symlink_component(path)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return None;
+    }
     let bytes = fs::read(path).ok()?;
     serde_json::from_slice::<PackL2CacheEntry>(&bytes)
         .ok()
@@ -452,11 +471,13 @@ fn cache_entry_stored_at(path: &Path) -> Option<u64> {
 }
 
 fn ensure_cache_dir(path: &Path) -> Result<(), PackL2CacheError> {
+    ensure_no_symlink_components(path, "inspect_root")?;
     fs::create_dir_all(path).map_err(|source| PackL2CacheError::Io {
         path: path.to_path_buf(),
         operation: "create_dir_all",
         source,
     })?;
+    ensure_no_symlink_components(path, "inspect_root")?;
     #[cfg(unix)]
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|source| {
         PackL2CacheError::Io {
@@ -466,6 +487,46 @@ fn ensure_cache_dir(path: &Path) -> Result<(), PackL2CacheError> {
         }
     })?;
     Ok(())
+}
+
+fn ensure_no_symlink_components(
+    path: &Path,
+    operation: &'static str,
+) -> Result<(), PackL2CacheError> {
+    if let Some(symlink_path) =
+        first_existing_symlink_component(path).map_err(|source| PackL2CacheError::Io {
+            path: path.to_path_buf(),
+            operation,
+            source,
+        })?
+    {
+        return Err(PackL2CacheError::Io {
+            path: path.to_path_buf(),
+            operation,
+            source: io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "pack L2 cache path traverses symbolic link {}",
+                    symlink_path.display()
+                ),
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn first_existing_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
 }
 
 fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), PackL2CacheError> {
@@ -671,6 +732,133 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn error_or_invalid_put_rejects_symlinked_cache_root() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_root = temp.path().join("real-pack-l2");
+        fs::create_dir_all(&real_root).map_err(|error| error.to_string())?;
+        let linked_root = temp.path().join("pack-l2");
+        symlink(&real_root, &linked_root).map_err(|error| error.to_string())?;
+        let cache = PackL2Cache::new(linked_root.clone(), PackL2CacheOptions::default());
+
+        let error = cache
+            .put_at("blake3:symlink-root", &json!({"hash": "unsafe"}), 100)
+            .expect_err("symlinked cache root should be rejected");
+
+        match error {
+            PackL2CacheError::Io {
+                path,
+                operation: "inspect_root",
+                source,
+            } => {
+                assert_eq!(path, linked_root);
+                assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
+            }
+            other => return Err(format!("unexpected error: {other}")),
+        }
+        assert!(
+            fs::read_dir(&real_root)
+                .map_err(|error| error.to_string())?
+                .next()
+                .is_none(),
+            "cache write must not publish through symlinked root"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn error_or_invalid_get_and_put_reject_symlinked_cache_entry() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let cache = PackL2Cache::new(
+            temp.path().join("pack-l2"),
+            PackL2CacheOptions::new(4096, Duration::from_secs(60)),
+        );
+        ensure_cache_dir(cache.root()).map_err(|error| error.to_string())?;
+        let outside_entry = temp.path().join("outside-entry.json");
+        fs::write(&outside_entry, br#"{"schema":"outside"}"#).map_err(|error| error.to_string())?;
+        let linked_entry = cache.entry_path("blake3:linked-entry");
+        symlink(&outside_entry, &linked_entry).map_err(|error| error.to_string())?;
+
+        let get_error = cache
+            .get_at("blake3:linked-entry", 100)
+            .expect_err("symlinked final cache entry should not be read");
+        match get_error {
+            PackL2CacheError::Io {
+                path,
+                operation: "inspect_entry",
+                source,
+            } => {
+                assert_eq!(path, linked_entry);
+                assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
+            }
+            other => return Err(format!("unexpected get error: {other}")),
+        }
+
+        let put_error = cache
+            .put_at("blake3:linked-entry", &json!({"hash": "overwrite"}), 100)
+            .expect_err("symlinked final cache entry should not be overwritten");
+        match put_error {
+            PackL2CacheError::Io {
+                path,
+                operation: "inspect_entry",
+                source,
+            } => {
+                assert_eq!(path, cache.entry_path("blake3:linked-entry"));
+                assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
+            }
+            other => return Err(format!("unexpected put error: {other}")),
+        }
+        assert_eq!(
+            fs::read_to_string(&outside_entry).map_err(|error| error.to_string())?,
+            r#"{"schema":"outside"}"#,
+            "cache write must not overwrite a symlink target"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn eviction_skips_symlinked_json_entries_without_following_targets() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let cache = PackL2Cache::new(
+            temp.path().join("pack-l2"),
+            PackL2CacheOptions::new(0, Duration::from_secs(0)),
+        );
+        ensure_cache_dir(cache.root()).map_err(|error| error.to_string())?;
+        let outside_entry = temp.path().join("outside-entry.json");
+        fs::write(&outside_entry, br#"{"storedAtEpochSeconds":0}"#)
+            .map_err(|error| error.to_string())?;
+        let linked_entry = cache.root().join("linked.json");
+        symlink(&outside_entry, &linked_entry).map_err(|error| error.to_string())?;
+
+        let report = cache
+            .evict_best_effort_at(100)
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.skipped, 1, "symlink entries should be skipped");
+        assert_eq!(report.removed, 0, "symlink entries should not be removed");
+        assert!(
+            fs::symlink_metadata(&linked_entry)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "cache eviction should leave the symlink entry untouched"
+        );
+        assert!(
+            outside_entry.exists(),
+            "cache eviction must not follow and remove a symlink target"
+        );
+        Ok(())
+    }
+
     #[test]
     fn eviction_removes_expired_entries_before_fresh_entries() -> TestResult {
         let (_temp, cache) = cache(10_000, Duration::from_secs(10))?;
@@ -724,7 +912,7 @@ mod tests {
                 200,
             )
             .map_err(|error| error.to_string())?;
-        cache
+        let third_report = cache
             .put_at(
                 "blake3:third",
                 &json!({"payload": "cccccccccccccccccccccccc"}),
@@ -735,12 +923,16 @@ mod tests {
         let report = cache
             .evict_best_effort_at(300)
             .map_err(|error| error.to_string())?;
+        let removed_total = third_report.eviction.removed.saturating_add(report.removed);
 
         assert!(
             report.bytes_after <= cache.options().max_bytes,
             "eviction should reduce byte usage below the configured cap"
         );
-        assert!(report.removed >= 1, "at least one entry should be evicted");
+        assert!(
+            removed_total >= 1,
+            "at least one entry should be evicted by write-through or explicit eviction"
+        );
         assert!(
             matches!(
                 cache
