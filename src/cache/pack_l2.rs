@@ -68,6 +68,12 @@ impl PackL2Cache {
         self.root.join(cache_file_name(key))
     }
 
+    #[must_use]
+    pub fn entry_path_for_body_hash(&self, key: &str, body_hash_prefix: &str) -> PathBuf {
+        self.root
+            .join(cache_file_name_with_body_hash(key, body_hash_prefix))
+    }
+
     pub fn get(&self, key: &str) -> Result<PackL2CacheLookup, PackL2CacheError> {
         self.get_at(key, system_time_seconds(SystemTime::now())?)
     }
@@ -77,7 +83,15 @@ impl PackL2Cache {
         key: &str,
         now_epoch_seconds: u64,
     ) -> Result<PackL2CacheLookup, PackL2CacheError> {
-        let path = self.entry_path(key);
+        let fallback_path = self.entry_path(key);
+        let candidates = self.entry_candidates(key)?;
+        let Some(path) = candidates.into_iter().next() else {
+            return Ok(PackL2CacheLookup::Miss(PackL2CacheMiss {
+                key: key.to_owned(),
+                path: fallback_path,
+                reason: PackL2CacheMissReason::NotFound,
+            }));
+        };
         ensure_no_symlink_components(&path, "inspect_entry")?;
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
@@ -96,6 +110,21 @@ impl PackL2Cache {
                 });
             }
         };
+
+        if let Some(expected_body_hash_prefix) = body_hash_prefix_from_path(&path) {
+            let actual_body_hash_prefix = body_hash_prefix(&bytes);
+            if actual_body_hash_prefix != expected_body_hash_prefix {
+                let _ = fs::remove_file(&path);
+                return Ok(PackL2CacheLookup::Miss(PackL2CacheMiss {
+                    key: key.to_owned(),
+                    path,
+                    reason: PackL2CacheMissReason::BodyHashMismatch {
+                        expected: expected_body_hash_prefix,
+                        actual: actual_body_hash_prefix,
+                    },
+                }));
+            }
+        }
 
         let entry = match serde_json::from_slice::<PackL2CacheEntry>(&bytes) {
             Ok(entry) => entry,
@@ -177,7 +206,9 @@ impl PackL2Cache {
             operation: "serialize",
             source,
         })?;
-        let temp_path = self.temp_path(key, stored_at_epoch_seconds);
+        let body_hash_prefix = body_hash_prefix(&bytes);
+        let path = self.entry_path_for_body_hash(key, &body_hash_prefix);
+        let temp_path = self.temp_path(key, &body_hash_prefix, stored_at_epoch_seconds);
         ensure_no_symlink_components(&path, "inspect_entry")?;
         ensure_no_symlink_components(&temp_path, "inspect_temp")?;
 
@@ -299,12 +330,55 @@ impl PackL2Cache {
         Ok(report)
     }
 
-    fn temp_path(&self, key: &str, stored_at_epoch_seconds: u64) -> PathBuf {
+    fn entry_candidates(&self, key: &str) -> Result<Vec<PathBuf>, PackL2CacheError> {
+        ensure_no_symlink_components(&self.root, "inspect_root")?;
+        let key_stem = cache_file_stem(key);
+        let mut candidates = Vec::new();
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(candidates),
+            Err(error) => {
+                return Err(PackL2CacheError::Io {
+                    path: self.root.clone(),
+                    operation: "read_dir",
+                    source: error,
+                });
+            }
+        };
+
+        for entry in entries {
+            let entry = entry.map_err(|source| PackL2CacheError::Io {
+                path: self.root.clone(),
+                operation: "read_dir_entry",
+                source,
+            })?;
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|file_name| file_name.to_str()) else {
+                continue;
+            };
+            if file_name == cache_file_name(key)
+                || body_hashed_file_name_matches(file_name, &key_stem)
+            {
+                candidates.push(path);
+            }
+        }
+
+        candidates.sort();
+        Ok(candidates)
+    }
+
+    fn temp_path(
+        &self,
+        key: &str,
+        body_hash_prefix: &str,
+        stored_at_epoch_seconds: u64,
+    ) -> PathBuf {
         let process_id = std::process::id();
         let temp_counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
         self.root.join(format!(
-            ".{}.{}.{}.{}.tmp",
+            ".{}.{}.{}.{}.{}.tmp",
             cache_file_stem(key),
+            body_hash_prefix,
             process_id,
             stored_at_epoch_seconds,
             temp_counter
@@ -346,6 +420,7 @@ pub enum PackL2CacheMissReason {
     NotFound,
     Expired { stored_at_epoch_seconds: u64 },
     Corrupt(String),
+    BodyHashMismatch { expected: String, actual: String },
     KeyMismatch { stored_key: String },
 }
 
@@ -442,8 +517,46 @@ fn cache_file_name(key: &str) -> String {
     format!("{}.json", cache_file_stem(key))
 }
 
+fn cache_file_name_with_body_hash(key: &str, body_hash_prefix: &str) -> String {
+    format!("{}.{}.json", cache_file_stem(key), body_hash_prefix)
+}
+
 fn cache_file_stem(key: &str) -> String {
     blake3::hash(key.as_bytes()).to_hex().to_string()
+}
+
+fn body_hash_prefix(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex()[..16].to_owned()
+}
+
+fn body_hashed_file_name_matches(file_name: &str, key_stem: &str) -> bool {
+    let Some(rest) = file_name.strip_prefix(key_stem) else {
+        return false;
+    };
+    let Some(body_hash_prefix) = rest
+        .strip_prefix('.')
+        .and_then(|rest| rest.strip_suffix(".json"))
+    else {
+        return false;
+    };
+    body_hash_prefix.len() == 16
+        && body_hash_prefix
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn body_hash_prefix_from_path(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_str()?;
+    let body_hash_prefix = file_name
+        .strip_suffix(".json")?
+        .rsplit_once('.')?
+        .1
+        .to_owned();
+    (body_hash_prefix.len() == 16
+        && body_hash_prefix
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()))
+    .then_some(body_hash_prefix)
 }
 
 fn is_expired(stored_at_epoch_seconds: u64, now_epoch_seconds: u64, max_age: Duration) -> bool {
@@ -595,6 +708,27 @@ mod tests {
         }
     }
 
+    fn raw_entry_bytes(
+        key: &str,
+        pack_json: JsonValue,
+        stored_at_epoch_seconds: u64,
+    ) -> Result<Vec<u8>, String> {
+        serde_json::to_vec(&PackL2CacheEntry {
+            schema: PACK_L2_CACHE_ENTRY_SCHEMA_V1.to_owned(),
+            key: key.to_owned(),
+            stored_at_epoch_seconds,
+            pack_json,
+        })
+        .map_err(|error| error.to_string())
+    }
+
+    fn write_raw_entry(cache: &PackL2Cache, key: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+        ensure_cache_dir(cache.root()).map_err(|error| error.to_string())?;
+        let path = cache.entry_path_for_body_hash(key, &body_hash_prefix(bytes));
+        fs::write(&path, bytes).map_err(|error| error.to_string())?;
+        Ok(path)
+    }
+
     #[test]
     fn happy_path_roundtrip_returns_stored_pack_json() -> TestResult {
         let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
@@ -606,6 +740,23 @@ mod tests {
         assert!(
             report.path.exists(),
             "write should publish final cache file"
+        );
+        let file_name = report
+            .path
+            .file_name()
+            .and_then(|file_name| file_name.to_str())
+            .ok_or_else(|| "cache path should have a UTF-8 file name".to_owned())?;
+        let parts = file_name
+            .strip_suffix(".json")
+            .ok_or_else(|| format!("cache file should end in .json: {file_name}"))?
+            .split('.')
+            .collect::<Vec<_>>();
+        assert_eq!(parts.len(), 2, "cache file should have key and body hash");
+        assert_eq!(parts[0].len(), 64, "key hash should be full BLAKE3 hex");
+        assert_eq!(parts[1].len(), 16, "body hash should be truncated hex");
+        assert!(
+            body_hashed_file_name_matches(file_name, &cache_file_stem("blake3:key-a")),
+            "cache file name should bind key hash and body hash"
         );
 
         let stored = hit_json(
@@ -639,7 +790,7 @@ mod tests {
     #[test]
     fn empty_or_boundary_expired_entry_returns_expired_miss() -> TestResult {
         let (_temp, cache) = cache(4096, Duration::from_secs(10))?;
-        cache
+        let report = cache
             .put_at("blake3:key-expired", &json!({"hash": "old"}), 100)
             .map_err(|error| error.to_string())?;
 
@@ -651,7 +802,7 @@ mod tests {
             lookup,
             PackL2CacheLookup::Miss(PackL2CacheMiss {
                 key: "blake3:key-expired".to_owned(),
-                path: cache.entry_path("blake3:key-expired"),
+                path: report.path,
                 reason: PackL2CacheMissReason::Expired {
                     stored_at_epoch_seconds: 100,
                 },
@@ -663,9 +814,7 @@ mod tests {
     #[test]
     fn error_or_invalid_corrupt_entry_returns_corrupt_miss() -> TestResult {
         let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
-        ensure_cache_dir(cache.root()).map_err(|error| error.to_string())?;
-        fs::write(cache.entry_path("blake3:corrupt"), b"{not-json")
-            .map_err(|error| error.to_string())?;
+        write_raw_entry(&cache, "blake3:corrupt", b"{not-json")?;
 
         let lookup = cache
             .get_at("blake3:corrupt", 100)
@@ -684,15 +833,43 @@ mod tests {
     }
 
     #[test]
+    fn error_or_invalid_body_hash_mismatch_removes_entry() -> TestResult {
+        let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
+        ensure_cache_dir(cache.root()).map_err(|error| error.to_string())?;
+        let path = cache.entry_path_for_body_hash("blake3:tampered", "0000000000000000");
+        fs::write(&path, b"{\"schema\":\"tampered\"}").map_err(|error| error.to_string())?;
+
+        let lookup = cache
+            .get_at("blake3:tampered", 100)
+            .map_err(|error| error.to_string())?;
+
+        match lookup {
+            PackL2CacheLookup::Miss(miss) => {
+                assert_eq!(
+                    miss.reason,
+                    PackL2CacheMissReason::BodyHashMismatch {
+                        expected: "0000000000000000".to_owned(),
+                        actual: body_hash_prefix(b"{\"schema\":\"tampered\"}"),
+                    }
+                );
+                assert_eq!(miss.path, path);
+            }
+            PackL2CacheLookup::Hit(_) => {
+                return Err("body-hash mismatch must not hit".to_owned());
+            }
+        }
+        assert!(
+            !path.exists(),
+            "body-hash mismatch should remove the corrupted entry"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn error_or_invalid_key_mismatch_returns_miss() -> TestResult {
         let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
-        cache
-            .put_at("blake3:original", &json!({"hash": "mismatch"}), 100)
-            .map_err(|error| error.to_string())?;
-        let original =
-            fs::read(cache.entry_path("blake3:original")).map_err(|error| error.to_string())?;
-        ensure_cache_dir(cache.root()).map_err(|error| error.to_string())?;
-        fs::write(cache.entry_path("blake3:other"), original).map_err(|error| error.to_string())?;
+        let original = raw_entry_bytes("blake3:original", json!({"hash": "mismatch"}), 100)?;
+        write_raw_entry(&cache, "blake3:other", &original)?;
 
         let lookup = cache
             .get_at("blake3:other", 100)
@@ -771,6 +948,36 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn error_or_invalid_get_rejects_symlinked_cache_root() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_root = temp.path().join("real-pack-l2");
+        fs::create_dir_all(&real_root).map_err(|error| error.to_string())?;
+        let linked_root = temp.path().join("pack-l2");
+        symlink(&real_root, &linked_root).map_err(|error| error.to_string())?;
+        let cache = PackL2Cache::new(linked_root.clone(), PackL2CacheOptions::default());
+
+        let error = cache
+            .get_at("blake3:symlink-root", 100)
+            .expect_err("symlinked cache root should be rejected before lookup");
+
+        match error {
+            PackL2CacheError::Io {
+                path,
+                operation: "inspect_root",
+                source,
+            } => {
+                assert_eq!(path, linked_root);
+                assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
+            }
+            other => return Err(format!("unexpected error: {other}")),
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn error_or_invalid_get_and_put_reject_symlinked_cache_entry() -> TestResult {
         use std::os::unix::fs::symlink;
 
@@ -782,7 +989,8 @@ mod tests {
         ensure_cache_dir(cache.root()).map_err(|error| error.to_string())?;
         let outside_entry = temp.path().join("outside-entry.json");
         fs::write(&outside_entry, br#"{"schema":"outside"}"#).map_err(|error| error.to_string())?;
-        let linked_entry = cache.entry_path("blake3:linked-entry");
+        let linked_entry =
+            cache.entry_path_for_body_hash("blake3:linked-entry", "0000000000000000");
         symlink(&outside_entry, &linked_entry).map_err(|error| error.to_string())?;
 
         let get_error = cache
@@ -800,8 +1008,13 @@ mod tests {
             other => return Err(format!("unexpected get error: {other}")),
         }
 
+        let overwrite_pack = json!({"hash": "overwrite"});
+        let overwrite_bytes = raw_entry_bytes("blake3:linked-entry", overwrite_pack.clone(), 100)?;
+        let linked_write_entry = cache
+            .entry_path_for_body_hash("blake3:linked-entry", &body_hash_prefix(&overwrite_bytes));
+        symlink(&outside_entry, &linked_write_entry).map_err(|error| error.to_string())?;
         let put_error = cache
-            .put_at("blake3:linked-entry", &json!({"hash": "overwrite"}), 100)
+            .put_at("blake3:linked-entry", &overwrite_pack, 100)
             .expect_err("symlinked final cache entry should not be overwritten");
         match put_error {
             PackL2CacheError::Io {
@@ -809,7 +1022,7 @@ mod tests {
                 operation: "inspect_entry",
                 source,
             } => {
-                assert_eq!(path, cache.entry_path("blake3:linked-entry"));
+                assert_eq!(path, linked_write_entry);
                 assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
             }
             other => return Err(format!("unexpected put error: {other}")),
