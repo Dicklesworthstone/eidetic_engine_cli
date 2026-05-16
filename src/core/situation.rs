@@ -6,6 +6,7 @@
 //! - Returning no fake show/explain records when storage is not wired
 
 use super::build_info;
+use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 pub use crate::models::{
     ROUTING_DECISION_SCHEMA_V1, RoutingDecision, SITUATION_CLASSIFY_SCHEMA_V1,
     SITUATION_EXPLAIN_SCHEMA_V1, SITUATION_LINK_SCHEMA_V1, SITUATION_SHOW_SCHEMA_V1,
@@ -127,6 +128,8 @@ impl ClassifyResult {
             })
             .collect();
 
+        let degraded = situation_classify_degraded_data_json();
+
         serde_json::json!({
             "command": "situation classify",
             "version": self.version,
@@ -146,14 +149,7 @@ impl ClassifyResult {
             "signals": signals,
             "alternativeCategories": alternatives,
             "routingDecisions": routing_decisions_json(&self.routing_decisions),
-            "degraded": [
-                {
-                    "code": SITUATION_DECISIONING_UNAVAILABLE_CODE,
-                    "severity": "warning",
-                    "message": "Situation routing is limited to deterministic heuristic hints; automatic planning, show, and explain require stored evidence.",
-                    "repair": "ee status --json"
-                }
-            ],
+            "degraded": degraded,
             "provenance": [
                 {
                     "sourceKind": "static_keyword_catalog",
@@ -163,6 +159,27 @@ impl ClassifyResult {
             ],
         })
     }
+}
+
+fn situation_classify_degraded_data_json() -> Vec<serde_json::Value> {
+    aggregate_degraded_entries([DegradationAggregationInput::new(
+        "situation_classify",
+        SITUATION_DECISIONING_UNAVAILABLE_CODE,
+        "warning",
+        "Situation routing is limited to deterministic heuristic hints; automatic planning, show, and explain require stored evidence.",
+        "ee status --json",
+    )])
+    .into_iter()
+    .map(|entry| {
+        serde_json::json!({
+            "code": entry.code,
+            "severity": entry.severity,
+            "message": entry.message,
+            "repair": entry.repair,
+            "sources": entry.sources,
+        })
+    })
+    .collect()
 }
 
 // ============================================================================
@@ -2091,6 +2108,32 @@ mod tests {
                 .is_some_and(|routes| !routes.is_empty()),
             true,
             "has heuristic routing decisions",
+        )
+    }
+
+    #[test]
+    fn classify_result_degraded_entries_are_aggregated() -> TestResult {
+        let json = classify_task("fix bug in login").data_json();
+        let degraded = json
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "classify degraded must be an array".to_string())?;
+
+        ensure(degraded.len(), 1, "aggregated degraded count")?;
+        ensure(
+            degraded[0].get("code"),
+            Some(&serde_json::json!(SITUATION_DECISIONING_UNAVAILABLE_CODE)),
+            "degraded code",
+        )?;
+        ensure(
+            degraded[0].get("severity"),
+            Some(&serde_json::json!("warning")),
+            "degraded severity",
+        )?;
+        ensure(
+            degraded[0].get("sources"),
+            Some(&serde_json::json!(["situation_classify"])),
+            "degraded source label",
         )
     }
 

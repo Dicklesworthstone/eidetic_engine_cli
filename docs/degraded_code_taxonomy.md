@@ -121,6 +121,7 @@ Current conventions:
 | `structural_health` | `ee health structural` graph-health degradation. |
 | `science_drift` | `ee analyze drift` science/evaluation drift degradation. |
 | `science_clustering` | `ee analyze clustering` candidate clustering degradation. |
+| `situation_classify` | `ee situation classify` deterministic heuristic-routing degradation. |
 | `why` | Top-level `ee why` memory explanation degradation. |
 | `why_graph_retrieval` | `ee why` graph-retrieval feature degradation. |
 
