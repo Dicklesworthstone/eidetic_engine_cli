@@ -48,10 +48,11 @@ fn canonicalize(value: &Value) -> Value {
 
 fn event_digest(event: &Value) -> Result<String, String> {
     let mut hashable = event.clone();
-    hashable
+    let object = hashable
         .as_object_mut()
-        .ok_or_else(|| "event must be an object".to_string())?
-        .remove("eventHash");
+        .ok_or_else(|| "event must be an object".to_string())?;
+    object.remove("eventHash");
+    object.remove("eventId");
     let canonical = canonicalize(&hashable);
     let bytes = serde_json::to_vec(&canonical).map_err(|error| error.to_string())?;
     Ok(format!("blake3:{}", blake3::hash(&bytes).to_hex()))

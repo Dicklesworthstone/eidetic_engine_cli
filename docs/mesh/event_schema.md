@@ -33,8 +33,10 @@ before importing it. Matching identifiers alone are not authorization.
 
 ## Hash Rules
 
-`eventHash` is computed over canonical JSON for the event with `eventHash`
-temporarily removed. Canonical JSON means:
+`eventHash` is computed over canonical JSON for the event with `eventHash` and
+`eventId` temporarily removed. `eventId` is removed because it is mechanically
+derived from the same digest; including it in the preimage would make the event
+self-referential and unrecomputable. Canonical JSON means:
 
 - UTF-8 JSON with no insignificant whitespace.
 - Object keys sorted lexicographically at every depth.

@@ -29,6 +29,7 @@
       "const": "ee.mesh.event.v1"
     },
     "eventId": {
+      "description": "mesh_evt_<digest>; derived from eventHash and excluded from the eventHash preimage.",
       "$ref": "#/$defs/eventId"
     },
     "originNodeId": {
@@ -55,6 +56,7 @@
       ]
     },
     "eventHash": {
+      "description": "BLAKE3 digest over canonical event JSON with eventHash and eventId removed.",
       "$ref": "#/$defs/hash"
     },
     "eventKind": {
