@@ -30,6 +30,23 @@ resolve_ee_binary() {
     exit 2
 }
 
+validate_ee_binary() {
+    if [ ! -x "$EE_BINARY" ]; then
+        echo "sx5_agent_profile: resolved EE_BINARY is not executable: $EE_BINARY" >&2
+        exit 2
+    fi
+    local version_output
+    local rc
+    if version_output="$(env -u EE_WORKSPACE -u EE_WORKSPACE_REGISTRY "$EE_BINARY" --version 2>&1)"; then
+        return 0
+    else
+        rc=$?
+    fi
+    echo "sx5_agent_profile: resolved EE_BINARY is not runnable: $EE_BINARY (exit $rc)" >&2
+    printf '%s\n' "$version_output" >&2
+    exit 2
+}
+
 json_event() {
     local kind="${1:?kind required}"
     shift
@@ -150,6 +167,7 @@ record_outcomes() {
 
 require_jq
 EE_BINARY="$(resolve_ee_binary)"
+validate_ee_binary
 ASSERTS_PASS=0
 ASSERTS_FAIL=0
 TMP_ROOT="${EE_E2E_TMPDIR:-${TMPDIR:-/tmp}}"
