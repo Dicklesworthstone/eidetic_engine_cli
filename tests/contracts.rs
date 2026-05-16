@@ -189,3 +189,6 @@ mod failure_mode_fixtures;
 
 #[path = "contracts/failure_mode_repair_string.rs"]
 mod failure_mode_repair_string;
+
+#[path = "contracts/read_pool_status_schema.rs"]
+mod read_pool_status_schema;
