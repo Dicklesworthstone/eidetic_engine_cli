@@ -48,7 +48,7 @@ use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
     SearchOptions, SearchReport, SearchStatus, elapsed_timing_json, performance_redaction_json,
-    query_observation_json, run_search,
+    query_observation_json, run_search_with_read_connection,
 };
 use crate::db::read_pool::{PoolConfig, ReadConnectionPool};
 use crate::db::{
@@ -916,28 +916,31 @@ pub fn run_context_pack_with_performance(
     }
 
     let search_start = Instant::now();
-    let mut search_report = match run_search(&SearchOptions {
-        workspace_path: options.workspace_path.clone(),
-        database_path: Some(database_path.clone()),
-        index_dir: options.index_dir.clone(),
-        query: request.query.clone(),
-        limit: request.candidate_pool,
-        speed: options.speed,
-        explain: false,
-        as_of: context_validity_reference_time(options, &effective_filters),
-        include_tombstoned: options.include_tombstoned,
-        include_expired: context_include_expired(options, &effective_filters),
-        include_future: context_include_future(options, &effective_filters),
-        include_stale: context_include_stale(options, &effective_filters),
-        // Context packing owns relevance and budget filtering after retrieval.
-        // Keep the candidate pool broad so an exact single-memory match is not
-        // dropped by the interactive search command's presentation floor.
-        relevance_floor: Some(0.0),
-        source_mode: crate::core::search::SearchSourceMode::Hybrid,
-        strict_source_mode: false,
-        memory_scope: options.memory_scope,
-        strict_scope: options.strict_scope,
-    }) {
+    let mut search_report = match run_search_with_read_connection(
+        &SearchOptions {
+            workspace_path: options.workspace_path.clone(),
+            database_path: Some(database_path.clone()),
+            index_dir: options.index_dir.clone(),
+            query: request.query.clone(),
+            limit: request.candidate_pool,
+            speed: options.speed,
+            explain: false,
+            as_of: context_validity_reference_time(options, &effective_filters),
+            include_tombstoned: options.include_tombstoned,
+            include_expired: context_include_expired(options, &effective_filters),
+            include_future: context_include_future(options, &effective_filters),
+            include_stale: context_include_stale(options, &effective_filters),
+            // Context packing owns relevance and budget filtering after retrieval.
+            // Keep the candidate pool broad so an exact single-memory match is not
+            // dropped by the interactive search command's presentation floor.
+            relevance_floor: Some(0.0),
+            source_mode: crate::core::search::SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: options.memory_scope,
+            strict_scope: options.strict_scope,
+        },
+        &read_snapshot,
+    ) {
         Ok(report) => report,
         Err(SearchError::NoIndex) => missing_index_search_report(
             &request.query,
@@ -4978,7 +4981,7 @@ fn push_consensus_conflict_degradations(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
@@ -4990,11 +4993,15 @@ mod tests {
     };
     use crate::config::WorkspaceLocation;
     use crate::core::budget::RequestBudget;
+    use crate::core::memory::{ReviseMemoryOptions, ReviseReason, revise_memory};
     use crate::core::profile::{OperatingProfile, RuntimeProfileReport};
     use crate::core::search::{
         PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchHit, SearchReport, SearchStatus,
     };
-    use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection, StoredMemory};
+    use crate::db::read_pool::{PoolConfig, ReadConnectionPool};
+    use crate::db::{
+        CreateMemoryInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, StoredMemory,
+    };
     use crate::models::{
         FocusItem, FocusState, MemoryId, MemoryScope, MemoryScopeStats, ProvenanceUri,
         QueryTemporalFilters, QueryTemporalValidity, QueryTemporalValidityPosture, TrustClass,
@@ -6334,37 +6341,207 @@ mod tests {
             output_options: Default::default(),
         };
 
-        let single_response = super::run_context_pack(&base_options)
-            .map_err(|error| format!("single-pool context pack failed: {error:?}"))?;
-        let single_hash = single_response
-            .data
-            .pack
-            .hash
-            .clone()
-            .ok_or_else(|| "single-pool response missing pack hash".to_string())?;
+        let mut hashes_by_pool_size = BTreeMap::new();
+        for pool_size in [1_u32, 4, 8] {
+            std::fs::write(
+                ee_dir.join("config.toml"),
+                format!(
+                    "[storage.read_pool]\nsize = {pool_size}\nidle_timeout_seconds = 30\npin_snapshot = true\n"
+                ),
+            )
+            .map_err(|error| error.to_string())?;
 
-        std::fs::write(
-            ee_dir.join("config.toml"),
-            "[storage.read_pool]\nsize = 4\nidle_timeout_seconds = 30\npin_snapshot = true\n",
+            let response = super::run_context_pack(&base_options)
+                .map_err(|error| format!("pool_size={pool_size} context pack failed: {error:?}"))?;
+            assert!(
+                response
+                    .data
+                    .degraded
+                    .iter()
+                    .all(|entry| entry.code != "context_config_unavailable"),
+                "valid read-pool config for size {pool_size} should not degrade"
+            );
+            let hash = response
+                .data
+                .pack
+                .hash
+                .clone()
+                .ok_or_else(|| format!("pool_size={pool_size} response missing pack hash"))?;
+            hashes_by_pool_size.insert(pool_size, hash);
+        }
+
+        let single_hash = hashes_by_pool_size
+            .get(&1)
+            .ok_or_else(|| "pool_size=1 hash missing".to_string())?;
+        for pool_size in [4_u32, 8] {
+            assert_eq!(
+                hashes_by_pool_size.get(&pool_size),
+                Some(single_hash),
+                "pool_size={pool_size} must preserve the pool_size=1 pack hash"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pinned_snapshot_prevents_revise_generation_mixing_in_pack_candidates() -> Result<(), String>
+    {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let db_path = ee_dir.join("ee.db");
+
+        let connection = DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = super::stable_context_workspace_id(&workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("workspace".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let original_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(45)).to_string();
+        connection
+            .insert_memory(
+                &original_memory_id,
+                &CreateMemoryInput {
+                    workspace_id,
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Snapshot provenance release must stay original generation."
+                        .to_owned(),
+                    workflow_id: None,
+                    confidence: 0.95,
+                    utility: 0.80,
+                    importance: 0.70,
+                    provenance_uri: Some("https://example.com/original-generation".to_owned()),
+                    trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                    trust_subclass: Some("test".to_owned()),
+                    tags: vec!["release".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let read_pool = ReadConnectionPool::new(
+            DatabaseConfig::file(db_path.clone()),
+            PoolConfig::new(1, Duration::from_secs(30)),
+        );
+        let read_snapshot = read_pool
+            .pin_snapshot()
+            .map_err(|error| error.to_string())?;
+
+        let revise_report = revise_memory(&ReviseMemoryOptions {
+            database_path: &db_path,
+            original_memory_id: &original_memory_id,
+            content: Some("Revised generation should not leak into this pinned context pack."),
+            level: None,
+            kind: None,
+            confidence: None,
+            tags: None,
+            provenance_uri: Some("https://example.com/revised-generation"),
+            reason: ReviseReason::Update,
+            actor: Some("context snapshot regression"),
+            dry_run: false,
+        });
+        assert!(
+            revise_report.success,
+            "revise should commit through a separate write connection: {revise_report:?}"
+        );
+        let revised_memory_id = revise_report
+            .new_id
+            .clone()
+            .ok_or_else(|| "revise report missing new memory id".to_string())?;
+
+        let mut degraded = Vec::new();
+        let hits = super::lexical_memory_fallback_hits(
+            &read_snapshot,
+            &workspace,
+            "snapshot provenance release original",
+            10,
+            false,
+            None,
+            false,
+            false,
+            false,
+            &mut degraded,
+        );
+        assert!(
+            hits.iter().any(|hit| hit.doc_id == original_memory_id),
+            "pinned snapshot should still see the original live generation, got {hits:?}"
+        );
+        assert!(
+            hits.iter().all(|hit| hit.doc_id != revised_memory_id),
+            "pinned snapshot must not see the later revised generation"
+        );
+
+        let search_report = SearchReport {
+            status: SearchStatus::Success,
+            query: "snapshot provenance release original".to_owned(),
+            requested_limit: 10,
+            results: hits,
+            elapsed_ms: 0.0,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: Some(0.0),
+            candidates_below_floor: 0,
+            source_mode_requested: crate::core::search::SearchSourceMode::Hybrid,
+            source_mode_applied: crate::core::search::SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        };
+        let (candidates, _) = super::candidates_from_search_with_metrics(
+            &read_snapshot,
+            &workspace,
+            &search_report,
+            &crate::models::QueryFilters::default(),
+            false,
+            &mut degraded,
+        );
+        let draft = assemble_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "snapshot provenance release original",
+            TokenBudget::new(400).map_err(|error| error.to_string())?,
+            candidates,
         )
         .map_err(|error| error.to_string())?;
 
-        let pooled_response = super::run_context_pack(&base_options)
-            .map_err(|error| format!("pooled context pack failed: {error:?}"))?;
-        let pooled_hash = pooled_response
-            .data
-            .pack
-            .hash
-            .clone()
-            .ok_or_else(|| "pooled response missing pack hash".to_string())?;
-
-        assert_eq!(pooled_hash, single_hash);
+        assert_eq!(draft.items.len(), 1, "expected one pinned-snapshot item");
+        let item = &draft.items[0];
+        assert_eq!(item.memory_id.to_string(), original_memory_id);
+        assert_eq!(
+            item.content,
+            "Snapshot provenance release must stay original generation."
+        );
         assert!(
-            pooled_response
-                .data
-                .degraded
-                .iter()
-                .all(|entry| entry.code != "context_config_unavailable")
+            !item.content.contains("Revised generation should not leak"),
+            "pack item content must not mix in the revised generation"
+        );
+        let provenance_urls = item
+            .provenance
+            .iter()
+            .filter_map(|entry| match &entry.uri {
+                ProvenanceUri::Web { url } => Some(url.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            provenance_urls,
+            vec!["https://example.com/original-generation"]
         );
         Ok(())
     }

@@ -17,6 +17,7 @@ use crate::pack::{
     PackSelectionAudit, PackSelectionObjective, PackSelectionPhase, PackTrustSignal, TokenBudget,
     analyze_pack_consensus_conflicts, estimate_tokens_default,
 };
+use crate::runtime::determinism::{Deterministic, Seed};
 
 use super::index::{
     IndexHealth, IndexStatusError, IndexStatusOptions, IndexStatusReport, get_index_status,
@@ -2123,6 +2124,38 @@ fn audit_append_best_effort(
 }
 
 pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> {
+    let determinism = Deterministic::from_seed(0);
+    run_search_seeded(options, &determinism)
+}
+
+pub fn run_search_seeded(
+    options: &SearchOptions,
+    determinism: &Deterministic<Seed>,
+) -> Result<SearchReport, SearchError> {
+    run_search_inner(options, None, determinism)
+}
+
+pub fn run_search_with_read_connection(
+    options: &SearchOptions,
+    read_connection: &DbConnection,
+) -> Result<SearchReport, SearchError> {
+    let determinism = Deterministic::from_seed(0);
+    run_search_with_read_connection_seeded(options, read_connection, &determinism)
+}
+
+pub fn run_search_with_read_connection_seeded(
+    options: &SearchOptions,
+    read_connection: &DbConnection,
+    determinism: &Deterministic<Seed>,
+) -> Result<SearchReport, SearchError> {
+    run_search_inner(options, Some(read_connection), determinism)
+}
+
+fn run_search_inner(
+    options: &SearchOptions,
+    read_connection: Option<&DbConnection>,
+    determinism: &Deterministic<Seed>,
+) -> Result<SearchReport, SearchError> {
     let start = Instant::now();
     let index_dir = options.resolve_index_dir();
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
@@ -2181,6 +2214,7 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
         options.two_tier_config_for_limit(effective_limit),
         options.explain,
         source_mode.applied,
+        determinism,
     );
 
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -2219,9 +2253,10 @@ pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> 
                     hit.score.is_finite() && hit.score >= per_hit_floor
                 });
             let dropped = below_floor.len();
-            let above_floor = apply_tombstone_visibility(options, above_floor, &mut degraded);
+            let above_floor =
+                apply_tombstone_visibility(options, above_floor, &mut degraded, read_connection);
             let (above_floor, scope_stats) =
-                apply_memory_scope_visibility(options, above_floor, &mut degraded);
+                apply_memory_scope_visibility(options, above_floor, &mut degraded, read_connection);
             let above_floor = apply_mesh_query_visibility(above_floor, &mut degraded);
             let kept = above_floor.len();
 
@@ -2469,7 +2504,7 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
         hit.score.is_finite() && hit.score >= per_hit_floor
     });
     let (above_floor, scope_stats) =
-        apply_memory_scope_visibility(options, above_floor, &mut degraded);
+        apply_memory_scope_visibility(options, above_floor, &mut degraded, None);
     let kept = above_floor.len();
     let dropped = below_floor.len();
     let floor = user_floor_override.unwrap_or_else(|| {
@@ -3009,7 +3044,18 @@ fn search_hit_component_scores_equivalent(left: &SearchHit, right: &SearchHit) -
         && option_scores_equivalent(left.rerank_score, right.rerank_score)
 }
 
-fn canonicalize_equivalent_component_scores(hits: &mut [SearchHit]) {
+fn canonicalize_equivalent_component_scores(
+    hits: &mut [SearchHit],
+    determinism: &Deterministic<Seed>,
+) {
+    let tie_seed = determinism.shared_child("search.canonical_ties");
+    tracing::debug!(
+        target: "ee::search::determinism",
+        seed_scope = %tie_seed.scope(),
+        seed_hash = %tie_seed.seed_hash_prefix(),
+        "threaded deterministic token through equivalent-score canonicalization"
+    );
+
     for left_index in 0..hits.len() {
         for right_index in (left_index + 1)..hits.len() {
             if search_hit_component_scores_equivalent(&hits[left_index], &hits[right_index])
@@ -3031,9 +3077,17 @@ fn search_sync(
     config: TwoTierConfig,
     explain: bool,
     source_mode: SearchSourceMode,
+    determinism: &Deterministic<Seed>,
 ) -> Result<(Vec<SearchHit>, Vec<String>), String> {
     let index_dir_owned = index_dir.to_path_buf();
     let query_owned = query.to_string();
+    let rerank_seed = determinism.shared_child("search.rerank");
+    tracing::debug!(
+        target: "ee::search::determinism",
+        seed_scope = %rerank_seed.scope(),
+        seed_hash = %rerank_seed.seed_hash_prefix(),
+        "threaded deterministic token through search_sync"
+    );
     #[allow(clippy::type_complexity)]
     let result_holder: Arc<Mutex<Option<Result<(Vec<SearchHit>, Vec<String>), String>>>> =
         Arc::new(Mutex::new(None));
@@ -3067,7 +3121,7 @@ fn search_sync(
                             .into_iter()
                             .map(|result| search_hit_from_scored_result(result, explain))
                             .collect();
-                        canonicalize_equivalent_component_scores(&mut hits);
+                        canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
                         hits.sort_by(search_hit_score_order);
                         Ok((hits, Vec::new()))
                     }
@@ -3114,7 +3168,7 @@ fn search_sync(
                         .into_iter()
                         .map(|result| search_hit_from_scored_result(result, explain))
                         .collect();
-                    canonicalize_equivalent_component_scores(&mut hits);
+                    canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
                     hits.sort_by(search_hit_score_order);
                     Ok((hits, Vec::new()))
                 }
@@ -3147,9 +3201,13 @@ fn apply_tombstone_visibility(
     options: &SearchOptions,
     hits: Vec<SearchHit>,
     degraded: &mut Vec<SearchDegradation>,
+    read_connection: Option<&DbConnection>,
 ) -> Vec<SearchHit> {
     if hits.is_empty() {
         return hits;
+    }
+    if let Some(connection) = read_connection {
+        return apply_tombstone_visibility_with_connection(options, hits, degraded, connection);
     }
 
     let explicit_database_path = options.database_path.is_some();
@@ -3170,6 +3228,15 @@ fn apply_tombstone_visibility(
         }
     };
 
+    apply_tombstone_visibility_with_connection(options, hits, degraded, &connection)
+}
+
+fn apply_tombstone_visibility_with_connection(
+    options: &SearchOptions,
+    hits: Vec<SearchHit>,
+    degraded: &mut Vec<SearchDegradation>,
+    connection: &DbConnection,
+) -> Vec<SearchHit> {
     let mut visible_hits = Vec::with_capacity(hits.len());
     let mut filtered = 0usize;
     let mut expired_filtered = 0usize;
@@ -3301,6 +3368,7 @@ fn apply_memory_scope_visibility(
     options: &SearchOptions,
     hits: Vec<SearchHit>,
     degraded: &mut Vec<SearchDegradation>,
+    read_connection: Option<&DbConnection>,
 ) -> (Vec<SearchHit>, MemoryScopeStats) {
     let scope_context = MemoryScopeContext::for_workspace(
         &options.workspace_path,
@@ -3326,6 +3394,17 @@ fn apply_memory_scope_visibility(
         options.memory_scope,
         MemoryScope::Swarm | MemoryScope::Workspace
     );
+    if let Some(connection) = read_connection {
+        return apply_memory_scope_visibility_with_connection(
+            options,
+            hits,
+            degraded,
+            &scope_context,
+            stats,
+            passthrough_scope,
+            connection,
+        );
+    }
 
     let explicit_database_path = options.database_path.is_some();
     let database_path = options
@@ -3361,6 +3440,26 @@ fn apply_memory_scope_visibility(
         }
     };
 
+    apply_memory_scope_visibility_with_connection(
+        options,
+        hits,
+        degraded,
+        &scope_context,
+        stats,
+        passthrough_scope,
+        &connection,
+    )
+}
+
+fn apply_memory_scope_visibility_with_connection(
+    options: &SearchOptions,
+    hits: Vec<SearchHit>,
+    degraded: &mut Vec<SearchDegradation>,
+    scope_context: &MemoryScopeContext,
+    mut stats: MemoryScopeStats,
+    passthrough_scope: bool,
+    connection: &DbConnection,
+) -> (Vec<SearchHit>, MemoryScopeStats) {
     let mut scoped_hits = Vec::with_capacity(hits.len());
     let mut read_error: Option<String> = None;
     for mut hit in hits {
@@ -4062,8 +4161,8 @@ mod tests {
             explanation: None,
         };
         let base_options = SearchOptions {
-            workspace_path: workspace,
-            database_path: Some(database_path),
+            workspace_path: workspace.clone(),
+            database_path: Some(database_path.clone()),
             index_dir: None,
             query: "cargo fmt".to_string(),
             limit: 10,
@@ -4081,15 +4180,30 @@ mod tests {
             strict_scope: false,
         };
 
+        let read_connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let mut snapshot_options = base_options.clone();
+        snapshot_options.database_path = Some(workspace.join("missing.db"));
         let mut degraded = Vec::new();
-        let visible = apply_tombstone_visibility(&base_options, vec![hit.clone()], &mut degraded);
+        let visible = apply_tombstone_visibility(
+            &snapshot_options,
+            vec![hit.clone()],
+            &mut degraded,
+            Some(&read_connection),
+        );
+        assert!(visible.is_empty());
+        assert_eq!(degraded[0].code, "tombstoned_filtered");
+
+        let mut degraded = Vec::new();
+        let visible =
+            apply_tombstone_visibility(&base_options, vec![hit.clone()], &mut degraded, None);
         assert!(visible.is_empty());
         assert_eq!(degraded[0].code, "tombstoned_filtered");
 
         let mut include_options = base_options.clone();
         include_options.include_tombstoned = true;
         let mut degraded = Vec::new();
-        let visible = apply_tombstone_visibility(&include_options, vec![hit], &mut degraded);
+        let visible = apply_tombstone_visibility(&include_options, vec![hit], &mut degraded, None);
         assert_eq!(visible.len(), 1);
         assert_eq!(degraded[0].code, "tombstoned_in_results");
 
@@ -4232,14 +4346,15 @@ mod tests {
         };
 
         let mut degraded = Vec::new();
-        let visible = apply_tombstone_visibility(&base_options, vec![hit.clone()], &mut degraded);
+        let visible =
+            apply_tombstone_visibility(&base_options, vec![hit.clone()], &mut degraded, None);
         assert!(visible.is_empty());
         assert_eq!(degraded[0].code, "stale_validity_filtered");
 
         let mut include_options = base_options;
         include_options.include_stale = true;
         let mut degraded = Vec::new();
-        let visible = apply_tombstone_visibility(&include_options, vec![hit], &mut degraded);
+        let visible = apply_tombstone_visibility(&include_options, vec![hit], &mut degraded, None);
         assert_eq!(visible.len(), 1);
         let report = SearchReport {
             status: SearchStatus::Success,
@@ -4341,14 +4456,15 @@ mod tests {
         };
 
         let mut degraded = Vec::new();
-        let visible = apply_tombstone_visibility(&base_options, vec![hit.clone()], &mut degraded);
+        let visible =
+            apply_tombstone_visibility(&base_options, vec![hit.clone()], &mut degraded, None);
         assert!(visible.is_empty());
         assert_eq!(degraded[0].code, "stale_validity_filtered");
 
         let mut include_options = base_options;
         include_options.include_stale = true;
         let mut degraded = Vec::new();
-        let visible = apply_tombstone_visibility(&include_options, vec![hit], &mut degraded);
+        let visible = apply_tombstone_visibility(&include_options, vec![hit], &mut degraded, None);
         assert_eq!(visible.len(), 1);
         let report = SearchReport {
             status: SearchStatus::Success,
@@ -4802,6 +4918,7 @@ mod tests {
             config,
             true,
             SearchSourceMode::Hybrid,
+            &Deterministic::from_seed(123),
         )?;
 
         assert!(errors.is_empty(), "search returned errors: {errors:?}");
@@ -5599,13 +5716,40 @@ mod tests {
             hit.fast_score = Some(0.42);
         }
 
-        canonicalize_equivalent_component_scores(&mut hits);
+        canonicalize_equivalent_component_scores(&mut hits, &Deterministic::from_seed(7));
         hits.sort_by(search_hit_score_order);
 
         assert_eq!(hits[0].doc_id, "mem_a");
         assert_eq!(hits[1].doc_id, "mem_b");
         assert!((hits[0].score - 0.20).abs() < 1e-6);
         assert!((hits[1].score - 0.20).abs() < 1e-6);
+    }
+
+    #[test]
+    fn component_score_tie_canonicalization_is_seed_threaded_but_stable() {
+        let mut seeded_a = vec![synthetic_hit("mem_b", 0.10), synthetic_hit("mem_a", 0.20)];
+        let mut seeded_b = seeded_a.clone();
+        for hit in seeded_a.iter_mut().chain(seeded_b.iter_mut()) {
+            hit.fast_score = Some(0.42);
+        }
+
+        canonicalize_equivalent_component_scores(&mut seeded_a, &Deterministic::from_seed(11));
+        canonicalize_equivalent_component_scores(&mut seeded_b, &Deterministic::from_seed(99));
+        seeded_a.sort_by(search_hit_score_order);
+        seeded_b.sort_by(search_hit_score_order);
+
+        let ids_a = seeded_a
+            .iter()
+            .map(|hit| hit.doc_id.as_str())
+            .collect::<Vec<_>>();
+        let ids_b = seeded_b
+            .iter()
+            .map(|hit| hit.doc_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids_a, vec!["mem_a", "mem_b"]);
+        assert_eq!(ids_a, ids_b);
+        assert_eq!(seeded_a[0].score, seeded_b[0].score);
+        assert_eq!(seeded_a[1].score, seeded_b[1].score);
     }
 
     #[test]
