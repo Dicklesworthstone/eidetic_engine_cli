@@ -1539,6 +1539,11 @@ fn determinism_proptest_run_event_rejects_impossible_counts_and_times() -> Resul
     Ok(())
 }
 
+#[test]
+fn determinism_regression_fixtures_replay_before_sampling() -> Result<(), String> {
+    verify_loaded_regression_fixture_replays(Path::new(REGRESSION_FIXTURE_DIR)).map(|_| ())
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(1024))]
 
