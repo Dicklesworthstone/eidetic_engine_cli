@@ -37141,10 +37141,10 @@ mod tests {
         GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY, GraphCommand, GraphSnapshotCommand,
         HandoffCommand, HealthArgs, ImportCommand, JobCommand, LearnCommand,
         LearnExperimentCommand, MaintenanceCommand, MemoryCommand, OutcomeQuarantineCommand,
-        OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand, RuleCommand, ShadowMode,
-        SituationCommand, StatusArgs, SwarmBriefArgs, SwarmCommand, TaskFrameCommand,
-        TaskFrameSubgoalCommand, VerifyCommand, WorkflowCommand, decay_settings_from_config, run,
-        write_index_rebuild_error,
+        OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand, RuleCommand,
+        SERVE_UNAVAILABLE_CODE, ShadowMode, SituationCommand, StatusArgs, SwarmBriefArgs,
+        SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand, VerifyCommand, WorkflowCommand,
+        decay_settings_from_config, run, write_index_rebuild_error,
     };
     use crate::config::MeshCommandMode;
     use crate::core::index::IndexRebuildError;
