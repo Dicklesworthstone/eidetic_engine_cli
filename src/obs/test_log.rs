@@ -22,8 +22,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::ffi::OsString;
-use std::fs::OpenOptions;
-use std::io::Write;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -258,13 +258,40 @@ pub fn log_event_to(path: &Path, level: LogLevel, event: &TestEvent) -> bool {
     let _guard = WRITE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if test_log_path_has_symlink_component(path).unwrap_or(true) {
+        return false;
+    }
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
+    }
+    if test_log_path_has_symlink_component(path).unwrap_or(true) {
+        return false;
     }
     let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
         return false;
     };
     writeln!(file, "{serialized}").is_ok()
+}
+
+fn test_log_path_has_symlink_component(path: &Path) -> io::Result<bool> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(true),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
 }
 
 /// Append a single event to the configured log file. No-op when unconfigured.
@@ -490,6 +517,57 @@ mod tests {
         assert_eq!(lines[0]["kind"], "note");
         assert_eq!(lines[0]["fields"]["message"], "hello");
         assert_eq!(lines[1]["kind"], "assert_ok");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_event_to_rejects_symlinked_parent_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        let real_logs = tmp.path().join("real-logs");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&real_logs).expect("real logs");
+        std::os::unix::fs::symlink(&real_logs, workspace.join("logs")).expect("symlink logs");
+        let log_path = workspace.join("logs").join("events.jsonl");
+
+        assert!(
+            !log_event_to(
+                &log_path,
+                LogLevel::Normal,
+                &TestEvent::new("smoke", EventKind::Note)
+            ),
+            "test-event logging should reject symlinked parents"
+        );
+        assert!(
+            !real_logs.join("events.jsonl").exists(),
+            "test-event logging must not write through symlinked parent"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_event_to_rejects_symlinked_log_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log_dir = tmp.path().join("logs");
+        std::fs::create_dir_all(&log_dir).expect("log dir");
+        let outside_log = tmp.path().join("outside.jsonl");
+        std::fs::write(&outside_log, "outside\n").expect("outside log");
+        let linked_log = log_dir.join("events.jsonl");
+        std::os::unix::fs::symlink(&outside_log, &linked_log).expect("symlink log");
+
+        assert!(
+            !log_event_to(
+                &linked_log,
+                LogLevel::Normal,
+                &TestEvent::new("smoke", EventKind::Note)
+            ),
+            "test-event logging should reject symlinked log files"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outside_log).expect("outside content"),
+            "outside\n",
+            "test-event logging must not append through symlinked file"
+        );
     }
 
     #[test]
