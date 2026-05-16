@@ -2328,7 +2328,9 @@ mod tests {
             "minimal support bundle redaction should leave paths intact"
         );
         assert!(
-            !minimal.content.contains("sk-test_123456789abcdefghijklmnop"),
+            !minimal
+                .content
+                .contains("sk-test_123456789abcdefghijklmnop"),
             "minimal support bundle redaction should redact secret-like values"
         );
 
