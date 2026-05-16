@@ -1652,11 +1652,40 @@ fn read_workspace_config_if_present(
 ) -> Result<Option<(PathBuf, String)>, DomainError> {
     let path = workspace_path.join(".ee").join("config.toml");
     ensure_workspace_config_path_is_not_symlink(&path, purpose)?;
+    ensure_workspace_config_path_is_regular_file(&path, purpose)?;
     match fs::read_to_string(&path) {
         Ok(contents) => Ok(Some((path, contents))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(DomainError::Configuration {
             message: format!("Failed to read {purpose} {}: {error}", path.display()),
+            repair: Some("Fix or remove .ee/config.toml.".to_owned()),
+        }),
+    }
+}
+
+fn ensure_workspace_config_path_is_regular_file(
+    path: &Path,
+    purpose: &str,
+) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Configuration {
+            message: format!(
+                "Refusing to read {purpose} {} because it is not a regular file.",
+                path.display()
+            ),
+            repair: Some("Replace .ee/config.toml with a regular TOML file.".to_owned()),
+        }),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(DomainError::Configuration {
+            message: format!("Failed to inspect {purpose} {}: {error}", path.display()),
             repair: Some("Fix or remove .ee/config.toml.".to_owned()),
         }),
     }
@@ -8755,6 +8784,23 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn memory_config_reads_reject_non_regular_config_path() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_path = temp.path().join(".ee").join("config.toml");
+        fs::create_dir_all(&config_path).map_err(|error| error.to_string())?;
+
+        let error = match load_secret_detector_allow_config(temp.path()) {
+            Ok(config) => return Err(format!("expected non-regular rejection, got {config:?}")),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("not a regular file"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn cluster_config_read_rejects_symlinked_config_file() -> TestResult {
@@ -8779,6 +8825,23 @@ mod tests {
         };
         assert!(
             error.to_string().contains("symlinked path component"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cluster_config_read_rejects_non_regular_config_path() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_path = temp.path().join(".ee").join("config.toml");
+        fs::create_dir_all(&config_path).map_err(|error| error.to_string())?;
+
+        let error = match remember_cluster_coherence_config(temp.path()) {
+            Ok(config) => return Err(format!("expected non-regular rejection, got {config:?}")),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("not a regular file"),
             "unexpected error: {error}"
         );
         Ok(())
