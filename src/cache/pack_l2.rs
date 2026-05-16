@@ -236,21 +236,23 @@ impl PackL2Cache {
             }
             let byte_len = metadata.len();
             report.bytes_before = report.bytes_before.saturating_add(byte_len);
-            let modified_epoch_seconds = metadata
+            let fallback_epoch_seconds = metadata
                 .modified()
                 .ok()
                 .and_then(|modified| system_time_seconds(modified).ok())
                 .unwrap_or(0);
-            let expired = modified_epoch_seconds == 0
+            let stored_epoch_seconds =
+                cache_entry_stored_at(&path).unwrap_or(fallback_epoch_seconds);
+            let expired = stored_epoch_seconds == 0
                 || is_expired(
-                    modified_epoch_seconds,
+                    stored_epoch_seconds,
                     now_epoch_seconds,
                     self.options.max_age,
                 );
             candidates.push(EvictionCandidate {
                 path,
                 byte_len,
-                modified_epoch_seconds,
+                stored_epoch_seconds,
                 expired,
             });
         }
@@ -259,10 +261,7 @@ impl PackL2Cache {
             left.expired
                 .cmp(&right.expired)
                 .reverse()
-                .then_with(|| {
-                    left.modified_epoch_seconds
-                        .cmp(&right.modified_epoch_seconds)
-                })
+                .then_with(|| left.stored_epoch_seconds.cmp(&right.stored_epoch_seconds))
                 .then_with(|| left.path.cmp(&right.path))
         });
 
@@ -419,7 +418,7 @@ struct PackL2CacheEntry {
 struct EvictionCandidate {
     path: PathBuf,
     byte_len: u64,
-    modified_epoch_seconds: u64,
+    stored_epoch_seconds: u64,
     expired: bool,
 }
 
@@ -439,6 +438,13 @@ fn system_time_seconds(time: SystemTime) -> Result<u64, PackL2CacheError> {
     time.duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .map_err(|source| PackL2CacheError::TimeBeforeUnixEpoch { source })
+}
+
+fn cache_entry_stored_at(path: &Path) -> Option<u64> {
+    let bytes = fs::read(path).ok()?;
+    serde_json::from_slice::<PackL2CacheEntry>(&bytes)
+        .ok()
+        .map(|entry| entry.stored_at_epoch_seconds)
 }
 
 fn ensure_cache_dir(path: &Path) -> Result<(), PackL2CacheError> {
@@ -667,19 +673,18 @@ mod tests {
         cache
             .put_at("blake3:old", &json!({"payload": "old"}), 100)
             .map_err(|error| error.to_string())?;
-        cache
+        let fresh_report = cache
             .put_at("blake3:fresh", &json!({"payload": "fresh"}), 120)
             .map_err(|error| error.to_string())?;
 
-        let report = cache
-            .evict_best_effort_at(111)
-            .map_err(|error| error.to_string())?;
-
-        assert_eq!(report.removed, 1, "one expired entry should be removed");
+        assert_eq!(
+            fresh_report.eviction.removed, 1,
+            "one expired entry should be removed during the next write"
+        );
         assert!(
             matches!(
                 cache
-                    .get_at("blake3:old", 111)
+                    .get_at("blake3:old", 120)
                     .map_err(|error| error.to_string())?,
                 PackL2CacheLookup::Miss(PackL2CacheMiss {
                     reason: PackL2CacheMissReason::NotFound,
@@ -690,7 +695,7 @@ mod tests {
         );
         assert!(
             cache
-                .get_at("blake3:fresh", 111)
+                .get_at("blake3:fresh", 120)
                 .map_err(|error| error.to_string())?
                 .is_hit(),
             "fresh entry should remain"
