@@ -100,15 +100,6 @@ impl ArtifactDegradation {
             repair: repair.into(),
         }
     }
-
-    fn data_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "code": self.code,
-            "severity": self.severity,
-            "message": self.message,
-            "repair": self.repair,
-        })
-    }
 }
 
 fn artifact_degraded_data_json(
@@ -1189,8 +1180,8 @@ mod tests {
             external_ref: None,
             content_hash: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .to_owned(),
-            media_type: Some("text/plain".to_owned()),
-            size_bytes: Some(12),
+            media_type: "text/plain".to_owned(),
+            size_bytes: 12,
             redaction_status: "none".to_owned(),
             snippet: Some("hello".to_owned()),
             snippet_hash: Some(
