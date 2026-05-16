@@ -31,13 +31,9 @@ fn determinism_lint_fixture_files_are_present() {
 }
 
 fn scan_fixture(source: &str) -> Vec<Finding> {
-    let lines = source.lines().collect::<Vec<_>>();
     let mut findings = Vec::new();
 
-    let scan_lines = lines
-        .iter()
-        .map(|line| strip_rust_line_noise(line))
-        .collect::<Vec<_>>();
+    let scan_lines = strip_rust_noise(source);
 
     for (index, line) in scan_lines.iter().enumerate() {
         let line_no = index + 1;
@@ -127,40 +123,164 @@ fn function_signature_has_deterministic_seed(lines: &[String], attribute_index: 
     false
 }
 
-fn strip_rust_line_noise(line: &str) -> String {
-    let bytes = line.as_bytes();
-    let mut escaped = false;
-    let mut in_string = false;
-    let mut in_char = false;
-    let mut cleaned = String::with_capacity(line.len());
+fn strip_rust_noise(source: &str) -> Vec<String> {
+    let chars = source.chars().collect::<Vec<_>>();
+    let mut lines = vec![String::new()];
+    let mut index = 0;
+    let mut state = StripState::Normal;
 
-    for index in 0..bytes.len() {
-        let byte = bytes[index];
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if byte == b'\\' && (in_string || in_char) {
-            escaped = true;
-            continue;
-        }
-        if byte == b'"' && !in_char {
-            in_string = !in_string;
-            continue;
-        }
-        if byte == b'\'' && !in_string {
-            in_char = !in_char;
-            continue;
-        }
-        if !in_string && !in_char && byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
-            return cleaned;
-        }
-        if !in_string && !in_char {
-            cleaned.push(char::from(byte));
+    while index < chars.len() {
+        let ch = chars[index];
+        match &mut state {
+            StripState::Normal => {
+                if ch == '\n' {
+                    lines.push(String::new());
+                    index += 1;
+                } else if starts_with(&chars, index, "//") {
+                    index = skip_until_newline(&chars, index + 2);
+                } else if starts_with(&chars, index, "/*") {
+                    state = StripState::BlockComment { depth: 1 };
+                    index += 2;
+                } else if let Some((consumed, hashes)) = raw_string_start(&chars, index) {
+                    state = StripState::RawString { hashes };
+                    index += consumed;
+                } else if ch == '"' {
+                    state = StripState::String { escaped: false };
+                    index += 1;
+                } else if ch == '\'' {
+                    state = StripState::Char { escaped: false };
+                    index += 1;
+                } else {
+                    lines.last_mut().expect("at least one output line").push(ch);
+                    index += 1;
+                }
+            }
+            StripState::String { escaped } => {
+                if ch == '\n' {
+                    lines.push(String::new());
+                    *escaped = false;
+                    index += 1;
+                } else if *escaped {
+                    *escaped = false;
+                    index += 1;
+                } else if ch == '\\' {
+                    *escaped = true;
+                    index += 1;
+                } else if ch == '"' {
+                    state = StripState::Normal;
+                    index += 1;
+                } else {
+                    index += 1;
+                }
+            }
+            StripState::Char { escaped } => {
+                if ch == '\n' {
+                    lines.push(String::new());
+                    *escaped = false;
+                    index += 1;
+                } else if *escaped {
+                    *escaped = false;
+                    index += 1;
+                } else if ch == '\\' {
+                    *escaped = true;
+                    index += 1;
+                } else if ch == '\'' {
+                    state = StripState::Normal;
+                    index += 1;
+                } else {
+                    index += 1;
+                }
+            }
+            StripState::BlockComment { depth } => {
+                if ch == '\n' {
+                    lines.push(String::new());
+                    index += 1;
+                } else if starts_with(&chars, index, "/*") {
+                    *depth += 1;
+                    index += 2;
+                } else if starts_with(&chars, index, "*/") {
+                    *depth -= 1;
+                    index += 2;
+                    if *depth == 0 {
+                        state = StripState::Normal;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            StripState::RawString { hashes } => {
+                if ch == '\n' {
+                    lines.push(String::new());
+                    index += 1;
+                } else if raw_string_end(&chars, index, *hashes) {
+                    state = StripState::Normal;
+                    index += 1 + *hashes;
+                } else {
+                    index += 1;
+                }
+            }
         }
     }
 
-    cleaned
+    lines
+}
+
+#[derive(Debug)]
+enum StripState {
+    Normal,
+    String { escaped: bool },
+    Char { escaped: bool },
+    BlockComment { depth: usize },
+    RawString { hashes: usize },
+}
+
+fn starts_with(chars: &[char], index: usize, needle: &str) -> bool {
+    needle
+        .chars()
+        .enumerate()
+        .all(|(offset, expected)| chars.get(index + offset) == Some(&expected))
+}
+
+fn skip_until_newline(chars: &[char], mut index: usize) -> usize {
+    while index < chars.len() && chars[index] != '\n' {
+        index += 1;
+    }
+    index
+}
+
+fn raw_string_start(chars: &[char], index: usize) -> Option<(usize, usize)> {
+    if index > 0 && is_identifier_char(chars[index - 1]) {
+        return None;
+    }
+
+    let raw_prefix_len = if chars.get(index) == Some(&'r') {
+        1
+    } else if chars.get(index) == Some(&'b') && chars.get(index + 1) == Some(&'r') {
+        2
+    } else {
+        return None;
+    };
+
+    let mut cursor = index + raw_prefix_len;
+    let mut hashes = 0;
+    while chars.get(cursor) == Some(&'#') {
+        hashes += 1;
+        cursor += 1;
+    }
+    if chars.get(cursor) == Some(&'"') {
+        Some((raw_prefix_len + hashes + 1, hashes))
+    } else {
+        None
+    }
+}
+
+fn raw_string_end(chars: &[char], index: usize, hashes: usize) -> bool {
+    chars.get(index) == Some(&'"')
+        && (0..hashes).all(|offset| chars.get(index + 1 + offset) == Some(&'#'))
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
 }
 
 fn nearby_lines_contain(lines: &[String], index: usize, needle: &str) -> bool {
@@ -216,6 +336,22 @@ mod self_tests {
                 // std::env::var("EE_SEED");
             }
         "#;
+        let report = render_report(&scan_fixture(fixture));
+        assert_eq!(report, "schema: ee.determinism_lint_fixture.v1\n");
+    }
+
+    #[test]
+    fn block_comments_and_raw_strings_do_not_emit_known_violations() {
+        let fixture = r##"
+            /*
+             * rand::thread_rng();
+             * std::env::var("EE_SEED");
+             * std::fs::read_dir(".");
+             */
+            fn documentation_mentions() {
+                let _ = r#"Uuid::new_v4() Instant::now() SystemTime::now()"#;
+            }
+        "##;
         let report = render_report(&scan_fixture(fixture));
         assert_eq!(report, "schema: ee.determinism_lint_fixture.v1\n");
     }

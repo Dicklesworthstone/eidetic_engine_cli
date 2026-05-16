@@ -54,3 +54,12 @@ fn benign_documentation_mentions() {
     // rand::thread_rng();
     // std::env::var("EE_SEED");
 }
+
+fn benign_block_comment_and_raw_string_mentions() {
+    /*
+     * rand::thread_rng();
+     * Uuid::new_v4();
+     * std::fs::read_dir(".");
+     */
+    let _ = r#"std::env::var("EE_SEED") Instant::now() SystemTime::now()"#;
+}
