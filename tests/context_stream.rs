@@ -26,6 +26,13 @@ use uuid::Uuid;
 type TestResult = Result<(), String>;
 
 const QUERY: &str = "stream release guardrail";
+const REAL_STREAM_QUERIES: &[&str] = &[
+    "stream release guardrail",
+    "stream trailer hash",
+    "partial stream terminal frame",
+    "item frame rank sequence",
+    "batch canonical selection source",
+];
 
 fn memory_id(seed: u128) -> MemoryId {
     MemoryId::from_uuid(Uuid::from_u128(seed))
@@ -297,42 +304,53 @@ fn real_context_stream_preserves_batch_hash_and_order() -> TestResult {
     let workspace = workspace_dir()?;
     seed_workspace(&workspace)?;
 
+    for query in REAL_STREAM_QUERIES {
+        assert_real_stream_matches_batch(&workspace, query)?;
+    }
+
+    Ok(())
+}
+
+fn assert_real_stream_matches_batch(workspace: &PathBuf, query: &str) -> TestResult {
     let batch = run_ee(
-        &workspace,
-        &["--format", "json", "context", QUERY, "--max-tokens", "900"],
+        workspace,
+        &["--format", "json", "context", query, "--max-tokens", "900"],
     )?;
-    ensure_success(&batch, "batch context")?;
-    let batch_json = stdout_json(&batch, "batch context")?;
+    ensure_success(&batch, &format!("batch context {query}"))?;
+    let batch_json = stdout_json(&batch, &format!("batch context {query}"))?;
     let batch_hash = batch_json
         .pointer("/data/pack/hash")
         .and_then(Value::as_str)
-        .ok_or_else(|| "batch context missing /data/pack/hash".to_owned())?;
+        .ok_or_else(|| format!("batch context {query} missing /data/pack/hash"))?;
     let batch_items = batch_json
         .pointer("/data/pack/items")
         .and_then(Value::as_array)
-        .ok_or_else(|| "batch context missing /data/pack/items".to_owned())?;
+        .ok_or_else(|| format!("batch context {query} missing /data/pack/items"))?;
     if batch_items.is_empty() {
-        return Err("batch context returned no pack items for stream fixture".to_owned());
+        return Err(format!(
+            "batch context returned no pack items for stream fixture query {query}"
+        ));
     }
 
     for stream_format in ["json", "jsonl"] {
         let stream = run_ee(
-            &workspace,
+            workspace,
             &[
                 "--format",
                 stream_format,
                 "context",
-                QUERY,
+                query,
                 "--max-tokens",
                 "900",
                 "--stream",
             ],
         )?;
-        ensure_success(&stream, &format!("stream context {stream_format}"))?;
-        let frames = stdout_stream(&stream, &format!("stream context {stream_format}"))?;
+        let label = format!("stream context {stream_format} {query}");
+        ensure_success(&stream, &label)?;
+        let frames = stdout_stream(&stream, &label)?;
         if frames.len() != batch_items.len() + 2 {
             return Err(format!(
-                "stream {stream_format} should emit header + items + trailer; got {} frames for {} batch items",
+                "stream {stream_format} for {query} should emit header + items + trailer; got {} frames for {} batch items",
                 frames.len(),
                 batch_items.len()
             ));
@@ -344,23 +362,27 @@ fn real_context_stream_preserves_batch_hash_and_order() -> TestResult {
             .and_then(Value::as_str)
             != Some("header")
         {
-            return Err(format!("first {stream_format} stream frame must be header"));
+            return Err(format!(
+                "first {stream_format} stream frame for {query} must be header"
+            ));
         }
         let trailer = frames
             .last()
-            .ok_or_else(|| format!("{stream_format} stream emitted no frames"))?;
+            .ok_or_else(|| format!("{stream_format} stream for {query} emitted no frames"))?;
         if trailer.get("kind").and_then(Value::as_str) != Some("trailer") {
-            return Err(format!("last {stream_format} stream frame must be trailer"));
+            return Err(format!(
+                "last {stream_format} stream frame for {query} must be trailer"
+            ));
         }
         if trailer.get("packHash").and_then(Value::as_str) != Some(batch_hash) {
             return Err(format!(
-                "stream {stream_format} trailer hash must match batch hash: {:?} != {batch_hash}",
+                "stream {stream_format} trailer hash for {query} must match batch hash: {:?} != {batch_hash}",
                 trailer.get("packHash")
             ));
         }
         if trailer.get("totalItems").and_then(Value::as_u64) != Some(batch_items.len() as u64) {
             return Err(format!(
-                "stream {stream_format} trailer totalItems must match batch item count"
+                "stream {stream_format} trailer totalItems for {query} must match batch item count"
             ));
         }
 
@@ -369,30 +391,32 @@ fn real_context_stream_preserves_batch_hash_and_order() -> TestResult {
             let expected_seq = index as u64;
             if frame.get("kind").and_then(Value::as_str) != Some("item") {
                 return Err(format!(
-                    "frame {index} between {stream_format} header/trailer must be an item"
+                    "frame {index} between {stream_format} header/trailer for {query} must be an item"
                 ));
             }
             if frame.get("seq").and_then(Value::as_u64) != Some(expected_seq) {
                 return Err(format!(
-                    "{stream_format} item frame {index} has non-monotone seq"
+                    "{stream_format} item frame {index} for {query} has non-monotone seq"
                 ));
             }
             if frame.get("rank").and_then(Value::as_u64) != Some(expected_rank) {
                 return Err(format!(
-                    "{stream_format} item frame {index} has non-monotone rank"
+                    "{stream_format} item frame {index} for {query} has non-monotone rank"
                 ));
             }
             let stream_id = frame
                 .get("memoryId")
                 .and_then(Value::as_str)
-                .ok_or_else(|| format!("{stream_format} item frame {index} missing memoryId"))?;
+                .ok_or_else(|| {
+                    format!("{stream_format} item frame {index} for {query} missing memoryId")
+                })?;
             let batch_id = batch_items[index]
                 .get("memoryId")
                 .and_then(Value::as_str)
-                .ok_or_else(|| format!("batch item {index} missing memoryId"))?;
+                .ok_or_else(|| format!("batch item {index} for {query} missing memoryId"))?;
             if stream_id != batch_id {
                 return Err(format!(
-                    "stream {stream_format} item {index} memoryId drifted from batch order: {stream_id} != {batch_id}"
+                    "stream {stream_format} item {index} for {query} memoryId drifted from batch order: {stream_id} != {batch_id}"
                 ));
             }
         }
