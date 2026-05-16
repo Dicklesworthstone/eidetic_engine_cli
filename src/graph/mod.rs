@@ -1886,11 +1886,20 @@ pub(crate) fn memory_link_mesh_metadata_visible(metadata_json: Option<&str>) -> 
     if !graph_link_metadata_contains_mesh_marker(&metadata) {
         return true;
     }
-    graph_link_mesh_string(
+    let workspace_scope_decision_allows = graph_link_mesh_string(
         &metadata,
         &["workspaceScopeDecision", "workspace_scope_decision"],
-    ) == Some("allow")
-        && graph_link_mesh_string(&metadata, &["cachedMaterialId", "cached_material_id"]).is_some()
+    ) == Some("allow");
+    if !workspace_scope_decision_allows {
+        return false;
+    }
+    if graph_link_metadata_has_policy_decision(&metadata)
+        && graph_link_mesh_policy_decision_kind(&metadata) != Some("allow")
+    {
+        return false;
+    }
+
+    graph_link_mesh_string(&metadata, &["cachedMaterialId", "cached_material_id"]).is_some()
         && graph_link_mesh_string(&metadata, &["originWorkspaceId", "origin_workspace_id"])
             .is_some()
         && graph_link_mesh_string(&metadata, &["producerPeerId", "producer_peer_id"]).is_some()
@@ -1911,9 +1920,34 @@ fn graph_link_metadata_contains_mesh_marker(metadata: &serde_json::Value) -> boo
         "origin_workspace_id",
         "producerPeerId",
         "producer_peer_id",
+        "policyDecision",
+        "policy_decision",
+        "policyFailureSurface",
+        "policy_failure_surface",
     ]
     .iter()
     .any(|key| metadata.get(key).is_some())
+}
+
+fn graph_link_metadata_has_policy_decision(metadata: &serde_json::Value) -> bool {
+    graph_link_mesh_policy_decision(metadata).is_some()
+}
+
+fn graph_link_mesh_policy_decision_kind(metadata: &serde_json::Value) -> Option<&str> {
+    let policy_decision = graph_link_mesh_policy_decision(metadata)?;
+    graph_link_json_string(policy_decision, "action")
+}
+
+fn graph_link_mesh_policy_decision(metadata: &serde_json::Value) -> Option<&serde_json::Value> {
+    metadata
+        .get("policyDecision")
+        .or_else(|| metadata.get("policy_decision"))
+        .or_else(|| {
+            metadata.get("mesh").and_then(|mesh| {
+                mesh.get("policyDecision")
+                    .or_else(|| mesh.get("policy_decision"))
+            })
+        })
 }
 
 fn graph_link_mesh_string<'a>(metadata: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
@@ -6687,6 +6721,18 @@ mod tests {
             0.9,
             Some(mesh_link_metadata("allow", "metadata", false)),
         )?;
+        insert_link_with_metadata(
+            &connection,
+            "link_00000000000000000000000029",
+            MEMORY_C,
+            MEMORY_A,
+            true,
+            0.9,
+            0.9,
+            Some(mesh_link_metadata_with_policy_action(
+                "allow", "metadata", true, "deny",
+            )),
+        )?;
 
         let projection = graph_result(super::build_memory_graph(
             &connection,
@@ -6709,6 +6755,34 @@ mod tests {
         material_lane: &str,
         complete: bool,
     ) -> String {
+        mesh_link_metadata_with_optional_policy_action(
+            workspace_scope_decision,
+            material_lane,
+            complete,
+            None,
+        )
+    }
+
+    fn mesh_link_metadata_with_policy_action(
+        workspace_scope_decision: &str,
+        material_lane: &str,
+        complete: bool,
+        policy_action: &str,
+    ) -> String {
+        mesh_link_metadata_with_optional_policy_action(
+            workspace_scope_decision,
+            material_lane,
+            complete,
+            Some(policy_action),
+        )
+    }
+
+    fn mesh_link_metadata_with_optional_policy_action(
+        workspace_scope_decision: &str,
+        material_lane: &str,
+        complete: bool,
+        policy_action: Option<&str>,
+    ) -> String {
         let mut mesh = serde_json::json!({
             "workspaceScopeDecision": workspace_scope_decision,
             "workspaceId": "wsp_local_alpha",
@@ -6724,6 +6798,18 @@ mod tests {
         });
         if !complete && let Some(object) = mesh.as_object_mut() {
             object.remove("trustLane");
+        }
+        if let Some(policy_action) = policy_action
+            && let Some(object) = mesh.as_object_mut()
+        {
+            object.insert(
+                "policyDecision".to_owned(),
+                serde_json::json!({
+                    "schema": "ee.mesh.policy_decision.v1",
+                    "direction": "inbound",
+                    "action": policy_action,
+                }),
+            );
         }
         serde_json::json!({ "mesh": mesh }).to_string()
     }
