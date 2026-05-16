@@ -548,32 +548,56 @@ fn write_hook_file(hook_dir: &Path, target_path: &Path, content: &str) -> Result
         ),
     })?;
 
-    std::fs::write(target_path, content).map_err(|error| DomainError::Storage {
-        message: format!("Failed to write hook '{}': {error}", target_path.display()),
-        repair: Some(
-            "Choose a writable hook directory or re-run with corrected permissions.".to_owned(),
-        ),
-    })?;
+    let mut temp_path = target_path.to_owned();
+    temp_path.set_extension("tmp");
+
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&temp_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to create temporary hook '{}': {error}", temp_path.display()),
+            repair: Some("Check hook path permissions.".to_owned()),
+        })?;
+        file.write_all(content.as_bytes()).map_err(|error| DomainError::Storage {
+            message: format!("Failed to write temporary hook '{}': {error}", temp_path.display()),
+            repair: Some("Check hook path permissions.".to_owned()),
+        })?;
+        file.sync_data().map_err(|error| DomainError::Storage {
+            message: format!("Failed to sync temporary hook '{}': {error}", temp_path.display()),
+            repair: Some("Check hook path permissions.".to_owned()),
+        })?;
+    }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let metadata = std::fs::metadata(target_path).map_err(|error| DomainError::Storage {
+        let metadata = std::fs::metadata(&temp_path).map_err(|error| DomainError::Storage {
             message: format!(
-                "Failed to read hook metadata '{}': {error}",
-                target_path.display()
+                "Failed to read temporary hook metadata '{}': {error}",
+                temp_path.display()
             ),
             repair: Some("Check hook file permissions and re-run hook installation.".to_owned()),
         })?;
         let mut perms = metadata.permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(target_path, perms).map_err(|error| DomainError::Storage {
+        std::fs::set_permissions(&temp_path, perms).map_err(|error| DomainError::Storage {
             message: format!(
-                "Failed to mark hook executable '{}': {error}",
-                target_path.display()
+                "Failed to mark temporary hook executable '{}': {error}",
+                temp_path.display()
             ),
             repair: Some("Check hook file permissions and re-run hook installation.".to_owned()),
         })?;
+    }
+
+    std::fs::rename(&temp_path, target_path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to rename temporary hook to '{}': {error}",
+            target_path.display()
+        ),
+        repair: Some("Check hook directory permissions.".to_owned()),
+    })?;
+
+    if let Ok(dir) = std::fs::File::open(hook_dir) {
+        let _ = dir.sync_data();
     }
 
     Ok(())
@@ -1035,7 +1059,6 @@ fn zsh_preflight_snippet(ee_path_quoted: &str) -> String {
 
 if [ -n "${{ZSH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; then
     EE_PREFLIGHT_HOOK_BINARY={ee_path}
-    EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES='{severities}'
 
     autoload -Uz add-zsh-hook
 
@@ -1060,10 +1083,6 @@ if [ -n "${{ZSH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; then
 
         _ee_sev=$(printf '%s' "$_ee_out" | awk -F'"severity":"' \
             'NF>1{{split($2,a,"\""); print a[1]; exit}}')
-        case " $EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES " in
-            *" $_ee_sev "*) ;;
-            *) return 0 ;;
-        esac
         _ee_msg=$(printf '%s' "$_ee_out" | awk -F'"message":"' \
             'NF>1{{split($2,a,"\""); print a[1]; exit}}')
         print -u2 -- "\n[ee preflight] $_ee_msg (severity=$_ee_sev)"
