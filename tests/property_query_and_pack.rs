@@ -301,6 +301,66 @@ fn regression_fixture_for_pack_case_mismatch(
     ))
 }
 
+fn parse_regression_redaction_level(value: &str) -> Result<RedactionLevel, String> {
+    RedactionLevel::all()
+        .iter()
+        .copied()
+        .find(|level| {
+            value.eq_ignore_ascii_case(level.as_str())
+                || value.eq_ignore_ascii_case(&format!("{level:?}"))
+        })
+        .ok_or_else(|| format!("unsupported regression redaction level {value:?}"))
+}
+
+fn replay_pack_case_input_bytes(input: &serde_json::Value) -> Result<Vec<u8>, String> {
+    let input: DeterminismRegressionInput =
+        serde_json::from_value(input.clone()).map_err(|error| error.to_string())?;
+    if input.workspace_state != "synthetic_pack_candidates.v1" {
+        return Err(format!(
+            "unsupported regression workspace_state {:?}",
+            input.workspace_state
+        ));
+    }
+    if input.index_state != "derived_from_candidate_specs.v1" {
+        return Err(format!(
+            "unsupported regression index_state {:?}",
+            input.index_state
+        ));
+    }
+
+    let profile = ContextPackProfile::parse(&input.config.profile)
+        .ok_or_else(|| format!("unsupported regression profile {:?}", input.config.profile))?;
+    let budget = TokenBudget::new(input.config.max_tokens).map_err(|error| format!("{error:?}"))?;
+    let options = PackAssemblyOptions {
+        include_coverage_fill: input.config.include_coverage_fill,
+        output_redaction_enabled: input.config.output_redaction_enabled,
+        redaction_level: parse_regression_redaction_level(&input.config.redaction_level)?,
+    };
+    let specs = input
+        .candidate_specs
+        .iter()
+        .map(|spec| {
+            (
+                spec.estimated_tokens,
+                spec.relevance_raw,
+                spec.utility_raw,
+                spec.content_shape,
+            )
+        })
+        .collect::<Vec<_>>();
+    let candidates = candidates_from_specs(specs)?;
+    let draft = assemble_draft_with_profile_and_options_seeded(
+        profile,
+        input.query,
+        budget,
+        candidates,
+        options,
+        &Deterministic::from_seed(input.seed),
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    Ok(draft_bytes(&draft))
+}
+
 fn regression_fixture_file_name(input_hash: &str) -> Result<String, String> {
     let input_hash_hex = input_hash.trim_start_matches("blake3:");
     if input_hash_hex.len() < 16 {
@@ -694,6 +754,60 @@ fn determinism_regression_fixture_captures_structured_pack_input() -> Result<(),
     assert_eq!(fixture.input["config"]["redaction_level"], "Strict");
     assert_eq!(fixture.input["candidate_specs"][0]["estimated_tokens"], 8);
     assert_eq!(fixture.input["candidate_specs"][1]["content_shape"], 3);
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_replays_structured_pack_input() -> Result<(), String> {
+    let specs = vec![(8, 900, 700, 1), (13, 500, 950, 3), (5, 650, 875, 2)];
+    let budget = TokenBudget::new(64).map_err(|error| format!("{error:?}"))?;
+    let options = PackAssemblyOptions {
+        include_coverage_fill: true,
+        output_redaction_enabled: true,
+        redaction_level: RedactionLevel::Strict,
+    };
+    let input = regression_input_for_pack_case(
+        "structured replay".to_string(),
+        budget,
+        ContextPackProfile::Balanced,
+        options,
+        42,
+        &specs,
+    )?;
+    let input_bytes = serde_json::to_vec(&input).map_err(|error| error.to_string())?;
+    let first = replay_pack_case_input_bytes(&input)?;
+    let replay = replay_pack_case_input_bytes(&input)?;
+    let fixture = regression_fixture_for_mismatch(
+        42,
+        &input_bytes,
+        &first,
+        b"synthetic nondeterministic output",
+    )
+    .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+
+    assert_eq!(first, replay);
+    assert_eq!(fixture.expected_hash, hash_bytes(&replay));
+    assert_eq!(fixture.input, input);
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_replay_rejects_unknown_input_shape() -> Result<(), String> {
+    let mut input = regression_input_for_pack_case(
+        "structured replay".to_string(),
+        TokenBudget::new(64).map_err(|error| format!("{error:?}"))?,
+        ContextPackProfile::Balanced,
+        PackAssemblyOptions::default(),
+        42,
+        &[(8, 900, 700, 1)],
+    )?;
+    input["workspace_state"] = serde_json::json!("external_workspace.v1");
+
+    let error = replay_pack_case_input_bytes(&input)
+        .expect_err("unexpected workspace state should not replay as synthetic candidates");
+
+    assert!(error.contains("unsupported regression workspace_state"));
+    assert!(error.contains("external_workspace.v1"));
     Ok(())
 }
 
