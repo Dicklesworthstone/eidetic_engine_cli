@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs;
 use std::time::{Instant, SystemTime};
 
 use rand::Rng;
@@ -36,6 +37,8 @@ fn ambient_wall_clock(_: &ee::runtime::determinism::Deterministic<Seed>) {
 #[determinism::required]
 fn ambient_env(_: &ee::runtime::determinism::Deterministic<Seed>) {
     let _ = std::env::var("EE_SEED");
+    let _ = std::env::var_os("EE_SEED");
+    let _ = std::env::vars();
 }
 
 #[determinism::required]
@@ -47,12 +50,16 @@ fn hashmap_iteration(_: &ee::runtime::determinism::Deterministic<Seed>) {
 #[determinism::required]
 fn read_dir_order(_: &ee::runtime::determinism::Deterministic<Seed>) {
     let _ = std::fs::read_dir(".");
+    let _ = fs::read_dir(".");
 }
 
 fn benign_documentation_mentions() {
     let _ = "rand::random::<u64>() Instant::now() SystemTime::now() std::fs::read_dir(.)";
     // rand::thread_rng();
     // std::env::var("EE_SEED");
+    // std::env::var_os("EE_SEED");
+    // std::env::vars();
+    // fs::read_dir(".");
 }
 
 fn benign_block_comment_and_raw_string_mentions() {

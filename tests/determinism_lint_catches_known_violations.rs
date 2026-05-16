@@ -88,6 +88,20 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "read env through the registered config boundary",
             });
         }
+        if line.contains("std::env::var_os(") {
+            findings.push(Finding {
+                line: line_no,
+                code: "ambient_env_var_os",
+                message: "read optional env through the registered config boundary",
+            });
+        }
+        if line.contains("std::env::vars(") || line.contains("std::env::vars_os(") {
+            findings.push(Finding {
+                line: line_no,
+                code: "ambient_env_iteration",
+                message: "iterate env only through a deterministic registered boundary",
+            });
+        }
         if line.contains(".iter()") && nearby_lines_contain(&scan_lines, index, "HashMap") {
             findings.push(Finding {
                 line: line_no,
@@ -95,7 +109,7 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "sort HashMap entries before deterministic output",
             });
         }
-        if line.contains("std::fs::read_dir(") {
+        if line.contains("std::fs::read_dir(") || line.contains("fs::read_dir(") {
             findings.push(Finding {
                 line: line_no,
                 code: "unsorted_read_dir",
@@ -334,6 +348,9 @@ mod self_tests {
                 let _ = "rand::random::<u64>() Instant::now() std::fs::read_dir(.)";
                 // rand::thread_rng();
                 // std::env::var("EE_SEED");
+                // std::env::var_os("EE_SEED");
+                // std::env::vars();
+                // fs::read_dir(".");
             }
         "#;
         let report = render_report(&scan_fixture(fixture));
@@ -346,7 +363,10 @@ mod self_tests {
             /*
              * rand::thread_rng();
              * std::env::var("EE_SEED");
+             * std::env::var_os("EE_SEED");
+             * std::env::vars();
              * std::fs::read_dir(".");
+             * fs::read_dir(".");
              */
             fn documentation_mentions() {
                 let _ = r#"Uuid::new_v4() Instant::now() SystemTime::now()"#;
@@ -354,5 +374,23 @@ mod self_tests {
         "##;
         let report = render_report(&scan_fixture(fixture));
         assert_eq!(report, "schema: ee.determinism_lint_fixture.v1\n");
+    }
+
+    #[test]
+    fn env_and_read_dir_aliases_emit_known_violations() {
+        let fixture = r#"
+            use std::fs;
+
+            fn ambient() {
+                let _ = std::env::var_os("EE_SEED");
+                let _ = std::env::vars();
+                let _ = std::env::vars_os();
+                let _ = fs::read_dir(".");
+            }
+        "#;
+        let report = render_report(&scan_fixture(fixture));
+        assert!(report.contains("ambient_env_var_os"));
+        assert!(report.contains("ambient_env_iteration"));
+        assert!(report.contains("unsorted_read_dir"));
     }
 }
