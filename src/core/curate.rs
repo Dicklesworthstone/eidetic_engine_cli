@@ -2556,18 +2556,8 @@ pub fn run_curation_disposition(
 
 fn structural_decay_feature_enabled(workspace_path: &Path) -> Result<bool, DomainError> {
     let path = workspace_path.join(".ee").join("config.toml");
-    let contents = match fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(DomainError::Configuration {
-                message: format!(
-                    "Failed to read workspace curation config {}: {error}",
-                    path.display()
-                ),
-                repair: Some("Fix or remove .ee/config.toml.".to_owned()),
-            });
-        }
+    let Some(contents) = structural_decay_config_contents(&path)? else {
+        return Ok(false);
     };
     let config = ConfigFile::parse(&contents).map_err(|error| DomainError::Configuration {
         message: format!(
@@ -2581,6 +2571,79 @@ fn structural_decay_feature_enabled(workspace_path: &Path) -> Result<bool, Domai
         .feature
         .structural_decay_enabled
         .unwrap_or(false))
+}
+
+fn structural_decay_config_contents(path: &Path) -> Result<Option<String>, DomainError> {
+    if let Some(symlink_path) = first_existing_structural_decay_config_symlink_component(path)? {
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Refusing to read workspace curation config {} through symlinked path component {}.",
+                path.display(),
+                symlink_path.display()
+            ),
+            repair: Some(
+                "Replace the symlinked .ee/config.toml path with a real workspace config file."
+                    .to_owned(),
+            ),
+        });
+    }
+
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(DomainError::Configuration {
+                message: format!(
+                    "Failed to inspect workspace curation config {}: {error}",
+                    path.display()
+                ),
+                repair: Some("Fix or remove .ee/config.toml.".to_owned()),
+            });
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Workspace curation config {} is not a regular file.",
+                path.display()
+            ),
+            repair: Some("Replace .ee/config.toml with a regular TOML file.".to_owned()),
+        });
+    }
+
+    fs::read_to_string(path)
+        .map(Some)
+        .map_err(|error| DomainError::Configuration {
+            message: format!(
+                "Failed to read workspace curation config {}: {error}",
+                path.display()
+            ),
+            repair: Some("Fix or remove .ee/config.toml.".to_owned()),
+        })
+}
+
+fn first_existing_structural_decay_config_symlink_component(
+    path: &Path,
+) -> Result<Option<PathBuf>, DomainError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(DomainError::Configuration {
+                    message: format!(
+                        "Failed to inspect workspace curation config path component {}: {error}",
+                        current.display()
+                    ),
+                    repair: Some("Fix or remove .ee/config.toml.".to_owned()),
+                });
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn push_structural_decay_feature_disabled_degradation(
@@ -6320,6 +6383,74 @@ mod tests {
             "[graph.feature.structural_decay]\nenabled = true\n",
         )
         .map_err(|error| error.to_string())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn structural_decay_feature_rejects_symlinked_workspace_config() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path().join("workspace");
+        let outside_path = tempdir.path().join("outside.toml");
+        fs::create_dir_all(workspace_path.join(".ee")).map_err(|error| error.to_string())?;
+        fs::write(
+            &outside_path,
+            "[graph.feature.structural_decay]\nenabled = true\n",
+        )
+        .map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(
+            &outside_path,
+            workspace_path.join(".ee").join("config.toml"),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let error = match super::structural_decay_feature_enabled(&workspace_path) {
+            Ok(enabled) => return Err(format!("symlinked config returned {enabled}")),
+            Err(error) => error,
+        };
+
+        assert!(error.message().contains("symlinked path component"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn structural_decay_feature_rejects_symlinked_workspace_config_parent() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path().join("workspace");
+        let outside_config_dir = tempdir.path().join("outside-ee");
+        fs::create_dir_all(&workspace_path).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&outside_config_dir).map_err(|error| error.to_string())?;
+        fs::write(
+            outside_config_dir.join("config.toml"),
+            "[graph.feature.structural_decay]\nenabled = true\n",
+        )
+        .map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_config_dir, workspace_path.join(".ee"))
+            .map_err(|error| error.to_string())?;
+
+        let error = match super::structural_decay_feature_enabled(&workspace_path) {
+            Ok(enabled) => return Err(format!("symlinked config parent returned {enabled}")),
+            Err(error) => error,
+        };
+
+        assert!(error.message().contains("symlinked path component"));
+        Ok(())
+    }
+
+    #[test]
+    fn structural_decay_feature_rejects_config_directory() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        fs::create_dir_all(workspace_path.join(".ee").join("config.toml"))
+            .map_err(|error| error.to_string())?;
+
+        let error = match super::structural_decay_feature_enabled(workspace_path) {
+            Ok(enabled) => return Err(format!("config directory returned {enabled}")),
+            Err(error) => error,
+        };
+
+        assert!(error.message().contains("is not a regular file"));
+        Ok(())
     }
 
     fn test_workspace_id(workspace_path: &Path) -> String {
