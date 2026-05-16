@@ -115,7 +115,7 @@ impl TimingCapture {
     #[must_use]
     pub fn finish(self) -> DiagnosticTiming {
         let end = Instant::now();
-        let elapsed = end.duration_since(self.start);
+        let elapsed = end.checked_duration_since(self.start).unwrap_or(Duration::ZERO);
 
         if self.phases.is_empty() {
             return DiagnosticTiming::elapsed_only(elapsed);
@@ -125,7 +125,7 @@ impl TimingCapture {
         let mut prev = self.start;
 
         for (instant, name) in &self.phases {
-            let duration = instant.duration_since(prev);
+            let duration = instant.checked_duration_since(prev).unwrap_or(Duration::ZERO);
             phases.push(TimingPhase::new(name, duration));
             prev = *instant;
         }
@@ -133,7 +133,7 @@ impl TimingCapture {
         // Trailing segment from the last mark to `end`. We only include it
         // when measurable time elapsed so a tightly-paired mark/finish pair
         // doesn't pollute the breakdown with a zero-duration "finish" entry.
-        let final_duration = end.duration_since(prev);
+        let final_duration = end.checked_duration_since(prev).unwrap_or(Duration::ZERO);
         if final_duration.as_nanos() > 0 {
             phases.push(TimingPhase::new("finish", final_duration));
         }
