@@ -42,15 +42,51 @@ run_cargo_gate() {
     return 1
 }
 
-count_exemptions() {
-    if [ ! -d "$REPO_ROOT/src" ]; then
-        printf '0'
-        return 0
-    fi
-    {
-        grep -R -E '#\[(allow|expect)\(clippy::disallowed_methods\)\]' "$REPO_ROOT/src" 2>/dev/null \
-            || true
-    } | wc -l | tr -d ' '
+summarize_exemptions() {
+    python3 - "$REPO_ROOT" <<'PY'
+import os
+import sys
+
+repo_root = sys.argv[1]
+roots = [os.path.join(repo_root, "src"), os.path.join(repo_root, "tests")]
+exemption_lines = {
+    "#[allow(clippy::disallowed_methods)]",
+    "#![allow(clippy::disallowed_methods)]",
+    "#[expect(clippy::disallowed_methods)]",
+    "#![expect(clippy::disallowed_methods)]",
+}
+justification_markers = ("why:", "because", "justification:", "determinism:")
+
+total = 0
+justified = 0
+for root in roots:
+    if not os.path.isdir(root):
+        continue
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for filename in sorted(filenames):
+            if not filename.endswith(".rs"):
+                continue
+            path = os.path.join(dirpath, filename)
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    lines = handle.read().splitlines()
+            except OSError:
+                continue
+            for index, line in enumerate(lines):
+                if line.lstrip() not in exemption_lines:
+                    continue
+                total += 1
+                window = lines[index : min(index + 4, len(lines))]
+                if any(
+                    candidate.lower().lstrip().startswith("//")
+                    and any(marker in candidate.lower() for marker in justification_markers)
+                    for candidate in window
+                ):
+                    justified += 1
+
+print(f"{total} {justified}")
+PY
 }
 
 emit_lint_summary() {
@@ -67,8 +103,12 @@ emit_lint_summary() {
 e2e_log_start "lint_determinism"
 trap 'e2e_log_end' EXIT
 
-EXEMPTIONS_COUNT="$(count_exemptions)"
-EXEMPTIONS_WITH_JUSTIFICATION="$EXEMPTIONS_COUNT"
+read -r EXEMPTIONS_COUNT EXEMPTIONS_WITH_JUSTIFICATION < <(summarize_exemptions)
+if [ "${EE_LINT_DETERMINISM_COUNTS_ONLY:-0}" = "1" ]; then
+    printf 'exemptions_count=%s exemptions_with_justification=%s\n' \
+        "$EXEMPTIONS_COUNT" "$EXEMPTIONS_WITH_JUSTIFICATION"
+    exit 0
+fi
 
 if ! run_cargo_gate \
     "lint_determinism_clippy_disallowed_methods" \
