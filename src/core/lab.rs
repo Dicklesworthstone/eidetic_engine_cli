@@ -739,9 +739,10 @@ fn maybe_store_frozen_episode(
             "artifact path has no parent",
         ));
     };
-    ensure_no_lab_symlink_components(workspace, parent)?;
+    ensure_no_lab_symlink_components(&artifact_path, "write frozen episode artifact")?;
     fs::create_dir_all(parent)
         .map_err(|error| lab_storage_error("create frozen episode directory", error))?;
+    ensure_no_lab_symlink_components(&artifact_path, "write frozen episode artifact")?;
     let bytes = serde_json::to_vec_pretty(&artifact).map_err(|error| {
         lab_storage_error_message("serialize frozen episode artifact", error.to_string())
     })?;
@@ -766,6 +767,7 @@ fn read_frozen_episode(
     episode_id: &str,
 ) -> Result<Option<FrozenEpisodeArtifact>, DomainError> {
     let path = frozen_episode_path(workspace, episode_id);
+    ensure_no_lab_symlink_components(&path, "read frozen episode artifact")?;
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -792,23 +794,28 @@ fn frozen_episode_path(workspace: &Path, episode_id: &str) -> PathBuf {
 }
 
 fn ensure_no_lab_symlink_components(
-    workspace: &Path,
-    artifact_dir: &Path,
+    path: &Path,
+    operation: &'static str,
 ) -> Result<(), DomainError> {
-    for path in [
-        workspace.join(".ee"),
-        workspace.join(".ee").join("lab"),
-        artifact_dir.to_path_buf(),
-    ] {
-        match fs::symlink_metadata(&path) {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(lab_storage_error_message(
                     "validate frozen episode artifact path",
-                    format!("refusing to write through symlink {}", path.display()),
+                    format!(
+                        "refusing to {operation} through symlinked path component {}",
+                        current.display()
+                    ),
                 ));
             }
             Ok(_) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error)
+                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
+            {
+                return Ok(());
+            }
             Err(error) => {
                 return Err(lab_storage_error(
                     "inspect frozen episode artifact path",
@@ -1430,6 +1437,39 @@ mod tests {
                 .any(|warning| warning.contains("hash")),
             true,
             "tamper warning",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_rejects_symlinked_frozen_episode_artifact() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let source_workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let capture = capture_episode(&CaptureOptions {
+            workspace: source_workspace.path().to_path_buf(),
+            session_id: Some("session_lab_symlink_source".to_string()),
+            task_input: Some("capture frozen source".to_string()),
+            dry_run: false,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+        let source_artifact = frozen_episode_path(source_workspace.path(), &capture.episode_id);
+
+        let replay_workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let replay_artifact = frozen_episode_path(replay_workspace.path(), &capture.episode_id);
+        let replay_parent = replay_artifact
+            .parent()
+            .ok_or_else(|| "replay artifact parent".to_string())?;
+        fs::create_dir_all(replay_parent).map_err(|error| error.to_string())?;
+        symlink(&source_artifact, &replay_artifact).map_err(|error| error.to_string())?;
+
+        let error = read_frozen_episode(replay_workspace.path(), &capture.episode_id)
+            .expect_err("symlinked frozen episode artifact should be rejected");
+        ensure(
+            error.message().contains("symlinked path component"),
+            true,
+            "symlinked artifact error message",
         )
     }
 
