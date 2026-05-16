@@ -315,78 +315,86 @@ fn real_context_stream_preserves_batch_hash_and_order() -> TestResult {
         return Err("batch context returned no pack items for stream fixture".to_owned());
     }
 
-    let stream = run_ee(
-        &workspace,
-        &[
-            "--format",
-            "json",
-            "context",
-            QUERY,
-            "--max-tokens",
-            "900",
-            "--stream",
-        ],
-    )?;
-    ensure_success(&stream, "stream context")?;
-    let frames = stdout_stream(&stream, "stream context")?;
-    if frames.len() != batch_items.len() + 2 {
-        return Err(format!(
-            "stream should emit header + items + trailer; got {} frames for {} batch items",
-            frames.len(),
-            batch_items.len()
-        ));
-    }
-
-    if frames
-        .first()
-        .and_then(|frame| frame.get("kind"))
-        .and_then(Value::as_str)
-        != Some("header")
-    {
-        return Err("first stream frame must be header".to_owned());
-    }
-    let trailer = frames
-        .last()
-        .ok_or_else(|| "stream emitted no frames".to_owned())?;
-    if trailer.get("kind").and_then(Value::as_str) != Some("trailer") {
-        return Err("last stream frame must be trailer".to_owned());
-    }
-    if trailer.get("packHash").and_then(Value::as_str) != Some(batch_hash) {
-        return Err(format!(
-            "stream trailer hash must match batch hash: {:?} != {batch_hash}",
-            trailer.get("packHash")
-        ));
-    }
-    if trailer.get("totalItems").and_then(Value::as_u64) != Some(batch_items.len() as u64) {
-        return Err("stream trailer totalItems must match batch item count".to_owned());
-    }
-
-    for (index, frame) in frames[1..frames.len() - 1].iter().enumerate() {
-        let expected_rank = (index + 1) as u64;
-        let expected_seq = index as u64;
-        if frame.get("kind").and_then(Value::as_str) != Some("item") {
+    for stream_format in ["json", "jsonl"] {
+        let stream = run_ee(
+            &workspace,
+            &[
+                "--format",
+                stream_format,
+                "context",
+                QUERY,
+                "--max-tokens",
+                "900",
+                "--stream",
+            ],
+        )?;
+        ensure_success(&stream, &format!("stream context {stream_format}"))?;
+        let frames = stdout_stream(&stream, &format!("stream context {stream_format}"))?;
+        if frames.len() != batch_items.len() + 2 {
             return Err(format!(
-                "frame {index} between header/trailer must be an item"
+                "stream {stream_format} should emit header + items + trailer; got {} frames for {} batch items",
+                frames.len(),
+                batch_items.len()
             ));
         }
-        if frame.get("seq").and_then(Value::as_u64) != Some(expected_seq) {
-            return Err(format!("item frame {index} has non-monotone seq"));
-        }
-        if frame.get("rank").and_then(Value::as_u64) != Some(expected_rank) {
-            return Err(format!("item frame {index} has non-monotone rank"));
-        }
-        let stream_id = frame
-            .get("memoryId")
+
+        if frames
+            .first()
+            .and_then(|frame| frame.get("kind"))
             .and_then(Value::as_str)
-            .ok_or_else(|| format!("item frame {index} missing memoryId"))?;
-        let batch_id = batch_items[index]
-            .get("memoryId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("batch item {index} missing memoryId"))?;
-        if stream_id != batch_id {
+            != Some("header")
+        {
+            return Err(format!("first {stream_format} stream frame must be header"));
+        }
+        let trailer = frames
+            .last()
+            .ok_or_else(|| format!("{stream_format} stream emitted no frames"))?;
+        if trailer.get("kind").and_then(Value::as_str) != Some("trailer") {
+            return Err(format!("last {stream_format} stream frame must be trailer"));
+        }
+        if trailer.get("packHash").and_then(Value::as_str) != Some(batch_hash) {
             return Err(format!(
-                "stream item {index} memoryId drifted from batch order: {stream_id} != {batch_id}"
+                "stream {stream_format} trailer hash must match batch hash: {:?} != {batch_hash}",
+                trailer.get("packHash")
             ));
+        }
+        if trailer.get("totalItems").and_then(Value::as_u64) != Some(batch_items.len() as u64) {
+            return Err(format!(
+                "stream {stream_format} trailer totalItems must match batch item count"
+            ));
+        }
+
+        for (index, frame) in frames[1..frames.len() - 1].iter().enumerate() {
+            let expected_rank = (index + 1) as u64;
+            let expected_seq = index as u64;
+            if frame.get("kind").and_then(Value::as_str) != Some("item") {
+                return Err(format!(
+                    "frame {index} between {stream_format} header/trailer must be an item"
+                ));
+            }
+            if frame.get("seq").and_then(Value::as_u64) != Some(expected_seq) {
+                return Err(format!(
+                    "{stream_format} item frame {index} has non-monotone seq"
+                ));
+            }
+            if frame.get("rank").and_then(Value::as_u64) != Some(expected_rank) {
+                return Err(format!(
+                    "{stream_format} item frame {index} has non-monotone rank"
+                ));
+            }
+            let stream_id = frame
+                .get("memoryId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("{stream_format} item frame {index} missing memoryId"))?;
+            let batch_id = batch_items[index]
+                .get("memoryId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("batch item {index} missing memoryId"))?;
+            if stream_id != batch_id {
+                return Err(format!(
+                    "stream {stream_format} item {index} memoryId drifted from batch order: {stream_id} != {batch_id}"
+                ));
+            }
         }
     }
 
