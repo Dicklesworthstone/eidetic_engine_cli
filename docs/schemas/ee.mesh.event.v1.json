@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.event.v1.json",
+  "title": "ee.mesh.event.v1",
+  "description": "Append-only optional mesh memory event envelope for deterministic export and replay.",
+  "type": "object",
+  "required": [
+    "schema",
+    "eventId",
+    "originNodeId",
+    "originWorkspaceId",
+    "seq",
+    "prevEventHash",
+    "eventHash",
+    "eventKind",
+    "logicalMemoryId",
+    "contentHash",
+    "materialLane",
+    "redactionClass",
+    "trustLane",
+    "bodyRef",
+    "requiredFeatures",
+    "producedAt"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.event.v1"
+    },
+    "eventId": {
+      "$ref": "#/$defs/eventId"
+    },
+    "originNodeId": {
+      "$ref": "#/$defs/nodeId"
+    },
+    "originWorkspaceId": {
+      "$ref": "#/$defs/workspaceId"
+    },
+    "producerPeerId": {
+      "$ref": "#/$defs/peerId"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "prevEventHash": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/hash"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "eventHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "eventKind": {
+      "type": "string",
+      "enum": [
+        "create",
+        "revise",
+        "tombstone",
+        "trust",
+        "validity",
+        "bodyAvailable"
+      ]
+    },
+    "logicalMemoryId": {
+      "$ref": "#/$defs/logicalMemoryId"
+    },
+    "supersedes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/logicalMemoryId"
+      }
+    },
+    "tombstones": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/logicalMemoryId"
+      }
+    },
+    "contentHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "bodyRef": {
+      "anyOf": [
+        {
+          "type": "object",
+          "required": ["kind"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["none", "inlinePreview", "contentAddressed", "remoteAvailable"]
+            },
+            "previewHash": {
+              "$ref": "#/$defs/hash"
+            },
+            "uri": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "sizeBytes": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "materialLane": {
+      "type": "string",
+      "enum": [
+        "metadata",
+        "body",
+        "embedding",
+        "graphLink",
+        "revisionNotice",
+        "curationSignal"
+      ]
+    },
+    "redactionClass": {
+      "type": "string",
+      "enum": ["metadataOnly", "preview", "body", "embedding", "secretDenied"]
+    },
+    "trustLane": {
+      "type": "string",
+      "enum": [
+        "localHuman",
+        "peerHumanViaPeer",
+        "peerAgent",
+        "peerDerived",
+        "untrusted"
+      ]
+    },
+    "trustClaim": {
+      "type": "object",
+      "additionalProperties": {
+        "type": ["string", "number", "boolean", "null"]
+      }
+    },
+    "validFrom": {
+      "$ref": "#/$defs/rfc3339"
+    },
+    "validUntil": {
+      "$ref": "#/$defs/rfc3339"
+    },
+    "sourceAuditHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "requiredFeatures": {
+      "type": "array",
+      "description": "Forward-compatibility gates required to safely replay this event.",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^mesh\\.[a-z0-9_.-]+$"
+      }
+    },
+    "producedAt": {
+      "$ref": "#/$defs/rfc3339"
+    }
+  },
+  "$defs": {
+    "eventId": {
+      "type": "string",
+      "pattern": "^mesh_evt_[a-f0-9]{64}$"
+    },
+    "nodeId": {
+      "type": "string",
+      "pattern": "^node_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "peerId": {
+      "type": "string",
+      "pattern": "^peer_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "workspaceId": {
+      "type": "string",
+      "pattern": "^wsp_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "logicalMemoryId": {
+      "type": "string",
+      "pattern": "^mem_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^blake3:[a-f0-9]{64}$"
+    },
+    "rfc3339": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

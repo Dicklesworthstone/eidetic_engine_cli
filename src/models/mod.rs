@@ -358,6 +358,9 @@ pub const GRAPH_MODULE_SCHEMA_V1: &str = "ee.graph.module.v1";
 /// Schema for workspace-scoped mesh peer-group binding documents.
 pub const MESH_PEER_GROUP_BINDING_SCHEMA_V1: &str = "ee.mesh.peer_group_binding.v1";
 
+/// Schema for append-only optional mesh memory events.
+pub const MESH_EVENT_SCHEMA_V1: &str = "ee.mesh.event.v1";
+
 /// Schema for evaluation fixtures.
 pub const EVAL_FIXTURE_SCHEMA_V1: &str = "ee.eval_fixture.v1";
 
