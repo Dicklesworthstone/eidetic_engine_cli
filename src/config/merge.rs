@@ -53,6 +53,7 @@ pub const CACHE_PACK_L2_MAX_AGE_DAYS_KEY: &str = "cache.pack_l2.max_age_days";
 pub const MESH_ENABLED_KEY: &str = "mesh.enabled";
 pub const MESH_COMMAND_MODE_KEY: &str = "mesh.command_mode";
 pub const MESH_PEER_GROUP_BINDINGS_KEY: &str = "mesh.peer_group_bindings";
+pub const MESH_PEER_POLICIES_KEY: &str = "mesh.peer_policies";
 pub const GRAPH_PPR_ALPHA_KEY: &str = "graph.ppr.alpha";
 pub const GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY: &str = "graph.health.contradiction_threshold";
 pub const GRAPH_CURATE_ONION_DECAY_MAX_KEY: &str = "graph.curate.onion_decay_max";
@@ -380,6 +381,13 @@ impl MergedConfig {
                 MESH_PEER_GROUP_BINDINGS_KEY,
                 bindings.len().to_string(),
                 self.source(MESH_PEER_GROUP_BINDINGS_KEY),
+            ));
+        }
+        if let Some(ref policies) = self.values.mesh.peer_policies {
+            entries.push(ConfigShowEntry::new(
+                MESH_PEER_POLICIES_KEY,
+                policies.len().to_string(),
+                self.source(MESH_PEER_POLICIES_KEY),
             ));
         }
 
@@ -796,6 +804,7 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             enabled: Some(false),
             command_mode: Some(MeshCommandMode::Off),
             peer_group_bindings: Some(Vec::new()),
+            peer_policies: Some(Vec::new()),
         },
         graph: GraphConfig {
             ppr: GraphPprConfig { alpha: Some(0.30) },
@@ -922,6 +931,7 @@ pub fn config_from_env(
             enabled: optional_env_bool(env, EnvVar::MeshEnabled.name())?,
             command_mode: optional_env_mesh_command_mode(env, EnvVar::MeshMode.name())?,
             peer_group_bindings: None,
+            peer_policies: None,
         },
         graph: GraphConfig::default(),
         pack: PackConfig {
@@ -1285,6 +1295,15 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.mesh.peer_group_bindings,
                 &layers.user.mesh.peer_group_bindings,
                 &layers.defaults.mesh.peer_group_bindings,
+            ),
+            peer_policies: pick_field(
+                &mut sources,
+                MESH_PEER_POLICIES_KEY,
+                &layers.cli.mesh.peer_policies,
+                &layers.environment.mesh.peer_policies,
+                &layers.project.mesh.peer_policies,
+                &layers.user.mesh.peer_policies,
+                &layers.defaults.mesh.peer_policies,
             ),
         },
         graph: GraphConfig {
@@ -1857,7 +1876,7 @@ mod tests {
         GRAPH_PPR_ALPHA_KEY, LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY,
         LEARN_DECAY_DEMOTE_THRESHOLD_KEY, LEARN_DECAY_PROCEDURAL_RULE_HALF_LIFE_DAYS_KEY,
         MESH_COMMAND_MODE_KEY, MESH_ENABLED_KEY, MESH_PEER_GROUP_BINDINGS_KEY,
-        PACK_DEFAULT_MAX_TOKENS_KEY, PACK_DEFAULT_PROFILE_KEY,
+        MESH_PEER_POLICIES_KEY, PACK_DEFAULT_MAX_TOKENS_KEY, PACK_DEFAULT_PROFILE_KEY,
         POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY, SEARCH_DEFAULT_SPEED_KEY,
         STORAGE_DATABASE_PATH_KEY, STORAGE_INDEX_DIR_KEY,
         STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY, STORAGE_READ_POOL_PIN_SNAPSHOT_KEY,
@@ -2256,6 +2275,7 @@ mod tests {
                 enabled: Some(true),
                 command_mode: Some(MeshCommandMode::Cache),
                 peer_group_bindings: None,
+                peer_policies: None,
             },
             ..ConfigFile::default()
         };
@@ -2516,6 +2536,7 @@ mod tests {
             MESH_ENABLED_KEY,
             MESH_COMMAND_MODE_KEY,
             MESH_PEER_GROUP_BINDINGS_KEY,
+            MESH_PEER_POLICIES_KEY,
             STORAGE_READ_POOL_SIZE_KEY,
             STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY,
             STORAGE_READ_POOL_PIN_SNAPSHOT_KEY,
