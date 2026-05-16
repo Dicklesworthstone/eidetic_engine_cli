@@ -262,13 +262,14 @@ A degraded entry's `code` is classified into one of three buckets:
 | `write_spool_backpressure` | warning | bd-17c65.12.2 (L1) |
 | `write_queue_full` | low | bd-17c65.12.2 (L1) |
 
-#### Other (6)
+#### Other (7)
 | Code | Severity | Bead |
 |------|----------|------|
 | `graph_feature_disabled` | medium | bd-17c65.5.3 (E3) — different from build-time `graph_unavailable`; this is a per-call disable |
 | `singleflight_follower_timeout` | medium | bd-gni47.3 (SF3) |
 | `singleflight_leader_failed` | medium | bd-gni47.3 (SF3) |
 | `singleflight_state_poisoned` | high | bd-gni47.3 (SF3) |
+| `unattributed_compile_blocker` | low | ownership-posture (OP) — fallback when no active reservation or bead matches a compile diagnostic path |
 | `situation_decisioning_unavailable` | medium | (TBD) |
 | `test_degraded` | info | testing harness (synthetic; not emitted in production paths) |
 

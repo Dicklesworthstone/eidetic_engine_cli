@@ -316,7 +316,17 @@ pub fn ownership_candidates_for_path(
 
 #[must_use]
 pub fn pattern_matches_path(pattern: &str, path: &str) -> bool {
-    pattern == path || glob_match(pattern, path)
+    if pattern == path {
+        return true;
+    }
+    // Normalize ** to * so that common recursive reservation patterns from
+    // Agent Mail ("src/**", "src/graph/**") work with the minimal glob matcher.
+    // The underlying glob_match already treats * as crossing directory
+    // separators (byte-level), so this normalization gives the expected
+    // "this directory and everything under it" semantics without changing
+    // the small deterministic glob language used elsewhere (tripwire preflight).
+    let normalized = pattern.replace("**", "*");
+    glob_match(&normalized, path)
 }
 
 #[must_use]
@@ -723,5 +733,122 @@ mod tests {
         assert_eq!(normalized.beads[1].bead_id, "bd-alpha");
         assert_eq!(normalized.dirty_files[0].path, "README.md");
         assert_eq!(normalized.reservations[0].path_pattern, "src/core/*.rs");
+    }
+
+    // bd-iez98 — coverage for the generalized has_active_owner_conflict.
+    //
+    // The function previously only flagged conflict when at least one
+    // active candidate carried `exclusive: true`. After the bd-iez98 fix,
+    // it flags conflict whenever 2+ DISTINCT active (non-expired) owners
+    // claim the same path, regardless of exclusivity, because two agents
+    // with overlapping advisory claims can still race unsafe edits.
+    //
+    // These tests cover the happy / edge / error paths AGENTS.md L300-302
+    // requires alongside the implementation (and also satisfy bd-3usjw.62
+    // Rule 7's inline-test obligation for the file).
+
+    fn candidate(owner: &str, exclusive: bool, expired: bool) -> OwnershipCandidate {
+        OwnershipCandidate {
+            owner: owner.to_owned(),
+            source: OwnershipCandidateSource::AgentMailReservation,
+            path_pattern: "src/core/example.rs".to_owned(),
+            bead_id: Some("bd-iez98".to_owned()),
+            thread_id: Some("bd-iez98".to_owned()),
+            expires_at: Some("2026-05-15T08:23:03Z".to_owned()),
+            exclusive,
+            expired,
+            exact_match: true,
+            pattern_specificity: 100,
+            provenance: provenance(&format!("candidate-{owner}")),
+        }
+    }
+
+    #[test]
+    fn has_active_owner_conflict_single_owner_is_not_a_conflict() {
+        let only_one = vec![candidate("Solo", false, false)];
+        assert!(!has_active_owner_conflict(&only_one));
+
+        let only_exclusive = vec![candidate("Solo", true, false)];
+        assert!(
+            !has_active_owner_conflict(&only_exclusive),
+            "a single exclusive owner is the normal case and must not flag conflict"
+        );
+    }
+
+    #[test]
+    fn has_active_owner_conflict_flags_two_distinct_advisory_owners() {
+        // The regression bd-iez98 fixes: previously this returned `false`
+        // because no candidate was exclusive. The post-fix expectation is
+        // that two distinct advisory owners on the same path is enough to
+        // demand explicit coordination.
+        let advisory_overlap = vec![
+            candidate("Alpha", false, false),
+            candidate("Beta", false, false),
+        ];
+        assert!(
+            has_active_owner_conflict(&advisory_overlap),
+            "2+ distinct advisory owners on the same path must be flagged as conflict"
+        );
+    }
+
+    #[test]
+    fn has_active_owner_conflict_ignores_expired_candidates() {
+        // An expired non-exclusive lease and a current advisory lease from
+        // different agents must NOT flag conflict: the expired one is no
+        // longer load-bearing for coordination.
+        let one_expired = vec![
+            candidate("Alpha", false, false),
+            candidate("Beta", false, true),
+        ];
+        assert!(
+            !has_active_owner_conflict(&one_expired),
+            "expired candidates must be filtered out before counting distinct active owners"
+        );
+
+        // Even when both are expired, no conflict.
+        let both_expired = vec![
+            candidate("Alpha", true, true),
+            candidate("Beta", true, true),
+        ];
+        assert!(!has_active_owner_conflict(&both_expired));
+    }
+
+    #[test]
+    fn has_active_owner_conflict_treats_repeated_owner_as_single_holder() {
+        // Two candidates from the SAME owner (e.g. one Agent Mail
+        // reservation + one Beads assignee record) must not flag conflict.
+        // The whole point of distinct-owner counting is to ignore the
+        // collision between an agent's parallel coordination signals.
+        let mut beads = candidate("Alpha", false, false);
+        beads.source = OwnershipCandidateSource::BeadsAssignee;
+        let same_owner_two_sources = vec![candidate("Alpha", true, false), beads];
+        assert!(
+            !has_active_owner_conflict(&same_owner_two_sources),
+            "the same owner appearing twice (across sources) is one holder, not a conflict"
+        );
+    }
+
+    #[test]
+    fn has_active_owner_conflict_flags_mixed_exclusive_and_advisory_across_owners() {
+        // The post-fix behavior is symmetric: any 2+ distinct active
+        // owners flag conflict regardless of exclusivity mix. An exclusive
+        // claim by Alpha plus an advisory claim by Beta is still a race
+        // surface that the swarm brief should highlight.
+        let mixed = vec![
+            candidate("Alpha", true, false),
+            candidate("Beta", false, false),
+        ];
+        assert!(
+            has_active_owner_conflict(&mixed),
+            "mixed exclusive+advisory across distinct active owners must flag conflict"
+        );
+    }
+
+    #[test]
+    fn has_active_owner_conflict_empty_input_is_not_a_conflict() {
+        // Boundary: an empty candidate list (no reservations, no assignees)
+        // is unambiguously not a conflict.
+        let empty: Vec<OwnershipCandidate> = Vec::new();
+        assert!(!has_active_owner_conflict(&empty));
     }
 }

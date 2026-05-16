@@ -1,0 +1,34 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "unattributed_compile_blocker",
+  "introduced_by": {
+    "bead": "ownership-posture-e2e",
+    "epic_letter": "OP"
+  },
+  "surfaces": [
+    "swarm brief",
+    "handoff capsule",
+    "compile blocker attribution"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "A Rust compiler diagnostic (error with --> location) is attributed via OwnershipSnapshot, but no active (non-expired) Agent Mail reservation or Beads assignee matches the diagnostic path after glob normalization.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# provide an OwnershipSnapshot with no matching reservations/beads for the failing path",
+      "# or all matching claims are expired"
+    ],
+    "invocation": "ee swarm brief --workspace . --json (or handoff preview/create that includes compile attribution)"
+  },
+  "expected_emission": {
+    "code": "unattributed_compile_blocker",
+    "severity": "low",
+    "message_contains": [
+      "unattributed compile blocker",
+      "no active owner"
+    ],
+    "repair_contains": "br list --status in_progress",
+    "repair_string": "br list --status in_progress --json; bv --robot-file-beads <path>; search Agent Mail for the source path before editing"
+  }
+}
