@@ -5,7 +5,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -558,11 +557,9 @@ fn resolve_learn_cluster_threshold(
         return Ok(threshold);
     }
     let config_path = workspace.join(".ee").join("config.toml");
-    let contents = match fs::read_to_string(&config_path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(DEFAULT_LEARN_CLUSTER_COHERENCE_THRESHOLD);
-        }
+    let contents = match crate::config::read_workspace_config_contents(workspace) {
+        Ok(Some(contents)) => contents,
+        Ok(None) => return Ok(DEFAULT_LEARN_CLUSTER_COHERENCE_THRESHOLD),
         Err(error) => {
             return Err(DomainError::Configuration {
                 message: format!(
@@ -3156,6 +3153,90 @@ mod tests {
             .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
         Ok((dir, database, workspace_id))
+    }
+
+    fn ensure_threshold(actual: f32, expected: f32, context: &str) -> TestResult {
+        if (actual - expected).abs() <= f32::EPSILON {
+            Ok(())
+        } else {
+            Err(format!("{context}: expected {expected}, got {actual}"))
+        }
+    }
+
+    #[test]
+    fn learn_cluster_threshold_reads_workspace_config() -> TestResult {
+        let workspace = tempfile::Builder::new()
+            .prefix("ee-learn-config-")
+            .tempdir()
+            .map_err(|error| error.to_string())?;
+        fs::create_dir_all(workspace.path().join(".ee")).map_err(|error| error.to_string())?;
+        fs::write(
+            workspace.path().join(".ee").join("config.toml"),
+            "[learn]\ncluster_coherence_threshold = 0.42\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        ensure_threshold(
+            resolve_learn_cluster_threshold(workspace.path(), None).map_err(|e| e.to_string())?,
+            0.42,
+            "workspace learn cluster threshold",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn learn_cluster_threshold_ignores_symlinked_workspace_config() -> TestResult {
+        let workspace = tempfile::Builder::new()
+            .prefix("ee-learn-symlink-config-")
+            .tempdir()
+            .map_err(|error| error.to_string())?;
+        let outside = tempfile::Builder::new()
+            .prefix("ee-learn-symlink-outside-")
+            .tempdir()
+            .map_err(|error| error.to_string())?;
+        fs::create_dir_all(workspace.path().join(".ee")).map_err(|error| error.to_string())?;
+        fs::write(
+            outside.path().join("config.toml"),
+            "[learn]\ncluster_coherence_threshold = 0.12\n",
+        )
+        .map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(
+            outside.path().join("config.toml"),
+            workspace.path().join(".ee").join("config.toml"),
+        )
+        .map_err(|error| error.to_string())?;
+
+        ensure_threshold(
+            resolve_learn_cluster_threshold(workspace.path(), None).map_err(|e| e.to_string())?,
+            DEFAULT_LEARN_CLUSTER_COHERENCE_THRESHOLD,
+            "symlinked workspace learn config fallback",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn learn_cluster_threshold_ignores_symlinked_workspace_config_parent() -> TestResult {
+        let workspace = tempfile::Builder::new()
+            .prefix("ee-learn-symlink-parent-")
+            .tempdir()
+            .map_err(|error| error.to_string())?;
+        let outside = tempfile::Builder::new()
+            .prefix("ee-learn-symlink-parent-outside-")
+            .tempdir()
+            .map_err(|error| error.to_string())?;
+        fs::write(
+            outside.path().join("config.toml"),
+            "[learn]\ncluster_coherence_threshold = 0.12\n",
+        )
+        .map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join(".ee"))
+            .map_err(|error| error.to_string())?;
+
+        ensure_threshold(
+            resolve_learn_cluster_threshold(workspace.path(), None).map_err(|e| e.to_string())?,
+            DEFAULT_LEARN_CLUSTER_COHERENCE_THRESHOLD,
+            "symlinked workspace learn config parent fallback",
+        )
     }
 
     fn seed_memory(

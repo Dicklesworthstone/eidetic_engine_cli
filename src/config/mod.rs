@@ -136,21 +136,35 @@ pub fn workspace_redaction_default(
 }
 
 fn workspace_config_contents(workspace_path: &Path) -> Option<String> {
-    let config_path = workspace_path.join(".ee").join("config.toml");
-    if first_existing_config_symlink_component(&config_path)
+    read_workspace_config_contents(workspace_path)
         .ok()
         .flatten()
-        .is_some()
-    {
-        return None;
+}
+
+pub(crate) fn read_workspace_config_contents(
+    workspace_path: &Path,
+) -> std::io::Result<Option<String>> {
+    let config_path = workspace_path.join(".ee").join("config.toml");
+    if first_existing_config_symlink_component(&config_path)?.is_some() {
+        return Ok(None);
     }
-    if !std::fs::symlink_metadata(&config_path)
-        .map(|metadata| metadata.file_type().is_file())
-        .unwrap_or(false)
-    {
-        return None;
+
+    let metadata = match std::fs::symlink_metadata(&config_path) {
+        Ok(metadata) => metadata,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_file() {
+        return Ok(None);
     }
-    std::fs::read_to_string(config_path).ok()
+    std::fs::read_to_string(config_path).map(Some)
 }
 
 fn first_existing_config_symlink_component(path: &Path) -> std::io::Result<Option<PathBuf>> {
