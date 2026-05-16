@@ -3967,7 +3967,82 @@ fn numeric_field_any(value: &Value, keys: &[&str]) -> Option<u64> {
 }
 
 fn redact_brief_text(input: &str) -> String {
-    redact_secret_like_content(input).content
+    let secret_redacted = redact_secret_like_content(input).content;
+    redact_absolute_path_like_segments(&secret_redacted)
+}
+
+fn redact_absolute_path_like_segments(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut offset = 0usize;
+
+    while let Some(relative_start) = input[offset..].find('/') {
+        let start = offset + relative_start;
+        output.push_str(&input[offset..start]);
+
+        if !is_absolute_path_redaction_start(input, start) {
+            output.push('/');
+            offset = start + '/'.len_utf8();
+            continue;
+        }
+
+        let end = input[start..]
+            .char_indices()
+            .find_map(|(idx, ch)| {
+                (idx > 0 && is_absolute_path_redaction_delimiter(ch)).then_some(start + idx)
+            })
+            .unwrap_or(input.len());
+        let candidate = &input[start..end];
+        let (path_candidate, trailing_punctuation) = split_absolute_path_candidate(candidate);
+
+        if should_redact_absolute_path_candidate(path_candidate) {
+            output.push_str(&format!(
+                "[REDACTED_PATH:{}]",
+                blake3_summary_hash(path_candidate)
+                    .trim_start_matches("blake3:")
+                    .get(..12)
+                    .unwrap_or("unknown")
+            ));
+            output.push_str(trailing_punctuation);
+        } else {
+            output.push_str(candidate);
+        }
+        offset = end;
+    }
+
+    output.push_str(&input[offset..]);
+    output
+}
+
+fn is_absolute_path_redaction_start(input: &str, start: usize) -> bool {
+    if input[start..].starts_with("//") {
+        return false;
+    }
+    let previous = input[..start].chars().next_back();
+    let next = input[start + '/'.len_utf8()..].chars().next();
+    let previous_allows_path = previous.is_none_or(|ch| {
+        ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | '(' | '[' | '{' | ':' | '=')
+    });
+    let next_allows_path = next.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '.');
+    previous_allows_path && next_allows_path
+}
+
+fn is_absolute_path_redaction_delimiter(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '"' | '\'' | '`' | '<' | '>' | ')' | ']' | '}' | ',' | ';' | '|'
+        )
+}
+
+fn split_absolute_path_candidate(candidate: &str) -> (&str, &str) {
+    let path_end = candidate.trim_end_matches(['.', ':']).len();
+    (&candidate[..path_end], &candidate[path_end..])
+}
+
+fn should_redact_absolute_path_candidate(candidate: &str) -> bool {
+    candidate
+        .strip_prefix('/')
+        .is_some_and(|without_root| without_root.contains('/'))
 }
 
 fn redact_path_label(path: &Path) -> String {
@@ -4106,14 +4181,17 @@ mod tests {
     #[test]
     fn summary_redacts_raw_content_and_hashes_underlying_brief() {
         let raw_secret = format!("{}{}", "api_key=sk-live-", "A".repeat(32));
+        let raw_remote_workspace = "/Users/alice/private/repo";
         let mut report = report_with_ready_sources();
         report.beads.ready.push(bead(
             "eidetic_engine_cli-pswb",
-            &format!("[swarm-brief] Support bundle handoff {raw_secret}"),
+            &format!(
+                "[swarm-brief] Support bundle handoff {raw_secret} from {raw_remote_workspace}"
+            ),
             "ready",
         ));
         report.dirty_files.push(SwarmBriefDirtyFile {
-            path: format!("src/core/support_bundle.rs {raw_secret}"),
+            path: format!("src/core/support_bundle.rs {raw_secret} {raw_remote_workspace}"),
             status: "M".to_string(),
         });
         apply_swarm_brief_advice(&mut report);
@@ -4136,6 +4214,14 @@ mod tests {
         assert!(
             !rendered.contains(&raw_secret),
             "summary must not expose raw secret-like bead titles or file paths"
+        );
+        assert!(
+            !rendered.contains(raw_remote_workspace),
+            "summary must not expose raw remote workspace paths"
+        );
+        assert!(
+            rendered.contains("[REDACTED_PATH:"),
+            "summary should preserve path-presence evidence as a stable redaction marker"
         );
         assert!(
             summary
@@ -4161,6 +4247,35 @@ mod tests {
                 .and_then(Value::as_str)
                 .is_some_and(|hash| hash.starts_with("blake3:")),
             "summary must hash high-risk file paths instead of listing them"
+        );
+    }
+
+    #[test]
+    fn brief_text_redacts_absolute_workspace_paths_without_touching_urls() {
+        let raw_remote_workspace = "/Users/alice/private/repo";
+        let rendered = redact_brief_text(&format!(
+            "blocked origin={raw_remote_workspace}, docs=https://example.test/a/b and alias=remote-beta"
+        ));
+
+        assert!(
+            !rendered.contains(raw_remote_workspace),
+            "raw absolute workspace path should be redacted"
+        );
+        assert!(
+            rendered.contains("[REDACTED_PATH:"),
+            "redacted path marker should preserve the presence of a path-like value"
+        );
+        assert!(
+            redact_brief_text("/Users/alice/private/repo.").ends_with("]."),
+            "path redaction should preserve trailing sentence punctuation"
+        );
+        assert!(
+            rendered.contains("https://example.test/a/b"),
+            "URL paths are not workspace labels and should remain readable"
+        );
+        assert!(
+            rendered.contains("alias=remote-beta"),
+            "non-path namespace aliases should remain readable"
         );
     }
 
