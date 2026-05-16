@@ -357,10 +357,16 @@ fn validate_import_binary_metadata(path: &Path, _source: DiscoverySource) -> Res
 /// Search `$PATH` for the named binary and return the first match.
 fn search_path_for(name: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
+    search_path_for_in(name, &path_var)
+}
+
+fn search_path_for_in(name: &str, path_var: &OsStr) -> Option<PathBuf> {
     for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join(name);
         if candidate.is_file() {
-            return Some(candidate);
+            if let Ok(path) = candidate.canonicalize() {
+                return Some(path);
+            }
         }
     }
     None
@@ -703,7 +709,7 @@ mod tests {
 
     use super::{
         CassClient, DEFAULT_BINARY, DiscoveredBinary, DiscoverySource, STABLE_ENV_OVERRIDES,
-        discover, discover_import_binary_from_sources, discover_with_override,
+        discover, discover_import_binary_from_sources, discover_with_override, search_path_for_in,
         trusted_cass_locations_for_home,
     };
 
@@ -875,6 +881,34 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn path_search_canonicalizes_relative_matches() -> TestResult {
+        let relative_dir = PathBuf::from("target")
+            .join("ee-cass-client-tests")
+            .join(format!(
+                "relative-path-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|error| error.to_string())?
+                    .as_nanos()
+            ));
+        fs::create_dir_all(&relative_dir).map_err(|error| error.to_string())?;
+        let binary = relative_dir.join(DEFAULT_BINARY);
+        write_test_cass_binary(&binary, 0o755)?;
+
+        let discovered = search_path_for_in(DEFAULT_BINARY, relative_dir.as_os_str())
+            .ok_or_else(|| "relative PATH entry should discover cass".to_string())?;
+
+        assert!(discovered.is_absolute());
+        assert_eq!(
+            discovered,
+            binary.canonicalize().map_err(|error| error.to_string())?
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn import_discovery_ignores_inherited_path_only_cass() -> TestResult {
         let dir = unique_test_dir("path-ignored")?;
         let fake_dir = dir.join("fake-path");
@@ -918,12 +952,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn import_discovery_rejects_group_or_world_writable_binary() -> TestResult {
-        if std::env::var("TMPDIR")
-            .unwrap_or_default()
-            .contains("USBNVME")
-        {
-            return Ok(());
-        }
         if std::env::var("TMPDIR")
             .unwrap_or_default()
             .contains("USBNVME")

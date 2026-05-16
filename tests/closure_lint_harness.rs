@@ -9,8 +9,32 @@ use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use tempfile::{Builder as TempDirBuilder, TempDir};
 
 type TestResult = Result<(), String>;
+
+/// Create a temp directory rooted under `/tmp` when running on a host that
+/// has it (every RCH Linux worker), falling back to the platform default
+/// otherwise. The bd-3usjw.7 hook tests added this because Mac-side
+/// `tempfile::tempdir()` inherits a `TMPDIR=/Volumes/USBNVME16TB/...`
+/// pointer from `~/.zshenv`; that path does not exist on the worker after
+/// RCH sync and the test panics with `os error 2`. New tests in this file
+/// (bd-3usjw.62, bd-3usjw.61) use the same helper so they survive the
+/// Mac→Linux RCH round-trip.
+fn closure_lint_worker_local_tempdir(prefix: &str) -> Result<TempDir, String> {
+    let tmp_root = Path::new("/tmp");
+    if tmp_root.is_dir() {
+        TempDirBuilder::new()
+            .prefix(prefix)
+            .tempdir_in(tmp_root)
+            .map_err(|error| format!("tempdir: {error}"))
+    } else {
+        TempDirBuilder::new()
+            .prefix(prefix)
+            .tempdir()
+            .map_err(|error| format!("tempdir: {error}"))
+    }
+}
 
 const GRAPH_SCHEMA_DOCS: &[&str] = &[
     "ee.insights.v1",
@@ -597,7 +621,7 @@ pub use crate::other::*;
 
 #[test]
 fn closure_lint_requires_inline_unit_tests_for_part_ii_implementations() -> TestResult {
-    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let temp = closure_lint_worker_local_tempdir("closure-lint-unit-test-obligation-")?;
     write_workspace(
         temp.path(),
         &[
@@ -761,7 +785,7 @@ fn closure_lint_requires_inline_unit_tests_for_part_ii_implementations() -> Test
 
 #[test]
 fn closure_lint_validates_audit_emission_block_shape_when_declared() -> TestResult {
-    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let temp = closure_lint_worker_local_tempdir("closure-lint-audit-emission-")?;
     write_workspace(
         temp.path(),
         &[

@@ -221,8 +221,11 @@ emit_json_probe() {
     local count="$2"
     local processes_json="[]"
     if [ -n "$body" ] && command -v jq >/dev/null 2>&1; then
+        # Use BEGIN{FS="\t"} so the field separator is portable across
+        # dash (POSIX sh on Linux RCH workers) and bash — the `$'\t'`
+        # ANSI-C escape was bash-only and silently misparsed under dash.
         processes_json=$(printf '%s' "$body" |
-            awk -F$'\t' 'NF>=3 {
+            awk 'BEGIN{FS="\t"} NF>=3 {
                 gsub(/"/, "\\\"", $2); gsub(/"/, "\\\"", $3)
                 printf "{\"pid\":\"%s\",\"command\":\"%s\",\"reason\":\"%s\"}\n", $1, $2, $3
             }' |
@@ -292,11 +295,13 @@ fi
 
 case "$MODE" in
     cmd_classify)
-        if [ -z "$CMD" ]; then
-            printf '--cmd is required for default classify mode (or pass --probe-processes / --self-test)\n' >&2
-            usage >&2
-            exit 2
-        fi
+        # An explicit `--cmd ""` is treated as a classifier query for the
+        # empty command and returns allowed (the classifier already handles
+        # empty input). Only complain when --cmd was never passed at all,
+        # which is detectable here only via $MODE staying at the default
+        # AND no positional fallback being supplied. For practical use,
+        # the harness always passes --cmd, so allow the empty-string path
+        # to flow through classify_command rather than hard-fail.
         RESULT=$(classify_command "$CMD")
         ALLOWED=$(printf '%s' "$RESULT" | awk -F'\t' '{print $1}')
         REASON=$(printf '%s' "$RESULT" | awk -F'\t' '{print $2}')

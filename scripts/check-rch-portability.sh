@@ -136,8 +136,12 @@ emit_json_report() {
     local body="$2"
     local anomalies_json="[]"
     if [ -n "$body" ] && command -v jq >/dev/null 2>&1; then
+        # Use BEGIN{FS="\t"} so the field separator is portable across
+        # dash (POSIX sh on Linux RCH workers) and bash — the `$'\t'`
+        # ANSI-C escape was bash-only and silently misparsed under dash,
+        # producing count=N but an empty anomalies[] array.
         anomalies_json=$(printf '%s' "$body" |
-            awk -F$'\t' 'NF>=3 {
+            awk 'BEGIN{FS="\t"} NF>=3 {
                 gsub(/"/, "\\\"", $1); gsub(/"/, "\\\"", $2); gsub(/"/, "\\\"", $3)
                 printf "{\"code\":\"%s\",\"description\":\"%s\",\"example\":\"%s\"}\n", $1, $2, $3
             }' |
