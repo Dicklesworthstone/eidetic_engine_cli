@@ -337,6 +337,14 @@ fn load_regression_fixtures(dir: &Path) -> Result<Vec<DeterminismRegressionFixtu
         if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
             continue;
         }
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("metadata {}: {error}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "read {}: regression fixture path is a symlink",
+                path.display()
+            ));
+        }
         let file_name = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -724,6 +732,30 @@ fn determinism_regression_fixture_loader_rejects_short_input_hash() -> Result<()
 
     assert!(error.contains("too short"));
     assert!(error.contains("blake3:short"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn determinism_regression_fixture_loader_rejects_symlinked_fixture_file() -> Result<(), String> {
+    use std::os::unix::fs::symlink;
+
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let outside = tempdir.path().join("outside.json");
+    let fixture = regression_fixture_for_mismatch(7, b"symlinked", b"expected", b"observed")
+        .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    fs::write(&outside, serialize_regression_fixture(&fixture)?)
+        .map_err(|error| error.to_string())?;
+    let symlink_path = tempdir
+        .path()
+        .join(regression_fixture_file_name(&fixture.input_hash)?);
+    symlink(&outside, &symlink_path).map_err(|error| error.to_string())?;
+
+    let error = load_regression_fixtures(tempdir.path())
+        .expect_err("symlinked fixture files should not be followed");
+
+    assert!(error.contains("regression fixture path is a symlink"));
+    assert!(error.contains(&symlink_path.display().to_string()));
     Ok(())
 }
 
