@@ -168,6 +168,123 @@ tail_text() {
     python3 -c 'import sys; text=sys.stdin.read(); print(text[-4000:])'
 }
 
+extract_worker_id() {
+    sed -n \
+        -e 's/^.*Selected worker: \([A-Za-z0-9_.-][A-Za-z0-9_.-]*\) .*/\1/p' \
+        -e 's/^\[RCH\] remote \([A-Za-z0-9_.-][A-Za-z0-9_.-]*\) (.*/\1/p' \
+        -e 's/^\[RCH\] remote \([A-Za-z0-9_.-][A-Za-z0-9_.-]*\) failed.*/\1/p' \
+        | tail -n 1
+}
+
+is_worker_disk_full_output() {
+    grep -Eiq "No space left on device|disk full|ENOSPC"
+}
+
+healthy_alternate_workers() {
+    local failed_worker="${1:?failed worker required}"
+    HEALTHY_WORKERS="${RCH_VERIFY_HEALTHY_WORKERS:-}" \
+    FAILED_WORKER="$failed_worker" \
+    RCH_BIN_PATH="$RCH_BIN" \
+    python3 - <<'PY'
+import json
+import os
+import subprocess
+
+failed = os.environ["FAILED_WORKER"]
+explicit = os.environ.get("HEALTHY_WORKERS", "")
+
+def emit(ids):
+    seen = []
+    for item in ids:
+        item = item.strip()
+        if item and item != failed and item not in seen:
+            seen.append(item)
+    print(",".join(seen))
+
+if explicit:
+    emit(explicit.split(","))
+    raise SystemExit(0)
+
+rch_bin = os.environ["RCH_BIN_PATH"]
+try:
+    status = subprocess.run(
+        [rch_bin, "status", "--workers", "--jobs", "--json"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=10,
+    )
+    payload = json.loads(status.stdout)
+    workers = payload.get("data", {}).get("daemon", {}).get("workers", [])
+    healthy = [
+        worker.get("id", "")
+        for worker in workers
+        if worker.get("status") == "healthy"
+    ]
+    if healthy:
+        emit(healthy)
+        raise SystemExit(0)
+except Exception:
+    pass
+
+try:
+    listed = subprocess.run(
+        [rch_bin, "workers", "list", "--json"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=10,
+    )
+    payload = json.loads(listed.stdout)
+    workers = payload.get("data", {}).get("workers", [])
+    emit(worker.get("id", "") for worker in workers)
+except Exception:
+    print("")
+PY
+}
+
+run_rch_invocation_once() {
+    if [ -n "${RCH_VERIFY_FAKE_OUTPUT:-}" ]; then
+        printf '%s' "$RCH_VERIFY_FAKE_OUTPUT"
+        return "${RCH_VERIFY_FAKE_EXIT_CODE:-0}"
+    fi
+
+    cd "$PROJECT_ROOT" && \
+        RCH_COMPRESSION="${RCH_COMPRESSION:-0}" \
+        RCH_REQUIRE_REMOTE=1 \
+        RCH_QUEUE_WHEN_BUSY="${RCH_QUEUE_WHEN_BUSY:-1}" \
+        RCH_TEST_SLOTS="${RCH_TEST_SLOTS:-2}" \
+        RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
+        RCH_DAEMON_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
+        RCH_CANONICAL_PROJECT_ROOT="${RCH_CANONICAL_PROJECT_ROOT:-/Users/jemanuel/projects}" \
+        RCH_ALIAS_PROJECT_ROOT="${RCH_ALIAS_PROJECT_ROOT:-/data/projects}" \
+        RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+        "${RCH_INVOCATION[@]}" 2>&1
+}
+
+run_rch_invocation_retry() {
+    local preferred_workers="${1:?preferred workers required}"
+    if [ -n "${RCH_VERIFY_FAKE_RETRY_OUTPUT:-}" ]; then
+        printf '%s' "$RCH_VERIFY_FAKE_RETRY_OUTPUT"
+        return "${RCH_VERIFY_FAKE_RETRY_EXIT_CODE:-0}"
+    fi
+
+    cd "$PROJECT_ROOT" && \
+        RCH_WORKERS="$preferred_workers" \
+        RCH_COMPRESSION="${RCH_COMPRESSION:-0}" \
+        RCH_REQUIRE_REMOTE=1 \
+        RCH_QUEUE_WHEN_BUSY="${RCH_QUEUE_WHEN_BUSY:-1}" \
+        RCH_TEST_SLOTS="${RCH_TEST_SLOTS:-2}" \
+        RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
+        RCH_DAEMON_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
+        RCH_CANONICAL_PROJECT_ROOT="${RCH_CANONICAL_PROJECT_ROOT:-/Users/jemanuel/projects}" \
+        RCH_ALIAS_PROJECT_ROOT="${RCH_ALIAS_PROJECT_ROOT:-/data/projects}" \
+        RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+        "${RCH_INVOCATION[@]}" 2>&1
+}
+
 now_iso() {
     if [ -n "${RCH_VERIFY_NOW:-}" ]; then
         printf '%s' "$RCH_VERIFY_NOW"
@@ -265,6 +382,8 @@ elif exit_code == 0:
 elif (
     "rch_verify_topology_blocked" in degraded
     or "rch_verify_local_fallback_refused" in degraded
+    or "rch_verify_worker_disk_full" in degraded
+    or "rch_verify_worker_quarantine_ignored" in degraded
 ):
     status = "rch_environment_failure"
 elif "rch_verify_capacity_or_timeout" in degraded:
@@ -392,39 +511,47 @@ if [ "$DRY_RUN" -eq 1 ]; then
     exit 0
 fi
 
-if [ -n "${RCH_VERIFY_FAKE_OUTPUT:-}" ]; then
-    combined_output="$RCH_VERIFY_FAKE_OUTPUT"
-    exit_code="${RCH_VERIFY_FAKE_EXIT_CODE:-0}"
-    elapsed_ms="${RCH_VERIFY_FAKE_ELAPSED_MS:-0}"
-else
-    start_ms="$(now_ms)"
-    set +e
-    combined_output="$(
-        cd "$PROJECT_ROOT" && \
-        RCH_COMPRESSION="${RCH_COMPRESSION:-0}" \
-        RCH_REQUIRE_REMOTE=1 \
-        RCH_QUEUE_WHEN_BUSY="${RCH_QUEUE_WHEN_BUSY:-1}" \
-        RCH_TEST_SLOTS="${RCH_TEST_SLOTS:-2}" \
-        RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
-        RCH_DAEMON_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
-        RCH_CANONICAL_PROJECT_ROOT="${RCH_CANONICAL_PROJECT_ROOT:-/Users/jemanuel/projects}" \
-        RCH_ALIAS_PROJECT_ROOT="${RCH_ALIAS_PROJECT_ROOT:-/data/projects}" \
-        RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
-        "${RCH_INVOCATION[@]}" 2>&1
-    )"
-    exit_code=$?
-    set -e
-    end_ms="$(now_ms)"
-    elapsed_ms=$((end_ms - start_ms))
+start_ms="$(now_ms)"
+set +e
+combined_output="$(run_rch_invocation_once)"
+exit_code=$?
+set -e
+end_ms="$(now_ms)"
+elapsed_ms=$((end_ms - start_ms))
+if [ -n "${RCH_VERIFY_FAKE_ELAPSED_MS:-}" ]; then
+    elapsed_ms="${RCH_VERIFY_FAKE_ELAPSED_MS}"
 fi
 
-worker_id="$(
-    printf '%s' "$combined_output" \
-        | sed -n \
-            -e 's/^\[RCH\] remote \([A-Za-z0-9_.-][A-Za-z0-9_.-]*\) (.*/\1/p' \
-            -e 's/^\[RCH\] remote \([A-Za-z0-9_.-][A-Za-z0-9_.-]*\) failed.*/\1/p' \
-        | tail -n 1
-)"
+worker_id="$(printf '%s' "$combined_output" | extract_worker_id)"
+disk_full_worker=""
+retried_after_disk_full=0
+retry_worker=""
+if [ "$exit_code" -ne 0 ] \
+    && printf '%s' "$combined_output" | is_worker_disk_full_output \
+    && [ -n "$worker_id" ] \
+    && [ "${RCH_VERIFY_DISABLE_DISK_FULL_RETRY:-0}" != "1" ]; then
+    disk_full_worker="$worker_id"
+    alternate_workers="$(healthy_alternate_workers "$disk_full_worker")"
+    if [ -n "$alternate_workers" ]; then
+        retried_after_disk_full=1
+        retry_note="[RCH_VERIFY] worker $disk_full_worker hit disk-full transfer failure; retrying once with RCH_WORKERS=$alternate_workers"
+        start_retry_ms="$(now_ms)"
+        set +e
+        retry_output="$(run_rch_invocation_retry "$alternate_workers")"
+        retry_exit_code=$?
+        set -e
+        end_retry_ms="$(now_ms)"
+        elapsed_ms=$((elapsed_ms + end_retry_ms - start_retry_ms))
+        combined_output="${combined_output}
+${retry_note}
+${retry_output}"
+        exit_code="$retry_exit_code"
+        retry_worker="$(printf '%s' "$retry_output" | extract_worker_id)"
+        if [ -n "$retry_worker" ]; then
+            worker_id="$retry_worker"
+        fi
+    fi
+fi
 if [ -n "$worker_id" ]; then
     WORKER_ID_JSON="$(json_quote "$worker_id")"
 fi
@@ -433,6 +560,15 @@ stdout_tail="$(printf '%s' "$combined_output" | tail_text)"
 degraded=()
 if [ "$exit_code" -ne 0 ]; then
     degraded+=("rch_verify_remote_command_failed")
+fi
+if [ -n "$disk_full_worker" ] || printf '%s' "$combined_output" | is_worker_disk_full_output; then
+    degraded+=("rch_verify_worker_disk_full")
+fi
+if [ "$retried_after_disk_full" -eq 1 ]; then
+    degraded+=("rch_verify_retry_after_worker_disk_full")
+fi
+if [ -n "$disk_full_worker" ] && [ "${retry_worker:-}" = "$disk_full_worker" ]; then
+    degraded+=("rch_verify_worker_quarantine_ignored")
 fi
 if [ "$COMMAND_KIND" = "raw" ]; then
     degraded+=("rch_verify_raw_command_may_not_offload")

@@ -57,6 +57,14 @@ fn run_json(args: &[&str]) -> Result<Value, String> {
     serde_json::from_str(&stdout).map_err(|error| format!("parse wrapper JSON: {error}"))
 }
 
+fn degraded_contains(report: &Value, expected: &str) -> Result<bool, String> {
+    Ok(report["degraded_codes"]
+        .as_array()
+        .ok_or_else(|| "missing degraded codes".to_owned())?
+        .iter()
+        .any(|code| code == expected))
+}
+
 #[test]
 fn script_is_syntax_valid_and_uses_explicit_rch_exec() -> TestResult {
     let output = Command::new("bash")
@@ -333,6 +341,133 @@ fn synthetic_remote_test_failure_with_timeout_env_is_remote_failure() -> TestRes
         .any(|code| code == "rch_verify_capacity_or_timeout")
     {
         return Err(format!("remote test failure was misclassified: {report}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn synthetic_pre_cargo_disk_full_extracts_selected_worker() -> TestResult {
+    let (status, stdout, _stderr) = run_script_with_env(
+        &["--", "cargo", "test", "--lib", "task_frame"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "2026-05-16T12:58:58Z INFO Selected worker: csd at ubuntu@csd (8 slots, speed 50.0)\nrsync: [receiver] mkstemp \"/data/projects/eidetic_engine_cli/.rchignore.XXXXXX\" failed: No space left on device (28)\n[RCH] remote required; refusing local fallback (remote pipeline failed)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "1998"),
+            ("RCH_VERIFY_DISABLE_DISK_FULL_RETRY", "1"),
+        ],
+    )?;
+    if status.success() {
+        return Err("disk-full transcript should preserve non-zero exit".to_owned());
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse disk-full: {error}"))?;
+    if report["worker_id"] != "csd" {
+        return Err(format!("selected worker was not extracted: {report}"));
+    }
+    if report["status"] != "rch_environment_failure" {
+        return Err(format!(
+            "disk-full local-fallback refusal should be environment failure: {report}"
+        ));
+    }
+    for expected in [
+        "rch_verify_remote_command_failed",
+        "rch_verify_worker_disk_full",
+        "rch_verify_local_fallback_refused",
+    ] {
+        if !degraded_contains(&report, expected)? {
+            return Err(format!("missing {expected} in degraded codes: {report}"));
+        }
+    }
+    if degraded_contains(&report, "rch_verify_remote_marker_missing")? {
+        return Err(format!(
+            "selected-worker transcript should not be remote-marker missing: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn synthetic_disk_full_retry_stops_when_quarantine_is_ignored() -> TestResult {
+    let (status, stdout, _stderr) = run_script_with_env(
+        &["--", "cargo", "test", "--lib", "qos"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "INFO Selected worker: csd at ubuntu@csd (8 slots, speed 50.0)\nrsync: write failed on \"/data/projects/eidetic_engine_cli/.rchignore\": No space left on device (28)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "20"),
+            ("RCH_VERIFY_HEALTHY_WORKERS", "css,trj"),
+            (
+                "RCH_VERIFY_FAKE_RETRY_OUTPUT",
+                "INFO Selected worker: csd at ubuntu@csd (8 slots, speed 50.0)\nrsync: write failed on \"/data/projects/eidetic_engine_cli/.rchignore\": No space left on device (28)\n",
+            ),
+            ("RCH_VERIFY_FAKE_RETRY_EXIT_CODE", "1"),
+        ],
+    )?;
+    if status.success() {
+        return Err("ignored quarantine retry should preserve non-zero exit".to_owned());
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse retry: {error}"))?;
+    if report["worker_id"] != "csd" {
+        return Err(format!(
+            "retry worker should record ignored quarantine: {report}"
+        ));
+    }
+    for expected in [
+        "rch_verify_worker_disk_full",
+        "rch_verify_retry_after_worker_disk_full",
+        "rch_verify_worker_quarantine_ignored",
+    ] {
+        if !degraded_contains(&report, expected)? {
+            return Err(format!("missing {expected} in degraded codes: {report}"));
+        }
+    }
+    let stdout_tail = report["stdout_tail"]
+        .as_str()
+        .ok_or_else(|| "missing stdout_tail".to_owned())?;
+    if !stdout_tail.contains("retrying once with RCH_WORKERS=css,trj") {
+        return Err(format!("retry note missing from stdout tail: {report}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn synthetic_compile_error_is_not_worker_disk_full() -> TestResult {
+    let (status, stdout, _stderr) = run_script_with_env(
+        &["--", "cargo", "test", "--lib", "support_bundle"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "error[E0277]: the trait bound `&str: Borrow<String>` is not satisfied\n  --> src/core/support_bundle.rs:1339:44\n[RCH] remote css failed (exit 101)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "3000"),
+        ],
+    )?;
+    if status.success() {
+        return Err("compile-error transcript should preserve non-zero exit".to_owned());
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse compile: {error}"))?;
+    if report["status"] != "remote_failure" {
+        return Err(format!(
+            "compile error should remain remote failure: {report}"
+        ));
+    }
+    if degraded_contains(&report, "rch_verify_worker_disk_full")? {
+        return Err(format!(
+            "compile error was misclassified as disk full: {report}"
+        ));
+    }
+    if report["first_error_file"] != "src/core/support_bundle.rs"
+        || report["first_error_line"] != 1339
+    {
+        return Err(format!("compile error location not extracted: {report}"));
     }
     Ok(())
 }
