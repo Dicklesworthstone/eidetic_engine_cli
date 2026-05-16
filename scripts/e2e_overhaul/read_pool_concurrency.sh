@@ -97,6 +97,7 @@ spawn_context_reader() {
     local meta_file="$ARTIFACT_DIR/$label.meta"
     (
         started="$(python3 -c 'import time; print(time.monotonic_ns())')"
+        set +e
         "$EE_BINARY" context \
             "read pool concurrency fixture $RUN_ID stable pack" \
             --workspace "$EPIC_WORKSPACE" \
@@ -104,6 +105,7 @@ spawn_context_reader() {
             --max-tokens 2000 \
             --json >"$out_file" 2>"$err_file"
         rc=$?
+        set -e
         ended="$(python3 -c 'import time; print(time.monotonic_ns())')"
         elapsed_ms="$(python3 -c "print(int(($ended - $started) / 1_000_000))")"
         printf 'rc=%s\nelapsed_ms=%s\npool_size=%s\n' "$rc" "$elapsed_ms" "$pool_size" >"$meta_file"
@@ -116,6 +118,7 @@ spawn_writer() {
     local out_file="$ARTIFACT_DIR/$label.out"
     local err_file="$ARTIFACT_DIR/$label.err"
     (
+        set +e
         "$EE_BINARY" remember \
             "Read pool writer $label for $RUN_ID commits during context readers." \
             --workspace "$EPIC_WORKSPACE" \
@@ -123,7 +126,9 @@ spawn_writer() {
             --kind fact \
             --no-propose-candidates \
             --json >"$out_file" 2>"$err_file"
-        printf 'rc=%s\n' "$?" >"$ARTIFACT_DIR/$label.meta"
+        rc=$?
+        set -e
+        printf 'rc=%s\n' "$rc" >"$ARTIFACT_DIR/$label.meta"
     ) &
     printf '%s\n' "$!"
 }
