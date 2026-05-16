@@ -1,0 +1,6 @@
+[package]
+name = "fnx-runtime"
+version = "0.1.0"
+edition = "2024"
+description = "Runtime support types for deterministic FrankenNetworkX graph algorithms"
+license-file = "../../LICENSE"

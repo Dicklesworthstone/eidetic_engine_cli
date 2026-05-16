@@ -1,0 +1,6 @@
+[package]
+name = "fnx-convert"
+version = "0.1.0"
+edition = "2024"
+description = "Conversion helpers between FrankenNetworkX graph representations"
+license-file = "../../LICENSE"

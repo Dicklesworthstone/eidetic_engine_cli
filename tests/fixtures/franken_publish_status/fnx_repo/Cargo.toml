@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/fnx-runtime",
+  "crates/fnx-cgse",
+  "crates/fnx-classes",
+  "crates/fnx-dispatch",
+  "crates/fnx-convert",
+  "crates/fnx-algorithms",
+  "crates/fnx-generators",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license-file = "LICENSE"

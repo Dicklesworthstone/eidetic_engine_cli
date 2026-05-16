@@ -1,0 +1,6 @@
+[package]
+name = "fnx-classes"
+version = "0.1.0"
+edition = "2024"
+description = "Core graph classes and data structures for FrankenNetworkX"
+license-file = "../../LICENSE"

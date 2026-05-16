@@ -1,0 +1,6 @@
+[package]
+name = "fnx-algorithms"
+version = "0.1.0"
+edition = "2024"
+description = "Deterministic graph algorithms for FrankenNetworkX"
+license-file = "../../LICENSE"

@@ -1,0 +1,6 @@
+[package]
+name = "fnx-cgse"
+version.workspace = true
+edition.workspace = true
+description = "Canonical Graph Semantics Engine"
+license-file.workspace = true
