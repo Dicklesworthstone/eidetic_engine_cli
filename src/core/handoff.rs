@@ -3283,8 +3283,7 @@ struct StaleThresholdBreach {
 }
 
 fn handoff_stale_thresholds_for_workspace(workspace_path: &Path) -> HandoffStaleThresholds {
-    let config_path = workspace_path.join(".ee").join("config.toml");
-    let Ok(contents) = std::fs::read_to_string(config_path) else {
+    let Ok(Some(contents)) = crate::config::read_workspace_config_contents(workspace_path) else {
         return HandoffStaleThresholds::default();
     };
     let Ok(config) = crate::config::ConfigFile::parse(&contents) else {
@@ -3791,6 +3790,85 @@ mod tests {
         ensure_equal(&CapsuleProfile::Compact.as_str(), &"compact", "compact")?;
         ensure_equal(&CapsuleProfile::Resume.as_str(), &"resume", "resume")?;
         ensure_equal(&CapsuleProfile::Handoff.as_str(), &"handoff", "handoff")
+    }
+
+    #[test]
+    fn handoff_stale_thresholds_read_workspace_config() -> TestResult {
+        let temp = repo_tempdir()?;
+        let config_dir = temp.path().join(".ee");
+        fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[handoff.stale_threshold]
+memories_added = 7
+any_expired_in_pack = false
+content_drift_score = 0.25
+memories_revised = 3
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let thresholds = handoff_stale_thresholds_for_workspace(temp.path());
+        ensure_equal(&thresholds.memories_added, &7, "memories added threshold")?;
+        ensure_equal(&thresholds.any_expired_in_pack, &false, "expired threshold")?;
+        ensure_equal(
+            &thresholds.content_drift_score,
+            &0.25,
+            "content drift threshold",
+        )?;
+        ensure_equal(
+            &thresholds.memories_revised,
+            &3,
+            "memories revised threshold",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_stale_thresholds_ignore_symlinked_workspace_config() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = repo_tempdir()?;
+        let outside = repo_tempdir()?;
+        fs::create_dir_all(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        fs::write(
+            outside.path().join("config.toml"),
+            "[handoff.stale_threshold]\nmemories_added = 1\n",
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(
+            outside.path().join("config.toml"),
+            temp.path().join(".ee").join("config.toml"),
+        )
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &handoff_stale_thresholds_for_workspace(temp.path()),
+            &HandoffStaleThresholds::default(),
+            "symlinked handoff config falls back to defaults",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_stale_thresholds_ignore_symlinked_workspace_config_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = repo_tempdir()?;
+        let outside = repo_tempdir()?;
+        fs::write(
+            outside.path().join("config.toml"),
+            "[handoff.stale_threshold]\nmemories_added = 1\n",
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(outside.path(), temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &handoff_stale_thresholds_for_workspace(temp.path()),
+            &HandoffStaleThresholds::default(),
+            "symlinked handoff config parent falls back to defaults",
+        )
     }
 
     #[test]
