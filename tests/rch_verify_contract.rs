@@ -65,6 +65,24 @@ fn degraded_contains(report: &Value, expected: &str) -> Result<bool, String> {
         .any(|code| code == expected))
 }
 
+fn write_fake_rch(name: &str, body: &str) -> Result<PathBuf, String> {
+    let dir = target_tmp_dir();
+    fs::create_dir_all(&dir).map_err(|error| format!("create target temp dir: {error}"))?;
+    let path = dir.join(name);
+    fs::write(&path, body).map_err(|error| format!("write fake rch: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&path)
+            .map_err(|error| format!("stat fake rch: {error}"))?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions)
+            .map_err(|error| format!("chmod fake rch: {error}"))?;
+    }
+    Ok(path)
+}
+
 #[test]
 fn script_is_syntax_valid_and_uses_explicit_rch_exec() -> TestResult {
     let output = Command::new("bash")
@@ -125,6 +143,64 @@ fn dry_run_accepts_focused_cargo_test_and_builds_remote_env() -> TestResult {
     }
     if invocation_text.contains("/Volumes/USBNVME16TB") {
         return Err("dry-run remote invocation leaked Mac-only USB path".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn first_remote_invocation_passes_requested_workers() -> TestResult {
+    let fake_rch = write_fake_rch(
+        "fake-rch-workers.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf 'RCH_WORKERS=%s\n' "${RCH_WORKERS:-}"
+printf '[RCH] remote trj (0.1s)\n'
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "graph::algorithms::run_with_budget_emits_algorithm_compute_telemetry",
+        ],
+        &[
+            ("RCH_WORKERS", "trj"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "css,trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "css,trj,csd"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "fake rch invocation failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse requested-workers proof: {error}"))?;
+    if report["worker_id"] != "trj" {
+        return Err(format!("fake rch worker was not detected: {report}"));
+    }
+    if report["requested_workers"] != serde_json::json!(["trj"]) {
+        return Err(format!("requested workers missing from proof: {report}"));
+    }
+    let stdout_tail = report["stdout_tail"]
+        .as_str()
+        .ok_or_else(|| "missing stdout_tail".to_owned())?;
+    if !stdout_tail.contains("RCH_WORKERS=trj") {
+        return Err(format!(
+            "first invocation did not receive RCH_WORKERS: {report}"
+        ));
+    }
+    if degraded_contains(&report, "rch_verify_worker_filter_ignored")? {
+        return Err(format!(
+            "requested worker should not trip filter ignored: {report}"
+        ));
     }
     Ok(())
 }

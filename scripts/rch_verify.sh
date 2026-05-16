@@ -544,6 +544,7 @@ run_rch_invocation_once() {
     fi
 
     cd "$PROJECT_ROOT" && \
+        RCH_WORKERS="${RCH_WORKERS:-}" \
         RCH_COMPRESSION="${RCH_COMPRESSION:-0}" \
         RCH_REQUIRE_REMOTE=1 \
         RCH_QUEUE_WHEN_BUSY="${RCH_QUEUE_WHEN_BUSY:-1}" \
