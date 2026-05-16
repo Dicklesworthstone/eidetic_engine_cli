@@ -14,6 +14,9 @@ use std::str::FromStr;
 use serde::{Serialize, Serializer};
 use toml_edit::{DocumentMut, Item};
 
+use crate::core::degraded_aggregation::{
+    AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
+};
 use crate::models::{ArtifactSummary, MetricValueKind};
 
 pub const HOST_PROFILE_PROBE_SCHEMA_V1: &str = "ee.host_profile.v1";
@@ -38,6 +41,7 @@ pub struct HostResourceProbeReport {
     pub tools: Vec<ToolProbe>,
     pub environment: EnvironmentProbe,
     pub topology: HostTopologyProbe,
+    #[serde(serialize_with = "serialize_host_probe_degradations")]
     pub degraded: Vec<HostProbeDegradation>,
 }
 
@@ -433,6 +437,7 @@ pub struct VerificationRecipe {
     pub cargo_commands: Vec<CargoCommand>,
     pub target_dir_strategy: TargetDirStrategy,
     pub timeout_seconds: u64,
+    #[serde(serialize_with = "serialize_verification_degradations")]
     pub degraded: Vec<VerificationDegradation>,
 }
 
@@ -1026,6 +1031,17 @@ pub enum ProfileBudgetConformanceSeverity {
     High,
 }
 
+impl ProfileBudgetConformanceSeverity {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileBudgetConformanceReport {
@@ -1038,6 +1054,7 @@ pub struct ProfileBudgetConformanceReport {
     pub artifact: ProfileBudgetArtifactSummary,
     pub status: ProfileBudgetConformanceStatus,
     pub checks: Vec<ProfileBudgetConformanceCheck>,
+    #[serde(serialize_with = "serialize_profile_budget_conformance_degradations")]
     pub degraded: Vec<ProfileBudgetConformanceDegradation>,
 }
 
@@ -2285,6 +2302,81 @@ impl HostProbeDegradation {
     }
 }
 
+fn serialize_host_probe_degradations<S>(
+    degraded: &[HostProbeDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_host_probe_degradations(degraded).serialize(serializer)
+}
+
+fn serialize_verification_degradations<S>(
+    degraded: &[VerificationDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_verification_degradations(degraded).serialize(serializer)
+}
+
+fn serialize_profile_budget_conformance_degradations<S>(
+    degraded: &[ProfileBudgetConformanceDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_profile_budget_conformance_degradations(degraded).serialize(serializer)
+}
+
+fn aggregate_host_probe_degradations(
+    degraded: &[HostProbeDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "profile_host_probe",
+            entry.code.to_owned(),
+            entry.severity.to_owned(),
+            entry.message.clone(),
+            entry.repair.to_owned(),
+        )
+    }))
+}
+
+fn aggregate_verification_degradations(
+    degraded: &[VerificationDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "profile_verification_recipe",
+            entry.code.to_owned(),
+            entry.severity.to_owned(),
+            entry.message.clone(),
+            entry.repair.to_owned(),
+        )
+    }))
+}
+
+fn aggregate_profile_budget_conformance_degradations(
+    degraded: &[ProfileBudgetConformanceDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "profile_budget_conformance",
+            entry.code.clone(),
+            entry.severity.as_str().to_owned(),
+            entry.message.clone(),
+            entry
+                .repair
+                .clone()
+                .unwrap_or_else(|| "Review profile budget conformance details.".to_owned()),
+        )
+    }))
+}
+
 fn parse_proc_meminfo_bytes(input: &str) -> (Option<u64>, Option<u64>) {
     let mut total = None;
     let mut available = None;
@@ -2774,6 +2866,46 @@ mod tests {
     }
 
     #[test]
+    fn host_probe_serializes_aggregated_degraded_entries() -> TestResult {
+        let mut report = probe_with_resources(Some(8), 32);
+        report.complete = false;
+        report.degraded = vec![
+            HostProbeDegradation::warning(
+                "profile_fixture_degraded",
+                "first duplicate",
+                "first repair",
+            ),
+            HostProbeDegradation::warning(
+                "profile_fixture_degraded",
+                "second duplicate",
+                "second repair",
+            ),
+        ];
+
+        let value = serde_json::to_value(&report).map_err(|error| error.to_string())?;
+        let degraded = value
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("degraded array missing: {value}"))?;
+
+        ensure(
+            degraded.len(),
+            1usize,
+            "duplicate host probe degraded entries aggregate",
+        )?;
+        ensure(
+            degraded[0]["code"].as_str(),
+            Some("profile_fixture_degraded"),
+            "aggregated host probe code",
+        )?;
+        ensure(
+            degraded[0]["sources"].clone(),
+            serde_json::json!(["profile_host_probe"]),
+            "host probe source label",
+        )
+    }
+
+    #[test]
     fn recommend_swarm_for_high_resource_host() -> TestResult {
         let probe = probe_with_resources(Some(16), 64);
         let result = recommend_operating_profile(&probe);
@@ -3142,5 +3274,105 @@ mod tests {
         ensure_true(json.contains("gatesIncluded"), "JSON has camelCase fields")?;
         ensure_true(json.contains("gatesSkipped"), "JSON has skipped gates")?;
         ensure_true(json.contains("rchCommands"), "JSON has RCH commands")
+    }
+
+    #[test]
+    fn verification_recipe_serializes_aggregated_degraded_entries() -> TestResult {
+        let mut recipe = VerificationRecipe::for_profile(OperatingProfile::Constrained);
+        recipe.degraded.push(VerificationDegradation {
+            code: "manual_heavy_strategy",
+            severity: "high",
+            message: "Escalated duplicate".to_string(),
+            repair: "Use RCH for heavy gates.",
+        });
+
+        let value = serde_json::to_value(&recipe).map_err(|error| error.to_string())?;
+        let degraded = value
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("degraded array missing: {value}"))?;
+        let manual = degraded
+            .iter()
+            .find(|entry| entry["code"] == "manual_heavy_strategy")
+            .ok_or_else(|| format!("manual_heavy_strategy missing: {degraded:?}"))?;
+
+        ensure(
+            degraded
+                .iter()
+                .filter(|entry| entry["code"] == "manual_heavy_strategy")
+                .count(),
+            1usize,
+            "duplicate verification degraded code aggregates",
+        )?;
+        ensure(
+            manual["severity"].as_str(),
+            Some("high"),
+            "highest severity wins",
+        )?;
+        ensure(
+            manual["sources"].clone(),
+            serde_json::json!(["profile_verification_recipe"]),
+            "verification source label",
+        )
+    }
+
+    #[test]
+    fn profile_budget_conformance_serializes_aggregated_degraded_entries() -> TestResult {
+        let report = ProfileBudgetConformanceReport {
+            schema: PROFILE_BUDGET_CONFORMANCE_SCHEMA_V1,
+            side_effect_free: true,
+            requested_profile: OperatingProfile::Portable,
+            advertised_profile: Some(OperatingProfile::Portable),
+            effective_profile: OperatingProfile::Portable,
+            explicit_overrides: Vec::new(),
+            artifact: ProfileBudgetArtifactSummary {
+                artifact_id: "artifact_profile_fixture".to_string(),
+                source_schema: "ee.test.profile_fixture.v1".to_string(),
+                observed_profile: Some("portable".to_string()),
+                metric_count: 0,
+            },
+            status: ProfileBudgetConformanceStatus::Failed,
+            checks: Vec::new(),
+            degraded: vec![
+                ProfileBudgetConformanceDegradation::new(
+                    "profile_fixture_mismatch",
+                    ProfileBudgetConformanceSeverity::Low,
+                    "profile",
+                    "fixture.low",
+                    "low duplicate",
+                    Some("low repair".to_string()),
+                ),
+                ProfileBudgetConformanceDegradation::new(
+                    "profile_fixture_mismatch",
+                    ProfileBudgetConformanceSeverity::High,
+                    "profile",
+                    "fixture.high",
+                    "high duplicate",
+                    Some("high repair".to_string()),
+                ),
+            ],
+        };
+
+        let value = serde_json::to_value(&report).map_err(|error| error.to_string())?;
+        let degraded = value
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("degraded array missing: {value}"))?;
+
+        ensure(
+            degraded.len(),
+            1usize,
+            "duplicate profile budget degraded entries aggregate",
+        )?;
+        ensure(
+            degraded[0]["severity"].as_str(),
+            Some("high"),
+            "profile budget highest severity wins",
+        )?;
+        ensure(
+            degraded[0]["sources"].clone(),
+            serde_json::json!(["profile_budget_conformance"]),
+            "profile budget source label",
+        )
     }
 }

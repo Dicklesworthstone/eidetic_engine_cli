@@ -83,6 +83,9 @@ Current conventions:
 | `preflight_guard` | `ee preflight check --cmd` command-guard degradation. |
 | `preflight_run` | `ee preflight run` risk-evidence degradation. |
 | `preflight_show` | `ee preflight show` persisted-run or risk-evidence degradation. |
+| `profile_budget_conformance` | `ee perf budget check` profile-budget conformance degradation. |
+| `profile_host_probe` | Host profile probe resource-inspection degradation. |
+| `profile_verification_recipe` | Profile-derived verification recipe degradation. |
 | `playbook_export` | `ee playbook export` portable-rule export degradation. |
 | `playbook_extract` | `ee playbook extract` candidate extraction degradation. |
 | `playbook_import` | `ee playbook import` portable-rule import degradation. |
