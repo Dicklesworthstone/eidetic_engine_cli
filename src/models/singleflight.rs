@@ -124,7 +124,29 @@ pub struct SingleFlightSurfacePosture {
     pub reused_result_count: u64,
     pub state_poisoned_count: u64,
     pub follower_timeout_ms: u64,
+    pub last_key: Option<SingleFlightLastKeyPosture>,
     pub suggested_action: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleFlightLastKeyPosture {
+    pub key_hash: String,
+    pub workspace_generation: u64,
+    pub index_generation: Option<u64>,
+    pub graph_generation: Option<u64>,
+}
+
+impl SingleFlightLastKeyPosture {
+    #[must_use]
+    pub fn from_key(key: &SingleFlightKey) -> Self {
+        Self {
+            key_hash: key.key_hash.clone(),
+            workspace_generation: key.workspace_generation,
+            index_generation: key.index_generation,
+            graph_generation: key.graph_generation,
+        }
+    }
 }
 
 impl SingleFlightSurfacePosture {
@@ -135,6 +157,7 @@ impl SingleFlightSurfacePosture {
         active_leader_count: u32,
         counters: SingleFlightSurfaceCounters,
         follower_timeout_ms: u64,
+        last_key: Option<SingleFlightLastKeyPosture>,
     ) -> Self {
         let status = if counters.state_poisoned_count > 0 {
             "state_poisoned"
@@ -170,6 +193,7 @@ impl SingleFlightSurfacePosture {
             reused_result_count: counters.reused_result_count,
             state_poisoned_count: counters.state_poisoned_count,
             follower_timeout_ms,
+            last_key,
             suggested_action: suggested_action.to_owned(),
         }
     }

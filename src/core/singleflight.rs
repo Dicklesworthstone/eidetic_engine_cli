@@ -13,13 +13,30 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crate::models::{
-    SingleFlightKey, SingleFlightKeyInput, SingleFlightPostureReport, SingleFlightSurface,
-    SingleFlightSurfaceCounters, SingleFlightSurfacePosture,
+    SingleFlightKey, SingleFlightKeyInput, SingleFlightLastKeyPosture, SingleFlightPostureReport,
+    SingleFlightSurface, SingleFlightSurfaceCounters, SingleFlightSurfacePosture,
 };
 
 pub const SINGLEFLIGHT_FOLLOWER_TIMEOUT_CODE: &str = "singleflight_follower_timeout";
 pub const SINGLEFLIGHT_LEADER_FAILED_CODE: &str = "singleflight_leader_failed";
 pub const SINGLEFLIGHT_STATE_POISONED_CODE: &str = "singleflight_state_poisoned";
+const SINGLEFLIGHT_TRACE_SURFACE: &str = "singleflight";
+const SINGLEFLIGHT_TRACE_REQUEST_ID: &str = "singleflight_group_run";
+const SINGLEFLIGHT_TRACE_WORKSPACE_ID: &str = "process_local";
+const SINGLEFLIGHT_LEADER_START_EVENT: &str = "leader_start";
+const SINGLEFLIGHT_FOLLOWER_JOIN_EVENT: &str = "follower_join";
+const SINGLEFLIGHT_FOLLOWER_TIMEOUT_EVENT: &str = "follower_timeout";
+const SINGLEFLIGHT_LEADER_COMPLETE_EVENT: &str = "leader_complete";
+const SINGLEFLIGHT_COALESCED_RESULT_REUSED_EVENT: &str = "coalesced_result_reused";
+const SINGLEFLIGHT_LEADER_FAILED_EVENT: &str = "leader_failed";
+#[cfg(test)]
+const SINGLEFLIGHT_REQUIRED_TELEMETRY_PHASES: [&str; 5] = [
+    SINGLEFLIGHT_LEADER_START_EVENT,
+    SINGLEFLIGHT_FOLLOWER_JOIN_EVENT,
+    SINGLEFLIGHT_FOLLOWER_TIMEOUT_EVENT,
+    SINGLEFLIGHT_LEADER_COMPLETE_EVENT,
+    SINGLEFLIGHT_COALESCED_RESULT_REUSED_EVENT,
+];
 const GRAPH_FEATURE_ENRICHMENT_FOLLOWER_TIMEOUT: Duration = Duration::from_secs(30);
 
 static GRAPH_FEATURE_ENRICHMENT_GROUP: OnceLock<
@@ -122,6 +139,7 @@ impl std::error::Error for SingleFlightError {}
 pub struct SingleFlightGroup<T> {
     entries: Mutex<HashMap<String, Arc<SingleFlightEntry<T>>>>,
     counters: SingleFlightCounters,
+    last_key: Mutex<Option<SingleFlightLastKeyPosture>>,
 }
 
 impl<T> Default for SingleFlightGroup<T> {
@@ -129,6 +147,7 @@ impl<T> Default for SingleFlightGroup<T> {
         Self {
             entries: Mutex::new(HashMap::new()),
             counters: SingleFlightCounters::default(),
+            last_key: Mutex::new(None),
         }
     }
 }
@@ -151,15 +170,18 @@ where
     where
         F: FnOnce() -> Result<T, String>,
     {
+        self.record_last_key(key);
         let key_hash = key.key_hash.clone();
         let (entry, is_leader) = self.entry_for(&key_hash)?;
 
         if is_leader {
+            let leader_started = Instant::now();
             let result = operation();
-            self.complete_leader(&key_hash, &entry, result)
+            self.complete_leader(&key_hash, &entry, leader_started, result)
         } else {
             self.counters.follower_joins.fetch_add(1, Ordering::SeqCst);
             entry.followers.fetch_add(1, Ordering::SeqCst);
+            trace_singleflight_checkpoint(SINGLEFLIGHT_FOLLOWER_JOIN_EVENT, &key_hash, 0, &[]);
             self.wait_for_leader(&key_hash, &entry, follower_timeout)
         }
     }
@@ -180,6 +202,7 @@ where
         configured: bool,
         follower_timeout: Duration,
     ) -> SingleFlightSurfacePosture {
+        let last_key = self.last_key_snapshot();
         let active_leader_count = match self.active_len() {
             Ok(count) => capped_u32(count),
             Err(_) => {
@@ -193,7 +216,29 @@ where
             active_leader_count,
             self.counters.snapshot(),
             duration_ms(follower_timeout),
+            last_key,
         )
+    }
+
+    fn record_last_key(&self, key: &SingleFlightKey) {
+        match self.last_key.lock() {
+            Ok(mut last_key) => {
+                *last_key = Some(SingleFlightLastKeyPosture::from_key(key));
+            }
+            Err(_) => {
+                self.counters.state_poisoned.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn last_key_snapshot(&self) -> Option<SingleFlightLastKeyPosture> {
+        match self.last_key.lock() {
+            Ok(last_key) => last_key.clone(),
+            Err(_) => {
+                self.counters.state_poisoned.fetch_add(1, Ordering::SeqCst);
+                None
+            }
+        }
     }
 
     fn entry_for(
@@ -213,6 +258,7 @@ where
         let entry = Arc::new(SingleFlightEntry::default());
         entries.insert(key_hash.to_owned(), Arc::clone(&entry));
         self.counters.leader_starts.fetch_add(1, Ordering::SeqCst);
+        trace_singleflight_checkpoint(SINGLEFLIGHT_LEADER_START_EVENT, key_hash, 0, &[]);
         Ok((entry, true))
     }
 
@@ -220,6 +266,7 @@ where
         &self,
         key_hash: &str,
         entry: &Arc<SingleFlightEntry<T>>,
+        leader_started: Instant,
         result: Result<T, String>,
     ) -> Result<SingleFlightRun<T>, SingleFlightError> {
         {
@@ -239,6 +286,12 @@ where
                 self.counters
                     .completed_leaders
                     .fetch_add(1, Ordering::SeqCst);
+                trace_singleflight_checkpoint(
+                    SINGLEFLIGHT_LEADER_COMPLETE_EVENT,
+                    key_hash,
+                    duration_ms(leader_started.elapsed()),
+                    &[],
+                );
                 Ok(SingleFlightRun {
                     value,
                     role: SingleFlightRole::Leader,
@@ -247,6 +300,12 @@ where
             }
             Err(message) => {
                 self.counters.leader_failures.fetch_add(1, Ordering::SeqCst);
+                trace_singleflight_checkpoint(
+                    SINGLEFLIGHT_LEADER_FAILED_EVENT,
+                    key_hash,
+                    duration_ms(leader_started.elapsed()),
+                    &[SINGLEFLIGHT_LEADER_FAILED_CODE],
+                );
                 Err(SingleFlightError::LeaderFailed {
                     key_hash: key_hash.to_owned(),
                     role: SingleFlightRole::Leader,
@@ -263,12 +322,24 @@ where
         follower_timeout: Duration,
     ) -> Result<SingleFlightRun<T>, SingleFlightError> {
         let started = Instant::now();
-        let deadline = started.checked_add(follower_timeout).ok_or_else(|| {
-            SingleFlightError::FollowerTimeout {
-                key_hash: key_hash.to_owned(),
-                timeout_ms: duration_ms(follower_timeout),
+        let deadline = match started.checked_add(follower_timeout) {
+            Some(deadline) => deadline,
+            None => {
+                self.counters
+                    .follower_timeouts
+                    .fetch_add(1, Ordering::SeqCst);
+                trace_singleflight_checkpoint(
+                    SINGLEFLIGHT_FOLLOWER_TIMEOUT_EVENT,
+                    key_hash,
+                    0,
+                    &[SINGLEFLIGHT_FOLLOWER_TIMEOUT_CODE],
+                );
+                return Err(SingleFlightError::FollowerTimeout {
+                    key_hash: key_hash.to_owned(),
+                    timeout_ms: duration_ms(follower_timeout),
+                });
             }
-        })?;
+        };
         let mut state = entry
             .state
             .lock()
@@ -285,6 +356,12 @@ where
                             self.counters
                                 .follower_timeouts
                                 .fetch_add(1, Ordering::SeqCst);
+                            trace_singleflight_checkpoint(
+                                SINGLEFLIGHT_FOLLOWER_TIMEOUT_EVENT,
+                                key_hash,
+                                duration_ms(started.elapsed()),
+                                &[SINGLEFLIGHT_FOLLOWER_TIMEOUT_CODE],
+                            );
                             return Err(SingleFlightError::FollowerTimeout {
                                 key_hash: key_hash.to_owned(),
                                 timeout_ms: duration_ms(follower_timeout),
@@ -302,6 +379,12 @@ where
                         self.counters
                             .follower_timeouts
                             .fetch_add(1, Ordering::SeqCst);
+                        trace_singleflight_checkpoint(
+                            SINGLEFLIGHT_FOLLOWER_TIMEOUT_EVENT,
+                            key_hash,
+                            duration_ms(started.elapsed()),
+                            &[SINGLEFLIGHT_FOLLOWER_TIMEOUT_CODE],
+                        );
                         return Err(SingleFlightError::FollowerTimeout {
                             key_hash: key_hash.to_owned(),
                             timeout_ms: duration_ms(follower_timeout),
@@ -310,6 +393,12 @@ where
                 }
                 SingleFlightState::Completed(Ok(value)) => {
                     self.counters.reused_results.fetch_add(1, Ordering::SeqCst);
+                    trace_singleflight_checkpoint(
+                        SINGLEFLIGHT_COALESCED_RESULT_REUSED_EVENT,
+                        key_hash,
+                        duration_ms(started.elapsed()),
+                        &[],
+                    );
                     return Ok(SingleFlightRun {
                         value: value.clone(),
                         role: SingleFlightRole::Follower,
@@ -317,6 +406,12 @@ where
                     });
                 }
                 SingleFlightState::Completed(Err(message)) => {
+                    trace_singleflight_checkpoint(
+                        SINGLEFLIGHT_LEADER_FAILED_EVENT,
+                        key_hash,
+                        duration_ms(started.elapsed()),
+                        &[SINGLEFLIGHT_LEADER_FAILED_CODE],
+                    );
                     return Err(SingleFlightError::LeaderFailed {
                         key_hash: key_hash.to_owned(),
                         role: SingleFlightRole::Follower,
@@ -383,6 +478,7 @@ pub fn singleflight_posture_report() -> SingleFlightPostureReport {
                 0,
                 SingleFlightSurfaceCounters::default(),
                 duration_ms(GRAPH_FEATURE_ENRICHMENT_FOLLOWER_TIMEOUT),
+                None,
             )
         },
         |group| {
@@ -498,6 +594,26 @@ fn capped_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+fn trace_singleflight_checkpoint(
+    phase: &'static str,
+    key_hash: &str,
+    elapsed_ms: u64,
+    degraded_codes: &[&str],
+) {
+    tracing::info!(
+        target: "ee::singleflight",
+        workspace_id = SINGLEFLIGHT_TRACE_WORKSPACE_ID,
+        request_id = SINGLEFLIGHT_TRACE_REQUEST_ID,
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-gni47.3"),
+        surface = SINGLEFLIGHT_TRACE_SURFACE,
+        phase,
+        elapsed_ms,
+        degraded_codes = ?degraded_codes,
+        key_hash = %key_hash,
+        "single-flight checkpoint"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,6 +697,43 @@ mod tests {
     }
 
     #[test]
+    fn posture_records_only_redaction_safe_last_key_generations() -> TestResult {
+        let group = SingleFlightGroup::new();
+        let mut input = SingleFlightKeyInput::new(
+            SingleFlightSurface::Context,
+            "/workspace/secret-path",
+            11,
+            "ee.context.v2",
+        );
+        input.index_generation = Some(17);
+        input.graph_generation = Some(23);
+        input.query_text = Some("raw query with token secret should never surface");
+        let key = SingleFlightKey::from_input(&input);
+
+        group
+            .run(&key, Duration::from_secs(1), || Ok("ok".to_owned()))
+            .map_err(|error| format!("single-flight run failed: {error}"))?;
+
+        let posture = group.posture(SingleFlightSurface::Context, true, Duration::from_secs(1));
+        let last_key = posture
+            .last_key
+            .as_ref()
+            .ok_or_else(|| "posture should include last key".to_owned())?;
+        assert_eq!(last_key.key_hash, key.key_hash);
+        assert_eq!(last_key.workspace_generation, 11);
+        assert_eq!(last_key.index_generation, Some(17));
+        assert_eq!(last_key.graph_generation, Some(23));
+
+        let serialized = serde_json::to_string(&posture)
+            .map_err(|error| format!("serialize single-flight posture: {error}"))?;
+        assert!(serialized.contains(&key.key_hash));
+        assert!(!serialized.contains("raw query"));
+        assert!(!serialized.contains("token secret"));
+        assert!(!serialized.contains("/workspace/secret-path"));
+        Ok(())
+    }
+
+    #[test]
     fn distinct_keys_execute_independently() -> TestResult {
         let group = Arc::new(SingleFlightGroup::new());
         let calls = Arc::new(AtomicUsize::new(0));
@@ -658,6 +811,20 @@ mod tests {
         assert_eq!(posture.follower_timeout_count, 1);
         assert_eq!(posture.completed_leader_count, 1);
         Ok(())
+    }
+
+    #[test]
+    fn telemetry_contract_names_required_events() {
+        assert_eq!(
+            SINGLEFLIGHT_REQUIRED_TELEMETRY_PHASES,
+            [
+                "leader_start",
+                "follower_join",
+                "follower_timeout",
+                "leader_complete",
+                "coalesced_result_reused",
+            ]
+        );
     }
 
     #[test]

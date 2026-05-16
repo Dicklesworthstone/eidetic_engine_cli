@@ -19,6 +19,7 @@
         "posture",
         "capabilities",
         "runtime",
+        "read_pool",
         "memoryHealth",
         "curationHealth",
         "feedbackHealth",
@@ -37,10 +38,11 @@
         "posture": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "capabilities": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "runtime": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "read_pool": {"$ref": "#/$defs/readPoolStatus"},
         "memoryHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "curationHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "feedbackHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "singleFlight": {"$ref": "ee.singleflight.posture.v1.json"},
+        "singleFlight": {"$ref": "#/$defs/singleFlightPosture"},
         "graphCompute": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "graphSnapshotArtifact": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "derivedAssets": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
@@ -52,10 +54,108 @@
   "field_presets": {
     "minimal": ["command", "version", "workspace"],
     "summary": ["command", "version", "workspace", "posture", "singleFlight", "capabilities"],
-    "standard": ["command", "version", "workspace", "posture", "capabilities", "runtime", "memoryHealth", "curationHealth", "feedbackHealth", "singleFlight", "graphCompute", "graphSnapshotArtifact", "derivedAssets", "agentInventory", "degraded"],
+    "standard": ["command", "version", "workspace", "posture", "capabilities", "runtime", "read_pool", "memoryHealth", "curationHealth", "feedbackHealth", "singleFlight", "graphCompute", "graphSnapshotArtifact", "derivedAssets", "agentInventory", "degraded"],
     "full": ["*"]
   },
   "$defs": {
+    "readPoolStatus": {
+      "type": "object",
+      "required": ["active", "idle", "max_seen", "drops"],
+      "additionalProperties": false,
+      "properties": {
+        "active": {"type": "integer", "minimum": 0},
+        "idle": {"type": "integer", "minimum": 0},
+        "max_seen": {"type": "integer", "minimum": 0},
+        "drops": {"type": "integer", "minimum": 0}
+      }
+    },
+    "singleFlightStatus": {
+      "type": "string",
+      "enum": ["idle", "active", "observed_failures", "state_poisoned", "unconfigured"]
+    },
+    "singleFlightPosture": {
+      "type": "object",
+      "required": [
+        "schema",
+        "status",
+        "configuredSurfaceCount",
+        "activeLeaderCount",
+        "leaderStartCount",
+        "followerWaitCount",
+        "followerTimeoutCount",
+        "leaderFailureCount",
+        "reusedResultCount",
+        "surfaces"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.singleflight.posture.v1"},
+        "status": {"$ref": "#/$defs/singleFlightStatus"},
+        "configuredSurfaceCount": {"type": "integer", "minimum": 0},
+        "activeLeaderCount": {"type": "integer", "minimum": 0},
+        "leaderStartCount": {"type": "integer", "minimum": 0},
+        "followerWaitCount": {"type": "integer", "minimum": 0},
+        "followerTimeoutCount": {"type": "integer", "minimum": 0},
+        "leaderFailureCount": {"type": "integer", "minimum": 0},
+        "reusedResultCount": {"type": "integer", "minimum": 0},
+        "surfaces": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/singleFlightSurfacePosture"}
+        }
+      }
+    },
+    "singleFlightSurfacePosture": {
+      "type": "object",
+      "required": [
+        "surface",
+        "status",
+        "configured",
+        "activeLeaderCount",
+        "leaderStartCount",
+        "completedLeaderCount",
+        "followerJoinCount",
+        "followerTimeoutCount",
+        "leaderFailureCount",
+        "reusedResultCount",
+        "statePoisonedCount",
+        "followerTimeoutMs",
+        "lastKey",
+        "suggestedAction"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "surface": {
+          "type": "string",
+          "enum": ["context", "search", "graph_snapshot", "graph_feature_enrichment"]
+        },
+        "status": {"$ref": "#/$defs/singleFlightStatus"},
+        "configured": {"type": "boolean"},
+        "activeLeaderCount": {"type": "integer", "minimum": 0},
+        "leaderStartCount": {"type": "integer", "minimum": 0},
+        "completedLeaderCount": {"type": "integer", "minimum": 0},
+        "followerJoinCount": {"type": "integer", "minimum": 0},
+        "followerTimeoutCount": {"type": "integer", "minimum": 0},
+        "leaderFailureCount": {"type": "integer", "minimum": 0},
+        "reusedResultCount": {"type": "integer", "minimum": 0},
+        "statePoisonedCount": {"type": "integer", "minimum": 0},
+        "followerTimeoutMs": {"type": "integer", "minimum": 0},
+        "lastKey": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/singleFlightLastKey"}]
+        },
+        "suggestedAction": {"type": "string", "minLength": 1}
+      }
+    },
+    "singleFlightLastKey": {
+      "type": "object",
+      "required": ["keyHash", "workspaceGeneration", "indexGeneration", "graphGeneration"],
+      "additionalProperties": false,
+      "properties": {
+        "keyHash": {"type": "string", "minLength": 8},
+        "workspaceGeneration": {"type": "integer", "minimum": 0},
+        "indexGeneration": {"type": ["integer", "null"], "minimum": 0},
+        "graphGeneration": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
     "jsonValue": {
       "oneOf": [
         {"type": "null"},

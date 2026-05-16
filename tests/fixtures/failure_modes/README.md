@@ -210,6 +210,9 @@ in the same commit, keeping the catalog complete by construction.
 | `rch_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
 | `rch_worker_topology_blocked` | swarm brief | warning | bd-1zb7k.13.4 (C4) |
 | `agent_status_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
+| `singleflight_follower_timeout` | graph feature-enrichment | medium | bd-gni47.3 (SF) |
+| `singleflight_leader_failed` | graph feature-enrichment | medium | bd-gni47.3 (SF) |
+| `singleflight_state_poisoned` | graph feature-enrichment | high | bd-gni47.3 (SF) |
 | `swarm_scale_budget_exceeded` | swarm-scale benchmark | warning | bd-1zb7k.8 (S7) |
 | `swarm_scale_nondeterminism` | swarm-scale benchmark | high | bd-1zb7k.8 (S7) |
 | `write_owner_busy` | write owner | medium | bd-17c65.10.6 (J6) |

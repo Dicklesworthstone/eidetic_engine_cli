@@ -12,6 +12,7 @@ use ee::core::procedure::{
     ProcedurePromotionCurationPlan, ProcedurePromotionEffect,
     ProcedurePromotionVerificationSummary,
 };
+use ee::core::singleflight::singleflight_posture_report;
 use ee::core::why::{
     MemoryLinkSummary, PackSelectionExplanation, RationaleTraceSummary, RetrievalExplanation,
     SelectionExplanation, StorageExplanation, WhyDegradation, WhyReport,
@@ -186,6 +187,7 @@ fn doctor_fixture() -> DoctorReport {
         version: env!("CARGO_PKG_VERSION"),
         overall_healthy: false,
         posture: Posture::DegradedRecoverable,
+        singleflight_posture: singleflight_posture_report(),
         checks: vec![
             CheckResult {
                 name: "database",

@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "singleflight_follower_timeout",
+  "introduced_by": {
+    "bead": "bd-gni47.3",
+    "epic_letter": "SF"
+  },
+  "surfaces": [
+    "graph feature-enrichment"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A graph feature-enrichment request joins an in-process single-flight group as a follower but the leader does not complete before the follower wait budget expires.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# arrange two duplicate graph feature-enrichment requests with the same redaction-safe single-flight key",
+      "# hold the leader past GRAPH_FEATURE_ENRICHMENT_FOLLOWER_TIMEOUT"
+    ],
+    "invocation": "ee graph feature-enrichment --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "singleflight_follower_timeout",
+    "severity": "medium",
+    "message_contains": [
+      "Single-flight coalescing failed",
+      "follower timed out waiting for key"
+    ],
+    "repair_contains": "longer wait budget",
+    "repair_string": "Retry the read with a longer wait budget."
+  }
+}

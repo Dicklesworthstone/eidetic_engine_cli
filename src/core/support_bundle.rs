@@ -38,6 +38,7 @@ use crate::policy::redact_secret_like_content;
 use crate::search::{SearchCacheGovernor, SearchHotset, SearchHotsetEntry, prewarm_search_hotset};
 
 use super::doctor::DoctorReport;
+use super::singleflight::singleflight_posture_report;
 use super::status::{
     STATUS_BENCH_GROUP_NAME, STATUS_BENCH_HARD_CEILING_MS, STATUS_BENCH_QUICK_ITERATIONS,
     STATUS_BENCH_SCALES, StatusReport,
@@ -65,6 +66,7 @@ const MAX_PERFORMANCE_EXPLAIN_SAMPLES: usize = 16;
 const PACK_REPLAY_SUMMARY_FILE: &str = "pack_replay_summary.json";
 const MAX_PACK_REPLAY_SUMMARY_RECORDS: usize = 16;
 const SWARM_BRIEF_SUMMARY_FILE: &str = "swarm_brief_summary.json";
+const SINGLEFLIGHT_POSTURE_FILE: &str = "singleflight_posture.json";
 const TRIAGE_SUMMARY_FILE: &str = "scale_triage_summary.json";
 const PERF_COMPARE_BUNDLE_SECTIONS: [(&str, &str); 8] = [
     ("profile_evidence", PROFILE_EVIDENCE_FILE),
@@ -225,6 +227,7 @@ struct CollectedDiagnostics {
     performance_explain_samples_json: String,
     pack_replay_summary_json: String,
     swarm_brief_summary_json: String,
+    singleflight_posture_json: String,
     triage_summary_json: String,
 }
 
@@ -316,6 +319,10 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         (
             SWARM_BRIEF_SUMMARY_FILE,
             &diagnostics.swarm_brief_summary_json,
+        ),
+        (
+            SINGLEFLIGHT_POSTURE_FILE,
+            &diagnostics.singleflight_posture_json,
         ),
         (TRIAGE_SUMMARY_FILE, &diagnostics.triage_summary_json),
     ];
@@ -748,6 +755,7 @@ fn collect_diagnostics(
     let performance_explain_samples_json = performance_explain_samples_json(workspace);
     let pack_replay_summary_json = pack_replay_summary_json(workspace);
     let swarm_brief_summary_json = swarm_brief_summary_json(workspace);
+    let singleflight_posture_json = singleflight_posture_json();
     let triage_summary_json = triage_summary_json(&status, &swarm_reports);
 
     Ok(CollectedDiagnostics {
@@ -764,6 +772,7 @@ fn collect_diagnostics(
         performance_explain_samples_json,
         pack_replay_summary_json,
         swarm_brief_summary_json,
+        singleflight_posture_json,
         triage_summary_json,
     })
 }
@@ -1354,6 +1363,19 @@ fn swarm_brief_summary_json(workspace: &Path) -> String {
     stable_json(&super::swarm_brief::collect_swarm_brief_summary(workspace))
 }
 
+fn singleflight_posture_json() -> String {
+    serde_json::to_value(singleflight_posture_report()).map_or_else(
+        |error| {
+            json!({
+                "schema": "ee.support_bundle.serialization_error.v1",
+                "message": error.to_string(),
+            })
+            .to_string()
+        },
+        |value| stable_json(&value),
+    )
+}
+
 fn collect_pack_replay_summary(workspace: &Path) -> Value {
     let database_path = workspace.join(".ee").join("ee.db");
     let mut database = json!({
@@ -1853,6 +1875,7 @@ fn planned_files() -> Vec<String> {
         PERFORMANCE_EXPLAIN_SAMPLES_FILE.to_owned(),
         PACK_REPLAY_SUMMARY_FILE.to_owned(),
         SWARM_BRIEF_SUMMARY_FILE.to_owned(),
+        SINGLEFLIGHT_POSTURE_FILE.to_owned(),
         TRIAGE_SUMMARY_FILE.to_owned(),
         MANIFEST_FILE.to_owned(),
     ]
@@ -2674,6 +2697,7 @@ mod tests {
             CACHE_REPORTS_FILE,
             WRITE_QUEUE_REPORT_FILE,
             PERFORMANCE_EXPLAIN_SAMPLES_FILE,
+            SINGLEFLIGHT_POSTURE_FILE,
             TRIAGE_SUMMARY_FILE,
         ] {
             assert!(
@@ -2696,6 +2720,25 @@ mod tests {
         assert!(
             !benchmark_summary.contains(&raw_secret),
             "benchmark summary must not leak secret-like report content"
+        );
+
+        let singleflight_text = fs::read_to_string(bundle_dir.join(SINGLEFLIGHT_POSTURE_FILE))
+            .map_err(|error| format!("failed to read single-flight posture: {error}"))?;
+        let singleflight: Value = serde_json::from_str(&singleflight_text)
+            .map_err(|error| format!("single-flight posture must parse: {error}"))?;
+        assert_eq!(
+            singleflight.pointer("/schema"),
+            Some(&json!("ee.singleflight.posture.v1"))
+        );
+        assert!(
+            singleflight.pointer("/surfaces").is_some(),
+            "single-flight posture must include surface summaries"
+        );
+        assert!(
+            !singleflight_text.contains("raw_query")
+                && !singleflight_text.contains("memory_body")
+                && !singleflight_text.contains(&raw_secret),
+            "single-flight posture must remain redaction-safe"
         );
 
         let clean_inspect = inspect_bundle(&InspectOptions {

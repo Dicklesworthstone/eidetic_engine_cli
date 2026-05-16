@@ -13,11 +13,12 @@ use crate::db::{
     CreateMemoryInput, DbConnection, ForeignKeyCheckResult, IntegrityCheckResult,
     ProvenanceSampleVerificationReport, ReferenceIntegrityReport,
 };
-use crate::models::TrustClass;
 use crate::models::error_codes::{self, ErrorCode};
+use crate::models::{SingleFlightPostureReport, TrustClass};
 
 use super::build_cli_runtime;
 use super::index::{IndexHealth, IndexStatusOptions, get_index_status};
+use super::singleflight::singleflight_posture_report;
 use super::status::{default_workspace_path, probe_cass_capability};
 
 pub const DEPENDENCY_DIAGNOSTICS_SCHEMA_V1: &str = "ee.diag.dependencies.v1";
@@ -198,6 +199,8 @@ pub struct DoctorReport {
     pub overall_healthy: bool,
     /// Three-state aggregate posture (E1). Authoritative going forward.
     pub posture: Posture,
+    /// Redaction-safe duplicate-work coalescing posture for agent operators.
+    pub singleflight_posture: SingleFlightPostureReport,
     pub checks: Vec<CheckResult>,
 }
 
@@ -216,6 +219,7 @@ impl DoctorReport {
 
     #[must_use]
     pub fn gather_with_workspace(workspace_path: Option<&Path>) -> Self {
+        let singleflight_posture = singleflight_posture_report();
         let checks = vec![
             check_runtime(),
             check_workspace(workspace_path),
@@ -236,6 +240,7 @@ impl DoctorReport {
             version: env!("CARGO_PKG_VERSION"),
             overall_healthy,
             posture,
+            singleflight_posture,
             checks,
         }
     }
@@ -1974,6 +1979,7 @@ mod tests {
             version: "0.1.0",
             overall_healthy: true,
             posture: Posture::Ok,
+            singleflight_posture: singleflight_posture_report(),
             checks: vec![
                 CheckResult::ok("test1", "All good"),
                 CheckResult::ok("test2", "Also good"),
@@ -1992,6 +1998,7 @@ mod tests {
             version: "0.1.0",
             overall_healthy: true,
             posture: Posture::Ok,
+            singleflight_posture: singleflight_posture_report(),
             checks: vec![],
         };
         let plan = report.to_fix_plan();
@@ -2025,6 +2032,7 @@ mod tests {
             version: "0.1.0",
             overall_healthy: false,
             posture: Posture::DegradedRecoverable,
+            singleflight_posture: singleflight_posture_report(),
             checks: vec![CheckResult::warning(
                 "cass",
                 "CASS import dry-run recommended.",
@@ -2599,6 +2607,7 @@ mod tests {
             version: "0.1.0",
             overall_healthy: true,
             posture: Posture::Ok,
+            singleflight_posture: singleflight_posture_report(),
             checks: vec![CheckResult::ok("runtime", "ok")],
         };
         assert_eq!(report.posture, Posture::Ok);

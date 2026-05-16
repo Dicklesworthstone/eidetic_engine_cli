@@ -12,13 +12,14 @@
     "fields": {"type": "string"},
     "data": {
       "type": "object",
-      "required": ["command", "version", "posture", "healthy", "checks"],
+      "required": ["command", "version", "posture", "healthy", "singleFlight", "checks"],
       "additionalProperties": false,
       "properties": {
         "command": {"type": "string", "const": "doctor"},
         "version": {"type": "string"},
         "posture": {"type": "string"},
         "healthy": {"type": "boolean"},
+        "singleFlight": {"$ref": "#/$defs/singleFlightPosture"},
         "checks": {
           "type": "array",
           "items": {
@@ -37,8 +38,97 @@
   },
   "field_presets": {
     "minimal": ["command", "version", "posture", "healthy"],
-    "summary": ["command", "version", "posture", "healthy"],
-    "standard": ["command", "version", "posture", "healthy", "checks"],
+    "summary": ["command", "version", "posture", "healthy", "singleFlight"],
+    "standard": ["command", "version", "posture", "healthy", "singleFlight", "checks"],
     "full": ["*"]
+  },
+  "$defs": {
+    "singleFlightStatus": {
+      "type": "string",
+      "enum": ["idle", "active", "observed_failures", "state_poisoned", "unconfigured"]
+    },
+    "singleFlightPosture": {
+      "type": "object",
+      "required": [
+        "schema",
+        "status",
+        "configuredSurfaceCount",
+        "activeLeaderCount",
+        "leaderStartCount",
+        "followerWaitCount",
+        "followerTimeoutCount",
+        "leaderFailureCount",
+        "reusedResultCount",
+        "surfaces"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.singleflight.posture.v1"},
+        "status": {"$ref": "#/$defs/singleFlightStatus"},
+        "configuredSurfaceCount": {"type": "integer", "minimum": 0},
+        "activeLeaderCount": {"type": "integer", "minimum": 0},
+        "leaderStartCount": {"type": "integer", "minimum": 0},
+        "followerWaitCount": {"type": "integer", "minimum": 0},
+        "followerTimeoutCount": {"type": "integer", "minimum": 0},
+        "leaderFailureCount": {"type": "integer", "minimum": 0},
+        "reusedResultCount": {"type": "integer", "minimum": 0},
+        "surfaces": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/singleFlightSurfacePosture"}
+        }
+      }
+    },
+    "singleFlightSurfacePosture": {
+      "type": "object",
+      "required": [
+        "surface",
+        "status",
+        "configured",
+        "activeLeaderCount",
+        "leaderStartCount",
+        "completedLeaderCount",
+        "followerJoinCount",
+        "followerTimeoutCount",
+        "leaderFailureCount",
+        "reusedResultCount",
+        "statePoisonedCount",
+        "followerTimeoutMs",
+        "lastKey",
+        "suggestedAction"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "surface": {
+          "type": "string",
+          "enum": ["context", "search", "graph_snapshot", "graph_feature_enrichment"]
+        },
+        "status": {"$ref": "#/$defs/singleFlightStatus"},
+        "configured": {"type": "boolean"},
+        "activeLeaderCount": {"type": "integer", "minimum": 0},
+        "leaderStartCount": {"type": "integer", "minimum": 0},
+        "completedLeaderCount": {"type": "integer", "minimum": 0},
+        "followerJoinCount": {"type": "integer", "minimum": 0},
+        "followerTimeoutCount": {"type": "integer", "minimum": 0},
+        "leaderFailureCount": {"type": "integer", "minimum": 0},
+        "reusedResultCount": {"type": "integer", "minimum": 0},
+        "statePoisonedCount": {"type": "integer", "minimum": 0},
+        "followerTimeoutMs": {"type": "integer", "minimum": 0},
+        "lastKey": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/singleFlightLastKey"}]
+        },
+        "suggestedAction": {"type": "string", "minLength": 1}
+      }
+    },
+    "singleFlightLastKey": {
+      "type": "object",
+      "required": ["keyHash", "workspaceGeneration", "indexGeneration", "graphGeneration"],
+      "additionalProperties": false,
+      "properties": {
+        "keyHash": {"type": "string", "minLength": 8},
+        "workspaceGeneration": {"type": "integer", "minimum": 0},
+        "indexGeneration": {"type": ["integer", "null"], "minimum": 0},
+        "graphGeneration": {"type": ["integer", "null"], "minimum": 0}
+      }
+    }
   }
 }

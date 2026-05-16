@@ -82,6 +82,14 @@ fn singleflight_posture_schema_is_documented_and_registered() -> TestResult {
         "/properties/schema/const",
         SINGLEFLIGHT_POSTURE_SCHEMA_V1,
     )?;
+    if schema
+        .pointer("/$defs/surfacePosture/required")
+        .and_then(Value::as_array)
+        .is_none_or(|required| !required.iter().any(|field| field == "lastKey"))
+    {
+        return Err("single-flight posture schema must require surface lastKey".to_owned());
+    }
+    ensure_json_bool(&schema, "/$defs/lastKey/additionalProperties", false)?;
 
     if !KNOWN_SCHEMAS.contains(&SINGLEFLIGHT_POSTURE_SCHEMA_V1) {
         return Err("KNOWN_SCHEMAS missing ee.singleflight.posture.v1".to_owned());

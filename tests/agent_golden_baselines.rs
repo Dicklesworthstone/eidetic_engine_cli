@@ -19,8 +19,8 @@ use ee::core::status::{
     DerivedAssetStatus, FeedbackHealthReport, FeedbackHealthStatus,
     GraphAlgorithmResultCacheReport, GraphComputeReport, GraphComputeStatus,
     GraphSnapshotArtifactReport, GraphSnapshotMemoryGraphReport, MemoryHealthReport,
-    MemoryHealthStatus, RuntimeReport, StatusReport, WorkspaceDiagnosticReport,
-    WorkspaceStatusReport,
+    MemoryHealthStatus, ReadPoolStatusReport, RuntimeReport, StatusReport,
+    WorkspaceDiagnosticReport, WorkspaceStatusReport,
 };
 use ee::models::posture::{
     OperationPostureReport, SubsystemPostureReport, SubsystemPostureStatus, WorkspacePostureReport,
@@ -1152,8 +1152,19 @@ fn fixture_singleflight_posture() -> SingleFlightPostureReport {
         true,
         0,
         SingleFlightSurfaceCounters::default(),
-        250,
+        30_000,
+        None,
     )])
+}
+
+fn fixture_capabilities(storage: CapabilityStatus, search: CapabilityStatus) -> CapabilityReport {
+    let mut capabilities = CapabilityReport::gather();
+    capabilities.runtime = CapabilityStatus::Ready;
+    capabilities.storage = storage;
+    capabilities.search = search;
+    capabilities.output_toon = CapabilityStatus::Ready;
+    capabilities.agent_detection = CapabilityStatus::Ready;
+    capabilities
 }
 
 fn status_missing_db_report() -> StatusReport {
@@ -1166,14 +1177,9 @@ fn status_missing_db_report() -> StatusReport {
             SubsystemPostureStatus::Blocked,
             SubsystemPostureStatus::Blocked,
         ),
-        capabilities: CapabilityReport {
-            runtime: CapabilityStatus::Ready,
-            storage: CapabilityStatus::Pending,
-            search: CapabilityStatus::Pending,
-            output_toon: CapabilityStatus::Ready,
-            agent_detection: CapabilityStatus::Ready,
-        },
+        capabilities: fixture_capabilities(CapabilityStatus::Pending, CapabilityStatus::Pending),
         runtime: fixture_runtime_report(),
+        read_pool: ReadPoolStatusReport::default(),
         memory_health: unavailable_memory_health(),
         curation_health: CurationHealthReport::unavailable(),
         feedback_health: unavailable_feedback_health(),
@@ -1229,14 +1235,9 @@ fn status_pending_migration_report() -> StatusReport {
             SubsystemPostureStatus::Blocked,
             SubsystemPostureStatus::DegradedRequired,
         ),
-        capabilities: CapabilityReport {
-            runtime: CapabilityStatus::Ready,
-            storage: CapabilityStatus::Degraded,
-            search: CapabilityStatus::Degraded,
-            output_toon: CapabilityStatus::Ready,
-            agent_detection: CapabilityStatus::Ready,
-        },
+        capabilities: fixture_capabilities(CapabilityStatus::Degraded, CapabilityStatus::Degraded),
         runtime: fixture_runtime_report(),
+        read_pool: ReadPoolStatusReport::default(),
         memory_health: unavailable_memory_health(),
         curation_health: CurationHealthReport::unavailable(),
         feedback_health: unavailable_feedback_health(),
@@ -1292,14 +1293,9 @@ fn status_stale_index_lexical_only_report() -> StatusReport {
             SubsystemPostureStatus::Ok,
             SubsystemPostureStatus::DegradedRecoverable,
         ),
-        capabilities: CapabilityReport {
-            runtime: CapabilityStatus::Ready,
-            storage: CapabilityStatus::Ready,
-            search: CapabilityStatus::Degraded,
-            output_toon: CapabilityStatus::Ready,
-            agent_detection: CapabilityStatus::Ready,
-        },
+        capabilities: fixture_capabilities(CapabilityStatus::Ready, CapabilityStatus::Degraded),
         runtime: fixture_runtime_report(),
+        read_pool: ReadPoolStatusReport::default(),
         memory_health: healthy_memory_health(),
         curation_health: CurationHealthReport::not_inspected(),
         feedback_health: healthy_feedback_health(),
@@ -1341,14 +1337,12 @@ fn status_search_unimplemented_report() -> StatusReport {
             SubsystemPostureStatus::Ok,
             SubsystemPostureStatus::DegradedRecoverable,
         ),
-        capabilities: CapabilityReport {
-            runtime: CapabilityStatus::Ready,
-            storage: CapabilityStatus::Ready,
-            search: CapabilityStatus::Unimplemented,
-            output_toon: CapabilityStatus::Ready,
-            agent_detection: CapabilityStatus::Ready,
-        },
+        capabilities: fixture_capabilities(
+            CapabilityStatus::Ready,
+            CapabilityStatus::Unimplemented,
+        ),
         runtime: fixture_runtime_report(),
+        read_pool: ReadPoolStatusReport::default(),
         memory_health: healthy_memory_health(),
         curation_health: CurationHealthReport::not_inspected(),
         feedback_health: healthy_feedback_health(),
@@ -1443,6 +1437,7 @@ fn doctor_missing_db_report() -> DoctorReport {
         version: env!("CARGO_PKG_VERSION"),
         overall_healthy: false,
         posture: Posture::DegradedRecoverable,
+        singleflight_posture: fixture_singleflight_posture(),
         checks: vec![
             CheckResult::ok("runtime", "Asupersync runtime initialized successfully."),
             CheckResult::warning(
@@ -1474,6 +1469,7 @@ fn doctor_pending_migration_report() -> DoctorReport {
         version: env!("CARGO_PKG_VERSION"),
         overall_healthy: false,
         posture: Posture::Blocked,
+        singleflight_posture: fixture_singleflight_posture(),
         checks: vec![
             CheckResult::ok("runtime", "Asupersync runtime initialized successfully."),
             CheckResult::ok("workspace", "Workspace inspected at /workspace."),

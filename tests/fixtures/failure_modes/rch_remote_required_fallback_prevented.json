@@ -11,9 +11,10 @@
   "severity": "warning",
   "repair_present": true,
   "trigger": {
-    "description": "Swarm brief collects RCH posture while remote-only execution is required and RCH refuses local fallback.",
+    "description": "Swarm brief collects RCH local capability while remote-only Cargo is required, but the current Codex shell has neither direct `rch exec` nor an installed Codex RCH hook.",
     "setup_commands": [
       "export RCH_REQUIRE_REMOTE=1",
+      "# arrange RCH help/status captures where `exec` is unavailable and `agents status codex-cli --json` reports CodexCli as Not installed",
       "# run swarm brief --include-rch while no acceptable remote execution path is available"
     ],
     "invocation": "ee swarm brief --include-rch --workspace . --json"
@@ -22,10 +23,11 @@
     "code": "rch_remote_required_fallback_prevented",
     "severity": "warning",
     "message_contains": [
-      "RCH_REQUIRE_REMOTE",
-      "no valid remote evidence"
+      "Remote-only Cargo is required",
+      "neither",
+      "installed Codex RCH hook"
     ],
-    "repair_contains": "Fix remote worker availability",
-    "repair_string": "Fix remote worker availability or unset the remote-required guard only with explicit approval."
+    "repair_contains": "harness with an installed RCH hook",
+    "repair_string": "Use a harness with an installed RCH hook, upgrade RCH to expose `rch exec`, or record static-only evidence."
   }
 }

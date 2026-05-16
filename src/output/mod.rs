@@ -54,6 +54,7 @@ use crate::steward::{
 
 pub mod jsonl_export;
 pub(crate) mod markdown;
+pub mod streaming;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Renderer {
@@ -2976,6 +2977,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
             c.field_str("runtime", report.capabilities.runtime.as_str());
             c.field_str("storage", report.capabilities.storage.as_str());
             c.field_str("search", report.capabilities.search.as_str());
+            c.field_str("mesh", report.capabilities.mesh.as_str());
             c.field_object("output", |output| {
                 output.field_str("toon", report.capabilities.output_toon.as_str());
             });
@@ -2990,6 +2992,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
             r.field_raw("workerThreads", &report.runtime.worker_threads.to_string());
             r.field_str("asyncBoundary", report.runtime.async_boundary);
         });
+        render_read_pool_status_json(d, &report.read_pool);
         render_memory_health_json(d, &report.memory_health);
         render_curation_health_json(d, &report.curation_health);
         render_feedback_health_json(d, &report.feedback_health);
@@ -3094,6 +3097,22 @@ fn render_singleflight_posture_json(
                 "followerTimeoutMs",
                 &surface.follower_timeout_ms.to_string(),
             );
+            match &surface.last_key {
+                Some(last_key) => {
+                    obj.field_object("lastKey", |last| {
+                        last.field_str("keyHash", &last_key.key_hash);
+                        last.field_raw(
+                            "workspaceGeneration",
+                            &last_key.workspace_generation.to_string(),
+                        );
+                        field_optional_u64(last, "indexGeneration", last_key.index_generation);
+                        field_optional_u64(last, "graphGeneration", last_key.graph_generation);
+                    });
+                }
+                None => {
+                    obj.field_raw("lastKey", "null");
+                }
+            }
             obj.field_str("suggestedAction", &surface.suggested_action);
         });
     });
@@ -3183,6 +3202,18 @@ fn render_workspace_status_json(
                 );
             }
         });
+    });
+}
+
+fn render_read_pool_status_json(
+    parent: &mut JsonBuilder,
+    report: &crate::core::status::ReadPoolStatusReport,
+) {
+    parent.field_object("read_pool", |pool| {
+        pool.field_raw("active", &report.active.to_string());
+        pool.field_raw("idle", &report.idle.to_string());
+        pool.field_raw("max_seen", &report.max_seen.to_string());
+        pool.field_raw("drops", &report.drops.to_string());
     });
 }
 
@@ -3470,6 +3501,7 @@ pub fn render_status_json_with_meta(
             c.field_str("runtime", report.capabilities.runtime.as_str());
             c.field_str("storage", report.capabilities.storage.as_str());
             c.field_str("search", report.capabilities.search.as_str());
+            c.field_str("mesh", report.capabilities.mesh.as_str());
             c.field_str(
                 "agentDetection",
                 report.capabilities.agent_detection.as_str(),
@@ -3481,6 +3513,7 @@ pub fn render_status_json_with_meta(
             r.field_raw("workerThreads", &report.runtime.worker_threads.to_string());
             r.field_str("asyncBoundary", report.runtime.async_boundary);
         });
+        render_read_pool_status_json(d, &report.read_pool);
         render_memory_health_json(d, &report.memory_health);
         render_graph_compute_json(d, &report.graph_compute);
         render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
@@ -3526,10 +3559,11 @@ pub fn render_status_human(report: &StatusReport) -> String {
             )
         });
     format!(
-        "ee status\n\n{}storage: {}\nsearch: {}\nagent detection: {}\nruntime: {} ({} {})\n\nNext:\n  ee status --json\n",
+        "ee status\n\n{}storage: {}\nsearch: {}\nmesh: {}\nagent detection: {}\nruntime: {} ({} {})\n\nNext:\n  ee status --json\n",
         workspace_line,
         report.capabilities.storage.as_str(),
         report.capabilities.search.as_str(),
+        report.capabilities.mesh.as_str(),
         report.capabilities.agent_detection.as_str(),
         report.capabilities.runtime.as_str(),
         report.runtime.engine,
@@ -3562,6 +3596,7 @@ pub fn render_doctor_json(report: &DoctorReport) -> String {
         // kept alongside for the v0.1 → v0.2 transition window.
         d.field_str("posture", report.posture.as_str());
         d.field_bool("healthy", report.overall_healthy);
+        render_singleflight_posture_json(d, &report.singleflight_posture);
         d.field_array_of_objects("checks", &report.checks, |obj, check| {
             obj.field_str("name", check.name);
             obj.field_str("severity", check.severity.as_str());
@@ -3593,6 +3628,14 @@ pub fn render_doctor_human(report: &DoctorReport) -> String {
             output.push_str(&format!("  repair: {}\n", repair));
         }
     }
+
+    output.push_str(&format!(
+        "single-flight: {} (active leaders: {}, follower waits: {}, timeouts: {})\n",
+        report.singleflight_posture.status,
+        report.singleflight_posture.active_leader_count,
+        report.singleflight_posture.follower_wait_count,
+        report.singleflight_posture.follower_timeout_count
+    ));
 
     if report.overall_healthy {
         output.push_str("\nAll checks passed.\n");
@@ -5692,6 +5735,13 @@ fn field_optional_str(builder: &mut JsonBuilder, key: &str, value: Option<&str>)
 fn field_optional_bool(builder: &mut JsonBuilder, key: &str, value: Option<bool>) {
     match value {
         Some(value) => builder.field_bool(key, value),
+        None => builder.field_raw(key, "null"),
+    };
+}
+
+fn field_optional_u64(builder: &mut JsonBuilder, key: &str, value: Option<u64>) {
+    match value {
+        Some(value) => builder.field_raw(key, &value.to_string()),
         None => builder.field_raw(key, "null"),
     };
 }
@@ -8530,6 +8580,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
                 c.field_str("runtime", report.capabilities.runtime.as_str());
                 c.field_str("storage", report.capabilities.storage.as_str());
                 c.field_str("search", report.capabilities.search.as_str());
+                c.field_str("mesh", report.capabilities.mesh.as_str());
                 c.field_object("output", |output| {
                     output.field_str("toon", report.capabilities.output_toon.as_str());
                 });
@@ -8547,6 +8598,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
                 r.field_raw("workerThreads", &report.runtime.worker_threads.to_string());
                 r.field_str("asyncBoundary", report.runtime.async_boundary);
             });
+            render_read_pool_status_json(d, &report.read_pool);
             render_memory_health_json(d, &report.memory_health);
             render_curation_health_json(d, &report.curation_health);
             render_feedback_health_json(d, &report.feedback_health);
@@ -8668,6 +8720,10 @@ pub fn render_doctor_json_filtered(report: &DoctorReport, profile: FieldProfile)
         // Bead bd-17c65.5.1 (E1) — three-state posture.
         d.field_str("posture", report.posture.as_str());
         d.field_bool("healthy", report.overall_healthy);
+
+        if profile.include_summary_metrics() {
+            render_singleflight_posture_json(d, &report.singleflight_posture);
+        }
 
         if profile.include_arrays() {
             d.field_array_of_objects("checks", &report.checks, |obj, check| {
@@ -12028,15 +12084,16 @@ mod tests {
         ShadowRunReport, error_response_json, escape_json_string, help_text, human_status,
         render_agent_docs_json, render_agent_docs_toon, render_context_response_json,
         render_context_response_markdown, render_context_response_toon, render_doctor_json,
-        render_doctor_toon, render_handoff_create_json, render_handoff_create_toon,
-        render_handoff_inspect_json, render_handoff_inspect_toon, render_handoff_preview_json,
-        render_handoff_preview_toon, render_handoff_resume_json, render_handoff_resume_toon,
-        render_health_json, render_health_toon, render_integrity_diagnostics_json,
-        render_learn_experiment_proposal_human, render_learn_experiment_proposal_json,
-        render_learn_experiment_proposal_toon, render_memory_history_json,
-        render_memory_history_toon, render_schema_export_json, render_shadow_run_human,
-        render_shadow_run_json, render_shadow_run_toon, render_status_json,
-        render_status_json_filtered, render_status_toon, render_version_json, status_response_json,
+        render_doctor_json_filtered, render_doctor_toon, render_handoff_create_json,
+        render_handoff_create_toon, render_handoff_inspect_json, render_handoff_inspect_toon,
+        render_handoff_preview_json, render_handoff_preview_toon, render_handoff_resume_json,
+        render_handoff_resume_toon, render_health_json, render_health_toon,
+        render_integrity_diagnostics_json, render_learn_experiment_proposal_human,
+        render_learn_experiment_proposal_json, render_learn_experiment_proposal_toon,
+        render_memory_history_json, render_memory_history_toon, render_schema_export_json,
+        render_shadow_run_human, render_shadow_run_json, render_shadow_run_toon,
+        render_status_json, render_status_json_filtered, render_status_toon, render_version_json,
+        status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::doctor::{
@@ -14006,6 +14063,30 @@ mod tests {
     }
 
     #[test]
+    fn render_doctor_json_exposes_singleflight_posture() -> TestResult {
+        let report = DoctorReport::gather();
+        let json = render_doctor_json_filtered(&report, FieldProfile::Standard);
+        let value = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("doctor JSON should parse: {error}"))?;
+        let singleflight = value
+            .pointer("/data/singleFlight")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| "doctor JSON has data.singleFlight object".to_string())?;
+
+        ensure_equal(
+            &singleflight
+                .get("schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.singleflight.posture.v1"),
+            "singleFlight schema",
+        )?;
+        ensure(
+            singleflight.contains_key("surfaces"),
+            "singleFlight includes surface summaries",
+        )
+    }
+
+    #[test]
     fn json_toon_parity_agent_docs_decodes_to_same_json() -> TestResult {
         let report = AgentDocsReport::gather(None);
         let json = render_agent_docs_json(&report);
@@ -14510,6 +14591,7 @@ mod tests {
 
         ensure_contains(&json, "\"fields\":\"summary\"", "fields indicator")?;
         ensure_contains(&json, "\"capabilities\":", "has capabilities")?;
+        ensure_contains(&json, "\"mesh\":\"pending\"", "mesh capability default")?;
         // Summary should NOT have runtime or degraded arrays
         let value = serde_json::from_str::<serde_json::Value>(&json)
             .map_err(|error| format!("status summary JSON parses: {error}"))?;
@@ -14533,6 +14615,7 @@ mod tests {
 
         ensure_contains(&json, "\"fields\":\"standard\"", "fields indicator")?;
         ensure_contains(&json, "\"capabilities\":", "has capabilities")?;
+        ensure_contains(&json, "\"mesh\":\"pending\"", "mesh capability default")?;
         ensure_contains(&json, "\"runtime\":", "has runtime")?;
         ensure_contains(&json, "\"singleFlight\":", "has singleFlight")?;
         ensure_contains(
@@ -14565,6 +14648,7 @@ mod tests {
 
         ensure_contains(&json, "\"fields\":\"full\"", "fields indicator")?;
         ensure_contains(&json, "\"capabilities\":", "has capabilities")?;
+        ensure_contains(&json, "\"mesh\":\"pending\"", "mesh capability default")?;
         ensure_contains(&json, "\"runtime\":", "has runtime")?;
         ensure_contains(&json, "\"degraded\":", "has degraded")?;
         ensure_contains(&json, "\"repair\":", "has repair in degraded")

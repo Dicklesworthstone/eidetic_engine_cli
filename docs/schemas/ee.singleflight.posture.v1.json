@@ -82,6 +82,12 @@
           "reusedResultCount": 5,
           "statePoisonedCount": 0,
           "followerTimeoutMs": 250,
+          "lastKey": {
+            "keyHash": "b9184d4a3d72",
+            "workspaceGeneration": 12,
+            "indexGeneration": 18,
+            "graphGeneration": 7
+          },
           "suggestedAction": "no action; single-flight is available for duplicate read-heavy work"
         }
       ]
@@ -107,6 +113,7 @@
         "reusedResultCount",
         "statePoisonedCount",
         "followerTimeoutMs",
+        "lastKey",
         "suggestedAction"
       ],
       "additionalProperties": false,
@@ -126,7 +133,30 @@
         "reusedResultCount": { "type": "integer", "minimum": 0 },
         "statePoisonedCount": { "type": "integer", "minimum": 0 },
         "followerTimeoutMs": { "type": "integer", "minimum": 0 },
+        "lastKey": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/lastKey" }]
+        },
         "suggestedAction": { "type": "string", "minLength": 1 }
+      }
+    },
+    "lastKey": {
+      "type": "object",
+      "required": [
+        "keyHash",
+        "workspaceGeneration",
+        "indexGeneration",
+        "graphGeneration"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "keyHash": {
+          "type": "string",
+          "minLength": 8,
+          "description": "Redaction-safe canonical single-flight key hash."
+        },
+        "workspaceGeneration": { "type": "integer", "minimum": 0 },
+        "indexGeneration": { "type": ["integer", "null"], "minimum": 0 },
+        "graphGeneration": { "type": ["integer", "null"], "minimum": 0 }
       }
     }
   }

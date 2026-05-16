@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "singleflight_leader_failed",
+  "introduced_by": {
+    "bead": "bd-gni47.3",
+    "epic_letter": "SF"
+  },
+  "surfaces": [
+    "graph feature-enrichment"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A graph feature-enrichment single-flight leader returns an error; the leader and any duplicate followers observe the same failure for the redaction-safe key hash.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# arrange graph feature-enrichment inputs that share a single-flight key",
+      "# force the leader operation to fail before publishing a reusable result"
+    ],
+    "invocation": "ee graph feature-enrichment --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "singleflight_leader_failed",
+    "severity": "medium",
+    "message_contains": [
+      "Single-flight coalescing failed",
+      "observed leader failure for key"
+    ],
+    "repair_contains": "leader operation error",
+    "repair_string": "Inspect the leader operation error; followers observed the same failure."
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "singleflight_state_poisoned",
+  "introduced_by": {
+    "bead": "bd-gni47.3",
+    "epic_letter": "SF"
+  },
+  "surfaces": [
+    "graph feature-enrichment"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "The in-process single-flight state mutex is poisoned while graph feature-enrichment is coalescing duplicate read-heavy work.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# panic a leader while holding the single-flight group mutex in a harness-only failure path"
+    ],
+    "invocation": "ee graph feature-enrichment --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "singleflight_state_poisoned",
+    "severity": "high",
+    "message_contains": [
+      "Single-flight coalescing failed",
+      "single-flight state was poisoned for key"
+    ],
+    "repair_contains": "Restart the process",
+    "repair_string": "Restart the process to clear poisoned in-memory single-flight state."
+  }
+}

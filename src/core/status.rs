@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::config::{
-    EnvVar, WorkspaceDiagnostic, WorkspaceDiagnosticSeverity, WorkspaceResolution,
-    WorkspaceResolutionMode, WorkspaceResolutionRequest, WorkspaceResolutionSource,
-    diagnose_workspace_resolution, read_env_var, resolve_workspace,
+    EnvVar, GRAPH_FEATURE_SKYLINE_ENABLED_KEY, WorkspaceDiagnostic, WorkspaceDiagnosticSeverity,
+    WorkspaceResolution, WorkspaceResolutionMode, WorkspaceResolutionRequest,
+    WorkspaceResolutionSource, diagnose_workspace_resolution, read_env_var, resolve_workspace,
 };
 #[cfg(feature = "graph")]
 use crate::db::StoredMemoryLink;
@@ -640,6 +640,7 @@ pub struct CapabilityReport {
     pub runtime: CapabilityStatus,
     pub storage: CapabilityStatus,
     pub search: CapabilityStatus,
+    pub mesh: CapabilityStatus,
     pub output_toon: CapabilityStatus,
     pub agent_detection: CapabilityStatus,
 }
@@ -662,6 +663,7 @@ impl CapabilityReport {
             runtime: probe_runtime_capability(),
             storage: probe_storage_capability(workspace_path),
             search: probe_search_capability(workspace_path),
+            mesh: probe_mesh_capability(),
             output_toon: probe_toon_output_capability(),
             agent_detection: CapabilityStatus::Ready,
         }
@@ -781,6 +783,18 @@ pub fn probe_graph_capability() -> CapabilityStatus {
 }
 
 #[must_use]
+pub fn probe_mesh_capability() -> CapabilityStatus {
+    if diag_forced_capability_gap("mesh") {
+        return CapabilityStatus::Unimplemented;
+    }
+
+    match read_env_var(EnvVar::MeshEnabled).as_deref() {
+        Some("true") => CapabilityStatus::Unimplemented,
+        _ => CapabilityStatus::Pending,
+    }
+}
+
+#[must_use]
 pub fn diag_forced_capability_gap(capability: &str) -> bool {
     let Some(raw) = read_env_var(EnvVar::DiagForceCapabilityGap) else {
         return false;
@@ -810,6 +824,27 @@ impl RuntimeReport {
             profile: status.profile.as_str(),
             worker_threads: status.worker_threads(),
             async_boundary: status.async_boundary,
+        }
+    }
+}
+
+/// Process-local read-pool counters exposed by `ee status --json`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ReadPoolStatusReport {
+    pub active: usize,
+    pub idle: usize,
+    pub max_seen: usize,
+    pub drops: u64,
+}
+
+impl ReadPoolStatusReport {
+    #[must_use]
+    pub const fn gather() -> Self {
+        Self {
+            active: 0,
+            idle: 0,
+            max_seen: 0,
+            drops: 0,
         }
     }
 }
@@ -910,6 +945,7 @@ pub struct StatusReport {
     pub posture: WorkspacePostureReport,
     pub capabilities: CapabilityReport,
     pub runtime: RuntimeReport,
+    pub read_pool: ReadPoolStatusReport,
     pub memory_health: MemoryHealthReport,
     pub curation_health: CurationHealthReport,
     pub feedback_health: FeedbackHealthReport,
@@ -946,14 +982,20 @@ impl StatusReport {
         let capabilities =
             CapabilityReport::gather_with_workspace(options.workspace_path.as_deref());
         let runtime = RuntimeReport::gather();
+        let read_pool = ReadPoolStatusReport::gather();
         let (memory_health, memory_health_degradations) =
             gather_memory_health(options.workspace_path.as_deref());
         let workspace = gather_workspace_status(options.workspace_path.as_deref());
         let graph_compute = gather_graph_compute(options.workspace_path.as_deref());
         let graph_snapshot_artifact =
             gather_graph_snapshot_artifact(options.workspace_path.as_deref());
-        let skyline_community_count =
-            gather_status_skyline_community_count(options.workspace_path.as_deref());
+        let skyline_feature_enabled =
+            status_skyline_feature_enabled(options.workspace_path.as_deref());
+        let skyline_community_count = if skyline_feature_enabled == Some(true) {
+            gather_status_skyline_community_count(options.workspace_path.as_deref())
+        } else {
+            None
+        };
         let derived_assets =
             gather_derived_assets(options.workspace_path.as_deref(), &graph_snapshot_artifact);
         let (curation_health, curation_degradations) =
@@ -977,6 +1019,10 @@ impl StatusReport {
             options.workspace_path.as_deref(),
         );
         push_graph_capability_degradation(&mut degradations, graph_compute.status);
+        push_status_skyline_feature_disabled_degradation(
+            &mut degradations,
+            skyline_feature_enabled,
+        );
         push_skyline_degenerate_communities_degradation(&mut degradations, skyline_community_count);
         push_toon_output_capability_degradation(&mut degradations, capabilities.output_toon);
 
@@ -1002,6 +1048,7 @@ impl StatusReport {
             posture,
             capabilities,
             runtime,
+            read_pool,
             memory_health,
             curation_health,
             feedback_health,
@@ -1747,6 +1794,21 @@ fn push_skyline_degenerate_communities_degradation(
     });
 }
 
+fn push_status_skyline_feature_disabled_degradation(
+    degradations: &mut Vec<DegradationReport>,
+    enabled: Option<bool>,
+) {
+    if enabled != Some(false) {
+        return;
+    }
+    degradations.push(DegradationReport {
+        code: "graph_feature_disabled",
+        severity: "medium",
+        message: "Knowledge skyline status is disabled by graph.feature.skyline.enabled.",
+        repair: "ee config set graph.feature.skyline.enabled true",
+    });
+}
+
 fn push_toon_output_capability_degradation(
     degradations: &mut Vec<DegradationReport>,
     status: CapabilityStatus,
@@ -1789,6 +1851,17 @@ fn gather_status_skyline_community_count(workspace_path: Option<&Path>) -> Optio
         let _ = workspace_path;
         None
     }
+}
+
+fn status_skyline_feature_enabled(workspace_path: Option<&Path>) -> Option<bool> {
+    let workspace_root = workspace_path?;
+    let options = crate::core::config_surface::ConfigSurfaceOptions {
+        workspace_root: workspace_root.to_path_buf(),
+        config_path: None,
+    };
+    crate::core::config_surface::get_config(&options, GRAPH_FEATURE_SKYLINE_ENABLED_KEY)
+        .ok()
+        .map(|report| report.value == "true")
 }
 
 #[cfg(feature = "graph")]
@@ -3172,6 +3245,11 @@ mod tests {
             "search not inspected without workspace",
         )?;
         ensure(
+            report.capabilities.mesh,
+            CapabilityStatus::Pending,
+            "mesh should default to disabled/pending",
+        )?;
+        ensure(
             report.capabilities.agent_detection,
             CapabilityStatus::Ready,
             "agent detection should be ready",
@@ -3399,6 +3477,44 @@ mod tests {
             sufficient.is_empty(),
             true,
             "three communities is sufficient",
+        )
+    }
+
+    #[test]
+    fn status_skyline_respects_runtime_feature_flag() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let disabled_report = StatusReport::gather_for_workspace(temp.path());
+        let disabled = disabled_report
+            .degradations
+            .iter()
+            .find(|degradation| {
+                degradation.code == "graph_feature_disabled"
+                    && degradation.message.contains("Knowledge skyline status")
+            })
+            .ok_or_else(|| "status skyline should emit disabled degradation".to_string())?;
+        ensure(disabled.severity, "medium", "disabled skyline severity")?;
+        ensure(
+            disabled.repair,
+            "ee config set graph.feature.skyline.enabled true",
+            "disabled skyline repair",
+        )?;
+
+        let config_dir = temp.path().join(".ee");
+        std::fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[graph.feature.skyline]\nenabled = true\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let enabled_report = StatusReport::gather_for_workspace(temp.path());
+        ensure(
+            enabled_report.degradations.iter().all(|degradation| {
+                degradation.code != "graph_feature_disabled"
+                    || !degradation.message.contains("Knowledge skyline status")
+            }),
+            true,
+            "enabled skyline should not emit disabled degradation",
         )
     }
 
