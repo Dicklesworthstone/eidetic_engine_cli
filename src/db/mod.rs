@@ -4002,6 +4002,26 @@ CREATE INDEX idx_agent_context_profiles_last_seen
     "blake3:v050_agent_context_profiles_2026_05_16",
 );
 
+/// V051: Add a covering index for pack-time agent profile reads.
+pub const V051_AGENT_CONTEXT_PROFILE_PACK_INDEX: Migration = Migration::new(
+    51,
+    "agent_context_profile_pack_index",
+    r#"
+CREATE INDEX idx_agent_context_profiles_pack_covering
+    ON agent_context_profiles(
+        workspace_id,
+        agent_name,
+        memory_id,
+        helpful_count,
+        harmful_count,
+        ignored_count,
+        last_seen_at,
+        weight_cached
+    );
+"#,
+    "blake3:v051_agent_context_profile_pack_index_2026_05_16",
+);
+
 /// V042: Allow every pack omission reason emitted by the packer.
 pub const V042_PACK_OMISSION_REASONS: Migration = Migration::new(
     42,
@@ -4168,6 +4188,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V048_WAL_HOLDS,
     V049_PREFLIGHT_BYPASS_TOKENS,
     V050_AGENT_CONTEXT_PROFILES,
+    V051_AGENT_CONTEXT_PROFILE_PACK_INDEX,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -18096,6 +18117,48 @@ mod tests {
             &rows[1].memory_id.as_str(),
             &"mem_b1234567890123456789012345",
             "second row is sorted by memory id",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn agent_context_profiles_pack_query_has_covering_index() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let index_rows = connection.query_for(
+            DbOperation::Query,
+            "SELECT name
+             FROM sqlite_master
+             WHERE type = 'index'
+               AND name = 'idx_agent_context_profiles_pack_covering'",
+            &[],
+        )?;
+        ensure_equal(&index_rows.len(), &1_usize, "covering index exists")?;
+
+        let plan_rows = connection.query_for(
+            DbOperation::Query,
+            "EXPLAIN QUERY PLAN
+             SELECT workspace_id, agent_name, memory_id, helpful_count, harmful_count,
+                    ignored_count, last_seen_at, weight_cached
+             FROM agent_context_profiles INDEXED BY idx_agent_context_profiles_pack_covering
+             WHERE workspace_id = ?1 AND agent_name = ?2
+             ORDER BY memory_id ASC",
+            &[
+                Value::Text("wsp_01234567890123456789012345".to_string()),
+                Value::Text("CloudyHawk".to_string()),
+            ],
+        )?;
+        let plan = plan_rows
+            .iter()
+            .map(|row| super::required_text(row, 3, DbOperation::Query, "detail"))
+            .collect::<std::result::Result<Vec<_>, DbError>>()?
+            .join("\n");
+        ensure(
+            plan.contains("idx_agent_context_profiles_pack_covering"),
+            "pack query plan names the covering index",
         )?;
 
         connection.close()?;
