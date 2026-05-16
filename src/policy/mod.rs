@@ -495,6 +495,13 @@ pub fn workspace_secret_risk_evidence(
     }
 }
 
+#[must_use]
+pub fn workspace_secret_risk_overrides_safe_classification(
+    report: &WorkspaceSecretRiskReport,
+) -> bool {
+    report.secret_risk
+}
+
 fn workspace_secret_path_risk_classes(path: &str) -> Vec<&'static str> {
     let normalized = path.replace('\\', "/").to_ascii_lowercase();
     let file_name = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
@@ -522,7 +529,22 @@ fn workspace_secret_path_risk_classes(path: &str) -> Vec<&'static str> {
         || file_name.contains("token")
         || file_name.contains("secret")
         || file_name.contains("password")
-        || normalized.contains("/.aws/credentials")
+        || file_name == ".netrc"
+        || file_name == ".npmrc"
+        || file_name == ".pypirc"
+        || file_name == "application_default_credentials.json"
+        || file_name == "kubeconfig"
+        || normalized == ".cargo/credentials"
+        || normalized == ".cargo/credentials.toml"
+        || normalized.ends_with("/.cargo/credentials")
+        || normalized.ends_with("/.cargo/credentials.toml")
+        || normalized == ".docker/config.json"
+        || normalized.ends_with("/.docker/config.json")
+        || normalized == ".kube/config"
+        || normalized.ends_with("/.kube/config")
+        || normalized == ".aws/credentials"
+        || normalized.ends_with("/.aws/credentials")
+        || normalized.starts_with(".config/gcloud/")
         || normalized.contains("/.config/gcloud/")
     {
         classes.push("credential_path");
@@ -2010,6 +2032,36 @@ mod tests {
     }
 
     #[test]
+    fn workspace_secret_risk_flags_common_cloud_and_local_credential_paths() {
+        for path in [
+            ".aws/credentials",
+            ".cargo/credentials.toml",
+            ".config/gcloud/application_default_credentials.json",
+            ".docker/config.json",
+            ".kube/config",
+            ".netrc",
+            ".npmrc",
+            ".pypirc",
+            "project/kubeconfig",
+        ] {
+            let report = workspace_secret_risk_evidence(path, None, 4096);
+            assert!(
+                report.secret_risk,
+                "expected {path} to be a workspace secret risk"
+            );
+            assert!(
+                report.risk_classes.contains(&"credential_path"),
+                "expected {path} to be credential_path, got {:?}",
+                report.risk_classes
+            );
+            assert!(
+                workspace_secret_risk_overrides_safe_classification(&report),
+                "secret-risk paths must override configured safe classifications"
+            );
+        }
+    }
+
+    #[test]
     fn workspace_secret_risk_redacts_content_evidence() {
         let raw_value = concat!(
             "sk",
@@ -2042,6 +2094,7 @@ mod tests {
             !rendered.contains(raw_value),
             "workspace secret-risk evidence must not leak raw matched values: {rendered}"
         );
+        assert!(workspace_secret_risk_overrides_safe_classification(&report));
     }
 
     #[test]
@@ -2079,6 +2132,9 @@ mod tests {
         assert!(!report.skipped_content_scan);
         assert!(report.risk_classes.is_empty());
         assert!(report.evidence.is_empty());
+        assert!(!workspace_secret_risk_overrides_safe_classification(
+            &report
+        ));
     }
 
     #[test]
