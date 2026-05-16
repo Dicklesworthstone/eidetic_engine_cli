@@ -181,7 +181,7 @@ if [ "$COMMAND_KIND" = "rejected" ]; then
     exit 2
 fi
 
-if [ "$COMMAND_KIND" = "raw" ]; then
+if [ "$COMMAND_KIND" = "raw" ] || [ "$COMMAND_KIND" = "cargo_fmt_check" ]; then
     WOULD_OFFLOAD=false
 else
     WOULD_OFFLOAD=true
@@ -201,25 +201,31 @@ if [ "$DRY_RUN" -eq 1 ]; then
     exit 0
 fi
 
-start_ms="$(now_ms)"
-set +e
-combined_output="$(
-    cd "$PROJECT_ROOT" && \
-    RCH_COMPRESSION="${RCH_COMPRESSION:-0}" \
-    RCH_REQUIRE_REMOTE=1 \
-    RCH_QUEUE_WHEN_BUSY="${RCH_QUEUE_WHEN_BUSY:-1}" \
-    RCH_TEST_SLOTS="${RCH_TEST_SLOTS:-2}" \
-    RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
-    RCH_DAEMON_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
-    RCH_CANONICAL_PROJECT_ROOT="${RCH_CANONICAL_PROJECT_ROOT:-/Users/jemanuel/projects}" \
-    RCH_ALIAS_PROJECT_ROOT="${RCH_ALIAS_PROJECT_ROOT:-/data/projects}" \
-    RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
-    "${RCH_INVOCATION[@]}" 2>&1
-)"
-exit_code=$?
-set -e
-end_ms="$(now_ms)"
-elapsed_ms=$((end_ms - start_ms))
+if [ -n "${RCH_VERIFY_FAKE_OUTPUT:-}" ]; then
+    combined_output="$RCH_VERIFY_FAKE_OUTPUT"
+    exit_code="${RCH_VERIFY_FAKE_EXIT_CODE:-0}"
+    elapsed_ms="${RCH_VERIFY_FAKE_ELAPSED_MS:-0}"
+else
+    start_ms="$(now_ms)"
+    set +e
+    combined_output="$(
+        cd "$PROJECT_ROOT" && \
+        RCH_COMPRESSION="${RCH_COMPRESSION:-0}" \
+        RCH_REQUIRE_REMOTE=1 \
+        RCH_QUEUE_WHEN_BUSY="${RCH_QUEUE_WHEN_BUSY:-1}" \
+        RCH_TEST_SLOTS="${RCH_TEST_SLOTS:-2}" \
+        RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
+        RCH_DAEMON_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
+        RCH_CANONICAL_PROJECT_ROOT="${RCH_CANONICAL_PROJECT_ROOT:-/Users/jemanuel/projects}" \
+        RCH_ALIAS_PROJECT_ROOT="${RCH_ALIAS_PROJECT_ROOT:-/data/projects}" \
+        RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
+        "${RCH_INVOCATION[@]}" 2>&1
+    )"
+    exit_code=$?
+    set -e
+    end_ms="$(now_ms)"
+    elapsed_ms=$((end_ms - start_ms))
+fi
 
 worker_id="$(
     printf '%s' "$combined_output" \
@@ -237,6 +243,11 @@ if [ "$exit_code" -ne 0 ]; then
 fi
 if [ "$COMMAND_KIND" = "raw" ]; then
     degraded+=("rch_verify_raw_command_may_not_offload")
+fi
+if printf '%s' "$combined_output" | grep -q "non-compilation command"; then
+    degraded+=("rch_verify_not_offloaded")
+elif [ "$WOULD_OFFLOAD" = true ] && [ -z "$worker_id" ]; then
+    degraded+=("rch_verify_remote_marker_missing")
 fi
 
 emit_json true "$exit_code" "$elapsed_ms" "$stdout_tail" "" "${degraded[@]}"

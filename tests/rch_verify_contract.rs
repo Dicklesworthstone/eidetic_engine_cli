@@ -13,12 +13,20 @@ fn script_path() -> PathBuf {
     repo_root().join("scripts/rch_verify.sh")
 }
 
-fn run_script(args: &[&str]) -> Result<(std::process::ExitStatus, String, String), String> {
-    let output = Command::new("bash")
+fn run_script_with_env(
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Result<(std::process::ExitStatus, String, String), String> {
+    let mut command = Command::new("bash");
+    command
         .arg(script_path())
         .args(args)
         .env("RCH_VERIFY_NOW", "2026-05-16T04:40:00.000000Z")
-        .current_dir(repo_root())
+        .current_dir(repo_root());
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command
         .output()
         .map_err(|error| format!("run rch verifier wrapper: {error}"))?;
     Ok((
@@ -26,6 +34,10 @@ fn run_script(args: &[&str]) -> Result<(std::process::ExitStatus, String, String
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
     ))
+}
+
+fn run_script(args: &[&str]) -> Result<(std::process::ExitStatus, String, String), String> {
+    run_script_with_env(args, &[])
 }
 
 fn run_json(args: &[&str]) -> Result<Value, String> {
@@ -111,6 +123,9 @@ fn dry_run_accepts_cargo_fmt_only_when_checking() -> TestResult {
             "cargo fmt --check classified incorrectly: {report}"
         ));
     }
+    if report["would_offload"] != false {
+        return Err("cargo fmt --check should not claim RCH offload".to_owned());
+    }
 
     let (status, stdout, _stderr) = run_script(&["--dry-run", "--", "cargo", "fmt"])?;
     if status.success() {
@@ -171,6 +186,44 @@ fn dry_run_json_is_deterministic_for_same_input() -> TestResult {
     }
     if first["command_kind"] != "cargo_clippy" {
         return Err("cargo clippy classified incorrectly".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn synthetic_remote_transcript_extracts_worker_id() -> TestResult {
+    let (status, stdout, stderr) = run_script_with_env(
+        &["--", "cargo", "test", "--test", "rch_verify_contract"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "remote test ok\n[RCH] remote trj (12.3s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "123"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "fake transcript run failed with {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            status.code()
+        ));
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse transcript: {error}"))?;
+    if report["worker_id"] != "trj" {
+        return Err(format!("worker id was not extracted: {report}"));
+    }
+    if report["elapsed_ms"] != 123 {
+        return Err("fake elapsed_ms was not preserved".to_owned());
+    }
+    if report["degraded_codes"]
+        .as_array()
+        .ok_or_else(|| "missing degraded codes".to_owned())?
+        .iter()
+        .any(|code| code == "rch_verify_remote_marker_missing")
+    {
+        return Err("remote marker was present but missing-marker degradation emitted".to_owned());
     }
     Ok(())
 }

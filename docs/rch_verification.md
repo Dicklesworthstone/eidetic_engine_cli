@@ -13,7 +13,9 @@ scripts/rch_verify.sh -- cargo fmt --check
 ```
 
 Accepted verifier shapes are `cargo check`, `cargo test`, `cargo bench`,
-`cargo clippy`, and `cargo fmt --check`. Other commands are refused unless
+`cargo clippy`, and `cargo fmt --check`. `cargo fmt --check` is accepted for
+contract consistency, but current RCH may classify it as non-compilation; its
+proof therefore reports `would_offload=false`. Other commands are refused unless
 `--allow-raw` is passed. Raw commands still run through explicit `rch exec`, but
 the JSON marks `would_offload=false` because RCH may decline non-compilation
 commands.
