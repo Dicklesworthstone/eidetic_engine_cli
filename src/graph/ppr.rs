@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::str::FromStr;
 use std::sync::{OnceLock, RwLock};
 
@@ -22,7 +22,7 @@ use crate::models::MemoryId;
 
 pub const DEFAULT_PERSONALIZED_PAGERANK_ALPHA: f64 = 0.85;
 pub const DEFAULT_PERSONALIZED_PAGERANK_MAX_ITERATIONS: usize = 50;
-pub const DEFAULT_PERSONALIZED_PAGERANK_TOLERANCE: f64 = 1.0e-6;
+pub const DEFAULT_PERSONALIZED_PAGERANK_TOLERANCE: f64 = 1.0e-3;
 pub const DEFAULT_PPR_PREFETCH_CACHE_ENTRIES: usize = 4096;
 
 const RELATION_WEIGHT_SUPPORTS: f64 = 1.0;
@@ -282,7 +282,7 @@ fn compute_personalized_pagerank_result_unbudgeted(
     nodes.sort_unstable();
     let node_count = nodes.len();
     if node_count == 0 {
-        return personalized_pagerank_result(Vec::new(), true, 0, 0);
+        return personalized_pagerank_result(Vec::new(), true, 0, 0, 0);
     }
 
     let personalization = normalized_seed_weights(graph, seed_map);
@@ -294,7 +294,7 @@ fn compute_personalized_pagerank_result_unbudgeted(
                 score: 0.0,
             })
             .collect();
-        return personalized_pagerank_result(scores, true, 0, 0);
+        return personalized_pagerank_result(scores, true, 0, 0, 0);
     }
 
     let node_index = nodes
@@ -303,75 +303,107 @@ fn compute_personalized_pagerank_result_unbudgeted(
         .map(|(index, node)| (*node, index))
         .collect::<BTreeMap<&str, usize>>();
     let outgoing = weighted_outgoing_edges(graph, &nodes, &node_index);
-    let edges_per_iteration = outgoing.iter().map(Vec::len).sum::<usize>();
-    let mut ranks = nodes
-        .iter()
-        .map(|node| personalization.get(*node).copied().unwrap_or(0.0))
-        .collect::<Vec<_>>();
-    let mut next_ranks = vec![0.0; node_count];
     let alpha = policy.alpha.clamp(0.0, 1.0);
     let teleport_scale = 1.0 - alpha;
-    let mut iterations = 0;
-    let mut converged = false;
-
-    for _ in 0..policy.max_iterations {
-        iterations += 1;
-        next_ranks.fill(0.0);
-        for (node, seed_weight) in &personalization {
-            if let Some(index) = node_index.get(node.as_str()) {
-                next_ranks[*index] += teleport_scale * seed_weight;
-            }
-        }
-
-        let dangling_mass = ranks
-            .iter()
-            .enumerate()
-            .filter_map(|(index, rank)| outgoing[index].is_empty().then_some(*rank))
-            .sum::<f64>();
-        if dangling_mass > 0.0 {
-            for (node, seed_weight) in &personalization {
-                if let Some(index) = node_index.get(node.as_str()) {
-                    next_ranks[*index] += alpha * dangling_mass * seed_weight;
-                }
-            }
-        }
-
-        for (source_index, edges) in outgoing.iter().enumerate() {
-            if edges.is_empty() || ranks[source_index] <= 0.0 {
-                continue;
-            }
-            let push = alpha * ranks[source_index];
-            for (target_index, weight_share) in edges {
-                next_ranks[*target_index] += push * weight_share;
-            }
-        }
-
-        let delta = next_ranks
-            .iter()
-            .zip(ranks.iter())
-            .map(|(left, right)| (left - right).abs())
-            .sum::<f64>();
-        ranks.copy_from_slice(&next_ranks);
-        if delta < node_count as f64 * policy.tolerance {
-            converged = true;
-            break;
+    let max_pushes = policy.max_iterations.saturating_mul(node_count).max(1);
+    let mut estimates = vec![0.0; node_count];
+    let mut residuals = vec![0.0; node_count];
+    let mut active = BTreeSet::new();
+    for (node, seed_weight) in &personalization {
+        if let Some(index) = node_index.get(node.as_str()) {
+            residuals[*index] += *seed_weight;
+            maybe_activate_node(
+                *index,
+                residuals[*index],
+                outgoing[*index].len(),
+                &mut active,
+                policy,
+            );
         }
     }
+
+    let mut pushes = 0_usize;
+    let mut edges_scanned = 0_usize;
+    let mut queue_peak = active.len();
+
+    while let Some(source_index) = active.pop_first() {
+        if pushes >= max_pushes {
+            break;
+        }
+        let residual = residuals[source_index];
+        residuals[source_index] = 0.0;
+        if !should_push_residual(residual, outgoing[source_index].len(), policy) {
+            continue;
+        }
+
+        pushes = pushes.saturating_add(1);
+        estimates[source_index] += teleport_scale * residual;
+        let push = alpha * residual;
+        if push <= 0.0 {
+            continue;
+        }
+
+        if outgoing[source_index].is_empty() {
+            for (node, seed_weight) in &personalization {
+                if let Some(target_index) = node_index.get(node.as_str()) {
+                    residuals[*target_index] += push * seed_weight;
+                    maybe_activate_node(
+                        *target_index,
+                        residuals[*target_index],
+                        outgoing[*target_index].len(),
+                        &mut active,
+                        policy,
+                    );
+                }
+            }
+        } else {
+            edges_scanned = edges_scanned.saturating_add(outgoing[source_index].len());
+            for (target_index, weight_share) in &outgoing[source_index] {
+                residuals[*target_index] += push * weight_share;
+                maybe_activate_node(
+                    *target_index,
+                    residuals[*target_index],
+                    outgoing[*target_index].len(),
+                    &mut active,
+                    policy,
+                );
+            }
+        }
+        queue_peak = queue_peak.max(active.len());
+    }
+
+    let converged = active.is_empty();
 
     let scores = nodes
         .iter()
         .enumerate()
         .map(|(index, node)| CentralityScore {
             node: (*node).to_owned(),
-            score: ranks[index],
+            score: estimates[index],
         })
         .collect();
-    personalized_pagerank_result(
-        scores,
-        converged,
-        node_count.saturating_mul(iterations),
-        edges_per_iteration.saturating_mul(iterations),
-    )
+    personalized_pagerank_result(scores, converged, pushes, edges_scanned, queue_peak)
+}
+
+fn should_push_residual(
+    residual: f64,
+    outgoing_edge_count: usize,
+    policy: PersonalizedPageRankPolicy,
+) -> bool {
+    let degree_scale = outgoing_edge_count.max(1) as f64;
+    residual > policy.tolerance.max(0.0) * degree_scale
+}
+
+fn maybe_activate_node(
+    index: usize,
+    residual: f64,
+    outgoing_edge_count: usize,
+    active: &mut BTreeSet<usize>,
+    policy: PersonalizedPageRankPolicy,
+) {
+    if should_push_residual(residual, outgoing_edge_count, policy) {
+        active.insert(index);
+    }
 }
 
 pub fn emit_personalized_pagerank_witness(
@@ -488,16 +520,17 @@ fn personalized_pagerank_result(
     converged: bool,
     nodes_touched: usize,
     edges_scanned: usize,
+    queue_peak: usize,
 ) -> PageRankResult {
     PageRankResult {
         scores,
         converged,
         witness: ComplexityWitness {
-            algorithm: "personalized_pagerank_power_iteration".to_owned(),
-            complexity_claim: "O(k * (|V| + |E|))".to_owned(),
+            algorithm: "personalized_pagerank_acl_push".to_owned(),
+            complexity_claim: "O(1/epsilon * 1/(1-alpha)) local push".to_owned(),
             nodes_touched,
             edges_scanned,
-            queue_peak: 0,
+            queue_peak,
         },
     }
 }
@@ -745,9 +778,52 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(second, third);
-        assert_eq!(
-            raw.witness.algorithm,
-            "personalized_pagerank_power_iteration"
+        assert_eq!(raw.witness.algorithm, "personalized_pagerank_acl_push");
+        Ok(())
+    }
+
+    #[test]
+    fn personalized_pagerank_uses_local_acl_frontier() -> TestResult {
+        let mut graph = DiGraph::strict();
+        let ids = (100..200).map(memory_id).collect::<Vec<_>>();
+        for pair in ids.windows(2) {
+            graph
+                .add_edge_with_attrs(
+                    pair[0].to_string(),
+                    pair[1].to_string(),
+                    edge_attrs("supports", 1.0, 1.0),
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let seeds = BTreeMap::from([(ids[0].to_string(), 1.0)]);
+
+        let result = graph_result(compute_personalized_pagerank_result(&graph, &seeds))?;
+
+        assert_eq!(result.witness.algorithm, "personalized_pagerank_acl_push");
+        assert!(
+            result.witness.nodes_touched < ids.len(),
+            "local push should not scan the full chain: {:?}",
+            result.witness
+        );
+        assert!(
+            result.witness.edges_scanned < ids.len(),
+            "local push should not scan every chain edge: {:?}",
+            result.witness
+        );
+        assert_eq!(result.witness.queue_peak, 1);
+        assert!(
+            result
+                .scores
+                .iter()
+                .find(|score| score.node == ids[0].to_string())
+                .is_some_and(|score| score.score > 0.0)
+        );
+        assert!(
+            result
+                .scores
+                .iter()
+                .find(|score| score.node == ids[99].to_string())
+                .is_some_and(|score| score.score == 0.0)
         );
         Ok(())
     }
