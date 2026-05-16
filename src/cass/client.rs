@@ -240,8 +240,38 @@ fn validate_import_binary(
             reason: "CASS import binary file name must be `cass`".to_string(),
         });
     }
+    reject_existing_symlink_component(path)?;
     validate_import_binary_metadata(path, source)?;
     Ok(DiscoveredBinary::new(canonicalize_path(path)?, source))
+}
+
+fn reject_existing_symlink_component(path: &Path) -> Result<(), CassError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CassError::InvalidBinary {
+                    binary: path.to_path_buf(),
+                    reason: format!(
+                        "CASS import binary path contains symlink component `{}`",
+                        current.display()
+                    ),
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(CassError::InvalidBinary {
+                    binary: path.to_path_buf(),
+                    reason: format!(
+                        "CASS import binary path component metadata is unavailable: {error}"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -972,6 +1002,36 @@ mod tests {
         assert_eq!(error.kind_str(), "invalid_binary");
         assert!(
             error.to_string().contains("writable by group or other"),
+            "unexpected error: {error}",
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_discovery_rejects_symlinked_explicit_env_binary() -> TestResult {
+        let dir = unique_test_dir("symlinked-env-binary")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let real_binary = dir.join("real-cass");
+        let binary_link = dir.join(DEFAULT_BINARY);
+        write_test_cass_binary(&real_binary, 0o755)?;
+        std::os::unix::fs::symlink(&real_binary, &binary_link)
+            .map_err(|error| error.to_string())?;
+
+        let result = discover_import_binary_from_sources(Some(binary_link.as_os_str()), None, &[]);
+        let error = match result {
+            Ok(discovered) => {
+                return Err(format!(
+                    "symlinked import binary should be rejected, got {}",
+                    discovered.path.display()
+                ));
+            }
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind_str(), "invalid_binary");
+        assert!(
+            error.to_string().contains("symlink"),
             "unexpected error: {error}",
         );
         Ok(())

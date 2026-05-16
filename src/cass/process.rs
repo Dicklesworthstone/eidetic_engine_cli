@@ -536,6 +536,7 @@ fn terminate_cass_process_group(child_group: Pid) {
 }
 
 fn validate_absolute_cass_binary(path: &Path) -> Result<(), CassError> {
+    reject_existing_symlink_component(path)?;
     let metadata = std::fs::metadata(path).map_err(|error| CassError::InvalidBinary {
         binary: path.to_path_buf(),
         reason: format!("CASS binary metadata is unavailable: {error}"),
@@ -588,6 +589,33 @@ fn validate_absolute_cass_binary_permissions(
     _path: &Path,
     _metadata: &std::fs::Metadata,
 ) -> Result<(), CassError> {
+    Ok(())
+}
+
+fn reject_existing_symlink_component(path: &Path) -> Result<(), CassError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CassError::InvalidBinary {
+                    binary: path.to_path_buf(),
+                    reason: format!(
+                        "CASS binary path contains symlink component `{}`",
+                        current.display()
+                    ),
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(CassError::InvalidBinary {
+                    binary: path.to_path_buf(),
+                    reason: format!("CASS binary path component metadata is unavailable: {error}"),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -953,6 +981,40 @@ mod tests {
 
         assert_eq!(error.kind_str(), "invalid_binary");
         assert!(error.to_string().contains("writable"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rejects_symlinked_absolute_binary_before_spawn() -> Result<(), String> {
+        let dir = unique_test_dir("symlinked-absolute-binary")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let real_binary = dir.join("real-cass");
+        let binary_link = dir.join("cass");
+        let marker = dir.join("symlink-ran");
+        write_executable_script(
+            &real_binary,
+            &format!(
+                "#!/bin/sh\nprintf ran > '{}'\nprintf '{{\"ok\":true}}\\n'\n",
+                marker.display()
+            ),
+            0o755,
+        )?;
+        std::os::unix::fs::symlink(&real_binary, &binary_link)
+            .map_err(|error| error.to_string())?;
+
+        let inv = CassInvocation::new(binary_link, ["health", "--json"]);
+        let error = match inv.run() {
+            Ok(_) => return Err("symlinked cass binary should fail before spawn".to_string()),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind_str(), "invalid_binary");
+        assert!(
+            error.to_string().contains("symlink"),
+            "unexpected error: {error}",
+        );
+        assert!(!marker.exists(), "symlinked cass binary was executed");
         Ok(())
     }
 
