@@ -145,12 +145,13 @@ fn draft_bytes(draft: &PackDraft) -> Vec<u8> {
     format!("{draft:#?}").into_bytes()
 }
 
-#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 struct DeterminismRegressionFixture {
     schema: String,
     captured_at: String,
     last_verified_at: String,
     seed: u64,
+    input: serde_json::Value,
     input_hash: String,
     expected_hash: String,
     observed_hash_run1: String,
@@ -159,7 +160,7 @@ struct DeterminismRegressionFixture {
     first_diff_window: DeterminismDiffWindow,
 }
 
-#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 struct DeterminismDiffWindow {
     expected: String,
     observed: String,
@@ -178,6 +179,7 @@ fn regression_fixture_for_mismatch(
         captured_at: REGRESSION_FIXTURE_CAPTURED_AT.to_string(),
         last_verified_at: REGRESSION_FIXTURE_CAPTURED_AT.to_string(),
         seed,
+        input: regression_input_payload(input),
         input_hash: input_hash.clone(),
         expected_hash: hash_bytes(expected),
         observed_hash_run1: hash_bytes(expected),
@@ -188,6 +190,11 @@ fn regression_fixture_for_mismatch(
             observed: diff_window(observed, first_diff_byte_offset),
         },
     })
+}
+
+fn regression_input_payload(input: &[u8]) -> serde_json::Value {
+    serde_json::from_slice(input)
+        .unwrap_or_else(|_| serde_json::json!({ "raw": String::from_utf8_lossy(input) }))
 }
 
 fn regression_fixture_file_name(input_hash: &str) -> String {
@@ -367,6 +374,8 @@ fn determinism_regression_fixture_metadata_is_stable() -> Result<(), String> {
     assert_eq!(first.captured_at, REGRESSION_FIXTURE_CAPTURED_AT);
     assert_eq!(first.last_verified_at, REGRESSION_FIXTURE_CAPTURED_AT);
     assert_eq!(first.seed, 42);
+    assert_eq!(first.input["query"], "release");
+    assert_eq!(first.input["profile"], "compact");
     let file_name = regression_fixture_file_name(&first.input_hash);
     assert!(file_name.ends_with(".json"));
     assert_eq!(file_name.len(), 21);
@@ -389,6 +398,7 @@ fn determinism_regression_fixture_handles_prefix_drift() -> Result<(), String> {
     .ok_or_else(|| "fixture should detect length drift".to_owned())?;
 
     assert_eq!(fixture.first_diff_byte_offset, b"same-prefix-left".len());
+    assert_eq!(fixture.input["raw"], "input");
     assert_eq!(fixture.first_diff_window.expected, "same-prefix-left");
     assert!(fixture.first_diff_window.observed.ends_with("-and-longer"));
     Ok(())
