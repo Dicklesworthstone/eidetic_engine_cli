@@ -14317,7 +14317,7 @@ mod tests {
         ensure_contains(&toon, "degraded[", "degradation section")?;
         ensure_contains(
             &toon,
-            "{code,severity,message,repair}:",
+            "{code,severity,message,repair,sources}:",
             "degradation columns",
         )
     }

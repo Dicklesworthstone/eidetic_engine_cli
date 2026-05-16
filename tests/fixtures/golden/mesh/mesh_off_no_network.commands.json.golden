@@ -4,7 +4,7 @@
     "meshCapability": "absent",
     "meshOrPeerCodes": [],
     "meshOrPeerDataKeys": [],
-    "schema": "ee.response.v2",
+    "schema": "ee.response.v1",
     "success": true
   },
   {
@@ -12,7 +12,7 @@
     "meshCapability": "present",
     "meshOrPeerCodes": [],
     "meshOrPeerDataKeys": [],
-    "schema": "ee.response.v2",
+    "schema": "ee.response.v1",
     "success": true
   },
   {
@@ -20,7 +20,7 @@
     "meshCapability": "absent",
     "meshOrPeerCodes": [],
     "meshOrPeerDataKeys": [],
-    "schema": "ee.response.v2",
+    "schema": "ee.response.v1",
     "success": true
   },
   {
@@ -28,7 +28,7 @@
     "meshCapability": "absent",
     "meshOrPeerCodes": [],
     "meshOrPeerDataKeys": [],
-    "schema": "ee.response.v2",
+    "schema": "ee.response.v1",
     "success": true
   },
   {
@@ -36,7 +36,7 @@
     "meshCapability": "absent",
     "meshOrPeerCodes": [],
     "meshOrPeerDataKeys": [],
-    "schema": "ee.response.v2",
+    "schema": "ee.response.v1",
     "success": true
   },
   {
@@ -44,7 +44,7 @@
     "meshCapability": "absent",
     "meshOrPeerCodes": [],
     "meshOrPeerDataKeys": [],
-    "schema": "ee.response.v2",
+    "schema": "ee.response.v1",
     "success": true
   },
   {
@@ -52,7 +52,7 @@
     "meshCapability": "absent",
     "meshOrPeerCodes": [],
     "meshOrPeerDataKeys": [],
-    "schema": "ee.response.v2",
+    "schema": "ee.response.v1",
     "success": true
   }
 ]
