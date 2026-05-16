@@ -3493,7 +3493,7 @@ fn render_qos_lane_record_json(parent: &mut JsonBuilder, record: &crate::core::q
     match record.process_id {
         Some(process_id) => parent.field_u32("processId", process_id),
         None => parent.field_raw("processId", "null"),
-    }
+    };
     field_optional_str(parent, "profileLabel", record.profile_label.as_deref());
     field_optional_str(parent, "budgetLabel", record.budget_label.as_deref());
     field_optional_str(parent, "requestHash", record.request_hash.as_deref());

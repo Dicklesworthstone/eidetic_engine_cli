@@ -13,6 +13,8 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+use crate::models::RedactionLevel;
+
 use super::env_registry::EnvVar;
 use super::file::{
     CacheConfig, CassConfig, ConfigFile, CurationConfig, FeedbackConfig, GraphCausalConfig,
@@ -20,8 +22,8 @@ use super::file::{
     GraphHealthConfig, GraphHitsConfig, GraphPackDnaConfig, GraphPprConfig, GraphWitnessesConfig,
     HandoffConfig, LearnConfig, LearnDecayConfig, MeshCommandMode, MeshConfig,
     OutputRedactionConfig, PackConfig, PackL2CacheConfig, PolicyConfig, PrivacyConfig,
-    ReadPoolConfig, RuntimeConfig, SearchConfig, SearchSpeed, SecretDetectorConfig, StorageConfig,
-    TrustConfig,
+    ReadPoolConfig, RedactionConfig, RedactionDefaultsConfig, RuntimeConfig, SearchConfig,
+    SearchSpeed, SecretDetectorConfig, StorageConfig, TrustConfig,
 };
 use super::path::{PathExpander, PathExpansionError};
 
@@ -102,6 +104,10 @@ pub const LEARN_DECAY_DEFAULT_HALF_LIFE_DAYS_KEY: &str = "learn.decay.default_ha
 pub const LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY: &str = "learn.cluster_coherence_threshold";
 pub const FEEDBACK_HARMFUL_PER_SOURCE_PER_HOUR_KEY: &str = "feedback.harmful_per_source_per_hour";
 pub const FEEDBACK_HARMFUL_BURST_WINDOW_SECONDS_KEY: &str = "feedback.harmful_burst_window_seconds";
+pub const REDACTION_DEFAULT_EXPORT_KEY: &str = "redaction.defaults.export";
+pub const REDACTION_DEFAULT_HANDOFF_CREATE_KEY: &str = "redaction.defaults.handoff_create";
+pub const REDACTION_DEFAULT_CONTEXT_JSON_KEY: &str = "redaction.defaults.context_json";
+pub const REDACTION_DEFAULT_SUPPORT_BUNDLE_KEY: &str = "redaction.defaults.support_bundle";
 pub const POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY: &str = "policy.secret_detector.allow_phrases";
 pub const POLICY_SECRET_DETECTOR_ALLOW_REGEX_KEY: &str = "policy.secret_detector.allow_regex";
 pub const POLICY_OUTPUT_REDACTION_ENABLED_KEY: &str = "policy.output_redaction.enabled";
@@ -670,6 +676,36 @@ impl MergedConfig {
             ));
         }
 
+        // Redaction defaults section
+        if let Some(level) = self.values.redaction.defaults.export {
+            entries.push(ConfigShowEntry::new(
+                REDACTION_DEFAULT_EXPORT_KEY,
+                level.as_str().to_string(),
+                self.source(REDACTION_DEFAULT_EXPORT_KEY),
+            ));
+        }
+        if let Some(level) = self.values.redaction.defaults.handoff_create {
+            entries.push(ConfigShowEntry::new(
+                REDACTION_DEFAULT_HANDOFF_CREATE_KEY,
+                level.as_str().to_string(),
+                self.source(REDACTION_DEFAULT_HANDOFF_CREATE_KEY),
+            ));
+        }
+        if let Some(level) = self.values.redaction.defaults.context_json {
+            entries.push(ConfigShowEntry::new(
+                REDACTION_DEFAULT_CONTEXT_JSON_KEY,
+                level.as_str().to_string(),
+                self.source(REDACTION_DEFAULT_CONTEXT_JSON_KEY),
+            ));
+        }
+        if let Some(level) = self.values.redaction.defaults.support_bundle {
+            entries.push(ConfigShowEntry::new(
+                REDACTION_DEFAULT_SUPPORT_BUNDLE_KEY,
+                level.as_str().to_string(),
+                self.source(REDACTION_DEFAULT_SUPPORT_BUNDLE_KEY),
+            ));
+        }
+
         // Policy section
         if let Some(ref phrases) = self.values.policy.secret_detector.allow_phrases {
             entries.push(ConfigShowEntry::new(
@@ -896,6 +932,14 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             harmful_per_source_per_hour: Some(5),
             harmful_burst_window_seconds: Some(3600),
         },
+        redaction: RedactionConfig {
+            defaults: RedactionDefaultsConfig {
+                export: Some(RedactionLevel::Strict),
+                handoff_create: Some(RedactionLevel::Standard),
+                context_json: Some(RedactionLevel::Minimal),
+                support_bundle: Some(RedactionLevel::Paranoid),
+            },
+        },
         policy: PolicyConfig {
             output_redaction: OutputRedactionConfig {
                 enabled: Some(true),
@@ -994,6 +1038,7 @@ pub fn config_from_env(
                 EnvVar::HarmfulBurstWindowSeconds.name(),
             )?,
         },
+        redaction: RedactionConfig::default(),
         policy: PolicyConfig::default(),
         privacy: PrivacyConfig::default(),
         trust: TrustConfig::default(),
@@ -1740,6 +1785,46 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.user.feedback.harmful_burst_window_seconds,
                 &layers.defaults.feedback.harmful_burst_window_seconds,
             ),
+        },
+        redaction: RedactionConfig {
+            defaults: RedactionDefaultsConfig {
+                export: pick_field(
+                    &mut sources,
+                    REDACTION_DEFAULT_EXPORT_KEY,
+                    &layers.cli.redaction.defaults.export,
+                    &layers.environment.redaction.defaults.export,
+                    &layers.project.redaction.defaults.export,
+                    &layers.user.redaction.defaults.export,
+                    &layers.defaults.redaction.defaults.export,
+                ),
+                handoff_create: pick_field(
+                    &mut sources,
+                    REDACTION_DEFAULT_HANDOFF_CREATE_KEY,
+                    &layers.cli.redaction.defaults.handoff_create,
+                    &layers.environment.redaction.defaults.handoff_create,
+                    &layers.project.redaction.defaults.handoff_create,
+                    &layers.user.redaction.defaults.handoff_create,
+                    &layers.defaults.redaction.defaults.handoff_create,
+                ),
+                context_json: pick_field(
+                    &mut sources,
+                    REDACTION_DEFAULT_CONTEXT_JSON_KEY,
+                    &layers.cli.redaction.defaults.context_json,
+                    &layers.environment.redaction.defaults.context_json,
+                    &layers.project.redaction.defaults.context_json,
+                    &layers.user.redaction.defaults.context_json,
+                    &layers.defaults.redaction.defaults.context_json,
+                ),
+                support_bundle: pick_field(
+                    &mut sources,
+                    REDACTION_DEFAULT_SUPPORT_BUNDLE_KEY,
+                    &layers.cli.redaction.defaults.support_bundle,
+                    &layers.environment.redaction.defaults.support_bundle,
+                    &layers.project.redaction.defaults.support_bundle,
+                    &layers.user.redaction.defaults.support_bundle,
+                    &layers.defaults.redaction.defaults.support_bundle,
+                ),
+            },
         },
         policy: PolicyConfig {
             secret_detector: SecretDetectorConfig {

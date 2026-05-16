@@ -565,15 +565,19 @@ fn update_hash_with_len_prefixed_str(hasher: &mut blake3::Hasher, value: &str) {
 
 fn hash_json_value(hasher: &mut blake3::Hasher, value: &serde_json::Value) {
     match value {
-        serde_json::Value::Null => hasher.update(b"n"),
-        serde_json::Value::Bool(value) => hasher.update(if *value { b"t" } else { b"f" }),
+        serde_json::Value::Null => {
+            hasher.update(b"n");
+        }
+        serde_json::Value::Bool(value) => {
+            hasher.update(if *value { b"t" } else { b"f" });
+        }
         serde_json::Value::Number(value) => {
             hasher.update(b"#");
-            hasher.update(value.to_string().as_bytes())
+            hasher.update(value.to_string().as_bytes());
         }
         serde_json::Value::String(value) => {
             hasher.update(b"s");
-            update_hash_with_len_prefixed_str(hasher, value)
+            update_hash_with_len_prefixed_str(hasher, value);
         }
         serde_json::Value::Array(items) => {
             hasher.update(b"[");
@@ -581,7 +585,7 @@ fn hash_json_value(hasher: &mut blake3::Hasher, value: &serde_json::Value) {
             for item in items {
                 hash_json_value(hasher, item);
             }
-            hasher.update(b"]")
+            hasher.update(b"]");
         }
         serde_json::Value::Object(fields) => {
             hasher.update(b"{");
@@ -594,7 +598,7 @@ fn hash_json_value(hasher: &mut blake3::Hasher, value: &serde_json::Value) {
                     hash_json_value(hasher, value);
                 }
             }
-            hasher.update(b"}")
+            hasher.update(b"}");
         }
     };
 }
