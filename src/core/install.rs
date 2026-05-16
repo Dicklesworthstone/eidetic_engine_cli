@@ -565,6 +565,60 @@ fn load_manifest(
     target_triple: &str,
     findings: &mut Vec<InstallFinding>,
 ) -> Result<ReleaseManifest, InstallFinding> {
+    match install_path_has_symlink_component(path) {
+        Ok(Some(component)) => {
+            return Err(InstallFinding::error(
+                InstallFindingCode::ManifestInvalid,
+                format!(
+                    "release manifest '{}' traverses symbolic link '{}'",
+                    path.display(),
+                    component.display()
+                ),
+                "Pass a release manifest through regular directories and a regular manifest file.",
+            ));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return Err(InstallFinding::error(
+                InstallFindingCode::ManifestMissing,
+                format!(
+                    "failed to inspect release manifest '{}': {error}",
+                    path.display()
+                ),
+                "Pass a readable --manifest path.",
+            ));
+        }
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(InstallFinding::error(
+                InstallFindingCode::ManifestInvalid,
+                format!(
+                    "release manifest '{}' is not a regular file",
+                    path.display()
+                ),
+                "Pass a regular ee.release_manifest.v1 JSON file.",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(InstallFinding::error(
+                InstallFindingCode::ManifestMissing,
+                format!("release manifest '{}' was not found", path.display()),
+                "Pass a readable --manifest path.",
+            ));
+        }
+        Err(error) => {
+            return Err(InstallFinding::error(
+                InstallFindingCode::ManifestMissing,
+                format!(
+                    "failed to inspect release manifest '{}': {error}",
+                    path.display()
+                ),
+                "Pass a readable --manifest path.",
+            ));
+        }
+    }
     let raw = fs::read_to_string(path).map_err(|error| {
         InstallFinding::error(
             InstallFindingCode::ManifestMissing,
@@ -1345,6 +1399,30 @@ fn install_artifact_path_has_symlink_component(root: &Path, relative: &Path) -> 
     Ok(false)
 }
 
+fn install_path_has_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                current.push(component.as_os_str());
+                continue;
+            }
+            Component::CurDir => continue,
+            Component::ParentDir | Component::Normal(_) => {
+                current.push(component.as_os_str());
+            }
+        }
+
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1513,6 +1591,83 @@ mod tests {
             "unsafe_target_path finding",
         )?;
         ensure_equal(report.status, InstallPlanStatus::Blocked, "status")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_plan_rejects_symlinked_manifest_file() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_manifest = tempdir.path().join("outside-manifest.json");
+        let manifest = ReleaseManifest::new("9.9.9", "commit-a", Vec::new());
+        fs::write(
+            &outside_manifest,
+            serde_json::to_vec(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let manifest_link = tempdir.path().join("manifest-link.json");
+        std::os::unix::fs::symlink(&outside_manifest, &manifest_link)
+            .map_err(|error| error.to_string())?;
+
+        let report = plan_install(&InstallPlanOptions {
+            manifest: Some(manifest_link),
+            install_dir: Some(tempdir.path().join("bin")),
+            target_triple: Some("x86_64-unknown-linux-gnu".to_owned()),
+            offline: true,
+            ..InstallPlanOptions::default()
+        });
+
+        ensure_equal(report.status, InstallPlanStatus::Blocked, "status")?;
+        ensure_equal(
+            report.verification.manifest_status.as_str(),
+            "invalid",
+            "manifest status",
+        )?;
+        ensure(
+            report.findings.iter().any(|finding| {
+                matches!(finding.code, InstallFindingCode::ManifestInvalid)
+                    && finding.message.contains("symbolic link")
+            }),
+            "symlinked manifest should be reported as invalid",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_plan_rejects_symlinked_manifest_parent() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_dir = tempdir.path().join("real-manifests");
+        fs::create_dir_all(&real_dir).map_err(|error| error.to_string())?;
+        let manifest = ReleaseManifest::new("9.9.9", "commit-a", Vec::new());
+        fs::write(
+            real_dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let manifest_dir_link = tempdir.path().join("manifest-dir-link");
+        std::os::unix::fs::symlink(&real_dir, &manifest_dir_link)
+            .map_err(|error| error.to_string())?;
+
+        let report = plan_install(&InstallPlanOptions {
+            manifest: Some(manifest_dir_link.join("manifest.json")),
+            install_dir: Some(tempdir.path().join("bin")),
+            target_triple: Some("x86_64-unknown-linux-gnu".to_owned()),
+            offline: true,
+            ..InstallPlanOptions::default()
+        });
+
+        ensure_equal(report.status, InstallPlanStatus::Blocked, "status")?;
+        ensure_equal(
+            report.verification.manifest_status.as_str(),
+            "invalid",
+            "manifest status",
+        )?;
+        ensure(
+            report.findings.iter().any(|finding| {
+                matches!(finding.code, InstallFindingCode::ManifestInvalid)
+                    && finding.message.contains("symbolic link")
+            }),
+            "symlinked manifest parent should be reported as invalid",
+        )
     }
 
     #[test]
