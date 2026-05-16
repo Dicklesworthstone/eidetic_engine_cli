@@ -2314,6 +2314,50 @@ mod tests {
     }
 
     #[test]
+    fn support_bundle_redaction_levels_control_final_pass() {
+        let raw = "home=/Users/alice/private token=sk-test_123456789abcdefghijklmnop";
+
+        let none = redact_support_bundle_content(raw, RedactionLevel::None);
+        assert_eq!(none.content, raw);
+        assert!(!none.redacted);
+
+        let minimal = redact_support_bundle_content(raw, RedactionLevel::Minimal);
+        assert!(minimal.redacted);
+        assert!(
+            minimal.content.contains("/Users/alice/private"),
+            "minimal support bundle redaction should leave paths intact"
+        );
+        assert!(
+            !minimal.content.contains("sk-test_123456789abcdefghijklmnop"),
+            "minimal support bundle redaction should redact secret-like values"
+        );
+
+        let standard = redact_support_bundle_content(raw, RedactionLevel::Standard);
+        assert!(standard.redacted);
+        assert!(
+            !standard.content.contains("/Users/alice/private"),
+            "standard support bundle redaction should redact path-like segments"
+        );
+        assert!(
+            standard
+                .redacted_reasons
+                .iter()
+                .any(|reason| reason == "path_like_segment"),
+            "standard support bundle redaction should report path-like redaction"
+        );
+    }
+
+    #[test]
+    fn support_bundle_include_raw_forces_effective_none() {
+        let options = BundleOptions {
+            redaction_level: RedactionLevel::Paranoid,
+            include_raw: true,
+            ..BundleOptions::default()
+        };
+        assert_eq!(options.effective_redaction_level(), RedactionLevel::None);
+    }
+
+    #[test]
     fn generate_bundle_id_format() {
         let id = generate_bundle_id();
         assert!(id.contains('_'));

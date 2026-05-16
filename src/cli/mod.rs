@@ -39699,6 +39699,48 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_support_bundle_redaction_level_and_defaults_paranoid() -> TestResult {
+        let default_parsed = Cli::try_parse_from(["ee", "support", "bundle", "--dry-run"])
+            .map_err(|error| {
+                format!(
+                    "failed to parse default support bundle: {:?}",
+                    error.kind()
+                )
+            })?;
+        match default_parsed.command {
+            Some(Command::Support(SupportCommand::Bundle(args))) => {
+                ensure_equal(
+                    &args.redaction,
+                    &BackupRedaction::Paranoid,
+                    "default redaction",
+                )?;
+            }
+            other => return Err(format!("expected support bundle command, got {other:?}")),
+        }
+
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "support",
+            "bundle",
+            "--dry-run",
+            "--redaction",
+            "minimal",
+        ])
+        .map_err(|error| {
+            format!(
+                "failed to parse support bundle redaction: {:?}",
+                error.kind()
+            )
+        })?;
+        match parsed.command {
+            Some(Command::Support(SupportCommand::Bundle(args))) => {
+                ensure_equal(&args.redaction, &BackupRedaction::Minimal, "redaction")
+            }
+            other => Err(format!("expected support bundle command, got {other:?}")),
+        }
+    }
+
+    #[test]
     fn parser_rejects_legacy_full_redaction_cli_value() -> TestResult {
         let args: Vec<std::ffi::OsString> =
             ["ee", "backup", "create", "--redaction", "full", "--dry-run"]
