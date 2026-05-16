@@ -1713,6 +1713,10 @@ pub struct ContextArgs {
     #[arg(long = "no-pack-dna", action = ArgAction::SetTrue)]
     pub no_pack_dna: bool,
 
+    /// Emit ee.pack.stream.v1 NDJSON frames instead of a batch context response.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub stream: bool,
+
     /// Disable the coverage-fill pass; accepts --no-coverage-fill=false to override a lean profile.
     #[arg(long = "no-coverage-fill", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
     pub no_coverage_fill: Option<bool>,
@@ -23075,6 +23079,88 @@ where
     write_stdout(stdout, &rendered)
 }
 
+fn validate_context_stream_request(cli: &Cli, args: &ContextArgs) -> Result<(), DomainError> {
+    if !args.stream {
+        return Ok(());
+    }
+    if args.explain_performance {
+        return Err(DomainError::Usage {
+            message: "`ee context --stream` cannot be combined with --explain-performance."
+                .to_string(),
+            repair: Some(
+                "Use `ee context \"<task>\" --stream --format json` for frames, or omit --stream for the performance report."
+                    .to_string(),
+            ),
+        });
+    }
+    match cli.context_renderer() {
+        output::Renderer::Json | output::Renderer::Jsonl => Ok(()),
+        _ => Err(DomainError::Usage {
+            message:
+                "`ee context --stream` requires --json, --robot, --format json, or --format jsonl."
+                    .to_string(),
+            repair: Some("Use `ee context \"<task>\" --stream --format json`.".to_string()),
+        }),
+    }
+}
+
+fn write_context_stream_response<W>(
+    response: &ContextResponse,
+    workspace_path: &Path,
+    stdout: &mut W,
+) -> Result<ProcessExitCode, String>
+where
+    W: Write,
+{
+    let started_at = chrono::Utc::now().to_rfc3339();
+    let pack_id = context_stream_pack_id(response);
+    let workspace_id = crate::core::workspace::stable_workspace_id(workspace_path);
+    let request_id = format!("ctx_stream_{pack_id}");
+    let options = output::streaming::ContextStreamFrameOptions::new(
+        pack_id,
+        workspace_id,
+        request_id,
+        started_at,
+        chrono::Utc::now().to_rfc3339(),
+    );
+    let frames = output::streaming::context_response_stream_frames(response, options)
+        .map_err(|error| error.to_string())?;
+    let mut writer = output::streaming::PackStreamWriter::new(stdout);
+    for frame in &frames {
+        writer
+            .write_frame(frame)
+            .map_err(|error| error.to_string())?;
+    }
+    tracing::debug!(
+        target: "ee::context_stream",
+        event = "context_stream_render",
+        frame_count = writer.frames_written(),
+        hash = response.data.pack.hash.as_deref().unwrap_or("absent"),
+    );
+    Ok(ProcessExitCode::Success)
+}
+
+fn context_stream_pack_id(response: &ContextResponse) -> String {
+    let source = response
+        .data
+        .pack
+        .hash
+        .as_deref()
+        .unwrap_or("absent")
+        .strip_prefix("blake3:")
+        .unwrap_or_else(|| response.data.pack.hash.as_deref().unwrap_or("absent"));
+    let suffix: String = source
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .take(26)
+        .collect();
+    if suffix.is_empty() {
+        "pack_stream_absent".to_string()
+    } else {
+        format!("pack_stream_{suffix}")
+    }
+}
+
 fn context_format_name(renderer: output::Renderer, requested_format: OutputFormat) -> &'static str {
     match (renderer, requested_format) {
         (output::Renderer::Markdown, OutputFormat::Mermaid) => "mermaid",
@@ -23335,8 +23421,11 @@ where
     );
     let mut filters = crate::models::QueryFilters::default();
     filters.temporal.as_of = args.as_of;
+    if let Err(domain_error) = validate_context_stream_request(cli, args) {
+        return write_domain_error(&domain_error, true, stdout, stderr);
+    }
     let options = ContextPackOptions {
-        workspace_path,
+        workspace_path: workspace_path.clone(),
         database_path: args.database.clone(),
         index_dir: args.index_dir.clone(),
         query: args.query.clone(),
@@ -23380,6 +23469,21 @@ where
                     .data
                     .degraded
                     .push(deprecated_context_alias_degradation());
+            }
+            if args.stream {
+                return match write_context_stream_response(&response, &workspace_path, stdout) {
+                    Ok(exit) => exit,
+                    Err(error) => {
+                        let domain_error = DomainError::Usage {
+                            message: format!("Failed to render context stream: {error}"),
+                            repair: Some(
+                                "Retry without --stream to inspect the batch context response."
+                                    .to_string(),
+                            ),
+                        };
+                        write_domain_error(&domain_error, true, stdout, stderr)
+                    }
+                };
             }
             write_context_response(
                 cli.context_renderer(),
@@ -25563,6 +25667,7 @@ where
             max_tokens: args.max_tokens.unwrap_or(4000),
             candidate_pool: args.candidate_pool.unwrap_or(100),
             speed: args.speed.unwrap_or(crate::search::SpeedMode::Default),
+            stream: false,
             profile: args
                 .profile
                 .clone()
@@ -42994,7 +43099,21 @@ default_half_life_days = 45
                     &args.mesh_mode,
                     &MeshCommandMode::Off,
                     "context default mesh mode",
-                )
+                )?;
+                ensure_equal(&args.stream, &false, "context stream default")
+            }
+            _ => Err("expected Context command".to_string()),
+        }
+    }
+
+    #[test]
+    fn context_command_accepts_stream_flag() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "--format", "json", "context", "test", "--stream"])
+            .map_err(|e| format!("failed to parse context stream: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Context(ref args)) => {
+                ensure_equal(&args.stream, &true, "context stream flag")
             }
             _ => Err("expected Context command".to_string()),
         }
@@ -43310,6 +43429,86 @@ default_half_life_days = 45
             &output::Renderer::Jsonl,
             "context renderer with --format jsonl should be JSONL",
         )
+    }
+
+    #[test]
+    fn context_stream_request_allows_json_and_jsonl_renderers() -> TestResult {
+        for args in [
+            ["ee", "--json", "context", "test", "--stream"].as_slice(),
+            ["ee", "--robot", "context", "test", "--stream"].as_slice(),
+            ["ee", "--format", "json", "context", "test", "--stream"].as_slice(),
+            ["ee", "--format", "jsonl", "context", "test", "--stream"].as_slice(),
+        ] {
+            let cli = Cli::try_parse_from(args).map_err(|error| {
+                format!("failed to parse stream args {args:?}: {:?}", error.kind())
+            })?;
+            match &cli.command {
+                Some(Command::Context(context_args)) => {
+                    super::validate_context_stream_request(&cli, context_args)
+                        .map_err(|error| error.message())?;
+                }
+                _ => return Err("expected Context command".to_string()),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn context_stream_request_rejects_batch_only_renderers() -> TestResult {
+        for args in [
+            ["ee", "context", "test", "--stream"].as_slice(),
+            ["ee", "--format", "human", "context", "test", "--stream"].as_slice(),
+            ["ee", "--format", "markdown", "context", "test", "--stream"].as_slice(),
+            ["ee", "--format", "toon", "context", "test", "--stream"].as_slice(),
+            ["ee", "--format", "compact", "context", "test", "--stream"].as_slice(),
+            ["ee", "--format", "hook", "context", "test", "--stream"].as_slice(),
+        ] {
+            let mut cli = Cli::try_parse_from(args).map_err(|error| {
+                format!("failed to parse stream args {args:?}: {:?}", error.kind())
+            })?;
+            if args.contains(&"human") {
+                cli.format_explicit = true;
+            }
+            match &cli.command {
+                Some(Command::Context(context_args)) => {
+                    let error = super::validate_context_stream_request(&cli, context_args)
+                        .expect_err("batch-only renderer should be rejected");
+                    ensure_contains(
+                        &error.message(),
+                        "`ee context --stream` requires",
+                        "stream format error",
+                    )?;
+                }
+                _ => return Err("expected Context command".to_string()),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn context_stream_request_rejects_explain_performance() -> TestResult {
+        let cli = Cli::try_parse_from([
+            "ee",
+            "--format",
+            "json",
+            "context",
+            "test",
+            "--stream",
+            "--explain-performance",
+        ])
+        .map_err(|error| format!("failed to parse stream explain args: {:?}", error.kind()))?;
+        match &cli.command {
+            Some(Command::Context(context_args)) => {
+                let error = super::validate_context_stream_request(&cli, context_args)
+                    .expect_err("stream explain-performance should be rejected");
+                ensure_contains(
+                    &error.message(),
+                    "cannot be combined",
+                    "stream explain-performance error",
+                )
+            }
+            _ => Err("expected Context command".to_string()),
+        }
     }
 
     #[test]
@@ -44051,6 +44250,35 @@ default_half_life_days = 45
         ensure(
             stderr.is_empty(),
             "context invalid profile stderr must be empty",
+        )
+    }
+
+    #[test]
+    fn context_stream_invalid_format_writes_json_error_before_database_work() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "context", "test query", "--stream"]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Usage,
+            "context stream invalid format exit",
+        )?;
+        ensure_starts_with(
+            &stdout,
+            "{\"schema\":\"ee.error.v2\"",
+            "context stream invalid format schema",
+        )?;
+        ensure_contains(&stdout, "\"code\":\"usage\"", "context stream usage code")?;
+        ensure_contains(
+            &stdout,
+            "`ee context --stream` requires",
+            "context stream invalid format message",
+        )?;
+        ensure(
+            !stdout.contains("Database not found"),
+            "stream format validation must run before database access",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "context stream invalid stderr must be empty",
         )
     }
 
