@@ -113,6 +113,8 @@ fn doc_distinguishes_current_and_planned_redaction_flags() -> TestResult {
         "`none`/`--include-raw` keeps collected diagnostics raw",
         "`minimal` applies only the secret detector",
         "`standard`/`strict`/`paranoid`",
+        "Per-workspace defaults live in `.ee/config.toml`",
+        "CLI flag → workspace config → built-in default",
     ] {
         ensure(
             doc.contains(required_phrase),
@@ -294,16 +296,17 @@ fn current_context_redaction_claim_matches_cli_and_pack_wiring() -> TestResult {
         "docs/redaction_levels.md must mark ee context --json as a current minimal-redaction surface",
     )?;
     ensure(
-        cli.contains("pub redaction: BackupRedaction"),
+        cli.contains("pub redaction: Option<BackupRedaction>"),
         "ContextArgs must expose a parsed redaction field",
     )?;
     ensure(
-        cli.contains("default_value_t = BackupRedaction::Minimal"),
-        "ee context --redaction must default to the documented minimal level",
+        cli.contains("RedactionDefaultSurface::ContextJson")
+            && cli.contains("RedactionLevel::Minimal"),
+        "ee context must resolve the documented minimal built-in default through workspace config",
     )?;
     ensure(
-        cli.contains("redaction_level: args.redaction.to_model()"),
-        "handle_context must pass the parsed redaction level into ContextPackOptions",
+        cli.contains("redaction_level,"),
+        "handle_context must pass the effective redaction level into ContextPackOptions",
     )?;
     ensure(
         context.contains("pub redaction_level: crate::models::RedactionLevel"),
@@ -335,12 +338,13 @@ fn current_handoff_redaction_claim_matches_cli_wiring() -> TestResult {
         "src/cli/mod.rs must define HandoffCreateArgs",
     )?;
     ensure(
-        cli.contains("default_value_t = BackupRedaction::Standard"),
-        "ee handoff create --redaction must default to the documented standard level",
+        cli.contains("RedactionDefaultSurface::HandoffCreate")
+            && cli.contains("RedactionLevel::Standard"),
+        "ee handoff create must resolve the documented standard built-in default through workspace config",
     )?;
     ensure(
-        cli.contains("redaction_level: args.redaction.to_model()"),
-        "handoff create must pass the parsed redaction level into HandoffCreateOptions",
+        cli.contains("redaction_level,"),
+        "handoff create must pass the effective redaction level into HandoffCreateOptions",
     )
 }
 
@@ -366,12 +370,13 @@ fn current_support_bundle_redaction_claim_matches_cli_and_core_wiring() -> TestR
         "src/cli/mod.rs must define SupportBundleArgs",
     )?;
     ensure(
-        cli.contains("default_value_t = BackupRedaction::Paranoid"),
-        "ee support bundle --redaction must default to the documented paranoid level",
+        cli.contains("RedactionDefaultSurface::SupportBundle")
+            && cli.contains("RedactionLevel::Paranoid"),
+        "ee support bundle must resolve the documented paranoid built-in default through workspace config",
     )?;
     ensure(
-        cli.contains("redaction_level: args.redaction.to_model()"),
-        "support bundle must pass the parsed redaction level into BundleOptions",
+        cli.contains("redaction_level,"),
+        "support bundle must pass the effective redaction level into BundleOptions",
     )?;
     ensure(
         support_bundle.contains("pub redaction_level: RedactionLevel"),
@@ -384,5 +389,40 @@ fn current_support_bundle_redaction_claim_matches_cli_and_core_wiring() -> TestR
     ensure(
         support_bundle.contains("redact_support_bundle_content(content, redaction_level)"),
         "support bundle creation must apply the requested redaction level during final bundle writes",
+    )
+}
+
+#[test]
+fn workspace_redaction_defaults_claim_matches_config_parser() -> TestResult {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let doc = read_doc()?;
+    let config_file = std::fs::read_to_string(manifest_dir.join("src/config/file.rs"))
+        .map_err(|e| format!("read src/config/file.rs: {e}"))?;
+    let config_mod = std::fs::read_to_string(manifest_dir.join("src/config/mod.rs"))
+        .map_err(|e| format!("read src/config/mod.rs: {e}"))?;
+    let cli = std::fs::read_to_string(manifest_dir.join("src/cli/mod.rs"))
+        .map_err(|e| format!("read src/cli/mod.rs: {e}"))?;
+
+    ensure(
+        doc.contains("[redaction.defaults]")
+            && doc.contains("export         = \"standard\"")
+            && doc.contains("support_bundle = \"paranoid\""),
+        "docs/redaction_levels.md must document the live redaction.defaults config table",
+    )?;
+    ensure(
+        config_file.contains("pub struct RedactionDefaultsConfig")
+            && config_file.contains("export: optional_redaction_level_path")
+            && config_file.contains("support_bundle: optional_redaction_level_path"),
+        "ConfigFile must parse redaction.defaults surface defaults",
+    )?;
+    ensure(
+        config_mod.contains("pub enum RedactionDefaultSurface")
+            && config_mod.contains("pub fn workspace_redaction_default"),
+        "config module must expose workspace redaction default resolution",
+    )?;
+    ensure(
+        cli.contains("fn effective_redaction_level")
+            && cli.contains("workspace_redaction_default(workspace_path, surface, built_in)"),
+        "CLI handlers must share CLI-over-config redaction default resolution",
     )
 }

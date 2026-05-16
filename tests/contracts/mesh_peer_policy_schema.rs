@@ -8,8 +8,10 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 const MESH_PEER_POLICY_SCHEMA_V1: &str = "ee.mesh.peer_policy.v1";
+const MESH_POLICY_DECISION_SCHEMA_V1: &str = "ee.mesh.policy_decision.v1";
 const MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1: &str = "ee.mesh.policy_failure_surface.v1";
 const SCHEMA_PATH: &str = "docs/schemas/ee.mesh.peer_policy.v1.json";
+const DECISION_SCHEMA_PATH: &str = "docs/schemas/ee.mesh.policy_decision.v1.json";
 const FAILURE_SURFACE_SCHEMA_PATH: &str = "docs/schemas/ee.mesh.policy_failure_surface.v1.json";
 const FIXTURES: &[&str] = &[
     "tests/fixtures/mesh/peer_policy_metadata_only.json",
@@ -19,6 +21,10 @@ const FIXTURES: &[&str] = &[
 const FAILURE_SURFACE_FIXTURES: &[&str] = &[
     "tests/fixtures/mesh/peer_policy_failure_surface_denied.json",
     "tests/fixtures/mesh/peer_policy_failure_surface_outbound_denied.json",
+];
+const DECISION_FIXTURES: &[&str] = &[
+    "tests/fixtures/mesh/peer_policy_decision_inbound_allowed.json",
+    "tests/fixtures/mesh/peer_policy_decision_outbound_redacted_body_allowed.json",
 ];
 
 fn repo_root() -> PathBuf {
@@ -189,6 +195,64 @@ fn peer_policy_failure_surface_schema_pins_structured_codes() -> TestResult {
 }
 
 #[test]
+fn peer_policy_decision_schema_pins_directional_side_effect_fields() -> TestResult {
+    let schema = read_json(DECISION_SCHEMA_PATH)?;
+
+    ensure_equal(
+        &schema.pointer("/$schema").and_then(Value::as_str),
+        &Some("https://json-schema.org/draft/2020-12/schema"),
+        "json schema draft",
+    )?;
+    ensure_equal(
+        &schema.pointer("/$id").and_then(Value::as_str),
+        &Some("https://eidetic-engine/schemas/ee.mesh.policy_decision.v1.json"),
+        "schema id",
+    )?;
+    ensure_equal(
+        &schema.pointer("/title").and_then(Value::as_str),
+        &Some(MESH_POLICY_DECISION_SCHEMA_V1),
+        "schema title",
+    )?;
+
+    let actions = schema
+        .pointer("/properties/action/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "policy decision action enum missing".to_string())?;
+    for action in ["allow", "deny", "quarantine", "reject"] {
+        ensure(
+            actions.iter().any(|value| value.as_str() == Some(action)),
+            format!("policy decision action {action} missing"),
+        )?;
+    }
+
+    let import_trust = schema
+        .pointer("/properties/importTrustClass/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "importTrustClass enum missing".to_string())?;
+    ensure(
+        !import_trust
+            .iter()
+            .any(|value| value.as_str() == Some("human_explicit")),
+        "policy decision must not allow peer material to import as human_explicit",
+    )?;
+
+    for field in [
+        "bodyFetchAllowed",
+        "localTruthSideEffectsAllowed",
+        "searchOrGraphSideEffectsAllowed",
+        "payloadExportAllowed",
+        "rawPayloadExportAllowed",
+        "redactedPayloadRequired",
+    ] {
+        ensure(
+            schema.pointer(&format!("/properties/{field}")).is_some(),
+            format!("policy decision schema missing {field}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn peer_policy_failure_surface_fixtures_are_redaction_safe() -> TestResult {
     for fixture in FAILURE_SURFACE_FIXTURES {
         let value = read_json(fixture)?;
@@ -210,6 +274,67 @@ fn peer_policy_failure_surface_fixtures_are_redaction_safe() -> TestResult {
                 !text.contains('/') && !text.contains('\\'),
                 format!("{fixture} {field} contains raw path separator"),
             )?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn peer_policy_decision_fixtures_are_redaction_safe_and_directional() -> TestResult {
+    for fixture in DECISION_FIXTURES {
+        let value = read_json(fixture)?;
+        ensure_equal(
+            &value.pointer("/schema").and_then(Value::as_str),
+            &Some(MESH_POLICY_DECISION_SCHEMA_V1),
+            fixture,
+        )?;
+        for field in ["policyRef", "reason"] {
+            let text = value
+                .get(field)
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("{fixture} missing {field}"))?;
+            ensure(
+                !text.contains('/') && !text.contains('\\'),
+                format!("{fixture} {field} contains raw path separator"),
+            )?;
+        }
+
+        match value.pointer("/direction").and_then(Value::as_str) {
+            Some("inbound") => {
+                ensure(
+                    value.get("importTrustClass").is_some()
+                        && value.get("bodyFetchAllowed").is_some()
+                        && value.get("localTruthSideEffectsAllowed").is_some()
+                        && value.get("searchOrGraphSideEffectsAllowed").is_some(),
+                    format!("{fixture} missing inbound side-effect fields"),
+                )?;
+                ensure(
+                    value.get("payloadExportAllowed").is_none()
+                        && value.get("rawPayloadExportAllowed").is_none()
+                        && value.get("redactedPayloadRequired").is_none(),
+                    format!("{fixture} mixes outbound fields into inbound decision"),
+                )?;
+            }
+            Some("outbound") => {
+                ensure(
+                    value.get("payloadExportAllowed").is_some()
+                        && value.get("rawPayloadExportAllowed").is_some()
+                        && value.get("redactedPayloadRequired").is_some(),
+                    format!("{fixture} missing outbound export fields"),
+                )?;
+                ensure(
+                    value.get("importTrustClass").is_none()
+                        && value.get("bodyFetchAllowed").is_none()
+                        && value.get("localTruthSideEffectsAllowed").is_none()
+                        && value.get("searchOrGraphSideEffectsAllowed").is_none(),
+                    format!("{fixture} mixes inbound fields into outbound decision"),
+                )?;
+            }
+            other => {
+                return Err(format!(
+                    "{fixture} has invalid decision direction {other:?}"
+                ));
+            }
         }
     }
     Ok(())

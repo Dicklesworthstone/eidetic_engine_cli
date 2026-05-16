@@ -1,0 +1,14 @@
+{
+  "schema": "ee.mesh.policy_decision.v1",
+  "direction": "outbound",
+  "action": "allow",
+  "reason": "outbound_lane_allowed",
+  "policyRef": "pol_alpha_mesh_policy",
+  "materialLane": "body",
+  "redaction": "redact",
+  "trustLane": "peerAgent",
+  "payloadExportAllowed": true,
+  "rawPayloadExportAllowed": false,
+  "redactedPayloadRequired": true,
+  "failure": null
+}

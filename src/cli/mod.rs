@@ -964,8 +964,8 @@ pub struct BackupCreateArgs {
     pub database: Option<PathBuf>,
 
     /// Redaction level for exported records.
-    #[arg(long, value_enum, default_value_t = BackupRedaction::Standard)]
-    pub redaction: BackupRedaction,
+    #[arg(long, value_enum)]
+    pub redaction: Option<BackupRedaction>,
 
     /// Include rebuildable derived asset manifests and lab evidence in the backup.
     #[arg(long, action = ArgAction::SetTrue)]
@@ -1070,6 +1070,18 @@ impl BackupRedaction {
     }
 }
 
+fn effective_redaction_level(
+    workspace_path: &std::path::Path,
+    cli_level: Option<BackupRedaction>,
+    surface: crate::config::RedactionDefaultSurface,
+    built_in: RedactionLevel,
+) -> RedactionLevel {
+    cli_level.map_or_else(
+        || crate::config::workspace_redaction_default(workspace_path, surface, built_in),
+        BackupRedaction::to_model,
+    )
+}
+
 /// Arguments for `ee export`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct ExportArgs {
@@ -1086,8 +1098,8 @@ pub struct ExportArgs {
     pub label: Option<String>,
 
     /// Redaction level for exported records.
-    #[arg(long, value_enum, default_value_t = BackupRedaction::Standard)]
-    pub redaction: BackupRedaction,
+    #[arg(long, value_enum)]
+    pub redaction: Option<BackupRedaction>,
 
     /// Preview export paths, hashes, and counts without writing files.
     #[arg(long, action = ArgAction::SetTrue)]
@@ -1755,8 +1767,8 @@ pub struct ContextArgs {
     pub no_meta: Option<bool>,
 
     /// Redaction level for context pack output.
-    #[arg(long, value_enum, default_value_t = BackupRedaction::Minimal)]
-    pub redaction: BackupRedaction,
+    #[arg(long, value_enum)]
+    pub redaction: Option<BackupRedaction>,
 
     /// Redacted ee.coordination_snapshot.v1 JSON to embed in the pack.
     #[arg(long, value_name = "PATH")]
@@ -3456,8 +3468,8 @@ pub struct HandoffCreateArgs {
     pub dry_run: bool,
 
     /// Redaction level for the handoff capsule.
-    #[arg(long, value_enum, default_value_t = BackupRedaction::Standard)]
-    pub redaction: BackupRedaction,
+    #[arg(long, value_enum)]
+    pub redaction: Option<BackupRedaction>,
 
     /// Bind capsule integrity to this machine's local handoff salt.
     #[arg(long = "bind-to-machine", action = ArgAction::SetTrue)]
@@ -7782,8 +7794,8 @@ pub struct SupportBundleArgs {
     pub redacted: bool,
 
     /// Redaction level for diagnostic bundle content.
-    #[arg(long, value_enum, default_value_t = BackupRedaction::Paranoid)]
-    pub redaction: BackupRedaction,
+    #[arg(long, value_enum)]
+    pub redaction: Option<BackupRedaction>,
 
     /// Include raw unredacted content (requires explicit opt-in).
     #[arg(long, action = ArgAction::SetTrue)]
@@ -8451,6 +8463,12 @@ where
             }
             HandoffCommand::Create(args) => {
                 let workspace_path = cli.resolve_workspace();
+                let redaction_level = effective_redaction_level(
+                    &workspace_path,
+                    args.redaction,
+                    crate::config::RedactionDefaultSurface::HandoffCreate,
+                    RedactionLevel::Standard,
+                );
                 let profile = match args.profile {
                     HandoffProfile::Compact => CapsuleProfile::Compact,
                     HandoffProfile::Resume => CapsuleProfile::Resume,
@@ -8465,7 +8483,7 @@ where
                     task_frame_id: None,
                     bind_to_machine: args.bind_to_machine,
                     machine_salt_path: None,
-                    redaction_level: args.redaction.to_model(),
+                    redaction_level,
                 };
                 match create_handoff(&options) {
                     Ok(report) => match cli.renderer() {
@@ -11616,12 +11634,18 @@ where
     E: Write,
 {
     let workspace_path = cli.resolve_workspace();
+    let redaction_level = effective_redaction_level(
+        &workspace_path,
+        args.redaction,
+        crate::config::RedactionDefaultSurface::Export,
+        RedactionLevel::Standard,
+    );
     let options = BackupCreateOptions {
         workspace_path,
         database_path: args.database.clone(),
         output_dir: args.output_dir.clone(),
         label: args.label.clone(),
-        redaction_level: args.redaction.to_model(),
+        redaction_level,
         include_derived: args.include_derived,
         include_graph_cache: args.include_graph_cache,
         dry_run: args.dry_run,
@@ -11660,12 +11684,18 @@ where
     E: Write,
 {
     let workspace_path = cli.resolve_workspace();
+    let redaction_level = effective_redaction_level(
+        &workspace_path,
+        args.redaction,
+        crate::config::RedactionDefaultSurface::Export,
+        RedactionLevel::Standard,
+    );
     let options = BackupCreateOptions {
         workspace_path,
         database_path: args.database.clone(),
         output_dir: args.output_dir.clone(),
         label: args.label.clone(),
-        redaction_level: args.redaction.to_model(),
+        redaction_level,
         include_derived: false,
         include_graph_cache: false,
         dry_run: args.dry_run,
@@ -23997,6 +24027,12 @@ where
         args.no_meta,
         args.include_non_affecting_degradations,
     );
+    let redaction_level = effective_redaction_level(
+        &workspace_path,
+        args.redaction,
+        crate::config::RedactionDefaultSurface::ContextJson,
+        RedactionLevel::Minimal,
+    );
     let mut filters = crate::models::QueryFilters::default();
     filters.temporal.as_of = args.as_of;
     if let Err(domain_error) = validate_context_stream_request(cli, args) {
@@ -24017,7 +24053,7 @@ where
         include_expired: args.include_expired,
         include_future: args.include_future,
         include_stale: args.include_stale,
-        redaction_level: args.redaction.to_model(),
+        redaction_level,
         memory_scope: args.memory_scope,
         strict_scope: args.strict_scope,
         ppr_weight: args.ppr_weight,
@@ -26299,7 +26335,7 @@ where
             no_rendered_text: args.no_rendered_text,
             no_skipped: args.no_skipped,
             no_meta: args.no_meta,
-            redaction: BackupRedaction::Minimal,
+            redaction: None,
             include_non_affecting_degradations: args.include_non_affecting_degradations,
             include_tombstoned: false,
             as_of: args.as_of,
@@ -35776,13 +35812,19 @@ where
         .workspace
         .clone()
         .unwrap_or_else(|| cli.resolve_workspace());
+    let redaction_level = effective_redaction_level(
+        &workspace_path,
+        args.redaction,
+        crate::config::RedactionDefaultSurface::SupportBundle,
+        RedactionLevel::Paranoid,
+    );
 
     let options = BundleOptions {
         workspace: workspace_path,
         output_dir: args.out.clone(),
         dry_run: args.dry_run,
         redacted: args.redacted && !args.include_raw,
-        redaction_level: args.redaction.to_model(),
+        redaction_level,
         include_raw: args.include_raw,
         audit_limit: 100,
     };
@@ -37746,6 +37788,7 @@ mod tests {
     use crate::models::error_codes::ALL_ERROR_CODES;
     use crate::models::{
         ALL_DEGRADATION_CODES, MemoryId, MemoryScope, MemoryScopeStats, ProcessExitCode,
+        RedactionLevel,
     };
     use crate::output;
     use crate::pack::PackResourceProfile;
@@ -39662,7 +39705,11 @@ mod tests {
                     &Some(std::path::PathBuf::from("db.sqlite")),
                     "database",
                 )?;
-                ensure_equal(&args.redaction, &BackupRedaction::Paranoid, "redaction")?;
+                ensure_equal(
+                    &args.redaction,
+                    &Some(BackupRedaction::Paranoid),
+                    "redaction",
+                )?;
                 ensure_equal(&args.include_derived, &true, "include derived")?;
                 ensure_equal(&args.include_graph_cache, &false, "include graph cache")?;
                 ensure_equal(&args.dry_run, &true, "dry run")
@@ -39672,16 +39719,12 @@ mod tests {
     }
 
     #[test]
-    fn parser_accepts_context_redaction_level_and_defaults_minimal() -> TestResult {
+    fn parser_accepts_context_redaction_level_and_leaves_default_to_config() -> TestResult {
         let default_parsed = Cli::try_parse_from(["ee", "context", "prepare release"])
             .map_err(|error| format!("failed to parse default context: {:?}", error.kind()))?;
         match default_parsed.command {
             Some(Command::Context(args)) => {
-                ensure_equal(
-                    &args.redaction,
-                    &BackupRedaction::Minimal,
-                    "default redaction",
-                )?;
+                ensure_equal(&args.redaction, &None, "default redaction")?;
             }
             other => return Err(format!("expected context command, got {other:?}")),
         }
@@ -39693,25 +39736,21 @@ mod tests {
                 })?;
         match parsed.command {
             Some(Command::Context(args)) => {
-                ensure_equal(&args.redaction, &BackupRedaction::Strict, "redaction")
+                ensure_equal(&args.redaction, &Some(BackupRedaction::Strict), "redaction")
             }
             other => Err(format!("expected context command, got {other:?}")),
         }
     }
 
     #[test]
-    fn parser_accepts_support_bundle_redaction_level_and_defaults_paranoid() -> TestResult {
+    fn parser_accepts_support_bundle_redaction_level_and_leaves_default_to_config() -> TestResult {
         let default_parsed = Cli::try_parse_from(["ee", "support", "bundle", "--dry-run"])
             .map_err(|error| {
                 format!("failed to parse default support bundle: {:?}", error.kind())
             })?;
         match default_parsed.command {
             Some(Command::Support(SupportCommand::Bundle(args))) => {
-                ensure_equal(
-                    &args.redaction,
-                    &BackupRedaction::Paranoid,
-                    "default redaction",
-                )?;
+                ensure_equal(&args.redaction, &None, "default redaction")?;
             }
             other => return Err(format!("expected support bundle command, got {other:?}")),
         }
@@ -39731,11 +39770,57 @@ mod tests {
             )
         })?;
         match parsed.command {
-            Some(Command::Support(SupportCommand::Bundle(args))) => {
-                ensure_equal(&args.redaction, &BackupRedaction::Minimal, "redaction")
-            }
+            Some(Command::Support(SupportCommand::Bundle(args))) => ensure_equal(
+                &args.redaction,
+                &Some(BackupRedaction::Minimal),
+                "redaction",
+            ),
             other => Err(format!("expected support bundle command, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn effective_redaction_level_uses_cli_then_workspace_config_then_builtin() -> TestResult {
+        let workspace =
+            std::env::temp_dir().join(format!("ee-cli-redaction-defaults-{}", std::process::id()));
+        std::fs::create_dir_all(workspace.join(".ee"))
+            .map_err(|error| format!("create config dir: {error}"))?;
+        std::fs::write(
+            workspace.join(".ee").join("config.toml"),
+            "[redaction.defaults]\ncontext_json = \"strict\"\nsupport_bundle = \"minimal\"\n",
+        )
+        .map_err(|error| format!("write config: {error}"))?;
+
+        ensure_equal(
+            &super::effective_redaction_level(
+                &workspace,
+                None,
+                crate::config::RedactionDefaultSurface::ContextJson,
+                RedactionLevel::Minimal,
+            ),
+            &RedactionLevel::Strict,
+            "config default",
+        )?;
+        ensure_equal(
+            &super::effective_redaction_level(
+                &workspace,
+                Some(BackupRedaction::None),
+                crate::config::RedactionDefaultSurface::ContextJson,
+                RedactionLevel::Minimal,
+            ),
+            &RedactionLevel::None,
+            "CLI override",
+        )?;
+        ensure_equal(
+            &super::effective_redaction_level(
+                &workspace,
+                None,
+                crate::config::RedactionDefaultSurface::HandoffCreate,
+                RedactionLevel::Standard,
+            ),
+            &RedactionLevel::Standard,
+            "built-in fallback",
+        )
     }
 
     #[test]
@@ -42953,17 +43038,13 @@ mod tests {
     }
 
     #[test]
-    fn handoff_create_redaction_command_parses_and_defaults_standard() -> TestResult {
+    fn handoff_create_redaction_command_parses_and_leaves_default_to_config() -> TestResult {
         let default_parsed =
             Cli::try_parse_from(["ee", "handoff", "create", "--out", "handoff.json"])
                 .map_err(|e| format!("failed to parse handoff create: {:?}", e.kind()))?;
         match default_parsed.command {
             Some(Command::Handoff(HandoffCommand::Create(args))) => {
-                ensure_equal(
-                    &args.redaction,
-                    &BackupRedaction::Standard,
-                    "default redaction",
-                )?;
+                ensure_equal(&args.redaction, &None, "default redaction")?;
             }
             _ => return Err("expected handoff create command".to_string()),
         }
@@ -42980,7 +43061,7 @@ mod tests {
         .map_err(|e| format!("failed to parse handoff create redaction: {:?}", e.kind()))?;
         match parsed.command {
             Some(Command::Handoff(HandoffCommand::Create(args))) => {
-                ensure_equal(&args.redaction, &BackupRedaction::Strict, "redaction")
+                ensure_equal(&args.redaction, &Some(BackupRedaction::Strict), "redaction")
             }
             _ => Err("expected handoff create command".to_string()),
         }

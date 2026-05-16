@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.policy_decision.v1.json",
+  "title": "ee.mesh.policy_decision.v1",
+  "description": "Structured, redaction-safe authorization decision surface for optional mesh memory policy checks.",
+  "type": "object",
+  "required": [
+    "schema",
+    "direction",
+    "action",
+    "reason",
+    "policyRef",
+    "materialLane",
+    "redaction",
+    "trustLane",
+    "failure"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.policy_decision.v1"
+    },
+    "direction": {
+      "type": "string",
+      "enum": ["inbound", "outbound"]
+    },
+    "action": {
+      "type": "string",
+      "enum": ["allow", "deny", "quarantine", "reject"]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[a-z0-9_:-]+$"
+    },
+    "policyRef": {
+      "description": "Either the literal missing-policy sentinel or a redaction-safe policy alias. Raw path-like policy IDs must be hashed before they reach this field.",
+      "type": "string",
+      "pattern": "^(missing|[A-Za-z0-9._:-]{6,160})$"
+    },
+    "materialLane": {
+      "type": "string",
+      "enum": [
+        "metadata",
+        "body",
+        "embedding",
+        "graphLink",
+        "revisionNotice",
+        "curationSignal"
+      ]
+    },
+    "redaction": {
+      "type": "string",
+      "enum": ["share", "redact", "deny"]
+    },
+    "trustLane": {
+      "type": ["string", "null"],
+      "enum": [
+        "localHuman",
+        "peerHumanViaPeer",
+        "peerAgent",
+        "peerDerived",
+        "untrusted",
+        null
+      ]
+    },
+    "importTrustClass": {
+      "type": ["string", "null"],
+      "enum": ["agent_validated", "agent_assertion", "cass_evidence", "legacy_import", null]
+    },
+    "bodyFetchAllowed": {
+      "type": "boolean"
+    },
+    "localTruthSideEffectsAllowed": {
+      "type": "boolean"
+    },
+    "searchOrGraphSideEffectsAllowed": {
+      "type": "boolean"
+    },
+    "payloadExportAllowed": {
+      "type": "boolean"
+    },
+    "rawPayloadExportAllowed": {
+      "type": "boolean"
+    },
+    "redactedPayloadRequired": {
+      "type": "boolean"
+    },
+    "failure": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "ee.mesh.policy_failure_surface.v1.json"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "direction": { "const": "inbound" }
+        }
+      },
+      "then": {
+        "required": [
+          "importTrustClass",
+          "bodyFetchAllowed",
+          "localTruthSideEffectsAllowed",
+          "searchOrGraphSideEffectsAllowed"
+        ],
+        "not": {
+          "anyOf": [
+            { "required": ["payloadExportAllowed"] },
+            { "required": ["rawPayloadExportAllowed"] },
+            { "required": ["redactedPayloadRequired"] }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "direction": { "const": "outbound" }
+        }
+      },
+      "then": {
+        "required": [
+          "payloadExportAllowed",
+          "rawPayloadExportAllowed",
+          "redactedPayloadRequired"
+        ],
+        "not": {
+          "anyOf": [
+            { "required": ["importTrustClass"] },
+            { "required": ["bodyFetchAllowed"] },
+            { "required": ["localTruthSideEffectsAllowed"] },
+            { "required": ["searchOrGraphSideEffectsAllowed"] }
+          ]
+        }
+      }
+    }
+  ]
+}

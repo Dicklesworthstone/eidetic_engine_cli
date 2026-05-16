@@ -257,6 +257,8 @@ impl MeshPeerPolicyDecision {
     #[must_use]
     pub fn to_json(&self) -> JsonValue {
         json!({
+            "schema": "ee.mesh.policy_decision.v1",
+            "direction": "inbound",
             "action": self.import.workspace_scope_decision.as_str(),
             "reason": self.import.reason,
             "policyRef": mesh_policy_ref(self.policy_id.as_deref()),
@@ -330,6 +332,8 @@ impl MeshOutboundPolicyDecision {
     #[must_use]
     pub fn to_json(&self) -> JsonValue {
         json!({
+            "schema": "ee.mesh.policy_decision.v1",
+            "direction": "outbound",
             "action": self.action.as_str(),
             "reason": self.reason,
             "policyRef": mesh_policy_ref(self.policy_id.as_deref()),
@@ -1867,6 +1871,8 @@ max_bytes = 0
         let allowed =
             decide_mesh_peer_policy(&peer_policy_input(MeshLane::Metadata), Some(&peer_policy()));
         let allowed_json = allowed.to_json();
+        assert_eq!(allowed_json["schema"], "ee.mesh.policy_decision.v1");
+        assert_eq!(allowed_json["direction"], "inbound");
         assert_eq!(allowed_json["action"], "allow");
         assert_eq!(allowed_json["reason"], "peer_policy_lane_allowed");
         assert_eq!(allowed_json["policyRef"], "pol_alpha_mesh_policy");
@@ -2040,6 +2046,8 @@ max_bytes = 0
             Some(&peer_policy()),
         );
         let allowed_json = allowed.to_json();
+        assert_eq!(allowed_json["schema"], "ee.mesh.policy_decision.v1");
+        assert_eq!(allowed_json["direction"], "outbound");
         assert_eq!(allowed_json["action"], "allow");
         assert_eq!(allowed_json["reason"], "outbound_lane_allowed");
         assert_eq!(allowed_json["policyRef"], "pol_alpha_mesh_policy");

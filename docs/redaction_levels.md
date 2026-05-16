@@ -79,7 +79,7 @@ path-like segments. Some nested support-bundle sections are already
 summary-only before this final pass, so higher levels may have identical output
 when no additional path-like or secret-like text is present.
 
-The planned per-workspace override shape is:
+Per-workspace defaults live in `.ee/config.toml`:
 
 ```toml
 [redaction.defaults]
@@ -89,7 +89,7 @@ context_json   = "minimal"
 support_bundle = "paranoid"
 ```
 
-The override precedence once that policy surface is implemented is:
+The override precedence is:
 CLI flag → workspace config → built-in default. No `EE_REDACTION_*`
 redaction-level override is currently registered; adding one must update
 both `src/config/env_registry.rs` and `docs/env_vars.md` in the same change.

@@ -4,6 +4,7 @@ Status: proposed
 Bead: bd-29ulx
 ADR: docs/adr/0037-optional-mesh-memory.md
 Schema: docs/schemas/ee.mesh.peer_policy.v1.json
+Decision schema: docs/schemas/ee.mesh.policy_decision.v1.json
 
 ## Purpose
 
@@ -162,6 +163,10 @@ Initial fixtures live under `tests/fixtures/mesh/`:
   trusted peer-agent lane.
 - `peer_policy_redacted_body_allowed.json` allows bounded body fetch only with
   consent and redacted body payloads while embeddings remain denied.
+- `peer_policy_decision_inbound_allowed.json` pins the stable JSON shape for an
+  allowed inbound metadata decision and its local side-effect booleans.
+- `peer_policy_decision_outbound_redacted_body_allowed.json` pins the outbound
+  redacted body export decision shape.
 - `peer_policy_failure_surface_outbound_denied.json` pins an outbound
   embedding export denial when policy requires a redacted payload.
 

@@ -1,0 +1,15 @@
+{
+  "schema": "ee.mesh.policy_decision.v1",
+  "direction": "inbound",
+  "action": "allow",
+  "reason": "peer_policy_lane_allowed",
+  "policyRef": "pol_alpha_mesh_policy",
+  "materialLane": "metadata",
+  "redaction": "share",
+  "trustLane": "peerAgent",
+  "importTrustClass": "agent_validated",
+  "bodyFetchAllowed": false,
+  "localTruthSideEffectsAllowed": true,
+  "searchOrGraphSideEffectsAllowed": true,
+  "failure": null
+}

@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::models::RedactionLevel;
+
 pub mod env_registry;
 pub mod file;
 pub mod merge;
@@ -17,8 +19,8 @@ pub use file::{
     MeshBodyFetchPolicyConfig, MeshCommandMode, MeshConfig, MeshLane, MeshLaneDecision,
     MeshLaneGrants, MeshPeerGroupBinding, MeshPeerPolicyConfig, MeshRedactionDecision,
     MeshRedactionPolicyConfig, MeshTrustLane, OutputRedactionConfig, PackConfig, PackL2CacheConfig,
-    PolicyConfig, PrivacyConfig, ReadPoolConfig, RuntimeConfig, SearchConfig, SearchSpeed,
-    SecretDetectorConfig, StorageConfig, TrustConfig,
+    PolicyConfig, PrivacyConfig, ReadPoolConfig, RedactionConfig, RedactionDefaultsConfig,
+    RuntimeConfig, SearchConfig, SearchSpeed, SecretDetectorConfig, StorageConfig, TrustConfig,
 };
 pub use merge::{
     CACHE_PACK_L2_DIRECTORY_KEY, CACHE_PACK_L2_ENABLED_KEY, CACHE_PACK_L2_MAX_AGE_DAYS_KEY,
@@ -104,9 +106,46 @@ pub fn workspace_output_redaction_enabled(workspace_path: &Path) -> bool {
         .unwrap_or(true)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RedactionDefaultSurface {
+    Export,
+    HandoffCreate,
+    ContextJson,
+    SupportBundle,
+}
+
+#[must_use]
+pub fn workspace_redaction_default(
+    workspace_path: &Path,
+    surface: RedactionDefaultSurface,
+    built_in: RedactionLevel,
+) -> RedactionLevel {
+    let config_path = workspace_path.join(".ee").join("config.toml");
+    let Ok(contents) = std::fs::read_to_string(config_path) else {
+        return built_in;
+    };
+    let Ok(config) = ConfigFile::parse(&contents) else {
+        return built_in;
+    };
+    let configured = match surface {
+        RedactionDefaultSurface::Export => config.redaction.defaults.export,
+        RedactionDefaultSurface::HandoffCreate => config.redaction.defaults.handoff_create,
+        RedactionDefaultSurface::ContextJson => config.redaction.defaults.context_json,
+        RedactionDefaultSurface::SupportBundle => config.redaction.defaults.support_bundle,
+    };
+    configured.unwrap_or(built_in)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{subsystem_name, trace_minhash_rank_centrality_config};
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::{
+        RedactionDefaultSurface, subsystem_name, trace_minhash_rank_centrality_config,
+        workspace_redaction_default,
+    };
+    use crate::models::RedactionLevel;
 
     type TestResult = Result<(), String>;
 
@@ -126,5 +165,51 @@ mod tests {
         trace_minhash_rank_centrality_config("input", 0, &[]);
         trace_minhash_rank_centrality_config("response", 0, &[]);
         ensure_equal(&subsystem_name(), &"config", "config subsystem name")
+    }
+
+    #[test]
+    fn workspace_redaction_default_reads_surface_config() -> TestResult {
+        let workspace =
+            std::env::temp_dir().join(format!("ee-redaction-defaults-{}", std::process::id()));
+        fs::create_dir_all(workspace.join(".ee"))
+            .map_err(|error| format!("create config dir: {error}"))?;
+        fs::write(
+            workspace.join(".ee").join("config.toml"),
+            r#"
+[redaction.defaults]
+export = "strict"
+context_json = "minimal"
+support_bundle = "paranoid"
+"#,
+        )
+        .map_err(|error| format!("write config: {error}"))?;
+
+        ensure_equal(
+            &workspace_redaction_default(
+                &workspace,
+                RedactionDefaultSurface::Export,
+                RedactionLevel::Standard,
+            ),
+            &RedactionLevel::Strict,
+            "export default",
+        )?;
+        ensure_equal(
+            &workspace_redaction_default(
+                &workspace,
+                RedactionDefaultSurface::HandoffCreate,
+                RedactionLevel::Standard,
+            ),
+            &RedactionLevel::Standard,
+            "handoff default fallback",
+        )?;
+        ensure_equal(
+            &workspace_redaction_default(
+                &PathBuf::from("/definitely/missing/ee/workspace"),
+                RedactionDefaultSurface::SupportBundle,
+                RedactionLevel::Paranoid,
+            ),
+            &RedactionLevel::Paranoid,
+            "missing config fallback",
+        )
     }
 }

@@ -11,7 +11,7 @@ use std::str::FromStr;
 use regex_lite::Regex;
 use toml_edit::{DocumentMut, Item, Table, Value};
 
-use crate::models::TrustClass;
+use crate::models::{RedactionLevel, TrustClass};
 
 use super::path::{PathExpander, PathExpansionError};
 
@@ -30,6 +30,7 @@ pub struct ConfigFile {
     pub curation: CurationConfig,
     pub learn: LearnConfig,
     pub feedback: FeedbackConfig,
+    pub redaction: RedactionConfig,
     pub policy: PolicyConfig,
     pub privacy: PrivacyConfig,
     pub trust: TrustConfig,
@@ -83,6 +84,7 @@ impl ConfigFile {
             curation: CurationConfig::parse(&document)?,
             learn: LearnConfig::parse(&document)?,
             feedback: FeedbackConfig::parse(&document)?,
+            redaction: RedactionConfig::parse(&document)?,
             policy: PolicyConfig::parse(&document)?,
             privacy: PrivacyConfig::parse(&document)?,
             trust: TrustConfig::parse(&document)?,
@@ -911,6 +913,39 @@ impl FeedbackConfig {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RedactionConfig {
+    pub defaults: RedactionDefaultsConfig,
+}
+
+impl RedactionConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            defaults: RedactionDefaultsConfig::parse(document)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RedactionDefaultsConfig {
+    pub export: Option<RedactionLevel>,
+    pub handoff_create: Option<RedactionLevel>,
+    pub context_json: Option<RedactionLevel>,
+    pub support_bundle: Option<RedactionLevel>,
+}
+
+impl RedactionDefaultsConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        const SECTIONS: &[&str] = &["redaction", "defaults"];
+        Ok(Self {
+            export: optional_redaction_level_path(document, SECTIONS, "export")?,
+            handoff_create: optional_redaction_level_path(document, SECTIONS, "handoff_create")?,
+            context_json: optional_redaction_level_path(document, SECTIONS, "context_json")?,
+            support_bundle: optional_redaction_level_path(document, SECTIONS, "support_bundle")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PolicyConfig {
     pub secret_detector: SecretDetectorConfig,
     pub output_redaction: OutputRedactionConfig,
@@ -1080,6 +1115,48 @@ fn optional_string(
             }),
         None => Ok(None),
     }
+}
+
+fn optional_string_path(
+    document: &DocumentMut,
+    sections: &[&str],
+    key: &str,
+) -> Result<Option<String>, ConfigParseError> {
+    match item_path(document, sections, key) {
+        Some(value) => value
+            .as_str()
+            .map(|text| Some(text.to_string()))
+            .ok_or_else(|| ConfigParseError::InvalidType {
+                key: key_path_name(sections, key),
+                expected: "a string",
+            }),
+        None => Ok(None),
+    }
+}
+
+fn optional_redaction_level_path(
+    document: &DocumentMut,
+    sections: &[&str],
+    key: &str,
+) -> Result<Option<RedactionLevel>, ConfigParseError> {
+    let Some(raw) = optional_string_path(document, sections, key)? else {
+        return Ok(None);
+    };
+    let level = raw
+        .parse::<RedactionLevel>()
+        .map_err(|error| ConfigParseError::InvalidValue {
+            key: key_path_name(sections, key),
+            value: error.invalid,
+            message: "expected one of: none, minimal, standard, strict, paranoid".to_owned(),
+        })?;
+    if level == RedactionLevel::Full {
+        return Err(ConfigParseError::InvalidValue {
+            key: key_path_name(sections, key),
+            value: raw,
+            message: "expected one of: none, minimal, standard, strict, paranoid".to_owned(),
+        });
+    }
+    Ok(Some(level))
 }
 
 fn optional_bool(
@@ -1850,7 +1927,7 @@ mod tests {
         ConfigFile, ConfigParseError, MeshCommandMode, MeshLane, MeshLaneDecision,
         MeshRedactionDecision, MeshTrustLane, PathExpander, SearchSpeed, optional_string_array,
     };
-    use crate::models::TrustClass;
+    use crate::models::{RedactionLevel, TrustClass};
 
     type TestResult = Result<(), String>;
 
@@ -2021,6 +2098,12 @@ episodic_failure_half_life_days = 90
 semantic_fact_half_life_days = 180
 procedural_rule_half_life_days = 365
 default_half_life_days = 30
+
+[redaction.defaults]
+export = "strict"
+handoff_create = "standard"
+context_json = "minimal"
+support_bundle = "paranoid"
 
 [policy.secret_detector]
 allow_phrases = ["OAuth refresh token", "secret ballot"]
@@ -2302,6 +2385,26 @@ prompt_injection_guard = true
             "output redaction enabled",
         )?;
         ensure_equal(
+            &config.redaction.defaults.export,
+            &Some(RedactionLevel::Strict),
+            "export redaction default",
+        )?;
+        ensure_equal(
+            &config.redaction.defaults.handoff_create,
+            &Some(RedactionLevel::Standard),
+            "handoff create redaction default",
+        )?;
+        ensure_equal(
+            &config.redaction.defaults.context_json,
+            &Some(RedactionLevel::Minimal),
+            "context JSON redaction default",
+        )?;
+        ensure_equal(
+            &config.redaction.defaults.support_bundle,
+            &Some(RedactionLevel::Paranoid),
+            "support bundle redaction default",
+        )?;
+        ensure_equal(
             &config.privacy.redaction_classes,
             &Some(vec![
                 "api_key".to_string(),
@@ -2355,6 +2458,26 @@ prompt_injection_guard = true
             &config.policy.output_redaction.enabled,
             &None,
             "output redaction enabled",
+        )?;
+        ensure_equal(
+            &config.redaction.defaults.export,
+            &None,
+            "export redaction default",
+        )?;
+        ensure_equal(
+            &config.redaction.defaults.handoff_create,
+            &None,
+            "handoff create redaction default",
+        )?;
+        ensure_equal(
+            &config.redaction.defaults.context_json,
+            &None,
+            "context JSON redaction default",
+        )?;
+        ensure_equal(
+            &config.redaction.defaults.support_bundle,
+            &None,
+            "support bundle redaction default",
         )?;
         ensure_equal(
             &config.handoff.stale_threshold.memories_added,
@@ -2429,6 +2552,20 @@ prompt_injection_guard = true
                 error,
                 ConfigParseError::InvalidValue { ref key, .. }
                     if key == "search.default_speed"
+            ),
+            format!("unexpected error: {error:?}"),
+        )
+    }
+
+    #[test]
+    fn rejects_unknown_redaction_default_level() -> TestResult {
+        let error = expect_config_error("[redaction.defaults]\ncontext_json = \"full\"\n")?;
+
+        ensure(
+            matches!(
+                error,
+                ConfigParseError::InvalidValue { ref key, ref value, .. }
+                    if key == "redaction.defaults.context_json" && value == "full"
             ),
             format!("unexpected error: {error:?}"),
         )
