@@ -10661,6 +10661,17 @@ pub fn generate_audit_id() -> String {
     format!("audit_{}", uuid::Uuid::now_v7().simple())
 }
 
+/// Generate a deterministic audit ID from a caller-owned capability token.
+///
+/// This preserves the legacy `audit_` + 32-hex UUID payload contract while
+/// giving N4.3 call sites a token-threaded alternative to ambient UUIDv7.
+#[must_use]
+pub fn generate_audit_id_seeded(
+    determinism: &mut crate::runtime::determinism::Deterministic<crate::runtime::determinism::Seed>,
+) -> String {
+    format!("audit_{}", determinism.clock().next_uuid_v7().simple())
+}
+
 /// Input for creating a hashed preflight bypass token record.
 #[derive(Debug, Clone)]
 pub struct CreatePreflightBypassTokenInput {
@@ -13059,6 +13070,28 @@ fn advisory_lock_retry_delay(attempt: usize) -> Duration {
     let multiplier = 1_u64 << attempt.min(6);
     Duration::from_millis(BASE_DELAY_MS.saturating_mul(multiplier).min(MAX_DELAY_MS))
 }
+
+/// NOTE ON Asupersync / CANCELLATION CONTRACT (as of 2026-05 ownership-posture review):
+/// The retry loops that call `std::thread::sleep(advisory_lock_retry_delay(...))` (in
+/// `retry_file_database_open`, `retry_sqlite_contention`, advisory lock acquisition,
+/// and the write-owner begin_tx path) use a hard OS thread sleep.
+///
+/// Per AGENTS.md and the core architecture, all long-running/contended work should
+/// respect `&Cx`, `Outcome`, budgets, and cancellation via asupersync. `thread::sleep`
+/// cannot be cancelled and does not participate in structured concurrency.
+///
+/// Current mitigation (best judgement at time of review):
+/// - Total backoff across all attempts is intentionally capped at < ~400 ms (16 attempts
+///   at 50 ms cap).
+/// - The primary callers for the hot query contention path are bounded.
+/// - DB open paths are synchronous CLI entry points (init, workspace resolution).
+///
+/// TODO (follow-up bead): Provide a Cx-aware variant of the retry helpers that accepts
+/// `Option<&Cx>` and uses `asupersync::time::sleep(cx.now(), dur).await` (see steward/mod.rs
+/// for the pattern) when a Cx is supplied, falling back to thread::sleep only for
+/// truly synchronous open. When that lands, remove this note and the `std::thread::sleep`
+/// calls in async-reachable paths. The write-owner flock + process gate remain the
+/// correct safety mechanism; only the *waiting* strategy needs to become cancellation-aware.
 
 /// Result of attempting to acquire an advisory lock.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19852,6 +19885,30 @@ mod tests {
             )?;
         }
         ensure_equal(&ids.len(), &1000, "all 1000 IDs are unique")?;
+        Ok(())
+    }
+
+    #[test]
+    fn generate_audit_id_seeded_is_replayable_and_monotonic() -> TestResult {
+        let mut first_token = crate::runtime::determinism::Deterministic::from_seed(9_000);
+        let first = super::generate_audit_id_seeded(&mut first_token);
+        let second = super::generate_audit_id_seeded(&mut first_token);
+
+        ensure(first.starts_with("audit_"), "seeded ID starts with audit_")?;
+        ensure_equal(&first.len(), &38, "seeded ID preserves audit hex shape")?;
+        ensure(first < second, "seeded UUIDv7 audit IDs are monotonic")?;
+
+        let mut replay_token = crate::runtime::determinism::Deterministic::from_seed(9_000);
+        ensure_equal(
+            &first,
+            &super::generate_audit_id_seeded(&mut replay_token),
+            "first seeded audit ID replays",
+        )?;
+        ensure_equal(
+            &second,
+            &super::generate_audit_id_seeded(&mut replay_token),
+            "second seeded audit ID replays",
+        )?;
         Ok(())
     }
 
