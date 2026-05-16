@@ -66,6 +66,7 @@ impl PprPrefetchCacheEntry {
 pub struct PprPrefetchCache {
     capacity: usize,
     access_sequence: u64,
+    live_generation: Option<u64>,
     entries: BTreeMap<PprPrefetchCacheKey, PprPrefetchCacheEntry>,
 }
 
@@ -75,6 +76,7 @@ impl PprPrefetchCache {
         Self {
             capacity,
             access_sequence: 0,
+            live_generation: None,
             entries: BTreeMap::new(),
         }
     }
@@ -100,14 +102,17 @@ impl PprPrefetchCache {
         scores: Vec<CentralityScore>,
     ) -> PprPrefetchCacheInsert {
         let result_hash = ppr_prefetch_result_hash(&key, &scores);
+        let snapshot_generation = key.snapshot_generation;
         if self.capacity == 0 {
+            let evicted = self.evict_for_generation_insert(snapshot_generation);
             self.entries.clear();
             return PprPrefetchCacheInsert {
                 result_hash,
-                evicted: Vec::new(),
+                evicted,
             };
         }
 
+        let mut evicted = self.evict_for_generation_insert(snapshot_generation);
         let last_used_sequence = self.next_access_sequence();
         self.entries.insert(
             key,
@@ -118,7 +123,7 @@ impl PprPrefetchCache {
                 last_used_sequence,
             },
         );
-        let evicted = self.evict_to_capacity();
+        evicted.extend(self.evict_to_capacity());
         PprPrefetchCacheInsert {
             result_hash,
             evicted,
@@ -131,14 +136,17 @@ impl PprPrefetchCache {
         result: PageRankResult,
     ) -> PprPrefetchCacheInsert {
         let result_hash = ppr_prefetch_page_rank_result_hash(&key, &result);
+        let snapshot_generation = key.snapshot_generation;
         if self.capacity == 0 {
+            let evicted = self.evict_for_generation_insert(snapshot_generation);
             self.entries.clear();
             return PprPrefetchCacheInsert {
                 result_hash,
-                evicted: Vec::new(),
+                evicted,
             };
         }
 
+        let mut evicted = self.evict_for_generation_insert(snapshot_generation);
         let last_used_sequence = self.next_access_sequence();
         self.entries.insert(
             key,
@@ -149,7 +157,7 @@ impl PprPrefetchCache {
                 last_used_sequence,
             },
         );
-        let evicted = self.evict_to_capacity();
+        evicted.extend(self.evict_to_capacity());
         PprPrefetchCacheInsert {
             result_hash,
             evicted,
@@ -195,6 +203,22 @@ impl PprPrefetchCache {
         &mut self,
         snapshot_generation: u64,
     ) -> Vec<PprPrefetchCacheKey> {
+        self.live_generation = Some(snapshot_generation);
+        self.remove_generations_except(snapshot_generation)
+    }
+
+    fn evict_for_generation_insert(
+        &mut self,
+        snapshot_generation: u64,
+    ) -> Vec<PprPrefetchCacheKey> {
+        if self.live_generation == Some(snapshot_generation) {
+            return Vec::new();
+        }
+        self.live_generation = Some(snapshot_generation);
+        self.remove_generations_except(snapshot_generation)
+    }
+
+    fn remove_generations_except(&mut self, snapshot_generation: u64) -> Vec<PprPrefetchCacheKey> {
         let stale = self
             .entries
             .keys()
@@ -444,13 +468,43 @@ mod tests {
         let old_key = key("seed-a", 1);
         let live_key = key("seed-a", 2);
         cache.insert(old_key.clone(), scores(&[("old", 1.0)]));
-        cache.insert(live_key.clone(), scores(&[("live", 1.0)]));
 
         let removed = cache.invalidate_generations_except(2);
 
         assert_eq!(removed, vec![old_key.clone()]);
         assert_eq!(cache.get(&old_key), None);
+        assert!(cache.is_empty());
+        let insert = cache.insert(live_key.clone(), scores(&[("live", 1.0)]));
+        assert!(insert.evicted.is_empty());
         assert!(cache.get(&live_key).is_some());
+    }
+
+    #[test]
+    fn generation_bump_on_insert_evicts_prior_generation() {
+        let mut cache = PprPrefetchCache::new(4);
+        let old_key = key("seed-a", 1);
+        let live_key = key("seed-a", 2);
+        cache.insert(old_key.clone(), scores(&[("old", 1.0)]));
+
+        let insert = cache.insert(live_key.clone(), scores(&[("live", 1.0)]));
+
+        assert_eq!(insert.evicted, vec![old_key.clone()]);
+        assert_eq!(cache.get(&old_key), None);
+        assert!(cache.get(&live_key).is_some());
+    }
+
+    #[test]
+    fn generation_bump_on_result_insert_evicts_prior_generation() {
+        let mut cache = PprPrefetchCache::new(4);
+        let old_key = key("seed-a", 1);
+        let live_key = key("seed-a", 2);
+        cache.insert_result(old_key.clone(), page_rank_result(&[("old", 1.0)]));
+
+        let insert = cache.insert_result(live_key.clone(), page_rank_result(&[("live", 1.0)]));
+
+        assert_eq!(insert.evicted, vec![old_key.clone()]);
+        assert_eq!(cache.get_result(&old_key), None);
+        assert!(cache.get_result(&live_key).is_some());
     }
 
     #[test]
