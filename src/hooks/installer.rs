@@ -969,30 +969,28 @@ fn bash_preflight_snippet(ee_path_quoted: &str) -> String {
 
 if [ -n "${{BASH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; then
     EE_PREFLIGHT_HOOK_BINARY={ee_path}
-    EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES='{severities}'
 
     __ee_preflight_hook_check() {{
         # Skip our own callbacks and shell builtins that have nothing to gate.
         case "${{BASH_COMMAND:-}}" in
             __ee_preflight_*|trap*|exit*|return*|fc*|history*|cd*|''|set*|unset*) return 0 ;;
         esac
-        # Only intercept in interactive shells with a controlling tty.
+        # Only intercept in interactive shells. The /dev/tty read below
+        # defaults to N (block) when no controlling tty is available.
         [ -z "${{PS1:-}}" ] && return 0
-        [ ! -t 0 ] && return 0
 
         local _ee_out _ee_exit _ee_sev _ee_msg _ee_reply
         _ee_out=$("$EE_PREFLIGHT_HOOK_BINARY" preflight check \
             --cmd "$BASH_COMMAND" --json 2>/dev/null)
         _ee_exit=$?
         # Exit 7 means policy denied per the AGENTS.md trauma-guard contract.
+        # We always respect the live check's severity decision (no baked
+        # client-side filter) so installed hooks stay in sync with the
+        # current central policy in commands.json.
         [ "$_ee_exit" != 7 ] && return 0
 
         _ee_sev=$(printf '%s' "$_ee_out" | awk -F'"severity":"' \
             'NF>1{{split($2,a,"\""); print a[1]; exit}}')
-        case " $EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES " in
-            *" $_ee_sev "*) ;;
-            *) return 0 ;;
-        esac
         _ee_msg=$(printf '%s' "$_ee_out" | awk -F'"message":"' \
             'NF>1{{split($2,a,"\""); print a[1]; exit}}')
         printf '\n[ee preflight] %s (severity=%s)\n' "$_ee_msg" "$_ee_sev" >&2
@@ -1048,8 +1046,12 @@ if [ -n "${{ZSH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; then
         case "$_ee_cmd" in
             __ee_preflight_*|trap*|exit*|return*|fc*|history*|''|cd*|set*|unset*) return 0 ;;
         esac
+        # Only intercept in interactive shells. The /dev/tty read below
+        # defaults to N (block-via-SIGINT) when no controlling tty is
+        # available, so there is no need for a separate `[ ! -t 0 ]`
+        # early-return that would short-circuit before the snippet can
+        # call ee preflight, render the warning, or default-block.
         [ -z "${{PS1:-}}" ] && return 0
-        [ ! -t 0 ] && return 0
 
         local _ee_out _ee_exit _ee_sev _ee_msg _ee_reply
         _ee_out=$("$EE_PREFLIGHT_HOOK_BINARY" preflight check \
