@@ -287,11 +287,38 @@ fn lock_database_write_file(database_path: &Path) -> Result<File> {
         })?;
 
     #[cfg(unix)]
-    flock(&lock_file, FlockOperation::LockExclusive).map_err(|error| DbError::InvalidPath {
-        operation: DbOperation::BeginTransaction,
-        path: lock_path,
-        message: format!("could not acquire database write lock: {error}"),
-    })?;
+    {
+        use rustix::io::Errno;
+        let mut acquired = false;
+        for attempt in 0..FILE_DATABASE_OPEN_MAX_ATTEMPTS {
+            match flock(&lock_file, FlockOperation::NonBlockingLockExclusive) {
+                Ok(_) => {
+                    acquired = true;
+                    break;
+                }
+                Err(error) => {
+                    if error == Errno::WOULDBLOCK || error == Errno::AGAIN {
+                        if attempt + 1 < FILE_DATABASE_OPEN_MAX_ATTEMPTS {
+                            std::thread::sleep(advisory_lock_retry_delay(attempt));
+                            continue;
+                        }
+                    }
+                    return Err(DbError::InvalidPath {
+                        operation: DbOperation::BeginTransaction,
+                        path: lock_path.clone(),
+                        message: format!("could not acquire database write lock: {error}"),
+                    });
+                }
+            }
+        }
+        if !acquired {
+            return Err(DbError::InvalidPath {
+                operation: DbOperation::BeginTransaction,
+                path: lock_path,
+                message: "could not acquire database write lock: contention timeout".to_string(),
+            });
+        }
+    }
 
     Ok(lock_file)
 }
