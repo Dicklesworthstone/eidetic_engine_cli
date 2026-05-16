@@ -1273,6 +1273,8 @@ enum IndexPublishRecoveryAction {
 fn recover_interrupted_publish(
     index_dir: &Path,
 ) -> Result<IndexPublishRecoveryAction, IndexRebuildError> {
+    ensure_index_path_has_no_symlinks(index_dir, "recover interrupted index publish")?;
+
     if index_dir.exists() {
         return Ok(IndexPublishRecoveryAction::ActivePresent);
     }
@@ -1297,6 +1299,7 @@ fn recover_interrupted_publish(
 
 fn create_publish_staging_dir(index_dir: &Path) -> Result<PathBuf, IndexRebuildError> {
     let parent = index_parent(index_dir);
+    ensure_index_path_has_no_symlinks(parent, "create index parent directory")?;
     std::fs::create_dir_all(parent).map_err(|e| {
         IndexRebuildError::Index(format!("Failed to create index parent directory: {e}"))
     })?;
@@ -1324,6 +1327,9 @@ fn create_publish_staging_dir(index_dir: &Path) -> Result<PathBuf, IndexRebuildE
 }
 
 fn publish_staged_index(index_dir: &Path, staging_dir: &Path) -> Result<(), IndexRebuildError> {
+    ensure_index_path_has_no_symlinks(staging_dir, "publish staged index generation")?;
+    ensure_index_path_has_no_symlinks(index_dir, "publish staged index generation")?;
+
     if !staging_dir.exists() {
         return Err(IndexRebuildError::Index(format!(
             "Index staging directory does not exist: {}",
@@ -1369,6 +1375,7 @@ fn write_index_metadata(
     })?;
 
     let meta_path = index_dir.join(INDEX_METADATA_FILE);
+    ensure_index_path_has_no_symlinks(&meta_path, "write index metadata")?;
     let mut file = std::fs::File::create(&meta_path).map_err(|e| {
         IndexRebuildError::Index(format!("Failed to open index metadata for writing: {e}"))
     })?;
@@ -1403,7 +1410,9 @@ fn find_complete_staging_dir(index_dir: &Path) -> Result<Option<PathBuf>, IndexR
         }
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with(&prefix) && entry.path().join(INDEX_METADATA_FILE).is_file() {
+        if name.starts_with(&prefix)
+            && path_is_regular_file_no_follow(&entry.path().join(INDEX_METADATA_FILE))
+        {
             candidates.push(entry.path());
         }
     }
@@ -1458,6 +1467,8 @@ fn index_base_name(index_dir: &Path) -> Result<String, IndexRebuildError> {
 }
 
 fn rename_index_dir(from: &Path, to: &Path, action: &str) -> Result<(), IndexRebuildError> {
+    ensure_index_path_has_no_symlinks(from, action)?;
+    ensure_index_path_has_no_symlinks(to, action)?;
     std::fs::rename(from, to).map_err(|e| {
         IndexRebuildError::Index(format!(
             "Failed to {action} from {} to {}: {e}",
@@ -1465,6 +1476,53 @@ fn rename_index_dir(from: &Path, to: &Path, action: &str) -> Result<(), IndexReb
             to.display()
         ))
     })
+}
+
+fn ensure_index_path_has_no_symlinks(path: &Path, action: &str) -> Result<(), IndexRebuildError> {
+    if let Some(component) = first_existing_index_symlink_component(path)? {
+        return Err(IndexRebuildError::Index(format!(
+            "Refusing to {action} through symlinked index path component: {}",
+            component.display()
+        )));
+    }
+    Ok(())
+}
+
+fn first_existing_index_symlink_component(
+    path: &Path,
+) -> Result<Option<PathBuf>, IndexRebuildError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                current.push(component.as_os_str());
+                continue;
+            }
+            std::path::Component::CurDir => continue,
+            std::path::Component::ParentDir | std::path::Component::Normal(_) => {
+                current.push(component.as_os_str());
+            }
+        }
+
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(IndexRebuildError::Index(format!(
+                    "Failed to inspect index path component {}: {error}",
+                    current.display()
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn path_is_regular_file_no_follow(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false)
 }
 
 fn monotonicish_stamp() -> u128 {
@@ -3559,6 +3617,128 @@ mod tests {
         ensure(
             read_marker(&retained_dir, "generation.txt")? == "old",
             "retained index should contain previous generation",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_publish_staging_dir_rejects_symlinked_index_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("publish-symlink-parent");
+        let real_parent = root.join("real-index-root");
+        let linked_parent = root.join("linked-index-root");
+        std::fs::create_dir_all(&real_parent).map_err(|error| error.to_string())?;
+        symlink(&real_parent, &linked_parent).map_err(|error| error.to_string())?;
+
+        let error = match create_publish_staging_dir(&linked_parent.join("index")) {
+            Ok(path) => return Err(format!("unexpected staging dir: {}", path.display())),
+            Err(error) => error,
+        };
+
+        ensure(
+            error.to_string().contains("symlinked index path component"),
+            format!("unexpected error: {error}"),
+        )?;
+        ensure(
+            std::fs::read_dir(&real_parent)
+                .map_err(|error| error.to_string())?
+                .next()
+                .is_none(),
+            "staging creation must not write through symlinked parent",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_staged_index_rejects_symlinked_active_index() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("publish-symlink-active");
+        let outside = root.join("outside-active");
+        let index_dir = root.join("index");
+        let staging_dir = root.join(".index.publish-test");
+        write_marker(&outside, "generation.txt", "outside")?;
+        write_marker(&staging_dir, "generation.txt", "new")?;
+        symlink(&outside, &index_dir).map_err(|error| error.to_string())?;
+
+        let error = match publish_staged_index(&index_dir, &staging_dir) {
+            Ok(()) => return Err("unexpected publish success".to_owned()),
+            Err(error) => error,
+        };
+
+        ensure(
+            error.to_string().contains("symlinked index path component"),
+            format!("unexpected error: {error}"),
+        )?;
+        ensure(
+            read_marker(&outside, "generation.txt")? == "outside",
+            "publish must not mutate outside symlink target",
+        )?;
+        ensure(
+            staging_dir.is_dir(),
+            "rejected publish should leave staging directory intact",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recover_interrupted_publish_rejects_symlinked_retained_generation() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("recover-symlink-retained");
+        let index_dir = root.join("index");
+        let retained_dir = root.join("index.previous");
+        let outside = root.join("outside-retained");
+        write_marker(&outside, "generation.txt", "outside")?;
+        symlink(&outside, &retained_dir).map_err(|error| error.to_string())?;
+
+        let error = match recover_interrupted_publish(&index_dir) {
+            Ok(action) => return Err(format!("unexpected recovery action: {action:?}")),
+            Err(error) => error,
+        };
+
+        ensure(
+            error.to_string().contains("symlinked index path component"),
+            format!("unexpected error: {error}"),
+        )?;
+        ensure(
+            !index_dir.exists(),
+            "recovery must not publish a symlinked retained generation",
+        )?;
+        ensure(
+            read_marker(&outside, "generation.txt")? == "outside",
+            "recovery must not mutate outside symlink target",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recover_interrupted_publish_ignores_staging_with_symlinked_metadata() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("recover-symlink-metadata");
+        let index_dir = root.join("index");
+        let staging_dir = root.join(".index.publish-20260501-000");
+        let outside_meta = root.join("outside-meta.json");
+        std::fs::create_dir_all(&staging_dir).map_err(|error| error.to_string())?;
+        std::fs::write(&outside_meta, "{}").map_err(|error| error.to_string())?;
+        symlink(&outside_meta, staging_dir.join(INDEX_METADATA_FILE))
+            .map_err(|error| error.to_string())?;
+
+        let action = recover_interrupted_publish(&index_dir).map_err(|error| error.to_string())?;
+
+        ensure(
+            action == IndexPublishRecoveryAction::NoRecoverableGeneration,
+            format!("unexpected recovery action: {action:?}"),
+        )?;
+        ensure(
+            !index_dir.exists(),
+            "staging with symlinked metadata should not become active",
+        )?;
+        ensure(
+            staging_dir.is_dir(),
+            "rejected staging directory should remain in place",
         )
     }
 
