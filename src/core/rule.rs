@@ -1980,13 +1980,7 @@ pub fn import_playbook(
         options.database_path,
         Some("ee playbook import --help"),
     )?;
-    let bytes = fs::read(options.source_path).map_err(|error| DomainError::Import {
-        message: format!(
-            "failed to read playbook source '{}': {error}",
-            options.source_path.display()
-        ),
-        repair: Some("choose a readable playbook JSON file".to_owned()),
-    })?;
+    let bytes = read_side_path_no_symlinks(options.source_path)?;
     let source_hash = hash_bytes(&bytes);
     let document: PlaybookPortableDocument =
         serde_json::from_slice(&bytes).map_err(|error| DomainError::Import {
@@ -2371,6 +2365,27 @@ fn write_side_path_no_overwrite(path: &Path, bytes: &[u8]) -> Result<(), DomainE
     })
 }
 
+fn read_side_path_no_symlinks(path: &Path) -> Result<Vec<u8>, DomainError> {
+    if let Some(symlink_path) = first_existing_symlink_component(path)? {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "playbook import source path '{}' traverses symbolic link '{}'",
+                path.display(),
+                symlink_path.display()
+            ),
+            repair: Some("choose a real, non-symlink playbook source path".to_owned()),
+        });
+    }
+
+    fs::read(path).map_err(|error| DomainError::Import {
+        message: format!(
+            "failed to read playbook source '{}': {error}",
+            path.display()
+        ),
+        repair: Some("choose a readable playbook JSON file".to_owned()),
+    })
+}
+
 fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, DomainError> {
     let mut current = PathBuf::new();
     for component in path.components() {
@@ -2389,11 +2404,11 @@ fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, Doma
             Err(error) => {
                 return Err(DomainError::Storage {
                     message: format!(
-                        "failed to inspect playbook export path component '{}': {error}",
+                        "failed to inspect playbook path component '{}': {error}",
                         current.display()
                     ),
                     repair: Some(
-                        "inspect filesystem permissions or choose another --out path".to_owned(),
+                        "inspect filesystem permissions or choose another playbook path".to_owned(),
                     ),
                 });
             }
@@ -4141,6 +4156,50 @@ mod tests {
         ensure(
             !real_parent.join("playbook.json").exists(),
             "playbook export must not write through symlinked parent",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn playbook_import_rejects_symlinked_source_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_parent = tempdir.path().join("real-parent");
+        fs::create_dir_all(&real_parent).map_err(|error| error.to_string())?;
+        let source_path = real_parent.join("playbook.json");
+        fs::write(
+            &source_path,
+            b"{\"schema\":\"ee.playbook.portable.v1\",\"ruleCount\":0,\"rules\":[]}",
+        )
+        .map_err(|error| error.to_string())?;
+        let linked_parent = tempdir.path().join("linked-parent");
+        symlink(&real_parent, &linked_parent).map_err(|error| error.to_string())?;
+        let linked_source = linked_parent.join("playbook.json");
+
+        let err = match import_playbook(&PlaybookImportOptions {
+            workspace_path: tempdir.path(),
+            database_path: Some(&tempdir.path().join("ee.db")),
+            source_path: &linked_source,
+            dry_run: true,
+            actor: Some("test"),
+        }) {
+            Ok(report) => {
+                return Err(format!(
+                    "symlinked import source should reject, got status {}",
+                    report.status
+                ));
+            }
+            Err(err) => err,
+        };
+
+        ensure(
+            matches!(err, DomainError::PolicyDenied { .. }),
+            "expected policy error",
+        )?;
+        ensure(
+            err.message().contains("symbolic link"),
+            "error should mention symbolic link",
         )
     }
 
