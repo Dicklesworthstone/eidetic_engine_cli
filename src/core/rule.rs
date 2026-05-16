@@ -2313,6 +2313,17 @@ fn preflight_playbook_import_candidates(
 }
 
 fn write_side_path_no_overwrite(path: &Path, bytes: &[u8]) -> Result<(), DomainError> {
+    if let Some(symlink_path) = first_existing_symlink_component(path)? {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "playbook export path '{}' traverses symbolic link '{}'",
+                path.display(),
+                symlink_path.display()
+            ),
+            repair: Some("choose a real, non-symlink --out path".to_owned()),
+        });
+    }
+
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
             message: format!(
@@ -2358,6 +2369,37 @@ fn write_side_path_no_overwrite(path: &Path, bytes: &[u8]) -> Result<(), DomainE
         ),
         repair: Some("inspect disk health and retry".to_owned()),
     })
+}
+
+fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, DomainError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "failed to inspect playbook export path component '{}': {error}",
+                        current.display()
+                    ),
+                    repair: Some(
+                        "inspect filesystem permissions or choose another --out path".to_owned(),
+                    ),
+                });
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
@@ -4068,6 +4110,37 @@ mod tests {
         ensure(
             rules.is_empty(),
             "preflight failure must not persist valid prefix",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn playbook_export_rejects_symlinked_output_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_parent = tempdir.path().join("real-parent");
+        fs::create_dir_all(&real_parent).map_err(|error| error.to_string())?;
+        let linked_parent = tempdir.path().join("linked-parent");
+        symlink(&real_parent, &linked_parent).map_err(|error| error.to_string())?;
+        let output_path = linked_parent.join("playbook.json");
+
+        let err = match write_side_path_no_overwrite(&output_path, b"{}") {
+            Ok(()) => return Err("symlinked output parent should reject".to_owned()),
+            Err(err) => err,
+        };
+
+        ensure(
+            matches!(err, DomainError::PolicyDenied { .. }),
+            "expected policy error",
+        )?;
+        ensure(
+            err.message().contains("symbolic link"),
+            "error should mention symbolic link",
+        )?;
+        ensure(
+            !real_parent.join("playbook.json").exists(),
+            "playbook export must not write through symlinked parent",
         )
     }
 
