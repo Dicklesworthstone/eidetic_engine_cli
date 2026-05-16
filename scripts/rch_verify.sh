@@ -731,7 +731,11 @@ emit_json() {
     configured_workers_json="$(csv_json_array "${CONFIGURED_WORKERS_CSV:-}")"
     daemon_workers_json="$(csv_json_array "${DAEMON_WORKERS_CSV:-}")"
     local source_state_json
-    source_state_json="${SOURCE_STATE_JSON:-{\"verification_attribution\":\"live_dirty_checkout\",\"git_head\":null,\"git_tree\":null,\"dirty_status_hash\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"dirty_summary\":{\"total\":0,\"tracked\":0,\"untracked\":0,\"beads\":0,\"scratch\":0,\"secret_risk\":0,\"ignored\":0,\"unknown\":0},\"dirty_paths_sample\":[],\"source_state_degraded_codes\":[]}}"
+    if [ -n "${SOURCE_STATE_JSON:-}" ]; then
+        source_state_json="$SOURCE_STATE_JSON"
+    else
+        source_state_json='{"verification_attribution":"live_dirty_checkout","git_head":null,"git_tree":null,"dirty_status_hash":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","dirty_summary":{"total":0,"tracked":0,"untracked":0,"beads":0,"scratch":0,"secret_risk":0,"ignored":0,"unknown":0},"dirty_paths_sample":[],"source_state_degraded_codes":[]}'
+    fi
     local json_payload
     json_payload="$(cat <<EOF
 {"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"source_state":$source_state_json}

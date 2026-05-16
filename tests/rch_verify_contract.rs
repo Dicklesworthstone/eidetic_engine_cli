@@ -1,7 +1,8 @@
 use serde_json::Value;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 type TestResult = Result<(), String>;
 
@@ -23,12 +24,20 @@ fn run_script_with_env(
     args: &[&str],
     envs: &[(&str, &str)],
 ) -> Result<(std::process::ExitStatus, String, String), String> {
+    run_script_with_env_in_dir(args, envs, &repo_root())
+}
+
+fn run_script_with_env_in_dir(
+    args: &[&str],
+    envs: &[(&str, &str)],
+    cwd: &Path,
+) -> Result<(std::process::ExitStatus, String, String), String> {
     let mut command = Command::new("bash");
     command
         .arg(script_path())
         .args(args)
         .env("RCH_VERIFY_NOW", "2026-05-16T04:40:00.000000Z")
-        .current_dir(repo_root());
+        .current_dir(cwd);
     for (key, value) in envs {
         command.env(key, value);
     }
@@ -63,6 +72,59 @@ fn degraded_contains(report: &Value, expected: &str) -> Result<bool, String> {
         .ok_or_else(|| "missing degraded codes".to_owned())?
         .iter()
         .any(|code| code == expected))
+}
+
+fn source_degraded_contains(report: &Value, expected: &str) -> Result<bool, String> {
+    Ok(report["source_state_degraded_codes"]
+        .as_array()
+        .ok_or_else(|| "missing source-state degraded codes".to_owned())?
+        .iter()
+        .any(|code| code == expected))
+}
+
+fn unique_tmp_path(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    target_tmp_dir().join(format!("{label}-{}-{nanos}", std::process::id()))
+}
+
+fn git(workspace: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(args)
+        .output()
+        .map_err(|error| format!("run git {args:?}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {args:?} failed with {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn seed_git_workspace(label: &str) -> Result<PathBuf, String> {
+    let workspace = unique_tmp_path(label);
+    fs::create_dir_all(&workspace)
+        .map_err(|error| format!("create workspace {}: {error}", workspace.display()))?;
+    git(&workspace, &["init"])?;
+    git(&workspace, &["config", "user.name", "RCH Verify Test"])?;
+    git(
+        &workspace,
+        &["config", "user.email", "rch-verify-test@example.invalid"],
+    )?;
+    fs::write(workspace.join("tracked.txt"), "seed\n")
+        .map_err(|error| format!("write tracked fixture: {error}"))?;
+    fs::write(workspace.join(".gitignore"), "._*\n")
+        .map_err(|error| format!("write fixture gitignore: {error}"))?;
+    git(&workspace, &["add", ".gitignore", "tracked.txt"])?;
+    git(&workspace, &["commit", "-m", "seed"])?;
+    Ok(workspace)
 }
 
 fn write_fake_rch(name: &str, body: &str) -> Result<PathBuf, String> {
@@ -143,6 +205,249 @@ fn dry_run_accepts_focused_cargo_test_and_builds_remote_env() -> TestResult {
     }
     if invocation_text.contains("/Volumes/USBNVME16TB") {
         return Err("dry-run remote invocation leaked Mac-only USB path".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn strict_clean_tree_dry_run_reports_clean_source_state() -> TestResult {
+    let workspace = seed_git_workspace("rch-strict-clean")?;
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--require-clean-tree",
+            "--dry-run",
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "strict_clean_tree_smoke",
+        ],
+        &[],
+        &workspace,
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "strict clean dry-run failed with {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            status.code()
+        ));
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse strict clean: {error}"))?;
+    if report["verification_attribution"] != "strict_clean_tree" {
+        return Err(format!("wrong attribution for clean tree: {report}"));
+    }
+    if report["git_head"].as_str().map(str::len) != Some(40)
+        || report["git_tree"].as_str().map(str::len) != Some(40)
+    {
+        return Err(format!("missing git source identity: {report}"));
+    }
+    if report["dirty_status_hash"]
+        != "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    {
+        return Err(format!(
+            "clean tree should have empty status hash: {report}"
+        ));
+    }
+    if report["dirty_summary"]["total"] != 0
+        || report["dirty_paths_sample"] != serde_json::json!([])
+        || report["source_state_degraded_codes"] != serde_json::json!([])
+    {
+        return Err(format!("clean tree reported dirty source state: {report}"));
+    }
+    if report["rch_invocation"]
+        .as_array()
+        .ok_or_else(|| "missing rch invocation".to_owned())?
+        .is_empty()
+    {
+        return Err(format!("clean dry-run should still plan RCH: {report}"));
+    }
+    if !degraded_contains(&report, "rch_verify_dry_run")? {
+        return Err(format!(
+            "clean dry-run missing dry-run degradation: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn strict_clean_tree_refuses_tracked_dirty_source_before_rch() -> TestResult {
+    let workspace = seed_git_workspace("rch-strict-tracked-dirty")?;
+    fs::write(workspace.join("tracked.txt"), "dirty\n")
+        .map_err(|error| format!("dirty tracked fixture: {error}"))?;
+    let fake_rch = write_fake_rch(
+        "fake-rch-should-not-run.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf 'REMOTE SHOULD NOT RUN\n'
+printf '[RCH] remote css (0.1s)\n'
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--require-clean-tree",
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "strict_clean_tree_dirty_smoke",
+        ],
+        &[],
+        &workspace,
+    )?;
+    if status.success() {
+        return Err(format!(
+            "strict dirty tree should fail before RCH\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse dirty tracked: {error}"))?;
+    if report["status"] != "source_state_refused"
+        || report["verification_attribution"] != "live_dirty_checkout"
+        || report["exit_code"] != 1
+        || report["elapsed_ms"] != 0
+    {
+        return Err(format!("unexpected dirty tracked refusal: {report}"));
+    }
+    if report["dirty_summary"]["tracked"] != 1 || report["dirty_summary"]["total"] != 1 {
+        return Err(format!("tracked dirty counts were not precise: {report}"));
+    }
+    for expected in [
+        "rch_verify_dirty_tree_refused",
+        "rch_verify_dirty_tracked_paths",
+    ] {
+        if !degraded_contains(&report, expected)? || !source_degraded_contains(&report, expected)? {
+            return Err(format!("missing {expected} in dirty refusal: {report}"));
+        }
+    }
+    if report["rch_invocation"] != serde_json::json!([]) {
+        return Err(format!(
+            "strict refusal should not build RCH invocation: {report}"
+        ));
+    }
+    let stdout_tail = report["stdout_tail"]
+        .as_str()
+        .ok_or_else(|| "missing stdout tail".to_owned())?;
+    if stdout_tail.contains("REMOTE SHOULD NOT RUN") {
+        return Err(format!("strict refusal invoked fake RCH: {report}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn strict_clean_tree_refuses_staged_dirty_source_before_rch() -> TestResult {
+    let workspace = seed_git_workspace("rch-strict-staged-dirty")?;
+    fs::write(workspace.join("tracked.txt"), "staged dirty\n")
+        .map_err(|error| format!("dirty staged fixture: {error}"))?;
+    git(&workspace, &["add", "tracked.txt"])?;
+
+    let (status, stdout, _stderr) = run_script_with_env_in_dir(
+        &[
+            "--require-clean-tree",
+            "--dry-run",
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "strict_clean_tree_staged_smoke",
+        ],
+        &[],
+        &workspace,
+    )?;
+    if status.success() {
+        return Err("strict staged dirty tree should fail before dry-run planning".to_owned());
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse staged dirty: {error}"))?;
+    if report["status"] != "source_state_refused" {
+        return Err(format!(
+            "staged dirty tree was not source refused: {report}"
+        ));
+    }
+    if report["dirty_summary"]["tracked"] != 1 || report["dirty_summary"]["total"] != 1 {
+        return Err(format!("staged dirty counts were not precise: {report}"));
+    }
+    if !source_degraded_contains(&report, "rch_verify_dirty_tracked_paths")? {
+        return Err(format!("missing staged tracked degradation: {report}"));
+    }
+    if degraded_contains(&report, "rch_verify_dry_run")? {
+        return Err(format!(
+            "strict source refusal should happen before dry-run proof: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn strict_clean_tree_classifies_beads_scratch_and_secret_risk_paths() -> TestResult {
+    let workspace = seed_git_workspace("rch-strict-path-classes")?;
+    fs::create_dir_all(workspace.join(".beads"))
+        .map_err(|error| format!("create .beads fixture: {error}"))?;
+    fs::write(workspace.join(".beads/issues.jsonl"), "{}\n")
+        .map_err(|error| format!("write beads fixture: {error}"))?;
+    fs::write(workspace.join("ubs.json"), "{}\n")
+        .map_err(|error| format!("write ubs scratch fixture: {error}"))?;
+    fs::write(workspace.join(".plan-drift-report.json"), "{}\n")
+        .map_err(|error| format!("write plan drift scratch fixture: {error}"))?;
+    fs::write(workspace.join("test_ln_1p.rs"), "fn main() {}\n")
+        .map_err(|error| format!("write line-probe scratch fixture: {error}"))?;
+    fs::write(workspace.join("credential-note.txt"), "redacted fixture\n")
+        .map_err(|error| format!("write secret-risk path fixture: {error}"))?;
+
+    let (status, stdout, _stderr) = run_script_with_env_in_dir(
+        &[
+            "--require-clean-tree",
+            "--dry-run",
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "strict_clean_tree_path_classes",
+        ],
+        &[],
+        &workspace,
+    )?;
+    if status.success() {
+        return Err("strict path-class dirty tree should fail before RCH".to_owned());
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse path classes: {error}"))?;
+    let summary = &report["dirty_summary"];
+    if summary["total"] != 5
+        || summary["beads"] != 1
+        || summary["scratch"] != 3
+        || summary["secret_risk"] != 1
+    {
+        return Err(format!("unexpected path classification counts: {report}"));
+    }
+    for expected in [
+        "rch_verify_dirty_tree_refused",
+        "rch_verify_dirty_beads_metadata",
+        "rch_verify_dirty_untracked_scratch",
+        "rch_verify_dirty_untracked_paths",
+    ] {
+        if !source_degraded_contains(&report, expected)? {
+            return Err(format!("missing {expected} in source codes: {report}"));
+        }
+    }
+    let sample = report["dirty_paths_sample"]
+        .as_array()
+        .ok_or_else(|| "missing dirty path sample".to_owned())?;
+    for expected_path in [
+        ".beads/issues.jsonl",
+        ".plan-drift-report.json",
+        "credential-note.txt",
+        "test_ln_1p.rs",
+        "ubs.json",
+    ] {
+        if !sample.iter().any(|entry| entry["path"] == expected_path) {
+            return Err(format!("sample missing {expected_path}: {report}"));
+        }
     }
     Ok(())
 }
