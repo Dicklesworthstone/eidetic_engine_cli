@@ -1995,9 +1995,15 @@ mod tests {
         prefix: &str,
         workspace_id: Option<String>,
     ) -> Result<(tempfile::TempDir, std::path::PathBuf), String> {
+        let temp_root = std::env::temp_dir();
+        let temp_root = if temp_root.exists() {
+            temp_root
+        } else {
+            std::path::PathBuf::from("/tmp")
+        };
         let dir = tempfile::Builder::new()
             .prefix(prefix)
-            .tempdir()
+            .tempdir_in(temp_root)
             .map_err(|error| error.to_string())?;
         let workspace_path = dir
             .path()
@@ -2446,6 +2452,86 @@ mod tests {
                 .iter()
                 .all(|row| row.target_type.as_deref() == Some("memory")),
             "profile audit rows target the memory",
+        )
+    }
+
+    #[test]
+    fn quarantined_harmful_feedback_does_not_update_agent_context_profile() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-agent-profile-quarantine")?;
+        let first = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: None,
+            signal: "harmful".to_string(),
+            weight: Some(1.0),
+            source_type: "outcome_observed".to_string(),
+            source_id: Some("agent-profile-quarantine-source".to_string()),
+            reason: Some("First harmful event remains live.".to_string()),
+            evidence_json: None,
+            session_id: None,
+            event_id: Some("fb_61234567890123456789012345".to_string()),
+            actor: Some("test".to_string()),
+            agent_name: Some("FrostyMoose".to_string()),
+            dry_run: false,
+            harmful_per_source_per_hour: 1,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            &first.status,
+            &OutcomeRecordStatus::Recorded,
+            "first harmful event records",
+        )?;
+
+        let quarantined = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: None,
+            signal: "harmful".to_string(),
+            weight: Some(1.0),
+            source_type: "outcome_observed".to_string(),
+            source_id: Some("agent-profile-quarantine-source".to_string()),
+            reason: Some("Second harmful event crosses quarantine limit.".to_string()),
+            evidence_json: None,
+            session_id: None,
+            event_id: Some("fb_71234567890123456789012345".to_string()),
+            actor: Some("test".to_string()),
+            agent_name: Some("FrostyMoose".to_string()),
+            dry_run: false,
+            harmful_per_source_per_hour: 1,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            &quarantined.status,
+            &OutcomeRecordStatus::Quarantined,
+            "second harmful event quarantines",
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let profile = connection
+            .get_agent_context_profile(
+                OUTCOME_TEST_WORKSPACE_ID,
+                "FrostyMoose",
+                OUTCOME_TEST_MEMORY_ID,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "agent profile row missing".to_string())?;
+        ensure_equal(
+            &profile.counts,
+            &crate::models::AgentContextProfileCounts::new(0, 1, 0),
+            "quarantined event must not change profile counts",
+        )?;
+
+        let profile_audit = connection
+            .list_audit_by_action(crate::db::audit_actions::AGENT_PROFILE_UPDATE, None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &profile_audit.len(),
+            &1_usize,
+            "only live harmful feedback writes a profile audit row",
         )
     }
 
