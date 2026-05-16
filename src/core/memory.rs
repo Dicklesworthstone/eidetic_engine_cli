@@ -29,7 +29,7 @@ use crate::db::{
     ApplyMemoryLevelTransitionInput, CreateAuditInput, CreateCurationCandidateInput,
     CreateMemoryInput, CreateMemoryLinkInput, CreateSearchIndexJobInput, CreateWorkspaceInput,
     DbConnection, MemoryLinkRelation, MemoryLinkSource, SearchIndexJobType, StoredMemory,
-    StoredMemoryLink, audit_actions, generate_audit_id,
+    StoredMemoryLink, audit_actions, generate_audit_id, generate_audit_id_seeded,
 };
 use crate::models::{
     DomainError, MAX_TAG_BYTES, MemoryContent, MemoryId, MemoryKind, MemoryLevel,
@@ -37,6 +37,7 @@ use crate::models::{
     UnitScore, WorkspaceId,
 };
 use crate::obs::{AuditEvent, AuditOutcome, now_rfc3339_nanos};
+use crate::runtime::determinism::{Deterministic, Seed};
 use crate::search::HashEmbedder;
 
 /// A memory with its associated tags for display.
@@ -435,7 +436,51 @@ impl RememberPolicyBypassReport {
 pub fn remember_memory(
     options: &RememberMemoryOptions<'_>,
 ) -> Result<RememberMemoryReport, DomainError> {
-    let prepared = prepare_remember_memory(options)?;
+    let mut id_source = RememberIdSource::Ambient;
+    remember_memory_inner(options, &mut id_source)
+}
+
+pub fn remember_memory_seeded(
+    options: &RememberMemoryOptions<'_>,
+    determinism: &mut Deterministic<Seed>,
+) -> Result<RememberMemoryReport, DomainError> {
+    let mut id_source = RememberIdSource::Seeded(determinism);
+    remember_memory_inner(options, &mut id_source)
+}
+
+enum RememberIdSource<'a> {
+    Ambient,
+    Seeded(&'a mut Deterministic<Seed>),
+}
+
+impl RememberIdSource<'_> {
+    fn next_memory_id(&mut self) -> MemoryId {
+        match self {
+            Self::Ambient => MemoryId::now(),
+            Self::Seeded(determinism) => MemoryId::now_seeded(determinism),
+        }
+    }
+
+    fn next_audit_id(&mut self) -> String {
+        match self {
+            Self::Ambient => generate_audit_id(),
+            Self::Seeded(determinism) => generate_audit_id_seeded(determinism),
+        }
+    }
+
+    fn next_search_index_job_id(&mut self) -> String {
+        match self {
+            Self::Ambient => generate_search_index_job_id(),
+            Self::Seeded(determinism) => generate_search_index_job_id_seeded(determinism),
+        }
+    }
+}
+
+fn remember_memory_inner(
+    options: &RememberMemoryOptions<'_>,
+    id_source: &mut RememberIdSource<'_>,
+) -> Result<RememberMemoryReport, DomainError> {
+    let prepared = prepare_remember_memory(options, id_source.next_memory_id())?;
     if options.dry_run {
         return Ok(RememberMemoryReport {
             version: env!("CARGO_PKG_VERSION"),
@@ -496,9 +541,12 @@ pub fn remember_memory(
     )?;
 
     let memory_id = prepared.memory_id.to_string();
-    let audit_id = generate_audit_id();
-    let policy_bypass_audit_id = prepared.policy_bypass.as_ref().map(|_| generate_audit_id());
-    let index_job_id = generate_search_index_job_id();
+    let audit_id = id_source.next_audit_id();
+    let policy_bypass_audit_id = prepared
+        .policy_bypass
+        .as_ref()
+        .map(|_| id_source.next_audit_id());
+    let index_job_id = id_source.next_search_index_job_id();
     let memory_input = CreateMemoryInput {
         workspace_id: prepared.workspace_id.clone(),
         level: prepared.level.as_str().to_owned(),
@@ -923,6 +971,7 @@ impl Drop for RememberWriteReplayGuard {
 
 fn prepare_remember_memory(
     options: &RememberMemoryOptions<'_>,
+    memory_id: MemoryId,
 ) -> Result<PreparedRememberMemory, DomainError> {
     let workspace_path = resolve_workspace_path(options.workspace_path, options.dry_run)?;
     let database_path = options
@@ -955,7 +1004,7 @@ fn prepare_remember_memory(
     let validity = prepare_validity_window(options.valid_from, options.valid_to)?;
 
     Ok(PreparedRememberMemory {
-        memory_id: MemoryId::now(),
+        memory_id,
         workspace_id: stable_workspace_id(&workspace_path),
         workspace_path,
         database_path,
@@ -1959,6 +2008,12 @@ fn stable_workspace_id(path: &Path) -> String {
 
 fn generate_search_index_job_id() -> String {
     let memory_id = MemoryId::now().to_string();
+    let payload = memory_id.trim_start_matches("mem_");
+    format!("sidx_{payload}")
+}
+
+fn generate_search_index_job_id_seeded(determinism: &mut Deterministic<Seed>) -> String {
+    let memory_id = MemoryId::now_seeded(determinism).to_string();
     let payload = memory_id.trim_start_matches("mem_");
     format!("sidx_{payload}")
 }
@@ -5936,6 +5991,66 @@ mod tests {
         .map_err(|error| error.message())?;
 
         Ok((temp, created))
+    }
+
+    #[test]
+    fn remember_memory_seeded_replays_memory_audit_and_index_ids() -> TestResult {
+        fn run_seeded_remember(
+            seed: u64,
+        ) -> Result<(String, Option<String>, Option<String>), String> {
+            let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+            std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+            let mut determinism = Deterministic::from_seed(seed);
+            let report = remember_memory_seeded(
+                &RememberMemoryOptions {
+                    workspace_path: temp.path(),
+                    database_path: None,
+                    content: "Run cargo fmt --check before release.",
+                    workflow_id: None,
+                    level: "procedural",
+                    kind: "rule",
+                    tags: Some("release,checks"),
+                    confidence: 0.9,
+                    source: Some("file://README.md#L74-77"),
+                    allow_secret_mention: false,
+                    valid_from: None,
+                    valid_to: None,
+                    dry_run: false,
+                    auto_link: false,
+                    propose_candidates: false,
+                },
+                &mut determinism,
+            )
+            .map_err(|error| error.message())?;
+
+            assert!(report.persisted);
+            assert!(report.memory_id.to_string().starts_with("mem_"));
+            assert!(
+                report
+                    .audit_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("audit_"))
+            );
+            assert!(
+                report
+                    .index_job_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("sidx_"))
+            );
+            Ok((
+                report.memory_id.to_string(),
+                report.audit_id,
+                report.index_job_id,
+            ))
+        }
+
+        let first = run_seeded_remember(12_345)?;
+        let replay = run_seeded_remember(12_345)?;
+        let other_seed = run_seeded_remember(12_346)?;
+
+        assert_eq!(first, replay);
+        assert_ne!(first, other_seed);
+        Ok(())
     }
 
     fn enable_revision_dominance(workspace: &Path) -> TestResult {
