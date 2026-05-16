@@ -13,6 +13,7 @@ use chrono::Utc;
 use serde_json::{Value as JsonValue, json};
 
 use crate::config::WORKSPACE_MARKER;
+use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
 use crate::db::{
     CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
@@ -142,7 +143,7 @@ impl BackupCreateReport {
             "verificationStatus": self.verification_status,
             "artifacts": self.artifacts.iter().map(BackupArtifactReport::data_json).collect::<Vec<_>>(),
             "derived": self.derived.iter().map(BackupDerivedAssetReport::data_json).collect::<Vec<_>>(),
-            "degraded": self.degraded.iter().map(BackupDegradation::data_json).collect::<Vec<_>>(),
+            "degraded": backup_degraded_data_json("backup_create", &self.degraded),
         })
     }
 
@@ -316,7 +317,7 @@ impl BackupInspectReport {
             "verificationStatus": self.verification_status,
             "artifacts": self.artifacts.iter().map(BackupArtifactReport::data_json).collect::<Vec<_>>(),
             "derived": self.derived.iter().map(BackupDerivedAssetReport::data_json).collect::<Vec<_>>(),
-            "degraded": self.degraded.iter().map(BackupDegradation::data_json).collect::<Vec<_>>(),
+            "degraded": backup_degraded_data_json("backup_inspect", &self.degraded),
             "issues": self.issues.iter().map(BackupVerificationIssue::data_json).collect::<Vec<_>>(),
         })
     }
@@ -368,7 +369,7 @@ impl BackupListReport {
             "command": "backup list",
             "backupRoot": self.backup_root,
             "backups": self.backups.iter().map(BackupListEntry::data_json).collect::<Vec<_>>(),
-            "degraded": self.degraded.iter().map(BackupDegradation::data_json).collect::<Vec<_>>(),
+            "degraded": backup_degraded_data_json("backup_list", &self.degraded),
         })
     }
 }
@@ -437,7 +438,7 @@ impl BackupRestoreReport {
                 "issues": self.issue_count,
             },
             "restoredDerived": self.restored_derived.iter().map(BackupRestoredDerivedAssetReport::data_json).collect::<Vec<_>>(),
-            "degraded": self.degraded.iter().map(BackupDegradation::data_json).collect::<Vec<_>>(),
+            "degraded": backup_degraded_data_json("backup_restore", &self.degraded),
             "nextActions": self.next_actions,
         })
     }
@@ -605,6 +606,32 @@ impl BackupDegradation {
             "nextAction": self.next_action,
         })
     }
+}
+
+fn backup_degraded_data_json(
+    source: &'static str,
+    degraded: &[BackupDegradation],
+) -> Vec<JsonValue> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            source,
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry.next_action.clone(),
+        )
+    }))
+    .into_iter()
+    .map(|entry| {
+        json!({
+            "code": entry.code,
+            "severity": entry.severity,
+            "message": entry.message,
+            "nextAction": entry.repair,
+            "sources": entry.sources,
+        })
+    })
+    .collect()
 }
 
 struct BackupExportData {
@@ -2348,7 +2375,7 @@ fn manifest_json(
             "auditRecords": report.audit_count,
         },
         "artifacts": report.artifacts.iter().map(BackupArtifactReport::data_json).collect::<Vec<_>>(),
-        "degraded": report.degraded.iter().map(BackupDegradation::data_json).collect::<Vec<_>>(),
+        "degraded": backup_degraded_data_json("backup_manifest", &report.degraded),
         "verification": {
             "status": report.verification_status,
             "manifestHash": manifest_hash,
@@ -3415,6 +3442,61 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    #[test]
+    fn backup_report_degraded_entries_are_aggregated() -> TestResult {
+        let report = BackupListReport {
+            schema: BACKUP_LIST_SCHEMA_V1,
+            backup_root: "/tmp/ee-backups".to_owned(),
+            backups: Vec::new(),
+            degraded: vec![
+                BackupDegradation::warning(
+                    "backup_index_unavailable",
+                    "index manifest unavailable",
+                    "run ee index rebuild --workspace .",
+                ),
+                BackupDegradation::with_severity(
+                    "backup_index_unavailable",
+                    "high",
+                    "index manifest and graph cache unavailable",
+                    "rerun backup create with --include-graph-cache",
+                ),
+            ],
+        };
+
+        let json = report.data_json();
+        let degraded = json
+            .get("degraded")
+            .and_then(JsonValue::as_array)
+            .ok_or_else(|| "expected degraded array".to_owned())?;
+
+        ensure(
+            degraded.len() == 1,
+            format!("expected one aggregated degradation, got {degraded:?}"),
+        )?;
+        ensure(
+            degraded[0].get("code").and_then(JsonValue::as_str) == Some("backup_index_unavailable"),
+            format!("unexpected code: {:?}", degraded[0]),
+        )?;
+        ensure(
+            degraded[0].get("severity").and_then(JsonValue::as_str) == Some("high"),
+            format!("unexpected severity: {:?}", degraded[0]),
+        )?;
+        ensure(
+            degraded[0].get("nextAction").and_then(JsonValue::as_str)
+                == Some("rerun backup create with --include-graph-cache"),
+            format!("unexpected nextAction: {:?}", degraded[0]),
+        )?;
+        ensure(
+            degraded[0]
+                .get("sources")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|sources| {
+                    sources == [JsonValue::String("backup_list".to_owned())].as_slice()
+                }),
+            format!("unexpected sources: {:?}", degraded[0]),
+        )
     }
 
     #[test]

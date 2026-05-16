@@ -80,6 +80,11 @@ Current conventions:
 | `status` | Top-level `ee status` posture, capability, or subsystem degradation. |
 | `skyline` | `ee status --skyline` structural skyline degradation. |
 | `agent_detection` | Agent inventory and agent-status detection degradation. |
+| `backup_create` | `ee backup create` export, redaction, index, or graph-cache degradation. |
+| `backup_inspect` | `ee backup inspect` manifest or artifact-inspection degradation. |
+| `backup_list` | `ee backup list` backup-root or manifest-listing degradation. |
+| `backup_manifest` | Persisted backup manifest degradation records. |
+| `backup_restore` | `ee backup restore` import, side-path, or derived-asset degradation. |
 | `build` | Binary version and build-provenance degradation. |
 | `db_status` | `ee db status` migration or sidecar-file degradation. |
 | `dependency_contract` | `ee diag dependencies` dependency-contract degradation. |
