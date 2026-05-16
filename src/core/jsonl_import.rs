@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -384,6 +385,7 @@ pub fn import_jsonl_records(
     options: &JsonlImportOptions,
 ) -> Result<JsonlImportReport, JsonlImportError> {
     let workspace_path = normalize_path(&options.workspace_path);
+    ensure_import_source_path_is_not_symlink(&options.source_path)?;
     let source_path = normalize_path(&options.source_path);
     let source_id = source_id(&source_path);
     let input = std::fs::read_to_string(&source_path).map_err(|error| JsonlImportError::Io {
@@ -1158,6 +1160,58 @@ fn ensure_database_parent(path: &Path) -> Result<(), JsonlImportError> {
     })
 }
 
+fn ensure_import_source_path_is_not_symlink(path: &Path) -> Result<(), JsonlImportError> {
+    if let Some(symlink_path) =
+        first_existing_symlink_component(path).map_err(|error| JsonlImportError::Io {
+            path: error.path,
+            message: error.source.to_string(),
+        })?
+    {
+        return Err(JsonlImportError::Io {
+            path: path.to_path_buf(),
+            message: format!(
+                "refusing to import JSONL source through symlinked path component `{}`",
+                symlink_path.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct SymlinkComponentInspectionError {
+    path: PathBuf,
+    source: std::io::Error,
+}
+
+fn first_existing_symlink_component(
+    path: &Path,
+) -> Result<Option<PathBuf>, SymlinkComponentInspectionError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(source) => {
+                return Err(SymlinkComponentInspectionError {
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn normalize_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -1548,5 +1602,52 @@ mod tests {
             Some("2026-06-01T00:00:00Z"),
             "valid_to fallback from expires_at",
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_rejects_symlinked_source_path_components() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_source_dir = tempdir.path().join("real-source");
+        fs::create_dir_all(&real_source_dir).map_err(|error| error.to_string())?;
+        let real_source = real_source_dir.join("export.jsonl");
+        fs::write(&real_source, sample_jsonl()).map_err(|error| error.to_string())?;
+
+        let linked_source_dir = tempdir.path().join("linked-source");
+        symlink(&real_source_dir, &linked_source_dir).map_err(|error| error.to_string())?;
+        let parent_error = match import_jsonl_records(&JsonlImportOptions {
+            workspace_path: tempdir.path().join("workspace"),
+            database_path: None,
+            source_path: linked_source_dir.join("export.jsonl"),
+            dry_run: true,
+        }) {
+            Ok(_) => return Err("import should reject symlinked source parent".to_owned()),
+            Err(error) => error,
+        };
+        assert!(
+            parent_error
+                .to_string()
+                .contains("symlinked path component"),
+            "unexpected error: {parent_error}"
+        );
+
+        let linked_source_file = tempdir.path().join("linked-export.jsonl");
+        symlink(&real_source, &linked_source_file).map_err(|error| error.to_string())?;
+        let file_error = match import_jsonl_records(&JsonlImportOptions {
+            workspace_path: tempdir.path().join("workspace"),
+            database_path: None,
+            source_path: linked_source_file,
+            dry_run: true,
+        }) {
+            Ok(_) => return Err("import should reject symlinked source file".to_owned()),
+            Err(error) => error,
+        };
+        assert!(
+            file_error.to_string().contains("symlinked path component"),
+            "unexpected error: {file_error}"
+        );
+        Ok(())
     }
 }
