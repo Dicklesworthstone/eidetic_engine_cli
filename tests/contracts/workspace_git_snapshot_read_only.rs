@@ -419,6 +419,8 @@ fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
     write_file(&workspace.join("large.dat"), vec![b'x'; 128])?;
     unix_fs::symlink("tracked.txt", workspace.join("tracked.link"))
         .map_err(|error| format!("symlink tracked.link: {error}"))?;
+    unix_fs::symlink(".", workspace.join("self.loop"))
+        .map_err(|error| format!("symlink self.loop: {error}"))?;
 
     let before_status = status_digest(workspace)?;
     let before_files = file_state_digest(workspace)?;
@@ -473,6 +475,7 @@ fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
     assert!(entries_by_path.contains_key("untracked.txt"));
     assert!(entries_by_path.contains_key("large.dat"));
     assert!(entries_by_path.contains_key("tracked.link"));
+    assert!(entries_by_path.contains_key("self.loop"));
     assert!(
         !entries_by_path.contains_key("ignored.tmp"),
         "ignored files should not appear in porcelain-v2 snapshot"
@@ -533,6 +536,16 @@ fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
     let symlink = entry_by_path(&snapshot.entries, "tracked.link")?;
     assert_eq!(
         symlink
+            .metadata
+            .as_ref()
+            .map(|metadata| metadata.file_type.as_str()),
+        Some("symlink")
+    );
+
+    let symlink_loop = entry_by_path(&snapshot.entries, "self.loop")?;
+    assert_eq!(symlink_loop.entry_kind, "untracked");
+    assert_eq!(
+        symlink_loop
             .metadata
             .as_ref()
             .map(|metadata| metadata.file_type.as_str()),
