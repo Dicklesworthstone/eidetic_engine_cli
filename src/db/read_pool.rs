@@ -989,7 +989,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_on_panic_path_releases_pin_idempotently() {
+    fn drop__on_panic_path_releases_pin_idempotently() {
         let (_tempdir, _database_path, pool) = file_pool(1);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _pin = must(pool.pin_snapshot(), "snapshot pin opens before panic");
@@ -1007,7 +1007,7 @@ mod tests {
     }
 
     #[test]
-    fn rollback_releases_pin_before_returning_connection_to_lifo() {
+    fn drop__double_drop_does_not_double_release() {
         let (_tempdir, _database_path, pool) = file_pool(1);
         let pin = must(pool.pin_snapshot(), "snapshot pin opens");
         let slot_id = pin.slot_id();
@@ -1018,9 +1018,34 @@ mod tests {
         assert_eq!(stats.active, 0);
         assert_eq!(stats.idle, 1);
         assert_eq!(stats.active_pins, 0);
+        assert_eq!(stats.drops, 0);
 
-        let reacquired = must(pool.acquire(), "rolled back pin returns connection");
+        let reacquired = must(pool.acquire(), "rolled back pin returns connection once");
         assert_eq!(reacquired.slot_id(), slot_id);
+        assert_eq!(pool.stats().active, 1);
+        assert_eq!(pool.stats().idle, 0);
+    }
+
+    #[test]
+    fn drop__field_order_releases_pin_before_returning_connection_under_panic() {
+        let (_tempdir, _database_path, pool) = file_pool(1);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _pin = must(pool.pin_snapshot(), "snapshot pin opens before panic");
+            panic!("force unwind across SnapshotPin");
+        }));
+
+        assert!(result.is_err());
+
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 1);
+        assert_eq!(stats.active_pins, 0);
+
+        let _reacquired = must(
+            pool.acquire(),
+            "connection is reusable only after pin metadata is cleared",
+        );
+        assert_eq!(pool.stats().active_pins, 0);
     }
 
     #[test]
@@ -1053,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_during_wait_no_pooled_connection_acquired_no_leak() {
+    fn cancel_during_wait__no_connection_acquired_no_leak() {
         let pool = ReadConnectionPool::new(
             DatabaseConfig::memory(),
             PoolConfig::new(1, Duration::from_secs(30)).with_acquire_timeout(Duration::ZERO),
@@ -1079,7 +1104,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_just_after_acquire_connection_returns_to_lifo_no_pin_state() {
+    fn cancel_just_after_acquire__connection_returns_to_lifo_no_pin_state() {
         let pool = memory_pool(1, Duration::from_secs(30));
         let acquired = must(pool.acquire(), "pooled connection opens");
         let slot_id = acquired.slot_id();
@@ -1096,7 +1121,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_during_pin_rollback_runs_connection_returns_to_lifo() {
+    fn cancel_during_pin__rollback_runs_connection_returns_to_lifo() {
         let (_tempdir, database_path, pool) = file_pool(1);
         let pin = must(pool.pin_snapshot(), "snapshot pin opens");
         let slot_id = pin.slot_id();
