@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, CreateSearchIndexJobInput, DbConnection, DbError,
@@ -1963,11 +1964,7 @@ impl IndexVacuumReport {
             .iter()
             .map(IndexVacuumCandidate::data_json)
             .collect::<Vec<_>>();
-        let degraded = self
-            .degraded
-            .iter()
-            .map(IndexVacuumDegradation::data_json)
-            .collect::<Vec<_>>();
+        let degraded = index_vacuum_degraded_data_json(&self.degraded);
         serde_json::json!({
             "command": "index_vacuum",
             "schema": "ee.index.vacuum.v1",
@@ -1987,6 +1984,29 @@ impl IndexVacuumReport {
             "elapsedMs": self.elapsed_ms,
         })
     }
+}
+
+fn index_vacuum_degraded_data_json(degraded: &[IndexVacuumDegradation]) -> Vec<serde_json::Value> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "index_vacuum",
+            entry.code,
+            entry.severity,
+            entry.message,
+            entry.repair,
+        )
+    }))
+    .into_iter()
+    .map(|entry| {
+        serde_json::json!({
+            "code": entry.code,
+            "severity": entry.severity,
+            "message": entry.message,
+            "repair": entry.repair,
+            "sources": entry.sources,
+        })
+    })
+    .collect()
 }
 
 /// Diagnostic report for `ee index status`.
@@ -3678,6 +3698,75 @@ mod tests {
         assert_eq!(IndexVacuumStatus::Stale.as_str(), "stale");
         assert_eq!(IndexVacuumStatus::Locked.as_str(), "locked");
         assert_eq!(IndexVacuumStatus::Corrupt.as_str(), "corrupt");
+    }
+
+    #[test]
+    fn index_vacuum_degraded_entries_are_aggregated() -> TestResult {
+        let root = unique_test_dir("vacuum-degraded-aggregation");
+        let report = IndexVacuumReport {
+            status: IndexVacuumStatus::Stale,
+            database_path: root.join(".ee").join("ee.db"),
+            index_dir: root.join(".ee").join("index"),
+            before: IndexPathStats {
+                path: root.join(".ee").join("index"),
+                exists: true,
+                file_count: 1,
+                directory_count: 0,
+                size_bytes: 128,
+            },
+            after: IndexPathStats {
+                path: root.join(".ee").join("index"),
+                exists: true,
+                file_count: 1,
+                directory_count: 0,
+                size_bytes: 128,
+            },
+            candidate_count: 0,
+            reclaimable_bytes: 0,
+            candidates: Vec::new(),
+            degraded: vec![
+                IndexVacuumDegradation {
+                    code: "index_stale",
+                    severity: "medium",
+                    message: "Search index metadata lags behind the database.",
+                    repair: "Run `ee index rebuild --workspace <path>` before vacuuming.",
+                },
+                IndexVacuumDegradation {
+                    code: "index_stale",
+                    severity: "high",
+                    message: "Search index metadata is stale while a publish lock is held.",
+                    repair: "Wait for the lock holder to finish, then rebuild the index.",
+                },
+            ],
+            lock: IndexVacuumLockReport::none(),
+            elapsed_ms: 0.0,
+        };
+
+        let json = report.data_json();
+        let degraded = json["degraded"]
+            .as_array()
+            .ok_or_else(|| "vacuum degraded array should be present".to_string())?;
+
+        ensure(
+            degraded.len() == 1,
+            format!("duplicate degraded codes should collapse: {degraded:?}"),
+        )?;
+        ensure(
+            degraded[0]["code"] == "index_stale",
+            "aggregate should preserve the degraded code",
+        )?;
+        ensure(
+            degraded[0]["severity"] == "high",
+            "aggregate should escalate to the worst severity",
+        )?;
+        ensure(
+            degraded[0]["repair"] == "Wait for the lock holder to finish, then rebuild the index.",
+            "aggregate should keep the highest-severity repair hint",
+        )?;
+        ensure(
+            degraded[0]["sources"] == serde_json::json!(["index_vacuum"]),
+            "aggregate should expose the index vacuum source label",
+        )
     }
 
     #[test]
