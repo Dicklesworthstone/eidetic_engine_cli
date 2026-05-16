@@ -9028,13 +9028,13 @@ where
             let (workspace_path, workspace_source) =
                 resolve_workspace_for_cli(cli.workspace.as_deref());
             if args.skyline {
-                let workspace_for_skyline =
-                    if workspace_source == WorkspaceSource::Cwd && !workspace_path.join(".ee").is_dir()
-                    {
-                        None
-                    } else {
-                        Some(workspace_path.as_path())
-                    };
+                let workspace_for_skyline = if workspace_source == WorkspaceSource::Cwd
+                    && !workspace_path.join(".ee").is_dir()
+                {
+                    None
+                } else {
+                    Some(workspace_path.as_path())
+                };
                 let report = StatusSkylineReport::gather_for_workspace(workspace_for_skyline);
                 return match cli.renderer() {
                     output::Renderer::Human | output::Renderer::Markdown => {
@@ -39738,6 +39738,45 @@ mod tests {
             "status format JSON schema",
         )?;
         ensure(stderr.is_empty(), "status format JSON stderr must be empty")
+    }
+
+    #[test]
+    fn parser_accepts_status_skyline_flag() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "status", "--skyline", "--json"])
+            .map_err(|error| format!("failed to parse status skyline: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Status(args)) => ensure_equal(&args.skyline, &true, "skyline flag"),
+            other => Err(format!("expected status command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn status_skyline_json_writes_machine_data_to_stdout_only() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "status", "--skyline", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "status skyline JSON exit")?;
+        ensure(
+            stderr.is_empty(),
+            "status skyline JSON stderr must be empty",
+        )?;
+        ensure_ends_with(&stdout, '\n', "status skyline JSON trailing newline")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v1"),
+            "status skyline response schema",
+        )?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!("ee.status.skyline.v1"),
+            "status skyline data schema",
+        )?;
+        ensure_equal(
+            &value["data"]["command"],
+            &serde_json::json!("status --skyline"),
+            "status skyline command",
+        )
     }
 
     #[test]

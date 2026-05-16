@@ -3626,11 +3626,7 @@ pub fn render_status_skyline_human(report: &StatusSkylineReport) -> String {
     let _ = writeln!(output, "ee status --skyline");
     let _ = writeln!(output);
     let _ = writeln!(output, "schema: {}", report.schema);
-    let _ = writeln!(
-        output,
-        "communities: {}",
-        report.summary.community_count
-    );
+    let _ = writeln!(output, "communities: {}", report.summary.community_count);
     let _ = writeln!(
         output,
         "load-bearing memories: {}",
