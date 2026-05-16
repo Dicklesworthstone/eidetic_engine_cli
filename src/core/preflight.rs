@@ -722,8 +722,21 @@ pub fn preflight_run_store_path(workspace: &Path) -> PathBuf {
 }
 
 fn read_preflight_run_store(store_path: &Path) -> Result<PreflightRunStoreDocument, DomainError> {
-    if !store_path.exists() {
-        return Ok(PreflightRunStoreDocument::default());
+    ensure_no_symlink_components(store_path, "read")?;
+    match fs::symlink_metadata(store_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PreflightRunStoreDocument::default());
+        }
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Failed to stat preflight run store `{}`: {error}",
+                    store_path.display()
+                ),
+                repair: Some("Check workspace .ee permissions.".to_owned()),
+            });
+        }
     }
 
     let text = fs::read_to_string(store_path).map_err(|error| DomainError::Storage {
@@ -763,6 +776,7 @@ fn write_preflight_run_store(
     store_path: &Path,
     store: &mut PreflightRunStoreDocument,
 ) -> Result<(), DomainError> {
+    ensure_no_symlink_components(store_path, "write")?;
     if let Some(parent) = store_path.parent() {
         fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
             message: format!(
@@ -772,6 +786,7 @@ fn write_preflight_run_store(
             repair: Some("Check workspace .ee permissions.".to_owned()),
         })?;
     }
+    ensure_no_symlink_components(store_path, "write")?;
 
     store.runs.sort_by(|left, right| {
         left.report
@@ -792,6 +807,47 @@ fn write_preflight_run_store(
         ),
         repair: Some("Check workspace .ee permissions.".to_owned()),
     })
+}
+
+fn ensure_no_symlink_components(path: &Path, operation: &'static str) -> Result<(), DomainError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Refusing to {operation} preflight run store `{}` through symlinked path component `{}`.",
+                        path.display(),
+                        current.display()
+                    ),
+                    repair: Some(
+                        "Replace the symlink with a real workspace .ee path before retrying."
+                            .to_owned(),
+                    ),
+                });
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Failed to inspect preflight run store path component `{}` before {operation}: {error}",
+                        current.display()
+                    ),
+                    repair: Some("Check workspace .ee permissions.".to_owned()),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn persist_preflight_run(workspace: &Path, report: &RunReport) -> Result<(), DomainError> {
@@ -1498,6 +1554,80 @@ mod tests {
             "shown source id",
         )?;
         ensure(shown.degraded.is_empty(), true, "no degraded evidence")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_preflight_rejects_symlinked_metadata_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = temp_workspace()?;
+        let real_metadata = workspace.path().join("real-ee");
+        std::fs::create_dir_all(&real_metadata).map_err(|error| error.to_string())?;
+        symlink(&real_metadata, workspace.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let source = TripwireSource::dependency_contract(
+            "dep_forbidden_runtime",
+            "Forbidden runtime dependency must not be introduced",
+            true,
+            ["release"],
+        );
+        let result = run_preflight(&RunOptions {
+            workspace: workspace.path().to_path_buf(),
+            task_input: "prepare release".to_owned(),
+            persist_run: true,
+            tripwire_sources: vec![source],
+            ..Default::default()
+        });
+        let error = result.expect_err("symlinked .ee parent should be rejected");
+        ensure(
+            error.message().contains("symlinked path component"),
+            true,
+            "symlinked .ee error message",
+        )?;
+        ensure(
+            real_metadata.join("preflight_runs.json").exists(),
+            false,
+            "preflight store must not be written through symlinked .ee parent",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn show_preflight_rejects_symlinked_run_store_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = temp_workspace()?;
+        let ee_dir = workspace.path().join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+
+        let outside_store = workspace.path().join("outside-preflight-runs.json");
+        let run = RunReport::new(
+            "pf_symlink000000000000000000000".to_owned(),
+            "prepare release".to_owned(),
+        );
+        let mut store = PreflightRunStoreDocument {
+            schema: PREFLIGHT_RUN_STORE_SCHEMA_V1.to_owned(),
+            runs: vec![StoredPreflightRun {
+                report: run,
+                close_report: None,
+            }],
+        };
+        write_preflight_run_store(&outside_store, &mut store).map_err(|error| error.message())?;
+        symlink(&outside_store, preflight_run_store_path(workspace.path()))
+            .map_err(|error| error.to_string())?;
+
+        let result = show_preflight(&ShowOptions {
+            workspace: workspace.path().to_path_buf(),
+            run_id: "pf_symlink000000000000000000000".to_owned(),
+            ..Default::default()
+        });
+        let error = result.expect_err("symlinked preflight run store should be rejected");
+        ensure(
+            error.message().contains("symlinked path component"),
+            true,
+            "symlinked store error message",
+        )
     }
 
     #[test]
