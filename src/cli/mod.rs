@@ -163,6 +163,9 @@ use crate::core::profile::{
     ProfileConfigOptions, ProfileConfigReport, VerificationRecipe, apply_profile_config,
     plan_profile_config,
 };
+use crate::core::proof_verify::{
+    ProofCheckReport, ProofCheckStatus, SystemProofCommandRunner, run_proof_checks,
+};
 use crate::core::rehearse::{
     CommandSpec, RehearsalProfile, RehearseInspectOptions, RehearsePlanOptions,
     RehearsePromotePlanOptions, RehearseRunOptions, inspect_rehearsal, plan_rehearsal,
@@ -3923,6 +3926,8 @@ pub enum VerifyCommand {
     /// Legacy alias for `ingest`.
     #[command(hide = true)]
     Record(VerifyIngestArgs),
+    /// Check committed Lean4 and TLA+ proof artifacts.
+    Proofs(VerifyProofsArgs),
     /// Query reusable verification evidence without launching a build.
     #[command(subcommand)]
     Broker(VerifyBrokerCommand),
@@ -4002,6 +4007,14 @@ pub struct VerifyIngestArgs {
     /// Explicit database path.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee verify proofs`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct VerifyProofsArgs {
+    /// Root directory containing lean4/ and tla/ proof artifact directories.
+    #[arg(long = "proofs-root", value_name = "PATH")]
+    pub proofs_root: Option<PathBuf>,
 }
 
 /// Arguments for `ee verify closure-guidance`.
@@ -9168,6 +9181,9 @@ where
         Some(Command::Verify(VerifyCommand::Ingest(ref args))) => {
             handle_verification_ingest(&cli, args, stdout, stderr)
         }
+        Some(Command::Verify(VerifyCommand::Proofs(ref args))) => {
+            handle_verify_proofs(&cli, args, stdout, stderr)
+        }
         Some(Command::Verify(VerifyCommand::Broker(VerifyBrokerCommand::Lookup(ref args)))) => {
             handle_verify_broker_lookup(&cli, args, stdout, stderr)
         }
@@ -9179,6 +9195,9 @@ where
         }
         Some(Command::Verification(VerifyCommand::Ingest(ref args))) => {
             handle_verification_ingest(&cli, args, stdout, stderr)
+        }
+        Some(Command::Verification(VerifyCommand::Proofs(ref args))) => {
+            handle_verify_proofs(&cli, args, stdout, stderr)
         }
         Some(Command::Verification(VerifyCommand::Broker(VerifyBrokerCommand::Lookup(
             ref args,
@@ -28119,6 +28138,92 @@ fn read_verification_evidence_input(args: &VerifyIngestArgs) -> Result<String, S
     }
 }
 
+fn handle_verify_proofs<W, E>(
+    cli: &Cli,
+    args: &VerifyProofsArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let proofs_root = args
+        .proofs_root
+        .clone()
+        .unwrap_or_else(|| cli.resolve_workspace().join("proofs"));
+    let runner = SystemProofCommandRunner;
+    match run_proof_checks(&proofs_root, &runner) {
+        Ok(report) => write_verify_proofs_report(cli, &report, stdout),
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: format!(
+                    "Failed to inspect proof artifacts under '{}': {error}",
+                    proofs_root.display()
+                ),
+                repair: Some("rerun with --proofs-root <path-to-proofs>".to_owned()),
+            };
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn write_verify_proofs_report<W>(
+    cli: &Cli,
+    report: &ProofCheckReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_verify_proofs_human(report))
+        }
+        output::Renderer::Toon => {
+            let json =
+                serde_json::to_string(report).expect("proof check report should serialize to JSON");
+            write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json =
+                serde_json::to_string(report).expect("proof check report should serialize to JSON");
+            write_stdout(stdout, &(json + "\n"))
+        }
+    }
+}
+
+fn render_verify_proofs_human(report: &ProofCheckReport) -> String {
+    let mut lines = Vec::with_capacity(report.checks.len() + 3);
+    let status = if report.success { "ok" } else { "failed" };
+    lines.push(format!("proof verification\n  Status: {status}"));
+    if !report.degraded.is_empty() {
+        lines.push(format!("  Degraded: {}", report.degraded.join(", ")));
+    }
+    for check in &report.checks {
+        lines.push(format!(
+            "  - {} [{}]: {}",
+            check.artifact.path.display(),
+            check.artifact.kind.as_str(),
+            proof_check_status_label(check.status)
+        ));
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+fn proof_check_status_label(status: ProofCheckStatus) -> &'static str {
+    match status {
+        ProofCheckStatus::Proved => "proved",
+        ProofCheckStatus::ModelChecked => "model_checked",
+        ProofCheckStatus::Violation => "violation",
+        ProofCheckStatus::ToolMissing => "tool_missing",
+    }
+}
+
 fn handle_verify_broker_lookup<W, E>(
     cli: &Cli,
     args: &VerifyBrokerLookupArgs,
@@ -35962,7 +36067,8 @@ const SWARM_SUBCOMMANDS: &[&str] = &["brief"];
 const TASK_FRAME_SUBCOMMANDS: &[&str] = &["create", "show", "update", "close", "subgoal"];
 const TASK_FRAME_SUBGOAL_SUBCOMMANDS: &[&str] = &["add"];
 const TRIPWIRE_SUBCOMMANDS: &[&str] = &["list", "check"];
-const VERIFICATION_SUBCOMMANDS: &[&str] = &["ingest", "record", "broker", "closure-guidance"];
+const VERIFICATION_SUBCOMMANDS: &[&str] =
+    &["ingest", "record", "proofs", "broker", "closure-guidance"];
 const WORKSPACE_SUBCOMMANDS: &[&str] = &["resolve", "list", "alias"];
 
 /// Read-only normalized representation of a CLI invocation.
@@ -36399,6 +36505,7 @@ impl NormalizedInvocation {
                 Command::Verify(verify) => match verify {
                     VerifyCommand::Ingest(_) => "verify ingest".to_string(),
                     VerifyCommand::Record(_) => "verify record".to_string(),
+                    VerifyCommand::Proofs(_) => "verify proofs".to_string(),
                     VerifyCommand::Broker(VerifyBrokerCommand::Lookup(_)) => {
                         "verify broker lookup".to_string()
                     }
@@ -36407,6 +36514,7 @@ impl NormalizedInvocation {
                 Command::Verification(verify) => match verify {
                     VerifyCommand::Ingest(_) => "verification ingest".to_string(),
                     VerifyCommand::Record(_) => "verification record".to_string(),
+                    VerifyCommand::Proofs(_) => "verification proofs".to_string(),
                     VerifyCommand::Broker(VerifyBrokerCommand::Lookup(_)) => {
                         "verification broker lookup".to_string()
                     }
@@ -38939,6 +39047,30 @@ mod tests {
                 ensure(args.stdin, "stdin flag parsed")
             }
             other => Err(format!("expected verification ingest stdin, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_verify_proofs_with_optional_root() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "verify",
+            "proofs",
+            "--proofs-root",
+            "custom-proofs",
+            "--json",
+        ])
+        .map(|cli| (cli.wants_json(), cli.command))
+        .map_err(|error| format!("failed to parse verify proofs: {:?}", error.kind()))?;
+
+        ensure(parsed.0, "verify proofs honors json global")?;
+        match parsed.1 {
+            Some(Command::Verify(VerifyCommand::Proofs(args))) => ensure_equal(
+                &args.proofs_root,
+                &Some(PathBuf::from("custom-proofs")),
+                "proofs root",
+            ),
+            other => Err(format!("expected verify proofs, got {other:?}")),
         }
     }
 
