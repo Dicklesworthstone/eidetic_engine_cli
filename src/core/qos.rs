@@ -441,6 +441,38 @@ fn read_registry_document(path: &Path) -> Result<Option<QosActiveLaneRegistry>, 
             repair: Some("replace the symlinked .ee/qos path with a real directory".to_owned()),
         });
     }
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => Some(metadata),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            None
+        }
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "failed to inspect QoS active-lane registry '{}': {error}",
+                    path.display()
+                ),
+                repair: Some("check workspace .ee/qos permissions".to_owned()),
+            });
+        }
+    };
+    let Some(metadata) = metadata else {
+        return Ok(None);
+    };
+    if !metadata.file_type().is_file() {
+        return Err(DomainError::Storage {
+            message: format!(
+                "refusing to read QoS active-lane registry '{}' because it is not a regular file",
+                path.display()
+            ),
+            repair: Some("replace .ee/qos/active-lanes.json with a regular JSON file".to_owned()),
+        });
+    }
 
     match fs::read_to_string(path) {
         Ok(raw) => {
@@ -1004,6 +1036,22 @@ mod tests {
         assert_eq!(summary.degraded.len(), 1);
         assert_eq!(summary.degraded[0].code, QOS_REGISTRY_UNAVAILABLE_CODE);
         assert!(summary.degraded[0].message.contains("symlink"));
+        Ok(())
+    }
+
+    #[test]
+    fn registry_read_rejects_registry_directory() -> TestResult {
+        let tempdir = tempfile::tempdir()?;
+        let workspace = tempdir.path().join("workspace");
+        let path = qos_registry_path(&workspace);
+        fs::create_dir_all(&path)?;
+
+        let summary = summarize_qos_lane_registry(&workspace, "/workspace/secret-project", 500);
+
+        assert!(summary.active_records.is_empty());
+        assert_eq!(summary.degraded.len(), 1);
+        assert_eq!(summary.degraded[0].code, QOS_REGISTRY_UNAVAILABLE_CODE);
+        assert!(summary.degraded[0].message.contains("not a regular file"));
         Ok(())
     }
 
