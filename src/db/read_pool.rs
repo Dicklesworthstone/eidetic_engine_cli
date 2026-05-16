@@ -360,6 +360,19 @@ impl SnapshotPin<'_> {
         Ok(())
     }
 
+    pub fn rollback(mut self) -> Result<()> {
+        if self.snapshot_active {
+            self.snapshot_active = false;
+            if let Some(connection) = self.connection.as_mut() {
+                if let Err(error) = connection.rollback_read_snapshot() {
+                    connection.abandon();
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn rollback_on_drop(&mut self) {
         if !self.snapshot_active {
             return;
@@ -777,6 +790,66 @@ mod tests {
         assert_eq!(stats.drops, 1);
         let fresh = must(pool.acquire(), "fresh connection opens after abandon");
         assert_ne!(fresh.slot_id(), Some(1));
+    }
+
+    #[test]
+    fn drop_on_panic_path_releases_pin_idempotently() {
+        let (_tempdir, _database_path, pool) = file_pool(1);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _pin = must(pool.pin_snapshot(), "snapshot pin opens before panic");
+            assert_eq!(pool.stats().active, 1);
+            panic!("force unwind across SnapshotPin");
+        }));
+
+        assert!(result.is_err());
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 1);
+        assert_eq!(stats.drops, 0);
+    }
+
+    #[test]
+    fn rollback_releases_pin_before_returning_connection_to_lifo() {
+        let (_tempdir, _database_path, pool) = file_pool(1);
+        let pin = must(pool.pin_snapshot(), "snapshot pin opens");
+        let slot_id = pin.slot_id();
+
+        must(pin.rollback(), "read snapshot rolls back explicitly");
+
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 1);
+
+        let reacquired = must(pool.acquire(), "rolled back pin returns connection");
+        assert_eq!(reacquired.slot_id(), slot_id);
+    }
+
+    #[test]
+    fn rollback_error_abandons_connection_and_prevents_lifo_reuse() {
+        let (_tempdir, _database_path, pool) = file_pool(1);
+        let pin = must(pool.pin_snapshot(), "snapshot pin opens");
+        let slot_id = pin.slot_id();
+        must(
+            pin.connection().commit_read_snapshot(),
+            "test commits behind pin before explicit rollback",
+        );
+
+        let error = match pin.rollback() {
+            Ok(()) => panic!("rollback after manual commit should fail"),
+            Err(error) => error,
+        };
+        assert!(error.operation().is_some());
+
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 0);
+        assert_eq!(stats.drops, 1);
+
+        let fresh = must(
+            pool.acquire(),
+            "fresh connection opens after rollback abandon",
+        );
+        assert_ne!(fresh.slot_id(), slot_id);
     }
 
     #[test]
