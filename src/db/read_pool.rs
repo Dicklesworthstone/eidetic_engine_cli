@@ -331,6 +331,8 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     fn memory_pool(max_size: usize, idle_timeout: Duration) -> ReadConnectionPool {
         ReadConnectionPool::new(
@@ -402,6 +404,105 @@ mod tests {
                 .and_then(|row| row.get(0).and_then(|value| value.as_i64())),
             "count row present",
         )
+    }
+
+    fn join_reader_latency(handle: thread::JoinHandle<u128>) -> u128 {
+        match handle.join() {
+            Ok(value) => value,
+            Err(payload) => {
+                if let Some(message) = payload.downcast_ref::<&str>() {
+                    panic!("reader thread panicked: {message}");
+                }
+                if let Some(message) = payload.downcast_ref::<String>() {
+                    panic!("reader thread panicked: {message}");
+                }
+                panic!("reader thread panicked with non-string payload");
+            }
+        }
+    }
+
+    fn p50_latency_ms(values: &[u128]) -> u128 {
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        sorted[sorted.len() / 2]
+    }
+
+    fn pool_size_eight_batch_completion_latencies(
+        database_path: PathBuf,
+        readers: usize,
+        per_reader_work: Duration,
+    ) -> Vec<u128> {
+        let pool = Arc::new(ReadConnectionPool::new(
+            DatabaseConfig::file(database_path.clone()),
+            PoolConfig::new(8, Duration::from_secs(30)),
+        ));
+        let readers_ready = Arc::new(Barrier::new(readers + 1));
+        let release_readers = Arc::new(Barrier::new(readers + 1));
+        let batch_start = Arc::new(Mutex::new(None::<Instant>));
+
+        let handles: Vec<_> = (0..readers)
+            .map(|_| {
+                let pool = Arc::clone(&pool);
+                let readers_ready = Arc::clone(&readers_ready);
+                let release_readers = Arc::clone(&release_readers);
+                let batch_start = Arc::clone(&batch_start);
+                thread::spawn(move || {
+                    let pin = must(pool.pin_snapshot(), "fanout reader snapshot opens");
+                    assert_eq!(snapshot_item_count(&pin), 1);
+                    readers_ready.wait();
+                    release_readers.wait();
+                    thread::sleep(per_reader_work);
+                    assert_eq!(snapshot_item_count(&pin), 1);
+                    batch_start
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .expect("batch start set before readers release")
+                        .elapsed()
+                        .as_millis()
+                })
+            })
+            .collect();
+
+        readers_ready.wait();
+        insert_snapshot_item(&database_path, 2, "during_pool_eight_readers");
+        {
+            let mut start = batch_start
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *start = Some(Instant::now());
+        }
+        release_readers.wait();
+
+        let latencies: Vec<u128> = handles.into_iter().map(join_reader_latency).collect();
+        let fresh = must(pool.acquire(), "fresh reader opens after fanout batch");
+        assert_eq!(snapshot_item_count(&fresh), 2);
+        latencies
+    }
+
+    fn pool_size_one_batch_completion_latencies(
+        database_path: PathBuf,
+        readers: usize,
+        per_reader_work: Duration,
+    ) -> Vec<u128> {
+        let pool = ReadConnectionPool::new(
+            DatabaseConfig::file(database_path.clone()),
+            PoolConfig::new(1, Duration::from_secs(30)),
+        );
+        let batch_start = Instant::now();
+        let mut latencies = Vec::with_capacity(readers);
+
+        for index in 0..readers {
+            let pin = must(pool.pin_snapshot(), "serial reader snapshot opens");
+            assert!(snapshot_item_count(&pin) >= 1);
+            thread::sleep(per_reader_work);
+            latencies.push(batch_start.elapsed().as_millis());
+            drop(pin);
+            if index == 0 {
+                insert_snapshot_item(&database_path, 2, "during_pool_one_readers");
+            }
+        }
+
+        latencies
     }
 
     #[test]
@@ -647,5 +748,31 @@ mod tests {
         drop(first);
         assert_eq!(pool.stats().active, 0);
         assert_eq!(pool.stats().idle, 1);
+    }
+
+    #[test]
+    fn in_process_fanout_latency_pool_eight_meets_speedup_budget_under_writer_load() {
+        let readers = 8;
+        let per_reader_work = Duration::from_millis(15);
+        let (_single_tempdir, single_database_path, _single_pool) = file_pool(1);
+        let (_fanout_tempdir, fanout_database_path, _fanout_pool) = file_pool(8);
+
+        let single_latencies = pool_size_one_batch_completion_latencies(
+            single_database_path,
+            readers,
+            per_reader_work,
+        );
+        let fanout_latencies = pool_size_eight_batch_completion_latencies(
+            fanout_database_path,
+            readers,
+            per_reader_work,
+        );
+        let single_p50 = p50_latency_ms(&single_latencies);
+        let fanout_p50 = p50_latency_ms(&fanout_latencies);
+
+        assert!(
+            fanout_p50.saturating_mul(100) <= single_p50.saturating_mul(60),
+            "pool_size=8 p50 {fanout_p50}ms should be <= 60% of pool_size=1 p50 {single_p50}ms; single={single_latencies:?} fanout={fanout_latencies:?}",
+        );
     }
 }
