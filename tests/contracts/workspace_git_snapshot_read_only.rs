@@ -16,8 +16,8 @@ use std::process::Command;
 use std::time::Instant;
 
 use ee::core::swarm_brief::{
-    SystemSwarmBriefCommandRunner, WorkspaceGitSnapshotOptions, WorkspaceGitStatusEntry,
-    collect_workspace_git_snapshot,
+    SwarmBriefCommandError, SystemSwarmBriefCommandRunner, WorkspaceGitSnapshotOptions,
+    WorkspaceGitStatusEntry, collect_workspace_git_snapshot,
 };
 use serde_json::{Value, json};
 
@@ -420,6 +420,45 @@ fn workspace_git_snapshot_provider_is_read_only_for_unmerged_conflict() -> TestR
     assert!(conflict.metadata.as_ref().is_some_and(|metadata| {
         metadata.exists && metadata.file_type == "file" && !metadata.large_file
     }));
+
+    Ok(())
+}
+
+#[test]
+fn workspace_git_snapshot_provider_degrades_read_only_outside_git_repo() -> TestResult {
+    let temp = tempfile::Builder::new()
+        .prefix("ee-workspace-git-not-repo-readonly-")
+        .tempdir()
+        .map_err(|error| format!("tempdir: {error}"))?;
+    let workspace = temp.path();
+    write_file(&workspace.join("loose.txt"), "not a git checkout\n")?;
+
+    let before_files = file_state_digest(workspace)?;
+    let options = WorkspaceGitSnapshotOptions::for_workspace(workspace);
+    let error = collect_workspace_git_snapshot(&options, &SystemSwarmBriefCommandRunner)
+        .expect_err("non-repository workspace should degrade instead of returning a snapshot");
+    let after_files = file_state_digest(workspace)?;
+
+    assert_eq!(
+        after_files, before_files,
+        "provider must not mutate files when git rev-parse fails"
+    );
+    match error {
+        SwarmBriefCommandError::Failed { status, stderr } => {
+            assert_ne!(status, Some(0));
+            assert!(
+                stderr.contains("not a git repository")
+                    || stderr.contains("not a git repo")
+                    || stderr.contains("outside a git repository"),
+                "unexpected git rev-parse stderr: {stderr}"
+            );
+        }
+        other => {
+            return Err(format!(
+                "expected git rev-parse failure outside a repository, got {other:?}"
+            ));
+        }
+    }
 
     Ok(())
 }
