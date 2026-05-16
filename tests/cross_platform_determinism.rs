@@ -10,6 +10,9 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use ee::graph::hits::compute_hits;
+use ee::graph::minhash_rank::{
+    MinHashRankPolicy, MinHashRankResult, compute_minhash_rank_with_policy,
+};
 use ee::graph::ppr::{
     PersonalizedPageRankPolicy, compute_personalized_pagerank_result_with_policy,
 };
@@ -40,6 +43,12 @@ const EXPECTED_HASHES: &[ExpectedHash] = &[
         output_hash: "blake3:899880f112e11cf015273f6cae10010e01d49f362061bb4cd18932fcbcab1bf9",
     },
     ExpectedHash {
+        target_triple: "x86_64-unknown-linux-gnu",
+        algorithm: "minhash_rank_centrality",
+        seed: "incoming-density-v1",
+        output_hash: "blake3:6756bd905f8593b7587ec91fe699e48c4bf2ffff22dd4c94bdeb248cc99a4b53",
+    },
+    ExpectedHash {
         target_triple: "x86_64-unknown-linux-musl",
         algorithm: "personalized_pagerank",
         seed: "weighted-cycle-v1",
@@ -50,6 +59,12 @@ const EXPECTED_HASHES: &[ExpectedHash] = &[
         algorithm: "hits",
         seed: "authority-star-v1",
         output_hash: "blake3:899880f112e11cf015273f6cae10010e01d49f362061bb4cd18932fcbcab1bf9",
+    },
+    ExpectedHash {
+        target_triple: "x86_64-unknown-linux-musl",
+        algorithm: "minhash_rank_centrality",
+        seed: "incoming-density-v1",
+        output_hash: "blake3:6756bd905f8593b7587ec91fe699e48c4bf2ffff22dd4c94bdeb248cc99a4b53",
     },
     ExpectedHash {
         target_triple: "aarch64-unknown-linux-gnu",
@@ -64,6 +79,12 @@ const EXPECTED_HASHES: &[ExpectedHash] = &[
         output_hash: "blake3:899880f112e11cf015273f6cae10010e01d49f362061bb4cd18932fcbcab1bf9",
     },
     ExpectedHash {
+        target_triple: "aarch64-unknown-linux-gnu",
+        algorithm: "minhash_rank_centrality",
+        seed: "incoming-density-v1",
+        output_hash: "blake3:6756bd905f8593b7587ec91fe699e48c4bf2ffff22dd4c94bdeb248cc99a4b53",
+    },
+    ExpectedHash {
         target_triple: "aarch64-apple-darwin",
         algorithm: "personalized_pagerank",
         seed: "weighted-cycle-v1",
@@ -76,6 +97,12 @@ const EXPECTED_HASHES: &[ExpectedHash] = &[
         output_hash: "blake3:899880f112e11cf015273f6cae10010e01d49f362061bb4cd18932fcbcab1bf9",
     },
     ExpectedHash {
+        target_triple: "aarch64-apple-darwin",
+        algorithm: "minhash_rank_centrality",
+        seed: "incoming-density-v1",
+        output_hash: "blake3:6756bd905f8593b7587ec91fe699e48c4bf2ffff22dd4c94bdeb248cc99a4b53",
+    },
+    ExpectedHash {
         target_triple: "x86_64-pc-windows-msvc",
         algorithm: "personalized_pagerank",
         seed: "weighted-cycle-v1",
@@ -86,6 +113,12 @@ const EXPECTED_HASHES: &[ExpectedHash] = &[
         algorithm: "hits",
         seed: "authority-star-v1",
         output_hash: "blake3:899880f112e11cf015273f6cae10010e01d49f362061bb4cd18932fcbcab1bf9",
+    },
+    ExpectedHash {
+        target_triple: "x86_64-pc-windows-msvc",
+        algorithm: "minhash_rank_centrality",
+        seed: "incoming-density-v1",
+        output_hash: "blake3:6756bd905f8593b7587ec91fe699e48c4bf2ffff22dd4c94bdeb248cc99a4b53",
     },
 ];
 
@@ -129,6 +162,7 @@ fn all_supported_targets_have_hash_rows_for_each_algorithm_seed() -> TestResult 
         for (algorithm, seed) in [
             ("personalized_pagerank", "weighted-cycle-v1"),
             ("hits", "authority-star-v1"),
+            ("minhash_rank_centrality", "incoming-density-v1"),
         ] {
             let present = EXPECTED_HASHES.iter().any(|entry| {
                 entry.target_triple == *target_triple
@@ -166,7 +200,11 @@ fn current_target_matches_pinned_graph_algorithm_hashes() -> TestResult {
         format!("current target {target} is not listed in TARGET_TRIPLES"),
     )?;
     let manifest = divergence_manifest()?;
-    let observed = [observed_pagerank_hash()?, observed_hits_hash()?];
+    let observed = [
+        observed_pagerank_hash()?,
+        observed_hits_hash()?,
+        observed_minhash_rank_hash()?,
+    ];
 
     for observed in observed {
         let Some(expected) = EXPECTED_HASHES.iter().find(|entry| {
@@ -247,6 +285,43 @@ fn observed_hits_hash() -> Result<ObservedHash, String> {
     })
 }
 
+fn observed_minhash_rank_hash() -> Result<ObservedHash, String> {
+    let graph = incoming_density_graph()?;
+    let result = graph_result(compute_minhash_rank_with_policy(
+        &graph,
+        MinHashRankPolicy {
+            signature_count: 16,
+            top_k: 6,
+        },
+    ))?;
+    Ok(ObservedHash {
+        algorithm: "minhash_rank_centrality",
+        seed: "incoming-density-v1",
+        output_hash: hash_minhash_rank_result(&result),
+    })
+}
+
+fn hash_minhash_rank_result(result: &MinHashRankResult) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.cross_platform_determinism.minhash_rank_centrality.v1\0");
+    hasher.update(&(result.policy.signature_count as u64).to_le_bytes());
+    hasher.update(&(result.policy.top_k as u64).to_le_bytes());
+    hasher.update(&(result.witness.nodes_touched as u64).to_le_bytes());
+    hasher.update(&(result.witness.edges_scanned as u64).to_le_bytes());
+    hasher.update(&(result.witness.queue_peak as u64).to_le_bytes());
+    for score in &result.scores {
+        hasher.update(&(score.rank as u64).to_le_bytes());
+        hash_string(&mut hasher, &score.node);
+        hasher.update(&score.signature_density.to_le_bytes());
+        hasher.update(&(score.incoming_edge_count as u64).to_le_bytes());
+        hasher.update(&(score.outgoing_edge_count as u64).to_le_bytes());
+        for value in &score.signature {
+            hasher.update(&value.to_le_bytes());
+        }
+    }
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
 fn hash_pagerank_result(result: &PageRankResult) -> String {
     let mut scores = result.scores.clone();
     scores.sort_by(|left, right| left.node.cmp(&right.node));
@@ -280,6 +355,25 @@ fn authority_star_graph() -> Result<DiGraph, String> {
     }
     add_weighted_edge(&mut graph, "mem_b", "mem_f", "related", 0.4, 0.9)?;
     add_weighted_edge(&mut graph, "mem_f", "mem_b", "derived_from", 0.6, 0.8)?;
+    Ok(graph)
+}
+
+fn incoming_density_graph() -> Result<DiGraph, String> {
+    let mut graph = DiGraph::strict();
+    for (source, target) in [
+        ("mem_d", "mem_a"),
+        ("mem_e", "mem_a"),
+        ("mem_f", "mem_a"),
+        ("mem_c", "mem_b"),
+        ("mem_e", "mem_b"),
+        ("mem_a", "mem_c"),
+        ("mem_b", "mem_c"),
+        ("mem_a", "mem_d"),
+        ("mem_b", "mem_e"),
+        ("mem_c", "mem_f"),
+    ] {
+        add_weighted_edge(&mut graph, source, target, "supports", 1.0, 1.0)?;
+    }
     Ok(graph)
 }
 

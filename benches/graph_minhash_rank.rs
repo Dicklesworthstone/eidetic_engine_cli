@@ -17,6 +17,8 @@ const QUICK_MEASURE_ITERS: usize = 9;
 const MINHASH_SPEEDUP_FLOOR: f64 = 5.0;
 const TOP_K: usize = 100;
 const SIGNATURE_COUNT: usize = 1;
+const MAX_HUB_INCOMING: usize = 256;
+const MAX_TAIL_INCOMING: usize = 64;
 const BENCH_SCALES: &[usize] = &[100, 1_000, 2_000];
 const COMPARE_SCALE: usize = 10_000;
 
@@ -35,18 +37,53 @@ fn seeded_graph(node_count: usize) -> DiGraph {
     for index in 0..node_count {
         graph.add_node(node_id(index));
     }
-    for source in 0..node_count {
-        let fanout = source.min(32);
-        for offset in 0..fanout {
-            let target = offset;
-            if source != target {
-                graph
-                    .add_edge(node_id(source), node_id(target))
-                    .expect("minhash rank benchmark edge should be valid");
-            }
+
+    let hub_count = TOP_K.min((node_count / 4).max(1));
+    let tail_count = node_count.saturating_sub(hub_count);
+    if tail_count == 0 {
+        return graph;
+    }
+
+    let hub_incoming = tail_count.min(MAX_HUB_INCOMING);
+    for target in 0..hub_count {
+        for offset in 0..hub_incoming {
+            let source = hub_count + ((target + offset) % tail_count);
+            graph
+                .add_edge(node_id(source), node_id(target))
+                .expect("minhash rank benchmark hub edge should be valid");
+        }
+    }
+
+    let tail_incoming = tail_count
+        .saturating_sub(1)
+        .min(MAX_TAIL_INCOMING)
+        .min(hub_incoming.saturating_sub(1));
+    for target_offset in 0..tail_count {
+        let target = hub_count + target_offset;
+        for offset in 1..=tail_incoming {
+            let source = hub_count + ((target_offset + offset) % tail_count);
+            graph
+                .add_edge(node_id(source), node_id(target))
+                .expect("minhash rank benchmark tail edge should be valid");
         }
     }
     graph
+}
+
+fn top_k_incoming_edges(graph: &DiGraph) -> usize {
+    (0..TOP_K)
+        .map(|index| graph.in_degree(&node_id(index)))
+        .sum()
+}
+
+fn assert_compare_graph_shape(graph: &DiGraph) {
+    let top_k_incoming_edges = top_k_incoming_edges(graph);
+
+    assert!(top_k_incoming_edges > 0);
+    assert!(
+        graph.edge_count() >= top_k_incoming_edges * MINHASH_SPEEDUP_FLOOR as usize,
+        "compare graph should make PageRank scan the broad tail while minhash scans the top-K head"
+    );
 }
 
 fn run_minhash_once(graph: &DiGraph) -> f64 {
@@ -84,6 +121,9 @@ fn percentile(sorted_samples: &[f64], percentile: f64) -> f64 {
 
 fn quick_stats(node_count: usize) -> QuickStats {
     let graph = seeded_graph(node_count);
+    if node_count == COMPARE_SCALE {
+        assert_compare_graph_shape(&graph);
+    }
     for _ in 0..QUICK_WARMUP_ITERS {
         let _ = run_minhash_once(&graph);
         let _ = run_pagerank_top_k_once(&graph);
@@ -169,5 +209,12 @@ mod tests {
     #[test]
     fn compare_scale_exercises_large_top_k_graph() {
         assert!(super::COMPARE_SCALE >= 10_000);
+    }
+
+    #[test]
+    fn compare_graph_keeps_top_k_edge_set_sparse() {
+        let graph = super::seeded_graph(super::COMPARE_SCALE);
+
+        super::assert_compare_graph_shape(&graph);
     }
 }
