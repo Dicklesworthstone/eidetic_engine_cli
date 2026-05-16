@@ -1,0 +1,24 @@
+{
+  "schema": "ee.mesh.policy_decision.v1",
+  "direction": "inbound",
+  "action": "deny",
+  "reason": "peer_policy_redaction_denied",
+  "policyRef": "mesh_pol_5ff4cbe39b",
+  "materialLane": "body",
+  "redaction": "deny",
+  "trustLane": "peerAgent",
+  "importTrustClass": "agent_validated",
+  "bodyFetchAllowed": false,
+  "localTruthSideEffectsAllowed": false,
+  "searchOrGraphSideEffectsAllowed": false,
+  "failure": {
+    "schema": "ee.mesh.policy_failure_surface.v1",
+    "code": "mesh_peer_policy_denied",
+    "action": "deny",
+    "reason": "peer_policy_redaction_denied",
+    "policyRef": "mesh_pol_5ff4cbe39b",
+    "materialLane": "body",
+    "redaction": "deny",
+    "trustLane": "peerAgent"
+  }
+}

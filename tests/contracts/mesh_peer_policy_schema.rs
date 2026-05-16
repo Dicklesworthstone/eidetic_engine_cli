@@ -25,6 +25,7 @@ const FAILURE_SURFACE_FIXTURES: &[&str] = &[
 ];
 const DECISION_FIXTURES: &[&str] = &[
     "tests/fixtures/mesh/peer_policy_decision_inbound_allowed.json",
+    "tests/fixtures/mesh/peer_policy_decision_inbound_denied.json",
     "tests/fixtures/mesh/peer_policy_decision_outbound_redacted_body_allowed.json",
 ];
 
@@ -407,6 +408,64 @@ fn peer_policy_failure_surface_fixtures_pin_inbound_and_outbound_codes() -> Test
         &outbound.pointer("/redaction").and_then(Value::as_str),
         &Some("redact"),
         "outbound redaction posture",
+    )
+}
+
+#[test]
+fn peer_policy_decision_fixture_pins_nested_inbound_failure() -> TestResult {
+    let value = read_json("tests/fixtures/mesh/peer_policy_decision_inbound_denied.json")?;
+    ensure_equal(
+        &value.pointer("/schema").and_then(Value::as_str),
+        &Some(MESH_POLICY_DECISION_SCHEMA_V1),
+        "decision schema",
+    )?;
+    ensure_equal(
+        &value.pointer("/direction").and_then(Value::as_str),
+        &Some("inbound"),
+        "decision direction",
+    )?;
+    ensure_equal(
+        &value.pointer("/action").and_then(Value::as_str),
+        &Some("deny"),
+        "decision action",
+    )?;
+    ensure_equal(
+        &value
+            .pointer("/localTruthSideEffectsAllowed")
+            .and_then(Value::as_bool),
+        &Some(false),
+        "local truth side effects",
+    )?;
+    ensure_equal(
+        &value
+            .pointer("/searchOrGraphSideEffectsAllowed")
+            .and_then(Value::as_bool),
+        &Some(false),
+        "search or graph side effects",
+    )?;
+
+    let failure = value
+        .pointer("/failure")
+        .ok_or_else(|| "denied decision missing nested failure".to_owned())?;
+    ensure_equal(
+        &failure.pointer("/schema").and_then(Value::as_str),
+        &Some(MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1),
+        "failure schema",
+    )?;
+    ensure_equal(
+        &failure.pointer("/code").and_then(Value::as_str),
+        &Some("mesh_peer_policy_denied"),
+        "failure code",
+    )?;
+    ensure_equal(
+        &failure.pointer("/reason").and_then(Value::as_str),
+        &value.pointer("/reason").and_then(Value::as_str),
+        "failure reason mirrors decision reason",
+    )?;
+    ensure_equal(
+        &failure.pointer("/policyRef").and_then(Value::as_str),
+        &value.pointer("/policyRef").and_then(Value::as_str),
+        "failure policy ref mirrors decision policy ref",
     )
 }
 
