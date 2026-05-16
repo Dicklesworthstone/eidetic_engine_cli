@@ -4193,7 +4193,8 @@ pub fn render_dependency_diagnostics_json(report: &DependencyDiagnosticsReport) 
             render_dependency_contract_capability_gap(obj, entry);
         });
         let degraded_entries = dependency_contract_degraded_entries(report);
-        d.field_array_of_objects("degraded", &degraded_entries, |obj, entry| {
+        let degraded = aggregate_dependency_contract_degradations(&degraded_entries);
+        d.field_array_of_objects("degraded", &degraded, |obj, entry| {
             render_dependency_contract_degradation(obj, entry);
         });
         d.field_array_of_objects("entries", report.entries, render_dependency_contract_entry);
@@ -4515,6 +4516,67 @@ fn dependency_contract_degraded_entries(
         .collect()
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DependencyContractDegradation {
+    aggregate: AggregatedDegradation,
+    dependencies: Vec<&'static str>,
+    owning_surfaces: Vec<&'static str>,
+    statuses: Vec<&'static str>,
+    readiness: Vec<&'static str>,
+    diagnostic_commands: Vec<&'static str>,
+}
+
+fn aggregate_dependency_contract_degradations(
+    entries: &[DependencyContractEntry],
+) -> Vec<DependencyContractDegradation> {
+    aggregate_degraded_entries(entries.iter().copied().map(|entry| {
+        DegradationAggregationInput::new(
+            "dependency_contract",
+            entry.degradation_code,
+            "medium",
+            dependency_contract_degradation_message(&entry),
+            dependency_contract_degradation_repair(&entry),
+        )
+    }))
+    .into_iter()
+    .map(|aggregate| {
+        let matching: Vec<DependencyContractEntry> = entries
+            .iter()
+            .copied()
+            .filter(|entry| entry.degradation_code == aggregate.code)
+            .collect();
+        DependencyContractDegradation {
+            aggregate,
+            dependencies: unique_dependency_contract_values(&matching, |entry| entry.name),
+            owning_surfaces: unique_dependency_contract_values(&matching, |entry| {
+                entry.owning_surface
+            }),
+            statuses: unique_dependency_contract_values(&matching, |entry| entry.status),
+            readiness: unique_dependency_contract_values(&matching, |entry| entry.readiness()),
+            diagnostic_commands: unique_dependency_contract_values(&matching, |entry| {
+                entry.diagnostic_command
+            }),
+        }
+    })
+    .collect()
+}
+
+fn unique_dependency_contract_values<F>(
+    entries: &[DependencyContractEntry],
+    mut value: F,
+) -> Vec<&'static str>
+where
+    F: FnMut(DependencyContractEntry) -> &'static str,
+{
+    entries
+        .iter()
+        .copied()
+        .map(&mut value)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn dependency_contract_capability_gap_entries(
     report: &DependencyDiagnosticsReport,
 ) -> Vec<DependencyContractEntry> {
@@ -4551,16 +4613,18 @@ fn render_dependency_contract_capability_gap(
     obj.field_str("capabilitiesCommand", "ee capabilities --json");
 }
 
-fn render_dependency_contract_degradation(obj: &mut JsonBuilder, entry: &DependencyContractEntry) {
-    obj.field_str("code", entry.degradation_code);
-    obj.field_str("severity", "medium");
-    obj.field_str("message", &dependency_contract_degradation_message(entry));
-    obj.field_str("repair", &dependency_contract_degradation_repair(entry));
-    obj.field_str("dependency", entry.name);
-    obj.field_str("owningSurface", entry.owning_surface);
-    obj.field_str("status", entry.status);
-    obj.field_str("readiness", entry.readiness());
-    obj.field_str("diagnosticCommand", entry.diagnostic_command);
+fn render_dependency_contract_degradation(
+    obj: &mut JsonBuilder,
+    entry: &DependencyContractDegradation,
+) {
+    build_aggregated_degradation(obj, &entry.aggregate);
+    if !entry.dependencies.is_empty() {
+        obj.field_array_of_strs("dependencies", &entry.dependencies);
+        obj.field_array_of_strs("owningSurfaces", &entry.owning_surfaces);
+        obj.field_array_of_strs("statuses", &entry.statuses);
+        obj.field_array_of_strs("readiness", &entry.readiness);
+        obj.field_array_of_strs("diagnosticCommands", &entry.diagnostic_commands);
+    }
 }
 
 fn dependency_contract_degradation_message(entry: &DependencyContractEntry) -> String {
@@ -12338,22 +12402,24 @@ mod tests {
         OutputEnvironment, Renderer, ResponseEnvelope, SHADOW_RUN_SCHEMA_V1, ShadowRunComparison,
         ShadowRunReport, error_response_json, escape_json_string, help_text, human_status,
         render_agent_docs_json, render_agent_docs_toon, render_context_response_json,
-        render_context_response_markdown, render_context_response_toon, render_doctor_json,
-        render_doctor_json_filtered, render_doctor_toon, render_handoff_create_json,
-        render_handoff_create_toon, render_handoff_inspect_json, render_handoff_inspect_toon,
-        render_handoff_preview_json, render_handoff_preview_toon, render_handoff_resume_json,
-        render_handoff_resume_toon, render_health_json, render_health_toon,
-        render_integrity_diagnostics_json, render_learn_experiment_proposal_human,
-        render_learn_experiment_proposal_json, render_learn_experiment_proposal_toon,
-        render_memory_history_json, render_memory_history_toon, render_schema_export_json,
-        render_shadow_run_human, render_shadow_run_json, render_shadow_run_toon,
-        render_status_json, render_status_json_filtered, render_status_toon, render_version_json,
-        status_response_json,
+        render_context_response_markdown, render_context_response_toon,
+        render_dependency_diagnostics_json, render_doctor_json, render_doctor_json_filtered,
+        render_doctor_toon, render_handoff_create_json, render_handoff_create_toon,
+        render_handoff_inspect_json, render_handoff_inspect_toon, render_handoff_preview_json,
+        render_handoff_preview_toon, render_handoff_resume_json, render_handoff_resume_toon,
+        render_health_json, render_health_toon, render_integrity_diagnostics_json,
+        render_learn_experiment_proposal_human, render_learn_experiment_proposal_json,
+        render_learn_experiment_proposal_toon, render_memory_history_json,
+        render_memory_history_toon, render_schema_export_json, render_shadow_run_human,
+        render_shadow_run_json, render_shadow_run_toon, render_status_json,
+        render_status_json_filtered, render_status_toon, render_version_json, status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::doctor::{
-        DoctorReport, IntegrityCanaryReport, IntegrityDiagnosticCheck,
-        IntegrityDiagnosticDegradation, IntegrityDiagnosticsReport, IntegrityDiagnosticsStatus,
+        DependencyContractEntry, DependencyDiagnosticsReport, DependencyDiagnosticsSummary,
+        DependencyDriftPolicy, DependencyFeatureProfile, DependencySource, DoctorReport,
+        IntegrityCanaryReport, IntegrityDiagnosticCheck, IntegrityDiagnosticDegradation,
+        IntegrityDiagnosticsReport, IntegrityDiagnosticsStatus,
     };
     use crate::core::handoff::{
         CapsuleProfile, CreateReport as HandoffCreateReport, InspectReport as HandoffInspectReport,
@@ -12436,6 +12502,100 @@ mod tests {
         assert!(
             !json.is_empty(),
             "serialization failure must not be hidden as an empty string"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dependency_diagnostics_degraded_entries_are_aggregated() -> TestResult {
+        static TEST_ENTRIES: &[DependencyContractEntry] = &[
+            DependencyContractEntry {
+                name: "graph-alpha",
+                kind: "franken",
+                owning_surface: "ee-graph",
+                status: "optional_feature_gated",
+                enabled_by_default: false,
+                source: DependencySource {
+                    kind: "path",
+                    version: "0.1.0",
+                    path: "/dp/graph-alpha",
+                },
+                default_feature_profile: DependencyFeatureProfile {
+                    default_features: false,
+                    features: &[],
+                },
+                optional_feature_profiles: &[],
+                blocked_features: &[],
+                forbidden_transitive_dependencies: &[],
+                minimum_smoke_test: "cargo test graph_alpha",
+                degradation_code: "graph_unavailable",
+                status_fields: &[],
+                diagnostic_command: "ee diag graph --json",
+                release_pin_decision: "test",
+            },
+            DependencyContractEntry {
+                name: "graph-beta",
+                kind: "franken",
+                owning_surface: "ee-graph",
+                status: "optional_feature_gated",
+                enabled_by_default: false,
+                source: DependencySource {
+                    kind: "path",
+                    version: "0.1.0",
+                    path: "/dp/graph-beta",
+                },
+                default_feature_profile: DependencyFeatureProfile {
+                    default_features: false,
+                    features: &[],
+                },
+                optional_feature_profiles: &[],
+                blocked_features: &[],
+                forbidden_transitive_dependencies: &[],
+                minimum_smoke_test: "cargo test graph_beta",
+                degradation_code: "graph_unavailable",
+                status_fields: &[],
+                diagnostic_command: "ee diag graph --json",
+                release_pin_decision: "test",
+            },
+        ];
+
+        let report = DependencyDiagnosticsReport {
+            version: "test",
+            schema: "ee.diag.dependencies.v1",
+            matrix_revision: 1,
+            source_bead: "bd-test",
+            source_plan_item: "test",
+            default_feature_profile: "test",
+            forbidden_crates: &[],
+            entries: TEST_ENTRIES,
+            drift_policy: DependencyDriftPolicy {
+                cargo_update_dry_run: "cargo update --dry-run",
+                fail_conditions: &[],
+                runtime_diagnostic_owner: "test",
+            },
+            summary: DependencyDiagnosticsSummary::from_entries(TEST_ENTRIES),
+        };
+
+        let json = render_dependency_diagnostics_json(&report);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        let degraded = parsed["data"]["degraded"]
+            .as_array()
+            .ok_or_else(|| "degraded must be an array".to_string())?;
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0]["code"], "graph_unavailable");
+        assert_eq!(
+            degraded[0]["sources"],
+            serde_json::json!(["dependency_contract"])
+        );
+        assert_eq!(
+            degraded[0]["dependencies"],
+            serde_json::json!(["graph-alpha", "graph-beta"])
+        );
+        assert_eq!(
+            degraded[0]["diagnosticCommands"],
+            serde_json::json!(["ee diag graph --json"])
         );
         Ok(())
     }
