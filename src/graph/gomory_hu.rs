@@ -3,8 +3,11 @@ use std::time::Duration;
 
 use asupersync::Cx;
 use fnx_classes::Graph;
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
+use crate::core::degraded_aggregation::{
+    AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
+};
 use crate::graph::GraphResult;
 use crate::graph::algorithms::{current_or_testing_cx, run_with_budget};
 use crate::models::degradation::GRAPH_PROXIMITY_UNREACHABLE_CODE;
@@ -39,6 +42,7 @@ pub struct ProximityReport {
     pub min_cut: Option<f64>,
     pub interpretation: String,
     pub tree_path: Option<Vec<String>>,
+    #[serde(serialize_with = "serialize_proximity_degraded")]
     pub degraded: Vec<ProximityDegradation>,
 }
 
@@ -49,6 +53,31 @@ pub struct ProximityDegradation {
     pub severity: String,
     pub message: String,
     pub repair: Option<String>,
+}
+
+fn serialize_proximity_degraded<S>(
+    degraded: &[ProximityDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_proximity_degraded(degraded).serialize(serializer)
+}
+
+fn aggregate_proximity_degraded(degraded: &[ProximityDegradation]) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "gomory_hu_proximity",
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry
+                .repair
+                .clone()
+                .unwrap_or_else(|| "Refresh graph proximity diagnostics.".to_owned()),
+        )
+    }))
 }
 
 pub fn build_gomory_hu_tree(graph: &Graph) -> GraphResult<GomoryHuTree> {
@@ -441,6 +470,50 @@ mod tests {
         assert!(degraded.message.contains("unreachable"));
         assert!(degraded.message.contains("different components"));
         assert_eq!(degraded.repair, None);
+        Ok(())
+    }
+
+    #[test]
+    fn proximity_report_serializes_aggregated_degraded_entries() -> TestResult {
+        let report = ProximityReport {
+            schema: PROXIMITY_SCHEMA_V1,
+            memory_a: "a".to_owned(),
+            memory_b: "b".to_owned(),
+            snapshot_version: 7,
+            min_cut: None,
+            interpretation: "unreachable".to_owned(),
+            tree_path: None,
+            degraded: vec![
+                proximity_unreachable_degradation("a", "b"),
+                proximity_unreachable_degradation("a", "b"),
+            ],
+        };
+
+        let value = serde_json::to_value(report).map_err(|error| error.to_string())?;
+        let degraded = value
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                "serialized proximity report should include degraded array".to_owned()
+            })?;
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(
+            degraded[0].get("code"),
+            Some(&serde_json::json!(GRAPH_PROXIMITY_UNREACHABLE_CODE))
+        );
+        assert_eq!(
+            degraded[0].get("severity"),
+            Some(&serde_json::json!("info"))
+        );
+        assert_eq!(
+            degraded[0].get("repair"),
+            Some(&serde_json::json!("Refresh graph proximity diagnostics."))
+        );
+        assert_eq!(
+            degraded[0].get("sources"),
+            Some(&serde_json::json!(["gomory_hu_proximity"]))
+        );
         Ok(())
     }
 

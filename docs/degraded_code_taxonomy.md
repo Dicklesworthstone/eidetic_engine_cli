@@ -139,6 +139,7 @@ Current conventions:
 | `graph_export` | `ee graph export` graph snapshot export degradation. |
 | `graph_feature_enrichment` | `ee graph feature-enrichment` graph-derived scoring degradation. |
 | `hits` | `ee graph hits` HITS algorithm degradation. |
+| `gomory_hu_proximity` | `ee proximity` Gomory-Hu min-cut proximity degradation. |
 | `review_session` | `ee review session` curation proposal degradation. |
 | `review_workspace` | `ee review workspace` curation proposal degradation. |
 | `host_profile` | Swarm brief host-profile source degradation. |
