@@ -75,10 +75,10 @@ pub fn redact_content(content: &str, level: RedactionLevel) -> String {
             }
         }
         RedactionLevel::Strict => {
-            if contains_secret_pattern(content) || content.len() > 200 {
+            if contains_secret_pattern(content) {
                 REDACTED_PLACEHOLDER.to_owned()
             } else {
-                redact_paths_in_content(content)
+                redact_paths_in_content(content).chars().take(200).collect()
             }
         }
         RedactionLevel::Paranoid => REDACTED_PLACEHOLDER.to_owned(),
@@ -150,10 +150,7 @@ pub fn redact_path(path: &str, level: RedactionLevel) -> String {
 #[must_use]
 pub fn redact_identifier(id: &str, level: RedactionLevel) -> String {
     match level {
-        RedactionLevel::None
-        | RedactionLevel::Minimal
-        | RedactionLevel::Strict
-        | RedactionLevel::Paranoid => id.to_owned(),
+        RedactionLevel::None | RedactionLevel::Minimal | RedactionLevel::Strict => id.to_owned(),
         RedactionLevel::Standard => {
             if id.len() > 8 {
                 format!("{}...{}", &id[..4], &id[id.len() - 4..])
@@ -161,6 +158,7 @@ pub fn redact_identifier(id: &str, level: RedactionLevel) -> String {
                 id.to_owned()
             }
         }
+        RedactionLevel::Paranoid => format!("id_{}", blake3_prefix(id, 16)),
         RedactionLevel::Full => REDACTED_ID_PLACEHOLDER.to_owned(),
     }
 }
@@ -175,7 +173,14 @@ pub fn redact_memory_record(
         return record;
     }
 
-    record.content = redact_content(&record.content, level);
+    let original_content = record.content.clone();
+    if matches!(
+        level,
+        RedactionLevel::Strict | RedactionLevel::Paranoid | RedactionLevel::Full
+    ) {
+        record.content_hash = Some(blake3_digest(&original_content));
+    }
+    record.content = redact_content(&original_content, level);
     if let Some(reason) = record.tombstoned_reason.as_ref() {
         record.tombstoned_reason = Some(redact_content(reason, level));
     }
@@ -297,8 +302,18 @@ pub fn redact_audit_record(
         }
     }
 
-    if level.redacts_content() {
-        record.details = None;
+    match level {
+        RedactionLevel::Minimal | RedactionLevel::Standard | RedactionLevel::Strict => {
+            if let Some(details) = record.details.as_ref() {
+                record.details = Some(serde_json::json!({
+                    "hash": format!("blake3:{}", blake3_prefix(&canonical_json(details), 16)),
+                }));
+            }
+        }
+        RedactionLevel::Paranoid | RedactionLevel::Full => {
+            record.details = None;
+        }
+        RedactionLevel::None => {}
     }
 
     record
@@ -354,10 +369,41 @@ fn redact_tag_record(mut record: ExportTagRecord, level: RedactionLevel) -> Expo
     if level.redacts_identifiers() {
         record.memory_id = redact_identifier(&record.memory_id, level);
     }
-    if level.redacts_content() {
-        record.tag = REDACTED_PLACEHOLDER.to_owned();
+    match level {
+        RedactionLevel::Paranoid => {
+            record.tag = format!("tag_{}", blake3_prefix(&record.tag, 16));
+        }
+        RedactionLevel::Full => {
+            record.tag = REDACTED_PLACEHOLDER.to_owned();
+        }
+        _ => {}
     }
     record
+}
+
+fn blake3_prefix(input: &str, chars: usize) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = blake3::hash(input.as_bytes());
+    let mut output = String::with_capacity(chars);
+    for byte in digest.as_bytes() {
+        if output.len() >= chars {
+            break;
+        }
+        output.push(HEX[(byte >> 4) as usize] as char);
+        if output.len() >= chars {
+            break;
+        }
+        output.push(HEX[(byte & 0x0F) as usize] as char);
+    }
+    output
+}
+
+fn blake3_digest(input: &str) -> String {
+    format!("blake3:{}", blake3::hash(input.as_bytes()).to_hex())
+}
+
+fn canonical_json(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
 }
 
 /// JSONL export writer.

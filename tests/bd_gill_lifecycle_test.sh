@@ -29,8 +29,7 @@ expect_readme_reference() {
   local canonical_id="$1"
 
   if ! grep -Fq "\`$canonical_id\`" README.md; then
-    printf 'expected README.md to reference `%s`' "$canonical_id" >&2
-    printf '\n' >&2
+    printf 'expected README.md to reference %s\n' "\`$canonical_id\`" >&2
     return 1
   fi
 }

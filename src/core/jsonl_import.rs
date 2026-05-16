@@ -349,8 +349,10 @@ impl From<DbError> for JsonlImportError {
 struct ParsedJsonlImport {
     header: Option<ExportHeader>,
     footer: Option<ExportFooter>,
+    footer_line: Option<u32>,
     memories: Vec<ExportMemoryRecord>,
     tags_by_memory: BTreeMap<String, BTreeSet<String>>,
+    tag_lines_by_memory: BTreeMap<String, u32>,
     issues: Vec<JsonlImportIssue>,
     records_total: u32,
     ignored_records: u32,
@@ -524,8 +526,10 @@ fn parse_jsonl_source(input: &str) -> ParsedJsonlImport {
     let mut parsed = ParsedJsonlImport {
         header: None,
         footer: None,
+        footer_line: None,
         memories: Vec::new(),
         tags_by_memory: BTreeMap::new(),
+        tag_lines_by_memory: BTreeMap::new(),
         issues: Vec::new(),
         records_total: 0,
         ignored_records: 0,
@@ -678,6 +682,10 @@ fn parse_tag_record(parsed: &mut ParsedJsonlImport, line_number: u32, value: Jso
         Ok(tag) => match Tag::parse(&tag.tag) {
             Ok(canonical) => {
                 parsed
+                    .tag_lines_by_memory
+                    .entry(tag.memory_id.clone())
+                    .or_insert(line_number);
+                parsed
                     .tags_by_memory
                     .entry(tag.memory_id)
                     .or_default()
@@ -706,14 +714,40 @@ fn parse_footer_record(parsed: &mut ParsedJsonlImport, line_number: u32, value: 
         ));
         return;
     }
-    match serde_json::from_value::<ExportFooter>(value) {
-        Ok(footer) => parsed.footer = Some(footer),
+    match serde_json::from_value::<ExportFooter>(value)
+        .map_err(|error| error.to_string())
+        .and_then(|footer| {
+            validate_export_footer_required_fields(&footer)?;
+            Ok(footer)
+        }) {
+        Ok(footer) => {
+            parsed.footer = Some(footer);
+            parsed.footer_line = Some(line_number);
+        }
         Err(error) => parsed.issues.push(JsonlImportIssue::error(
             Some(line_number),
             "invalid_footer",
             error.to_string(),
         )),
     }
+}
+
+fn validate_export_footer_required_fields(footer: &ExportFooter) -> Result<(), String> {
+    for (field, value) in [
+        ("schema", footer.schema.as_str()),
+        ("export_id", footer.export_id.as_str()),
+        ("completed_at", footer.completed_at.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(format!("footer field `{field}` must not be blank"));
+        }
+    }
+    if footer.schema != EXPORT_FOOTER_SCHEMA_V1 {
+        return Err(format!(
+            "footer field `schema` must be {EXPORT_FOOTER_SCHEMA_V1}"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_header_and_footer(parsed: &mut ParsedJsonlImport, first_schema: Option<(u32, String)>) {
@@ -747,7 +781,47 @@ fn validate_header_and_footer(parsed: &mut ParsedJsonlImport, first_schema: Opti
         }
     }
 
+    let memory_ids = parsed
+        .memories
+        .iter()
+        .map(|memory| memory.memory_id.as_str())
+        .collect::<BTreeSet<_>>();
+    for memory_id in parsed.tags_by_memory.keys() {
+        if !memory_ids.contains(memory_id.as_str()) {
+            parsed.issues.push(JsonlImportIssue::error(
+                parsed.tag_lines_by_memory.get(memory_id).copied(),
+                "orphaned_tag_record",
+                format!("tag record references missing memory `{memory_id}`"),
+            ));
+        }
+    }
+
     if let Some(footer) = &parsed.footer {
+        if let Some(header) = &parsed.header
+            && footer.export_id != header.export_id
+        {
+            parsed.issues.push(JsonlImportIssue::error(
+                parsed.footer_line,
+                "footer_export_id_mismatch",
+                format!(
+                    "footer export_id `{}` does not match header export_id `{}`",
+                    footer.export_id, header.export_id
+                ),
+            ));
+        }
+        let parsed_tag_count = parsed.tags_by_memory.values().fold(0_u64, |total, tags| {
+            total.saturating_add(u64::try_from(tags.len()).unwrap_or(u64::MAX))
+        });
+        if footer.tag_count != parsed_tag_count {
+            parsed.issues.push(JsonlImportIssue::warning(
+                None,
+                "footer_tag_count_mismatch",
+                format!(
+                    "footer tag_count {} does not match parsed tag records {}",
+                    footer.tag_count, parsed_tag_count
+                ),
+            ));
+        }
         if !footer.success {
             parsed.issues.push(JsonlImportIssue::warning(
                 None,
@@ -1214,6 +1288,88 @@ mod tests {
                 .any(|issue| issue.code == "missing_header"),
             true,
             "missing header issue",
+        )
+    }
+
+    #[test]
+    fn parse_jsonl_source_rejects_blank_footer_required_fields() -> TestResult {
+        let input = sample_jsonl().replace(
+            "\"completed_at\":\"2026-04-30T00:01:00Z\"",
+            "\"completed_at\":\"  \"",
+        );
+        let parsed = parse_jsonl_source(&input);
+
+        ensure(parsed.has_errors(), true, "has errors")?;
+        ensure(parsed.footer.is_none(), true, "invalid footer omitted")?;
+        ensure(
+            parsed.issues.iter().any(|issue| {
+                issue.line == Some(4)
+                    && issue.code == "invalid_footer"
+                    && issue
+                        .message
+                        .contains("footer field `completed_at` must not be blank")
+            }),
+            true,
+            "invalid footer issue",
+        )
+    }
+
+    #[test]
+    fn parse_jsonl_source_rejects_footer_export_id_mismatch() -> TestResult {
+        let input = sample_jsonl().replace(
+            "\"schema\":\"ee.export.footer.v1\",\"export_id\":\"exp-001\"",
+            "\"schema\":\"ee.export.footer.v1\",\"export_id\":\"exp-other\"",
+        );
+        let parsed = parse_jsonl_source(&input);
+
+        ensure(parsed.has_errors(), true, "has errors")?;
+        ensure(parsed.footer.is_some(), true, "valid footer parsed")?;
+        ensure(
+            parsed.issues.iter().any(|issue| {
+                issue.line == Some(4)
+                    && issue.code == "footer_export_id_mismatch"
+                    && issue.message.contains("exp-other")
+                    && issue.message.contains("exp-001")
+            }),
+            true,
+            "footer mismatch issue",
+        )
+    }
+
+    #[test]
+    fn parse_jsonl_source_rejects_orphaned_tag_records() -> TestResult {
+        let input = sample_jsonl().replace(
+            "\"schema\":\"ee.export.tag.v1\",\"memory_id\":\"mem_01234567890123456789012345\"",
+            "\"schema\":\"ee.export.tag.v1\",\"memory_id\":\"mem_99999999999999999999999999\"",
+        );
+        let parsed = parse_jsonl_source(&input);
+
+        ensure(parsed.has_errors(), true, "has errors")?;
+        ensure(
+            parsed.issues.iter().any(|issue| {
+                issue.line == Some(3)
+                    && issue.code == "orphaned_tag_record"
+                    && issue.message.contains("mem_99999999999999999999999999")
+            }),
+            true,
+            "orphaned tag issue",
+        )
+    }
+
+    #[test]
+    fn parse_jsonl_source_warns_on_footer_tag_count_mismatch() -> TestResult {
+        let input = sample_jsonl().replace("\"tag_count\":1", "\"tag_count\":2");
+        let parsed = parse_jsonl_source(&input);
+
+        ensure(parsed.has_errors(), false, "warning only")?;
+        ensure(
+            parsed.issues.iter().any(|issue| {
+                issue.line.is_none()
+                    && issue.code == "footer_tag_count_mismatch"
+                    && issue.severity == JsonlImportIssueSeverity::Warning
+            }),
+            true,
+            "tag count warning",
         )
     }
 

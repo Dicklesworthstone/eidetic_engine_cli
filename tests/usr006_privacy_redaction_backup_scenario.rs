@@ -304,6 +304,173 @@ fn redaction_level_standard_redacts_paths_and_truncates_ids() -> TestResult {
 }
 
 #[test]
+fn redaction_level_paranoid_hashes_identifiers_and_tags() -> TestResult {
+    use ee::models::{ExportRecord, ExportTagRecord, RedactionLevel};
+    use ee::output::jsonl_export::{redact_identifier, redact_record};
+
+    let redacted_id = redact_identifier("mem-secret-001234567890", RedactionLevel::Paranoid);
+    ensure(
+        redacted_id.starts_with("id_"),
+        "paranoid identifiers should use an id_ hash prefix",
+    )?;
+    ensure(
+        !redacted_id.contains("mem-secret"),
+        "paranoid identifiers must not expose the original identifier",
+    )?;
+    ensure(
+        redacted_id == redact_identifier("mem-secret-001234567890", RedactionLevel::Paranoid),
+        "paranoid identifier hashing should be deterministic",
+    )?;
+
+    let tag = ExportRecord::Tag(
+        ExportTagRecord::builder()
+            .memory_id("mem-secret-001234567890")
+            .tag("customer-secret-tag")
+            .created_at("2026-05-03T00:00:00Z")
+            .build()
+            .expect("tag has required fields"),
+    );
+
+    if let ExportRecord::Tag(t) = redact_record(tag, RedactionLevel::Paranoid) {
+        ensure(
+            t.memory_id.starts_with("id_"),
+            "paranoid tag memory_id should use an id_ hash prefix",
+        )?;
+        ensure(
+            t.tag.starts_with("tag_"),
+            "paranoid tags should use a tag_ hash prefix",
+        )?;
+        ensure(
+            !t.tag.contains("customer-secret-tag"),
+            "paranoid tags must not expose the original tag",
+        )?;
+    } else {
+        return Err("expected tag variant".into());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn strict_memory_redaction_truncates_content_and_adds_hash() -> TestResult {
+    use ee::models::{ExportMemoryRecord, RedactionLevel};
+    use ee::output::jsonl_export::redact_memory_record;
+
+    let content = "strict-redaction-fixture ".repeat(16);
+    let expected_hash = format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex());
+    let memory = ExportMemoryRecord::builder()
+        .memory_id("mem-strict-001234567890")
+        .workspace_id("ws-test")
+        .level("procedural")
+        .kind("rule")
+        .content(content.clone())
+        .created_at("2026-05-03T00:00:00Z")
+        .build()
+        .expect("memory has required fields");
+
+    let redacted = redact_memory_record(memory, RedactionLevel::Strict);
+    ensure(redacted.redacted, "strict should mark memory as redacted")?;
+    ensure(
+        redacted.content.chars().count() == 200,
+        format!(
+            "strict should truncate memory content to 200 chars, got {}",
+            redacted.content.chars().count()
+        ),
+    )?;
+    ensure(
+        redacted.content == content.chars().take(200).collect::<String>(),
+        "strict should retain only the first 200 chars of non-secret content",
+    )?;
+    ensure(
+        redacted.content_hash.as_deref() == Some(expected_hash.as_str()),
+        "strict should attach a BLAKE3 hash of the original full body",
+    )
+}
+
+#[test]
+fn paranoid_memory_redaction_replaces_content_and_adds_hash() -> TestResult {
+    use ee::models::{ExportMemoryRecord, RedactionLevel};
+    use ee::output::jsonl_export::{REDACTED_PLACEHOLDER, redact_memory_record};
+
+    let content = "private memory body with enough detail to require a digest";
+    let expected_hash = format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex());
+    let memory = ExportMemoryRecord::builder()
+        .memory_id("mem-paranoid-001234567890")
+        .workspace_id("ws-test")
+        .level("procedural")
+        .kind("rule")
+        .content(content)
+        .created_at("2026-05-03T00:00:00Z")
+        .build()
+        .expect("memory has required fields");
+
+    let redacted = redact_memory_record(memory, RedactionLevel::Paranoid);
+    ensure(
+        redacted.content == REDACTED_PLACEHOLDER,
+        "paranoid should replace memory content with placeholder",
+    )?;
+    ensure(
+        redacted.content_hash.as_deref() == Some(expected_hash.as_str()),
+        "paranoid should attach a BLAKE3 hash of the original full body",
+    )?;
+    ensure(
+        !redacted.content.contains("private memory body"),
+        "paranoid should not expose original memory content",
+    )
+}
+
+#[test]
+fn export_memory_content_hash_is_optional_and_round_trips() -> TestResult {
+    use ee::models::{EXPORT_MEMORY_SCHEMA_V1, ExportMemoryRecord};
+
+    let old_json = r#"{
+        "schema": "ee.export.memory.v1",
+        "memory_id": "mem-old-001",
+        "workspace_id": "ws-test",
+        "level": "procedural",
+        "kind": "rule",
+        "content": "old export without content hash",
+        "created_at": "2026-05-03T00:00:00Z",
+        "redacted": false
+    }"#;
+    let old_record: ExportMemoryRecord =
+        serde_json::from_str(old_json).map_err(|error| error.to_string())?;
+    ensure(
+        old_record.content_hash.is_none(),
+        "legacy memory exports without content_hash should still deserialize",
+    )?;
+
+    let hash = "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let new_record = ExportMemoryRecord::builder()
+        .memory_id("mem-new-001")
+        .workspace_id("ws-test")
+        .level("procedural")
+        .kind("rule")
+        .content("new export with content hash")
+        .content_hash(hash)
+        .created_at("2026-05-03T00:00:00Z")
+        .redacted(true)
+        .redaction_reason("redaction_level:strict")
+        .build()
+        .expect("memory has required fields");
+    let serialized = serde_json::to_string(&new_record).map_err(|error| error.to_string())?;
+    ensure(
+        serialized.contains(r#""content_hash":"blake3:"#),
+        "new memory exports should serialize content_hash when present",
+    )?;
+    let parsed: ExportMemoryRecord =
+        serde_json::from_str(&serialized).map_err(|error| error.to_string())?;
+    ensure(
+        parsed.schema == EXPORT_MEMORY_SCHEMA_V1,
+        "round-tripped memory schema should remain stable",
+    )?;
+    ensure(
+        parsed.content_hash.as_deref() == Some(hash),
+        "content_hash should round-trip through JSON",
+    )
+}
+
+#[test]
 fn redaction_level_full_redacts_everything() -> TestResult {
     use ee::models::RedactionLevel;
     use ee::output::jsonl_export::{
@@ -460,6 +627,67 @@ fn export_record_redaction_covers_all_record_types() -> TestResult {
     } else {
         return Err("expected tag variant".into());
     }
+
+    Ok(())
+}
+
+#[test]
+fn audit_details_redaction_matches_level_matrix() -> TestResult {
+    use ee::models::{ExportAuditRecord, RedactionLevel};
+    use ee::output::jsonl_export::redact_audit_record;
+
+    fn audit_record() -> ExportAuditRecord {
+        ExportAuditRecord::builder()
+            .audit_id("audit-test-001234567890")
+            .operation("memory.update")
+            .target_type("memory")
+            .target_id("mem-test-001234567890")
+            .performed_at("2026-05-03T00:00:00Z")
+            .performed_by("agent-test-001234567890")
+            .details(serde_json::json!({
+                "secret": "sk-secret-12345-test",
+                "reason": "redaction matrix fixture"
+            }))
+            .build()
+            .expect("audit has required fields")
+    }
+
+    let none = redact_audit_record(audit_record(), RedactionLevel::None);
+    ensure(
+        none.details
+            .as_ref()
+            .is_some_and(|details| details.to_string().contains("sk-secret-12345-test")),
+        "none should preserve audit details",
+    )?;
+
+    for level in [
+        RedactionLevel::Minimal,
+        RedactionLevel::Standard,
+        RedactionLevel::Strict,
+    ] {
+        let redacted = redact_audit_record(audit_record(), level);
+        let details = redacted
+            .details
+            .ok_or_else(|| format!("{level}: audit details should be hash-only"))?;
+        let hash = details
+            .get("hash")
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| format!("{level}: audit details missing hash"))?;
+        ensure(
+            hash.starts_with("blake3:"),
+            format!("{level}: audit hash should carry blake3 prefix"),
+        )?;
+        ensure(
+            !details.to_string().contains("sk-secret-12345-test"),
+            format!("{level}: audit details must not expose original secret"),
+        )?;
+    }
+
+    let paranoid = redact_audit_record(audit_record(), RedactionLevel::Paranoid);
+    ensure(
+        paranoid.details.is_none(),
+        "paranoid should omit audit details",
+    )?;
 
     Ok(())
 }

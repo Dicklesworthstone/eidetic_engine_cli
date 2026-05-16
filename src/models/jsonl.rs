@@ -426,7 +426,7 @@ impl RedactionLevel {
 
     #[must_use]
     pub const fn redacts_identifiers(self) -> bool {
-        matches!(self, Self::Standard | Self::Full)
+        matches!(self, Self::Standard | Self::Paranoid | Self::Full)
     }
 
     #[must_use]
@@ -880,6 +880,8 @@ pub struct ExportMemoryRecord {
     pub level: String,
     pub kind: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
     pub importance: Option<f64>,
     pub confidence: Option<f64>,
     pub utility: Option<f64>,
@@ -916,6 +918,7 @@ pub struct ExportMemoryRecordBuilder {
     level: Option<String>,
     kind: Option<String>,
     content: Option<String>,
+    content_hash: Option<String>,
     importance: Option<f64>,
     confidence: Option<f64>,
     utility: Option<f64>,
@@ -964,6 +967,12 @@ impl ExportMemoryRecordBuilder {
     #[must_use]
     pub fn content(mut self, content: impl Into<String>) -> Self {
         self.content = Some(content.into());
+        self
+    }
+
+    #[must_use]
+    pub fn content_hash(mut self, content_hash: impl Into<String>) -> Self {
+        self.content_hash = Some(content_hash.into());
         self
     }
 
@@ -1092,6 +1101,7 @@ impl ExportMemoryRecordBuilder {
             level: required_string(ExportRecordType::Memory, "level", self.level)?,
             kind: required_string(ExportRecordType::Memory, "kind", self.kind)?,
             content: required_string(ExportRecordType::Memory, "content", self.content)?,
+            content_hash: self.content_hash,
             importance: self.importance,
             confidence: self.confidence,
             utility: self.utility,
@@ -1935,6 +1945,7 @@ mod tests {
         assert!(!RedactionLevel::Standard.redacts_content());
         assert!(RedactionLevel::Strict.redacts_content());
         assert!(RedactionLevel::Paranoid.redacts_content());
+        assert!(RedactionLevel::Paranoid.redacts_identifiers());
         assert!(RedactionLevel::Full.redacts_content());
     }
 
@@ -2023,6 +2034,7 @@ mod tests {
             .level("procedural")
             .kind("rule")
             .content("Always run tests before commit")
+            .content_hash("blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
             .importance(0.8)
             .confidence(0.9)
             .created_at("2026-04-30T12:00:00Z")
@@ -2039,6 +2051,10 @@ mod tests {
         assert_eq!(memory.memory_id, "mem-001");
         assert_eq!(memory.level, "procedural");
         assert_eq!(memory.kind, "rule");
+        assert_eq!(
+            memory.content_hash.as_deref(),
+            Some("blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
         assert_eq!(memory.importance, Some(0.8));
         assert_eq!(
             memory.tombstoned_at.as_deref(),
@@ -2365,6 +2381,9 @@ mod tests {
                 .level("procedural")
                 .kind("rule")
                 .content("Run cargo fmt --check before release.")
+                .content_hash(
+                    "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                )
                 .importance(0.8)
                 .confidence(0.9)
                 .utility(0.7)
@@ -2656,6 +2675,7 @@ mod tests {
         assert_eq!(memory.schema, EXPORT_MEMORY_SCHEMA_V1);
         assert_eq!(memory.memory_id, "mem-001");
         assert_eq!(memory.importance, Some(0.8));
+        assert!(memory.content_hash.is_none());
         assert_eq!(memory.trust_class.as_deref(), Some("human_explicit"));
         assert_eq!(memory.trust_subclass.as_deref(), Some("project-rule"));
         assert_eq!(
