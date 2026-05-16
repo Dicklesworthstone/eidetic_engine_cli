@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # J3 — Epic F: discoverability e2e driver.
 #
-# Asserts the shipped F1 (recovery actions), F2 (top-level aliases), F4/F5
-# (capabilities binaries + env registry), F6 (completion aliases), F7
-# (didYouMean) surfaces and records TODOs for the remaining F3 work.
+# Asserts the shipped F1 (recovery actions), F2 (top-level aliases), F3
+# (most-used help prelude), F4/F5 (capabilities binaries + env registry), F6
+# (completion aliases), and F7 (didYouMean) surfaces.
 #
-# Shipped (real assertions):  F1, F2, F4, F5, F6, F7
-# Not yet shipped (todo):     F3
+# Shipped (real assertions):  F1, F2, F3, F4, F5, F6, F7
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -112,10 +111,37 @@ if printf '%s' "$CAPS_JSON" | jq . >/dev/null 2>&1; then
 fi
 
 # ------------------------------------------------------------
-# F3 — `ee --help` reorganization with "First 5" section.
+# F3 (shipped) — `ee --help` opens with a most-used command prelude and
+# stable categories before the full clap command reference.
 # ------------------------------------------------------------
-todo_assert "f3_help_first5_section" "bd-17c65.6.3" \
-    "ee --help lacks the curated 'First 5' commands section."
+HELP_TEXT=$(ee_global --help 2>/dev/null || true)
+if [ -n "$HELP_TEXT" ]; then
+    if printf '%s' "$HELP_TEXT" | grep -q 'Most-used commands (start here):'; then
+        e2e_log_assert_eq "true" "true" "f3_help_most_used_prelude"
+    else
+        e2e_log_assert_eq "missing" "Most-used commands (start here):" \
+            "f3_help_most_used_prelude"
+    fi
+
+    for command in init note pack why search remember; do
+        if printf '%s' "$HELP_TEXT" | grep -Eq "^[[:space:]]+${command}[[:space:]]"; then
+            e2e_log_assert_eq "true" "true" "f3_help_most_used_command_$command"
+        else
+            e2e_log_assert_eq "missing" "$command in most-used prelude" \
+                "f3_help_most_used_command_$command"
+        fi
+    done
+
+    for category in Inspect Curate Graph Maintenance Diagnostics Configuration; do
+        if printf '%s' "$HELP_TEXT" | grep -q "^[[:space:]]*$category:"; then
+            e2e_log_assert_eq "true" "true" "f3_help_category_$category"
+        else
+            e2e_log_assert_eq "missing" "$category category" "f3_help_category_$category"
+        fi
+    done
+else
+    e2e_log_assert_eq "empty" "non-empty help output" "f3_help_generated"
+fi
 
 # F5 (shipped) — the EnvVar registry is surfaced through capabilities
 # `envOverrides`, using registry names/descriptions and suppressing sensitive
