@@ -56,10 +56,23 @@ additional explicit gate. A policy can allow metadata while setting
 `bodyFetch.allowed = false`, which lets peers exchange indexes or revision
 notices without exposing full memory bodies.
 
-Policy failures should surface as structured denied/quarantined decisions with
-redaction-safe peer/workspace aliases. Raw remote workspace paths, memory
-bodies, embeddings, and secrets do not belong in status, support bundle, or
-handoff output unless a later explicit grant permits that lane.
+Policy failures should surface as structured denied/quarantined/rejected
+decisions with redaction-safe peer/workspace aliases. Raw remote workspace
+paths, memory bodies, embeddings, and secrets do not belong in status, support
+bundle, or handoff output unless a later explicit grant permits that lane.
+
+Inbound failures use these stable policy-layer codes:
+
+| Decision | Code |
+| --- | --- |
+| `deny` | `mesh_peer_policy_denied` |
+| `quarantine` | `mesh_peer_policy_quarantined` |
+| `reject` | `mesh_peer_policy_rejected` |
+
+The failure fields include the action, reason, material lane, redaction posture,
+trust lane, and a redaction-safe policy reference. Path-like policy identifiers
+are replaced with stable `mesh_pol_*` aliases before they leave the policy
+layer.
 
 The same policy is checked before outbound sharing. A lane grant alone is not
 enough for body or embedding payloads: if the redaction posture is `deny`, the
@@ -67,19 +80,14 @@ payload must not leave the node; if the posture is `redact`, only an already
 redacted payload can be exported. Raw body or embedding payloads require both
 `allow` on the lane and `share` on the matching redaction posture.
 
-Outbound failures use a small structured surface that later export/status
-callers can embed directly:
+Outbound failures use the same structured surface with outbound-specific codes
+that later export/status callers can embed directly:
 
 | Decision | Code |
 | --- | --- |
 | `deny` | `mesh_outbound_policy_denied` |
 | `quarantine` | `mesh_outbound_policy_quarantined` |
 | `reject` | `mesh_outbound_policy_rejected` |
-
-The failure fields include the action, reason, material lane, redaction posture,
-trust lane, and a redaction-safe policy reference. Path-like policy identifiers
-are replaced with stable `mesh_pol_*` aliases before they leave the policy
-layer.
 
 ## Config Registry
 

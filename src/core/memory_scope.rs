@@ -253,6 +253,26 @@ impl MeshPeerPolicyDecision {
     pub fn redaction_posture(&self) -> &'static str {
         self.redaction.as_str()
     }
+
+    #[must_use]
+    pub fn failure_surface(&self) -> Option<MeshPolicyFailureSurface> {
+        let code = match self.import.workspace_scope_decision {
+            MeshImportDecisionKind::Allow => return None,
+            MeshImportDecisionKind::Quarantine => "mesh_peer_policy_quarantined",
+            MeshImportDecisionKind::Deny => "mesh_peer_policy_denied",
+            MeshImportDecisionKind::Reject => "mesh_peer_policy_rejected",
+        };
+
+        Some(MeshPolicyFailureSurface {
+            code,
+            action: self.import.workspace_scope_decision,
+            reason: self.import.reason,
+            policy_ref: mesh_policy_ref(self.policy_id.as_deref()),
+            material_lane: self.import.material_lane,
+            redaction: self.redaction,
+            trust_lane: self.trust_lane,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1680,6 +1700,74 @@ mod tests {
             MeshImportDecisionKind::Quarantine
         );
         assert_eq!(event.import.reason, "event_policy_quarantine");
+    }
+
+    #[test]
+    fn mesh_peer_policy_failure_surface_uses_stable_structured_codes() {
+        let missing = decide_mesh_peer_policy(&peer_policy_input(MeshLane::Metadata), None);
+        let missing_surface = missing
+            .failure_surface()
+            .expect("denied peer policy should expose failure fields");
+        assert_eq!(missing_surface.code, "mesh_peer_policy_denied");
+        assert_eq!(missing_surface.action, MeshImportDecisionKind::Deny);
+        assert_eq!(missing_surface.policy_ref, "missing");
+        assert_eq!(missing_surface.reason, "missing_peer_policy");
+
+        let quarantined = decide_mesh_peer_policy(
+            &peer_policy_input(MeshLane::CurationSignal),
+            Some(&peer_policy()),
+        );
+        let quarantine_surface = quarantined
+            .failure_surface()
+            .expect("quarantined peer policy should expose failure fields");
+        assert_eq!(quarantine_surface.code, "mesh_peer_policy_quarantined");
+        assert_eq!(
+            quarantine_surface.action,
+            MeshImportDecisionKind::Quarantine
+        );
+
+        let mut policy = peer_policy();
+        policy.trust_lane = MeshTrustLane::LocalHuman;
+        let rejected =
+            decide_mesh_peer_policy(&peer_policy_input(MeshLane::Metadata), Some(&policy));
+        let reject_surface = rejected
+            .failure_surface()
+            .expect("rejected peer policy should expose failure fields");
+        assert_eq!(reject_surface.code, "mesh_peer_policy_rejected");
+        assert_eq!(reject_surface.action, MeshImportDecisionKind::Reject);
+
+        let allowed =
+            decide_mesh_peer_policy(&peer_policy_input(MeshLane::Metadata), Some(&peer_policy()));
+        assert_eq!(allowed.failure_surface(), None);
+    }
+
+    #[test]
+    fn mesh_peer_policy_failure_surface_redacts_path_like_policy_refs() {
+        let mut policy = peer_policy();
+        policy.policy_id = "/Users/alice/private/inbound-policy.toml".to_owned();
+        let decision = decide_mesh_peer_policy(&peer_policy_input(MeshLane::Body), Some(&policy));
+        let surface = decision
+            .failure_surface()
+            .expect("denied inbound body should expose failure fields");
+
+        assert_eq!(surface.code, "mesh_peer_policy_denied");
+        assert!(surface.policy_ref.starts_with("mesh_pol_"));
+        assert_ne!(
+            surface.policy_ref,
+            "/Users/alice/private/inbound-policy.toml"
+        );
+
+        let fields = surface.to_json();
+        assert_eq!(fields["code"], "mesh_peer_policy_denied");
+        assert_eq!(fields["action"], "deny");
+        assert_eq!(fields["reason"], "peer_policy_redaction_denied");
+        assert_eq!(fields["materialLane"], "body");
+        assert_eq!(fields["redaction"], "deny");
+        assert_eq!(fields["trustLane"], "peerAgent");
+        assert!(
+            !fields.to_string().contains("/Users/alice/private"),
+            "failure surface leaked raw policy path: {fields}"
+        );
     }
 
     #[test]
