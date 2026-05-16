@@ -410,14 +410,47 @@ fn detect_git_worktree(git_root: &Path) -> Option<String> {
 pub fn get_or_create_installation_salt() -> Result<Vec<u8>, CanonicalizationError> {
     let salt_path = get_salt_path();
 
-    if salt_path.exists() {
-        fs::read(&salt_path).map_err(|source| CanonicalizationError::SaltReadFailure {
-            path: salt_path,
-            source,
-        })
+    if let Some(salt) = read_existing_installation_salt(&salt_path)? {
+        Ok(salt)
     } else {
         create_installation_salt(&salt_path)
     }
+}
+
+fn read_existing_installation_salt(
+    salt_path: &Path,
+) -> Result<Option<Vec<u8>>, CanonicalizationError> {
+    let metadata = match fs::symlink_metadata(salt_path).map_err(|source| {
+        CanonicalizationError::SaltReadFailure {
+            path: salt_path.to_path_buf(),
+            source,
+        }
+    }) {
+        Ok(metadata) => metadata,
+        Err(CanonicalizationError::SaltReadFailure { source, .. })
+            if source.kind() == io::ErrorKind::NotFound =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+
+    if !metadata.file_type().is_file() {
+        return Err(CanonicalizationError::SaltReadFailure {
+            path: salt_path.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                "installation salt path is not a regular file",
+            ),
+        });
+    }
+
+    fs::read(salt_path)
+        .map(Some)
+        .map_err(|source| CanonicalizationError::SaltReadFailure {
+            path: salt_path.to_path_buf(),
+            source,
+        })
 }
 
 fn get_salt_path() -> PathBuf {
@@ -1624,7 +1657,7 @@ mod tests {
 
     use super::{
         CanonicalizationError, PlatformCaseHandling, SymlinkPolicy, canonicalize_workspace_path,
-        rand_salt,
+        rand_salt, read_existing_installation_salt,
     };
 
     #[test]
@@ -1749,6 +1782,60 @@ mod tests {
         assert_ne!(second, [0_u8; 32]);
         assert_ne!(first, second);
         Ok(())
+    }
+
+    #[test]
+    fn installation_salt_reads_existing_regular_file() -> TestResult {
+        let scratch = ScratchDir::new("salt-regular")?;
+        let salt_path = scratch.make_file("data/ee/.salt", "stable-test-salt")?;
+
+        let salt = read_existing_installation_salt(&salt_path)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "expected existing salt".to_string())?;
+
+        assert_eq!(salt, b"stable-test-salt");
+        Ok(())
+    }
+
+    #[test]
+    fn installation_salt_rejects_non_regular_path() -> TestResult {
+        let scratch = ScratchDir::new("salt-directory")?;
+        let salt_path = scratch.make_dir("data/ee/.salt")?;
+
+        let error = read_existing_installation_salt(&salt_path)
+            .expect_err("expected directory salt path to be rejected");
+
+        match error {
+            CanonicalizationError::SaltReadFailure { path, source } => {
+                assert_eq!(path, salt_path);
+                assert_eq!(source.kind(), io::ErrorKind::InvalidData);
+                Ok(())
+            }
+            other => Err(format!("unexpected error: {other}")),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installation_salt_rejects_symlinked_path() -> TestResult {
+        let scratch = ScratchDir::new("salt-symlink")?;
+        let target = scratch.make_file("outside-salt", "not-this-installation")?;
+        let salt_dir = scratch.make_dir("data/ee")?;
+        let salt_path = salt_dir.join(".salt");
+        std::os::unix::fs::symlink(target, &salt_path)
+            .map_err(|error| format!("symlink salt path: {error}"))?;
+
+        let error = read_existing_installation_salt(&salt_path)
+            .expect_err("expected symlinked salt path to be rejected");
+
+        match error {
+            CanonicalizationError::SaltReadFailure { path, source } => {
+                assert_eq!(path, salt_path);
+                assert_eq!(source.kind(), io::ErrorKind::InvalidData);
+                Ok(())
+            }
+            other => Err(format!("unexpected error: {other}")),
+        }
     }
 
     #[test]
