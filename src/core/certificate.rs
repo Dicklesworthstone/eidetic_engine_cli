@@ -1692,6 +1692,85 @@ fn resolve_key_path(
     Ok(key_dir.join(format!("{workspace_name}.ed25519")))
 }
 
+fn key_path_exists_no_symlinks(path: &Path) -> io::Result<bool> {
+    reject_key_symlink_chain(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("certificate key symlink refused: {}", path.display()),
+        )),
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn read_key_file_no_symlinks(path: &Path) -> io::Result<Vec<u8>> {
+    reject_key_symlink_chain(path)?;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("certificate key symlink refused: {}", path.display()),
+        ));
+    }
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("certificate key path is not a file: {}", path.display()),
+        ));
+    }
+    fs::read(path)
+}
+
+fn write_key_file_no_symlinks(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        reject_key_symlink_chain(parent)?;
+        fs::create_dir_all(parent)?;
+        reject_key_symlink_chain(parent)?;
+    }
+    reject_key_symlink_chain(path)?;
+    fs::write(path, bytes)?;
+    reject_key_symlink_chain(path)
+}
+
+fn reject_key_symlink_chain(path: &Path) -> io::Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::RootDir => current.push(component.as_os_str()),
+            Component::Normal(component) => {
+                current.push(component);
+                match fs::symlink_metadata(&current) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("certificate key symlink refused: {}", current.display()),
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Component::CurDir | Component::ParentDir => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unsafe certificate key path",
+                ));
+            }
+        }
+    }
+    if current.as_os_str().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "empty certificate key path",
+        ));
+    }
+    Ok(())
+}
+
 /// Derive the signer string from a public key.
 fn signer_from_public_key(public_key: &[u8]) -> String {
     let fingerprint = blake3::hash(public_key).to_hex();
@@ -1702,10 +1781,10 @@ fn signer_from_public_key(public_key: &[u8]) -> String {
 pub fn keygen(options: &KeygenOptions) -> io::Result<KeygenReport> {
     let key_path = resolve_key_path(options.workspace_path.as_deref(), None)?;
 
-    if key_path.exists() {
+    if key_path_exists_no_symlinks(&key_path)? {
         if options.show_only {
             // Load existing key and show fingerprint
-            let key_data = fs::read(&key_path)?;
+            let key_data = read_key_file_no_symlinks(&key_path)?;
             let keypair = Ed25519KeyPair::from_pkcs8(&key_data).map_err(|err| {
                 io::Error::new(io::ErrorKind::InvalidData, format!("invalid key: {err}"))
             })?;
@@ -1743,13 +1822,8 @@ pub fn keygen(options: &KeygenOptions) -> io::Result<KeygenReport> {
     let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng)
         .map_err(|err| io::Error::other(format!("key generation failed: {err}")))?;
 
-    // Ensure key directory exists
-    if let Some(parent) = key_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
     // Write key with restricted permissions
-    fs::write(&key_path, pkcs8_bytes.as_ref())?;
+    write_key_file_no_symlinks(&key_path, pkcs8_bytes.as_ref())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1791,7 +1865,7 @@ pub fn sign_certificate(options: &SignOptions) -> SignReport {
     };
 
     // Load the keypair
-    let key_data = match fs::read(&key_path) {
+    let key_data = match read_key_file_no_symlinks(&key_path) {
         Ok(data) => data,
         Err(err) => {
             return SignReport::error(
@@ -1932,7 +2006,7 @@ fn find_public_key_by_fingerprint(
     key_dir: &Path,
     fingerprint: &str,
 ) -> io::Result<Option<Vec<u8>>> {
-    if !key_dir.exists() {
+    if !key_path_exists_no_symlinks(key_dir)? {
         return Ok(None);
     }
 
@@ -1940,7 +2014,7 @@ fn find_public_key_by_fingerprint(
         let entry = entry?;
         let path = entry.path();
         if path.extension().map(|e| e == "ed25519").unwrap_or(false) {
-            if let Ok(key_data) = fs::read(&path) {
+            if let Ok(key_data) = read_key_file_no_symlinks(&path) {
                 if let Ok(keypair) = Ed25519KeyPair::from_pkcs8(&key_data) {
                     let public_key = keypair.public_key().as_ref();
                     let fp = blake3::hash(public_key).to_hex().to_string();
@@ -2544,6 +2618,100 @@ mod tests {
             AttestationVerification::Ok { .. } => Ok(()),
             AttestationVerification::Mismatch { message, .. } => {
                 Err(format!("round-trip verification should pass: {message}"))
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sign_certificate_rejects_symlinked_key_file() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let key_dir = dir.path().join("keys");
+        let outside_dir = dir.path().join("outside");
+        fs::create_dir_all(&key_dir).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&outside_dir).map_err(|e| e.to_string())?;
+
+        let real_key_path = outside_dir.join("real.ed25519");
+        let linked_key_path = key_dir.join("linked.ed25519");
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|e| e.to_string())?;
+        fs::write(&real_key_path, pkcs8.as_ref()).map_err(|e| e.to_string())?;
+        std::os::unix::fs::symlink(&real_key_path, &linked_key_path).map_err(|e| e.to_string())?;
+
+        let payload = r#"{"packHash":"signed","selected":["mem_01"]}"#;
+        let payload_hash = blake3::hash(payload.as_bytes()).to_hex().to_string();
+        fs::write(dir.path().join("payload.json"), payload).map_err(|e| e.to_string())?;
+        let manifest = serde_json::json!({
+            "schema": CERTIFICATE_MANIFEST_SCHEMA_V1,
+            "certificates": [
+                {
+                    "id": "cert_pack_signed",
+                    "kind": "pack",
+                    "status": "valid",
+                    "workspaceId": "workspace_main",
+                    "issuedAt": "2026-05-01T00:00:00Z",
+                    "expiresAt": "2999-01-01T00:00:00Z",
+                    "payloadPath": "payload.json",
+                    "payloadHash": payload_hash,
+                    "payloadSchema": CERTIFICATE_PAYLOAD_SCHEMA_V1,
+                    "assumptions": [{"valid": true}]
+                }
+            ]
+        });
+        let manifest_path = dir.path().join("certificates.json");
+        let manifest_json =
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?;
+        fs::write(&manifest_path, manifest_json).map_err(|e| e.to_string())?;
+
+        let report = sign_certificate(&SignOptions {
+            certificate_id: "cert_pack_signed".to_owned(),
+            manifest_path: Some(manifest_path),
+            key_path: Some(linked_key_path),
+            workspace_path: None,
+        });
+
+        ensure(!report.success, "symlinked key must not sign")?;
+        ensure(
+            report.message.contains("symlink"),
+            "sign error should mention symlink",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ed25519_verification_ignores_symlinked_key_entries() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let key_dir = dir.path().join("keys");
+        let outside_dir = dir.path().join("outside");
+        fs::create_dir_all(&key_dir).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&outside_dir).map_err(|e| e.to_string())?;
+
+        let real_key_path = outside_dir.join("real.ed25519");
+        let linked_key_path = key_dir.join("linked.ed25519");
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|e| e.to_string())?;
+        fs::write(&real_key_path, pkcs8.as_ref()).map_err(|e| e.to_string())?;
+        std::os::unix::fs::symlink(&real_key_path, &linked_key_path).map_err(|e| e.to_string())?;
+
+        let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+            .map_err(|e| e.to_string())?;
+        let signer = signer_from_public_key(keypair.public_key().as_ref());
+        let payload_hash = "payload_hash_from_untrusted_key_entry";
+        let signature = format!(
+            "ed25519:{}",
+            hex_lower(keypair.sign(payload_hash.as_bytes()).as_ref())
+        );
+
+        let result = verify_ed25519_signature(&signature, &signer, payload_hash, Some(&key_dir));
+        match result {
+            AttestationVerification::Mismatch { message, .. } => ensure(
+                message.contains("No public key found"),
+                "symlinked key entry should be ignored",
+            ),
+            AttestationVerification::Ok { .. } => {
+                Err("symlinked key entry must not verify".to_owned())
             }
         }
     }
