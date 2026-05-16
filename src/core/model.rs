@@ -6,6 +6,8 @@
 //! knows so agents can introspect availability and degraded-mode posture
 //! without scraping `ee index status`.
 
+use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
@@ -366,14 +368,72 @@ fn resolved_database_path(
     let path = database_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace_path.join(".ee").join(DEFAULT_DB_FILE));
-    if path.exists() {
-        Ok(path)
-    } else {
-        Err(DomainError::Storage {
+
+    ensure_no_model_database_symlink_components(&path)?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(path),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!("Database path {} is not a regular file", path.display()),
+            repair: Some(
+                "Replace it with an ee database file or run `ee init --workspace .`.".to_string(),
+            ),
+        }),
+        Err(error) if error.kind() == ErrorKind::NotFound => Err(DomainError::Storage {
             message: format!("Database not found at {}", path.display()),
             repair: Some("ee init --workspace .".to_string()),
-        })
+        }),
+        Err(error) if error.kind() == ErrorKind::NotADirectory => Err(DomainError::Storage {
+            message: format!("Database path {} is not reachable: {error}", path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        }),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect database path {}: {error}",
+                path.display()
+            ),
+            repair: Some("Check workspace permissions or run `ee doctor --json`.".to_string()),
+        }),
     }
+}
+
+fn ensure_no_model_database_symlink_components(path: &Path) -> Result<(), DomainError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Database path {} contains symlink component {}",
+                        path.display(),
+                        current.display()
+                    ),
+                    repair: Some(
+                        "Use a real ee database path inside the workspace and rerun `ee init --workspace .` if needed."
+                            .to_string(),
+                    ),
+                });
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
+            {
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Failed to inspect database path component {}: {error}",
+                        current.display()
+                    ),
+                    repair: Some(
+                        "Check workspace permissions or run `ee doctor --json`.".to_string(),
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn resolve_workspace_id(
@@ -626,6 +686,96 @@ mod tests {
             .canonicalize()
             .map_err(|error| format!("canonicalize: {error}"))?;
         Ok((temp, workspace_path))
+    }
+
+    #[test]
+    fn status_preserves_database_not_found_error() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+
+        let error = build_model_status_report(&ModelStatusOptions {
+            workspace_path: &workspace_path,
+            database_path: None,
+        })
+        .expect_err("missing database should return a storage error");
+
+        ensure(
+            error.message().contains("Database not found"),
+            "missing database error",
+        )
+    }
+
+    #[test]
+    fn status_rejects_non_regular_database_path() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        let database_path = workspace_path.join(".ee").join(DEFAULT_DB_FILE);
+        fs::create_dir_all(&database_path).map_err(|error| format!("create db dir: {error}"))?;
+
+        let error = build_model_status_report(&ModelStatusOptions {
+            workspace_path: &workspace_path,
+            database_path: None,
+        })
+        .expect_err("directory database path should be rejected");
+
+        ensure(
+            error.message().contains("not a regular file"),
+            "non-regular database error",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_rejects_symlinked_database_path() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        fs::create_dir_all(workspace_path.join(".ee"))
+            .map_err(|error| format!("create .ee: {error}"))?;
+        let outside = workspace_path.join("outside-ee.db");
+        fs::write(&outside, b"not sqlite").map_err(|error| format!("write outside db: {error}"))?;
+        std::os::unix::fs::symlink(&outside, workspace_path.join(".ee").join(DEFAULT_DB_FILE))
+            .map_err(|error| format!("symlink db: {error}"))?;
+
+        let error = build_model_list_report(&ModelListOptions {
+            workspace_path: &workspace_path,
+            database_path: None,
+        })
+        .expect_err("symlinked database path should be rejected");
+
+        ensure(
+            error.message().contains("symlink component"),
+            "symlinked database error",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_rejects_database_under_symlinked_parent() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+        let workspace_path = temp
+            .path()
+            .join("workspace")
+            .canonicalize()
+            .unwrap_or_else(|_| temp.path().join("workspace"));
+        fs::create_dir_all(&workspace_path)
+            .map_err(|error| format!("create workspace: {error}"))?;
+        let real_ee = temp.path().join("real-ee");
+        fs::create_dir_all(&real_ee).map_err(|error| format!("create real-ee: {error}"))?;
+        fs::write(real_ee.join(DEFAULT_DB_FILE), b"not sqlite")
+            .map_err(|error| format!("write real db: {error}"))?;
+        std::os::unix::fs::symlink(&real_ee, workspace_path.join(".ee"))
+            .map_err(|error| format!("symlink .ee: {error}"))?;
+        let workspace_path = workspace_path
+            .canonicalize()
+            .map_err(|error| format!("canonicalize workspace: {error}"))?;
+
+        let error = build_model_status_report(&ModelStatusOptions {
+            workspace_path: &workspace_path,
+            database_path: None,
+        })
+        .expect_err("database under symlinked parent should be rejected");
+
+        ensure(
+            error.message().contains("symlink component"),
+            "symlinked database parent error",
+        )
     }
 
     #[test]
