@@ -59,6 +59,27 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         shipped: false,
     },
     SchemaCase {
+        id: "ee.verification.run.v1",
+        file_name: "ee.verification.run.v1.json",
+        doc_path: "docs/swarm/verification_run.md",
+        tracking_bead: "bd-1zb7k.15.1",
+        shipped: true,
+    },
+    SchemaCase {
+        id: "ee.verification.reuse_advisory.v1",
+        file_name: "ee.verification.reuse_advisory.v1.json",
+        doc_path: "docs/swarm/verification_reuse_advisory.md",
+        tracking_bead: "bd-1zb7k.15.2",
+        shipped: true,
+    },
+    SchemaCase {
+        id: "ee.verification.closeout_capsule.v1",
+        file_name: "ee.verification.closeout_capsule.v1.json",
+        doc_path: "docs/swarm/verification_closeout_capsule.md",
+        tracking_bead: "bd-1zb7k.15.3",
+        shipped: true,
+    },
+    SchemaCase {
         id: "ee.coordination_snapshot.v1",
         file_name: "ee.coordination_snapshot.v1.json",
         doc_path: "docs/swarm/coordination_snapshot.md",
@@ -168,6 +189,24 @@ const DRIFT_CASES: &[DriftCase] = &[
         command: "ee verify broker lookup --json",
         json_path: ".data.broker",
         fixture_manifest_key: "ee.verification.broker_view.v1",
+    },
+    DriftCase {
+        schema_id: "ee.verification.run.v1",
+        command: "ee verification evidence import --json",
+        json_path: ".data.run",
+        fixture_manifest_key: "ee.verification.run.v1",
+    },
+    DriftCase {
+        schema_id: "ee.verification.reuse_advisory.v1",
+        command: "ee verify broker lookup --json",
+        json_path: ".data.advisory",
+        fixture_manifest_key: "ee.verification.reuse_advisory.v1",
+    },
+    DriftCase {
+        schema_id: "ee.verification.closeout_capsule.v1",
+        command: "ee verify closeout capsule --json",
+        json_path: ".data.closeoutCapsule",
+        fixture_manifest_key: "ee.verification.closeout_capsule.v1",
     },
     DriftCase {
         schema_id: "ee.coordination_snapshot.v1",
@@ -338,9 +377,16 @@ fn swarm_schema_catalog_is_complete_and_canonical() -> TestResult {
     for case in SCHEMA_CASES {
         let schema = schema_doc(*case)?;
         let context = case.file_name;
-        if string_field(&schema, "/$schema", context)? != "http://json-schema.org/draft-07/schema#"
-        {
-            return Err(format!("{} must use JSON Schema draft-07", case.file_name));
+        let dialect = string_field(&schema, "/$schema", context)?;
+        if !matches!(
+            dialect,
+            "http://json-schema.org/draft-07/schema#"
+                | "https://json-schema.org/draft/2020-12/schema"
+        ) {
+            return Err(format!(
+                "{} must use draft-07 or draft/2020-12, got {dialect}",
+                case.file_name
+            ));
         }
         let expected_id = format!("https://eidetic-engine/schemas/swarm/{}", case.file_name);
         if string_field(&schema, "/$id", context)? != expected_id {

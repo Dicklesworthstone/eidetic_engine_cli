@@ -63,5 +63,39 @@
         }
       }
     }
-  }
+  },
+  "x-ee-doc": "docs/swarm/verification_reuse_advisory.md",
+  "x-ee-status": {
+    "shipped": true,
+    "tracking_bead": "bd-1zb7k.15.2",
+    "available_in_build": true
+  },
+  "examples": [
+    {
+      "schema": "ee.verification.reuse_advisory.v1",
+      "beadId": "bd-example",
+      "status": "reusable_pass",
+      "requestedSourceHash": "blake3:source",
+      "requestedCommandHash": "blake3:rch-command",
+      "requestedExecutionSubstrate": "rch",
+      "featureProfileHash": "blake3:profile",
+      "workspaceGeneration": 42,
+      "strictnessFlags": [
+        "--all-targets",
+        "RCH_REQUIRE_REMOTE=1"
+      ],
+      "matchedRunId": "vrun_rch_00000000000000000001",
+      "matchedAgentName": "RubyWolf",
+      "matchedFinishedAt": "2026-05-15T05:00:42Z",
+      "reason": "matching verification run passed for the same source, command, and substrate",
+      "repairActions": [
+        {
+          "priority": 1,
+          "kind": "cite_existing_run",
+          "command": null,
+          "message": "cite the matched passing verification run instead of rerunning"
+        }
+      ]
+    }
+  ]
 }

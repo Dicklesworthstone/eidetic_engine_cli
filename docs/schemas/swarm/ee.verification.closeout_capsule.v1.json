@@ -94,5 +94,46 @@
         "localPathsRedacted": { "type": "boolean", "const": true }
       }
     }
-  }
+  },
+  "x-ee-doc": "docs/swarm/verification_closeout_capsule.md",
+  "x-ee-status": {
+    "shipped": true,
+    "tracking_bead": "bd-1zb7k.15.3",
+    "available_in_build": true
+  },
+  "examples": [
+    {
+      "schema": "ee.verification.closeout_capsule.v1",
+      "requestedSurface": "beads_comment",
+      "beadId": "bd-example",
+      "commandSummary": "rch command_hash=blake3:rch-command argv_hash=blake3:rch-command-argv",
+      "sourceHash": "blake3:source",
+      "commandHash": "blake3:rch-command",
+      "executionSubstrate": "rch",
+      "workerHost": "css",
+      "result": "passed",
+      "passedCount": 1,
+      "failedCount": 0,
+      "artifactManifestHash": "blake3:artifact-manifest",
+      "retainedLogReference": "retained_log_path_hash:blake3:retained-log-path",
+      "caveats": [],
+      "reusableUntil": "2026-05-15T07:00:42Z",
+      "sourceMustMatch": true,
+      "failureModeCodes": [],
+      "supportBundleMetadata": {
+        "runId": "vrun_rch_00000000000000000001",
+        "stdoutHash": "blake3:stdout",
+        "stderrExcerptHash": "blake3:stderr-excerpt",
+        "provenance": [
+          {
+            "source": "j1_jsonl",
+            "eventKind": "artifact_manifest",
+            "line": 2
+          }
+        ],
+        "rawOutputIncluded": false,
+        "localPathsRedacted": true
+      }
+    }
+  ]
 }

@@ -55,5 +55,39 @@
         }
       }
     }
-  }
+  },
+  "x-ee-doc": "docs/swarm/verification_run.md",
+  "x-ee-status": {
+    "shipped": true,
+    "tracking_bead": "bd-1zb7k.15.1",
+    "available_in_build": true
+  },
+  "examples": [
+    {
+      "schema": "ee.verification.run.v1",
+      "runId": "vrun_rch_00000000000000000001",
+      "beadId": "bd-example",
+      "agentName": "RubyWolf",
+      "sourceHash": "blake3:source",
+      "commandHash": "blake3:rch-command",
+      "commandArgvHash": "blake3:rch-command-argv",
+      "cargoTargetDirHashOrClass": "class:external_cargo_target",
+      "executionSubstrate": "rch",
+      "workerHost": "css",
+      "startedAt": "2026-05-15T05:00:00Z",
+      "finishedAt": "2026-05-15T05:00:42Z",
+      "exitCode": 0,
+      "stdoutHash": "blake3:stdout",
+      "stderrExcerptHash": "blake3:stderr-excerpt",
+      "artifactManifestHash": "blake3:artifact-manifest",
+      "retainedLogPathHash": "blake3:retained-log-path",
+      "provenance": [
+        {
+          "source": "j1_jsonl",
+          "eventKind": "artifact_manifest",
+          "line": 2
+        }
+      ]
+    }
+  ]
 }

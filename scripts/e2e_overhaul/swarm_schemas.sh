@@ -32,10 +32,10 @@ emit_event() {
     | tee -a "$EVENT_LOG" >&2
 }
 
-expected_count=12
+expected_count="$(jq -r '.examples | length' "$FIXTURE")"
 actual_count="$(find "$SCHEMA_DIR" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')"
 if [[ "$actual_count" != "$expected_count" ]]; then
-  emit_event "catalog" false 1 "expected $expected_count schema files, found $actual_count"
+  emit_event "catalog" false 1 "fixture manifest has $expected_count schema rows, found $actual_count schema files"
   exit 1
 fi
 
@@ -48,10 +48,14 @@ for schema_file in "$SCHEMA_DIR"/*.json; do
     emit_event "$schema_id" false 1 "invalid json"
     exit 1
   fi
-  if [[ "$(jq -r '."$schema"' "$schema_file")" != "http://json-schema.org/draft-07/schema#" ]]; then
-    emit_event "$schema_id" false 1 "not draft-07"
-    exit 1
-  fi
+  schema_dialect="$(jq -r '."$schema"' "$schema_file")"
+  case "$schema_dialect" in
+    "http://json-schema.org/draft-07/schema#"|"https://json-schema.org/draft/2020-12/schema") ;;
+    *)
+      emit_event "$schema_id" false 1 "unsupported schema dialect: $schema_dialect"
+      exit 1
+      ;;
+  esac
   if [[ "$(jq -r '."$id"' "$schema_file")" != "$expected_id" ]]; then
     emit_event "$schema_id" false 1 "non-canonical id"
     exit 1
