@@ -2039,6 +2039,22 @@ fn inspect_verification_json_file(
     {
         return procedure_source_path_failure(path, source_kind, source_id, error);
     }
+    match procedure_path_is_file(path) {
+        Ok(true) => {}
+        Ok(false) => {
+            return verification_source_result(
+                source_id,
+                source_kind,
+                "failed",
+                Some(format!(
+                    "verification source {} is not a regular file",
+                    path.display()
+                )),
+                Vec::new(),
+            );
+        }
+        Err(error) => return procedure_source_path_failure(path, source_kind, source_id, error),
+    }
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) => {
@@ -2349,9 +2365,9 @@ fn inspect_repro_pack_dir(path: &Path, source_id: &str) -> VerificationSourceRes
 }
 
 fn valid_json_file(path: &Path) -> bool {
-    if ensure_no_procedure_path_symlink_components(path, "read verification source").is_err() {
+    let Ok(true) = procedure_path_is_file(path) else {
         return false;
-    }
+    };
     fs::read_to_string(path)
         .ok()
         .and_then(|content| serde_json::from_str::<Value>(&content).ok())
@@ -4036,6 +4052,40 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.contains("symlinked path component")),
             "expected symlink failure, got {:?}",
+            report.sources_checked[0].message
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn verify_rejects_non_regular_named_eval_fixture_file() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let fixture_dir = workspace
+            .join(".ee")
+            .join("procedure-verification")
+            .join("eval_fixture");
+        fs::create_dir_all(fixture_dir.join("fixture_dir.json"))
+            .map_err(|error| error.to_string())?;
+
+        let report = verify_procedure(&ProcedureVerifyOptions {
+            workspace,
+            procedure_id: "proc_test".to_owned(),
+            source_kind: Some("eval_fixture".to_owned()),
+            source_ids: vec!["fixture_dir".to_owned()],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.overall_result, "failed");
+        assert_eq!(report.fail_count, 1);
+        assert_eq!(report.sources_checked[0].result, "failed");
+        assert!(
+            report.sources_checked[0]
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("not a regular file")),
+            "expected regular-file failure, got {:?}",
             report.sources_checked[0].message
         );
         Ok(())
