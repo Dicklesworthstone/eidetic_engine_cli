@@ -94,6 +94,25 @@ CLI flag → workspace config → built-in default. No `EE_REDACTION_*`
 redaction-level override is currently registered; adding one must update
 both `src/config/env_registry.rs` and `docs/env_vars.md` in the same change.
 
+### Response metadata status
+
+Current JSON surfaces expose the effective level with existing fields such as
+`redactionLevel` and, where available, `redactionSummary`. The source-aware
+response block remains K6 acceptance work:
+
+```json
+"redaction": {
+  "level_applied": "standard",
+  "level_source": "cli|workspace_config|built_in_default",
+  "fields_redacted": ["items[0].content"],
+  "patterns_matched": ["api_key"]
+}
+```
+
+Until that block lands, callers that need source attribution must infer it from
+their invocation and workspace config. Do not close K6 on `redactionLevel`
+alone; it proves the effective level, not the source or field-level manifest.
+
 ## Round-trip symmetry property
 
 `ee export --redaction <level> --output-dir <a>` followed by

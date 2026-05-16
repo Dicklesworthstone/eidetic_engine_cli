@@ -426,3 +426,27 @@ fn workspace_redaction_defaults_claim_matches_config_parser() -> TestResult {
         "CLI handlers must share CLI-over-config redaction default resolution",
     )
 }
+
+#[test]
+fn doc_declares_remaining_response_metadata_gap() -> TestResult {
+    let doc = read_doc()?;
+
+    for required_phrase in [
+        "Response metadata status",
+        "source-aware response block remains K6 acceptance work",
+        "\"level_applied\"",
+        "\"level_source\"",
+        "\"fields_redacted\"",
+        "\"patterns_matched\"",
+        "Do not close K6 on `redactionLevel` alone",
+    ] {
+        ensure(
+            doc.contains(required_phrase),
+            format!(
+                "docs/redaction_levels.md missing response-metadata gap marker: `{required_phrase}`"
+            ),
+        )?;
+    }
+
+    Ok(())
+}
