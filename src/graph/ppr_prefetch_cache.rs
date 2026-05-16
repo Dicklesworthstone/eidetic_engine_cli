@@ -83,7 +83,7 @@ impl PprPrefetchCache {
         key: PprPrefetchCacheKey,
         scores: Vec<CentralityScore>,
     ) -> PprPrefetchCacheInsert {
-        let result_hash = ppr_prefetch_result_hash(&scores);
+        let result_hash = ppr_prefetch_result_hash(&key, &scores);
         if self.capacity == 0 {
             self.entries.clear();
             return PprPrefetchCacheInsert {
@@ -110,7 +110,7 @@ impl PprPrefetchCache {
 
     pub fn get(&mut self, key: &PprPrefetchCacheKey) -> Option<PprPrefetchCacheHit> {
         let entry = self.entries.get(key)?;
-        let actual_hash = ppr_prefetch_result_hash(&entry.scores);
+        let actual_hash = ppr_prefetch_result_hash(key, &entry.scores);
         if actual_hash != entry.result_hash {
             self.entries.remove(key);
             return None;
@@ -198,9 +198,12 @@ impl PprPrefetchCache {
 }
 
 #[must_use]
-pub fn ppr_prefetch_result_hash(scores: &[CentralityScore]) -> String {
+pub fn ppr_prefetch_result_hash(key: &PprPrefetchCacheKey, scores: &[CentralityScore]) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"ee.graph.ppr_prefetch_cache.result.v1");
+    hasher.update(&(key.seed_set_hash.len() as u64).to_le_bytes());
+    hasher.update(key.seed_set_hash.as_bytes());
+    hasher.update(&key.snapshot_generation.to_le_bytes());
     hasher.update(&(scores.len() as u64).to_le_bytes());
     for score in scores {
         hasher.update(&(score.node.len() as u64).to_le_bytes());
@@ -250,7 +253,10 @@ mod tests {
 
         assert_eq!(hit.scores, expected_scores);
         assert_eq!(hit.result_hash, insert.result_hash);
-        assert_eq!(hit.result_hash, ppr_prefetch_result_hash(&expected_scores));
+        assert_eq!(
+            hit.result_hash,
+            ppr_prefetch_result_hash(&key, &expected_scores)
+        );
     }
 
     #[test]
@@ -348,6 +354,24 @@ mod tests {
         cache.corrupt_score_for_test(&key, 0.5);
 
         assert_eq!(cache.get(&key), None);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn hash_mismatch_evicts_key_score_swap() {
+        let mut cache = PprPrefetchCache::new(2);
+        let first = key("seed-a", 1);
+        let second = key("seed-b", 1);
+        cache.insert(first.clone(), scores(&[("mem-a", 1.0)]));
+        cache.insert(second.clone(), scores(&[("mem-b", 1.0)]));
+
+        let first_entry = cache.entries.remove(&first).expect("first entry");
+        let second_entry = cache.entries.remove(&second).expect("second entry");
+        cache.entries.insert(first.clone(), second_entry);
+        cache.entries.insert(second.clone(), first_entry);
+
+        assert_eq!(cache.get(&first), None);
+        assert_eq!(cache.get(&second), None);
         assert!(cache.is_empty());
     }
 
