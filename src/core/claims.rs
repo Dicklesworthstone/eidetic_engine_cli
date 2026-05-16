@@ -391,7 +391,7 @@ fn claims_file_path(workspace_path: &Path, claims_file: Option<&Path>) -> PathBu
     claims_file.map_or_else(
         || {
             let canonical = workspace_path.join(".ee").join("claims.yaml");
-            if canonical.exists() {
+            if path_exists_no_follow(&canonical) {
                 canonical
             } else {
                 workspace_path.join("claims.yaml")
@@ -419,6 +419,7 @@ fn manifest_path_for_claim(artifacts_root: &Path, claim_id: &ClaimId) -> PathBuf
 }
 
 fn read_claims_file(path: &Path) -> Result<Vec<ParsedClaim>, ClaimParseError> {
+    ensure_no_claim_metadata_symlink_components(path, "read claims file")?;
     let input = fs::read_to_string(path).map_err(|error| {
         ClaimParseError::new(format!("failed to read {}: {error}", path.display()))
     })?;
@@ -674,6 +675,7 @@ fn parse_demo_ids(ids: &[String], claim_index: usize) -> Result<Vec<DemoId>, Cla
 }
 
 fn read_claim_manifest(path: &Path) -> Result<ParsedManifest, ClaimParseError> {
+    ensure_no_claim_metadata_symlink_components(path, "read claim manifest")?;
     let input = fs::read_to_string(path).map_err(|error| {
         ClaimParseError::new(format!("failed to read {}: {error}", path.display()))
     })?;
@@ -888,6 +890,45 @@ fn read_claim_artifact_bytes(
         resolve_claim_artifact_path_no_symlinks(claim_artifacts_dir, relative_path)?;
     fs::read(&artifact_path)
         .map_err(|error| format!("artifact_not_found: {}: {}", artifact_path.display(), error))
+}
+
+fn path_exists_no_follow(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+fn ensure_no_claim_metadata_symlink_components(
+    path: &Path,
+    operation: &'static str,
+) -> Result<(), ClaimParseError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(ClaimParseError::new(format!(
+                    "refusing to {operation} `{}` through symlinked path component `{}`",
+                    path.display(),
+                    current.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(ClaimParseError::new(format!(
+                    "failed to inspect {}: {error}",
+                    current.display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn resolve_claim_artifact_path_no_symlinks(
@@ -1161,7 +1202,7 @@ pub fn build_claim_list_report(
 ) -> Result<ClaimListReport, ClaimParseError> {
     let claims_file = claims_file_path(&options.workspace_path, options.claims_file.as_deref());
     let claims_file_str = claims_file.display().to_string();
-    if !claims_file.exists() {
+    if !path_exists_no_follow(&claims_file) {
         return Ok(ClaimListReport {
             schema: CLAIM_LIST_SCHEMA_V1,
             claims_file: claims_file_str,
@@ -1213,7 +1254,7 @@ pub fn build_claim_show_report(
         ClaimParseError::new(format!("invalid claim id `{}`: {error}", options.claim_id))
     })?;
     let claims_file = claims_file_path(&options.workspace_path, options.claims_file.as_deref());
-    if !claims_file.exists() {
+    if !path_exists_no_follow(&claims_file) {
         return Ok(ClaimShowReport {
             schema: CLAIM_SHOW_SCHEMA_V1,
             claim_id: options.claim_id.clone(),
@@ -1239,7 +1280,7 @@ pub fn build_claim_show_report(
         artifacts_root_path(&options.workspace_path, options.artifacts_dir.as_deref());
     let manifest = if options.include_manifest {
         let manifest_path = manifest_path_for_claim(&artifacts_root, &claim_id);
-        if manifest_path.exists() {
+        if path_exists_no_follow(&manifest_path) {
             Some(read_claim_manifest(&manifest_path)?.detail())
         } else {
             None
@@ -1436,7 +1477,7 @@ impl DiagClaimsReport {
     pub fn gather(options: &DiagClaimsOptions) -> Self {
         let claims_file = claims_file_path(&options.workspace_path, options.claims_file.as_deref());
         let claims_file_str = claims_file.display().to_string();
-        let claims_file_exists = claims_file.exists();
+        let claims_file_exists = path_exists_no_follow(&claims_file);
 
         let staleness_threshold_days = if options.staleness_threshold_days == 0 {
             30
@@ -1555,6 +1596,15 @@ mod tests {
 
     use super::*;
 
+    const VALID_CLAIMS_YAML: &str = r#"schema: ee.claims_file.v1
+version: 1
+claims:
+  - id: claim_fixture_001
+    title: Symlink guard fixture
+    status: active
+    frequency: weekly
+"#;
+
     #[test]
     fn claim_list_report_schema_is_stable() -> TestResult {
         ensure_equal(
@@ -1672,5 +1722,64 @@ mod tests {
         };
         let report = DiagClaimsReport::gather(&options);
         ensure_equal(&report.staleness_threshold_days, &30, "staleness threshold")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claim_list_rejects_symlinked_workspace_claims_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ee_dir = temp.path().join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let outside_claims = temp.path().join("outside-claims.yaml");
+        std::fs::write(&outside_claims, VALID_CLAIMS_YAML).map_err(|error| error.to_string())?;
+        symlink(&outside_claims, ee_dir.join("claims.yaml")).map_err(|error| error.to_string())?;
+
+        let error = build_claim_list_report(&ClaimListOptions {
+            workspace_path: temp.path().to_path_buf(),
+            ..Default::default()
+        })
+        .expect_err("symlinked claims file should be rejected")
+        .to_string();
+        if error.contains("symlinked path component") {
+            Ok(())
+        } else {
+            Err(format!("unexpected symlink error: {error}"))
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claim_show_rejects_symlinked_manifest_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::write(temp.path().join("claims.yaml"), VALID_CLAIMS_YAML)
+            .map_err(|error| error.to_string())?;
+        let claim_dir = temp.path().join("artifacts").join("claim_fixture_001");
+        std::fs::create_dir_all(&claim_dir).map_err(|error| error.to_string())?;
+        let outside_manifest = temp.path().join("outside-manifest.json");
+        std::fs::write(
+            &outside_manifest,
+            r#"{"schema":"ee.claim_manifest.v1","claimId":"claim_fixture_001","artifacts":[]}"#,
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(&outside_manifest, claim_dir.join("manifest.json"))
+            .map_err(|error| error.to_string())?;
+
+        let error = build_claim_show_report(&ClaimShowOptions {
+            workspace_path: temp.path().to_path_buf(),
+            claim_id: "claim_fixture_001".to_owned(),
+            include_manifest: true,
+            ..Default::default()
+        })
+        .expect_err("symlinked manifest should be rejected")
+        .to_string();
+        if error.contains("symlinked path component") {
+            Ok(())
+        } else {
+            Err(format!("unexpected symlink error: {error}"))
+        }
     }
 }
