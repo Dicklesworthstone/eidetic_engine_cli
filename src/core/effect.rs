@@ -518,6 +518,8 @@ pub struct CommandEffect {
     pub mutation_contract: CommandMutationContract,
     /// Cross-cutting runtime, cancellation, and budget contract.
     pub runtime_contract: CommandRuntimeContract,
+    /// Whether the command should run through a read-side snapshot lease.
+    pub requires_read_snapshot: bool,
     /// Whether command requires audit log write.
     pub requires_audit: bool,
     /// Human-readable description of the effect.
@@ -536,9 +538,16 @@ impl CommandEffect {
             write_surfaces: WriteSurfaces::none(),
             mutation_contract: CommandMutationContract::read_only(),
             runtime_contract: CommandRuntimeContract::bounded_read(),
+            requires_read_snapshot: false,
             requires_audit: false,
             description,
         }
+    }
+
+    /// Create a DB-backed read-only effect entry that must use a read snapshot.
+    #[must_use]
+    pub fn read_only_db(command_path: &'static str, description: &'static str) -> Self {
+        Self::read_only(command_path, description).with_read_snapshot()
     }
 
     /// Create a derived-artifact-write effect entry.
@@ -563,6 +572,7 @@ impl CommandEffect {
                 "derived artifacts are rebuildable from FrankenSQLite source records",
             ),
             runtime_contract: CommandRuntimeContract::long_running_derived(),
+            requires_read_snapshot: false,
             requires_audit: false,
             description,
         }
@@ -589,6 +599,7 @@ impl CommandEffect {
                 "caller-provided key or generated durable record ID",
             ),
             runtime_contract: CommandRuntimeContract::transactional(),
+            requires_read_snapshot: false,
             requires_audit: true,
             description,
         }
@@ -614,6 +625,7 @@ impl CommandEffect {
             },
             mutation_contract: CommandMutationContract::append_only(idempotency_key),
             runtime_contract: CommandRuntimeContract::transactional(),
+            requires_read_snapshot: false,
             requires_audit: true,
             description,
         }
@@ -641,6 +653,7 @@ impl CommandEffect {
                 "no-overwrite/no-delete: existing output paths block unless the verifier proves the same manifest",
             ),
             runtime_contract: CommandRuntimeContract::side_path_artifact(),
+            requires_read_snapshot: false,
             requires_audit: true,
             description,
         }
@@ -693,6 +706,7 @@ impl CommandEffect {
                 partial_progress_policy: "each executed step writes evidence plus one audit row; remaining steps are skipped after the first failure unless explicitly continued",
                 outcome_mapping: "success, policy_denied, usage_error, storage_error, or step failure with persisted evidence",
             },
+            requires_read_snapshot: false,
             requires_audit: true,
             description,
         }
@@ -718,6 +732,7 @@ impl CommandEffect {
             },
             mutation_contract: CommandMutationContract::audited_mutation(idempotency_key),
             runtime_contract: CommandRuntimeContract::transactional(),
+            requires_read_snapshot: false,
             requires_audit: true,
             description,
         }
@@ -758,6 +773,7 @@ impl CommandEffect {
                 degraded_code: None,
             },
             runtime_contract: CommandRuntimeContract::side_path_artifact(),
+            requires_read_snapshot: false,
             requires_audit: false,
             description,
         }
@@ -796,6 +812,7 @@ impl CommandEffect {
                 degraded_code: None,
             },
             runtime_contract: CommandRuntimeContract::transactional(),
+            requires_read_snapshot: false,
             requires_audit: true,
             description,
         }
@@ -833,6 +850,7 @@ impl CommandEffect {
                 degraded_code: None,
             },
             runtime_contract: CommandRuntimeContract::transactional(),
+            requires_read_snapshot: false,
             requires_audit: true,
             description,
         }
@@ -853,6 +871,7 @@ impl CommandEffect {
             write_surfaces: WriteSurfaces::none(),
             mutation_contract: CommandMutationContract::degraded_unavailable(degraded_code),
             runtime_contract: CommandRuntimeContract::immediate(),
+            requires_read_snapshot: false,
             requires_audit: false,
             description,
         }
@@ -880,6 +899,7 @@ impl CommandEffect {
                 "job result reports failed/skipped/cancelled work; durable changes are limited to handler-owned audited updates",
             ),
             runtime_contract: CommandRuntimeContract::supervised_jobs(),
+            requires_read_snapshot: false,
             requires_audit: true,
             description,
         }
@@ -890,6 +910,19 @@ impl CommandEffect {
     pub const fn with_runtime_contract(mut self, runtime_contract: CommandRuntimeContract) -> Self {
         self.runtime_contract = runtime_contract;
         self
+    }
+
+    /// Mark this command as requiring a read-side snapshot lease.
+    #[must_use]
+    pub const fn with_read_snapshot(mut self) -> Self {
+        self.requires_read_snapshot = true;
+        self
+    }
+
+    /// `true` if this read-only command should acquire a read-side snapshot.
+    #[must_use]
+    pub const fn read_snapshot(&self) -> bool {
+        self.requires_read_snapshot
     }
 
     /// `true` if running this command is safe mid-task (no durable mutation).
