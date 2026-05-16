@@ -18235,27 +18235,31 @@ mod tests {
         )?;
         ensure_equal(&index_rows.len(), &1_usize, "covering index exists")?;
 
-        let plan_rows = connection.query_for(
+        let column_rows = connection.query_for(
             DbOperation::Query,
-            "EXPLAIN QUERY PLAN
-             SELECT memory_id, helpful_count, harmful_count, ignored_count,
-                    last_seen_at, weight_cached
-             FROM agent_context_profiles INDEXED BY idx_agent_context_profiles_pack_covering
-             WHERE workspace_id = ?1 AND agent_name = ?2
-             ORDER BY memory_id ASC",
-            &[
-                Value::Text("wsp_01234567890123456789012345".to_string()),
-                Value::Text("CloudyHawk".to_string()),
-            ],
+            "PRAGMA index_info('idx_agent_context_profiles_pack_covering')",
+            &[],
         )?;
-        let plan = plan_rows
+        let columns = column_rows
             .iter()
-            .map(|row| super::required_text(row, 3, DbOperation::Query, "detail"))
+            .map(|row| super::required_text(row, 2, DbOperation::Query, "name"))
             .collect::<std::result::Result<Vec<_>, DbError>>()?
-            .join("\n");
-        ensure(
-            plan.contains("idx_agent_context_profiles_pack_covering"),
-            "pack query plan names the covering index",
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &columns,
+            &vec![
+                "workspace_id".to_string(),
+                "agent_name".to_string(),
+                "memory_id".to_string(),
+                "helpful_count".to_string(),
+                "harmful_count".to_string(),
+                "ignored_count".to_string(),
+                "last_seen_at".to_string(),
+                "weight_cached".to_string(),
+            ],
+            "pack covering index columns",
         )?;
 
         connection.close()?;
