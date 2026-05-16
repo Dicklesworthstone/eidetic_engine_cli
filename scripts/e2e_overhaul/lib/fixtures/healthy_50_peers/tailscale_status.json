@@ -1,0 +1,1 @@
+{"BackendState":"Running","Peer":{},"Self":{"Authenticated":true,"DNSName":"ee-local.tailnet.test.","HostName":"ee-local","ID":"nodekey:selfalpha","Platform":"linux","Tailnet":"tailnet-alpha","TailnetName":"ee-local","TailscaleIPs":["100.64.0.10"]},"TUN":true,"Version":"fake-tailscale.v1","fixtureNote":"Use ft_add_peer in tests to materialize 50 deterministic peers."}

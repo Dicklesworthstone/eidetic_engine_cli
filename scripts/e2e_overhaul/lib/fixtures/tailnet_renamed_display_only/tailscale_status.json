@@ -1,0 +1,1 @@
+{"BackendState":"Running","Peer":{},"Self":{"Authenticated":true,"DNSName":"ee-local-renamed.tailnet.test.","HostName":"ee-local-renamed","ID":"nodekey:selfalpha","Platform":"linux","Tailnet":"tailnet-alpha","TailnetName":"ee-local-renamed","TailscaleIPs":["100.64.0.10"]},"TUN":true,"Version":"fake-tailscale.v1"}

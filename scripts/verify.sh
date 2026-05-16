@@ -22,6 +22,7 @@ set -euo pipefail
 #   6. Unit/Contract/Golden    - cargo test --workspace --lib --bins --tests --examples
 #   6. Basic E2E               - scripts/e2e_test.sh
 #   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
+#   6.6. Fake Tailscale Harness - deterministic SRR6.46 fake tailnet self-test
 #   7. Advanced E2E            - scripts/e2e_advanced.sh
 #   8. Boundary Migration      - scripts/e2e_boundary_migration.sh
 #   9. Benchmarks (optional)   - scripts/bench_perf_regression.sh --check-regression
@@ -424,6 +425,10 @@ run_stage "Overhaul Integration E2E (J4)" "./scripts/e2e_overhaul.sh"
 # epic registry because it tracks the GraphAccretion surfaces while they are
 # landing incrementally.
 run_stage "Graph Determinism E2E (F4.a)" "./scripts/e2e_overhaul/graph_determinism.sh"
+
+# Gate 6.7: Fake Tailscale harness (SRR6.46.10). Later SRR6.46 auto-enrollment
+# e2e scripts import this library, so this self-test runs before those surfaces.
+run_stage "Fake Tailscale Harness E2E (SRR6.46.10)" "./scripts/e2e_overhaul/lib/test_fake_tailscale.sh"
 
 # Gate 7: Advanced End-to-End
 run_stage "Advanced E2E Scripts" "./scripts/e2e_advanced.sh"

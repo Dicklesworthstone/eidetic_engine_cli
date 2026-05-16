@@ -84,6 +84,10 @@ pub enum EnvVar {
     TestLogPath,
     /// `EE_TEST_LOG_TEST_ID`
     TestLogTestId,
+    /// `EE_TAILSCALE_BINARY_OVERRIDE`
+    TailscaleBinaryOverride,
+    /// `EE_TAILSCALE_PROBE_SOCKET_OVERRIDE`
+    TailscaleProbeSocketOverride,
     /// `EE_WORKSPACE`
     Workspace,
     /// `EE_WORKSPACE_REGISTRY`
@@ -132,6 +136,8 @@ impl EnvVar {
             Self::TestLogLevel,
             Self::TestLogPath,
             Self::TestLogTestId,
+            Self::TailscaleBinaryOverride,
+            Self::TailscaleProbeSocketOverride,
             Self::Workspace,
             Self::WorkspaceRegistry,
         ]
@@ -178,6 +184,8 @@ impl EnvVar {
             Self::TestLogLevel => "EE_TEST_LOG_LEVEL",
             Self::TestLogPath => "EE_TEST_LOG_PATH",
             Self::TestLogTestId => "EE_TEST_LOG_TEST_ID",
+            Self::TailscaleBinaryOverride => "EE_TAILSCALE_BINARY_OVERRIDE",
+            Self::TailscaleProbeSocketOverride => "EE_TAILSCALE_PROBE_SOCKET_OVERRIDE",
             Self::Workspace => "EE_WORKSPACE",
             Self::WorkspaceRegistry => "EE_WORKSPACE_REGISTRY",
         }
@@ -240,6 +248,12 @@ impl EnvVar {
             Self::TestLogLevel => "Control structured test-log verbosity.",
             Self::TestLogPath => "Enable structured test logging at this JSONL path.",
             Self::TestLogTestId => "Name the active structured test-log scenario.",
+            Self::TailscaleBinaryOverride => {
+                "Test-only override for the tailscale binary used by fake-tailnet harnesses."
+            }
+            Self::TailscaleProbeSocketOverride => {
+                "Test-only override for fake mesh hello responder socket discovery."
+            }
             Self::Workspace => "Override workspace root discovery.",
             Self::WorkspaceRegistry => "Override the workspace alias registry database path.",
         }
@@ -289,7 +303,10 @@ impl EnvVar {
             | Self::TestLogLevel
             | Self::TestLogPath
             | Self::TestLogTestId => "diagnostics",
-            Self::MeshEnabled | Self::MeshMode => "mesh",
+            Self::MeshEnabled
+            | Self::MeshMode
+            | Self::TailscaleBinaryOverride
+            | Self::TailscaleProbeSocketOverride => "mesh",
             Self::HarmfulBurstWindowSeconds
             | Self::HarmfulPerSourcePerHour
             | Self::L2PackCacheBytes

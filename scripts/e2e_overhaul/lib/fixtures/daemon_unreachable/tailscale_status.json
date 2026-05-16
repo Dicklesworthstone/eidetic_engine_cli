@@ -1,0 +1,1 @@
+{"BackendState":"NoState","Peer":{},"Self":{"Authenticated":false,"DNSName":"ee-local.tailnet.test.","HostName":"ee-local","ID":"nodekey:selfalpha","Platform":"linux","Tailnet":"tailnet-alpha","TailnetName":"ee-local","TailscaleIPs":["100.64.0.10"]},"TUN":false,"Version":"fake-tailscale.v1"}

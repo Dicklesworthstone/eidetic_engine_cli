@@ -183,6 +183,36 @@ not allowed. Retained workspaces and manifests are verification evidence. Do not
 remove them during an agent session unless the user explicitly authorizes the
 exact deletion.
 
+### Fake Tailscale Harness
+
+SRR6.46 auto-enrollment tests must use the shared fake Tailscale harness instead
+of a real tailnet in default CI. The harness lives under
+`scripts/e2e_overhaul/lib/`:
+
+- `fake_tailscale.sh` is sourced by shell e2e scripts to create deterministic
+  scenario directories, rewrite `tailscale status --json` fixtures, run local
+  mesh-hello responders on Unix sockets, and emit `ee.test_event.v1` JSONL.
+- `fake_tailscale_shim.sh` is the PATH-prepended `tailscale` executable. It
+  supports `status --json`, narrowed `status --json --self=true --peers=true`,
+  and `up` logging without contacting a real Tailscale daemon.
+- `test_fake_tailscale.sh` is the harness self-test and runs before later
+  SRR6.46 e2e scripts in `scripts/verify.sh`.
+- `tests/support/fake_tailscale.rs` mirrors the shell scenario builder for
+  inline Rust integration tests without mutating process environment state.
+
+The fake-tailnet env vars are registered in the central env registry but are
+test-only: `EE_TAILSCALE_BINARY_OVERRIDE` and
+`EE_TAILSCALE_PROBE_SOCKET_OVERRIDE`. Production mesh functionality must remain
+strictly optional and must work as ordinary local-first `ee` when those variables
+and `EE_MESH_ENABLED` are unset.
+
+Harness scenarios must stay deterministic: fixed timestamps, lexicographic
+peer order, stable node keys, no real network, and zero default latency unless a
+budget test explicitly configures latency. Scenario directories and responder
+socket artifacts are retained during agent sessions under the repository
+no-deletion rule; use their event logs as closeout evidence rather than cleaning
+them up implicitly.
+
 ### RCH Stranded-Result Recovery
 
 Remote verification can produce useful RCH artifacts even when the local wrapper

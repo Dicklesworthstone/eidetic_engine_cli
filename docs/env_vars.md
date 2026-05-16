@@ -47,5 +47,7 @@ must not expose their current value.
 | `EE_TEST_LOG_LEVEL` | diagnostics | enum | none | Control structured test-log verbosity. | Used by the J1 structured E2E logging harness. |
 | `EE_TEST_LOG_PATH` | diagnostics | path | none | Enable structured test logging at this JSONL path. | Used by Rust and shell E2E logging helpers. |
 | `EE_TEST_LOG_TEST_ID` | diagnostics | string | none | Name the active structured test-log scenario. | Identifies events emitted by the test logging harness. |
+| `EE_TAILSCALE_BINARY_OVERRIDE` | mesh | absolute path | none | Test-only override for the tailscale binary used by fake-tailnet harnesses. | Reserved for deterministic fake Tailscale tests; production mesh code must default to normal discovery when unset. |
+| `EE_TAILSCALE_PROBE_SOCKET_OVERRIDE` | mesh | path | none | Test-only override for fake mesh hello responder socket discovery. | Reserved for deterministic fake Tailscale tests; production mesh code must default to normal Tailscale peer probing when unset. |
 | `EE_WORKSPACE` | paths | path | none | Override workspace root discovery. | Used after explicit `--workspace` and before cwd walk-up. |
 | `EE_WORKSPACE_REGISTRY` | paths | path | none | Override the workspace alias registry database path. | Controls where workspace aliases are stored. |
