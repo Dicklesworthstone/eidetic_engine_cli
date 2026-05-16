@@ -427,15 +427,25 @@ fn write_manifest_no_overwrite(
     {
         use std::io::Write;
         let mut file = fs::File::create(&temp_path).map_err(|error| DomainError::Storage {
-            message: format!("failed to create temporary manifest {}: {error}", temp_path.display()),
+            message: format!(
+                "failed to create temporary manifest {}: {error}",
+                temp_path.display()
+            ),
             repair: Some("Check manifest path permissions.".to_owned()),
         })?;
-        file.write_all(json.as_bytes()).map_err(|error| DomainError::Storage {
-            message: format!("failed to write temporary manifest {}: {error}", temp_path.display()),
-            repair: Some("Check manifest path permissions.".to_owned()),
-        })?;
+        file.write_all(json.as_bytes())
+            .map_err(|error| DomainError::Storage {
+                message: format!(
+                    "failed to write temporary manifest {}: {error}",
+                    temp_path.display()
+                ),
+                repair: Some("Check manifest path permissions.".to_owned()),
+            })?;
         file.sync_data().map_err(|error| DomainError::Storage {
-            message: format!("failed to sync temporary manifest {}: {error}", temp_path.display()),
+            message: format!(
+                "failed to sync temporary manifest {}: {error}",
+                temp_path.display()
+            ),
             repair: Some("Check manifest path permissions.".to_owned()),
         })?;
     }

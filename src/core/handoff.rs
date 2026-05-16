@@ -1507,11 +1507,10 @@ fn write_private_secret(path: &Path, secret: &[u8; 32]) -> Result<(), DomainErro
             message: format!("Failed to write handoff HMAC key: {error}"),
             repair: Some(format!("Check permissions for {}", path.display())),
         })?;
-    file.sync_all()
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to sync handoff HMAC key: {error}"),
-            repair: Some(format!("Check disk health for {}", path.display())),
-        })?;
+    file.sync_all().map_err(|error| DomainError::Storage {
+        message: format!("Failed to sync handoff HMAC key: {error}"),
+        repair: Some(format!("Check disk health for {}", path.display())),
+    })?;
     set_private_file_mode(path)
 }
 
