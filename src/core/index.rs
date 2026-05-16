@@ -2699,23 +2699,11 @@ fn get_db_stats(db: &DbConnection) -> Result<(u32, u32, Option<u64>), DbError> {
 }
 
 fn read_index_metadata(index_dir: &Path) -> (Option<u64>, Option<String>, Option<String>) {
-    let meta_path = index_dir.join("meta.json");
-    if !meta_path.exists() {
-        return (None, None, None);
-    }
-
-    let content = match std::fs::read_to_string(&meta_path) {
-        Ok(c) => c,
-        Err(error) => {
-            return (
-                None,
-                None,
-                Some(format!(
-                    "failed to read index metadata '{}': {error}",
-                    meta_path.display()
-                )),
-            );
-        }
+    let meta_path = index_dir.join(INDEX_METADATA_FILE);
+    let content = match read_index_metadata_contents(&meta_path) {
+        Ok(Some(content)) => content,
+        Ok(None) => return (None, None, None),
+        Err(error) => return (None, None, Some(error)),
     };
 
     let parsed: serde_json::Value = match serde_json::from_str(&content) {
@@ -2751,6 +2739,51 @@ fn read_index_metadata(index_dir: &Path) -> (Option<u64>, Option<String>, Option
         .map(str::to_string);
 
     (generation, last_rebuild, None)
+}
+
+fn read_index_metadata_contents(meta_path: &Path) -> Result<Option<String>, String> {
+    if let Some(component) =
+        first_existing_index_symlink_component(meta_path).map_err(|error| error.to_string())?
+    {
+        return Err(format!(
+            "index metadata '{}' traverses symlinked path component '{}'",
+            meta_path.display(),
+            component.display()
+        ));
+    }
+
+    match std::fs::symlink_metadata(meta_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(format!(
+                "index metadata '{}' is not a regular file",
+                meta_path.display()
+            ));
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect index metadata '{}': {error}",
+                meta_path.display()
+            ));
+        }
+    }
+
+    std::fs::read_to_string(meta_path)
+        .map(Some)
+        .map_err(|error| {
+            format!(
+                "failed to read index metadata '{}': {error}",
+                meta_path.display()
+            )
+        })
 }
 
 fn determine_health(
@@ -3867,6 +3900,75 @@ mod tests {
         ensure(
             report.data_json()["lastCheckError"].as_str().is_some(),
             "status JSON should expose lastCheckError for corrupt metadata",
+        )
+    }
+
+    #[test]
+    fn index_status_rejects_non_regular_metadata_before_read() -> TestResult {
+        let root = unique_test_dir("metadata-directory-status");
+        let index_dir = root.join("index");
+        std::fs::create_dir_all(index_dir.join(INDEX_METADATA_FILE))
+            .map_err(|error| error.to_string())?;
+
+        let report = get_index_status(&IndexStatusOptions {
+            workspace_path: root.clone(),
+            database_path: Some(root.join("missing.db")),
+            index_dir: Some(index_dir),
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure(
+            report.health == IndexHealth::Corrupt,
+            format!("non-regular metadata should report corrupt health: {report:?}"),
+        )?;
+        ensure(
+            report.last_check_error.as_deref().is_some_and(|error| {
+                error.contains("index metadata")
+                    && error.contains("meta.json")
+                    && error.contains("not a regular file")
+            }),
+            format!(
+                "non-regular metadata should preserve path-type error: {:?}",
+                report.last_check_error
+            ),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn index_status_rejects_symlinked_metadata_before_read() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("metadata-symlink-status");
+        let index_dir = root.join("index");
+        let outside_meta = root.join("outside-meta.json");
+        std::fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
+        std::fs::write(&outside_meta, r#"{"generation": 99}"#)
+            .map_err(|error| error.to_string())?;
+        symlink(&outside_meta, index_dir.join(INDEX_METADATA_FILE))
+            .map_err(|error| error.to_string())?;
+
+        let report = get_index_status(&IndexStatusOptions {
+            workspace_path: root,
+            database_path: None,
+            index_dir: Some(index_dir),
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure(
+            report.health == IndexHealth::Corrupt,
+            format!("symlinked metadata should report corrupt health: {report:?}"),
+        )?;
+        ensure(
+            report.last_check_error.as_deref().is_some_and(|error| {
+                error.contains("index metadata")
+                    && error.contains("meta.json")
+                    && error.contains("symlinked path component")
+            }),
+            format!(
+                "symlinked metadata should preserve path-type error: {:?}",
+                report.last_check_error
+            ),
         )
     }
 
