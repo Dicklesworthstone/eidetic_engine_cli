@@ -1,5 +1,7 @@
+use std::collections::BTreeMap;
 use std::ops::Deref;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use super::{DatabaseConfig, DbConnection, Result};
@@ -99,6 +101,8 @@ impl Default for PoolConfig {
 pub struct PoolStats {
     pub active: usize,
     pub idle: usize,
+    pub active_pins: usize,
+    pub expired_pins: usize,
     pub max_size: usize,
     pub max_seen: usize,
     pub drops: u64,
@@ -125,9 +129,18 @@ struct PoolState {
     idle: Vec<IdleConnection>,
     acquire_wait_ns: Vec<u128>,
     next_slot_id: u64,
+    next_pin_id: u64,
+    active_pins: BTreeMap<u64, ActivePinRecord>,
     max_seen: usize,
     drops: u64,
     ad_hoc_bypass_count: u64,
+}
+
+struct ActivePinRecord {
+    slot_id: Option<u64>,
+    acquired_at: Instant,
+    max_pin_duration: Duration,
+    poisoned: Arc<AtomicBool>,
 }
 
 struct IdleConnection {
@@ -145,8 +158,17 @@ pub struct PooledReadConnection<'pool> {
 pub struct SnapshotPin<'pool> {
     connection: Option<PooledReadConnection<'pool>>,
     snapshot_active: bool,
+    pin_id: Option<u64>,
+    poisoned: Arc<AtomicBool>,
     acquired_at: Instant,
     max_pin_duration: Duration,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExpiredSnapshotPin {
+    pub pin_id: u64,
+    pub slot_id: Option<u64>,
+    pub age: Duration,
 }
 
 impl ReadConnectionPool {
@@ -160,6 +182,8 @@ impl ReadConnectionPool {
                 idle: Vec::new(),
                 acquire_wait_ns: Vec::with_capacity(ACQUIRE_WAIT_SAMPLE_CAP),
                 next_slot_id: 1,
+                next_pin_id: 1,
+                active_pins: BTreeMap::new(),
                 max_seen: 0,
                 drops: 0,
                 ad_hoc_bypass_count: 0,
@@ -251,10 +275,24 @@ impl ReadConnectionPool {
             }
         }
 
+        let acquired_at = Instant::now();
+        let (pin_id, poisoned) = if pin_snapshot {
+            let (pin_id, poisoned) = self.register_pin(
+                connection.slot_id(),
+                acquired_at,
+                self.config.max_pin_duration(),
+            );
+            (Some(pin_id), poisoned)
+        } else {
+            (None, Arc::new(AtomicBool::new(false)))
+        };
+
         Ok(SnapshotPin {
             connection: Some(connection),
             snapshot_active: pin_snapshot,
-            acquired_at: Instant::now(),
+            pin_id,
+            poisoned,
+            acquired_at,
             max_pin_duration: self.config.max_pin_duration(),
         })
     }
@@ -265,6 +303,8 @@ impl ReadConnectionPool {
         PoolStats {
             active: state.active,
             idle: state.idle.len(),
+            active_pins: state.active_pins.len(),
+            expired_pins: expired_pin_count(&state.active_pins),
             max_size: self.config.max_size(),
             max_seen: state.max_seen,
             drops: state.drops,
@@ -300,6 +340,55 @@ impl ReadConnectionPool {
             state.drops = state.drops.saturating_add(1);
         }
         let _ = connection.close();
+    }
+
+    pub fn expire_stale_pins(&self) -> Vec<ExpiredSnapshotPin> {
+        let now = Instant::now();
+        let state = self.lock_state();
+        let mut expired = Vec::new();
+
+        for (pin_id, record) in &state.active_pins {
+            let age = now
+                .checked_duration_since(record.acquired_at)
+                .unwrap_or(Duration::ZERO);
+            if age >= record.max_pin_duration {
+                record.poisoned.store(true, Ordering::Release);
+                expired.push(ExpiredSnapshotPin {
+                    pin_id: *pin_id,
+                    slot_id: record.slot_id,
+                    age,
+                });
+            }
+        }
+
+        expired
+    }
+
+    fn register_pin(
+        &self,
+        slot_id: Option<u64>,
+        acquired_at: Instant,
+        max_pin_duration: Duration,
+    ) -> (u64, Arc<AtomicBool>) {
+        let mut state = self.lock_state();
+        let pin_id = state.next_pin_id;
+        state.next_pin_id = state.next_pin_id.saturating_add(1);
+        let poisoned = Arc::new(AtomicBool::new(false));
+        state.active_pins.insert(
+            pin_id,
+            ActivePinRecord {
+                slot_id,
+                acquired_at,
+                max_pin_duration,
+                poisoned: Arc::clone(&poisoned),
+            },
+        );
+        (pin_id, poisoned)
+    }
+
+    fn unregister_pin(&self, pin_id: u64) {
+        let mut state = self.lock_state();
+        state.active_pins.remove(&pin_id);
     }
 
     fn lock_state(&self) -> MutexGuard<'_, PoolState> {
@@ -352,10 +441,16 @@ impl SnapshotPin<'_> {
         self.age() >= self.max_pin_duration
     }
 
+    #[must_use]
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
+
     pub fn commit(mut self) -> Result<()> {
         if self.snapshot_active {
             self.connection().commit_read_snapshot()?;
             self.snapshot_active = false;
+            self.unregister_pin();
         }
         Ok(())
     }
@@ -363,6 +458,7 @@ impl SnapshotPin<'_> {
     pub fn rollback(mut self) -> Result<()> {
         if self.snapshot_active {
             self.snapshot_active = false;
+            self.unregister_pin();
             if let Some(connection) = self.connection.as_mut() {
                 if let Err(error) = connection.rollback_read_snapshot() {
                     connection.abandon();
@@ -379,10 +475,19 @@ impl SnapshotPin<'_> {
         }
 
         self.snapshot_active = false;
+        self.unregister_pin();
         if let Some(connection) = self.connection.as_mut() {
             if connection.rollback_read_snapshot().is_err() {
                 connection.abandon();
             }
+        }
+    }
+
+    fn unregister_pin(&mut self) {
+        if let (Some(pin_id), Some(connection)) = (self.pin_id.take(), self.connection.as_ref())
+            && let Some(pool) = connection.pool
+        {
+            pool.unregister_pin(pin_id);
         }
     }
 
@@ -478,6 +583,18 @@ fn acquire_wait_stats(samples: &[u128]) -> AcquireWaitStats {
         p50_ns: sorted[p50_index],
         p99_ns: sorted[p99_index.min(sorted.len() - 1)],
     }
+}
+
+fn expired_pin_count(active_pins: &BTreeMap<u64, ActivePinRecord>) -> usize {
+    let now = Instant::now();
+    active_pins
+        .values()
+        .filter(|record| {
+            now.checked_duration_since(record.acquired_at)
+                .unwrap_or(Duration::ZERO)
+                >= record.max_pin_duration
+        })
+        .count()
 }
 
 fn drop_idle_connections(connections: Vec<DbConnection>) {
@@ -681,6 +798,8 @@ mod tests {
             PoolStats {
                 active: 2,
                 idle: 0,
+                active_pins: 0,
+                expired_pins: 0,
                 max_size: 2,
                 max_seen: 2,
                 drops: 0,
@@ -766,11 +885,13 @@ mod tests {
         let pin = must(pool.pin_snapshot(), "snapshot pin opens");
 
         assert_eq!(pool.stats().active, 1);
+        assert_eq!(pool.stats().active_pins, 1);
         must(pin.commit(), "read snapshot commits");
 
         let stats = pool.stats();
         assert_eq!(stats.active, 0);
         assert_eq!(stats.idle, 1);
+        assert_eq!(stats.active_pins, 0);
     }
 
     #[test]
@@ -798,6 +919,7 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _pin = must(pool.pin_snapshot(), "snapshot pin opens before panic");
             assert_eq!(pool.stats().active, 1);
+            assert_eq!(pool.stats().active_pins, 1);
             panic!("force unwind across SnapshotPin");
         }));
 
@@ -805,6 +927,7 @@ mod tests {
         let stats = pool.stats();
         assert_eq!(stats.active, 0);
         assert_eq!(stats.idle, 1);
+        assert_eq!(stats.active_pins, 0);
         assert_eq!(stats.drops, 0);
     }
 
@@ -819,6 +942,7 @@ mod tests {
         let stats = pool.stats();
         assert_eq!(stats.active, 0);
         assert_eq!(stats.idle, 1);
+        assert_eq!(stats.active_pins, 0);
 
         let reacquired = must(pool.acquire(), "rolled back pin returns connection");
         assert_eq!(reacquired.slot_id(), slot_id);
@@ -843,6 +967,7 @@ mod tests {
         let stats = pool.stats();
         assert_eq!(stats.active, 0);
         assert_eq!(stats.idle, 0);
+        assert_eq!(stats.active_pins, 0);
         assert_eq!(stats.drops, 1);
 
         let fresh = must(
@@ -850,6 +975,44 @@ mod tests {
             "fresh connection opens after rollback abandon",
         );
         assert_ne!(fresh.slot_id(), slot_id);
+    }
+
+    #[test]
+    fn watchdog_pin_within_max_duration_is_not_disturbed() {
+        let (_tempdir, _database_path, pool) = file_pool(1);
+        let pin = must(pool.pin_snapshot(), "snapshot pin opens");
+
+        assert!(pool.expire_stale_pins().is_empty());
+        assert!(!pin.is_poisoned());
+        assert_eq!(pool.stats().active_pins, 1);
+        assert_eq!(pool.stats().expired_pins, 0);
+    }
+
+    #[test]
+    fn watchdog_pin_held_beyond_max_duration_is_marked_poisoned() {
+        let tempdir = must(tempfile::tempdir(), "tempdir creates");
+        let database_path = tempdir.path().join("read-pool-expired-pin.db");
+        seed_snapshot_database(&database_path);
+        let pool = ReadConnectionPool::new(
+            DatabaseConfig::file(database_path),
+            PoolConfig::new(1, Duration::from_secs(30)).with_max_pin_duration(Duration::ZERO),
+        );
+        let pin = must(pool.pin_snapshot(), "snapshot pin opens");
+        let slot_id = pin.slot_id();
+
+        let expired = pool.expire_stale_pins();
+
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].slot_id, slot_id);
+        assert!(pin.is_poisoned());
+        assert_eq!(pool.stats().active_pins, 1);
+        assert_eq!(pool.stats().expired_pins, 1);
+
+        drop(pin);
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 1);
+        assert_eq!(stats.active_pins, 0);
     }
 
     #[test]
