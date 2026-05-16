@@ -2493,34 +2493,22 @@ fn collect_index_manifest_payloads(
     ];
     let mut included = false;
     for candidate in candidates {
-        if !candidate.is_file() {
+        let Some(bytes) = read_index_manifest_candidate(&candidate, degraded) else {
             continue;
-        }
-        match fs::read(&candidate) {
-            Ok(bytes) => {
-                let name = candidate
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(safe_file_stem)
-                    .unwrap_or_else(|| "manifest.json".to_owned());
-                payloads.push(derived_payload(
-                    format!("derived/index/{name}"),
-                    "index_manifest",
-                    captured_at,
-                    None,
-                    bytes,
-                ));
-                included = true;
-            }
-            Err(error) => degraded.push(BackupDegradation::warning(
-                "index_manifest_unreadable",
-                format!(
-                    "index manifest '{}' could not be read: {error}",
-                    candidate.display()
-                ),
-                "inspect .ee/index permissions and retry backup create --include-derived",
-            )),
-        }
+        };
+        let name = candidate
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(safe_file_stem)
+            .unwrap_or_else(|| "manifest.json".to_owned());
+        payloads.push(derived_payload(
+            format!("derived/index/{name}"),
+            "index_manifest",
+            captured_at,
+            None,
+            bytes,
+        ));
+        included = true;
     }
     if !included {
         degraded.push(BackupDegradation::warning(
@@ -2528,6 +2516,76 @@ fn collect_index_manifest_payloads(
             "no workspace index manifest was found; backup includes the durable JSONL source of truth only",
             "run ee index rebuild --workspace . before creating a backup that must include derived index metadata",
         ));
+    }
+}
+
+fn read_index_manifest_candidate(
+    candidate: &Path,
+    degraded: &mut Vec<BackupDegradation>,
+) -> Option<Vec<u8>> {
+    match first_existing_symlink_component(candidate) {
+        Ok(Some(symlink_path)) => {
+            degraded.push(BackupDegradation::warning(
+                "index_manifest_symlink",
+                format!(
+                    "index manifest '{}' was skipped because it traverses symlinked path component '{}'",
+                    candidate.display(),
+                    symlink_path.display()
+                ),
+                "replace .ee/index manifests with regular files before retrying backup create --include-derived",
+            ));
+            return None;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            degraded.push(BackupDegradation::warning(
+                "index_manifest_unreadable",
+                error.message(),
+                "inspect .ee/index permissions and retry backup create --include-derived",
+            ));
+            return None;
+        }
+    }
+
+    let metadata = match fs::symlink_metadata(candidate) {
+        Ok(metadata) => metadata,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return None;
+        }
+        Err(error) => {
+            degraded.push(BackupDegradation::warning(
+                "index_manifest_unreadable",
+                format!(
+                    "index manifest '{}' could not be inspected: {error}",
+                    candidate.display()
+                ),
+                "inspect .ee/index permissions and retry backup create --include-derived",
+            ));
+            return None;
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return None;
+    }
+
+    match fs::read(candidate) {
+        Ok(bytes) => Some(bytes),
+        Err(error) => {
+            degraded.push(BackupDegradation::warning(
+                "index_manifest_unreadable",
+                format!(
+                    "index manifest '{}' could not be read: {error}",
+                    candidate.display()
+                ),
+                "inspect .ee/index permissions and retry backup create --include-derived",
+            ));
+            None
+        }
     }
 }
 
@@ -4007,6 +4065,55 @@ mod tests {
                 .iter()
                 .any(|derived| derived.kind == "wal_holds"),
             "verify checks WAL hold derived asset",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn include_derived_skips_symlinked_index_manifest_before_read() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let index_dir = workspace.join(WORKSPACE_MARKER).join("index");
+        fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
+        let outside_manifest = tempdir.path().join("outside-index-manifest.json");
+        fs::write(&outside_manifest, r#"{"schema":"outside.index.v1"}"#)
+            .map_err(|error| error.to_string())?;
+        symlink(&outside_manifest, index_dir.join("meta.json"))
+            .map_err(|error| error.to_string())?;
+
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace,
+            database_path: Some(database),
+            output_dir: Some(tempdir.path().join("backups")),
+            label: Some("derived-symlink".to_owned()),
+            redaction_level: RedactionLevel::Standard,
+            include_derived: true,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            !created
+                .derived
+                .iter()
+                .any(|derived| derived.kind == "index_manifest"),
+            "symlinked index manifest must not be included as a derived asset",
+        )?;
+        ensure(
+            created
+                .degraded
+                .iter()
+                .any(|degradation| degradation.code == "index_manifest_symlink"),
+            "symlinked index manifest should be reported as degraded",
+        )?;
+        ensure(
+            created
+                .degraded
+                .iter()
+                .any(|degradation| degradation.code == "index_manifest_missing"),
+            "backup should still report no safe index manifest was included",
         )
     }
 
