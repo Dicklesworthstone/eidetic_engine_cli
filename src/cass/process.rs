@@ -307,7 +307,6 @@ impl CassInvocation {
                 ));
             }
 
-            std::thread::sleep(TIMEOUT_POLL_INTERVAL);
             let elapsed = started.elapsed();
             if elapsed >= timeout {
                 #[cfg(unix)]
