@@ -12,6 +12,7 @@
 #![cfg(feature = "mcp")]
 #![allow(clippy::unwrap_used)]
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,6 +21,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Value as JsonValue, json};
 
 type TestResult = Result<(), String>;
+
+const PARITY_TESTED_TOOLS: &[&str] = &[
+    "ee_health",
+    "ee_status",
+    "ee_capabilities",
+    "ee_search",
+    "ee_context",
+    "ee_memory_show",
+    "ee_why",
+    "ee_remember",
+    "ee_outcome",
+];
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
@@ -436,6 +449,39 @@ fn mcp_parity_why_command() -> TestResult {
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "why")
 }
 
+/// Parity test: `ee memory show <memory-id> --json` vs `ee_memory_show` MCP tool
+#[test]
+fn mcp_parity_memory_show_command() -> TestResult {
+    let dir = scenario_dir("memory_show")?;
+    init_workspace(&dir)?;
+    let memory_id = remember_test_memory(&dir, "Show this memory through both CLI and MCP.")?;
+
+    let (cli_exit, cli_stdout, _cli_stderr) = run_cli(vec![
+        OsString::from("ee"),
+        OsString::from("memory"),
+        OsString::from("show"),
+        OsString::from(&memory_id),
+        OsString::from("--workspace"),
+        OsString::from(&dir),
+        OsString::from("--json"),
+    ]);
+    ensure(
+        cli_exit == ee::models::ProcessExitCode::Success,
+        "CLI memory show failed",
+    )?;
+
+    let mcp_response = run_mcp_tool_call(
+        "ee_memory_show",
+        json!({
+            "workspace": dir.to_string_lossy(),
+            "memoryId": memory_id
+        }),
+    )?;
+    let mcp_text = extract_mcp_tool_text(&mcp_response)?;
+
+    assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "memory show")
+}
+
 /// Parity test: `ee remember --dry-run --json` vs `ee_remember` MCP tool (default dry-run)
 #[test]
 fn mcp_parity_remember_dry_run_command() -> TestResult {
@@ -475,6 +521,49 @@ fn mcp_parity_remember_dry_run_command() -> TestResult {
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "remember --dry-run")
+}
+
+/// Parity test: `ee outcome --dry-run --json` vs `ee_outcome` MCP tool
+#[test]
+fn mcp_parity_outcome_dry_run_command() -> TestResult {
+    let dir = scenario_dir("outcome")?;
+    init_workspace(&dir)?;
+    let memory_id = remember_test_memory(&dir, "Record dry-run feedback parity for this memory.")?;
+    let event_id = "fb_01234567890123456789012345";
+
+    let (cli_exit, cli_stdout, _cli_stderr) = run_cli(vec![
+        OsString::from("ee"),
+        OsString::from("outcome"),
+        OsString::from(&memory_id),
+        OsString::from("--workspace"),
+        OsString::from(&dir),
+        OsString::from("--signal"),
+        OsString::from("helpful"),
+        OsString::from("--reason"),
+        OsString::from("parity dry run"),
+        OsString::from("--event-id"),
+        OsString::from(event_id),
+        OsString::from("--dry-run"),
+        OsString::from("--json"),
+    ]);
+    ensure(
+        cli_exit == ee::models::ProcessExitCode::Success,
+        "CLI outcome --dry-run failed",
+    )?;
+
+    let mcp_response = run_mcp_tool_call(
+        "ee_outcome",
+        json!({
+            "workspace": dir.to_string_lossy(),
+            "targetId": memory_id,
+            "signal": "helpful",
+            "reason": "parity dry run",
+            "eventId": event_id
+        }),
+    )?;
+    let mcp_text = extract_mcp_tool_text(&mcp_response)?;
+
+    assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "outcome --dry-run")
 }
 
 /// Verify MCP manifest lists all walking-skeleton CLI commands
@@ -538,22 +627,19 @@ fn mcp_tools_list_covers_parity_tested_tools() -> TestResult {
         .filter_map(|t| t.get("name").and_then(JsonValue::as_str))
         .collect();
 
-    let parity_tested_tools = [
-        "ee_status",
-        "ee_health",
-        "ee_capabilities",
-        "ee_search",
-        "ee_context",
-        "ee_remember",
-        "ee_why",
-    ];
-
-    for tool in parity_tested_tools {
+    for tool in PARITY_TESTED_TOOLS {
         ensure(
             tool_names.contains(&tool),
             format!("tools/list missing parity-tested tool: {tool}"),
         )?;
     }
+
+    let listed: BTreeSet<&str> = tool_names.into_iter().collect();
+    let tested: BTreeSet<&str> = PARITY_TESTED_TOOLS.iter().copied().collect();
+    ensure(
+        listed == tested,
+        format!("tools/list parity coverage mismatch; listed={listed:?}, tested={tested:?}"),
+    )?;
 
     Ok(())
 }
