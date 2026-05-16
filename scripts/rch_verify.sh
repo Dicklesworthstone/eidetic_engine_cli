@@ -331,10 +331,10 @@ PY
 recent_failed_excluded_daemon_workers() {
     CONFIGURED_WORKERS="${1:-}" \
     DAEMON_WORKERS="${2:-}" \
+    RECENT_FAILURE_MAX_MS="${3:-${RCH_VERIFY_RECENT_FAILURE_MAX_MS:-10000}}" \
     STATUS_JSON="${RCH_VERIFY_STATUS_JSON:-}" \
     FAKE_OUTPUT_PRESENT="${RCH_VERIFY_FAKE_OUTPUT:+1}" \
     RCH_BIN_PATH="$RCH_BIN" \
-    MAX_DURATION_MS="${RCH_VERIFY_RECENT_FAILURE_MAX_MS:-10000}" \
     python3 - <<'PY'
 import json
 import os
@@ -352,7 +352,7 @@ daemon = {
 }
 
 try:
-    max_duration_ms = int(os.environ.get("MAX_DURATION_MS") or "10000")
+    max_duration_ms = int(os.environ.get("RECENT_FAILURE_MAX_MS") or "10000")
 except ValueError:
     max_duration_ms = 10000
 
@@ -826,12 +826,19 @@ DAEMON_WORKERS_CSV="$(daemon_workers)"
 REQUESTED_WORKERS_CSV="${RCH_WORKERS:-}"
 
 if [ "${RCH_VERIFY_FAIL_FAST_STALE_WORKER:-1}" = "1" ]; then
-    stale_disk_full_workers="$(stale_disk_full_daemon_workers "$CONFIGURED_WORKERS_CSV" "$DAEMON_WORKERS_CSV" "${RCH_VERIFY_DISK_FULL_WORKERS:-}")"
-    stale_recent_failed_workers="$(recent_failed_excluded_daemon_workers "$CONFIGURED_WORKERS_CSV" "$DAEMON_WORKERS_CSV")"
+    allowed_workers_csv="${REQUESTED_WORKERS_CSV:-$CONFIGURED_WORKERS_CSV}"
+    allowed_workers_note="configured"
+    recent_failure_max_ms="${RCH_VERIFY_RECENT_FAILURE_MAX_MS:-10000}"
+    if [ -n "$REQUESTED_WORKERS_CSV" ]; then
+        allowed_workers_note="requested"
+        recent_failure_max_ms="${RCH_VERIFY_REQUESTED_RECENT_FAILURE_MAX_MS:-120000}"
+    fi
+    stale_disk_full_workers="$(stale_disk_full_daemon_workers "$allowed_workers_csv" "$DAEMON_WORKERS_CSV" "${RCH_VERIFY_DISK_FULL_WORKERS:-}")"
+    stale_recent_failed_workers="$(recent_failed_excluded_daemon_workers "$allowed_workers_csv" "$DAEMON_WORKERS_CSV" "$recent_failure_max_ms")"
     if [ -n "$stale_disk_full_workers" ]; then
         first_stale_worker="${stale_disk_full_workers%%,*}"
         WORKER_ID_JSON="$(json_quote "$first_stale_worker")"
-        preflight_note="[RCH_VERIFY] stale daemon worker(s) excluded from configured workers and recently disk-full: $stale_disk_full_workers"
+        preflight_note="[RCH_VERIFY] stale daemon worker(s) excluded from $allowed_workers_note workers and recently disk-full: $stale_disk_full_workers"
         emit_json true 1 0 "$preflight_note" "" \
             "rch_verify_remote_command_failed" \
             "rch_verify_worker_disk_full" \
@@ -840,7 +847,7 @@ if [ "${RCH_VERIFY_FAIL_FAST_STALE_WORKER:-1}" = "1" ]; then
     elif [ -n "$stale_recent_failed_workers" ]; then
         first_stale_worker="${stale_recent_failed_workers%%,*}"
         WORKER_ID_JSON="$(json_quote "$first_stale_worker")"
-        preflight_note="[RCH_VERIFY] stale daemon worker(s) excluded from configured workers and recently failed fast: $stale_recent_failed_workers"
+        preflight_note="[RCH_VERIFY] stale daemon worker(s) excluded from $allowed_workers_note workers and recently failed fast: $stale_recent_failed_workers"
         emit_json true 1 0 "$preflight_note" "" \
             "rch_verify_remote_command_failed" \
             "rch_verify_worker_filter_ignored"

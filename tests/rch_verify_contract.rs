@@ -625,6 +625,101 @@ fn synthetic_recent_failed_excluded_daemon_preflight_does_not_need_override() ->
 }
 
 #[test]
+fn synthetic_recent_failed_requested_worker_preflight_honors_rch_workers() -> TestResult {
+    let status_json = r#"{
+        "data": {
+            "daemon": {
+                "recent_builds": [
+                    {"worker_id": "css", "exit_code": 101, "duration_ms": 52903},
+                    {"worker_id": "trj", "exit_code": 0, "duration_ms": 2000}
+                ]
+            }
+        }
+    }"#;
+    let (status, stdout, _stderr) = run_script_with_env(
+        &[
+            "--bead-id",
+            "bd-requested-worker",
+            "--summary",
+            "--no-write",
+            "--",
+            "cargo",
+            "test",
+            "--test",
+            "g5_curate_decay_e2e",
+            "--",
+            "--nocapture",
+        ],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "INFO Selected worker: trj at ubuntu@trj (4 slots, speed 50.0)\n[RCH] remote trj (1.0s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "css,trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "css,trj,csd"),
+            ("RCH_VERIFY_STATUS_JSON", status_json),
+            ("RCH_WORKERS", "trj"),
+        ],
+    )?;
+    if status.success() {
+        return Err("recent failed worker outside RCH_WORKERS should fail before Cargo".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse requested-worker preflight: {error}"))?;
+    if report["status"] != "rch_environment_failure" || report["worker_id"] != "css" {
+        return Err(format!("unexpected requested-worker preflight: {report}"));
+    }
+    if report["requested_workers"] != serde_json::json!(["trj"])
+        || report["configured_workers"] != serde_json::json!(["css", "trj"])
+        || report["daemon_workers"] != serde_json::json!(["css", "trj", "csd"])
+    {
+        return Err(format!(
+            "worker inventory arrays were not preserved: {report}"
+        ));
+    }
+    for expected in [
+        "rch_verify_remote_command_failed",
+        "rch_verify_worker_filter_ignored",
+    ] {
+        if !degraded_contains(&report, expected)? {
+            return Err(format!("missing {expected} in degraded codes: {report}"));
+        }
+    }
+    if degraded_contains(&report, "rch_verify_worker_disk_full")? {
+        return Err(format!(
+            "recent requested-worker failure without disk-full transcript should not claim disk-full: {report}"
+        ));
+    }
+    let stdout_tail = report["stdout_tail"]
+        .as_str()
+        .ok_or_else(|| "missing stdout tail".to_owned())?;
+    if !stdout_tail.contains("excluded from requested workers")
+        || !stdout_tail.contains("recently failed fast")
+        || stdout_tail.contains("[RCH] remote trj")
+    {
+        return Err(format!(
+            "requested-worker preflight did not short-circuit fake Cargo run: {report}"
+        ));
+    }
+    let summary = report["summary_markdown"]
+        .as_str()
+        .ok_or_else(|| "summary missing".to_owned())?;
+    if !summary.contains("requested_workers: `trj`")
+        || !summary.contains("configured_workers: `css, trj`")
+        || !summary.contains("daemon_workers: `css, trj, csd`")
+    {
+        return Err(format!("summary missing worker arrays: {summary}"));
+    }
+    if report["elapsed_ms"] != 0 {
+        return Err(format!(
+            "preflight should not measure remote execution: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn synthetic_compile_error_is_not_worker_disk_full() -> TestResult {
     let (status, stdout, _stderr) = run_script_with_env(
         &["--", "cargo", "test", "--lib", "support_bundle"],
