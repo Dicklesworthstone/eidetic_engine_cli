@@ -108,6 +108,8 @@ Current conventions:
 | `focus` | `ee focus` passive focus-state degradation. |
 | `git` | Swarm brief Git source degradation. |
 | `graph_centrality_read` | `ee graph centrality` persisted centrality read degradation. |
+| `graph_export` | `ee graph export` graph snapshot export degradation. |
+| `graph_feature_enrichment` | `ee graph feature-enrichment` graph-derived scoring degradation. |
 | `hits` | `ee graph hits` HITS algorithm degradation. |
 | `host_profile` | Swarm brief host-profile source degradation. |
 | `integrity` | `ee diag integrity` database, schema, canary, or provenance-sample degradation. |

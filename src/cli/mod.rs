@@ -21839,6 +21839,68 @@ fn graph_hits_degraded_json(
     }))
 }
 
+fn graph_feature_enrichment_data_json(
+    report: &crate::graph::GraphFeatureEnrichmentReport,
+) -> serde_json::Value {
+    let degraded = graph_feature_enrichment_degraded_json(&report.degraded);
+    let mut data = report.data_json();
+    if let Some(object) = data.as_object_mut() {
+        object.insert(
+            "degraded".to_string(),
+            serde_json::Value::Array(degraded.clone()),
+        );
+        if let Some(summary) = object
+            .get_mut("summary")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            summary.insert(
+                "degradedCount".to_string(),
+                serde_json::json!(degraded.len()),
+            );
+        }
+    }
+    data
+}
+
+fn graph_feature_enrichment_degraded_json(
+    degraded: &[crate::graph::GraphFeatureEnrichmentDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_cli_degraded_json(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "graph_feature_enrichment",
+            entry.code,
+            entry.severity,
+            entry.message.clone(),
+            entry.repair.clone(),
+        )
+    }))
+}
+
+fn graph_export_data_json(report: &crate::graph::GraphExportReport) -> serde_json::Value {
+    let mut data = report.data_json();
+    if let Some(object) = data.as_object_mut() {
+        object.insert(
+            "degraded".to_string(),
+            serde_json::Value::Array(graph_export_degraded_json(&report.degraded)),
+        );
+    }
+    data
+}
+
+fn graph_export_degraded_json(
+    degraded: &[crate::graph::GraphExportDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_cli_degraded_json(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "graph_export",
+            entry.code,
+            entry.severity,
+            entry.message.clone(),
+            entry.repair.clone(),
+        )
+    }))
+}
+
 fn graph_centrality_read_human_output(report: &GraphCentralityReadReport) -> String {
     let mut output = format!(
         "Graph centrality ({})\n\n  Algorithm: {}\n  Rows: {}\n",
@@ -22060,7 +22122,7 @@ where
             let json = serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V1,
                 "success": true,
-                "data": report.data_json(),
+                "data": graph_feature_enrichment_data_json(&report),
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
@@ -22314,7 +22376,7 @@ where
             let json = serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V1,
                 "success": true,
-                "data": report.data_json(),
+                "data": graph_export_data_json(report),
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
@@ -45219,6 +45281,117 @@ default_half_life_days = 45
             &rendered[0]["sources"],
             &serde_json::json!(["hits"]),
             "HITS source label",
+        )
+    }
+
+    #[test]
+    fn graph_feature_enrichment_json_degraded_entries_are_aggregated() -> TestResult {
+        let report = crate::graph::GraphFeatureEnrichmentReport {
+            schema: crate::graph::GRAPH_FEATURE_ENRICHMENT_SCHEMA_V1,
+            version: "test",
+            status: crate::graph::GraphFeatureEnrichmentStatus::ScoresUnavailable,
+            source_status: crate::graph::CentralityRefreshStatus::EmptyGraph,
+            source: crate::graph::GraphFeatureEnrichmentSource {
+                kind: "graph_snapshot",
+                workspace_id: Some("ws_test".to_string()),
+                graph_type: Some("memory_links".to_string()),
+                snapshot: None,
+            },
+            limited: false,
+            max_features: 10,
+            max_selection_boost: 0.15,
+            features: Vec::new(),
+            degraded: vec![
+                crate::graph::GraphFeatureEnrichmentDegradation {
+                    code: "graph_snapshot_missing",
+                    severity: "low",
+                    message: "Graph snapshot is missing.".to_string(),
+                    repair: "ee graph centrality-refresh".to_string(),
+                },
+                crate::graph::GraphFeatureEnrichmentDegradation {
+                    code: "graph_snapshot_missing",
+                    severity: "warning",
+                    message: "Graph snapshot is missing; enrichment is unavailable.".to_string(),
+                    repair: "ee graph centrality-refresh --workspace .".to_string(),
+                },
+            ],
+        };
+
+        let rendered = super::graph_feature_enrichment_data_json(&report);
+        let degraded = rendered["degraded"]
+            .as_array()
+            .ok_or_else(|| "graph feature degraded must be an array".to_string())?;
+        ensure_equal(&degraded.len(), &1, "graph feature degraded count")?;
+        ensure_equal(
+            &degraded[0]["code"],
+            &serde_json::json!("graph_snapshot_missing"),
+            "graph feature degraded code",
+        )?;
+        ensure_equal(
+            &degraded[0]["severity"],
+            &serde_json::json!("warning"),
+            "graph feature severity escalates",
+        )?;
+        ensure_equal(
+            &degraded[0]["sources"],
+            &serde_json::json!(["graph_feature_enrichment"]),
+            "graph feature source label",
+        )?;
+        ensure_equal(
+            &rendered["summary"]["degradedCount"],
+            &serde_json::json!(1),
+            "graph feature degraded summary count",
+        )
+    }
+
+    #[test]
+    fn graph_export_json_degraded_entries_are_aggregated() -> TestResult {
+        let report = crate::graph::GraphExportReport {
+            schema: crate::graph::GRAPH_EXPORT_SCHEMA_V1,
+            version: "test",
+            status: crate::graph::GraphExportStatus::NoSnapshot,
+            format: crate::graph::GraphExportFormat::Mermaid,
+            workspace_id: "ws_test".to_string(),
+            graph_type: "memory_links".to_string(),
+            snapshot: None,
+            node_count: 0,
+            edge_count: 0,
+            diagram: String::new(),
+            degraded: vec![
+                crate::graph::GraphExportDegradation {
+                    code: "graph_snapshot_missing",
+                    severity: "low",
+                    message: "Graph snapshot is missing.".to_string(),
+                    repair: "ee graph centrality-refresh".to_string(),
+                },
+                crate::graph::GraphExportDegradation {
+                    code: "graph_snapshot_missing",
+                    severity: "medium",
+                    message: "Graph snapshot is missing; export is unavailable.".to_string(),
+                    repair: "ee graph centrality-refresh --workspace .".to_string(),
+                },
+            ],
+        };
+
+        let rendered = super::graph_export_data_json(&report);
+        let degraded = rendered["degraded"]
+            .as_array()
+            .ok_or_else(|| "graph export degraded must be an array".to_string())?;
+        ensure_equal(&degraded.len(), &1, "graph export degraded count")?;
+        ensure_equal(
+            &degraded[0]["code"],
+            &serde_json::json!("graph_snapshot_missing"),
+            "graph export degraded code",
+        )?;
+        ensure_equal(
+            &degraded[0]["severity"],
+            &serde_json::json!("medium"),
+            "graph export severity escalates",
+        )?;
+        ensure_equal(
+            &degraded[0]["sources"],
+            &serde_json::json!(["graph_export"]),
+            "graph export source label",
         )
     }
 
