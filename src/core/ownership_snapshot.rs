@@ -326,8 +326,8 @@ pub fn pattern_matches_path(pattern: &str, path: &str) -> bool {
     // We do not change the glob language itself (used by tripwire preflight)
     // because that must stay small and deterministic.
     let mut normalized = pattern.replace("**", "*");
-    // Handle degenerate cases like "***" -> "**" -> "*" in one pass is not enough;
-    // a second replace covers up to 4 stars in practice for file paths.
+    // A second replace handles degenerate cases like "src/***" (becomes "src/**" then "src/*").
+    // This is sufficient for any realistic file path patterns.
     if normalized.contains("**") {
         normalized = normalized.replace("**", "*");
     }
