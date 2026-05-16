@@ -252,6 +252,12 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         category: EnvVar::Format.category(),
     },
     EnvVarEntry {
+        name: EnvVar::GraphWitnessesRetentionDays.name(),
+        description: EnvVar::GraphWitnessesRetentionDays.description(),
+        default: EnvVar::GraphWitnessesRetentionDays.default_value(),
+        category: EnvVar::GraphWitnessesRetentionDays.category(),
+    },
+    EnvVarEntry {
         name: EnvVar::HarmfulBurstWindowSeconds.name(),
         description: EnvVar::HarmfulBurstWindowSeconds.description(),
         default: EnvVar::HarmfulBurstWindowSeconds.default_value(),
@@ -330,6 +336,12 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         category: EnvVar::MeshEnabled.category(),
     },
     EnvVarEntry {
+        name: EnvVar::MeshMode.name(),
+        description: EnvVar::MeshMode.description(),
+        default: EnvVar::MeshMode.default_value(),
+        category: EnvVar::MeshMode.category(),
+    },
+    EnvVarEntry {
         name: EnvVar::NoColor.name(),
         description: EnvVar::NoColor.description(),
         default: EnvVar::NoColor.default_value(),
@@ -354,6 +366,12 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         category: EnvVar::Profile.category(),
     },
     EnvVarEntry {
+        name: EnvVar::PprCacheEntries.name(),
+        description: EnvVar::PprCacheEntries.description(),
+        default: EnvVar::PprCacheEntries.default_value(),
+        category: EnvVar::PprCacheEntries.category(),
+    },
+    EnvVarEntry {
         name: EnvVar::ReadPoolDisablePin.name(),
         description: EnvVar::ReadPoolDisablePin.description(),
         default: EnvVar::ReadPoolDisablePin.default_value(),
@@ -370,6 +388,12 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         description: EnvVar::ReadPoolIdleTimeoutSeconds.description(),
         default: EnvVar::ReadPoolIdleTimeoutSeconds.default_value(),
         category: EnvVar::ReadPoolIdleTimeoutSeconds.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::ReadPoolMaxPinSeconds.name(),
+        description: EnvVar::ReadPoolMaxPinSeconds.description(),
+        default: EnvVar::ReadPoolMaxPinSeconds.default_value(),
+        category: EnvVar::ReadPoolMaxPinSeconds.category(),
     },
     EnvVarEntry {
         name: EnvVar::ReadPoolSize.name(),
@@ -414,10 +438,34 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         category: EnvVar::TestLogTestId.category(),
     },
     EnvVarEntry {
+        name: EnvVar::TailscaleBinaryOverride.name(),
+        description: EnvVar::TailscaleBinaryOverride.description(),
+        default: EnvVar::TailscaleBinaryOverride.default_value(),
+        category: EnvVar::TailscaleBinaryOverride.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::TailscaleProbeTimeoutMs.name(),
+        description: EnvVar::TailscaleProbeTimeoutMs.description(),
+        default: EnvVar::TailscaleProbeTimeoutMs.default_value(),
+        category: EnvVar::TailscaleProbeTimeoutMs.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::TailscaleProbeSocketOverride.name(),
+        description: EnvVar::TailscaleProbeSocketOverride.description(),
+        default: EnvVar::TailscaleProbeSocketOverride.default_value(),
+        category: EnvVar::TailscaleProbeSocketOverride.category(),
+    },
+    EnvVarEntry {
         name: EnvVar::Workspace.name(),
         description: EnvVar::Workspace.description(),
         default: EnvVar::Workspace.default_value(),
         category: EnvVar::Workspace.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::WorkspaceCloseDrainTimeoutSeconds.name(),
+        description: EnvVar::WorkspaceCloseDrainTimeoutSeconds.description(),
+        default: EnvVar::WorkspaceCloseDrainTimeoutSeconds.default_value(),
+        category: EnvVar::WorkspaceCloseDrainTimeoutSeconds.category(),
     },
     EnvVarEntry {
         name: EnvVar::WorkspaceRegistry.name(),

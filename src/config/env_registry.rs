@@ -100,6 +100,8 @@ pub enum EnvVar {
     TailscaleProbeSocketOverride,
     /// `EE_WORKSPACE`
     Workspace,
+    /// `EE_WORKSPACE_CLOSE_DRAIN_TIMEOUT_S`
+    WorkspaceCloseDrainTimeoutSeconds,
     /// `EE_WORKSPACE_REGISTRY`
     WorkspaceRegistry,
 }
@@ -154,6 +156,7 @@ impl EnvVar {
             Self::TailscaleProbeTimeoutMs,
             Self::TailscaleProbeSocketOverride,
             Self::Workspace,
+            Self::WorkspaceCloseDrainTimeoutSeconds,
             Self::WorkspaceRegistry,
         ]
     }
@@ -207,6 +210,7 @@ impl EnvVar {
             Self::TailscaleProbeTimeoutMs => "EE_TAILSCALE_PROBE_TIMEOUT_MS",
             Self::TailscaleProbeSocketOverride => "EE_TAILSCALE_PROBE_SOCKET_OVERRIDE",
             Self::Workspace => "EE_WORKSPACE",
+            Self::WorkspaceCloseDrainTimeoutSeconds => "EE_WORKSPACE_CLOSE_DRAIN_TIMEOUT_S",
             Self::WorkspaceRegistry => "EE_WORKSPACE_REGISTRY",
         }
     }
@@ -286,6 +290,9 @@ impl EnvVar {
                 "Test-only override for fake mesh hello responder socket discovery."
             }
             Self::Workspace => "Override workspace root discovery.",
+            Self::WorkspaceCloseDrainTimeoutSeconds => {
+                "Override workspace-close wait time for read snapshot pins in seconds."
+            }
             Self::WorkspaceRegistry => "Override the workspace alias registry database path.",
         }
     }
@@ -301,6 +308,7 @@ impl EnvVar {
             Self::GraphWitnessesRetentionDays => Some("30"),
             Self::ReadPoolAcquireTimeoutMs => Some("5000"),
             Self::ReadPoolMaxPinSeconds => Some("30"),
+            Self::WorkspaceCloseDrainTimeoutSeconds => Some("5"),
             Self::IndexPublishLockRetryAttempts => Some("200"),
             Self::RememberCurationSyncBudgetMs => Some("50"),
             _ => None,
@@ -357,6 +365,7 @@ impl EnvVar {
             | Self::ReadPoolIdleTimeoutSeconds
             | Self::ReadPoolMaxPinSeconds
             | Self::ReadPoolSize
+            | Self::WorkspaceCloseDrainTimeoutSeconds
             | Self::DisableRememberSearchNeighbors
             | Self::IndexPublishLockRetryAttempts
             | Self::RememberCurationSyncBudgetMs => "tuning",

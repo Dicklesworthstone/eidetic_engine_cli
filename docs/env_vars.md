@@ -55,4 +55,5 @@ must not expose their current value.
 | `EE_TAILSCALE_PROBE_TIMEOUT_MS` | mesh | integer milliseconds | `1500` | Override the local Tailscale probe timeout budget. | Applies to optional mesh-local Tailscale CLI/socket probes; ignored when mesh is disabled. |
 | `EE_TAILSCALE_PROBE_SOCKET_OVERRIDE` | mesh | path | none | Test-only override for fake mesh hello responder socket discovery. | Reserved for deterministic fake Tailscale tests; production mesh code must default to normal Tailscale peer probing when unset. |
 | `EE_WORKSPACE` | paths | path | none | Override workspace root discovery. | Used after explicit `--workspace` and before cwd walk-up. |
+| `EE_WORKSPACE_CLOSE_DRAIN_TIMEOUT_S` | tuning | integer seconds | `5` | Override workspace-close wait time for read snapshot pins in seconds. | Bounds how long workspace-close lifecycle waits for active SnapshotPins before force-poisoning remaining read snapshots. |
 | `EE_WORKSPACE_REGISTRY` | paths | path | none | Override the workspace alias registry database path. | Controls where workspace aliases are stored. |
