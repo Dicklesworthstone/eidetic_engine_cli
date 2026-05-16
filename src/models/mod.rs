@@ -358,6 +358,15 @@ pub const GRAPH_MODULE_SCHEMA_V1: &str = "ee.graph.module.v1";
 /// Schema for workspace-scoped mesh peer-group binding documents.
 pub const MESH_PEER_GROUP_BINDING_SCHEMA_V1: &str = "ee.mesh.peer_group_binding.v1";
 
+/// Schema for local mesh peer authorization and redaction policies.
+pub const MESH_PEER_POLICY_SCHEMA_V1: &str = "ee.mesh.peer_policy.v1";
+
+/// Schema for redaction-safe mesh policy decisions.
+pub const MESH_POLICY_DECISION_SCHEMA_V1: &str = "ee.mesh.policy_decision.v1";
+
+/// Schema for redaction-safe mesh policy failure surfaces.
+pub const MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1: &str = "ee.mesh.policy_failure_surface.v1";
+
 /// Schema for append-only optional mesh memory events.
 pub const MESH_EVENT_SCHEMA_V1: &str = "ee.mesh.event.v1";
 

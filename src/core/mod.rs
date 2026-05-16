@@ -2,7 +2,8 @@ use std::future::Future;
 
 use crate::models::{
     ARTIFACT_SUMMARY_SCHEMA_V1, ERROR_SCHEMA_V2, INSTALL_CHECK_SCHEMA_V1, INSTALL_PLAN_SCHEMA_V1,
-    MESH_EVENT_SCHEMA_V1, MESH_PEER_GROUP_BINDING_SCHEMA_V1, RESPONSE_SCHEMA_V1,
+    MESH_EVENT_SCHEMA_V1, MESH_PEER_GROUP_BINDING_SCHEMA_V1, MESH_PEER_POLICY_SCHEMA_V1,
+    MESH_POLICY_DECISION_SCHEMA_V1, MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1, RESPONSE_SCHEMA_V1,
     SINGLEFLIGHT_KEY_SCHEMA_V1, SINGLEFLIGHT_POSTURE_SCHEMA_V1, UPDATE_PLAN_SCHEMA_V1,
 };
 
@@ -245,6 +246,12 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
         SupportedSchema::new("context_augmented", "ee.context.v1"),
         SupportedSchema::new("mesh_event", MESH_EVENT_SCHEMA_V1),
         SupportedSchema::new("mesh_peer_group_binding", MESH_PEER_GROUP_BINDING_SCHEMA_V1),
+        SupportedSchema::new("mesh_peer_policy", MESH_PEER_POLICY_SCHEMA_V1),
+        SupportedSchema::new("mesh_policy_decision", MESH_POLICY_DECISION_SCHEMA_V1),
+        SupportedSchema::new(
+            "mesh_policy_failure_surface",
+            MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1,
+        ),
         SupportedSchema::new("singleflight_key", SINGLEFLIGHT_KEY_SCHEMA_V1),
         SupportedSchema::new("singleflight_posture", SINGLEFLIGHT_POSTURE_SCHEMA_V1),
         SupportedSchema::new("proof_check", proof_verify::PROOF_CHECK_SCHEMA_V1),
@@ -596,8 +603,14 @@ mod tests {
                 "proximity",
                 "why_augmented",
                 "context_augmented",
+                "mesh_event",
+                "mesh_peer_group_binding",
+                "mesh_peer_policy",
+                "mesh_policy_decision",
+                "mesh_policy_failure_surface",
                 "singleflight_key",
                 "singleflight_posture",
+                "proof_check",
                 "preflight_bypass_token",
                 "disk_pressure_diagnostics",
                 "artifact_retention_diagnostics",

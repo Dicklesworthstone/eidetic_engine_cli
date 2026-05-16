@@ -3,13 +3,14 @@
 use std::fs;
 use std::path::PathBuf;
 
+use ee::models::{
+    KNOWN_SCHEMAS, MESH_PEER_POLICY_SCHEMA_V1, MESH_POLICY_DECISION_SCHEMA_V1,
+    MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1,
+};
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
 
-const MESH_PEER_POLICY_SCHEMA_V1: &str = "ee.mesh.peer_policy.v1";
-const MESH_POLICY_DECISION_SCHEMA_V1: &str = "ee.mesh.policy_decision.v1";
-const MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1: &str = "ee.mesh.policy_failure_surface.v1";
 const SCHEMA_PATH: &str = "docs/schemas/ee.mesh.peer_policy.v1.json";
 const DECISION_SCHEMA_PATH: &str = "docs/schemas/ee.mesh.policy_decision.v1.json";
 const FAILURE_SURFACE_SCHEMA_PATH: &str = "docs/schemas/ee.mesh.policy_failure_surface.v1.json";
@@ -57,6 +58,31 @@ fn ensure(condition: bool, context: impl Into<String>) -> TestResult {
     }
 }
 
+fn ensure_schema_registered(schema_id: &str, supported_name: &str) -> TestResult {
+    ensure(
+        KNOWN_SCHEMAS.contains(&schema_id),
+        format!("KNOWN_SCHEMAS missing {schema_id}"),
+    )?;
+
+    let supported = ee::core::supported_schemas()
+        .into_iter()
+        .map(|schema| (schema.name, schema.schema))
+        .collect::<Vec<_>>();
+    ensure(
+        supported
+            .iter()
+            .any(|(name, schema)| *name == supported_name && *schema == schema_id),
+        format!("supported_schemas missing {supported_name}={schema_id}"),
+    )?;
+
+    ensure(
+        ee::output::public_schemas()
+            .iter()
+            .any(|entry| entry.id == schema_id),
+        format!("public_schemas missing {schema_id}"),
+    )
+}
+
 #[test]
 fn peer_policy_schema_pins_default_deny_and_trust_boundaries() -> TestResult {
     let schema = read_json(SCHEMA_PATH)?;
@@ -76,6 +102,7 @@ fn peer_policy_schema_pins_default_deny_and_trust_boundaries() -> TestResult {
         &Some(MESH_PEER_POLICY_SCHEMA_V1),
         "schema title",
     )?;
+    ensure_schema_registered(MESH_PEER_POLICY_SCHEMA_V1, "mesh_peer_policy")?;
     ensure_equal(
         &schema
             .pointer("/properties/defaultAction/const")
@@ -165,6 +192,10 @@ fn peer_policy_failure_surface_schema_pins_structured_codes() -> TestResult {
         &Some(MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1),
         "schema title",
     )?;
+    ensure_schema_registered(
+        MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1,
+        "mesh_policy_failure_surface",
+    )?;
 
     let codes = schema
         .pointer("/properties/code/enum")
@@ -213,6 +244,7 @@ fn peer_policy_decision_schema_pins_directional_side_effect_fields() -> TestResu
         &Some(MESH_POLICY_DECISION_SCHEMA_V1),
         "schema title",
     )?;
+    ensure_schema_registered(MESH_POLICY_DECISION_SCHEMA_V1, "mesh_policy_decision")?;
 
     let actions = schema
         .pointer("/properties/action/enum")

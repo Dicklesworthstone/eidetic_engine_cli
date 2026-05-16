@@ -6780,6 +6780,27 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: singleflight_posture_schema_definition,
         },
         SchemaEntry {
+            id: crate::models::MESH_PEER_POLICY_SCHEMA_V1,
+            version: "1",
+            description: "Workspace-scoped mesh peer authorization and redaction policy",
+            category: "mesh",
+            definition: mesh_peer_policy_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::models::MESH_POLICY_DECISION_SCHEMA_V1,
+            version: "1",
+            description: "Redaction-safe inbound and outbound mesh policy decision",
+            category: "mesh",
+            definition: mesh_policy_decision_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::models::MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1,
+            version: "1",
+            description: "Redaction-safe mesh policy denial, quarantine, and rejection surface",
+            category: "mesh",
+            definition: mesh_policy_failure_surface_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.doctor.v1",
             version: "1",
             description: "Doctor diagnostics response envelope",
@@ -7113,6 +7134,18 @@ fn status_response_schema_definition() -> String {
 
 fn singleflight_posture_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.singleflight.posture.v1.json").to_string()
+}
+
+fn mesh_peer_policy_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.peer_policy.v1.json").to_string()
+}
+
+fn mesh_policy_decision_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.policy_decision.v1.json").to_string()
+}
+
+fn mesh_policy_failure_surface_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.policy_failure_surface.v1.json").to_string()
 }
 
 fn doctor_response_schema_definition() -> String {
