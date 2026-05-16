@@ -1996,12 +1996,7 @@ pub fn import_playbook(
                     .to_owned(),
             ),
         })?;
-    if document.schema != PLAYBOOK_PORTABLE_SCHEMA_V1 {
-        return Err(DomainError::Import {
-            message: format!("unsupported playbook schema `{}`", document.schema),
-            repair: Some(format!("expected schema `{PLAYBOOK_PORTABLE_SCHEMA_V1}`")),
-        });
-    }
+    validate_playbook_document(&document)?;
 
     let existing = load_playbook_snapshot(&prepared, true, MAX_RULE_LIST_LIMIT, 0)?;
     let mut existing_contents = existing
@@ -2242,6 +2237,26 @@ fn portable_import_maturity(
         return Some(RuleMaturity::Candidate.as_str());
     }
     Some(parsed.as_str())
+}
+
+fn validate_playbook_document(document: &PlaybookPortableDocument) -> Result<(), DomainError> {
+    if document.schema != PLAYBOOK_PORTABLE_SCHEMA_V1 {
+        return Err(DomainError::Import {
+            message: format!("unsupported playbook schema `{}`", document.schema),
+            repair: Some(format!("expected schema `{PLAYBOOK_PORTABLE_SCHEMA_V1}`")),
+        });
+    }
+    if document.rule_count != document.rules.len() {
+        return Err(DomainError::Import {
+            message: format!(
+                "playbook rule_count {} does not match {} rule row(s)",
+                document.rule_count,
+                document.rules.len()
+            ),
+            repair: Some("recreate the playbook with `ee playbook export --out <path>`".to_owned()),
+        });
+    }
+    Ok(())
 }
 
 fn write_side_path_no_overwrite(path: &Path, bytes: &[u8]) -> Result<(), DomainError> {
@@ -3869,6 +3884,49 @@ mod tests {
             .map_err(|error| error.to_string())?;
         assert_eq!(actual_sources, expected_sources);
         Ok(())
+    }
+
+    #[test]
+    fn playbook_import_rejects_rule_count_mismatch_before_apply() -> TestResult {
+        let document = PlaybookPortableDocument {
+            schema: PLAYBOOK_PORTABLE_SCHEMA_V1.to_owned(),
+            exported_at: "2026-05-16T00:00:00Z".to_owned(),
+            ee_version: env!("CARGO_PKG_VERSION").to_owned(),
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            workspace_path: "/source".to_owned(),
+            rule_count: 2,
+            rules: vec![PlaybookPortableRule {
+                source_rule_id: Some("rule_01234567890123456789012345".to_owned()),
+                content: "Run cargo fmt --check before release.".to_owned(),
+                maturity: RuleMaturity::Candidate.as_str().to_owned(),
+                scope: RuleScope::Workspace.as_str().to_owned(),
+                scope_pattern: None,
+                trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                protected: false,
+                confidence: 0.8,
+                utility: 0.5,
+                importance: 0.6,
+                tags: vec!["release".to_owned()],
+                source_memory_ids: Vec::new(),
+                source_memory_count: 0,
+                created_at: Some("2026-05-16T00:00:00Z".to_owned()),
+                updated_at: None,
+            }],
+        };
+
+        let err = match validate_playbook_document(&document) {
+            Ok(()) => return Err("mismatched rule_count should reject".to_owned()),
+            Err(err) => err,
+        };
+
+        ensure(
+            matches!(err, DomainError::Import { .. }),
+            "expected import error",
+        )?;
+        ensure(
+            err.message().contains("rule_count 2 does not match 1"),
+            "error should describe rule_count mismatch",
+        )
     }
 
     #[test]
