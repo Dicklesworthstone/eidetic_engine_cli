@@ -490,7 +490,12 @@ fn drain_pipe_readers_after_timeout(
         if now >= deadline {
             break;
         }
-        thread::sleep((deadline - now).min(TIMEOUT_POLL_INTERVAL));
+        thread::sleep(
+            deadline
+                .checked_duration_since(now)
+                .unwrap_or(Duration::ZERO)
+                .min(TIMEOUT_POLL_INTERVAL),
+        );
     }
 
     if stdout_bytes.is_none() && stdout_thread.take().is_some() {
