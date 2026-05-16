@@ -908,7 +908,7 @@ fn expand_source_id_range(
 fn stable_numeric_suffix(value: &str) -> Option<(&str, u64, usize)> {
     let split_at = value
         .rfind(|ch: char| !ch.is_ascii_digit())
-        .map_or(0, |index| index + 1);
+        .map_or(0, |index| index + value[index..].chars().next().unwrap().len_utf8());
     let digits = value.get(split_at..)?;
     if digits.is_empty() {
         return None;
@@ -1013,7 +1013,7 @@ fn ndcg_at_k(retrieved: &[String], relevant: &HashSet<String>, k: usize) -> f64 
         .map(|i| 1.0 / (i as f64 + 2.0).log2())
         .sum();
 
-    if idcg == 0.0 { 0.0 } else { dcg / idcg }
+    if idcg < f64::EPSILON { 0.0 } else { dcg / idcg }
 }
 
 /// Compute mean reciprocal rank.

@@ -476,12 +476,33 @@ impl DbConnection {
         F: FnOnce() -> Result<T>,
     {
         let _write_owner = self.begin_write_transaction()?;
+
+        struct TransactionGuard<'a> {
+            conn: &'a DbConnection,
+            completed: bool,
+        }
+
+        impl Drop for TransactionGuard<'_> {
+            fn drop(&mut self) {
+                if !self.completed {
+                    let _ = self.conn.rollback();
+                }
+            }
+        }
+
+        let mut guard = TransactionGuard {
+            conn: self,
+            completed: false,
+        };
+
         match f() {
             Ok(result) => {
+                guard.completed = true;
                 self.commit()?;
                 Ok(result)
             }
             Err(err) => {
+                guard.completed = true;
                 let _ = self.rollback();
                 Err(err)
             }

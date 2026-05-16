@@ -2795,7 +2795,7 @@ fn calculate_risk_score(factors: &[RiskFactor]) -> f32 {
         return 0.0;
     }
     let total_weight: f32 = factors.iter().map(|f| f.weight).sum();
-    if total_weight == 0.0 {
+    if total_weight < f32::EPSILON {
         return 0.0;
     }
     let weighted_sum: f32 = factors.iter().map(|f| f.weighted_contribution()).sum();

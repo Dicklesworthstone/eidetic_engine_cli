@@ -468,7 +468,7 @@ where
     // Periodic garbage collection of expired results
     if CLEANUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 64 == 0 {
         let now = Instant::now();
-        cache.retain(|_, v| !v.expires_at.is_some_and(|exp| exp <= now));
+        cache.retain(|_, v| v.expires_at.is_none_or(|exp| exp > now));
     }
 
     cache.insert(
