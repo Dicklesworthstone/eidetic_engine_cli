@@ -557,6 +557,74 @@ fn synthetic_stale_daemon_disk_full_preflight_does_not_run_cargo() -> TestResult
 }
 
 #[test]
+fn synthetic_recent_failed_excluded_daemon_preflight_does_not_need_override() -> TestResult {
+    let status_json = r#"{
+        "data": {
+            "daemon": {
+                "recent_builds": [
+                    {"worker_id": "csd", "exit_code": 1, "duration_ms": 2342},
+                    {"worker_id": "css", "exit_code": 101, "duration_ms": 188436}
+                ]
+            }
+        }
+    }"#;
+    let (status, stdout, _stderr) = run_script_with_env(
+        &[
+            "--",
+            "cargo",
+            "bench",
+            "--bench",
+            "context_with_ppr",
+            "--",
+            "--sample-size",
+            "10",
+            "--measurement-time",
+            "5",
+        ],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "INFO Selected worker: css at ubuntu@css (8 slots, speed 50.0)\n[RCH] remote css (1.0s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "css,trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "css,trj,csd"),
+            ("RCH_VERIFY_STATUS_JSON", status_json),
+        ],
+    )?;
+    if status.success() {
+        return Err("recent failed excluded worker preflight should fail before Cargo".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse recent failure preflight: {error}"))?;
+    if report["status"] != "rch_environment_failure" || report["worker_id"] != "csd" {
+        return Err(format!("unexpected recent failure preflight: {report}"));
+    }
+    for expected in [
+        "rch_verify_remote_command_failed",
+        "rch_verify_worker_filter_ignored",
+    ] {
+        if !degraded_contains(&report, expected)? {
+            return Err(format!("missing {expected} in degraded codes: {report}"));
+        }
+    }
+    if degraded_contains(&report, "rch_verify_worker_disk_full")? {
+        return Err(format!(
+            "recent fast failure without disk-full transcript should not claim disk-full: {report}"
+        ));
+    }
+    let stdout_tail = report["stdout_tail"]
+        .as_str()
+        .ok_or_else(|| "missing stdout tail".to_owned())?;
+    if !stdout_tail.contains("recently failed fast") || stdout_tail.contains("[RCH] remote css") {
+        return Err(format!(
+            "recent failure preflight did not short-circuit fake Cargo run: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn synthetic_compile_error_is_not_worker_disk_full() -> TestResult {
     let (status, stdout, _stderr) = run_script_with_env(
         &["--", "cargo", "test", "--lib", "support_bundle"],

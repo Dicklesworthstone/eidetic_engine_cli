@@ -328,6 +328,75 @@ print(",".join(dict.fromkeys(stale)))
 PY
 }
 
+recent_failed_excluded_daemon_workers() {
+    CONFIGURED_WORKERS="${1:-}" \
+    DAEMON_WORKERS="${2:-}" \
+    STATUS_JSON="${RCH_VERIFY_STATUS_JSON:-}" \
+    FAKE_OUTPUT_PRESENT="${RCH_VERIFY_FAKE_OUTPUT:+1}" \
+    RCH_BIN_PATH="$RCH_BIN" \
+    MAX_DURATION_MS="${RCH_VERIFY_RECENT_FAILURE_MAX_MS:-10000}" \
+    python3 - <<'PY'
+import json
+import os
+import subprocess
+
+configured = {
+    item.strip()
+    for item in os.environ.get("CONFIGURED_WORKERS", "").split(",")
+    if item.strip()
+}
+daemon = {
+    item.strip()
+    for item in os.environ.get("DAEMON_WORKERS", "").split(",")
+    if item.strip()
+}
+
+try:
+    max_duration_ms = int(os.environ.get("MAX_DURATION_MS") or "10000")
+except ValueError:
+    max_duration_ms = 10000
+
+status_json = os.environ.get("STATUS_JSON", "")
+if not status_json and os.environ.get("FAKE_OUTPUT_PRESENT"):
+    print("")
+    raise SystemExit(0)
+
+try:
+    if status_json:
+        payload = json.loads(status_json)
+    else:
+        result = subprocess.run(
+            [os.environ["RCH_BIN_PATH"], "status", "--workers", "--jobs", "--json"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
+        )
+        payload = json.loads(result.stdout)
+except Exception:
+    print("")
+    raise SystemExit(0)
+
+recent = payload.get("data", {}).get("daemon", {}).get("recent_builds", [])
+stale = []
+for build in recent:
+    worker = str(build.get("worker_id") or "").strip()
+    if not worker or worker in configured or worker not in daemon:
+        continue
+    exit_code = build.get("exit_code")
+    try:
+        duration_ms = int(build.get("duration_ms") or 0)
+    except (TypeError, ValueError):
+        duration_ms = 0
+    if exit_code not in (None, 0) and 0 < duration_ms <= max_duration_ms:
+        if worker not in stale:
+            stale.append(worker)
+
+print(",".join(stale))
+PY
+}
+
 healthy_alternate_workers() {
     local failed_worker="${1:?failed worker required}"
     HEALTHY_WORKERS="${RCH_VERIFY_HEALTHY_WORKERS:-}" \
@@ -757,14 +826,23 @@ DAEMON_WORKERS_CSV="$(daemon_workers)"
 REQUESTED_WORKERS_CSV="${RCH_WORKERS:-}"
 
 if [ "${RCH_VERIFY_FAIL_FAST_STALE_WORKER:-1}" = "1" ]; then
-    stale_workers="$(stale_disk_full_daemon_workers "$CONFIGURED_WORKERS_CSV" "$DAEMON_WORKERS_CSV" "${RCH_VERIFY_DISK_FULL_WORKERS:-}")"
-    if [ -n "$stale_workers" ]; then
-        first_stale_worker="${stale_workers%%,*}"
+    stale_disk_full_workers="$(stale_disk_full_daemon_workers "$CONFIGURED_WORKERS_CSV" "$DAEMON_WORKERS_CSV" "${RCH_VERIFY_DISK_FULL_WORKERS:-}")"
+    stale_recent_failed_workers="$(recent_failed_excluded_daemon_workers "$CONFIGURED_WORKERS_CSV" "$DAEMON_WORKERS_CSV")"
+    if [ -n "$stale_disk_full_workers" ]; then
+        first_stale_worker="${stale_disk_full_workers%%,*}"
         WORKER_ID_JSON="$(json_quote "$first_stale_worker")"
-        preflight_note="[RCH_VERIFY] stale daemon worker(s) excluded from configured workers and recently disk-full: $stale_workers"
+        preflight_note="[RCH_VERIFY] stale daemon worker(s) excluded from configured workers and recently disk-full: $stale_disk_full_workers"
         emit_json true 1 0 "$preflight_note" "" \
             "rch_verify_remote_command_failed" \
             "rch_verify_worker_disk_full" \
+            "rch_verify_worker_filter_ignored"
+        exit 1
+    elif [ -n "$stale_recent_failed_workers" ]; then
+        first_stale_worker="${stale_recent_failed_workers%%,*}"
+        WORKER_ID_JSON="$(json_quote "$first_stale_worker")"
+        preflight_note="[RCH_VERIFY] stale daemon worker(s) excluded from configured workers and recently failed fast: $stale_recent_failed_workers"
+        emit_json true 1 0 "$preflight_note" "" \
+            "rch_verify_remote_command_failed" \
             "rch_verify_worker_filter_ignored"
         exit 1
     fi
