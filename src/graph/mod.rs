@@ -1959,6 +1959,8 @@ fn graph_link_metadata_contains_mesh_marker(metadata: &serde_json::Value) -> boo
         "producer_peer_id",
         "policyDecision",
         "policy_decision",
+        "policyDecisionJson",
+        "policy_decision_json",
         "policyFailureSurface",
         "policy_failure_surface",
     ]
@@ -1968,6 +1970,8 @@ fn graph_link_metadata_contains_mesh_marker(metadata: &serde_json::Value) -> boo
 
 fn graph_link_metadata_has_policy_decision(metadata: &serde_json::Value) -> bool {
     graph_link_mesh_policy_decision(metadata).is_some()
+        || graph_link_mesh_string(metadata, &["policyDecisionJson", "policy_decision_json"])
+            .is_some()
 }
 
 fn graph_link_mesh_policy_decision_kind(metadata: &serde_json::Value) -> Option<&str> {
@@ -6788,6 +6792,18 @@ mod tests {
                 "allow", "metadata", true, "outbound", "allow",
             )),
         )?;
+        insert_link_with_metadata(
+            &connection,
+            "link_00000000000000000000000031",
+            MEMORY_A,
+            MEMORY_C,
+            true,
+            0.9,
+            0.9,
+            Some(mesh_link_metadata_with_policy_json_string(
+                "allow", "metadata", true,
+            )),
+        )?;
 
         let projection = graph_result(super::build_memory_graph(
             &connection,
@@ -6846,6 +6862,34 @@ mod tests {
             complete,
             Some((policy_direction, policy_action)),
         )
+    }
+
+    fn mesh_link_metadata_with_policy_json_string(
+        workspace_scope_decision: &str,
+        material_lane: &str,
+        complete: bool,
+    ) -> String {
+        let mut metadata = serde_json::from_str::<serde_json::Value>(
+            &mesh_link_metadata_with_optional_policy_action(
+                workspace_scope_decision,
+                material_lane,
+                complete,
+                None,
+            ),
+        )
+        .expect("mesh link metadata fixture should be valid JSON");
+        if let Some(mesh) = metadata
+            .get_mut("mesh")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            mesh.insert(
+                "policyDecisionJson".to_owned(),
+                serde_json::json!(
+                    "{\"schema\":\"ee.mesh.policy_decision.v1\",\"direction\":\"inbound\",\"action\":\"allow\"}"
+                ),
+            );
+        }
+        metadata.to_string()
     }
 
     fn mesh_link_metadata_with_optional_policy_action(
