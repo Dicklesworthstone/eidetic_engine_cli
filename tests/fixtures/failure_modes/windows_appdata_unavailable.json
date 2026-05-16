@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "windows_appdata_unavailable",
+  "introduced_by": {
+    "bead": "bd-3usjw.68",
+    "epic_letter": "Bridge Plan Part II"
+  },
+  "surfaces": [
+    "windows smoke",
+    "path resolver"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Windows path resolution needs APPDATA or LOCALAPPDATA, but the relevant variable is missing or empty and no explicit --workspace was provided.",
+    "setup_commands": [
+      "Remove APPDATA or LOCALAPPDATA from a Windows test environment."
+    ],
+    "invocation": "ee init --json"
+  },
+  "expected_emission": {
+    "code": "windows_appdata_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "APPDATA",
+      "Windows"
+    ],
+    "repair_contains": "pass --workspace",
+    "repair_string": "Set APPDATA or LOCALAPPDATA, or pass --workspace explicitly."
+  }
+}

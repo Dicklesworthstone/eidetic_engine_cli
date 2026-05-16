@@ -4,6 +4,7 @@ pub mod env_registry;
 pub mod file;
 pub mod merge;
 pub mod path;
+pub mod path_resolver;
 pub mod workspace;
 
 pub use env_registry::{EnvVar, is_set as env_var_is_set, read as read_env_var};
@@ -53,6 +54,10 @@ pub use merge::{
     TRUST_TEAM_MEMBERS_KEY, built_in_config, config_from_env, merge_config,
 };
 pub use path::{PathExpander, PathExpansionError};
+pub use path_resolver::{
+    PlatformDataDirError, WINDOWS_APPDATA_UNAVAILABLE_CODE, resolve_dir_unix_xdg,
+    resolve_dir_windows_appdata, resolve_dir_windows_localappdata,
+};
 pub use workspace::{
     WORKSPACE_ENV_VAR, WORKSPACE_MARKER, WorkspaceDiagnostic, WorkspaceDiagnosticSeverity,
     WorkspaceError, WorkspaceLocation, WorkspaceResolution, WorkspaceResolutionMode,

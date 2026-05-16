@@ -96,6 +96,47 @@ jobs:
       - name: Cross-platform graph determinism
         run: cargo test --workspace --test cross_platform_determinism --target ${{ matrix.target }} -- --nocapture
 
+  windows-msvc-cli-smoke:
+    if: github.event_name != 'schedule'
+    name: windows-msvc-cli-smoke
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      EE_TEST_SEED: bd-3usjw.68-windows-msvc-cli-smoke
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Windows path resolver and binary smoke test
+        shell: pwsh
+        run: cargo test --workspace --test e2e_windows_smoke --target x86_64-pc-windows-msvc -- --nocapture
+
+      - name: Build ee for PowerShell smoke script
+        shell: pwsh
+        run: cargo build --workspace --bin ee --target x86_64-pc-windows-msvc
+
+      - name: PowerShell walking-skeleton smoke
+        shell: pwsh
+        run: >
+          ./scripts/e2e_windows_smoke.ps1
+          -EeBinary "target/x86_64-pc-windows-msvc/debug/ee.exe"
+          -WorkspaceRoot "$env:RUNNER_TEMP/ee-windows-msvc-cli-smoke"
+          -LogPath "$env:RUNNER_TEMP/ee-windows-msvc-cli-smoke.jsonl"
+
+      - name: Upload Windows smoke log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msvc-cli-smoke-log
+          path: ${{ runner.temp }}/ee-windows-msvc-cli-smoke.jsonl
+
   install-pipeline-smoke:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: install-pipeline-smoke (${{ matrix.os }})
