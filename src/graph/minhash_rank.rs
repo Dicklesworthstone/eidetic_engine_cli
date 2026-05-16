@@ -180,37 +180,46 @@ fn compute_minhash_rank_unbudgeted(
         })
         .collect();
 
-    candidates.sort_by(|left, right| {
-        right
-            .signature_density
-            .cmp(&left.signature_density)
-            .then_with(|| right.incoming_edge_count.cmp(&left.incoming_edge_count))
-            .then_with(|| right.outgoing_edge_count.cmp(&left.outgoing_edge_count))
-            .then_with(|| nodes[left.node_index].cmp(nodes[right.node_index]))
-    });
-
     // Correct top-K selection for composite key (primary=exact density + secondary=sketch).
-    // We sort cheaply on primary only, then identify the marginal density at position top_k.
-    // We compute expensive sketches for *all* nodes sharing that marginal primary density
-    // (plus all strictly better) so the final selection+sort by full signature_density is
-    // the true top-K. This preserves the defer-to-top-K perf win for low-degree nodes
-    // while guaranteeing determinism and correctness even on dense tie groups at the cutoff.
+    // We partition cheaply on primary only, then identify the marginal density at position top_k.
+    // Non-zero marginal groups need sketches for every node in the group because the sketch
+    // decides which tied nodes survive. A zero-incoming marginal group has no sketch entropy;
+    // it can be trimmed by outgoing degree and node id before materializing rows.
     let top_k = policy.top_k;
-    let compute_limit = if candidates.len() <= top_k {
-        candidates.len()
+    let candidates = if candidates.len() <= top_k {
+        candidates
     } else {
+        candidates.select_nth_unstable_by(top_k - 1, |left, right| {
+            candidate_primary_order(left, right, &nodes)
+        });
         let marginal_density = candidates[top_k - 1].signature_density;
-        let mut lim = top_k;
-        while lim < candidates.len() && candidates[lim].signature_density == marginal_density {
-            lim += 1;
+
+        let mut strict = Vec::with_capacity(top_k);
+        let mut marginal = Vec::new();
+        for candidate in candidates {
+            if candidate.signature_density > marginal_density {
+                strict.push(candidate);
+            } else if candidate.signature_density == marginal_density {
+                marginal.push(candidate);
+            }
         }
-        lim
+
+        let needed_from_marginal = top_k.saturating_sub(strict.len());
+        if marginal_density == 0 {
+            if marginal.len() > needed_from_marginal {
+                marginal.select_nth_unstable_by(needed_from_marginal, |left, right| {
+                    candidate_zero_marginal_order(left, right, &nodes)
+                });
+                marginal.truncate(needed_from_marginal);
+            }
+        }
+        strict.extend(marginal);
+        strict
     };
 
     let mut signature_edges_scanned = 0usize;
     let mut rows: Vec<MinHashRankScore> = candidates
         .into_iter()
-        .take(compute_limit)
         .map(|candidate| {
             let target_name = nodes[candidate.node_index];
             let target_hash = stable_node_hash(target_name);
@@ -265,7 +274,7 @@ fn compute_minhash_rank_unbudgeted(
         policy,
         witness: ComplexityWitness {
             algorithm: "minhash_rank_centrality".to_owned(),
-            complexity_claim: "O(|V| + m * |E_marginal|) integer minhash top-K (m >= k is marginal density group size at cutoff for exact composite-key selection)"
+            complexity_claim: "O(|V| + m * |E_marginal|) integer minhash top-K; zero-incoming marginal groups are trimmed before sketch materialization"
                 .to_owned(),
             nodes_touched: node_count,
             edges_scanned: edge_count.saturating_add(signature_edges_scanned),
@@ -273,6 +282,30 @@ fn compute_minhash_rank_unbudgeted(
         },
         scores: rows,
     }
+}
+
+fn candidate_primary_order(
+    left: &MinHashRankCandidate,
+    right: &MinHashRankCandidate,
+    nodes: &[&str],
+) -> std::cmp::Ordering {
+    right
+        .signature_density
+        .cmp(&left.signature_density)
+        .then_with(|| right.incoming_edge_count.cmp(&left.incoming_edge_count))
+        .then_with(|| right.outgoing_edge_count.cmp(&left.outgoing_edge_count))
+        .then_with(|| nodes[left.node_index].cmp(nodes[right.node_index]))
+}
+
+fn candidate_zero_marginal_order(
+    left: &MinHashRankCandidate,
+    right: &MinHashRankCandidate,
+    nodes: &[&str],
+) -> std::cmp::Ordering {
+    right
+        .outgoing_edge_count
+        .cmp(&left.outgoing_edge_count)
+        .then_with(|| nodes[left.node_index].cmp(nodes[right.node_index]))
 }
 
 fn stable_node_hash(node: &str) -> u64 {
@@ -414,6 +447,34 @@ mod tests {
         let second_bytes = serde_json::to_vec(&second).map_err(|error| error.to_string())?;
         assert_eq!(first_bytes, second_bytes);
         assert_eq!(first, second);
+        Ok(())
+    }
+
+    #[test]
+    fn minhash_rank_trims_zero_incoming_marginal_group_before_scoring() -> TestResult {
+        let mut graph = graph();
+        add_edge(&mut graph, "src_1", "hot")?;
+        add_edge(&mut graph, "src_2", "hot")?;
+        for index in 0..16 {
+            graph.add_node(format!("cold_{index:02}"));
+        }
+
+        let result = graph_result(compute_minhash_rank_with_policy(
+            &graph,
+            MinHashRankPolicy {
+                signature_count: 8,
+                top_k: 5,
+            },
+        ))?;
+
+        assert_eq!(result.scores.len(), 5);
+        assert_eq!(result.witness.queue_peak, 5);
+        assert_eq!(result.scores[0].node, "hot");
+        assert!(
+            result.scores[1..]
+                .iter()
+                .all(|score| score.incoming_edge_count == 0)
+        );
         Ok(())
     }
 
