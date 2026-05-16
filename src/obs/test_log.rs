@@ -152,7 +152,10 @@ impl LogLevel {
         match self {
             Self::Quiet => matches!(
                 kind,
-                EventKind::CommandEnd | EventKind::AssertFail | EventKind::GoldenCompare
+                EventKind::CommandEnd
+                    | EventKind::AssertFail
+                    | EventKind::GoldenCompare
+                    | EventKind::LintDeterminism
             ),
             Self::Normal => !matches!(kind, EventKind::TimerLap),
             Self::Verbose => true,

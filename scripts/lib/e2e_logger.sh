@@ -85,7 +85,7 @@ _e2e_emit_event() {
     local kind="$1"
     case "$EE_TEST_LOG_LEVEL" in
         quiet)
-            case "$kind" in command_end|assert_fail|golden_compare|artifact_manifest) :;; *) return 0;; esac ;;
+            case "$kind" in command_end|assert_fail|golden_compare|artifact_manifest|lint_determinism) :;; *) return 0;; esac ;;
         normal)
             case "$kind" in timer_lap) return 0;; esac ;;
     esac
