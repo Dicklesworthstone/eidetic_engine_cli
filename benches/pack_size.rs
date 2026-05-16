@@ -13,7 +13,7 @@ use tempfile::TempDir;
 use ee::core::context::{ContextPackOptions, run_context_pack};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::db::DbConnection;
-use ee::models::MemoryScope;
+use ee::models::{MemoryScope, RedactionLevel};
 use ee::output::{render_context_response_json, render_context_response_markdown};
 use ee::search::SpeedMode;
 
@@ -312,6 +312,7 @@ impl PackSizeFixture {
             include_stale: false,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
+            redaction_level: RedactionLevel::Minimal,
             ppr_weight: None,
             pagination: None,
             coordination_snapshot_path: None,
