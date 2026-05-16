@@ -3,6 +3,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 
+pub mod pack_l2;
+
 /// Cache statistics for comparison.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CacheStats {
