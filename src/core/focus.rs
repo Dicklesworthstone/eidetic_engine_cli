@@ -677,17 +677,9 @@ pub fn explain_focus(options: &FocusExplainOptions) -> Result<FocusReport, Domai
 pub fn read_active_focus_state(workspace_path: &Path) -> Result<Option<FocusState>, DomainError> {
     let workspace_path = normalize_workspace_path(workspace_path);
     let storage_path = focus_state_path(&workspace_path);
-    ensure_no_symlink_components(&storage_path, "read")?;
 
-    let metadata = match fs::symlink_metadata(&storage_path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(DomainError::Storage {
-                message: format!("Failed to stat focus state {}: {e}", storage_path.display()),
-                repair: Some("Check workspace .ee/focus permissions.".to_owned()),
-            });
-        }
+    let Some(metadata) = focus_state_metadata_for_read(&storage_path)? else {
+        return Ok(None);
     };
 
     let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
@@ -754,10 +746,9 @@ pub fn focus_memory_statuses_from_lookup(
 fn load_focus(workspace_path: &Path) -> Result<LoadedFocus, DomainError> {
     let workspace_path = normalize_workspace_path(workspace_path);
     let storage_path = focus_state_path(&workspace_path);
-    ensure_no_symlink_components(&storage_path, "read")?;
-    let (state, degraded) = match fs::symlink_metadata(&storage_path) {
-        Ok(_) => (read_focus_state(&storage_path)?, Vec::new()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+    let (state, degraded) = match focus_state_metadata_for_read(&storage_path)? {
+        Some(_) => (read_focus_state(&storage_path)?, Vec::new()),
+        None => (
             empty_focus_state(&workspace_path, DEFAULT_FOCUS_CAPACITY)?,
             vec![FocusDegradation::low(
                 "focus_state_absent",
@@ -765,15 +756,6 @@ fn load_focus(workspace_path: &Path) -> Result<LoadedFocus, DomainError> {
                 Some("ee focus set <memory-id> --json".to_owned()),
             )],
         ),
-        Err(error) => {
-            return Err(DomainError::Storage {
-                message: format!(
-                    "Failed to stat focus state {}: {error}",
-                    storage_path.display()
-                ),
-                repair: Some("Check workspace .ee/focus permissions.".to_owned()),
-            });
-        }
     };
     Ok(LoadedFocus {
         workspace_path,
@@ -784,7 +766,12 @@ fn load_focus(workspace_path: &Path) -> Result<LoadedFocus, DomainError> {
 }
 
 fn read_focus_state(path: &Path) -> Result<FocusState, DomainError> {
-    ensure_no_symlink_components(path, "read")?;
+    let Some(_) = focus_state_metadata_for_read(path)? else {
+        return Err(DomainError::Storage {
+            message: format!("Focus state {} is missing.", path.display()),
+            repair: Some("Run ee focus set <memory-id> --json.".to_owned()),
+        });
+    };
     let raw = fs::read_to_string(path).map_err(|error| DomainError::Storage {
         message: format!("Failed to read focus state {}: {error}", path.display()),
         repair: Some("Check workspace .ee/focus permissions.".to_owned()),
@@ -797,6 +784,37 @@ fn read_focus_state(path: &Path) -> Result<FocusState, DomainError> {
             ),
         })?;
     stored_focus_state_to_domain(stored)
+}
+
+fn focus_state_metadata_for_read(path: &Path) -> Result<Option<std::fs::Metadata>, DomainError> {
+    ensure_no_symlink_components(path, "read")?;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!("Failed to stat focus state {}: {error}", path.display()),
+                repair: Some("Check workspace .ee/focus permissions.".to_owned()),
+            });
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Refusing to read focus state {} because it is not a regular file.",
+                path.display()
+            ),
+            repair: Some("Replace .ee/focus/state.json with a regular JSON file.".to_owned()),
+        });
+    }
+    Ok(Some(metadata))
 }
 
 fn write_focus_state(path: &Path, state: &FocusState) -> Result<(), DomainError> {
@@ -1479,6 +1497,38 @@ mod tests {
             error.message().contains("symlinked path component"),
             true,
             "symlinked state error message",
+        )
+    }
+
+    #[test]
+    fn show_focus_rejects_state_directory_before_read() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(focus_state_path(dir.path())).map_err(|error| error.to_string())?;
+
+        let result = show_focus(&FocusShowOptions {
+            workspace_path: dir.path().to_path_buf(),
+        });
+        let error = result.expect_err("focus state directory should be rejected");
+        ensure(error.code(), "storage", "state directory error code")?;
+        ensure(
+            error.message().contains("not a regular file"),
+            true,
+            "state directory error message",
+        )
+    }
+
+    #[test]
+    fn active_focus_rejects_state_directory_before_cache_read() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(focus_state_path(dir.path())).map_err(|error| error.to_string())?;
+
+        let result = read_active_focus_state(dir.path());
+        let error = result.expect_err("active focus state directory should be rejected");
+        ensure(error.code(), "storage", "active state directory error code")?;
+        ensure(
+            error.message().contains("not a regular file"),
+            true,
+            "active state directory error message",
         )
     }
 
