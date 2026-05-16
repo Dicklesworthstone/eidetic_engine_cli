@@ -25,6 +25,10 @@ emit_event() {
     local degraded_codes="${6:-[]}"
     local stdout_artifact="${7:-}"
     local stderr_artifact="${8:-}"
+    local before_mutation_hash="${9:-}"
+    local after_mutation_hash="${10:-}"
+    local before_mutation_artifact="${11:-}"
+    local after_mutation_artifact="${12:-}"
     local finished_ns elapsed_ms
     finished_ns="$(date +%s%N)"
     elapsed_ms="$(( (finished_ns - STARTED_NS) / 1000000 ))"
@@ -38,6 +42,10 @@ emit_event() {
         --arg workspace "$REPO_ROOT" \
         --arg stdout_artifact "$stdout_artifact" \
         --arg stderr_artifact "$stderr_artifact" \
+        --arg before_mutation_hash "$before_mutation_hash" \
+        --arg after_mutation_hash "$after_mutation_hash" \
+        --arg before_mutation_artifact "$before_mutation_artifact" \
+        --arg after_mutation_artifact "$after_mutation_artifact" \
         --arg first_failure "$first_failure" \
         --argjson exit_code "$exit_code" \
         --argjson elapsed_ms "$elapsed_ms" \
@@ -54,6 +62,10 @@ emit_event() {
           exitCode: $exit_code,
           stdoutArtifact: (if $stdout_artifact == "" then null else $stdout_artifact end),
           stderrArtifact: (if $stderr_artifact == "" then null else $stderr_artifact end),
+          beforeMutationHash: (if $before_mutation_hash == "" then null else $before_mutation_hash end),
+          afterMutationHash: (if $after_mutation_hash == "" then null else $after_mutation_hash end),
+          beforeMutationArtifact: (if $before_mutation_artifact == "" then null else $before_mutation_artifact end),
+          afterMutationArtifact: (if $after_mutation_artifact == "" then null else $after_mutation_artifact end),
           degradedCodes: $degraded_codes,
           firstFailureDiagnosis: (if $first_failure == "" then null else $first_failure end)
         }' | tee -a "$EVENT_LOG" >&2
@@ -69,8 +81,34 @@ require_tool() {
 
 require_tool jq
 require_tool git
+require_tool shasum
 
 cd "$REPO_ROOT"
+
+hash_file() {
+    local path="${1:?path required}"
+    shasum -a 256 "$path" | awk '{ print $1 }'
+}
+
+capture_mutation_state() {
+    local label="${1:?label required}"
+    local artifact="$EVENT_DIR/${label}_mutation_state.txt"
+
+    {
+        printf '## git status --porcelain=v2 --branch --untracked-files=all\n'
+        git status --porcelain=v2 --branch --untracked-files=all
+        printf '\n## git diff --name-status\n'
+        git diff --name-status
+        printf '\n## git diff --cached --name-status\n'
+        git diff --cached --name-status
+        printf '\n## git ls-files --others --exclude-standard\n'
+        git ls-files --others --exclude-standard
+    } > "$artifact"
+
+    printf '%s\t%s\n' "$(hash_file "$artifact")" "$artifact"
+}
+
+read -r BEFORE_MUTATION_HASH BEFORE_MUTATION_ARTIFACT < <(capture_mutation_state "before")
 
 DIRTY_TRACKED="$(
     git status --porcelain --untracked-files=no |
@@ -83,6 +121,7 @@ DIRTY_TRACKED="$(
 if [ -n "$DIRTY_TRACKED" ] && [ "${EE_WORKSPACE_GIT_SNAPSHOT_ALLOW_DIRTY:-0}" != "1" ]; then
     dirty_artifact="$EVENT_DIR/dirty_tracked.txt"
     printf '%s\n' "$DIRTY_TRACKED" > "$dirty_artifact"
+    read -r AFTER_MUTATION_HASH AFTER_MUTATION_ARTIFACT < <(capture_mutation_state "after")
     emit_event \
         "preflight" \
         "blocked" \
@@ -91,7 +130,11 @@ if [ -n "$DIRTY_TRACKED" ] && [ "${EE_WORKSPACE_GIT_SNAPSHOT_ALLOW_DIRTY:-0}" !=
         "dirty tracked checkout; refusing unattributable RCH proof" \
         '["dirty_tracked_checkout"]' \
         "$dirty_artifact" \
-        ""
+        "" \
+        "$BEFORE_MUTATION_HASH" \
+        "$AFTER_MUTATION_HASH" \
+        "$BEFORE_MUTATION_ARTIFACT" \
+        "$AFTER_MUTATION_ARTIFACT"
     printf 'workspace git snapshot proof blocked by dirty tracked checkout; events=%s\n' "$EVENT_LOG" >&2
     exit 6
 fi
@@ -113,12 +156,26 @@ exit_code=$?
 set -e
 
 if [ "$exit_code" -eq 0 ]; then
-    emit_event "rch_contract" "pass" 0 "$command_text" "" "[]" "$stdout_artifact" "$stderr_artifact"
+    read -r AFTER_MUTATION_HASH AFTER_MUTATION_ARTIFACT < <(capture_mutation_state "after")
+    emit_event \
+        "rch_contract" \
+        "pass" \
+        0 \
+        "$command_text" \
+        "" \
+        "[]" \
+        "$stdout_artifact" \
+        "$stderr_artifact" \
+        "$BEFORE_MUTATION_HASH" \
+        "$AFTER_MUTATION_HASH" \
+        "$BEFORE_MUTATION_ARTIFACT" \
+        "$AFTER_MUTATION_ARTIFACT"
     printf 'workspace git snapshot read-only proof passed; events=%s\n' "$EVENT_LOG" >&2
     exit 0
 fi
 
 first_failure="$(tail -n 20 "$stderr_artifact" "$stdout_artifact" 2>/dev/null | tr '\n' ' ' | cut -c 1-500)"
+read -r AFTER_MUTATION_HASH AFTER_MUTATION_ARTIFACT < <(capture_mutation_state "after")
 emit_event \
     "rch_contract" \
     "failed" \
@@ -127,6 +184,10 @@ emit_event \
     "$first_failure" \
     '["rch_verify_remote_command_failed"]' \
     "$stdout_artifact" \
-    "$stderr_artifact"
+    "$stderr_artifact" \
+    "$BEFORE_MUTATION_HASH" \
+    "$AFTER_MUTATION_HASH" \
+    "$BEFORE_MUTATION_ARTIFACT" \
+    "$AFTER_MUTATION_ARTIFACT"
 printf 'workspace git snapshot read-only proof failed; events=%s\n' "$EVENT_LOG" >&2
 exit "$exit_code"
