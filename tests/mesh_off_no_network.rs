@@ -5,7 +5,9 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 type TestResult = Result<(), String>;
 
@@ -185,6 +187,105 @@ fn assert_byte_stable(workspace: &str, label: &str, args: &[&str]) -> TestResult
     }
 }
 
+fn unique_tmp_path(label: &str, extension: &str) -> Result<PathBuf, String> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock before Unix epoch: {error}"))?
+        .as_nanos();
+    Ok(PathBuf::from(format!(
+        "/tmp/ee-{label}-{}-{nanos}.{extension}",
+        std::process::id()
+    )))
+}
+
+fn assert_mesh_log_phases(log_path: &std::path::Path) -> TestResult {
+    let contents = fs::read_to_string(log_path)
+        .map_err(|error| format!("failed to read {}: {error}", log_path.display()))?;
+    let mut phases = Vec::new();
+    let mut saw_schema = false;
+    let mut saw_test_end = false;
+    let mut saw_assert_fail = false;
+    let mut final_assert_fail_count = None;
+
+    for (line_index, line) in contents.lines().enumerate() {
+        let event: serde_json::Value = serde_json::from_str(line).map_err(|error| {
+            format!(
+                "{}:{}: malformed test event JSON: {error}\n{line}",
+                log_path.display(),
+                line_index + 1
+            )
+        })?;
+        if event.get("schema").and_then(|value| value.as_str()) == Some("ee.test_event.v1") {
+            saw_schema = true;
+        }
+        if event.get("kind").and_then(|value| value.as_str()) == Some("assert_fail") {
+            saw_assert_fail = true;
+        }
+        let fields = event
+            .get("fields")
+            .and_then(|value| value.as_object())
+            .cloned()
+            .unwrap_or_default();
+        if fields.get("meshScenario").and_then(|value| value.as_str())
+            == Some("mesh_off_no_network")
+        {
+            if let Some(phase) = fields.get("phase").and_then(|value| value.as_str()) {
+                phases.push(phase.to_owned());
+            }
+        }
+        if fields
+            .get("message")
+            .and_then(|value| value.as_str())
+            .is_some_and(|message| message == "test_end: mesh_off_no_network")
+        {
+            saw_test_end = true;
+            final_assert_fail_count = fields
+                .get("asserts_fail")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned);
+        }
+    }
+
+    if !saw_schema {
+        return Err("shell driver log did not emit ee.test_event.v1 events".to_owned());
+    }
+    if saw_assert_fail {
+        return Err("shell driver log emitted at least one assert_fail event".to_owned());
+    }
+    if !saw_test_end {
+        return Err("shell driver log did not emit test_end note".to_owned());
+    }
+    if final_assert_fail_count.as_deref() != Some("0") {
+        return Err(format!(
+            "shell driver reported non-zero assertion failures: {final_assert_fail_count:?}"
+        ));
+    }
+    for required in ["setup", "action", "assert", "cleanup"] {
+        if !phases.iter().any(|phase| phase == required) {
+            return Err(format!(
+                "shell driver log missing {required:?} phase; phases={phases:?}"
+            ));
+        }
+    }
+    let phase_index = |required: &str| {
+        phases
+            .iter()
+            .position(|phase| phase == required)
+            .ok_or_else(|| format!("missing phase {required}"))
+    };
+    let setup = phase_index("setup")?;
+    let action = phase_index("action")?;
+    let assert = phase_index("assert")?;
+    let cleanup = phase_index("cleanup")?;
+    if setup <= action && action <= assert && assert <= cleanup {
+        Ok(())
+    } else {
+        Err(format!(
+            "shell driver phases out of order; phases={phases:?}"
+        ))
+    }
+}
+
 fn lsof_program() -> Option<&'static str> {
     if Command::new("sh")
         .args(["-c", "command -v lsof >/dev/null 2>&1"])
@@ -252,6 +353,38 @@ fn assert_no_new_mesh_listener(
             "mesh-off status left unexpected listener(s): {new_mesh:?}"
         ))
     }
+}
+
+#[test]
+fn mesh_off_shell_driver_emits_structured_log() -> TestResult {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = repo_root.join("scripts/e2e_overhaul/mesh_off_no_network.sh");
+    let log_path = unique_tmp_path("mesh-off-no-network", "jsonl")?;
+    let retention_manifest = unique_tmp_path("mesh-off-no-network-retention", "json")?;
+    let output = Command::new("bash")
+        .arg(&script)
+        .current_dir(repo_root)
+        .env("EE_BINARY", env!("CARGO_BIN_EXE_ee"))
+        .env("EE_TEST_LOG_PATH", &log_path)
+        .env("EE_TEST_LOG_LEVEL", "normal")
+        .env("EE_E2E_KEEP_WORKSPACE", "1")
+        .env("EE_E2E_KEEP_ARTIFACTS", "1")
+        .env("EE_E2E_TMPDIR", "/tmp")
+        .env("EE_E2E_ARTIFACT_TMPDIR", "/tmp")
+        .env("EE_E2E_RETENTION_MANIFEST", &retention_manifest)
+        .env("TMPDIR", "/tmp")
+        .env("EE_MESH_ENABLED", "0")
+        .output()
+        .map_err(|error| format!("failed to run {}: {error}", script.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "mesh-off shell driver exited {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    assert_mesh_log_phases(&log_path)
 }
 
 #[test]
