@@ -19,6 +19,7 @@ Options:
   --no-write                Do not write --ledger; render proof/summary only
   --rch-bin <path>          RCH binary (default: $RCH_BIN or rch)
   --project-root <path>     Local project root (default: cwd)
+  --env <NAME=VALUE>        Pass an explicit environment override to the remote verifier command
   --json                    Accepted for symmetry; output is always JSON
   -h, --help                Show this help
 
@@ -37,6 +38,7 @@ BEAD_ID=""
 LEDGER_PATH=""
 INCLUDE_SUMMARY=0
 NO_WRITE=0
+ENV_OVERRIDES=()
 DEFAULT_RCH_BIN="/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch"
 if [ -z "${RCH_BIN:-}" ] && [ -x "$DEFAULT_RCH_BIN" ]; then
     RCH_BIN="$DEFAULT_RCH_BIN"
@@ -44,6 +46,30 @@ elif [ -z "${RCH_BIN:-}" ]; then
     RCH_BIN="rch"
 fi
 PROJECT_ROOT="$PWD"
+
+validate_env_override() {
+    local item="${1:?environment override required}"
+    local name="${item%%=*}"
+    if [ "$item" = "$name" ] || [ -z "$name" ]; then
+        echo "rch_verify: --env requires NAME=VALUE, got: $item" >&2
+        exit 2
+    fi
+    case "$name" in
+        [A-Za-z_]*)
+            case "$name" in
+                *[!A-Za-z0-9_]*)
+                    echo "rch_verify: invalid --env name: $name" >&2
+                    exit 2
+                    ;;
+            esac
+            ;;
+        *)
+            echo "rch_verify: invalid --env name: $name" >&2
+            exit 2
+            ;;
+    esac
+    printf '%s' "$item"
+}
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -55,6 +81,7 @@ while [ "$#" -gt 0 ]; do
         --no-write) NO_WRITE=1; shift ;;
         --rch-bin) RCH_BIN="${2:?--rch-bin requires a value}"; shift 2 ;;
         --project-root) PROJECT_ROOT="${2:?--project-root requires a value}"; shift 2 ;;
+        --env) ENV_OVERRIDES+=("$(validate_env_override "${2:?--env requires NAME=VALUE}")"); shift 2 ;;
         --json) shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;
@@ -164,15 +191,16 @@ emit_json() {
     shift 5
     local degraded_codes_json
     degraded_codes_json="$(json_array "$@")"
-    local command_json rch_invocation_json command_text_json stdout_json stderr_json
+    local command_json rch_invocation_json command_text_json remote_env_json stdout_json stderr_json
     command_json="$(json_array "${COMMAND[@]}")"
     rch_invocation_json="$(json_array "${RCH_INVOCATION[@]}")"
-    command_text_json="$(json_quote "$(command_string "${COMMAND[@]}")")"
+    remote_env_json="$(json_array "${ENV_OVERRIDES[@]}")"
+    command_text_json="$(json_quote "$(command_string "${ENV_OVERRIDES[@]}" "${COMMAND[@]}")")"
     stdout_json="$(json_quote "$stdout_tail")"
     stderr_json="$(json_quote "$stderr_tail")"
     local json_payload
     json_payload="$(cat <<EOF
-{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json}
+{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json}
 EOF
 )"
     JSON_PAYLOAD="$json_payload" \
@@ -259,6 +287,7 @@ if bead_id:
 summary_lines = [
     f"RCH verifier `{command_text}` => `{status}`.",
     f"- command_kind: `{proof.get('command_kind')}`",
+    f"- remote_env: `{', '.join(proof.get('remote_env') or []) or 'none'}`",
     f"- remote_required: `{str(proof.get('remote_required')).lower()}`",
     f"- would_offload: `{str(proof.get('would_offload')).lower()}`",
     f"- worker_id: `{proof.get('worker_id') or 'unknown'}`",
@@ -294,6 +323,7 @@ if ledger_path:
             "command_text": proof.get("command_text"),
             "command_hash": command_hash,
             "command_kind": proof.get("command_kind"),
+            "remote_env": proof.get("remote_env") or [],
             "started_at": started_at,
             "completed_at": proof.get("generated_at"),
             "elapsed_ms": proof.get("elapsed_ms"),
@@ -349,6 +379,7 @@ fi
 RCH_INVOCATION=(
     "$RCH_BIN" "exec" "--"
     "env" "TMPDIR=/tmp" "CARGO_TARGET_DIR=$REMOTE_TARGET_DIR"
+    "${ENV_OVERRIDES[@]}"
     "${COMMAND[@]}"
 )
 
