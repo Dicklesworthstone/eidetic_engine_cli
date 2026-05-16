@@ -6,6 +6,7 @@
 //! import ledger.
 
 use std::fmt;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -1294,13 +1295,50 @@ fn database_path(options: &CassImportOptions) -> PathBuf {
 }
 
 fn ensure_database_parent(path: &Path) -> Result<(), CassImportError> {
+    ensure_database_path_has_no_symlink_components(path)?;
     let Some(parent) = path.parent() else {
         return Ok(());
     };
     std::fs::create_dir_all(parent).map_err(|error| CassImportError::Io {
         path: parent.to_path_buf(),
         message: error.to_string(),
-    })
+    })?;
+    ensure_database_path_has_no_symlink_components(path)
+}
+
+fn ensure_database_path_has_no_symlink_components(path: &Path) -> Result<(), CassImportError> {
+    match database_path_has_symlink_component(path) {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(CassImportError::Io {
+            path: path.to_path_buf(),
+            message: "refusing CASS import database path with symlink component".to_string(),
+        }),
+        Err(error) => Err(CassImportError::Io {
+            path: path.to_path_buf(),
+            message: format!("failed to inspect CASS import database path: {error}"),
+        }),
+    }
+}
+
+fn database_path_has_symlink_component(path: &Path) -> io::Result<bool> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(true),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -2069,6 +2107,49 @@ mod tests {
             &job.document_id.as_deref(),
             &Some(session_id),
             "job document",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_database_parent_rejects_symlinked_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("cass-import-db-symlink-parent")?;
+        let outside_parent = root.join("outside-db-parent");
+        fs::create_dir_all(&outside_parent).map_err(|error| error.to_string())?;
+        let linked_parent = root.join("linked-db-parent");
+        symlink(&outside_parent, &linked_parent).map_err(|error| error.to_string())?;
+        let database_path = linked_parent.join("ee.db");
+
+        let error = ensure_database_parent(&database_path)
+            .expect_err("symlinked database parent must be rejected");
+        ensure(
+            error.to_string().contains("symlink component"),
+            format!("unexpected error: {error}"),
+        )?;
+        ensure(
+            !outside_parent.join("ee.db").exists(),
+            "CASS import database setup must not follow symlinked parent",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_database_parent_rejects_symlinked_database_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("cass-import-db-symlink-file")?;
+        let outside_database = root.join("outside-ee.db");
+        fs::write(&outside_database, b"outside").map_err(|error| error.to_string())?;
+        let database_path = root.join("ee.db");
+        symlink(&outside_database, &database_path).map_err(|error| error.to_string())?;
+
+        let error = ensure_database_parent(&database_path)
+            .expect_err("symlinked database file must be rejected");
+        ensure(
+            error.to_string().contains("symlink component"),
+            format!("unexpected error: {error}"),
         )
     }
 
