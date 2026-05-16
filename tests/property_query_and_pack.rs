@@ -137,6 +137,70 @@ fn draft_bytes(draft: &PackDraft) -> Vec<u8> {
     format!("{draft:#?}").into_bytes()
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct DeterminismRegressionFixture {
+    schema: &'static str,
+    file_name: String,
+    seed: u64,
+    input_hash: String,
+    expected_hash: String,
+    observed_hash_run1: String,
+    observed_hash_run2: String,
+    first_diff_byte_offset: usize,
+    first_diff_window: DeterminismDiffWindow,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct DeterminismDiffWindow {
+    expected: String,
+    observed: String,
+}
+
+fn regression_fixture_for_mismatch(
+    seed: u64,
+    input: &[u8],
+    expected: &[u8],
+    observed: &[u8],
+) -> Option<DeterminismRegressionFixture> {
+    let first_diff_byte_offset = first_diff_byte_offset(expected, observed)?;
+    let input_hash = hash_bytes(input);
+    let input_hash_hex = input_hash.trim_start_matches("blake3:");
+    Some(DeterminismRegressionFixture {
+        schema: "ee.proptest.regression.v1",
+        file_name: format!("{}.json", &input_hash_hex[..16]),
+        seed,
+        input_hash,
+        expected_hash: hash_bytes(expected),
+        observed_hash_run1: hash_bytes(expected),
+        observed_hash_run2: hash_bytes(observed),
+        first_diff_byte_offset,
+        first_diff_window: DeterminismDiffWindow {
+            expected: diff_window(expected, first_diff_byte_offset),
+            observed: diff_window(observed, first_diff_byte_offset),
+        },
+    })
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(bytes).to_hex())
+}
+
+fn first_diff_byte_offset(left: &[u8], right: &[u8]) -> Option<usize> {
+    let shared_len = left.len().min(right.len());
+    for index in 0..shared_len {
+        if left[index] != right[index] {
+            return Some(index);
+        }
+    }
+    (left.len() != right.len()).then_some(shared_len)
+}
+
+fn diff_window(bytes: &[u8], offset: usize) -> String {
+    let start = offset.saturating_sub(16);
+    let end = bytes.len().min(offset.saturating_add(17));
+    String::from_utf8_lossy(&bytes[start..end]).into_owned()
+}
+
 #[test]
 fn seeded_pack_assembly_replays_edge_seeds_and_option_axes() -> Result<(), String> {
     let specs = vec![
@@ -211,8 +275,48 @@ fn seeded_pack_assembly_replays_edge_seeds_and_option_axes() -> Result<(), Strin
     Ok(())
 }
 
+#[test]
+fn determinism_regression_fixture_metadata_is_stable() -> Result<(), String> {
+    let input = br#"{"query":"release","profile":"compact","seed":42}"#;
+    let expected = br#"{"pack":{"hash":"blake3:expected","items":[1,2]}}"#;
+    let observed = br#"{"pack":{"hash":"blake3:observed","items":[1,2]}}"#;
+
+    let first = regression_fixture_for_mismatch(42, input, expected, observed)
+        .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    let replay = regression_fixture_for_mismatch(42, input, expected, observed)
+        .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+
+    assert_eq!(first, replay);
+    assert_eq!(first.schema, "ee.proptest.regression.v1");
+    assert_eq!(first.seed, 42);
+    assert!(first.file_name.ends_with(".json"));
+    assert_eq!(first.file_name.len(), 21);
+    assert_ne!(first.expected_hash, first.observed_hash_run2);
+    assert_eq!(first.expected_hash, first.observed_hash_run1);
+    assert!(first.first_diff_byte_offset > 0);
+    assert!(first.first_diff_window.expected.contains("expected"));
+    assert!(first.first_diff_window.observed.contains("observed"));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_handles_prefix_drift() -> Result<(), String> {
+    let fixture = regression_fixture_for_mismatch(
+        7,
+        b"input",
+        b"same-prefix-left",
+        b"same-prefix-left-and-longer",
+    )
+    .ok_or_else(|| "fixture should detect length drift".to_owned())?;
+
+    assert_eq!(fixture.first_diff_byte_offset, b"same-prefix-left".len());
+    assert_eq!(fixture.first_diff_window.expected, "same-prefix-left");
+    assert!(fixture.first_diff_window.observed.ends_with("-and-longer"));
+    Ok(())
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(512))]
+    #![proptest_config(ProptestConfig::with_cases(1024))]
 
     #[test]
     fn query_parser_never_panics_on_arbitrary_bytes(data in prop::collection::vec(any::<u8>(), 0..4096)) {
