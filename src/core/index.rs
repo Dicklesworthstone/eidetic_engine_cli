@@ -1366,8 +1366,19 @@ fn write_index_metadata(
     let serialized = serde_json::to_vec_pretty(&metadata).map_err(|e| {
         IndexRebuildError::Index(format!("Failed to serialize index metadata: {e}"))
     })?;
-    std::fs::write(index_dir.join(INDEX_METADATA_FILE), serialized)
-        .map_err(|e| IndexRebuildError::Index(format!("Failed to write index metadata: {e}")))
+    
+    let meta_path = index_dir.join(INDEX_METADATA_FILE);
+    let mut file = std::fs::File::create(&meta_path)
+        .map_err(|e| IndexRebuildError::Index(format!("Failed to open index metadata for writing: {e}")))?;
+    
+    use std::io::Write;
+    file.write_all(&serialized)
+        .map_err(|e| IndexRebuildError::Index(format!("Failed to write index metadata: {e}")))?;
+        
+    file.sync_data()
+        .map_err(|e| IndexRebuildError::Index(format!("Failed to sync index metadata: {e}")))?;
+        
+    Ok(())
 }
 
 fn find_complete_staging_dir(index_dir: &Path) -> Result<Option<PathBuf>, IndexRebuildError> {
