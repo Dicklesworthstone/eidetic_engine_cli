@@ -337,6 +337,23 @@ impl std::fmt::Display for TraceDegradation {
     }
 }
 
+impl TraceDegradation {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        let mut value = json!({
+            "code": self.code,
+            "message": self.message,
+            "severity": self.severity,
+        });
+        if let Some(repair) = &self.repair
+            && let Some(object) = value.as_object_mut()
+        {
+            object.insert("repair".to_string(), json!(repair));
+        }
+        value
+    }
+}
+
 fn trace_degradation(
     code: impl Into<String>,
     message: impl Into<String>,
