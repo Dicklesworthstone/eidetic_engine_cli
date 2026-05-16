@@ -300,10 +300,13 @@ fn strict_clean_tree_refuses_tracked_dirty_source_before_rch() -> TestResult {
     let workspace = seed_git_workspace("rch-strict-tracked-dirty")?;
     fs::write(workspace.join("tracked.txt"), "dirty\n")
         .map_err(|error| format!("dirty tracked fixture: {error}"))?;
+    let before_status = git_status_porcelain_v2(&workspace)?;
+    let invocation_log = unique_tmp_path("rch-fake-refusal-invocations");
     let fake_rch = write_fake_rch(
         "fake-rch-should-not-run.sh",
         r#"#!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
 printf 'REMOTE SHOULD NOT RUN\n'
 printf '[RCH] remote css (0.1s)\n'
 "#,
@@ -311,6 +314,9 @@ printf '[RCH] remote css (0.1s)\n'
     let fake_rch_arg = fake_rch
         .to_str()
         .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
 
     let (status, stdout, stderr) = run_script_with_env_in_dir(
         &[
@@ -323,13 +329,27 @@ printf '[RCH] remote css (0.1s)\n'
             "--lib",
             "strict_clean_tree_dirty_smoke",
         ],
-        &[],
+        &[("FAKE_RCH_INVOCATIONS", invocation_log_arg)],
         &workspace,
+    )?;
+    assert_git_status_unchanged(
+        &workspace,
+        &before_status,
+        "strict dirty-tree fake RCH refusal",
     )?;
     if status.success() {
         return Err(format!(
             "strict dirty tree should fail before RCH\nstdout:\n{stdout}\nstderr:\n{stderr}"
         ));
+    }
+    if invocation_log.exists() {
+        let invocations = fs::read_to_string(&invocation_log)
+            .map_err(|error| format!("read refusal invocation log: {error}"))?;
+        if !invocations.is_empty() {
+            return Err(format!(
+                "strict dirty-tree refusal should not invoke fake RCH: {invocations:?}"
+            ));
+        }
     }
     let report: Value =
         serde_json::from_str(&stdout).map_err(|error| format!("parse dirty tracked: {error}"))?;
