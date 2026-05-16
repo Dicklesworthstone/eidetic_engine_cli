@@ -47,7 +47,7 @@ const SURFACES_WITH_DEFAULTS: &[(&str, &str, &str)] = &[
     (
         "ee context --json",
         "minimal",
-        "planned `--redaction <level>`",
+        "current `--redaction <level>`",
     ),
     (
         "ee support bundle",
@@ -111,7 +111,7 @@ fn doc_distinguishes_current_and_planned_redaction_flags() -> TestResult {
     for required_phrase in [
         "current `--redaction <level>`",
         "planned `--redaction <level>`",
-        "Handoff, context, and support-bundle level flags are part of",
+        "Handoff and support-bundle level flags are part of",
         "not all live",
     ] {
         ensure(
@@ -274,4 +274,43 @@ fn doc_does_not_claim_unregistered_redaction_env_override() -> TestResult {
     }
 
     Ok(())
+}
+
+#[test]
+fn current_context_redaction_claim_matches_cli_and_pack_wiring() -> TestResult {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let doc = read_doc()?;
+    let cli = std::fs::read_to_string(manifest_dir.join("src/cli/mod.rs"))
+        .map_err(|e| format!("read src/cli/mod.rs: {e}"))?;
+    let context = std::fs::read_to_string(manifest_dir.join("src/core/context.rs"))
+        .map_err(|e| format!("read src/core/context.rs: {e}"))?;
+
+    ensure(
+        doc.lines().any(|line| {
+            line.contains("`ee context --json`")
+                && line.contains("`minimal`")
+                && line.contains("current `--redaction <level>`")
+        }),
+        "docs/redaction_levels.md must mark ee context --json as a current minimal-redaction surface",
+    )?;
+    ensure(
+        cli.contains("pub redaction: BackupRedaction"),
+        "ContextArgs must expose a parsed redaction field",
+    )?;
+    ensure(
+        cli.contains("default_value_t = BackupRedaction::Minimal"),
+        "ee context --redaction must default to the documented minimal level",
+    )?;
+    ensure(
+        cli.contains("redaction_level: args.redaction.to_model()"),
+        "handle_context must pass the parsed redaction level into ContextPackOptions",
+    )?;
+    ensure(
+        context.contains("pub redaction_level: crate::models::RedactionLevel"),
+        "ContextPackOptions must carry the requested redaction level",
+    )?;
+    ensure(
+        context.contains("redaction_level: options.redaction_level"),
+        "context pack assembly must use ContextPackOptions.redaction_level instead of a hardcoded level",
+    )
 }

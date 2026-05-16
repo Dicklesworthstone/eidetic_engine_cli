@@ -64,16 +64,16 @@ Notes on the matrix:
 |-------------------|---------------|-----------------------------------------------------------------|---------------------------------|
 | `ee export`       | `standard`    | Round-trip safe; preserves shape for re-import.                  | current `--redaction <level>`   |
 | `ee handoff create`| `standard`   | Handoff capsules are redaction-safe artifacts; stricter defaults remain planned K6 work. | planned `--redaction <level>`   |
-| `ee context --json`| `minimal`    | Agent-facing; minimal interference with retrieval intent.        | planned `--redaction <level>`   |
+| `ee context --json`| `minimal`    | Agent-facing; minimal interference with retrieval intent.        | current `--redaction <level>`   |
 | `ee support bundle`| `paranoid`   | Third-party-facing; max safety for bug-report uploads.           | planned `--redaction <level>`; current CLI exposes redacted/raw mode flags |
 | `ee why`          | `none`        | Forensic surface; must show the actual stored content.           | no override planned             |
 
 Current implementation note: as of this K6 slice, the canonical five-level
 `--redaction <level>` CLI vocabulary is implemented for export/backup-style
-JSONL artifacts. Handoff, context, and support-bundle level flags are part of
-the K6 acceptance target, but their public CLI override flags are not all live
-yet. Documentation must keep this distinction visible until the implementation
-matrix catches up.
+JSONL artifacts and `ee context --json`. Handoff and support-bundle level
+flags are part of the K6 acceptance target, but their public CLI override flags
+are not all live yet. Documentation must keep this distinction visible until
+the implementation matrix catches up.
 
 The planned per-workspace override shape is:
 

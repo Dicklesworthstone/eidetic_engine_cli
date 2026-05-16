@@ -1042,7 +1042,7 @@ pub struct BackupRestoreArgs {
     pub skip_graph_cache: bool,
 }
 
-/// CLI redaction levels for backup output.
+/// CLI redaction levels for redaction-bearing outputs.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum BackupRedaction {
     /// No redaction applied.
@@ -1753,6 +1753,10 @@ pub struct ContextArgs {
     /// Suppress data.pack.meta in JSON output.
     #[arg(long = "no-meta", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
     pub no_meta: Option<bool>,
+
+    /// Redaction level for context pack output.
+    #[arg(long, value_enum, default_value_t = BackupRedaction::Minimal)]
+    pub redaction: BackupRedaction,
 
     /// Redacted ee.coordination_snapshot.v1 JSON to embed in the pack.
     #[arg(long, value_name = "PATH")]
@@ -24005,6 +24009,7 @@ where
         include_expired: args.include_expired,
         include_future: args.include_future,
         include_stale: args.include_stale,
+        redaction_level: args.redaction.to_model(),
         memory_scope: args.memory_scope,
         strict_scope: args.strict_scope,
         ppr_weight: args.ppr_weight,
@@ -26286,6 +26291,7 @@ where
             no_rendered_text: args.no_rendered_text,
             no_skipped: args.no_skipped,
             no_meta: args.no_meta,
+            redaction: BackupRedaction::Minimal,
             include_non_affecting_degradations: args.include_non_affecting_degradations,
             include_tombstoned: false,
             as_of: args.as_of,
@@ -26423,6 +26429,7 @@ where
         include_expired: args.include_expired,
         include_future: args.include_future,
         include_stale: args.include_stale,
+        redaction_level: BackupRedaction::Minimal.to_model(),
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,
         ppr_weight: None,
@@ -39651,6 +39658,34 @@ mod tests {
                 ensure_equal(&args.dry_run, &true, "dry run")
             }
             other => Err(format!("expected backup create command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_context_redaction_level_and_defaults_minimal() -> TestResult {
+        let default_parsed = Cli::try_parse_from(["ee", "context", "prepare release"])
+            .map_err(|error| format!("failed to parse default context: {:?}", error.kind()))?;
+        match default_parsed.command {
+            Some(Command::Context(args)) => {
+                ensure_equal(
+                    &args.redaction,
+                    &BackupRedaction::Minimal,
+                    "default redaction",
+                )?;
+            }
+            other => return Err(format!("expected context command, got {other:?}")),
+        }
+
+        let parsed =
+            Cli::try_parse_from(["ee", "context", "prepare release", "--redaction", "strict"])
+                .map_err(|error| {
+                    format!("failed to parse context redaction: {:?}", error.kind())
+                })?;
+        match parsed.command {
+            Some(Command::Context(args)) => {
+                ensure_equal(&args.redaction, &BackupRedaction::Strict, "redaction")
+            }
+            other => Err(format!("expected context command, got {other:?}")),
         }
     }
 

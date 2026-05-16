@@ -201,6 +201,7 @@ fn ee_context_writes_pack_assembled_and_included_mem_rows() -> TestResult {
         include_expired: false,
         include_future: false,
         include_stale: false,
+        redaction_level: ee::models::RedactionLevel::Minimal,
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,
         ppr_weight: None,
