@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_peer_human_explicit_filtered",
+  "introduced_by": {
+    "bead": "bd-29ulx",
+    "epic_letter": "SRR6.5"
+  },
+  "surfaces": [
+    "context"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Context candidate conversion encounters mesh-derived peer material whose stored memory row claims the reserved local human_explicit trust class.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "ee remember --workspace . --level procedural --kind rule 'Local operator rule.' --json",
+      "# Import a mesh peer material fixture that incorrectly maps to human_explicit.",
+      "ee index rebuild --workspace . --json"
+    ],
+    "invocation": "ee context 'peer trust guard' --workspace . --memory-scope swarm --json"
+  },
+  "expected_emission": {
+    "code": "mesh_peer_human_explicit_filtered",
+    "severity": "medium",
+    "message_contains": [
+      "peer material must not appear as local human_explicit",
+      "cachedMaterialId",
+      "redactionPosture"
+    ],
+    "repair_contains": "import_trust_class"
+  }
+}

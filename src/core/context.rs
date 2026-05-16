@@ -43,7 +43,9 @@ use crate::config::{
 };
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
-use crate::core::memory_scope::{MemoryScopeContext, MeshQueryVisibility, mesh_query_visibility};
+use crate::core::memory_scope::{
+    MemoryScopeContext, MeshDisplayProvenance, MeshQueryVisibility, mesh_query_visibility,
+};
 use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
@@ -3211,16 +3213,18 @@ fn candidates_from_search_with_metrics(
     let mut hit_resolutions: Vec<(
         &crate::core::search::SearchHit,
         Option<(MemoryId, Option<String>)>,
+        Option<MeshDisplayProvenance>,
     )> = Vec::new();
     for hit in &search_report.results {
-        if matches!(
-            mesh_query_visibility(hit.metadata.as_ref()),
-            MeshQueryVisibility::Blocked
-        ) {
-            metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
-            mesh_blocked_hits = mesh_blocked_hits.saturating_add(1);
-            continue;
-        }
+        let mesh_provenance = match mesh_query_visibility(hit.metadata.as_ref()) {
+            MeshQueryVisibility::Local => None,
+            MeshQueryVisibility::Allowed(provenance) => Some(provenance),
+            MeshQueryVisibility::Blocked => {
+                metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
+                mesh_blocked_hits = mesh_blocked_hits.saturating_add(1);
+                continue;
+            }
+        };
         let resolution = match MemoryId::from_str(&hit.doc_id) {
             Ok(id) => Some((id, None)),
             Err(_) => {
@@ -3231,7 +3235,7 @@ fn candidates_from_search_with_metrics(
         if resolution.is_some() {
             metrics.resolved_memory_ids = metrics.resolved_memory_ids.saturating_add(1);
         }
-        hit_resolutions.push((hit, resolution));
+        hit_resolutions.push((hit, resolution, mesh_provenance));
     }
     if mesh_blocked_hits > 0 {
         push_degradation(
@@ -3252,7 +3256,7 @@ fn candidates_from_search_with_metrics(
     // Collect unique memory IDs for batch loading.
     let memory_ids: Vec<String> = hit_resolutions
         .iter()
-        .filter_map(|(_, res)| res.as_ref().map(|(mid, _)| mid.to_string()))
+        .filter_map(|(_, res, _)| res.as_ref().map(|(mid, _)| mid.to_string()))
         .collect();
     metrics.unique_memory_ids = memory_ids
         .iter()
@@ -3267,10 +3271,22 @@ fn candidates_from_search_with_metrics(
 
     // Phase 3: Build candidates from preloaded data.
     let mut candidates = Vec::new();
-    for (hit, resolution) in hit_resolutions {
+    for (hit, resolution, mesh_provenance) in hit_resolutions {
         match resolution {
             Some((memory_id, artifact_id)) => {
                 let memory_key = memory_id.to_string();
+                if let Some(mesh_provenance) = mesh_provenance.as_ref()
+                    && let Some(memory) = memories.get(&memory_key)
+                    && memory.trust_class == TrustClass::HumanExplicit.as_str()
+                {
+                    metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
+                    push_mesh_peer_human_explicit_filtered_degradation(
+                        degraded,
+                        memory,
+                        mesh_provenance,
+                    );
+                    continue;
+                }
                 if !filters.tags.is_empty() {
                     let tags = tags_map.get(&memory_key).cloned().unwrap_or_default();
                     if !filters.matches_tags(&tags) {
@@ -3395,6 +3411,32 @@ fn candidates_from_search_with_metrics(
         }
     }
     (candidates, metrics)
+}
+
+fn push_mesh_peer_human_explicit_filtered_degradation(
+    degraded: &mut Vec<ContextResponseDegradation>,
+    memory: &StoredMemory,
+    provenance: &MeshDisplayProvenance,
+) {
+    push_degradation(
+        degraded,
+        "mesh_peer_human_explicit_filtered",
+        ContextResponseSeverity::Medium,
+        format!(
+            "Mesh-derived memory {} was excluded because peer material must not appear as local human_explicit; cachedMaterialId={}, originWorkspaceAlias={}, producerPeer={}, importDecisionRef={}, trustLane={}, redactionPosture={}.",
+            memory.id,
+            provenance.cached_material_id,
+            provenance.origin_workspace_alias,
+            provenance.producer_peer,
+            provenance.import_decision_ref,
+            provenance.trust_lane,
+            provenance.redaction_posture
+        ),
+        Some(
+            "Re-import the peer material with a peer policy import_trust_class such as agent_assertion or agent_validated, then rebuild the index."
+                .to_string(),
+        ),
+    );
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -6525,6 +6567,149 @@ mod tests {
                 .all(|entry| !entry.note.contains("/Users/alice/private/repo"))
         );
         assert!(!candidate.why.contains("mesh-quarantined-context"));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn context_candidates_reject_mesh_hits_claiming_human_explicit_trust() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = WorkspaceId::from_uuid(uuid::Uuid::from_u128(713)).to_string();
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.to_string_lossy().into_owned(),
+                    name: Some("mesh-human-explicit-guard".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let local_id = MemoryId::from_uuid(uuid::Uuid::from_u128(714)).to_string();
+        let peer_id = MemoryId::from_uuid(uuid::Uuid::from_u128(715)).to_string();
+        for (id, content) in [
+            (
+                local_id.as_str(),
+                "Local release rule still allowed in the context pack.",
+            ),
+            (
+                peer_id.as_str(),
+                "REMOTE PEER MATERIAL MUST NOT BE AUTHORITATIVE HUMAN CONTENT",
+            ),
+        ] {
+            connection
+                .insert_memory(
+                    id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "procedural".to_string(),
+                        kind: "rule".to_string(),
+                        content: content.to_string(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.8,
+                        importance: 0.7,
+                        provenance_uri: Some(format!("ee://memory/{id}")),
+                        trust_class: TrustClass::HumanExplicit.as_str().to_string(),
+                        trust_subclass: Some("fixture".to_string()),
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        let search_report = SearchReport {
+            status: SearchStatus::Success,
+            query: "mesh human explicit guard".to_string(),
+            requested_limit: 2,
+            results: vec![
+                SearchHit {
+                    doc_id: peer_id.clone(),
+                    score: 0.99,
+                    source: ScoreSource::Lexical,
+                    fast_score: None,
+                    quality_score: None,
+                    lexical_score: Some(0.99),
+                    rerank_score: None,
+                    metadata: Some(serde_json::json!({
+                        "mesh": {
+                            "workspaceScopeDecision": "allow",
+                            "workspaceId": "wsp_local_alpha",
+                            "cachedMaterialId": "mesh-human-explicit-context",
+                            "originWorkspaceId": "origin-private",
+                            "originWorkspaceLabel": "/Users/alice/private/repo",
+                            "producerPeerId": "peer-private",
+                            "producerPeerLabel": "/Users/alice/private/peer-agent",
+                            "materialLane": "metadata",
+                            "importDecisionId": "mesh_dec_human_explicit",
+                            "trustLane": "peerAgent",
+                            "redactionPosture": "metadata"
+                        }
+                    })),
+                    explanation: None,
+                },
+                freshness_search_hit(&local_id, 0.90),
+            ],
+            elapsed_ms: 0.0,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: crate::core::search::SearchSourceMode::Hybrid,
+            source_mode_applied: crate::core::search::SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        };
+
+        let mut degraded = Vec::new();
+        let (candidates, metrics) = super::candidates_from_search_with_metrics(
+            &connection,
+            workspace_path,
+            &search_report,
+            &crate::models::QueryFilters::default(),
+            false,
+            &mut degraded,
+        );
+
+        assert_eq!(metrics.search_hits, 2);
+        assert_eq!(metrics.skipped_candidates, 1);
+        assert_eq!(metrics.resolved_memory_ids, 2);
+        assert_eq!(metrics.converted_candidates, 1);
+        assert!(degraded.iter().any(|entry| {
+            entry.code == "mesh_peer_human_explicit_filtered"
+                && entry.severity == ContextResponseSeverity::Medium
+                && entry
+                    .message
+                    .contains("peer material must not appear as local human_explicit")
+                && entry
+                    .repair
+                    .as_deref()
+                    .is_some_and(|repair| repair.contains("import_trust_class"))
+        }));
+        let degradation_text = degraded
+            .iter()
+            .map(|entry| entry.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!degradation_text.contains("/Users/alice/private/repo"));
+        assert!(!degradation_text.contains("/Users/alice/private/peer-agent"));
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].memory_id.to_string(), local_id);
+        assert!(!candidates[0].content.contains("REMOTE PEER MATERIAL"));
+        assert_eq!(
+            candidates[0].trust.class,
+            TrustClass::HumanExplicit,
+            "local non-mesh human memory stays authoritative"
+        );
 
         connection.close().map_err(|error| error.to_string())
     }

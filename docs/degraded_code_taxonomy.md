@@ -162,7 +162,7 @@ memory bodies in `sources[]`.
 
 ### `response_time` codes — stay in `degraded[]`
 
-#### Search and pack quality (33)
+#### Search and pack quality (40)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|
 | `conflict_direct` | medium | bd-1zb7k.9 (S8) |
@@ -181,6 +181,7 @@ memory bodies in `sources[]`.
 | `index_stale` | high | bd-17c65.2.1 (B1) |
 | `low_recall_after_floor` | info | bd-17c65.2.1 (B1) |
 | `malformed_validity_filtered` | medium | bd-17c65.2.10 (B11) |
+| `mesh_peer_human_explicit_filtered` | medium | bd-29ulx (SRR6.5) |
 | `no_relevant_results` | medium | bd-17c65.2.1 (B1) |
 | `output_redaction_disabled` | info | bd-17c65.2.9 (B10) |
 | `pack_assembly_budget_exceeded` | medium | bd-1zb7k.5 (S4) |
