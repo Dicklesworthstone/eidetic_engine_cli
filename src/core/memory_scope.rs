@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::io;
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
 use serde_json::{Value as JsonValue, json};
@@ -1146,7 +1147,7 @@ pub fn is_verified_memory(memory: &StoredMemory) -> bool {
 
 fn load_team_members(workspace_path: &Path) -> BTreeSet<String> {
     let config_path = workspace_path.join(".ee").join("config.toml");
-    let Ok(contents) = std::fs::read_to_string(config_path) else {
+    let Some(contents) = read_memory_scope_config(&config_path) else {
         return BTreeSet::new();
     };
     let Ok(config) = ConfigFile::parse(&contents) else {
@@ -1159,6 +1160,43 @@ fn load_team_members(workspace_path: &Path) -> BTreeSet<String> {
         .into_iter()
         .filter_map(normalized_non_empty)
         .collect()
+}
+
+fn read_memory_scope_config(config_path: &Path) -> Option<String> {
+    if memory_scope_path_has_symlink_component(config_path).ok()? {
+        return None;
+    }
+    if !std::fs::symlink_metadata(config_path)
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    std::fs::read_to_string(config_path).ok()
+}
+
+fn memory_scope_path_has_symlink_component(path: &Path) -> io::Result<bool> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                current.push(component.as_os_str());
+                continue;
+            }
+            Component::CurDir => continue,
+            Component::ParentDir | Component::Normal(_) => {
+                current.push(component.as_os_str());
+            }
+        }
+
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(true),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
 }
 
 fn agent_from_trust_subclass(value: &str) -> Option<String> {
@@ -1482,6 +1520,80 @@ mod tests {
             TrustClass::HumanExplicit,
             Some("agent=RedStone")
         )));
+    }
+
+    #[test]
+    fn team_scope_loads_configured_team_members_from_workspace_config() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_dir = tempdir.path().join(".ee");
+        std::fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[trust]
+team_members = ["GreenField", "  ", "BlueLake"]
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let context = MemoryScopeContext::for_workspace(tempdir.path(), MemoryScope::Team, false);
+
+        assert_eq!(
+            context.team_members,
+            BTreeSet::from(["BlueLake".to_owned(), "GreenField".to_owned()])
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn team_scope_ignores_symlinked_workspace_config_file() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_dir = tempdir.path().join(".ee");
+        let outside_dir = tempdir.path().join("outside");
+        std::fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&outside_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            outside_dir.join("config.toml"),
+            r#"
+[trust]
+team_members = ["OutsideAgent"]
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(
+            outside_dir.join("config.toml"),
+            config_dir.join("config.toml"),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let context = MemoryScopeContext::for_workspace(tempdir.path(), MemoryScope::Team, false);
+
+        assert!(context.team_members.is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn team_scope_ignores_symlinked_workspace_config_parent() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_dir = tempdir.path().join("outside-ee");
+        std::fs::create_dir_all(&outside_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            outside_dir.join("config.toml"),
+            r#"
+[trust]
+team_members = ["OutsideAgent"]
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_dir, tempdir.path().join(".ee"))
+            .map_err(|error| error.to_string())?;
+
+        let context = MemoryScopeContext::for_workspace(tempdir.path(), MemoryScope::Team, false);
+
+        assert!(context.team_members.is_empty());
+        Ok(())
     }
 
     #[test]
