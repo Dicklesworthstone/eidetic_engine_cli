@@ -35797,7 +35797,7 @@ where
         Ok(report) => match cli.renderer() {
             output::Renderer::Human | output::Renderer::Markdown => {
                 let human = format!(
-                    "Support bundle {}\n  Files: {}\n  Size: {} bytes\n  Redacted: {}\n  Output: {}\n",
+                    "Support bundle {}\n  Files: {}\n  Size: {} bytes\n  Redacted: {}\n  Redaction level: {}\n  Output: {}\n",
                     if report.dry_run {
                         "(dry run)"
                     } else {
@@ -35806,6 +35806,7 @@ where
                     report.files_collected.join(", "),
                     report.total_size_bytes,
                     report.redaction_applied,
+                    report.redaction_level.as_str(),
                     report
                         .output_path
                         .as_ref()
@@ -39702,10 +39703,7 @@ mod tests {
     fn parser_accepts_support_bundle_redaction_level_and_defaults_paranoid() -> TestResult {
         let default_parsed = Cli::try_parse_from(["ee", "support", "bundle", "--dry-run"])
             .map_err(|error| {
-                format!(
-                    "failed to parse default support bundle: {:?}",
-                    error.kind()
-                )
+                format!("failed to parse default support bundle: {:?}", error.kind())
             })?;
         match default_parsed.command {
             Some(Command::Support(SupportCommand::Bundle(args))) => {
