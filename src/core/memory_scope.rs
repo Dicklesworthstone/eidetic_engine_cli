@@ -1705,6 +1705,57 @@ max_bytes = 0
     }
 
     #[test]
+    fn mesh_outbound_policy_fails_closed_without_policy_or_with_non_deny_default() {
+        let missing = decide_mesh_outbound_policy(&outbound_policy_input(MeshLane::Metadata), None);
+        assert_eq!(missing.action, MeshImportDecisionKind::Deny);
+        assert_eq!(missing.reason, "missing_peer_policy");
+        assert_eq!(missing.redaction, MeshRedactionDecision::Deny);
+        assert!(!missing.permits_payload_export());
+
+        let mut policy = peer_policy();
+        policy.default_action = MeshLaneDecision::Allow;
+        let non_deny_default =
+            decide_mesh_outbound_policy(&outbound_policy_input(MeshLane::Metadata), Some(&policy));
+        assert_eq!(non_deny_default.action, MeshImportDecisionKind::Reject);
+        assert_eq!(non_deny_default.reason, "non_deny_default_action");
+        assert!(!non_deny_default.permits_payload_export());
+    }
+
+    #[test]
+    fn mesh_outbound_policy_denies_workspace_peer_and_origin_mismatches() {
+        let mut wrong_workspace = outbound_policy_input(MeshLane::Metadata);
+        wrong_workspace.local_workspace_id = "wsp_other";
+        let workspace = decide_mesh_outbound_policy(&wrong_workspace, Some(&peer_policy()));
+        assert_eq!(workspace.action, MeshImportDecisionKind::Deny);
+        assert_eq!(workspace.reason, "peer_policy_workspace_mismatch");
+
+        let mut wrong_peer = outbound_policy_input(MeshLane::Metadata);
+        wrong_peer.target_peer_id = "peer_other";
+        let peer = decide_mesh_outbound_policy(&wrong_peer, Some(&peer_policy()));
+        assert_eq!(peer.action, MeshImportDecisionKind::Deny);
+        assert_eq!(peer.reason, "peer_policy_peer_mismatch");
+
+        let mut wrong_origin = outbound_policy_input(MeshLane::Metadata);
+        wrong_origin.origin_workspace_id = "wsp_other_origin";
+        let origin = decide_mesh_outbound_policy(&wrong_origin, Some(&peer_policy()));
+        assert_eq!(origin.action, MeshImportDecisionKind::Deny);
+        assert_eq!(origin.reason, "peer_policy_origin_workspace_mismatch");
+    }
+
+    #[test]
+    fn mesh_outbound_policy_preserves_quarantine_lane_decisions() {
+        let decision = decide_mesh_outbound_policy(
+            &outbound_policy_input(MeshLane::CurationSignal),
+            Some(&peer_policy()),
+        );
+
+        assert_eq!(decision.action, MeshImportDecisionKind::Quarantine);
+        assert_eq!(decision.reason, "outbound_lane_quarantined");
+        assert_eq!(decision.redaction, MeshRedactionDecision::Share);
+        assert!(!decision.permits_payload_export());
+    }
+
+    #[test]
     fn mesh_outbound_policy_denies_body_and_embedding_by_default() {
         let body = decide_mesh_outbound_policy(
             &outbound_policy_input(MeshLane::Body),
