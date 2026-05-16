@@ -268,7 +268,6 @@ mod tests {
 
     use super::*;
 
-    #[derive(Default)]
     struct CapturedEvent {
         target: String,
         level: Level,
@@ -288,7 +287,7 @@ mod tests {
             let mut captured = CapturedEvent {
                 target: event.metadata().target().to_owned(),
                 level: *event.metadata().level(),
-                ..CapturedEvent::default()
+                fields: std::collections::BTreeMap::new(),
             };
             let mut visitor = CaptureVisitor {
                 fields: &mut captured.fields,
