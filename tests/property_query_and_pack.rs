@@ -272,6 +272,27 @@ fn context_cli_args(
     args
 }
 
+fn args_with_copied_store(args: &[String], copied_workspace: &Path) -> Vec<String> {
+    let mut copied_args = args.to_vec();
+    copied_args.push("--database".to_string());
+    copied_args.push(
+        copied_workspace
+            .join(".ee")
+            .join("ee.db")
+            .display()
+            .to_string(),
+    );
+    copied_args.push("--index-dir".to_string());
+    copied_args.push(
+        copied_workspace
+            .join(".ee")
+            .join("index")
+            .display()
+            .to_string(),
+    );
+    copied_args
+}
+
 fn canonicalize_json(value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Array(items) => {
@@ -1659,7 +1680,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(16))]
 
     #[test]
-    fn context_pack_json_replays_across_copied_workspace_tuple(
+    fn context_pack_json_replays_across_copied_store_tuple(
         memory_shapes in prop::collection::vec(0_u8..=7, 1..=6),
         query_raw in any::<u8>(),
         profile_raw in any::<u8>(),
@@ -1692,9 +1713,10 @@ proptest! {
             no_meta,
         );
 
+        let copied_args = args_with_copied_store(&args, clone.path());
         let source_bytes = context_canonical_json_bytes(source.path(), &args)
             .map_err(TestCaseError::fail)?;
-        let clone_bytes = context_canonical_json_bytes(clone.path(), &args)
+        let clone_bytes = context_canonical_json_bytes(source.path(), &copied_args)
             .map_err(TestCaseError::fail)?;
 
         prop_assert_eq!(hash_bytes(&source_bytes), hash_bytes(&clone_bytes));
