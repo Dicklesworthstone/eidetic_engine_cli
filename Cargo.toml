@@ -163,6 +163,10 @@ name = "graph_pagerank"
 harness = false
 
 [[bench]]
+name = "graph_minhash_rank"
+harness = false
+
+[[bench]]
 name = "graph_ppr"
 harness = false
 
