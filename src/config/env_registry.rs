@@ -70,6 +70,8 @@ pub enum EnvVar {
     PprCacheEntries,
     /// `EE_READ_POOL_DISABLE_PIN`
     ReadPoolDisablePin,
+    /// `EE_READ_POOL_ACQUIRE_TIMEOUT_MS`
+    ReadPoolAcquireTimeoutMs,
     /// `EE_READ_POOL_IDLE_TIMEOUT_S`
     ReadPoolIdleTimeoutSeconds,
     /// `EE_READ_POOL_SIZE`
@@ -133,6 +135,7 @@ impl EnvVar {
             Self::Profile,
             Self::PprCacheEntries,
             Self::ReadPoolDisablePin,
+            Self::ReadPoolAcquireTimeoutMs,
             Self::ReadPoolIdleTimeoutSeconds,
             Self::ReadPoolSize,
             Self::RememberCurationSyncBudgetMs,
@@ -183,6 +186,7 @@ impl EnvVar {
             Self::Profile => "EE_PROFILE",
             Self::PprCacheEntries => "EE_PPR_CACHE_ENTRIES",
             Self::ReadPoolDisablePin => "EE_READ_POOL_DISABLE_PIN",
+            Self::ReadPoolAcquireTimeoutMs => "EE_READ_POOL_ACQUIRE_TIMEOUT_MS",
             Self::ReadPoolIdleTimeoutSeconds => "EE_READ_POOL_IDLE_TIMEOUT_S",
             Self::ReadPoolSize => "EE_READ_POOL_SIZE",
             Self::RememberCurationSyncBudgetMs => "EE_REMEMBER_CURATION_SYNC_BUDGET_MS",
@@ -243,6 +247,9 @@ impl EnvVar {
             Self::Profile => "Override the default context pack profile.",
             Self::PprCacheEntries => "Override the in-process PPR prefetch cache entry cap.",
             Self::ReadPoolDisablePin => "Disable read-side snapshot pinning.",
+            Self::ReadPoolAcquireTimeoutMs => {
+                "Override the read-side connection pool acquire timeout in milliseconds."
+            }
             Self::ReadPoolIdleTimeoutSeconds => {
                 "Override the read-side connection pool idle timeout in seconds."
             }
@@ -277,6 +284,7 @@ impl EnvVar {
             Self::MeshEnabled => Some("false"),
             Self::TailscaleProbeTimeoutMs => Some("1500"),
             Self::PprCacheEntries => Some("4096"),
+            Self::ReadPoolAcquireTimeoutMs => Some("5000"),
             Self::IndexPublishLockRetryAttempts => Some("200"),
             Self::RememberCurationSyncBudgetMs => Some("50"),
             _ => None,
@@ -328,6 +336,7 @@ impl EnvVar {
             | Self::Profile
             | Self::PprCacheEntries
             | Self::ReadPoolDisablePin
+            | Self::ReadPoolAcquireTimeoutMs
             | Self::ReadPoolIdleTimeoutSeconds
             | Self::ReadPoolSize
             | Self::DisableRememberSearchNeighbors

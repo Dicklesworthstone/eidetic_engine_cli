@@ -71,3 +71,4 @@ Environment overrides:
 | `storage.read_pool.size` | `EE_READ_POOL_SIZE` |
 | `storage.read_pool.idle_timeout_seconds` | `EE_READ_POOL_IDLE_TIMEOUT_S` |
 | `storage.read_pool.pin_snapshot` | `EE_READ_POOL_DISABLE_PIN` inverts this value |
+| acquire timeout runtime override | `EE_READ_POOL_ACQUIRE_TIMEOUT_MS` |

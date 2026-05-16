@@ -38,8 +38,8 @@ use rustix::fs::{FlockOperation, flock};
 use rustix::io::Errno;
 
 use crate::config::{
-    ConfigFile, GRAPH_FEATURE_PACK_DNA_ENABLED_KEY, GRAPH_FEATURE_PPR_ENABLED_KEY,
-    GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, WorkspaceLocation,
+    ConfigFile, EnvVar, GRAPH_FEATURE_PACK_DNA_ENABLED_KEY, GRAPH_FEATURE_PPR_ENABLED_KEY,
+    GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, WorkspaceLocation, read_env_var,
 };
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
@@ -3667,9 +3667,13 @@ fn context_read_pool_config(
                 .and_then(|value| usize::try_from(value).ok())
                 .unwrap_or(1);
             let idle_timeout_seconds = read_pool.idle_timeout_seconds.unwrap_or(30);
+            let acquire_timeout_ms = read_env_var(EnvVar::ReadPoolAcquireTimeoutMs)
+                .and_then(|raw| raw.parse::<u64>().ok())
+                .unwrap_or(5000);
             let pin_snapshot = read_pool.pin_snapshot.unwrap_or(true);
             (
-                PoolConfig::new(max_size, Duration::from_secs(idle_timeout_seconds)),
+                PoolConfig::new(max_size, Duration::from_secs(idle_timeout_seconds))
+                    .with_acquire_timeout(Duration::from_millis(acquire_timeout_ms)),
                 pin_snapshot,
             )
         }

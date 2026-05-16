@@ -360,6 +360,12 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         category: EnvVar::ReadPoolDisablePin.category(),
     },
     EnvVarEntry {
+        name: EnvVar::ReadPoolAcquireTimeoutMs.name(),
+        description: EnvVar::ReadPoolAcquireTimeoutMs.description(),
+        default: EnvVar::ReadPoolAcquireTimeoutMs.default_value(),
+        category: EnvVar::ReadPoolAcquireTimeoutMs.category(),
+    },
+    EnvVarEntry {
         name: EnvVar::ReadPoolIdleTimeoutSeconds.name(),
         description: EnvVar::ReadPoolIdleTimeoutSeconds.description(),
         default: EnvVar::ReadPoolIdleTimeoutSeconds.default_value(),
