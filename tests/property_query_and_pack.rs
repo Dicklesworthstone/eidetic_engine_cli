@@ -184,6 +184,33 @@ struct DeterminismProptestRunEvent {
     budget_seconds: f64,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+struct DeterminismRegressionInput {
+    workspace_state: String,
+    index_state: String,
+    config: DeterminismRegressionConfig,
+    query: String,
+    seed: u64,
+    candidate_specs: Vec<DeterminismRegressionCandidateSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+struct DeterminismRegressionConfig {
+    profile: String,
+    max_tokens: u32,
+    include_coverage_fill: bool,
+    output_redaction_enabled: bool,
+    redaction_level: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+struct DeterminismRegressionCandidateSpec {
+    estimated_tokens: u32,
+    relevance_raw: u16,
+    utility_raw: u16,
+    content_shape: u8,
+}
+
 fn regression_fixture_for_mismatch(
     seed: u64,
     input: &[u8],
@@ -213,6 +240,64 @@ fn regression_fixture_for_mismatch(
 fn regression_input_payload(input: &[u8]) -> serde_json::Value {
     serde_json::from_slice(input)
         .unwrap_or_else(|_| serde_json::json!({ "raw": String::from_utf8_lossy(input) }))
+}
+
+fn regression_input_for_pack_case(
+    query: String,
+    budget: TokenBudget,
+    profile: ContextPackProfile,
+    options: PackAssemblyOptions,
+    seed: u64,
+    specs: &[(u32, u16, u16, u8)],
+) -> Result<serde_json::Value, String> {
+    let input = DeterminismRegressionInput {
+        workspace_state: "synthetic_pack_candidates.v1".to_string(),
+        index_state: "derived_from_candidate_specs.v1".to_string(),
+        config: DeterminismRegressionConfig {
+            profile: format!("{profile:?}"),
+            max_tokens: budget.max_tokens(),
+            include_coverage_fill: options.include_coverage_fill,
+            output_redaction_enabled: options.output_redaction_enabled,
+            redaction_level: format!("{:?}", options.redaction_level),
+        },
+        query,
+        seed,
+        candidate_specs: specs
+            .iter()
+            .map(
+                |(estimated_tokens, relevance_raw, utility_raw, content_shape)| {
+                    DeterminismRegressionCandidateSpec {
+                        estimated_tokens: *estimated_tokens,
+                        relevance_raw: *relevance_raw,
+                        utility_raw: *utility_raw,
+                        content_shape: *content_shape,
+                    }
+                },
+            )
+            .collect(),
+    };
+
+    serde_json::to_value(input).map_err(|error| error.to_string())
+}
+
+fn regression_fixture_for_pack_case_mismatch(
+    query: String,
+    budget: TokenBudget,
+    profile: ContextPackProfile,
+    options: PackAssemblyOptions,
+    seed: u64,
+    specs: &[(u32, u16, u16, u8)],
+    expected: &[u8],
+    observed: &[u8],
+) -> Result<Option<DeterminismRegressionFixture>, String> {
+    let input = regression_input_for_pack_case(query, budget, profile, options, seed, specs)?;
+    let input_bytes = serde_json::to_vec(&input).map_err(|error| error.to_string())?;
+    Ok(regression_fixture_for_mismatch(
+        seed,
+        &input_bytes,
+        expected,
+        observed,
+    ))
 }
 
 fn regression_fixture_file_name(input_hash: &str) -> String {
@@ -498,6 +583,60 @@ fn determinism_regression_fixture_json_roundtrips() -> Result<(), String> {
 
     assert_eq!(parsed, fixture);
     assert!(rendered.ends_with('\n'));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_captures_structured_pack_input() -> Result<(), String> {
+    let specs = vec![(8, 900, 700, 1), (13, 500, 950, 3)];
+    let budget = TokenBudget::new(64).map_err(|error| format!("{error:?}"))?;
+    let options = PackAssemblyOptions {
+        include_coverage_fill: false,
+        output_redaction_enabled: true,
+        redaction_level: RedactionLevel::Strict,
+    };
+
+    let fixture = regression_fixture_for_pack_case_mismatch(
+        "structured replay".to_string(),
+        budget,
+        ContextPackProfile::Balanced,
+        options,
+        42,
+        &specs,
+        br#"{"pack":{"hash":"blake3:expected"}}"#,
+        br#"{"pack":{"hash":"blake3:observed"}}"#,
+    )?
+    .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    let replay = regression_fixture_for_pack_case_mismatch(
+        "structured replay".to_string(),
+        budget,
+        ContextPackProfile::Balanced,
+        options,
+        42,
+        &specs,
+        br#"{"pack":{"hash":"blake3:expected"}}"#,
+        br#"{"pack":{"hash":"blake3:observed"}}"#,
+    )?
+    .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+
+    assert_eq!(fixture, replay);
+    assert_eq!(
+        fixture.input["workspace_state"],
+        "synthetic_pack_candidates.v1"
+    );
+    assert_eq!(
+        fixture.input["index_state"],
+        "derived_from_candidate_specs.v1"
+    );
+    assert_eq!(fixture.input["query"], "structured replay");
+    assert_eq!(fixture.input["seed"], 42);
+    assert_eq!(fixture.input["config"]["profile"], "Balanced");
+    assert_eq!(fixture.input["config"]["max_tokens"], 64);
+    assert_eq!(fixture.input["config"]["include_coverage_fill"], false);
+    assert_eq!(fixture.input["config"]["output_redaction_enabled"], true);
+    assert_eq!(fixture.input["config"]["redaction_level"], "Strict");
+    assert_eq!(fixture.input["candidate_specs"][0]["estimated_tokens"], 8);
+    assert_eq!(fixture.input["candidate_specs"][1]["content_shape"], 3);
     Ok(())
 }
 
