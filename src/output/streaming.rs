@@ -5,6 +5,10 @@ use std::io::{self, Write};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
+use crate::pack::{ContextResponse, ContextResponseDegradation, ContextResponseSeverity};
+
+use super::{ContextJsonRenderOptions, render_context_response_json_with_options};
+
 pub const PACK_STREAM_SCHEMA_V1: &str = "ee.pack.stream.v1";
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -70,6 +74,17 @@ impl StreamSeverity {
 impl fmt::Display for StreamSeverity {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+impl From<ContextResponseSeverity> for StreamSeverity {
+    fn from(severity: ContextResponseSeverity) -> Self {
+        match severity {
+            ContextResponseSeverity::Info => Self::Info,
+            ContextResponseSeverity::Low => Self::Low,
+            ContextResponseSeverity::Medium => Self::Medium,
+            ContextResponseSeverity::High => Self::High,
+        }
     }
 }
 
@@ -439,6 +454,333 @@ impl fmt::Display for StreamValidationError {
 
 impl std::error::Error for StreamValidationError {}
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextStreamFrameOptions {
+    pub pack_id: String,
+    pub workspace_id: String,
+    pub request_id: String,
+    pub started_at: String,
+    pub completed_at: String,
+}
+
+impl ContextStreamFrameOptions {
+    #[must_use]
+    pub fn new(
+        pack_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+        request_id: impl Into<String>,
+        started_at: impl Into<String>,
+        completed_at: impl Into<String>,
+    ) -> Self {
+        Self {
+            pack_id: pack_id.into(),
+            workspace_id: workspace_id.into(),
+            request_id: request_id.into(),
+            started_at: started_at.into(),
+            completed_at: completed_at.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ContextStreamAdapterError {
+    BatchJsonParse(String),
+    MissingField(&'static str),
+    InvalidField(&'static str),
+    NumericOverflow(&'static str),
+    Validation(StreamValidationError),
+}
+
+impl fmt::Display for ContextStreamAdapterError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BatchJsonParse(error) => {
+                write!(formatter, "batch context JSON could not be parsed: {error}")
+            }
+            Self::MissingField(field) => write!(formatter, "batch context JSON is missing {field}"),
+            Self::InvalidField(field) => {
+                write!(
+                    formatter,
+                    "batch context JSON field {field} has an invalid shape"
+                )
+            }
+            Self::NumericOverflow(field) => {
+                write!(
+                    formatter,
+                    "batch context JSON field {field} does not fit in u32"
+                )
+            }
+            Self::Validation(error) => {
+                write!(formatter, "stream frame sequence is invalid: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ContextStreamAdapterError {}
+
+/// Convert an already-assembled batch context response into typed stream
+/// frames without changing selection order or pack hash.
+///
+/// The adapter reads item/trailer material from the canonical batch JSON
+/// renderer, so stream output stays aligned with the stable batch envelope
+/// until the CLI streaming path is wired directly into context assembly.
+///
+/// # Errors
+///
+/// Returns [`ContextStreamAdapterError`] if the canonical batch JSON renderer
+/// emits an unexpected shape or the generated frame sequence violates the
+/// stream ordering contract.
+pub fn context_response_stream_frames(
+    response: &ContextResponse,
+    options: ContextStreamFrameOptions,
+) -> Result<Vec<PackStreamFrame>, ContextStreamAdapterError> {
+    let batch_json = render_context_response_json_with_options(
+        response,
+        ContextJsonRenderOptions {
+            include_rendered_text: false,
+            include_skipped: true,
+            include_meta: true,
+            include_verbose_meta: false,
+            include_non_affecting_degradations: false,
+            include_legacy_selection_certificate: false,
+        },
+    );
+    let root: JsonValue = serde_json::from_str(&batch_json)
+        .map_err(|error| ContextStreamAdapterError::BatchJsonParse(error.to_string()))?;
+    let pack = required_object(&root, "data.pack")?;
+    let item_values = pack
+        .get("items")
+        .ok_or(ContextStreamAdapterError::MissingField("data.pack.items"))?
+        .as_array()
+        .cloned()
+        .ok_or(ContextStreamAdapterError::InvalidField("data.pack.items"))?;
+    let pack_hash = pack_hash_from_batch(&pack);
+
+    let memory_scope = response
+        .data
+        .scope_stats
+        .as_ref()
+        .map_or("swarm", |stats| stats.scope_applied.as_str())
+        .to_string();
+    let strict_scope = response
+        .data
+        .scope_stats
+        .as_ref()
+        .is_some_and(|stats| stats.strict_scope);
+
+    let mut header = HeaderFrame::new(HeaderFrameInput {
+        pack_id: options.pack_id.clone(),
+        query: response.data.request.query.clone(),
+        workspace_id: options.workspace_id.clone(),
+        request_id: options.request_id,
+        profile: response.data.request.profile.as_str().to_string(),
+        max_tokens: response.data.request.budget.max_tokens(),
+        candidate_pool: response.data.request.candidate_pool,
+        memory_scope,
+        strict_scope,
+        started_at: options.started_at,
+    });
+    if pack_hash != "absent" {
+        header.canonical_key_hash = Some(pack_hash.clone());
+    }
+
+    let mut frames = Vec::with_capacity(item_values.len().saturating_add(2));
+    frames.push(PackStreamFrame::Header(header));
+
+    for (seq, value) in item_values.iter().enumerate() {
+        frames.push(PackStreamFrame::Item(item_frame_from_batch_item(
+            &options.pack_id,
+            u32_from_usize(seq, "data.pack.items[].seq")?,
+            value,
+        )?));
+    }
+
+    let mut trailer = TrailerFrame::new(
+        options.pack_id,
+        pack_hash,
+        u32_from_usize(item_values.len(), "data.pack.items.length")?,
+        response.data.pack.used_tokens,
+        options.completed_at,
+    );
+    trailer.selection_audit = optional_object(&pack, "selectionAudit")?.unwrap_or_default();
+    trailer.quality = optional_object(&pack, "quality")?.unwrap_or_default();
+    trailer.skipped_total = optional_u32(&pack, "skippedTotal")?;
+    trailer.provenance_footer = optional_object(&pack, "provenanceFooter")?.unwrap_or_default();
+    trailer.coordination = optional_object(&pack, "coordination")?.unwrap_or_default();
+    trailer.pack_dna = optional_object(&pack, "packDna")?.unwrap_or_default();
+    trailer.degraded = response
+        .data
+        .degraded
+        .iter()
+        .map(stream_degradation_from_context)
+        .collect();
+    frames.push(PackStreamFrame::Trailer(trailer));
+
+    validate_generated_frames(&frames)?;
+    Ok(frames)
+}
+
+fn item_frame_from_batch_item(
+    pack_id: &str,
+    seq: u32,
+    value: &JsonValue,
+) -> Result<ItemFrame, ContextStreamAdapterError> {
+    let item = value
+        .as_object()
+        .ok_or(ContextStreamAdapterError::InvalidField("data.pack.items[]"))?;
+    let mut frame = ItemFrame::new(ItemFrameInput {
+        pack_id: pack_id.to_string(),
+        seq,
+        rank: required_u32(item, "rank")?,
+        memory_id: required_string(item, "memoryId")?.to_string(),
+        section: required_string(item, "section")?.to_string(),
+        content: required_string(item, "content")?.to_string(),
+        estimated_tokens: required_u32(item, "estimatedTokens")?,
+        why: required_string(item, "why")?.to_string(),
+    });
+    frame.scores = optional_object(item, "scores")?.unwrap_or_default();
+    frame.provenance = optional_array_of_objects(item, "provenance")?.unwrap_or_default();
+    frame.trust = optional_object(item, "trust")?.unwrap_or_default();
+    frame.diversity_key = optional_string(item, "diversityKey").map(str::to_string);
+    frame.selected_in = optional_string(item, "selectedIn").map(str::to_string);
+    frame.lifecycle = optional_object(item, "lifecycle")?.unwrap_or_default();
+    frame.redactions = optional_array_of_objects(item, "redactions")?.unwrap_or_default();
+    Ok(frame)
+}
+
+fn stream_degradation_from_context(degradation: &ContextResponseDegradation) -> StreamDegradation {
+    StreamDegradation::new(
+        degradation.code.clone(),
+        StreamSeverity::from(degradation.severity),
+        degradation.message.clone(),
+        degradation.repair.clone(),
+    )
+}
+
+fn validate_generated_frames(frames: &[PackStreamFrame]) -> Result<(), ContextStreamAdapterError> {
+    let mut validator = StreamSequenceValidator::new();
+    for frame in frames {
+        validator
+            .observe(frame)
+            .map_err(ContextStreamAdapterError::Validation)?;
+    }
+    validator
+        .finish()
+        .map_err(ContextStreamAdapterError::Validation)
+}
+
+fn pack_hash_from_batch(pack: &serde_json::Map<String, JsonValue>) -> String {
+    pack.get("hash")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("absent")
+        .to_string()
+}
+
+fn required_object(
+    value: &JsonValue,
+    path: &'static str,
+) -> Result<serde_json::Map<String, JsonValue>, ContextStreamAdapterError> {
+    let mut current = value;
+    for segment in path.split('.') {
+        current = current
+            .get(segment)
+            .ok_or(ContextStreamAdapterError::MissingField(path))?;
+    }
+    current
+        .as_object()
+        .cloned()
+        .ok_or(ContextStreamAdapterError::InvalidField(path))
+}
+
+fn required_string<'a>(
+    item: &'a serde_json::Map<String, JsonValue>,
+    field: &'static str,
+) -> Result<&'a str, ContextStreamAdapterError> {
+    item.get(field)
+        .ok_or(ContextStreamAdapterError::MissingField(field))?
+        .as_str()
+        .ok_or(ContextStreamAdapterError::InvalidField(field))
+}
+
+fn optional_string<'a>(
+    item: &'a serde_json::Map<String, JsonValue>,
+    field: &'static str,
+) -> Option<&'a str> {
+    item.get(field).and_then(JsonValue::as_str)
+}
+
+fn required_u32(
+    item: &serde_json::Map<String, JsonValue>,
+    field: &'static str,
+) -> Result<u32, ContextStreamAdapterError> {
+    let value = item
+        .get(field)
+        .ok_or(ContextStreamAdapterError::MissingField(field))?
+        .as_u64()
+        .ok_or(ContextStreamAdapterError::InvalidField(field))?;
+    u32::try_from(value).map_err(|_| ContextStreamAdapterError::NumericOverflow(field))
+}
+
+fn optional_u32(
+    item: &serde_json::Map<String, JsonValue>,
+    field: &'static str,
+) -> Result<Option<u32>, ContextStreamAdapterError> {
+    match item.get(field) {
+        Some(value) => {
+            let Some(number) = value.as_u64() else {
+                return Err(ContextStreamAdapterError::InvalidField(field));
+            };
+            Ok(Some(u32::try_from(number).map_err(|_| {
+                ContextStreamAdapterError::NumericOverflow(field)
+            })?))
+        }
+        None => Ok(None),
+    }
+}
+
+fn optional_object(
+    item: &serde_json::Map<String, JsonValue>,
+    field: &'static str,
+) -> Result<Option<BTreeMap<String, JsonValue>>, ContextStreamAdapterError> {
+    item.get(field).map(object_to_btree).transpose()
+}
+
+fn optional_array_of_objects(
+    item: &serde_json::Map<String, JsonValue>,
+    field: &'static str,
+) -> Result<Option<Vec<BTreeMap<String, JsonValue>>>, ContextStreamAdapterError> {
+    let Some(value) = item.get(field) else {
+        return Ok(None);
+    };
+    let array = value
+        .as_array()
+        .ok_or(ContextStreamAdapterError::InvalidField(field))?;
+    array
+        .iter()
+        .map(object_to_btree)
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn object_to_btree(
+    value: &JsonValue,
+) -> Result<BTreeMap<String, JsonValue>, ContextStreamAdapterError> {
+    value
+        .as_object()
+        .map(|object| {
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .ok_or(ContextStreamAdapterError::InvalidField("object"))
+}
+
+fn u32_from_usize(value: usize, field: &'static str) -> Result<u32, ContextStreamAdapterError> {
+    u32::try_from(value).map_err(|_| ContextStreamAdapterError::NumericOverflow(field))
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StreamSequenceValidator {
     saw_header: bool,
@@ -617,6 +959,139 @@ mod tests {
                 Some("retry the command".to_string()),
             ),
         ))
+    }
+
+    fn memory_id(value: u128) -> crate::models::MemoryId {
+        crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(value))
+    }
+
+    fn pack_candidate(id_value: u128, content: &str, relevance: f32) -> crate::pack::PackCandidate {
+        let id = memory_id(id_value);
+        crate::pack::PackCandidate::new(crate::pack::PackCandidateInput {
+            memory_id: id,
+            section: crate::pack::PackSection::ProceduralRules,
+            content: content.to_string(),
+            estimated_tokens: 8,
+            relevance: crate::models::UnitScore::parse(relevance).unwrap(),
+            utility: crate::models::UnitScore::parse(0.8).unwrap(),
+            provenance: vec![
+                crate::pack::PackProvenance::new(
+                    crate::models::ProvenanceUri::EeMemory(id),
+                    "stream adapter test",
+                )
+                .unwrap(),
+            ],
+            why: format!("matched stream adapter fixture {id}"),
+        })
+        .unwrap()
+    }
+
+    fn context_response_fixture() -> crate::pack::ContextResponse {
+        let request = crate::pack::ContextRequest::from_query("prepare release stream").unwrap();
+        let mut draft = crate::pack::assemble_draft(
+            "prepare release stream",
+            crate::pack::TokenBudget::new(64).unwrap(),
+            vec![
+                pack_candidate(0x9001, "Run cargo fmt --check.", 0.93),
+                pack_candidate(0x9002, "Run RCH-only focused tests.", 0.81),
+            ],
+        )
+        .unwrap();
+        draft.hash = Some("blake3:stream-fixture-pack".to_string());
+        crate::pack::ContextResponse::new(
+            request,
+            draft,
+            vec![
+                crate::pack::ContextResponseDegradation::new(
+                    "stream_fixture_degraded",
+                    crate::pack::ContextResponseSeverity::Medium,
+                    "fixture degradation",
+                    Some("inspect fixture".to_string()),
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn stream_options() -> ContextStreamFrameOptions {
+        ContextStreamFrameOptions::new(
+            "pack_stream_fixture",
+            "workspace_fixture",
+            "request_fixture",
+            "2026-05-16T00:00:00Z",
+            "2026-05-16T00:00:01Z",
+        )
+    }
+
+    #[test]
+    fn happy_path_context_response_stream_frames_preserve_batch_order_and_hash() {
+        let response = context_response_fixture();
+        let batch: JsonValue =
+            serde_json::from_str(&crate::output::render_context_response_json(&response)).unwrap();
+        let frames = context_response_stream_frames(&response, stream_options()).unwrap();
+
+        let mut validator = StreamSequenceValidator::new();
+        for frame in &frames {
+            validator.observe(frame).unwrap();
+        }
+        validator.finish().unwrap();
+
+        assert_eq!(frames.len(), response.data.pack.items.len() + 2);
+        let PackStreamFrame::Header(header) = &frames[0] else {
+            panic!("first frame should be header");
+        };
+        assert_eq!(header.query, response.data.request.query);
+        assert_eq!(
+            header.canonical_key_hash.as_deref(),
+            Some("blake3:stream-fixture-pack")
+        );
+
+        for (index, batch_item) in response.data.pack.items.iter().enumerate() {
+            let PackStreamFrame::Item(frame) = &frames[index + 1] else {
+                panic!("middle frame should be item");
+            };
+            assert_eq!(frame.seq, u32::try_from(index).unwrap());
+            assert_eq!(frame.rank, batch_item.rank);
+            assert_eq!(frame.memory_id, batch_item.memory_id.to_string());
+            assert_eq!(frame.content, batch_item.content);
+            assert_eq!(
+                frame.selected_in.as_deref(),
+                Some(batch_item.selected_in.as_str())
+            );
+        }
+
+        let PackStreamFrame::Trailer(trailer) = frames.last().unwrap() else {
+            panic!("last frame should be trailer");
+        };
+        assert_eq!(
+            Some(trailer.pack_hash.as_str()),
+            batch["data"]["pack"]["hash"].as_str()
+        );
+        assert_eq!(
+            trailer.total_items,
+            u32::try_from(response.data.pack.items.len()).unwrap()
+        );
+    }
+
+    #[test]
+    fn happy_path_context_response_stream_trailer_carries_delayed_batch_sections() {
+        let response = context_response_fixture();
+        let frames = context_response_stream_frames(&response, stream_options()).unwrap();
+        let PackStreamFrame::Trailer(trailer) = frames.last().unwrap() else {
+            panic!("last frame should be trailer");
+        };
+
+        assert_eq!(
+            trailer.selection_audit["algorithmId"],
+            "mmr_with_coverage_fill_v1"
+        );
+        assert_eq!(trailer.quality["itemCount"], JsonValue::from(2));
+        assert_eq!(trailer.provenance_footer["memoryCount"], JsonValue::from(2));
+        assert_eq!(trailer.skipped_total, Some(0));
+        assert_eq!(trailer.degraded.len(), 1);
+        assert_eq!(trailer.degraded[0].code, "stream_fixture_degraded");
+        assert_eq!(trailer.degraded[0].severity, StreamSeverity::Medium);
     }
 
     #[test]
