@@ -7,7 +7,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
@@ -272,6 +272,7 @@ pub fn try_acquire_maintenance_job_lock(
     holder_id: &str,
 ) -> Result<MaintenanceJobLock, MaintenanceJobLockError> {
     let lock_path = workspace_path.join(".ee").join("maintenance-job.lock");
+    ensure_maintenance_job_lock_path_is_not_symlink(&lock_path)?;
     let process_gate_path = try_acquire_maintenance_job_process_gate(&lock_path)?;
 
     let Some(parent) = lock_path.parent() else {
@@ -281,12 +282,16 @@ pub fn try_acquire_maintenance_job_lock(
             message: "Could not resolve maintenance job lock parent directory.".to_owned(),
         });
     };
-    if let Err(error) = std::fs::create_dir_all(parent) {
+    if let Err(error) = fs::create_dir_all(parent) {
         release_maintenance_job_process_gate(&process_gate_path);
         return Err(MaintenanceJobLockError::OpenFailed {
             path: lock_path.clone(),
             message: format!("Failed to create maintenance job lock directory: {error}"),
         });
+    }
+    if let Err(error) = ensure_maintenance_job_lock_path_is_not_symlink(&lock_path) {
+        release_maintenance_job_process_gate(&process_gate_path);
+        return Err(error);
     }
     let file = OpenOptions::new()
         .create(true)
@@ -324,6 +329,65 @@ pub fn try_acquire_maintenance_job_lock(
         _file: file,
         process_gate_path,
     })
+}
+
+fn ensure_maintenance_job_lock_path_is_not_symlink(
+    lock_path: &Path,
+) -> Result<(), MaintenanceJobLockError> {
+    if let Some(symlink_path) = first_existing_symlink_component(lock_path).map_err(|error| {
+        MaintenanceJobLockError::OpenFailed {
+            path: lock_path.to_path_buf(),
+            message: format!(
+                "Failed to inspect maintenance job lock path component '{}': {}",
+                error.path.display(),
+                error.source
+            ),
+        }
+    })? {
+        return Err(MaintenanceJobLockError::OpenFailed {
+            path: lock_path.to_path_buf(),
+            message: format!(
+                "Refusing to open maintenance job lock '{}': path traverses symbolic link '{}'",
+                lock_path.display(),
+                symlink_path.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct SymlinkComponentInspectionError {
+    path: PathBuf,
+    source: std::io::Error,
+}
+
+fn first_existing_symlink_component(
+    path: &Path,
+) -> Result<Option<PathBuf>, SymlinkComponentInspectionError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(source) => {
+                return Err(SymlinkComponentInspectionError {
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(None)
 }
 
 // ============================================================================
@@ -5524,6 +5588,65 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maintenance_job_lock_rejects_symlinked_path_components() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_ee = tempdir.path().join("real-ee");
+        fs::create_dir_all(&real_ee).map_err(|error| error.to_string())?;
+        symlink(&real_ee, tempdir.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let error = match try_acquire_maintenance_job_lock(tempdir.path(), "test-holder") {
+            Ok(lock) => return Err(format!("symlinked .ee lock should fail, got {lock:?}")),
+            Err(error) => error,
+        };
+        ensure(
+            error.code(),
+            "maintenance_job_lock_open_failed",
+            "symlinked .ee error code",
+        )?;
+        ensure(
+            error.message().contains("path traverses symbolic link"),
+            true,
+            "symlinked .ee error message",
+        )?;
+        ensure(
+            real_ee.join("maintenance-job.lock").exists(),
+            false,
+            "lock must not be written through symlinked .ee",
+        )?;
+
+        let safe_workspace = tempdir.path().join("safe-workspace");
+        let safe_ee = safe_workspace.join(".ee");
+        fs::create_dir_all(&safe_ee).map_err(|error| error.to_string())?;
+        let outside_lock = tempdir.path().join("outside-maintenance-job.lock");
+        fs::write(&outside_lock, "").map_err(|error| error.to_string())?;
+        symlink(&outside_lock, safe_ee.join("maintenance-job.lock"))
+            .map_err(|error| error.to_string())?;
+
+        let error = match try_acquire_maintenance_job_lock(&safe_workspace, "test-holder") {
+            Ok(lock) => return Err(format!("symlinked lock target should fail, got {lock:?}")),
+            Err(error) => error,
+        };
+        ensure(
+            error.code(),
+            "maintenance_job_lock_open_failed",
+            "symlinked lock error code",
+        )?;
+        ensure(
+            error.message().contains("path traverses symbolic link"),
+            true,
+            "symlinked lock error message",
+        )?;
+        ensure(
+            fs::read_to_string(&outside_lock).map_err(|error| error.to_string())?,
+            String::new(),
+            "lock must not write through symlinked target",
+        )
     }
 
     fn open_score_decay_db() -> Result<DbConnection, String> {
