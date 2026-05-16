@@ -536,6 +536,14 @@ pub fn mesh_query_visibility(metadata: Option<&JsonValue>) -> MeshQueryVisibilit
     if decision_kind != MeshImportDecisionKind::Allow {
         return MeshQueryVisibility::Blocked;
     }
+    if metadata_has_mesh_policy_decision(metadata) {
+        let Some(policy_decision_kind) = metadata_mesh_policy_decision_kind(metadata) else {
+            return MeshQueryVisibility::Blocked;
+        };
+        if policy_decision_kind != MeshImportDecisionKind::Allow {
+            return MeshQueryVisibility::Blocked;
+        }
+    }
 
     let Some(cached_material_id) =
         metadata_mesh_string(metadata, &["cachedMaterialId", "cached_material_id"])
@@ -1418,6 +1426,33 @@ fn metadata_mesh_decision_kind(metadata: &JsonValue) -> Option<MeshImportDecisio
         "reject" => Some(MeshImportDecisionKind::Reject),
         _ => None,
     }
+}
+
+fn metadata_has_mesh_policy_decision(metadata: &JsonValue) -> bool {
+    metadata_mesh_policy_decision(metadata).is_some()
+}
+
+fn metadata_mesh_policy_decision_kind(metadata: &JsonValue) -> Option<MeshImportDecisionKind> {
+    let policy_decision = metadata_mesh_policy_decision(metadata)?;
+    match json_string(policy_decision, "action")? {
+        "allow" => Some(MeshImportDecisionKind::Allow),
+        "quarantine" => Some(MeshImportDecisionKind::Quarantine),
+        "deny" => Some(MeshImportDecisionKind::Deny),
+        "reject" => Some(MeshImportDecisionKind::Reject),
+        _ => None,
+    }
+}
+
+fn metadata_mesh_policy_decision(metadata: &JsonValue) -> Option<&JsonValue> {
+    metadata
+        .get("policyDecision")
+        .or_else(|| metadata.get("policy_decision"))
+        .or_else(|| {
+            metadata.get("mesh").and_then(|mesh| {
+                mesh.get("policyDecision")
+                    .or_else(|| mesh.get("policy_decision"))
+            })
+        })
 }
 
 fn metadata_mesh_string<'a>(metadata: &'a JsonValue, keys: &[&str]) -> Option<&'a str> {
@@ -2521,7 +2556,12 @@ max_bytes = 0
                 "materialLane": "metadata",
                 "importDecisionId": "mesh_dec_456",
                 "trustLane": "mesh_metadata",
-                "redactionPosture": "standard"
+                "redactionPosture": "standard",
+                "policyDecision": {
+                    "schema": "ee.mesh.policy_decision.v1",
+                    "direction": "inbound",
+                    "action": "allow"
+                }
             }
         });
 
@@ -2590,6 +2630,37 @@ max_bytes = 0
                 "redactionPosture": "standard"
             }
         });
+        let denied_policy_decision = json!({
+            "mesh": {
+                "workspaceScopeDecision": "allow",
+                "cachedMaterialId": "mesh_mat_123",
+                "originWorkspaceId": "wsp_remote_beta",
+                "producerPeerId": "peer_builder_one",
+                "materialLane": "metadata",
+                "trustLane": "mesh_metadata",
+                "redactionPosture": "standard",
+                "policyDecision": {
+                    "schema": "ee.mesh.policy_decision.v1",
+                    "direction": "inbound",
+                    "action": "deny"
+                }
+            }
+        });
+        let malformed_policy_decision = json!({
+            "mesh": {
+                "workspaceScopeDecision": "allow",
+                "cachedMaterialId": "mesh_mat_123",
+                "originWorkspaceId": "wsp_remote_beta",
+                "producerPeerId": "peer_builder_one",
+                "materialLane": "metadata",
+                "trustLane": "mesh_metadata",
+                "redactionPosture": "standard",
+                "policyDecision": {
+                    "schema": "ee.mesh.policy_decision.v1",
+                    "direction": "inbound"
+                }
+            }
+        });
 
         assert_eq!(
             mesh_query_visibility(Some(&denied)),
@@ -2605,6 +2676,14 @@ max_bytes = 0
         );
         assert_eq!(
             mesh_query_visibility(Some(&missing_decision)),
+            MeshQueryVisibility::Blocked
+        );
+        assert_eq!(
+            mesh_query_visibility(Some(&denied_policy_decision)),
+            MeshQueryVisibility::Blocked
+        );
+        assert_eq!(
+            mesh_query_visibility(Some(&malformed_policy_decision)),
             MeshQueryVisibility::Blocked
         );
         assert_eq!(
