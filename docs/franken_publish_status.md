@@ -45,3 +45,18 @@ Crates.io statuses:
 
 The initial target is `fnx`, but the schema and CLI also cover `sqlmodel`,
 `frankensearch`, and `fsqlite` groups for later release-readiness beads.
+
+## fnx-generators decision
+
+`eidetic_engine_cli` uses `fnx-generators = "0.1.0"` as a dev-dependency for
+all-targets and release-readiness checks. The release decision for
+`bd-3usjw.11.1.35` is to publish `fnx-generators` with the rest of
+`franken_networkx`, not to hide or remove the ee dev-dependency.
+
+The publish-status checker therefore treats `fnx-generators` as a required fnx
+crate. It must appear in the fnx crate list, have local publish metadata, resolve
+from crates.io at the required version, and appear in the release workflow after
+the core/runtime crates. If the workflow omits it, the report emits
+`workflow_missing_publish_crate`; if crates.io returns 404, the report emits
+`crates_io_missing`. This keeps `bd-3usjw.11.1.33` from closing while the
+generator crate needed by ee dev verification is still unpublished.

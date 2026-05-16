@@ -79,6 +79,11 @@ class FrankenPublishStatusScriptTest(unittest.TestCase):
             ],
         )
 
+    def test_fnx_publish_order_requires_generators_after_algorithms(self) -> None:
+        expected = self.mod.GROUPS["fnx"]["expected_publish_order"]
+        self.assertIn("fnx-generators", expected)
+        self.assertLess(expected.index("fnx-algorithms"), expected.index("fnx-generators"))
+
     def test_workflow_tag_gate_accepts_generic_tag_refs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -134,6 +139,14 @@ jobs:
         report = json.loads(output)
         golden = json.loads((FIXTURES / "fnx_all_missing_golden.json").read_text(encoding="utf-8"))
         self.assertEqual(report, golden)
+        group = report["groups"][0]
+        self.assertIn("fnx-generators", group["workflow"]["missing_from_publish_order"])
+        generator = next(crate for crate in group["crates"] if crate["crate_name"] == "fnx-generators")
+        self.assertEqual(generator["local_manifest"]["status"], "ok")
+        self.assertEqual(generator["local_manifest"]["version"], "0.1.0")
+        self.assertEqual(generator["crates_io"]["status"], "missing")
+        self.assertIn("crates_io_missing", generator["blocking_reasons"])
+        self.assertIn("workflow_missing_publish_crate", generator["blocking_reasons"])
 
     def test_markdown_summary_is_beads_ready_and_redaction_safe(self) -> None:
         output = subprocess.check_output(
