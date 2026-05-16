@@ -2,7 +2,8 @@ pub mod installer;
 
 pub use installer::{
     HookInstallOptions, HookInstallReport, HookStatusOptions, HookStatusReport, HookType,
-    check_hook_status, install_hooks,
+    PREFLIGHT_HOOK_SHELL_SCHEMA_V1, PreflightHookShell, PreflightHookShellOptions,
+    PreflightHookShellReport, check_hook_status, generate_preflight_shell_snippet, install_hooks,
 };
 
 pub const SUBSYSTEM: &str = "hooks";

@@ -1,0 +1,25 @@
+---
+source: src/hooks/installer.rs
+bead: bd-3usjw.7
+surface: trauma_guard_hook_helper
+assertion: ee hook preflight-shell --shell zsh emits a deterministic, syntactically-valid zsh snippet that wires ee preflight check into the preexec hook and aborts the upcoming command line via SIGINT when severity is high|critical and the user declines the prompt
+schema:
+  envelope: ee.response.v1
+  payload: ee.hooks.preflight_shell.v1
+contracts:
+  - snippet body is byte-identical across runs for the same (shell, ee_binary_path) pair
+  - snippet embeds a single-quoted absolute ee binary path (no PATH lookup)
+  - snippet wires preexec via add-zsh-hook so the function fires before each user command
+  - zsh preexec cannot natively cancel a command, so the snippet uses `kill -INT $$` for the block path (documented in the snippet comments)
+  - snippet declines safely when /dev/tty is unreadable (defaults to N, blocks via SIGINT)
+  - snippet allow-lists shell-internal builtins (cd, set, unset, trap, exit, return, fc, history) so they bypass the hook
+  - version field is the first 16 hex chars of blake3(snippet) for upgrade detection
+  - severity_block enumerates the severities {high, critical} that trigger the prompt
+evidence:
+  - src/hooks/installer.rs::generate_preflight_shell_snippet
+  - src/hooks/installer.rs::zsh_preflight_snippet
+  - tests/preflight_hook_zsh.rs::zsh_snippet_syntax_check_passes
+  - tests/preflight_hook_zsh.rs::zsh_snippet_source_defines_hook_function_and_activation_flag
+  - tests/preflight_hook_zsh.rs::zsh_snippet_warns_on_severity_high_when_preexec_fires
+  - tests/preflight_hook_zsh.rs::zsh_snippet_is_byte_stable_across_runs_for_pinned_binary_path
+  - tests/preflight_hook_zsh.rs::zsh_snippet_carries_documented_contract_markers

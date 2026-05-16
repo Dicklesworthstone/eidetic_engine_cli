@@ -787,6 +787,306 @@ pub fn check_hook_status(options: &HookStatusOptions) -> Result<HookStatusReport
     })
 }
 
+// ============================================================================
+// Preflight Shell Hook Helper (bd-3usjw.7 — trauma_guard_hook_helper)
+// ============================================================================
+
+/// Schema for the `ee hook preflight-shell` JSON envelope.
+pub const PREFLIGHT_HOOK_SHELL_SCHEMA_V1: &str = "ee.hooks.preflight_shell.v1";
+
+/// Severities at which the shell hook prompts and (on N) blocks the command.
+/// Lower severities still surface a warning at the source via `ee preflight
+/// check` but do not interrupt the shell flow.
+const PREFLIGHT_HOOK_BLOCK_SEVERITIES: &str = " high critical ";
+
+/// Length of the version hash slice surfaced in the JSON envelope. The full
+/// blake3 digest covers the entire snippet body; the prefix is enough to
+/// detect upgrades without bloating the envelope.
+const PREFLIGHT_HOOK_VERSION_HEX_LEN: usize = 16;
+
+/// Which shell flavor a generated snippet targets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreflightHookShell {
+    Bash,
+    Zsh,
+}
+
+impl PreflightHookShell {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bash => "bash",
+            Self::Zsh => "zsh",
+        }
+    }
+
+    #[must_use]
+    pub const fn default_install_basename(self) -> &'static str {
+        match self {
+            Self::Bash => "preflight.bash",
+            Self::Zsh => "preflight.zsh",
+        }
+    }
+}
+
+/// Options for [`generate_preflight_shell_snippet`].
+///
+/// `ee_binary_path` lets callers (tests, alternative installers) pin the
+/// absolute path embedded in the snippet. The CLI handler leaves it `None` to
+/// resolve from the current executable, which preserves the
+/// PATH-hijack-prevention contract documented on [`generate_hook_content`].
+#[derive(Clone, Debug, Default)]
+pub struct PreflightHookShellOptions {
+    pub shell: Option<PreflightHookShell>,
+    pub ee_binary_path: Option<PathBuf>,
+    pub install_dir: Option<PathBuf>,
+}
+
+/// Deterministic JSON-friendly report for `ee hook preflight-shell`.
+///
+/// `generated_at` is the only volatile field; the snippet body and
+/// `version` derived from it are byte-stable across runs for the same
+/// (`shell`, `ee_binary_path`) pair. The J7 strip-field convention drops
+/// `generated_at` before hash comparison.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PreflightHookShellReport {
+    pub schema: String,
+    pub shell: String,
+    pub snippet: String,
+    pub install_path: String,
+    pub version: String,
+    pub severity_block: Vec<String>,
+    pub ee_binary_path: String,
+    pub generated_at: String,
+}
+
+impl PreflightHookShellReport {
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        serialize_hook_report(self, "PreflightHookShellReport")
+    }
+}
+
+/// Generate the shell snippet, install path, and version hash for one shell
+/// flavor. Pure with respect to the resolved binary path: callers wanting
+/// determinism must pin `ee_binary_path` in [`PreflightHookShellOptions`].
+pub fn generate_preflight_shell_snippet(
+    options: &PreflightHookShellOptions,
+) -> Result<PreflightHookShellReport, DomainError> {
+    let started = Instant::now();
+    let install_dir = options
+        .install_dir
+        .clone()
+        .unwrap_or_else(default_preflight_hook_install_dir);
+    trace_trauma_guard_hook_helper(&install_dir, "input", elapsed_ms_since(started), &[]);
+
+    let shell = options.shell.ok_or_else(|| DomainError::Configuration {
+        message: "ee hook preflight-shell requires --shell bash|zsh".to_owned(),
+        repair: Some("Re-run with `--shell bash` or `--shell zsh`.".to_owned()),
+    })?;
+
+    let ee_binary = match options.ee_binary_path.clone() {
+        Some(path) => path,
+        None => get_ee_binary_path()?,
+    };
+    trace_trauma_guard_hook_helper(
+        &install_dir,
+        "dependency_check",
+        elapsed_ms_since(started),
+        &[],
+    );
+
+    let snippet = render_preflight_shell_snippet(shell, &ee_binary);
+    let version = preflight_snippet_version(&snippet);
+    let install_path = install_dir.join(shell.default_install_basename());
+    trace_trauma_guard_hook_helper(&install_dir, "persistence", elapsed_ms_since(started), &[]);
+
+    let report = PreflightHookShellReport {
+        schema: PREFLIGHT_HOOK_SHELL_SCHEMA_V1.to_owned(),
+        shell: shell.as_str().to_owned(),
+        snippet,
+        install_path: install_path.display().to_string(),
+        version,
+        severity_block: preflight_block_severities()
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+        ee_binary_path: ee_binary.display().to_string(),
+        generated_at: Utc::now().to_rfc3339(),
+    };
+    trace_trauma_guard_hook_helper(&install_dir, "response", elapsed_ms_since(started), &[]);
+    Ok(report)
+}
+
+#[must_use]
+fn default_preflight_hook_install_dir() -> PathBuf {
+    // Mirror the storage layout in README.md: ~/.local/share/ee/hooks/. Falls
+    // back to /tmp when HOME is unset so the JSON envelope still surfaces a
+    // useful suggestion rather than panicking.
+    if let Some(home) = std::env::var_os("HOME") {
+        let mut dir = PathBuf::from(home);
+        dir.push(".local/share/ee/hooks");
+        dir
+    } else {
+        PathBuf::from("/tmp/ee-hooks")
+    }
+}
+
+fn preflight_block_severities() -> Vec<&'static str> {
+    PREFLIGHT_HOOK_BLOCK_SEVERITIES.split_whitespace().collect()
+}
+
+fn preflight_snippet_version(snippet: &str) -> String {
+    let digest = blake3::hash(snippet.as_bytes()).to_hex().to_string();
+    digest[..PREFLIGHT_HOOK_VERSION_HEX_LEN].to_owned()
+}
+
+fn render_preflight_shell_snippet(shell: PreflightHookShell, ee_binary: &Path) -> String {
+    let ee_path_quoted = shell_quote(ee_binary);
+    match shell {
+        PreflightHookShell::Bash => bash_preflight_snippet(&ee_path_quoted),
+        PreflightHookShell::Zsh => zsh_preflight_snippet(&ee_path_quoted),
+    }
+}
+
+fn bash_preflight_snippet(ee_path_quoted: &str) -> String {
+    // The DEBUG trap is the only bash mechanism that runs reliably before
+    // every interactive command. Real blocking requires `shopt -s extdebug`
+    // (per bash(1)): when extdebug is enabled and the trap returns non-zero,
+    // the command is skipped.
+    format!(
+        r#"#!/usr/bin/env bash
+# ee preflight hook (bash) — surface=trauma_guard_hook_helper
+#
+# Installs a DEBUG trap that calls `ee preflight check --json` before each
+# interactive command. When the check exits 7 with severity in
+# {{high, critical}}, the user is prompted on /dev/tty; declining the
+# prompt blocks the command via `shopt -s extdebug`.
+#
+# Install:   source <install_path>   (see install_path in the JSON envelope)
+# Disable:   trap - DEBUG; shopt -u extdebug; unset EE_PREFLIGHT_HOOK_ACTIVE
+
+if [ -n "${{BASH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; then
+    EE_PREFLIGHT_HOOK_BINARY={ee_path}
+    EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES='{severities}'
+
+    __ee_preflight_hook_check() {{
+        # Skip our own callbacks and shell builtins that have nothing to gate.
+        case "${{BASH_COMMAND:-}}" in
+            __ee_preflight_*|trap*|exit*|return*|fc*|history*|cd*|''|set*|unset*) return 0 ;;
+        esac
+        # Only intercept in interactive shells with a controlling tty.
+        [ -z "${{PS1:-}}" ] && return 0
+        [ ! -t 0 ] && return 0
+
+        local _ee_out _ee_exit _ee_sev _ee_msg _ee_reply
+        _ee_out=$("$EE_PREFLIGHT_HOOK_BINARY" preflight check \
+            --cmd "$BASH_COMMAND" --json 2>/dev/null)
+        _ee_exit=$?
+        # Exit 7 means policy denied per the AGENTS.md trauma-guard contract.
+        [ "$_ee_exit" != 7 ] && return 0
+
+        _ee_sev=$(printf '%s' "$_ee_out" | awk -F'"severity":"' \
+            'NF>1{{split($2,a,"\""); print a[1]; exit}}')
+        case " $EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES " in
+            *" $_ee_sev "*) ;;
+            *) return 0 ;;
+        esac
+        _ee_msg=$(printf '%s' "$_ee_out" | awk -F'"message":"' \
+            'NF>1{{split($2,a,"\""); print a[1]; exit}}')
+        printf '\n[ee preflight] %s (severity=%s)\n' "$_ee_msg" "$_ee_sev" >&2
+        printf 'Proceed anyway? [y/N] ' >&2
+        if ! IFS= read -r _ee_reply </dev/tty; then
+            _ee_reply=N
+        fi
+        case "$_ee_reply" in
+            [yY]|[yY][eE][sS]) return 0 ;;
+        esac
+        printf '[ee preflight] Blocked by user.\n' >&2
+        return 1
+    }}
+
+    shopt -s extdebug 2>/dev/null || true
+    EE_PREFLIGHT_HOOK_ACTIVE=1
+    trap '__ee_preflight_hook_check' DEBUG
+fi
+"#,
+        ee_path = ee_path_quoted,
+        severities = PREFLIGHT_HOOK_BLOCK_SEVERITIES.trim(),
+    )
+}
+
+fn zsh_preflight_snippet(ee_path_quoted: &str) -> String {
+    // zsh's `preexec` hook fires before each user command but, unlike bash's
+    // DEBUG trap with extdebug, it cannot natively cancel the command. When
+    // the user declines the prompt we SIGINT the shell (`kill -INT $$`),
+    // which interrupts the about-to-exec command in interactive zsh.
+    format!(
+        r#"#!/usr/bin/env zsh
+# ee preflight hook (zsh) — surface=trauma_guard_hook_helper
+#
+# Installs a preexec function that calls `ee preflight check --json` before
+# each user command. When the check exits 7 with severity in
+# {{high, critical}}, the user is prompted on /dev/tty; declining the prompt
+# aborts the upcoming command by sending SIGINT to the shell. zsh preexec
+# cannot natively cancel a command, so SIGINT is the documented mechanism.
+#
+# Install:   source <install_path>   (see install_path in the JSON envelope)
+# Disable:   add-zsh-hook -d preexec __ee_preflight_hook_check;
+#            unset EE_PREFLIGHT_HOOK_ACTIVE
+
+if [ -n "${{ZSH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; then
+    EE_PREFLIGHT_HOOK_BINARY={ee_path}
+    EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES='{severities}'
+
+    autoload -Uz add-zsh-hook
+
+    __ee_preflight_hook_check() {{
+        # $1 is the verbatim command line as typed by the user.
+        local _ee_cmd="$1"
+        case "$_ee_cmd" in
+            __ee_preflight_*|trap*|exit*|return*|fc*|history*|''|cd*|set*|unset*) return 0 ;;
+        esac
+        [ -z "${{PS1:-}}" ] && return 0
+        [ ! -t 0 ] && return 0
+
+        local _ee_out _ee_exit _ee_sev _ee_msg _ee_reply
+        _ee_out=$("$EE_PREFLIGHT_HOOK_BINARY" preflight check \
+            --cmd "$_ee_cmd" --json 2>/dev/null)
+        _ee_exit=$?
+        [ "$_ee_exit" != 7 ] && return 0
+
+        _ee_sev=$(printf '%s' "$_ee_out" | awk -F'"severity":"' \
+            'NF>1{{split($2,a,"\""); print a[1]; exit}}')
+        case " $EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES " in
+            *" $_ee_sev "*) ;;
+            *) return 0 ;;
+        esac
+        _ee_msg=$(printf '%s' "$_ee_out" | awk -F'"message":"' \
+            'NF>1{{split($2,a,"\""); print a[1]; exit}}')
+        print -u2 -- "\n[ee preflight] $_ee_msg (severity=$_ee_sev)"
+        print -nu2 -- 'Proceed anyway? [y/N] '
+        if ! IFS= read -r _ee_reply </dev/tty; then
+            _ee_reply=N
+        fi
+        case "$_ee_reply" in
+            [yY]|[yY][eE][sS]) return 0 ;;
+        esac
+        print -u2 -- '[ee preflight] Blocked by user.'
+        kill -INT $$
+        return 1
+    }}
+
+    add-zsh-hook preexec __ee_preflight_hook_check
+    EE_PREFLIGHT_HOOK_ACTIVE=1
+fi
+"#,
+        ee_path = ee_path_quoted,
+        severities = PREFLIGHT_HOOK_BLOCK_SEVERITIES.trim(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1393,6 +1693,203 @@ mod tests {
         let status = check_existing_hook(&link);
         assert_eq!(status, ExistingHookStatus::Symlink);
 
+        Ok(())
+    }
+
+    // ========================================================================
+    // bd-3usjw.7 — trauma_guard_hook_helper preflight-shell snippet tests
+    // ========================================================================
+
+    fn fixed_ee_binary() -> PathBuf {
+        PathBuf::from("/usr/local/bin/ee")
+    }
+
+    fn fixed_install_dir() -> PathBuf {
+        PathBuf::from("/home/test-user/.local/share/ee/hooks")
+    }
+
+    fn fixed_options(shell: PreflightHookShell) -> PreflightHookShellOptions {
+        PreflightHookShellOptions {
+            shell: Some(shell),
+            ee_binary_path: Some(fixed_ee_binary()),
+            install_dir: Some(fixed_install_dir()),
+        }
+    }
+
+    #[test]
+    fn preflight_shell_requires_shell_choice() {
+        let options = PreflightHookShellOptions {
+            shell: None,
+            ee_binary_path: Some(fixed_ee_binary()),
+            install_dir: Some(fixed_install_dir()),
+        };
+
+        let error = generate_preflight_shell_snippet(&options).expect_err("shell required");
+        assert_eq!(error.code(), "configuration_error");
+        assert!(
+            error.message().contains("--shell"),
+            "error must point to --shell flag, got: {}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn bash_snippet_is_deterministic_for_fixed_binary_path() -> TestResult {
+        let options = fixed_options(PreflightHookShell::Bash);
+        let first = generate_preflight_shell_snippet(&options).map_err(|e| e.message())?;
+        let second = generate_preflight_shell_snippet(&options).map_err(|e| e.message())?;
+
+        assert_eq!(
+            first.snippet, second.snippet,
+            "bash snippet body must be byte-identical across runs"
+        );
+        assert_eq!(
+            first.version, second.version,
+            "bash snippet version hash must be byte-identical across runs"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn zsh_snippet_is_deterministic_for_fixed_binary_path() -> TestResult {
+        let options = fixed_options(PreflightHookShell::Zsh);
+        let first = generate_preflight_shell_snippet(&options).map_err(|e| e.message())?;
+        let second = generate_preflight_shell_snippet(&options).map_err(|e| e.message())?;
+
+        assert_eq!(first.snippet, second.snippet);
+        assert_eq!(first.version, second.version);
+        Ok(())
+    }
+
+    #[test]
+    fn bash_snippet_embeds_quoted_absolute_path() -> TestResult {
+        let report = generate_preflight_shell_snippet(&fixed_options(PreflightHookShell::Bash))
+            .map_err(|e| e.message())?;
+        assert!(
+            report.snippet.contains("'/usr/local/bin/ee'"),
+            "bash snippet must quote the absolute binary path; got:\n{}",
+            report.snippet
+        );
+        assert!(
+            !report.snippet.contains("\nee preflight"),
+            "bash snippet must not contain bare `ee` PATH-resolved invocation"
+        );
+        assert!(report.snippet.starts_with("#!/usr/bin/env bash"));
+        assert!(
+            report
+                .snippet
+                .contains("trap '__ee_preflight_hook_check' DEBUG")
+        );
+        assert!(report.snippet.contains("shopt -s extdebug"));
+        Ok(())
+    }
+
+    #[test]
+    fn zsh_snippet_embeds_quoted_absolute_path_and_uses_preexec_hook() -> TestResult {
+        let report = generate_preflight_shell_snippet(&fixed_options(PreflightHookShell::Zsh))
+            .map_err(|e| e.message())?;
+        assert!(
+            report.snippet.contains("'/usr/local/bin/ee'"),
+            "zsh snippet must quote the absolute binary path; got:\n{}",
+            report.snippet
+        );
+        assert!(report.snippet.starts_with("#!/usr/bin/env zsh"));
+        assert!(
+            report
+                .snippet
+                .contains("add-zsh-hook preexec __ee_preflight_hook_check")
+        );
+        assert!(report.snippet.contains("kill -INT $$"));
+        Ok(())
+    }
+
+    #[test]
+    fn snippet_path_with_special_characters_is_safely_quoted() -> TestResult {
+        let path_with_quote = PathBuf::from("/home/test/it's/ee");
+        let options = PreflightHookShellOptions {
+            shell: Some(PreflightHookShell::Bash),
+            ee_binary_path: Some(path_with_quote),
+            install_dir: Some(fixed_install_dir()),
+        };
+        let report = generate_preflight_shell_snippet(&options).map_err(|e| e.message())?;
+        // Single quotes inside paths must be escaped as '\''
+        assert!(
+            report.snippet.contains(r"'/home/test/it'\''s/ee'"),
+            "snippet must escape embedded single quote; got:\n{}",
+            report.snippet
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn install_path_includes_shell_specific_basename() -> TestResult {
+        let bash = generate_preflight_shell_snippet(&fixed_options(PreflightHookShell::Bash))
+            .map_err(|e| e.message())?;
+        let zsh = generate_preflight_shell_snippet(&fixed_options(PreflightHookShell::Zsh))
+            .map_err(|e| e.message())?;
+        assert!(bash.install_path.ends_with("/preflight.bash"));
+        assert!(zsh.install_path.ends_with("/preflight.zsh"));
+        Ok(())
+    }
+
+    #[test]
+    fn report_json_envelope_carries_schema_and_severity_block() -> TestResult {
+        let report = generate_preflight_shell_snippet(&fixed_options(PreflightHookShell::Bash))
+            .map_err(|e| e.message())?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&report.to_json()).map_err(|e| e.to_string())?;
+        assert_eq!(
+            parsed["schema"].as_str(),
+            Some(PREFLIGHT_HOOK_SHELL_SCHEMA_V1)
+        );
+        assert_eq!(parsed["shell"].as_str(), Some("bash"));
+        let severities: Vec<&str> = parsed["severity_block"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert!(severities.contains(&"high"));
+        assert!(severities.contains(&"critical"));
+        assert!(!report.version.is_empty());
+        assert_eq!(report.version.len(), PREFLIGHT_HOOK_VERSION_HEX_LEN);
+        Ok(())
+    }
+
+    #[test]
+    fn version_hash_changes_when_snippet_changes() -> TestResult {
+        let bash = generate_preflight_shell_snippet(&fixed_options(PreflightHookShell::Bash))
+            .map_err(|e| e.message())?;
+        let zsh = generate_preflight_shell_snippet(&fixed_options(PreflightHookShell::Zsh))
+            .map_err(|e| e.message())?;
+        assert_ne!(
+            bash.version, zsh.version,
+            "bash and zsh snippets must hash differently"
+        );
+
+        let different_binary = PreflightHookShellOptions {
+            shell: Some(PreflightHookShell::Bash),
+            ee_binary_path: Some(PathBuf::from("/opt/ee/bin/ee")),
+            install_dir: Some(fixed_install_dir()),
+        };
+        let bash_alt =
+            generate_preflight_shell_snippet(&different_binary).map_err(|e| e.message())?;
+        assert_ne!(
+            bash.version, bash_alt.version,
+            "binary-path change must propagate into version hash"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn snippet_body_contains_no_volatile_fields() -> TestResult {
+        let report = generate_preflight_shell_snippet(&fixed_options(PreflightHookShell::Bash))
+            .map_err(|e| e.message())?;
+        // J7 determinism contract: snippet body never embeds the volatile
+        // generated_at, only the deterministic version hash. generated_at
+        // lives in the JSON envelope and is stripped at compare time.
+        assert!(
+            !report.snippet.contains(&report.generated_at),
+            "generated_at must not leak into snippet body (volatile)"
+        );
         Ok(())
     }
 }

@@ -632,6 +632,9 @@ pub enum Command {
     Health(HealthArgs),
     /// Print command help.
     Help,
+    /// Generate agent-harness hook helpers (preflight shell snippets, etc.).
+    #[command(subcommand)]
+    Hook(HookCommand),
     /// Graph analytics, snapshots, and export artifacts.
     #[command(subcommand)]
     Graph(GraphCommand),
@@ -6980,6 +6983,52 @@ pub struct McpValidateArgs {
     pub manifest_schema: Option<PathBuf>,
 }
 
+/// Subcommands for `ee hook` (bd-3usjw.7 — trauma_guard_hook_helper).
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum HookCommand {
+    /// Emit a shell snippet that wires `ee preflight check` into bash or zsh
+    /// as a pre-execution hook.
+    #[command(name = "preflight-shell")]
+    PreflightShell(PreflightShellArgs),
+}
+
+/// Shell flavor selector for `ee hook preflight-shell`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum PreflightShellFlavor {
+    Bash,
+    Zsh,
+}
+
+impl PreflightShellFlavor {
+    #[must_use]
+    pub const fn into_hook_shell(self) -> crate::hooks::PreflightHookShell {
+        match self {
+            Self::Bash => crate::hooks::PreflightHookShell::Bash,
+            Self::Zsh => crate::hooks::PreflightHookShell::Zsh,
+        }
+    }
+}
+
+/// Arguments for `ee hook preflight-shell`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct PreflightShellArgs {
+    /// Target shell flavor: `bash` or `zsh`.
+    #[arg(long, value_enum)]
+    pub shell: PreflightShellFlavor,
+    /// Override the absolute path of the `ee` binary embedded in the snippet.
+    /// Defaults to the canonicalized path of the current executable, which
+    /// preserves the PATH-hijack-prevention contract documented on
+    /// `generate_hook_content`.
+    #[arg(long = "ee-binary", value_name = "PATH")]
+    pub ee_binary: Option<PathBuf>,
+    /// Override the directory used to suggest the install path in the JSON
+    /// envelope (the snippet body never contains it). Defaults to
+    /// `$HOME/.local/share/ee/hooks`.
+    #[arg(long = "install-dir", value_name = "PATH")]
+    pub install_dir: Option<PathBuf>,
+}
+
 /// Subcommands for `ee model`.
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum ModelCommand {
@@ -8760,6 +8809,9 @@ where
         Some(Command::Mcp(McpCommand::Validate(ref args))) => {
             handle_mcp_validate(&cli, args, stdout)
         }
+        Some(Command::Hook(HookCommand::PreflightShell(ref args))) => {
+            handle_hook_preflight_shell(&cli, args, stdout, stderr)
+        }
         Some(Command::Model(ref model_cmd)) => {
             handle_model_command(&cli, model_cmd, stdout, stderr)
         }
@@ -9034,6 +9086,58 @@ fn args_contain_fields_flag(args: &[OsString]) -> bool {
         }
     }
     false
+}
+
+fn handle_hook_preflight_shell<W, E>(
+    cli: &Cli,
+    args: &PreflightShellArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let options = crate::hooks::PreflightHookShellOptions {
+        shell: Some(args.shell.into_hook_shell()),
+        ee_binary_path: args.ee_binary.clone(),
+        install_dir: args.install_dir.clone(),
+    };
+    let report = match crate::hooks::generate_preflight_shell_snippet(&options) {
+        Ok(report) => report,
+        Err(error) => {
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            // Humans want the snippet itself (ready to paste). The JSON
+            // envelope is one --json away.
+            write_stdout(stdout, &report.snippet)
+        }
+        output::Renderer::Toon => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": report,
+            });
+            write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&json.to_string()) + "\n"),
+            )
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": report,
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
 }
 
 fn handle_mcp_validate<W>(cli: &Cli, args: &McpValidateArgs, stdout: &mut W) -> ProcessExitCode
@@ -35603,6 +35707,9 @@ impl NormalizedInvocation {
                 Command::Mcp(mcp) => match mcp {
                     McpCommand::Manifest => "mcp manifest".to_string(),
                     McpCommand::Validate(_) => "mcp validate".to_string(),
+                },
+                Command::Hook(hook) => match hook {
+                    HookCommand::PreflightShell(_) => "hook preflight-shell".to_string(),
                 },
                 Command::Model(model) => match model {
                     ModelCommand::Status(_) => "model status".to_string(),
