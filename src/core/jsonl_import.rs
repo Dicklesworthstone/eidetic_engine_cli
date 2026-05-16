@@ -385,7 +385,7 @@ pub fn import_jsonl_records(
     options: &JsonlImportOptions,
 ) -> Result<JsonlImportReport, JsonlImportError> {
     let workspace_path = normalize_path(&options.workspace_path);
-    ensure_import_source_path_is_not_symlink(&options.source_path)?;
+    ensure_import_source_path_is_regular_file(&options.source_path)?;
     let source_path = normalize_path(&options.source_path);
     let source_id = source_id(&source_path);
     let input = std::fs::read_to_string(&source_path).map_err(|error| JsonlImportError::Io {
@@ -1160,7 +1160,7 @@ fn ensure_database_parent(path: &Path) -> Result<(), JsonlImportError> {
     })
 }
 
-fn ensure_import_source_path_is_not_symlink(path: &Path) -> Result<(), JsonlImportError> {
+fn ensure_import_source_path_is_regular_file(path: &Path) -> Result<(), JsonlImportError> {
     if let Some(symlink_path) =
         first_existing_symlink_component(path).map_err(|error| JsonlImportError::Io {
             path: error.path,
@@ -1172,6 +1172,19 @@ fn ensure_import_source_path_is_not_symlink(path: &Path) -> Result<(), JsonlImpo
             message: format!(
                 "refusing to import JSONL source through symlinked path component `{}`",
                 symlink_path.display()
+            ),
+        });
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|error| JsonlImportError::Io {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(JsonlImportError::Io {
+            path: path.to_path_buf(),
+            message: format!(
+                "refusing to import JSONL source from non-regular path `{}`",
+                path.display()
             ),
         });
     }
@@ -1647,6 +1660,29 @@ mod tests {
         assert!(
             file_error.to_string().contains("symlinked path component"),
             "unexpected error: {file_error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn import_rejects_non_regular_source_path_before_read() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let source_dir = tempdir.path().join("export.jsonl");
+        fs::create_dir_all(&source_dir).map_err(|error| error.to_string())?;
+
+        let error = match import_jsonl_records(&JsonlImportOptions {
+            workspace_path: tempdir.path().join("workspace"),
+            database_path: None,
+            source_path: source_dir,
+            dry_run: true,
+        }) {
+            Ok(_) => return Err("import should reject directory source path".to_owned()),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("non-regular path"),
+            "unexpected error: {error}"
         );
         Ok(())
     }
