@@ -28,12 +28,39 @@ fn env_or_default(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_owned())
 }
 
+fn read_pool_script_source() -> Result<String, String> {
+    fs::read_to_string(
+        repo_root()
+            .join("scripts")
+            .join("e2e_overhaul")
+            .join("read_pool_concurrency.sh"),
+    )
+    .map_err(|error| format!("read read-pool e2e script: {error}"))
+}
+
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
         Ok(())
     } else {
         Err(message.into())
     }
+}
+
+#[test]
+fn strict_speedup_gate_requires_in_process_harness() -> TestResult {
+    let script = read_pool_script_source()?;
+    for required in [
+        "READ_POOL_HARNESS_MODE=\"process_fanout_cli\"",
+        "process_fanout_cli cannot prove process-local read-pool speedup",
+        "read_pool_strict_speedup_requires_in_process_harness",
+        "\"harness_mode\" \"$READ_POOL_HARNESS_MODE\"",
+    ] {
+        ensure(
+            script.contains(required),
+            format!("read-pool harness strict-gate contract missing: {required}"),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]

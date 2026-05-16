@@ -8,10 +8,12 @@
 #   - verifies writer results are successful or structured contention responses
 #   - records p50 latency for pool_size=1 and pool_size=8 batches
 #
-# Dedicated perf runs may set EE_READ_POOL_ENFORCE_SPEEDUP=1 to require the
-# pool_size=8 p50 to be <= 60% of pool_size=1. The default smoke path records
-# the measurement without enforcing it, because process launch and host load can
-# dominate small CI runs.
+# This is a process-fanout CLI harness: each `ee context` is a separate process.
+# The read pool is process-local, so this script can prove no-deadlock,
+# structured contention, pack hashes, and logging, but it cannot prove an
+# in-process pool speedup. Dedicated perf runs must use an in-process fanout
+# harness or benchmark before enforcing the pool_size=8 <= 60% of pool_size=1
+# acceptance gate.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,6 +36,7 @@ READ_POOL_CONTEXTS="${EE_READ_POOL_CONTEXTS:-8}"
 READ_POOL_WRITERS="${EE_READ_POOL_WRITERS:-4}"
 READ_POOL_CORPUS_SIZE="${EE_READ_POOL_CORPUS_SIZE:-220}"
 READ_POOL_ENFORCE_SPEEDUP="${EE_READ_POOL_ENFORCE_SPEEDUP:-0}"
+READ_POOL_HARNESS_MODE="process_fanout_cli"
 
 read_pool_step() {
     local phase="${1:?phase required}"
@@ -52,6 +55,7 @@ read_pool_step() {
         "request_id" "$RUN_ID-$phase" \
         "bead_id" "bd-2caru.5" \
         "surface" "read_pool" \
+        "harness_mode" "$READ_POOL_HARNESS_MODE" \
         "elapsed_ms" "$elapsed_ms" \
         "pool_size" "$pool_size" \
         "artifactHash" "$artifact_hash"
@@ -262,13 +266,11 @@ P50_EIGHT="$(run_batch "pool8" 8)"
 read_pool_step "summary" "true" "pool1_p50=$P50_SINGLE pool8_p50=$P50_EIGHT" "0" ""
 
 if [ "$READ_POOL_ENFORCE_SPEEDUP" = "1" ]; then
-    # Integer comparison for: pool8 <= pool1 * 0.60.
-    if [ "$((P50_EIGHT * 100))" -le "$((P50_SINGLE * 60))" ]; then
-        e2e_log_assert_eq "speedup" "speedup" "read_pool_pool8_p50_lte_60pct_pool1"
-    else
-        e2e_log_assert_eq "pool8_p50=$P50_EIGHT pool1_p50=$P50_SINGLE" \
-            "pool8_p50_lte_60pct_pool1" "read_pool_pool8_p50_lte_60pct_pool1"
-    fi
+    read_pool_step "perf_gate" "false" \
+        "process_fanout_cli cannot prove process-local read-pool speedup; use an in-process fanout benchmark or harness" \
+        "0" ""
+    e2e_log_assert_eq "$READ_POOL_HARNESS_MODE" "in_process_pool_benchmark" \
+        "read_pool_strict_speedup_requires_in_process_harness"
 else
     e2e_log_assert_eq "recorded" "recorded" "read_pool_perf_recorded_without_enforcement"
 fi
