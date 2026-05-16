@@ -83,7 +83,17 @@ Current conventions:
 | `preflight_guard` | `ee preflight check --cmd` command-guard degradation. |
 | `preflight_run` | `ee preflight run` risk-evidence degradation. |
 | `preflight_show` | `ee preflight show` persisted-run or risk-evidence degradation. |
+| `playbook_export` | `ee playbook export` portable-rule export degradation. |
+| `playbook_extract` | `ee playbook extract` candidate extraction degradation. |
+| `playbook_import` | `ee playbook import` portable-rule import degradation. |
+| `playbook_list` | `ee playbook list` portable-rule listing degradation. |
 | `request` | Request parsing, compatibility, or ignored-query-field degradation. |
+| `rule_add` | `ee rule add` procedural-rule creation degradation. |
+| `rule_list` | `ee rule list` procedural-rule listing degradation. |
+| `rule_mark` | `ee rule mark` lifecycle evidence degradation. |
+| `rule_protect` | `ee rule protect` mutation degradation. |
+| `rule_show` | `ee rule show` procedural-rule read degradation. |
+| `rule_update` | `ee rule update` mutation degradation. |
 | `search` | Search, index, recall, filtering, or visibility degradation carried into context output. |
 | `status` | Top-level `ee status` posture, capability, or subsystem degradation. |
 | `skyline` | `ee status --skyline` structural skyline degradation. |

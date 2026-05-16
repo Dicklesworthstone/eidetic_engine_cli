@@ -12,8 +12,11 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
+use crate::core::degraded_aggregation::{
+    AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
+};
 use crate::curate::{CandidateSource, CandidateType, specificity_score};
 use crate::db::{
     CreateAuditInput, CreateCurationCandidateInput, CreateProceduralRuleInput,
@@ -310,6 +313,7 @@ pub struct RuleAddReport {
     pub index_job_id: Option<String>,
     pub index_status: String,
     pub redaction_status: String,
+    #[serde(serialize_with = "serialize_rule_add_degradations")]
     pub degraded: Vec<RuleAddDegradation>,
 }
 
@@ -381,6 +385,121 @@ pub struct RuleAddDegradation {
     pub repair: String,
 }
 
+fn serialize_rule_add_degradations<S>(
+    degraded: &[RuleAddDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_rule_degradations("rule_add", degraded).serialize(serializer)
+}
+
+fn serialize_rule_list_degradations<S>(
+    degraded: &[RuleAddDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_rule_degradations("rule_list", degraded).serialize(serializer)
+}
+
+fn serialize_rule_show_degradations<S>(
+    degraded: &[RuleAddDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_rule_degradations("rule_show", degraded).serialize(serializer)
+}
+
+fn serialize_rule_mark_degradations<S>(
+    degraded: &[RuleAddDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_rule_degradations("rule_mark", degraded).serialize(serializer)
+}
+
+fn serialize_rule_protect_degradations<S>(
+    degraded: &[RuleAddDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_rule_degradations("rule_protect", degraded).serialize(serializer)
+}
+
+fn serialize_rule_update_degradations<S>(
+    degraded: &[RuleAddDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_rule_degradations("rule_update", degraded).serialize(serializer)
+}
+
+fn serialize_playbook_extract_degradations<S>(
+    degraded: &[RuleAddDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_rule_degradations("playbook_extract", degraded).serialize(serializer)
+}
+
+fn serialize_playbook_list_degradations<S>(
+    degraded: &[RuleAddDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_rule_degradations("playbook_list", degraded).serialize(serializer)
+}
+
+fn serialize_playbook_export_degradations<S>(
+    degraded: &[RuleAddDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_rule_degradations("playbook_export", degraded).serialize(serializer)
+}
+
+fn serialize_playbook_import_degradations<S>(
+    degraded: &[RuleAddDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_rule_degradations("playbook_import", degraded).serialize(serializer)
+}
+
+fn aggregate_rule_degradations(
+    source: &'static str,
+    degraded: &[RuleAddDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            source,
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry.repair.clone(),
+        )
+    }))
+}
+
 /// Result of listing procedural rules.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -398,6 +517,7 @@ pub struct RuleListReport {
     pub truncated: bool,
     pub filter: RuleListFilter,
     pub rules: Vec<RuleSummary>,
+    #[serde(serialize_with = "serialize_rule_list_degradations")]
     pub degraded: Vec<RuleAddDegradation>,
 }
 
@@ -455,6 +575,7 @@ pub struct RuleShowReport {
     pub database_path: String,
     pub found: bool,
     pub rule: RuleDetails,
+    #[serde(serialize_with = "serialize_rule_show_degradations")]
     pub degraded: Vec<RuleAddDegradation>,
 }
 
@@ -532,6 +653,7 @@ pub struct RuleMarkReport {
     pub evidence: RuleMarkEvidenceReport,
     pub previous_rule: RuleDetails,
     pub rule: RuleDetails,
+    #[serde(serialize_with = "serialize_rule_mark_degradations")]
     pub degraded: Vec<RuleAddDegradation>,
 }
 
@@ -628,6 +750,7 @@ pub struct RuleProtectReport {
     pub changed: bool,
     pub dry_run: bool,
     pub audit_id: Option<String>,
+    #[serde(serialize_with = "serialize_rule_protect_degradations")]
     pub degraded: Vec<RuleAddDegradation>,
 }
 
@@ -652,6 +775,7 @@ pub struct RuleUpdateReport {
     pub index_status: String,
     pub previous_rule: RuleDetails,
     pub rule: RuleDetails,
+    #[serde(serialize_with = "serialize_rule_update_degradations")]
     pub degraded: Vec<RuleAddDegradation>,
 }
 
@@ -716,6 +840,7 @@ pub struct PlaybookExtractReport {
     pub dry_run: bool,
     pub durable_mutation: bool,
     pub candidates: Vec<PlaybookRuleCandidate>,
+    #[serde(serialize_with = "serialize_playbook_extract_degradations")]
     pub degraded: Vec<RuleAddDegradation>,
     pub next_action: String,
 }
@@ -823,6 +948,7 @@ pub struct PlaybookListReport {
     pub offset: u32,
     pub truncated: bool,
     pub rules: Vec<PlaybookPortableRule>,
+    #[serde(serialize_with = "serialize_playbook_list_degradations")]
     pub degraded: Vec<RuleAddDegradation>,
 }
 
@@ -875,6 +1001,7 @@ pub struct PlaybookExportReport {
     pub no_overwrite: bool,
     pub redaction_status: String,
     pub document: PlaybookPortableDocument,
+    #[serde(serialize_with = "serialize_playbook_export_degradations")]
     pub degraded: Vec<RuleAddDegradation>,
 }
 
@@ -939,6 +1066,7 @@ pub struct PlaybookImportReport {
     pub downgraded_count: usize,
     pub durable_mutation: bool,
     pub decisions: Vec<PlaybookImportDecision>,
+    #[serde(serialize_with = "serialize_playbook_import_degradations")]
     pub degraded: Vec<RuleAddDegradation>,
 }
 
@@ -3873,6 +4001,143 @@ mod tests {
         } else {
             Err(message.into())
         }
+    }
+
+    #[test]
+    fn rule_add_data_json_aggregates_duplicate_degradations() -> TestResult {
+        let report = RuleAddReport {
+            schema: RULE_ADD_SCHEMA_V1,
+            command: "rule add",
+            version: "test",
+            status: "dry_run".to_owned(),
+            rule_id: "rule_01234567890123456789012345".to_owned(),
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            workspace_path: "/tmp/workspace".to_owned(),
+            database_path: "/tmp/workspace/.ee/ee.db".to_owned(),
+            content: "Run cargo fmt --check before release.".to_owned(),
+            scope: "workspace".to_owned(),
+            scope_pattern: None,
+            maturity: "candidate".to_owned(),
+            lifecycle: RuleAddLifecycle {
+                initial_maturity: "candidate".to_owned(),
+                is_active: true,
+                is_terminal: false,
+                next_action: "collect evidence".to_owned(),
+            },
+            trust_class: "agent_assertion".to_owned(),
+            protected: false,
+            confidence: 0.5,
+            utility: 0.5,
+            importance: 0.5,
+            tags: Vec::new(),
+            source_memory_ids: Vec::new(),
+            evidence: RuleAddEvidence {
+                status: "insufficient".to_owned(),
+                source_memory_count: 0,
+                verified: false,
+                requirement: "validated rules require evidence".to_owned(),
+            },
+            dry_run: true,
+            persisted: false,
+            audit_id: None,
+            index_job_id: None,
+            index_status: "dry_run_not_queued".to_owned(),
+            redaction_status: "checked".to_owned(),
+            degraded: vec![
+                RuleAddDegradation {
+                    code: "rule_fixture_degraded".to_owned(),
+                    severity: "low".to_owned(),
+                    message: "lower-severity duplicate".to_owned(),
+                    repair: "low repair".to_owned(),
+                },
+                RuleAddDegradation {
+                    code: "rule_fixture_degraded".to_owned(),
+                    severity: "high".to_owned(),
+                    message: "higher-severity duplicate".to_owned(),
+                    repair: "high repair".to_owned(),
+                },
+            ],
+        };
+
+        let value: serde_json::Value =
+            serde_json::from_str(&report.data_json()).map_err(|error| error.to_string())?;
+        let degraded = value
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("degraded array missing: {value}"))?;
+
+        ensure(
+            degraded.len() == 1,
+            format!("duplicate degraded entries should aggregate: {degraded:?}"),
+        )?;
+        ensure(
+            degraded[0]["code"] == "rule_fixture_degraded",
+            "aggregated code should be stable",
+        )?;
+        ensure(
+            degraded[0]["severity"] == "high",
+            "aggregated severity should escalate",
+        )?;
+        ensure(
+            degraded[0]["message"] == "higher-severity duplicate",
+            "highest-severity message should win",
+        )?;
+        ensure(
+            degraded[0]["repair"] == "high repair",
+            "highest-severity repair should win",
+        )?;
+        ensure(
+            degraded[0]["sources"] == serde_json::json!(["rule_add"]),
+            format!("rule_add source should be present: {}", degraded[0]),
+        )
+    }
+
+    #[test]
+    fn playbook_list_data_json_aggregates_duplicate_degradations() -> TestResult {
+        let report = PlaybookListReport {
+            schema: PLAYBOOK_LIST_SCHEMA_V1,
+            command: "playbook list",
+            version: "test",
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            workspace_path: "/tmp/workspace".to_owned(),
+            database_path: "/tmp/workspace/.ee/ee.db".to_owned(),
+            total_count: 0,
+            returned_count: 0,
+            limit: 50,
+            offset: 0,
+            truncated: false,
+            rules: Vec::new(),
+            degraded: vec![
+                RuleAddDegradation {
+                    code: "playbook_fixture_degraded".to_owned(),
+                    severity: "medium".to_owned(),
+                    message: "first duplicate".to_owned(),
+                    repair: "retry list".to_owned(),
+                },
+                RuleAddDegradation {
+                    code: "playbook_fixture_degraded".to_owned(),
+                    severity: "medium".to_owned(),
+                    message: "second duplicate".to_owned(),
+                    repair: "alternate retry".to_owned(),
+                },
+            ],
+        };
+
+        let value: serde_json::Value =
+            serde_json::from_str(&report.data_json()).map_err(|error| error.to_string())?;
+        let degraded = value
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("degraded array missing: {value}"))?;
+
+        ensure(
+            degraded.len() == 1,
+            format!("duplicate playbook degradations should aggregate: {degraded:?}"),
+        )?;
+        ensure(
+            degraded[0]["sources"] == serde_json::json!(["playbook_list"]),
+            format!("playbook_list source should be present: {}", degraded[0]),
+        )
     }
 
     #[test]
