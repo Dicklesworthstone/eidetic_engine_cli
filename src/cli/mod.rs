@@ -28556,6 +28556,23 @@ fn format_why_human(report: &crate::core::why::WhyReport) -> String {
         }
     }
 
+    if let Some(ref profile) = report.agent_profile {
+        output.push_str("\nAgent profile:\n");
+        output.push_str(&format!("  Agent: {}\n", profile.agent_name));
+        output.push_str(&format!(
+            "  Outcomes: {} helpful, {} harmful, {} ignored ({} total)\n",
+            profile.helpful_count,
+            profile.harmful_count,
+            profile.ignored_count,
+            profile.observed_outcomes
+        ));
+        output.push_str(&format!(
+            "  Bias: {:.4} (cap +/-{:.2}, cold start: {})\n",
+            profile.bias, profile.max_bias_magnitude, profile.cold_start
+        ));
+        output.push_str(&format!("  Last seen: {}\n", profile.last_seen_at));
+    }
+
     if !report.links.is_empty() {
         output.push_str("\nLinks:\n");
         for link in &report.links {
@@ -28831,6 +28848,23 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
         })
     });
 
+    let agent_profile = report.agent_profile.as_ref().map(|profile| {
+        serde_json::json!({
+            "schema": profile.schema,
+            "agentName": profile.agent_name,
+            "agentNameHash": profile.agent_name_hash,
+            "helpfulCount": profile.helpful_count,
+            "harmfulCount": profile.harmful_count,
+            "ignoredCount": profile.ignored_count,
+            "observedOutcomes": profile.observed_outcomes,
+            "bias": graph_score_json_value(profile.bias),
+            "maxBiasMagnitude": graph_score_json_value(profile.max_bias_magnitude),
+            "coldStart": profile.cold_start,
+            "coldStartThreshold": profile.cold_start_threshold,
+            "lastSeenAt": profile.last_seen_at,
+        })
+    });
+
     let degraded: Vec<serde_json::Value> = report
         .degraded
         .iter()
@@ -28915,6 +28949,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "retrieval": retrieval,
             "graphRetrievalFeatures": graph_retrieval,
             "selection": selection,
+            "agentProfile": agent_profile,
             "lifecycle": lifecycle,
             "contradictions": contradictions,
             "links": links,
@@ -36836,8 +36871,8 @@ mod tests {
         SearchStatus,
     };
     use crate::core::why::{
-        PackSelectionExplanation, RationaleTraceSummary, RetrievalExplanation,
-        SelectionExplanation, StorageExplanation, WhyReport,
+        AgentProfileSelectionExplanation, PackSelectionExplanation, RationaleTraceSummary,
+        RetrievalExplanation, SelectionExplanation, StorageExplanation, WhyReport,
     };
     use crate::models::error_codes::ALL_ERROR_CODES;
     use crate::models::{
@@ -37564,6 +37599,20 @@ mod tests {
                 }),
             },
         )
+        .with_agent_profile(Some(AgentProfileSelectionExplanation {
+            schema: crate::models::AGENT_CONTEXT_PROFILE_SCHEMA_V1,
+            agent_name: "FrostyMoose".to_string(),
+            agent_name_hash: "blake3:fixtureagent".to_string(),
+            helpful_count: 12,
+            harmful_count: 2,
+            ignored_count: 3,
+            observed_outcomes: 17,
+            bias: 0.03125,
+            max_bias_magnitude: crate::models::AGENT_PROFILE_BIAS_CAP,
+            cold_start: false,
+            cold_start_threshold: crate::models::AGENT_PROFILE_COLD_START_OUTCOMES,
+            last_seen_at: "2026-05-04T12:02:00Z".to_string(),
+        }))
         .with_lifecycle(crate::core::why::LifecycleExplanation {
             status: "active",
             tombstoned_at: None,
@@ -37610,7 +37659,27 @@ mod tests {
             &actual["data"]["selection"]["latestPackSelection"]["packId"],
             &serde_json::json!("pack_release"),
             "why TOON preserves latest pack selection provenance",
+        )?;
+        ensure(
+            actual["data"]["agentProfile"]["helpfulCount"].as_f64() == Some(12.0),
+            format!(
+                "why TOON preserves agent helpful count: expected 12, got {:?}",
+                actual["data"]["agentProfile"]["helpfulCount"]
+            ),
         )
+    }
+
+    #[test]
+    fn why_human_includes_agent_profile_counts() -> TestResult {
+        let output = super::format_why_human(&why_found_fixture());
+
+        ensure_contains(&output, "Agent profile:", "human agent profile heading")?;
+        ensure_contains(
+            &output,
+            "Outcomes: 12 helpful, 2 harmful, 3 ignored (17 total)",
+            "human agent profile counts",
+        )?;
+        ensure_contains(&output, "Bias: 0.0312", "human agent profile bias")
     }
 
     #[test]
