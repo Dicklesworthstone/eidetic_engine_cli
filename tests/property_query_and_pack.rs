@@ -810,6 +810,29 @@ fn proptest_run_event(
     })
 }
 
+fn regression_fixture_preflight_event(
+    dir: &Path,
+    now: &str,
+    stale_after_days: i64,
+    elapsed_seconds: f64,
+    budget_seconds: f64,
+) -> Result<DeterminismProptestRunEvent, String> {
+    let fixtures = load_regression_fixtures(dir)?;
+    for fixture in &fixtures {
+        verify_regression_fixture_replay(fixture)?;
+    }
+    let stale_regressions_flagged =
+        stale_regression_fixture_hashes(&fixtures, now, stale_after_days)?;
+    proptest_run_event(
+        fixtures.len(),
+        0,
+        &[],
+        stale_regressions_flagged,
+        elapsed_seconds,
+        budget_seconds,
+    )
+}
+
 fn hash_bytes(bytes: &[u8]) -> String {
     format!("blake3:{}", blake3::hash(bytes).to_hex())
 }
@@ -1536,6 +1559,70 @@ fn determinism_proptest_run_event_rejects_impossible_counts_and_times() -> Resul
     let budget_error = proptest_run_event(1, 0, &[], Vec::new(), 1.0, -1.0)
         .expect_err("negative budget should be rejected");
     assert!(budget_error.contains("invalid budget_seconds"));
+    Ok(())
+}
+
+#[test]
+fn determinism_preflight_event_replays_loaded_fixtures_and_flags_stale() -> Result<(), String> {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let specs = vec![(8, 900, 700, 1), (13, 500, 950, 3), (5, 650, 875, 2)];
+    let budget = TokenBudget::new(64).map_err(|error| format!("{error:?}"))?;
+    let options = PackAssemblyOptions {
+        include_coverage_fill: true,
+        output_redaction_enabled: true,
+        redaction_level: RedactionLevel::Strict,
+    };
+
+    let fresh_input = regression_input_for_pack_case(
+        "fresh preflight replay".to_string(),
+        budget,
+        ContextPackProfile::Balanced,
+        options,
+        42,
+        &specs,
+    )?;
+    let stale_input = regression_input_for_pack_case(
+        "stale preflight replay".to_string(),
+        budget,
+        ContextPackProfile::Balanced,
+        options,
+        99,
+        &specs,
+    )?;
+    let fresh_bytes = serde_json::to_vec(&fresh_input).map_err(|error| error.to_string())?;
+    let stale_bytes = serde_json::to_vec(&stale_input).map_err(|error| error.to_string())?;
+    let fresh_expected = replay_pack_case_input_bytes(&fresh_input)?;
+    let stale_expected = replay_pack_case_input_bytes(&stale_input)?;
+
+    let mut fresh = regression_fixture_for_mismatch(
+        42,
+        &fresh_bytes,
+        &fresh_expected,
+        b"synthetic nondeterministic output",
+    )
+    .ok_or_else(|| "fresh fixture should detect mismatch".to_owned())?;
+    fresh.last_verified_at = "2026-05-01T00:00:00Z".to_string();
+    let mut stale = regression_fixture_for_mismatch(
+        99,
+        &stale_bytes,
+        &stale_expected,
+        b"synthetic nondeterministic output",
+    )
+    .ok_or_else(|| "stale fixture should detect mismatch".to_owned())?;
+    stale.last_verified_at = "2026-01-01T00:00:00Z".to_string();
+
+    persist_regression_fixture(tempdir.path(), &stale)?;
+    persist_regression_fixture(tempdir.path(), &fresh)?;
+    let event =
+        regression_fixture_preflight_event(tempdir.path(), "2026-05-16T00:00:00Z", 90, 0.25, 60.0)?;
+
+    assert_eq!(event.schema, "ee.test_event.v1");
+    assert_eq!(event.kind, "proptest_run");
+    assert_eq!(event.cases_sampled, 2);
+    assert_eq!(event.cases_passed, 2);
+    assert_eq!(event.cases_failed, 0);
+    assert!(event.new_regressions.is_empty());
+    assert_eq!(event.stale_regressions_flagged, vec![stale.input_hash]);
     Ok(())
 }
 
