@@ -676,7 +676,8 @@ fn parse_tailscale_version(raw: &str) -> Option<String> {
     let go_version = lines.next()?;
     if !has_commit_suffix(tailscale_commit, "tailscale commit:")
         || !has_commit_suffix(other_commit, "other commit:")
-        || !go_version.starts_with("go version:")
+        || !has_go_version_suffix(go_version)
+        || lines.next().is_some()
     {
         return None;
     }
@@ -697,6 +698,17 @@ fn has_commit_suffix(line: &str, prefix: &str) -> bool {
     };
     let value = value.trim();
     value.len() == 40 && value.chars().all(|character| character.is_ascii_hexdigit())
+}
+
+fn has_go_version_suffix(line: &str) -> bool {
+    let Some(value) = line.strip_prefix("go version:") else {
+        return false;
+    };
+    let value = value.trim();
+    let Some(version) = value.strip_prefix("go") else {
+        return false;
+    };
+    looks_like_semver(version)
 }
 
 fn string_value(value: &Value, key: &str) -> Option<String> {

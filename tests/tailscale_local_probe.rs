@@ -221,6 +221,28 @@ fn local_probe_accepts_binary_with_well_formed_version_output() -> TestResult {
 }
 
 #[test]
+fn local_probe_rejects_binary_with_malformed_go_version_output() -> TestResult {
+    let binary = classify_binary(
+        "/opt/homebrew/bin/tailscale",
+        "1.66.0\n  tailscale commit: 0123456789abcdef0123456789abcdef01234567\n  other commit: 89abcdef0123456789abcdef0123456789abcdef\n  go version: shimmed\n",
+    );
+    assert!(!binary.authentic);
+    assert!(binary.parsed_version.is_none());
+    Ok(())
+}
+
+#[test]
+fn local_probe_rejects_binary_with_extra_version_output_line() -> TestResult {
+    let binary = classify_binary(
+        "/opt/homebrew/bin/tailscale",
+        "1.66.0\n  tailscale commit: 0123456789abcdef0123456789abcdef01234567\n  other commit: 89abcdef0123456789abcdef0123456789abcdef\n  go version: go1.22.3\nunexpected trailing line\n",
+    );
+    assert!(!binary.authentic);
+    assert!(binary.parsed_version.is_none());
+    Ok(())
+}
+
+#[test]
 fn local_probe_reports_shields_up_when_prefs_shields_up_true() -> TestResult {
     let report = classify_status_payload(TailscaleStatusProbeInput {
         status_json: healthy_status(),
