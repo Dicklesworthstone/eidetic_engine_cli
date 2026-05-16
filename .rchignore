@@ -47,6 +47,10 @@ recent_commits.txt
 .beads/*db-wal
 .beads/*db-journal
 .beads/.*.db.*
+.beads/bd.sock*
+.beads/daemon.lock
+.beads/daemon.log
+.beads/last-touched
 
 # Agent session reports (multi-pane orchestration artifacts)
 GEMINI_PANE*.md
