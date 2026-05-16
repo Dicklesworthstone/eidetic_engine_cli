@@ -2737,6 +2737,20 @@ fn aggregate_status_degradations(
     }))
 }
 
+fn aggregate_tailscale_status_degradations(
+    degraded: &[TailscaleProbeDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "tailscale_status",
+            entry.code,
+            entry.severity,
+            entry.message.as_str(),
+            entry.repair,
+        )
+    }))
+}
+
 fn aggregate_build_provenance_degradations(
     degraded: &[BuildProvenanceDegradation],
 ) -> Vec<AggregatedDegradation> {
@@ -3531,22 +3545,9 @@ fn render_tailscale_local_status_json(parent: &mut JsonBuilder, report: &Tailsca
         tailscale.field_str("probeMethod", report.probe_method.as_str());
         tailscale.field_raw("probeElapsedMs", &report.probe_elapsed_ms.to_string());
         tailscale.field_str("platform", report.platform.as_str());
-        tailscale.field_array_of_objects(
-            "degraded",
-            &report.degradations,
-            render_tailscale_probe_degradation_json,
-        );
+        let degraded = aggregate_tailscale_status_degradations(&report.degradations);
+        tailscale.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     });
-}
-
-fn render_tailscale_probe_degradation_json(
-    obj: &mut JsonBuilder,
-    degradation: &TailscaleProbeDegradation,
-) {
-    obj.field_str("code", degradation.code);
-    obj.field_str("severity", degradation.severity);
-    obj.field_str("message", &degradation.message);
-    obj.field_str("repair", degradation.repair);
 }
 
 fn render_memory_health_json(
@@ -12628,6 +12629,7 @@ mod tests {
         ShowReport as PreflightShowReport,
     };
     use crate::core::status::{DegradationReport, StatusReport};
+    use crate::core::tailscale_probe::{TailscaleLocalReport, TailscaleProbeMethod};
     use crate::core::{
         BUILD_TIMESTAMP_POLICY, BuildFeature, BuildInfo, BuildProvenanceDegradation,
         SupportedSchema, VERSION_PROVENANCE_SCHEMA_V1, VersionReport,
@@ -13321,6 +13323,40 @@ mod tests {
             &degraded[0]["sources"],
             &serde_json::json!(["status"]),
             "status source label is preserved",
+        )
+    }
+
+    #[test]
+    fn status_json_aggregates_tailscale_degradation_codes() -> TestResult {
+        let mut report = StatusReport::gather();
+        let mut tailscale = TailscaleLocalReport::timed_out(TailscaleProbeMethod::Cli, 1_501);
+        tailscale.degradations.push(
+            TailscaleLocalReport::timed_out(TailscaleProbeMethod::Cli, 1_501).degradations[0]
+                .clone(),
+        );
+        report.tailscale_local = Some(tailscale);
+
+        let value: serde_json::Value = serde_json::from_str(&render_status_json(&report))
+            .map_err(|error| error.to_string())?;
+        let degraded = value
+            .pointer("/data/mesh/tailscale/degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "tailscale status JSON has degraded array".to_string())?;
+
+        ensure_equal(
+            &serde_json::Value::from(degraded.len()),
+            &serde_json::json!(1),
+            "duplicate tailscale degraded codes are collapsed",
+        )?;
+        ensure_equal(
+            &degraded[0]["code"],
+            &serde_json::json!("tailscale_probe_timeout"),
+            "tailscale degradation code is preserved",
+        )?;
+        ensure_equal(
+            &degraded[0]["sources"],
+            &serde_json::json!(["tailscale_status"]),
+            "tailscale source label is preserved",
         )
     }
 
