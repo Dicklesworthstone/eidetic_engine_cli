@@ -215,7 +215,7 @@ pub fn list_workspace_registry(
     options: &WorkspaceListOptions,
 ) -> Result<WorkspaceListReport, DomainError> {
     let registry_path = registry_database_path_override(options.registry_path.as_deref());
-    if !registry_path.exists() {
+    if !registry_file_exists(&registry_path)? {
         return Ok(WorkspaceListReport {
             schema: WORKSPACE_REGISTRY_SCHEMA_V1,
             command: "workspace list",
@@ -586,7 +586,7 @@ fn find_workspace_alias_read_only(
     registry_path: &Path,
     workspace_path: &Path,
 ) -> Result<Option<String>, DomainError> {
-    if !registry_path.exists() {
+    if !registry_file_exists(registry_path)? {
         return Ok(None);
     }
     let canonical = canonical_or_lexical(workspace_path);
@@ -602,7 +602,7 @@ fn find_alias_read_only(
     registry_path: &Path,
     alias: &str,
 ) -> Result<Option<StoredWorkspace>, DomainError> {
-    if !registry_path.exists() {
+    if !registry_file_exists(registry_path)? {
         return Ok(None);
     }
     let conn = open_registry_read_only(registry_path)?;
@@ -618,7 +618,7 @@ fn find_workspace_id_read_only(
     registry_path: &Path,
     workspace_id: &str,
 ) -> Result<Option<StoredWorkspace>, DomainError> {
-    if !registry_path.exists() {
+    if !registry_file_exists(registry_path)? {
         return Ok(None);
     }
     let conn = open_registry_read_only(registry_path)?;
@@ -627,7 +627,14 @@ fn find_workspace_id_read_only(
 }
 
 fn open_registry_read_only(registry_path: &Path) -> Result<DbConnection, DomainError> {
-    ensure_registry_path_has_no_symlink_components(registry_path)?;
+    if !registry_file_exists(registry_path)? {
+        return Err(DomainError::Storage {
+            message: format!("workspace registry not found: {}", registry_path.display()),
+            repair: Some(
+                "Run `ee workspace alias --as <name>` to create the registry.".to_string(),
+            ),
+        });
+    }
     let conn = DbConnection::open(DatabaseConfig::file(registry_path))
         .map_err(|error| storage_error("failed to open workspace registry", error))?;
     if conn
@@ -659,6 +666,7 @@ fn open_registry_write(registry_path: &Path) -> Result<DbConnection, DomainError
         })?;
     }
     ensure_registry_path_has_no_symlink_components(registry_path)?;
+    ensure_existing_registry_path_is_regular_file(registry_path)?;
     let conn = DbConnection::open(DatabaseConfig::file(registry_path))
         .map_err(|error| storage_error("failed to open workspace registry", error))?;
     conn.migrate()
@@ -714,6 +722,68 @@ fn ensure_registry_path_has_no_symlink_components(path: &Path) -> Result<(), Dom
                 "Check permissions or set EE_WORKSPACE_REGISTRY to a readable path.".to_string(),
             ),
         }),
+    }
+}
+
+fn registry_file_exists(path: &Path) -> Result<bool, DomainError> {
+    ensure_registry_path_has_no_symlink_components(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(non_regular_registry_path_error(path)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "failed to inspect workspace registry path {}: {error}",
+                path.display()
+            ),
+            repair: Some(
+                "Check permissions or set EE_WORKSPACE_REGISTRY to a readable path.".to_string(),
+            ),
+        }),
+    }
+}
+
+fn ensure_existing_registry_path_is_regular_file(path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(non_regular_registry_path_error(path)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "failed to inspect workspace registry path {}: {error}",
+                path.display()
+            ),
+            repair: Some(
+                "Check permissions or set EE_WORKSPACE_REGISTRY to a readable path.".to_string(),
+            ),
+        }),
+    }
+}
+
+fn non_regular_registry_path_error(path: &Path) -> DomainError {
+    DomainError::Storage {
+        message: format!(
+            "workspace registry path is not a regular file: {}",
+            path.display()
+        ),
+        repair: Some(
+            "Set EE_WORKSPACE_REGISTRY to a regular database file path or move the directory aside."
+                .to_string(),
+        ),
     }
 }
 
@@ -931,6 +1001,58 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn registry_list_reports_missing_registry_without_creating_it() -> TestResult {
+        let registry = unique_dir("ee-workspace-registry-missing")?.join("registry.db");
+        let report = list_workspace_registry(&WorkspaceListOptions {
+            registry_path: Some(registry.clone()),
+        })
+        .map_err(|error| error.message())?;
+
+        assert!(!report.registry_exists);
+        assert!(!registry.exists());
+        assert!(report.workspaces.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn registry_list_rejects_directory_registry_path() -> TestResult {
+        let registry = unique_dir("ee-workspace-registry-dir")?.join("registry.db");
+        fs::create_dir_all(&registry).map_err(|error| error.to_string())?;
+
+        let error = match list_workspace_registry(&WorkspaceListOptions {
+            registry_path: Some(registry),
+        }) {
+            Ok(_) => return Err("directory registry path must be rejected".to_string()),
+            Err(error) => error,
+        };
+        assert!(
+            error.message().contains("not a regular file"),
+            "unexpected error: {}",
+            error.message()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn registry_write_rejects_directory_registry_path() -> TestResult {
+        let registry = unique_dir("ee-workspace-registry-write-dir")?.join("registry.db");
+        fs::create_dir_all(&registry).map_err(|error| error.to_string())?;
+
+        let error = match open_registry_write(&registry) {
+            Ok(_) => return Err("directory registry path must be rejected".to_string()),
+            Err(error) => error,
+        };
+        assert!(
+            error.message().contains("not a regular file"),
+            "unexpected error: {}",
+            error.message()
+        );
+
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn registry_write_rejects_symlinked_parent() -> TestResult {
@@ -974,6 +1096,31 @@ mod tests {
 
         let error = match open_registry_read_only(&registry) {
             Ok(_) => return Err("symlinked registry must be rejected".to_string()),
+            Err(error) => error,
+        };
+        assert!(
+            error.message().contains("symlink component"),
+            "unexpected error: {}",
+            error.message()
+        );
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_list_rejects_dangling_symlink_registry_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let registry = temp.path().join("registry.db");
+        symlink(temp.path().join("missing-outside-registry.db"), &registry)
+            .map_err(|error| error.to_string())?;
+
+        let error = match list_workspace_registry(&WorkspaceListOptions {
+            registry_path: Some(registry),
+        }) {
+            Ok(_) => return Err("dangling symlinked registry must be rejected".to_string()),
             Err(error) => error,
         };
         assert!(
