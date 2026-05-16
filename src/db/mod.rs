@@ -15286,6 +15286,54 @@ impl DbConnection {
             .collect()
     }
 
+    /// List graph algorithm witnesses with whether their snapshot is still active.
+    pub fn list_graph_algorithm_witnesses_with_snapshot_active(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<(StoredGraphAlgorithmWitness, bool)>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT w.workspace_id, w.snapshot_id, w.algorithm, w.params_json, w.witness_json, w.recorded_at, CASE WHEN s.id IS NULL THEN 0 ELSE 1 END AS snapshot_active FROM graph_algorithm_witnesses w LEFT JOIN graph_snapshots s ON s.id = w.snapshot_id AND s.workspace_id = w.workspace_id AND s.status = 'valid' WHERE w.workspace_id = ?1 ORDER BY w.snapshot_id ASC, w.algorithm ASC, w.recorded_at ASC, w.rowid ASC",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+
+        rows.iter()
+            .map(|row| {
+                let witness = stored_graph_algorithm_witness_from_row(row)?;
+                let snapshot_active =
+                    required_u64(row, 6, DbOperation::Query, "snapshot_active")? != 0;
+                Ok((witness, snapshot_active))
+            })
+            .collect()
+    }
+
+    /// Delete selected graph algorithm witness rows for a workspace.
+    pub fn delete_graph_algorithm_witnesses(
+        &self,
+        workspace_id: &str,
+        witnesses: &[StoredGraphAlgorithmWitness],
+    ) -> Result<u64> {
+        let mut deleted = 0;
+        for witness in witnesses {
+            if witness.workspace_id != workspace_id {
+                continue;
+            }
+            deleted += self.execute_for(
+                DbOperation::Execute,
+                "DELETE FROM graph_algorithm_witnesses WHERE workspace_id = ?1 AND snapshot_id = ?2 AND algorithm = ?3 AND params_json = ?4 AND witness_json = ?5 AND recorded_at = ?6",
+                &[
+                    Value::Text(workspace_id.to_string()),
+                    Value::Text(witness.snapshot_id.clone()),
+                    Value::Text(witness.algorithm.clone()),
+                    Value::Text(witness.params_json.clone()),
+                    Value::Text(witness.witness_json.clone()),
+                    Value::Text(witness.recorded_at.clone()),
+                ],
+            )?;
+        }
+        Ok(deleted)
+    }
+
     /// Upsert a graph algorithm result cache row.
     pub fn upsert_graph_algorithm_result(
         &self,
@@ -16899,6 +16947,141 @@ mod tests {
         let all_for_snapshot =
             connection.list_graph_algorithm_witnesses(workspace_id, first_snapshot_id, None)?;
         ensure_equal(&all_for_snapshot.len(), &2, "snapshot witness count")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn graph_algorithm_witnesses_list_with_snapshot_active_marks_archived_snapshots() -> TestResult
+    {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_id = "wsp_1a23456789abcdef0123456789";
+        let active_snapshot_id = "gsnap_1a23456789abcdef01234567";
+        let archived_snapshot_id = "gsnap_1b23456789abcdef01234567";
+
+        connection.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: "/workspace/graph-witness-active".to_string(),
+                name: Some("graph-witness-active".to_string()),
+            },
+        )?;
+        for (snapshot_id, snapshot_version) in [(active_snapshot_id, 1), (archived_snapshot_id, 2)]
+        {
+            connection.insert_graph_snapshot(
+                snapshot_id,
+                &CreateGraphSnapshotInput {
+                    workspace_id: workspace_id.to_string(),
+                    snapshot_version,
+                    schema_version: "ee.graph.snapshot.v1".to_string(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 3,
+                    edge_count: 2,
+                    metrics_json: r#"{"nodes":[],"edges":[]}"#.to_string(),
+                    content_hash: format!("blake3:graph-witness-active-{snapshot_version}"),
+                    source_generation: snapshot_version,
+                    expires_at: None,
+                },
+            )?;
+        }
+        connection
+            .update_graph_snapshot_status(archived_snapshot_id, GraphSnapshotStatus::Archived)?;
+
+        for (snapshot_id, algorithm) in [
+            (active_snapshot_id, "pagerank"),
+            (archived_snapshot_id, "betweenness"),
+        ] {
+            connection.insert_graph_algorithm_witness(&CreateGraphAlgorithmWitnessInput {
+                workspace_id: workspace_id.to_string(),
+                snapshot_id: snapshot_id.to_string(),
+                algorithm: algorithm.to_string(),
+                params_json: r#"{"limit":10}"#.to_string(),
+                witness_json: format!(
+                    r#"{{"elapsed_ms":11,"sampling_choice":"exact","decision_path_hash":"blake3:{algorithm}"}}"#
+                ),
+            })?;
+        }
+
+        let rows = connection.list_graph_algorithm_witnesses_with_snapshot_active(workspace_id)?;
+        ensure_equal(&rows.len(), &2, "workspace witness count")?;
+        let active = rows
+            .iter()
+            .find(|(witness, _)| witness.snapshot_id == active_snapshot_id)
+            .ok_or_else(|| "active snapshot witness should be present".to_string())?;
+        let archived = rows
+            .iter()
+            .find(|(witness, _)| witness.snapshot_id == archived_snapshot_id)
+            .ok_or_else(|| "archived snapshot witness should be present".to_string())?;
+
+        ensure(active.1, "valid snapshot should be active")?;
+        ensure(!archived.1, "archived snapshot should not be active")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn graph_algorithm_witnesses_delete_selected_rows_only() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_id = "wsp_1c23456789abcdef0123456789";
+        let snapshot_id = "gsnap_1c23456789abcdef01234567";
+
+        connection.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: "/workspace/graph-witness-delete".to_string(),
+                name: Some("graph-witness-delete".to_string()),
+            },
+        )?;
+        connection.insert_graph_snapshot(
+            snapshot_id,
+            &CreateGraphSnapshotInput {
+                workspace_id: workspace_id.to_string(),
+                snapshot_version: 1,
+                schema_version: "ee.graph.snapshot.v1".to_string(),
+                graph_type: GraphSnapshotType::MemoryLinks,
+                node_count: 3,
+                edge_count: 2,
+                metrics_json: r#"{"nodes":[],"edges":[]}"#.to_string(),
+                content_hash: "blake3:graph-witness-delete".to_string(),
+                source_generation: 1,
+                expires_at: None,
+            },
+        )?;
+        for algorithm in ["pagerank", "betweenness"] {
+            connection.insert_graph_algorithm_witness(&CreateGraphAlgorithmWitnessInput {
+                workspace_id: workspace_id.to_string(),
+                snapshot_id: snapshot_id.to_string(),
+                algorithm: algorithm.to_string(),
+                params_json: format!(r#"{{"algorithm":"{algorithm}"}}"#),
+                witness_json: format!(
+                    r#"{{"elapsed_ms":11,"sampling_choice":"exact","decision_path_hash":"blake3:{algorithm}"}}"#
+                ),
+            })?;
+        }
+
+        let rows = connection.list_graph_algorithm_witnesses(workspace_id, snapshot_id, None)?;
+        ensure_equal(&rows.len(), &2, "initial witness count")?;
+        let to_delete = rows
+            .iter()
+            .find(|witness| witness.algorithm == "pagerank")
+            .cloned()
+            .ok_or_else(|| "pagerank witness should be present".to_string())?;
+
+        let deleted = connection.delete_graph_algorithm_witnesses(workspace_id, &[to_delete])?;
+        ensure_equal(&deleted, &1, "deleted witness count")?;
+
+        let remaining =
+            connection.list_graph_algorithm_witnesses(workspace_id, snapshot_id, None)?;
+        ensure_equal(&remaining.len(), &1, "remaining witness count")?;
+        ensure_equal(
+            &remaining[0].algorithm.as_str(),
+            &"betweenness",
+            "remaining algorithm",
+        )?;
 
         connection.close()?;
         Ok(())
