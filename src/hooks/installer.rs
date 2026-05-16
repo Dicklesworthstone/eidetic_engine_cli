@@ -231,19 +231,14 @@ fn is_ee_managed_hook(content: &str) -> bool {
     content.contains(EE_HOOK_MARKER)
 }
 
-/// Get the status of an existing hook.
-///
-/// Uses `symlink_metadata` (lstat) to detect symlinks without following them.
-/// Symlinks are rejected as a security measure: a malicious symlink could
-/// point outside the hook directory, allowing arbitrary file overwrites.
-fn check_existing_hook(path: &Path) -> ExistingHookStatus {
+fn read_existing_hook_content(path: &Path) -> Result<String, ExistingHookStatus> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() {
-                return ExistingHookStatus::Symlink;
+                return Err(ExistingHookStatus::Symlink);
             }
             if !metadata.is_file() {
-                return ExistingHookStatus::Unreadable;
+                return Err(ExistingHookStatus::Unreadable);
             }
         }
         Err(error)
@@ -252,14 +247,23 @@ fn check_existing_hook(path: &Path) -> ExistingHookStatus {
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
             ) =>
         {
-            return ExistingHookStatus::NotFound;
+            return Err(ExistingHookStatus::NotFound);
         }
         Err(_) => {
-            return ExistingHookStatus::Unreadable;
+            return Err(ExistingHookStatus::Unreadable);
         }
     }
 
-    match std::fs::read_to_string(path) {
+    std::fs::read_to_string(path).map_err(|_| ExistingHookStatus::Unreadable)
+}
+
+/// Get the status of an existing hook.
+///
+/// Uses `symlink_metadata` (lstat) to detect symlinks without following them.
+/// Symlinks are rejected as a security measure: a malicious symlink could
+/// point outside the hook directory, allowing arbitrary file overwrites.
+fn check_existing_hook(path: &Path) -> ExistingHookStatus {
+    match read_existing_hook_content(path) {
         Ok(content) => {
             if is_ee_managed_hook(&content) {
                 ExistingHookStatus::ManagedByEe
@@ -267,7 +271,7 @@ fn check_existing_hook(path: &Path) -> ExistingHookStatus {
                 ExistingHookStatus::External
             }
         }
-        Err(_) => ExistingHookStatus::Unreadable,
+        Err(status) => status,
     }
 }
 
@@ -281,11 +285,15 @@ fn determine_action(
 ) -> (HookAction, &'static str) {
     match existing {
         ExistingHookStatus::NotFound => (HookAction::Install, "No existing hook"),
-        ExistingHookStatus::ManagedByEe => match std::fs::read_to_string(path) {
+        ExistingHookStatus::ManagedByEe => match read_existing_hook_content(path) {
             Ok(current_content) if current_content == desired_content => {
                 (HookAction::NoChange, "ee-managed hook already up to date")
             }
             Ok(_) => (HookAction::Update, "Updating ee-managed hook"),
+            Err(ExistingHookStatus::Symlink) => (
+                HookAction::Skip,
+                "Hook path is a symlink (security risk: remove symlink first)",
+            ),
             Err(_) if force => (HookAction::Update, "Force overwriting unreadable hook"),
             Err(_) => (HookAction::Skip, "Hook exists but is unreadable"),
         },
@@ -1717,6 +1725,39 @@ mod tests {
 
         let status = check_existing_hook(&link);
         assert_eq!(status, ExistingHookStatus::Symlink);
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_hook_compare_does_not_read_symlink_target() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let target = temp.path().join("target");
+        fs::write(
+            &target,
+            generate_hook_content(HookType::PreTask, &fixed_ee_binary()),
+        )
+        .map_err(|e| e.to_string())?;
+
+        let link = temp.path().join("pre-task");
+        symlink(&target, &link).map_err(|e| e.to_string())?;
+
+        let (action, reason) = determine_action(
+            &link,
+            ExistingHookStatus::ManagedByEe,
+            false,
+            true,
+            &generate_hook_content(HookType::PreTask, &fixed_ee_binary()),
+        );
+
+        assert_eq!(action, HookAction::Skip);
+        assert!(
+            reason.contains("symlink"),
+            "managed hook comparison must reject symlinks before reading: {reason}"
+        );
 
         Ok(())
     }
