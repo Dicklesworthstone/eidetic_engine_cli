@@ -82,6 +82,8 @@ Current conventions:
 | `integrity` | `ee diag integrity` database, schema, canary, or provenance-sample degradation. |
 | `quarantine` | `ee diag quarantine` trust or feedback quarantine degradation. |
 | `structural_health` | `ee health structural` graph-health degradation. |
+| `science_drift` | `ee analyze drift` science/evaluation drift degradation. |
+| `science_clustering` | `ee analyze clustering` candidate clustering degradation. |
 
 When adding a new renderer, prefer the most specific stable section, command,
 or algorithm label available. Do not include workspace paths, query text, or

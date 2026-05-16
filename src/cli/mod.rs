@@ -74,6 +74,7 @@ use crate::core::curate::{
     run_curate_untombstone, run_curation_disposition, run_review_workspace,
     validate_curation_candidate,
 };
+use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::disk_pressure::{
     ArtifactRetentionOptions, BuildAdmissionOptions, DiskPressureOptions, current_unix_seconds,
     gather_artifact_retention_report, gather_build_admission_report, gather_disk_pressure_report,
@@ -11253,6 +11254,52 @@ fn science_status_human(report: &crate::science::ScienceStatusReport) -> String 
     out
 }
 
+fn aggregate_analyze_degraded_json<I>(entries: I) -> Vec<serde_json::Value>
+where
+    I: IntoIterator<Item = DegradationAggregationInput>,
+{
+    aggregate_degraded_entries(entries)
+        .into_iter()
+        .map(|entry| {
+            serde_json::json!({
+                "code": entry.code,
+                "severity": entry.severity,
+                "message": entry.message,
+                "repair": entry.repair,
+                "sources": entry.sources,
+            })
+        })
+        .collect()
+}
+
+fn aggregate_drift_degraded_json(
+    degradations: &[crate::science::DriftDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_analyze_degraded_json(degradations.iter().map(|d| {
+        DegradationAggregationInput::new(
+            "science_drift",
+            d.code.clone(),
+            d.severity.clone(),
+            d.message.clone(),
+            d.repair.clone(),
+        )
+    }))
+}
+
+fn aggregate_clustering_degraded_json(
+    degradations: &[crate::science::ClusteringDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_analyze_degraded_json(degradations.iter().map(|d| {
+        DegradationAggregationInput::new(
+            "science_clustering",
+            d.code.clone(),
+            d.severity.clone(),
+            d.message.clone(),
+            d.repair.clone(),
+        )
+    }))
+}
+
 fn handle_analyze_drift<W>(cli: &Cli, args: &AnalyzeDriftArgs, stdout: &mut W) -> ProcessExitCode
 where
     W: Write,
@@ -11304,20 +11351,14 @@ where
                         + "\n"),
                 );
             } else {
+                let degraded = aggregate_drift_degraded_json(&report.degradations);
                 write_stdout(
                     stdout,
                     &(serde_json::json!({
                         "schema": crate::models::RESPONSE_SCHEMA_V1,
                         "success": false,
                         "data": data,
-                        "degraded": report.degradations.iter().map(|d| {
-                            serde_json::json!({
-                                "code": d.code,
-                                "message": d.message,
-                                "severity": d.severity,
-                                "repair": d.repair,
-                            })
-                        }).collect::<Vec<_>>(),
+                        "degraded": degraded,
                     })
                     .to_string()
                         + "\n"),
@@ -11385,20 +11426,14 @@ where
                         + "\n"),
                 );
             } else {
+                let degraded = aggregate_clustering_degraded_json(&report.degradations);
                 write_stdout(
                     stdout,
                     &(serde_json::json!({
                         "schema": crate::models::RESPONSE_SCHEMA_V1,
                         "success": false,
                         "data": data,
-                        "degraded": report.degradations.iter().map(|d| {
-                            serde_json::json!({
-                                "code": d.code,
-                                "message": d.message,
-                                "severity": d.severity,
-                                "repair": d.repair,
-                            })
-                        }).collect::<Vec<_>>(),
+                        "degraded": degraded,
                     })
                     .to_string()
                         + "\n"),
@@ -38025,6 +38060,41 @@ mod tests {
                 .as_array()
                 .is_some_and(|entries| !entries.is_empty()),
             "science capabilities must be present",
+        )
+    }
+
+    #[test]
+    fn analyze_drift_degraded_entries_are_aggregated() -> TestResult {
+        let degraded = super::aggregate_drift_degraded_json(&[
+            crate::science::DriftDegradation {
+                code: "drift_no_comparable_metrics".to_owned(),
+                message: "No comparable metrics were available.".to_owned(),
+                severity: "medium".to_owned(),
+                repair: "Capture comparable evaluation snapshots.".to_owned(),
+            },
+            crate::science::DriftDegradation {
+                code: "drift_no_comparable_metrics".to_owned(),
+                message: "No overlapping metrics were available.".to_owned(),
+                severity: "high".to_owned(),
+                repair: "Regenerate both snapshots with shared metric keys.".to_owned(),
+            },
+        ]);
+
+        ensure_equal(&degraded.len(), &1, "duplicate drift code collapses")?;
+        ensure_equal(
+            &degraded[0]["code"],
+            &serde_json::json!("drift_no_comparable_metrics"),
+            "aggregate code",
+        )?;
+        ensure_equal(
+            &degraded[0]["severity"],
+            &serde_json::json!("high"),
+            "aggregate escalates severity",
+        )?;
+        ensure_equal(
+            &degraded[0]["sources"],
+            &serde_json::json!(["science_drift"]),
+            "aggregate source label",
         )
     }
 
