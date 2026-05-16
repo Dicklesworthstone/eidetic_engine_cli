@@ -1,1 +1,134 @@
-{"violations":[],"count":0,"status":"pass"}
+{
+  "violations": [
+    {
+      "bead": "bd-2caru.1",
+      "label": "implements-surface",
+      "surface": "read_pool_core",
+      "reason": "missing tests/golden/read_pool_core.snap"
+    },
+    {
+      "bead": "bd-3usjw.1",
+      "label": "implements-surface",
+      "surface": "db_inspect",
+      "reason": "close_reason contains abstention language"
+    },
+    {
+      "bead": "bd-3usjw.1",
+      "label": "implements-surface",
+      "surface": "db_inspect",
+      "reason": "missing tests/golden/db_inspect.snap"
+    },
+    {
+      "bead": "bd-3usjw.1",
+      "label": "implements-surface",
+      "surface": "db_inspect",
+      "reason": "referenced test path missing: tests/fixtures/db_inspect"
+    },
+    {
+      "bead": "bd-3usjw.2",
+      "label": "implements-surface",
+      "surface": "graph_centrality_read",
+      "reason": "close_reason contains abstention language"
+    },
+    {
+      "bead": "bd-3usjw.2",
+      "label": "implements-surface",
+      "surface": "graph_centrality_read",
+      "reason": "missing tests/golden/graph_centrality_read.snap"
+    },
+    {
+      "bead": "bd-3usjw.2",
+      "label": "implements-surface",
+      "surface": "graph_centrality_read",
+      "reason": "referenced test path missing: tests/e2e_graph_centrality.rs"
+    },
+    {
+      "bead": "bd-3usjw.25",
+      "label": "implements-surface",
+      "surface": "cross_platform_determinism",
+      "reason": "missing tests/golden/cross_platform_determinism.snap"
+    },
+    {
+      "bead": "bd-3usjw.3",
+      "label": "implements-surface",
+      "surface": "mcp_top_level",
+      "reason": "missing tests/golden/mcp_top_level.snap"
+    },
+    {
+      "bead": "bd-3usjw.3",
+      "label": "implements-surface",
+      "surface": "mcp_top_level",
+      "reason": "referenced test path missing: tests/e2e_mcp_top_level.rs"
+    },
+    {
+      "bead": "bd-3usjw.3",
+      "label": "implements-surface",
+      "surface": "mcp_top_level",
+      "reason": "referenced test path missing: tests/golden/mcp_manifest_disabled.snap"
+    },
+    {
+      "bead": "bd-3usjw.49",
+      "label": "math-ambition",
+      "surface": "rejection_criteria",
+      "reason": "close_reason must include rejection_threshold_passed, measured_value, expected_value, and decision fields"
+    },
+    {
+      "bead": "bd-3usjw.5",
+      "label": "implements-surface",
+      "surface": "swarm_subcommand",
+      "reason": "missing tests/golden/swarm_subcommand.snap"
+    },
+    {
+      "bead": "bd-3usjw.6",
+      "label": "implements-surface",
+      "surface": "trauma_guard_preflight",
+      "reason": "close_reason contains abstention language"
+    },
+    {
+      "bead": "bd-3usjw.6",
+      "label": "implements-surface",
+      "surface": "trauma_guard_preflight",
+      "reason": "missing tests/golden/trauma_guard_preflight.snap"
+    },
+    {
+      "bead": "bd-3usjw.6",
+      "label": "implements-surface",
+      "surface": "trauma_guard_preflight",
+      "reason": "referenced test path missing: tests/preflight_destructive_unit.rs"
+    },
+    {
+      "bead": "bd-3usjw.6",
+      "label": "implements-surface",
+      "surface": "trauma_guard_preflight",
+      "reason": "emitted degraded code fixture missing from FILE SURFACE: tests/fixtures/failure_modes/no_risk_memories.json",
+      "bead_id": "bd-3usjw.6",
+      "missing_fixture_path": "tests/fixtures/failure_modes/no_risk_memories.json",
+      "emitted_code": "no_risk_memories",
+      "severity": "medium"
+    },
+    {
+      "bead": "bd-3usjw.6",
+      "label": "implements-surface",
+      "surface": "trauma_guard_preflight",
+      "reason": "emitted degraded code fixture missing from FILE SURFACE: tests/fixtures/failure_modes/preflight_patterns_unavailable.json",
+      "bead_id": "bd-3usjw.6",
+      "missing_fixture_path": "tests/fixtures/failure_modes/preflight_patterns_unavailable.json",
+      "emitted_code": "preflight_patterns_unavailable",
+      "severity": "medium"
+    },
+    {
+      "bead": "bd-3usjw.70",
+      "label": "implements-surface",
+      "surface": "mcp_validate_subcommand",
+      "reason": "missing tests/golden/mcp_validate_subcommand.snap"
+    },
+    {
+      "bead": "bd-igvt",
+      "label": "implements-surface",
+      "surface": "graph-algorithm-witnesses",
+      "reason": "missing tests/golden/graph-algorithm-witnesses.snap"
+    }
+  ],
+  "count": 20,
+  "status": "fail"
+}
