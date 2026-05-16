@@ -466,7 +466,14 @@ impl StreamSequenceValidator {
     /// violate the `ee.pack.stream.v1` contract.
     pub fn observe(&mut self, frame: &PackStreamFrame) -> Result<(), StreamValidationError> {
         if self.saw_terminal {
-            return Err(StreamValidationError::FrameAfterTerminal);
+            return match frame {
+                PackStreamFrame::Trailer(_) | PackStreamFrame::Terminal(_) => {
+                    Err(StreamValidationError::DuplicateTerminal)
+                }
+                PackStreamFrame::Header(_) | PackStreamFrame::Item(_) => {
+                    Err(StreamValidationError::FrameAfterTerminal)
+                }
+            };
         }
 
         match frame {
@@ -789,6 +796,19 @@ mod tests {
         assert_eq!(
             validator.observe(&trailer(0)),
             Err(StreamValidationError::FrameAfterTerminal)
+        );
+    }
+
+    #[test]
+    fn error_or_invalid_duplicate_terminal_is_rejected() {
+        let mut validator = StreamSequenceValidator::new();
+
+        validator.observe(&header()).unwrap();
+        validator.observe(&trailer(0)).unwrap();
+
+        assert_eq!(
+            validator.observe(&error_frame()),
+            Err(StreamValidationError::DuplicateTerminal)
         );
     }
 
