@@ -72,6 +72,7 @@ use crate::pack::{
 static PACK_HASH_LOG_RUN_INDEX: AtomicU64 = AtomicU64::new(0);
 static PACK_SLOT_PROCESS_GATES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
 const PACK_SLOT_RETRY_AFTER_MS: u64 = 250;
+#[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
 pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V1: &str = "ee.pack.l2_cache_key.v1";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
 
@@ -2439,6 +2440,7 @@ fn push_coordination_snapshot_degradations(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
 pub(crate) struct PackL2CacheKeyInput {
     pub(crate) workspace_id: String,
     pub(crate) database_generation: u64,
@@ -2453,6 +2455,7 @@ pub(crate) struct PackL2CacheKeyInput {
     pub(crate) personalization_generation: Option<u64>,
 }
 
+#[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
 pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     let mut hasher = blake3::Hasher::new();
     hash_labeled_bytes(
@@ -2561,6 +2564,7 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     finalize_blake3(hasher)
 }
 
+#[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
 fn hash_labeled_bytes(hasher: &mut blake3::Hasher, label: &str, value: &[u8]) {
     hasher.update(&(label.len() as u64).to_le_bytes());
     hasher.update(label.as_bytes());
@@ -2568,10 +2572,12 @@ fn hash_labeled_bytes(hasher: &mut blake3::Hasher, label: &str, value: &[u8]) {
     hasher.update(value);
 }
 
+#[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
 fn hash_labeled_u64(hasher: &mut blake3::Hasher, label: &str, value: u64) {
     hash_labeled_bytes(hasher, label, &value.to_le_bytes());
 }
 
+#[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
 fn hash_labeled_optional_u64(hasher: &mut blake3::Hasher, label: &str, value: Option<u64>) {
     match value {
         Some(value) => {
@@ -2584,6 +2590,7 @@ fn hash_labeled_optional_u64(hasher: &mut blake3::Hasher, label: &str, value: Op
     }
 }
 
+#[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
 fn hash_labeled_bool(hasher: &mut blake3::Hasher, label: &str, value: bool) {
     hash_labeled_bytes(hasher, label, &[u8::from(value)]);
 }
@@ -6016,8 +6023,8 @@ mod tests {
             section: PackSection::ProceduralRules,
             content: "Rotate SECRET_VALUE_ONE before release.".to_string(),
             estimated_tokens: 45,
-            relevance: UnitScore::parse(0.95).map_err(|error| error.to_string())?,
-            utility: UnitScore::parse(0.80).map_err(|error| error.to_string())?,
+            relevance: crate::models::UnitScore::parse(0.95).map_err(|error| error.to_string())?,
+            utility: crate::models::UnitScore::parse(0.80).map_err(|error| error.to_string())?,
             provenance: provenance.clone(),
             why: "selected by fixture".to_string(),
         })
@@ -6028,8 +6035,8 @@ mod tests {
             section: PackSection::Decisions,
             content: "Check SECRET_VALUE_TWO in CI before deploy.".to_string(),
             estimated_tokens: 45,
-            relevance: UnitScore::parse(0.90).map_err(|error| error.to_string())?,
-            utility: UnitScore::parse(0.70).map_err(|error| error.to_string())?,
+            relevance: crate::models::UnitScore::parse(0.90).map_err(|error| error.to_string())?,
+            utility: crate::models::UnitScore::parse(0.70).map_err(|error| error.to_string())?,
             provenance,
             why: "selected by fixture".to_string(),
         })
