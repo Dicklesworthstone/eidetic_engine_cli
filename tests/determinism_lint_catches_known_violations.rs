@@ -59,6 +59,13 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "inject timing at the boundary instead of calling Instant::now",
             });
         }
+        if line.contains("SystemTime::now(") {
+            findings.push(Finding {
+                line: line_no,
+                code: "ambient_system_time_now",
+                message: "inject wall-clock time at the boundary instead of calling SystemTime::now",
+            });
+        }
         if line.contains("std::env::var(") {
             findings.push(Finding {
                 line: line_no,

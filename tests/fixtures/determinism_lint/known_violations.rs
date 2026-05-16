@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use rand::Rng;
 
@@ -15,6 +15,11 @@ fn ambient_rng(_: &ee::runtime::determinism::Deterministic<Seed>) {
 #[determinism::required]
 fn ambient_time(_: &ee::runtime::determinism::Deterministic<Seed>) {
     let _ = Instant::now();
+}
+
+#[determinism::required]
+fn ambient_wall_clock(_: &ee::runtime::determinism::Deterministic<Seed>) {
+    let _ = SystemTime::now();
 }
 
 #[determinism::required]
