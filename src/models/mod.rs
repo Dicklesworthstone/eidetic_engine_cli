@@ -70,10 +70,13 @@ pub use claims::{
     validate_manifest_structure,
 };
 pub use context_profile::{
+    AGENT_CONTEXT_PROFILE_SCHEMA_V1, AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_COLD_START_OUTCOMES,
+    AgentContextProfileBias, AgentContextProfileCounts, AgentContextProfileDecayedCounts,
     CONTEXT_PROFILE_SCHEMA_CATALOG_V1, CONTEXT_PROFILE_SCHEMA_V1, ContextProfile,
     ContextProfileFieldSchema, ContextProfileName, ContextProfileObjectSchema,
     ContextProfileObjective, ContextProfileSection, ContextProfileSectionMix,
     ContextProfileValidationError, context_profile_schema_catalog_json, context_profile_schemas,
+    decay_factor,
 };
 pub use decision::{
     DECISION_PLANE_SCHEMA_V1, DecisionPlane, DecisionPlaneMetadata, DecisionRecord,
@@ -260,8 +263,8 @@ pub use schema::{
 };
 pub use singleflight::{
     SINGLEFLIGHT_KEY_CANONICAL_VERSION, SINGLEFLIGHT_KEY_SCHEMA_V1, SINGLEFLIGHT_POSTURE_SCHEMA_V1,
-    SingleFlightKey, SingleFlightKeyInput, SingleFlightPostureReport, SingleFlightSurface,
-    SingleFlightSurfaceCounters, SingleFlightSurfacePosture, query_shape_hash,
+    SingleFlightKey, SingleFlightKeyInput, SingleFlightLastKeyPosture, SingleFlightPostureReport,
+    SingleFlightSurface, SingleFlightSurfaceCounters, SingleFlightSurfacePosture, query_shape_hash,
     sample_singleflight_keys,
 };
 pub use situation::{
@@ -351,6 +354,9 @@ pub const SEARCH_DOCUMENT_SCHEMA_V1: &str = "ee.search.document.v1";
 
 /// Schema for graph module readiness.
 pub const GRAPH_MODULE_SCHEMA_V1: &str = "ee.graph.module.v1";
+
+/// Schema for workspace-scoped mesh peer-group binding documents.
+pub const MESH_PEER_GROUP_BINDING_SCHEMA_V1: &str = "ee.mesh.peer_group_binding.v1";
 
 /// Schema for evaluation fixtures.
 pub const EVAL_FIXTURE_SCHEMA_V1: &str = "ee.eval_fixture.v1";

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use regex_lite::Regex;
-use toml_edit::{DocumentMut, Item, Value};
+use toml_edit::{DocumentMut, Item, Table, Value};
 
 use super::path::{PathExpander, PathExpansionError};
 
@@ -22,6 +22,8 @@ pub struct ConfigFile {
     pub search: SearchConfig,
     pub pack: PackConfig,
     pub handoff: HandoffConfig,
+    pub cache: CacheConfig,
+    pub mesh: MeshConfig,
     pub graph: GraphConfig,
     pub curation: CurationConfig,
     pub learn: LearnConfig,
@@ -73,6 +75,8 @@ impl ConfigFile {
             search: SearchConfig::parse(&document)?,
             pack: PackConfig::parse(&document)?,
             handoff: HandoffConfig::parse(&document)?,
+            cache: CacheConfig::parse(&document, expander)?,
+            mesh: MeshConfig::parse(&document)?,
             graph: GraphConfig::parse(&document)?,
             curation: CurationConfig::parse(&document)?,
             learn: LearnConfig::parse(&document)?,
@@ -89,6 +93,7 @@ pub struct StorageConfig {
     pub database_path: Option<PathBuf>,
     pub index_dir: Option<PathBuf>,
     pub jsonl_export: Option<bool>,
+    pub read_pool: ReadPoolConfig,
 }
 
 impl StorageConfig {
@@ -100,6 +105,26 @@ impl StorageConfig {
             database_path: optional_path(document, "storage", "database_path", expander)?,
             index_dir: optional_path(document, "storage", "index_dir", expander)?,
             jsonl_export: optional_bool(document, "storage", "jsonl_export")?,
+            read_pool: ReadPoolConfig::parse(document)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ReadPoolConfig {
+    pub size: Option<u64>,
+    pub idle_timeout_seconds: Option<u64>,
+    pub pin_snapshot: Option<bool>,
+}
+
+impl ReadPoolConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        const SECTIONS: &[&str] = &["storage", "read_pool"];
+
+        Ok(Self {
+            size: optional_u64_path(document, SECTIONS, "size")?,
+            idle_timeout_seconds: optional_u64_path(document, SECTIONS, "idle_timeout_seconds")?,
+            pin_snapshot: optional_bool_path(document, SECTIONS, "pin_snapshot")?,
         })
     }
 }
@@ -247,6 +272,170 @@ impl HandoffStaleThresholdConfig {
             )?,
             memories_revised: optional_u64_path(document, SECTIONS, "memories_revised")?,
         })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CacheConfig {
+    pub pack_l2: PackL2CacheConfig,
+}
+
+impl CacheConfig {
+    fn parse(
+        document: &DocumentMut,
+        expander: Option<&PathExpander>,
+    ) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            pack_l2: PackL2CacheConfig::parse(document, expander)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PackL2CacheConfig {
+    pub enabled: Option<bool>,
+    pub directory: Option<PathBuf>,
+    pub max_bytes: Option<u64>,
+    pub max_age_days: Option<u64>,
+}
+
+impl PackL2CacheConfig {
+    fn parse(
+        document: &DocumentMut,
+        expander: Option<&PathExpander>,
+    ) -> Result<Self, ConfigParseError> {
+        const SECTIONS: &[&str] = &["cache", "pack_l2"];
+
+        Ok(Self {
+            enabled: optional_bool_path(document, SECTIONS, "enabled")?,
+            directory: optional_path_path(document, SECTIONS, "directory", expander)?,
+            max_bytes: optional_u64_path(document, SECTIONS, "max_bytes")?,
+            max_age_days: optional_u64_path(document, SECTIONS, "max_age_days")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MeshConfig {
+    pub enabled: Option<bool>,
+    pub peer_group_bindings: Option<Vec<MeshPeerGroupBinding>>,
+}
+
+impl MeshConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            enabled: optional_bool(document, "mesh", "enabled")?,
+            peer_group_bindings: optional_peer_group_bindings(document)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MeshPeerGroupBinding {
+    pub workspace_id: Option<String>,
+    pub workspace_alias: Option<String>,
+    pub peer_group_id: Option<String>,
+    pub peer_group_label: Option<String>,
+    pub peer_ids: Option<Vec<String>>,
+    pub origin_workspace_ids: Option<Vec<String>>,
+    pub lanes: MeshLaneGrants,
+    pub default_action: Option<MeshLaneDecision>,
+}
+
+impl MeshPeerGroupBinding {
+    #[must_use]
+    pub fn decision_for(
+        &self,
+        local_workspace_id: &str,
+        peer_id: &str,
+        origin_workspace_id: &str,
+        lane: MeshLane,
+    ) -> MeshLaneDecision {
+        if self.workspace_id.as_deref() != Some(local_workspace_id) {
+            return MeshLaneDecision::Deny;
+        }
+        if !self
+            .peer_ids
+            .as_ref()
+            .is_some_and(|peers| peers.iter().any(|known| known == peer_id))
+        {
+            return MeshLaneDecision::Deny;
+        }
+        if !self
+            .origin_workspace_ids
+            .as_ref()
+            .is_some_and(|origins| origins.iter().any(|known| known == origin_workspace_id))
+        {
+            return MeshLaneDecision::Deny;
+        }
+        self.lanes.decision(lane)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MeshLane {
+    Metadata,
+    Body,
+    Embedding,
+    GraphLink,
+    RevisionNotice,
+    CurationSignal,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MeshLaneDecision {
+    Allow,
+    Quarantine,
+    #[default]
+    Deny,
+}
+
+impl MeshLaneDecision {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Quarantine => "quarantine",
+            Self::Deny => "deny",
+        }
+    }
+
+    fn parse_for_key(input: &str, key: String) -> Result<Self, ConfigParseError> {
+        match input {
+            "allow" => Ok(Self::Allow),
+            "quarantine" => Ok(Self::Quarantine),
+            "deny" => Ok(Self::Deny),
+            other => Err(ConfigParseError::InvalidValue {
+                key,
+                value: other.to_string(),
+                message: "expected one of `allow`, `quarantine`, or `deny`".to_string(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MeshLaneGrants {
+    pub metadata: Option<MeshLaneDecision>,
+    pub body: Option<MeshLaneDecision>,
+    pub embedding: Option<MeshLaneDecision>,
+    pub graph_link: Option<MeshLaneDecision>,
+    pub revision_notice: Option<MeshLaneDecision>,
+    pub curation_signal: Option<MeshLaneDecision>,
+}
+
+impl MeshLaneGrants {
+    #[must_use]
+    pub fn decision(&self, lane: MeshLane) -> MeshLaneDecision {
+        match lane {
+            MeshLane::Metadata => self.metadata,
+            MeshLane::Body => self.body,
+            MeshLane::Embedding => self.embedding,
+            MeshLane::GraphLink => self.graph_link,
+            MeshLane::RevisionNotice => self.revision_notice,
+            MeshLane::CurationSignal => self.curation_signal,
+        }
+        .unwrap_or(MeshLaneDecision::Deny)
     }
 }
 
@@ -980,6 +1169,35 @@ fn optional_path(
     }
 }
 
+fn optional_path_path(
+    document: &DocumentMut,
+    sections: &[&str],
+    key: &str,
+    expander: Option<&PathExpander>,
+) -> Result<Option<PathBuf>, ConfigParseError> {
+    let Some(item) = item_path(document, sections, key) else {
+        return Ok(None);
+    };
+    let Some(raw) = item.as_str().map(str::to_owned) else {
+        return Err(ConfigParseError::InvalidType {
+            key: key_path_name(sections, key),
+            expected: "a string",
+        });
+    };
+    match expander {
+        Some(expander) => {
+            expander
+                .expand(&raw)
+                .map(Some)
+                .map_err(|source| ConfigParseError::PathExpansion {
+                    key: key_path_name(sections, key),
+                    source,
+                })
+        }
+        None => Ok(Some(PathBuf::from(raw))),
+    }
+}
+
 fn optional_search_speed(
     document: &DocumentMut,
     section: &str,
@@ -1051,6 +1269,147 @@ fn optional_string_array_path(
     Ok(Some(out))
 }
 
+fn optional_peer_group_bindings(
+    document: &DocumentMut,
+) -> Result<Option<Vec<MeshPeerGroupBinding>>, ConfigParseError> {
+    let Some(item) = item_path(document, &["mesh"], "peer_group_bindings") else {
+        return Ok(None);
+    };
+    let Some(tables) = item.as_array_of_tables() else {
+        return Err(ConfigParseError::InvalidType {
+            key: "mesh.peer_group_bindings".to_string(),
+            expected: "an array of tables",
+        });
+    };
+
+    let mut bindings = Vec::with_capacity(tables.len());
+    for (index, table) in tables.iter().enumerate() {
+        bindings.push(parse_peer_group_binding(table, index)?);
+    }
+    Ok(Some(bindings))
+}
+
+fn parse_peer_group_binding(
+    table: &Table,
+    index: usize,
+) -> Result<MeshPeerGroupBinding, ConfigParseError> {
+    let prefix = format!("mesh.peer_group_bindings[{index}]");
+    Ok(MeshPeerGroupBinding {
+        workspace_id: optional_table_string(table, &prefix, "workspace_id")?,
+        workspace_alias: optional_table_string(table, &prefix, "workspace_alias")?,
+        peer_group_id: optional_table_string(table, &prefix, "peer_group_id")?,
+        peer_group_label: optional_table_string(table, &prefix, "peer_group_label")?,
+        peer_ids: optional_table_string_array(table, &prefix, "peer_ids")?,
+        origin_workspace_ids: optional_table_string_array(table, &prefix, "origin_workspace_ids")?,
+        lanes: parse_lane_grants(table, &prefix)?,
+        default_action: optional_table_default_action(table, &prefix)?,
+    })
+}
+
+fn parse_lane_grants(table: &Table, prefix: &str) -> Result<MeshLaneGrants, ConfigParseError> {
+    let Some(lanes) = table.get("lanes") else {
+        return Ok(MeshLaneGrants::default());
+    };
+    let Some(lanes) = lanes.as_table() else {
+        return Err(ConfigParseError::InvalidType {
+            key: format!("{prefix}.lanes"),
+            expected: "a table",
+        });
+    };
+    Ok(MeshLaneGrants {
+        metadata: optional_table_lane_decision(lanes, &format!("{prefix}.lanes"), "metadata")?,
+        body: optional_table_lane_decision(lanes, &format!("{prefix}.lanes"), "body")?,
+        embedding: optional_table_lane_decision(lanes, &format!("{prefix}.lanes"), "embedding")?,
+        graph_link: optional_table_lane_decision(lanes, &format!("{prefix}.lanes"), "graph_link")?,
+        revision_notice: optional_table_lane_decision(
+            lanes,
+            &format!("{prefix}.lanes"),
+            "revision_notice",
+        )?,
+        curation_signal: optional_table_lane_decision(
+            lanes,
+            &format!("{prefix}.lanes"),
+            "curation_signal",
+        )?,
+    })
+}
+
+fn optional_table_string(
+    table: &Table,
+    prefix: &str,
+    key: &str,
+) -> Result<Option<String>, ConfigParseError> {
+    match table.get(key) {
+        Some(value) => value
+            .as_str()
+            .map(|text| Some(text.to_string()))
+            .ok_or_else(|| ConfigParseError::InvalidType {
+                key: format!("{prefix}.{key}"),
+                expected: "a string",
+            }),
+        None => Ok(None),
+    }
+}
+
+fn optional_table_lane_decision(
+    table: &Table,
+    prefix: &str,
+    key: &str,
+) -> Result<Option<MeshLaneDecision>, ConfigParseError> {
+    let Some(value) = optional_table_string(table, prefix, key)? else {
+        return Ok(None);
+    };
+    MeshLaneDecision::parse_for_key(&value, format!("{prefix}.{key}")).map(Some)
+}
+
+fn optional_table_default_action(
+    table: &Table,
+    prefix: &str,
+) -> Result<Option<MeshLaneDecision>, ConfigParseError> {
+    let key = "default_action";
+    let Some(value) = optional_table_string(table, prefix, key)? else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        "deny" => Ok(Some(MeshLaneDecision::Deny)),
+        other => Err(ConfigParseError::InvalidValue {
+            key: format!("{prefix}.{key}"),
+            value: other.to_string(),
+            message: "expected `deny`; mesh peer-group bindings are default-deny".to_string(),
+        }),
+    }
+}
+
+fn optional_table_string_array(
+    table: &Table,
+    prefix: &str,
+    key: &str,
+) -> Result<Option<Vec<String>>, ConfigParseError> {
+    let Some(value) = table.get(key) else {
+        return Ok(None);
+    };
+    let Some(array) = value.as_array() else {
+        return Err(ConfigParseError::InvalidType {
+            key: format!("{prefix}.{key}"),
+            expected: "an array of strings",
+        });
+    };
+
+    let mut out = Vec::new();
+    for entry in array.iter() {
+        match entry {
+            Value::String(text) => out.push(text.value().to_string()),
+            _ => {
+                return Err(ConfigParseError::InvalidType {
+                    key: format!("{prefix}.{key}"),
+                    expected: "an array of strings",
+                });
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
 fn optional_regex_array_path(
     document: &DocumentMut,
     sections: &[&str],
@@ -1075,7 +1434,10 @@ mod tests {
     use std::ffi::OsString;
     use std::path::PathBuf;
 
-    use super::{ConfigFile, ConfigParseError, PathExpander, SearchSpeed, optional_string_array};
+    use super::{
+        ConfigFile, ConfigParseError, MeshLane, MeshLaneDecision, PathExpander, SearchSpeed,
+        optional_string_array,
+    };
 
     type TestResult = Result<(), String>;
 
@@ -1113,6 +1475,11 @@ database_path = "~/.local/share/ee/ee.db"
 index_dir = "$EE_INDEX_ROOT"
 jsonl_export = false
 
+[storage.read_pool]
+size = 4
+idle_timeout_seconds = 120
+pin_snapshot = true
+
 [runtime]
 daemon = false
 job_budget_ms = 5000
@@ -1141,6 +1508,32 @@ memories_added = 20
 any_expired_in_pack = true
 content_drift_score = 0.15
 memories_revised = 0
+
+[cache.pack_l2]
+enabled = true
+directory = "$EE_CACHE_ROOT"
+max_bytes = 1073741824
+max_age_days = 30
+
+[mesh]
+enabled = false
+
+[[mesh.peer_group_bindings]]
+workspace_id = "wsp_local_release_001"
+workspace_alias = "local-release"
+peer_group_id = "pg_release_mesh_001"
+peer_group_label = "release-mesh"
+peer_ids = ["peer_alice_laptop_001", "peer_builder_host_001"]
+origin_workspace_ids = ["wsp_remote_release_001"]
+default_action = "deny"
+
+[mesh.peer_group_bindings.lanes]
+metadata = "allow"
+body = "deny"
+embedding = "deny"
+graph_link = "allow"
+revision_notice = "allow"
+curation_signal = "quarantine"
 
 [graph.ppr]
 alpha = 0.30
@@ -1205,6 +1598,7 @@ prompt_injection_guard = true
             "EE_INDEX_ROOT".to_string(),
             OsString::from("/tmp/ee-indexes"),
         );
+        env.insert("EE_CACHE_ROOT".to_string(), OsString::from("/tmp/ee-cache"));
         let expander = PathExpander::with_env(Some(PathBuf::from("/home/tester")), env);
 
         let config = ConfigFile::parse_with_expander(input, &expander)
@@ -1221,6 +1615,17 @@ prompt_injection_guard = true
             "index dir",
         )?;
         ensure_equal(&config.storage.jsonl_export, &Some(false), "jsonl export")?;
+        ensure_equal(&config.storage.read_pool.size, &Some(4), "read pool size")?;
+        ensure_equal(
+            &config.storage.read_pool.idle_timeout_seconds,
+            &Some(120),
+            "read pool idle timeout",
+        )?;
+        ensure_equal(
+            &config.storage.read_pool.pin_snapshot,
+            &Some(true),
+            "read pool snapshot pinning",
+        )?;
         ensure_equal(&config.runtime.job_budget_ms, &Some(5000), "job budget")?;
         ensure_equal(&config.cass.binary.as_deref(), &Some("cass"), "cass binary")?;
         ensure_equal(
@@ -1259,6 +1664,58 @@ prompt_injection_guard = true
             &config.handoff.stale_threshold.memories_revised,
             &Some(0),
             "handoff stale memories revised threshold",
+        )?;
+        ensure_equal(
+            &config.cache.pack_l2.enabled,
+            &Some(true),
+            "pack L2 cache enabled",
+        )?;
+        ensure_equal(
+            &config.cache.pack_l2.directory,
+            &Some(PathBuf::from("/tmp/ee-cache")),
+            "pack L2 cache directory",
+        )?;
+        ensure_equal(
+            &config.cache.pack_l2.max_bytes,
+            &Some(1_073_741_824),
+            "pack L2 cache max bytes",
+        )?;
+        ensure_equal(
+            &config.cache.pack_l2.max_age_days,
+            &Some(30),
+            "pack L2 cache max age",
+        )?;
+        ensure_equal(&config.mesh.enabled, &Some(false), "mesh enabled")?;
+        let binding = config
+            .mesh
+            .peer_group_bindings
+            .as_ref()
+            .and_then(|bindings| bindings.first())
+            .ok_or_else(|| "expected one mesh peer-group binding".to_string())?;
+        ensure_equal(
+            &binding.workspace_id.as_deref(),
+            &Some("wsp_local_release_001"),
+            "mesh binding workspace id",
+        )?;
+        ensure_equal(
+            &binding.decision_for(
+                "wsp_local_release_001",
+                "peer_alice_laptop_001",
+                "wsp_remote_release_001",
+                MeshLane::Metadata,
+            ),
+            &MeshLaneDecision::Allow,
+            "mesh metadata lane",
+        )?;
+        ensure_equal(
+            &binding.decision_for(
+                "wsp_local_release_001",
+                "peer_alice_laptop_001",
+                "wsp_remote_release_001",
+                MeshLane::Body,
+            ),
+            &MeshLaneDecision::Deny,
+            "mesh body lane",
         )?;
         ensure_equal(&config.graph.ppr.alpha, &Some(0.30), "graph ppr alpha")?;
         ensure_equal(
@@ -1376,6 +1833,17 @@ prompt_injection_guard = true
             ConfigFile::parse("").map_err(|error| format!("empty config should parse: {error}"))?;
 
         ensure_equal(&config.storage.database_path, &None, "database path")?;
+        ensure_equal(&config.storage.read_pool.size, &None, "read pool size")?;
+        ensure_equal(
+            &config.storage.read_pool.idle_timeout_seconds,
+            &None,
+            "read pool idle timeout",
+        )?;
+        ensure_equal(
+            &config.storage.read_pool.pin_snapshot,
+            &None,
+            "read pool pin snapshot",
+        )?;
         ensure_equal(&config.runtime.daemon, &None, "runtime daemon")?;
         ensure_equal(&config.search.default_speed, &None, "search default speed")?;
         ensure_equal(
@@ -1408,7 +1876,33 @@ prompt_injection_guard = true
             &None,
             "handoff stale expired threshold",
         )?;
+        ensure_equal(
+            &config.cache.pack_l2.enabled,
+            &None,
+            "pack L2 cache enabled",
+        )?;
+        ensure_equal(
+            &config.cache.pack_l2.directory,
+            &None,
+            "pack L2 cache directory",
+        )?;
+        ensure_equal(
+            &config.cache.pack_l2.max_bytes,
+            &None,
+            "pack L2 cache max bytes",
+        )?;
+        ensure_equal(
+            &config.cache.pack_l2.max_age_days,
+            &None,
+            "pack L2 cache max age",
+        )?;
         ensure_equal(&config.graph.ppr.alpha, &None, "graph ppr alpha")?;
+        ensure_equal(&config.mesh.enabled, &None, "mesh enabled")?;
+        ensure_equal(
+            &config.mesh.peer_group_bindings,
+            &None,
+            "mesh peer-group bindings",
+        )?;
         ensure_equal(
             &config.graph.gomory_hu.sample_threshold,
             &None,
@@ -1482,6 +1976,155 @@ prompt_injection_guard = true
                 error,
                 ConfigParseError::InvalidValue { ref key, .. }
                     if key == "graph.curate.onion_decay_max"
+            ),
+            format!("unexpected error: {error:?}"),
+        )
+    }
+
+    #[test]
+    fn peer_group_binding_denies_without_explicit_workspace_binding() -> TestResult {
+        let config = ConfigFile::parse(
+            r#"
+[[mesh.peer_group_bindings]]
+workspace_id = "wsp_workspace_a_001"
+workspace_alias = "workspace-a"
+peer_group_id = "pg_team_alpha_001"
+peer_ids = ["peer_agent_001"]
+origin_workspace_ids = ["wsp_origin_001"]
+
+[mesh.peer_group_bindings.lanes]
+metadata = "allow"
+"#,
+        )
+        .map_err(|error| format!("config should parse: {error}"))?;
+        let binding = config
+            .mesh
+            .peer_group_bindings
+            .as_ref()
+            .and_then(|bindings| bindings.first())
+            .ok_or_else(|| "expected peer-group binding".to_string())?;
+
+        ensure_equal(
+            &binding.decision_for(
+                "wsp_workspace_b_001",
+                "peer_agent_001",
+                "wsp_origin_001",
+                MeshLane::Metadata,
+            ),
+            &MeshLaneDecision::Deny,
+            "workspace B without explicit binding must deny",
+        )
+    }
+
+    #[test]
+    fn peer_group_binding_can_allow_metadata_while_denying_body_and_embedding() -> TestResult {
+        let config = ConfigFile::parse(
+            r#"
+[[mesh.peer_group_bindings]]
+workspace_id = "wsp_workspace_a_001"
+workspace_alias = "workspace-a"
+peer_group_id = "pg_team_alpha_001"
+peer_ids = ["peer_agent_001"]
+origin_workspace_ids = ["wsp_origin_001"]
+
+[mesh.peer_group_bindings.lanes]
+metadata = "allow"
+body = "deny"
+embedding = "deny"
+revision_notice = "allow"
+"#,
+        )
+        .map_err(|error| format!("config should parse: {error}"))?;
+        let binding = config
+            .mesh
+            .peer_group_bindings
+            .as_ref()
+            .and_then(|bindings| bindings.first())
+            .ok_or_else(|| "expected peer-group binding".to_string())?;
+
+        for (lane, expected, context) in [
+            (MeshLane::Metadata, MeshLaneDecision::Allow, "metadata"),
+            (MeshLane::Body, MeshLaneDecision::Deny, "body"),
+            (MeshLane::Embedding, MeshLaneDecision::Deny, "embedding"),
+        ] {
+            ensure_equal(
+                &binding.decision_for(
+                    "wsp_workspace_a_001",
+                    "peer_agent_001",
+                    "wsp_origin_001",
+                    lane,
+                ),
+                &expected,
+                context,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn peer_group_binding_missing_lane_and_unknown_origin_deny_by_default() -> TestResult {
+        let config = ConfigFile::parse(
+            r#"
+[[mesh.peer_group_bindings]]
+workspace_id = "wsp_workspace_a_001"
+workspace_alias = "workspace-a"
+peer_group_id = "pg_team_alpha_001"
+peer_ids = ["peer_agent_001"]
+origin_workspace_ids = ["wsp_origin_001"]
+
+[mesh.peer_group_bindings.lanes]
+metadata = "allow"
+"#,
+        )
+        .map_err(|error| format!("config should parse: {error}"))?;
+        let binding = config
+            .mesh
+            .peer_group_bindings
+            .as_ref()
+            .and_then(|bindings| bindings.first())
+            .ok_or_else(|| "expected peer-group binding".to_string())?;
+
+        ensure_equal(
+            &binding.decision_for(
+                "wsp_workspace_a_001",
+                "peer_agent_001",
+                "wsp_unknown_origin_001",
+                MeshLane::Metadata,
+            ),
+            &MeshLaneDecision::Deny,
+            "unknown origin must deny",
+        )?;
+        ensure_equal(
+            &binding.decision_for(
+                "wsp_workspace_a_001",
+                "peer_agent_001",
+                "wsp_origin_001",
+                MeshLane::CurationSignal,
+            ),
+            &MeshLaneDecision::Deny,
+            "missing curation signal lane must deny",
+        )
+    }
+
+    #[test]
+    fn peer_group_binding_rejects_non_deny_default_action() -> TestResult {
+        let error = expect_config_error(
+            r#"
+[[mesh.peer_group_bindings]]
+workspace_id = "wsp_workspace_a_001"
+workspace_alias = "workspace-a"
+peer_group_id = "pg_team_alpha_001"
+peer_ids = ["peer_agent_001"]
+origin_workspace_ids = ["wsp_origin_001"]
+default_action = "allow"
+"#,
+        )?;
+
+        ensure(
+            matches!(
+                error,
+                ConfigParseError::InvalidValue { ref key, .. }
+                    if key == "mesh.peer_group_bindings[0].default_action"
             ),
             format!("unexpected error: {error:?}"),
         )

@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.context.agent_profile.v1.json",
+  "title": "ee.context.agent_profile.v1",
+  "description": "Agent-specific retrieval bias summary emitted by ee context --explain --json when per-agent profile data affects or explains pack ranking.",
+  "type": "object",
+  "required": [
+    "schema",
+    "agentName",
+    "observedOutcomes",
+    "helpfulCount",
+    "harmfulCount",
+    "ignoredCount",
+    "biasMagnitude",
+    "maxBiasMagnitude",
+    "memoryBiasApplied",
+    "coldStart",
+    "coldStartThreshold",
+    "determinismKey"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.context.agent_profile.v1"},
+    "agentName": {"type": ["string", "null"]},
+    "agentNameHash": {"type": ["string", "null"]},
+    "workspaceId": {"type": ["string", "null"]},
+    "observedOutcomes": {"type": "integer", "minimum": 0},
+    "helpfulCount": {"type": "integer", "minimum": 0},
+    "harmfulCount": {"type": "integer", "minimum": 0},
+    "ignoredCount": {"type": "integer", "minimum": 0},
+    "biasMagnitude": {"type": "number", "minimum": 0.0, "maximum": 0.05},
+    "maxBiasMagnitude": {"type": "number", "const": 0.05},
+    "memoryBiasApplied": {"type": "integer", "minimum": 0},
+    "coldStart": {"type": "boolean"},
+    "coldStartThreshold": {"type": "integer", "minimum": 1},
+    "halfLifeDays": {"type": ["integer", "null"], "minimum": 1},
+    "determinismKey": {
+      "type": "object",
+      "required": [
+        "workspaceGeneration",
+        "profileGeneration",
+        "agentNameHash",
+        "basePackHash"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "workspaceGeneration": {"type": "integer", "minimum": 0},
+        "profileGeneration": {"type": "integer", "minimum": 0},
+        "agentNameHash": {"type": ["string", "null"]},
+        "basePackHash": {"type": ["string", "null"]}
+      }
+    },
+    "topBiases": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/memoryBias"}
+    },
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradation"}
+    }
+  },
+  "$defs": {
+    "memoryBias": {
+      "type": "object",
+      "required": [
+        "memoryId",
+        "bias",
+        "helpfulCount",
+        "harmfulCount",
+        "ignoredCount"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": {"type": "string"},
+        "bias": {"type": "number", "minimum": -0.05, "maximum": 0.05},
+        "helpfulCount": {"type": "integer", "minimum": 0},
+        "harmfulCount": {"type": "integer", "minimum": 0},
+        "ignoredCount": {"type": "integer", "minimum": 0},
+        "lastSeenAt": {"type": ["string", "null"], "format": "date-time"}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {"type": "string"},
+        "repair": {"type": ["string", "null"]},
+        "details": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

@@ -13,9 +13,129 @@ pub const CONTEXT_PROFILE_SCHEMA_V1: &str = "ee.context.profile.v1";
 
 /// Schema identifier for the context profile schema catalog.
 pub const CONTEXT_PROFILE_SCHEMA_CATALOG_V1: &str = "ee.context.profile.schemas.v1";
+pub const AGENT_CONTEXT_PROFILE_SCHEMA_V1: &str = "ee.context.agent_profile.v1";
 
 const JSON_SCHEMA_DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 const TOTAL_BASIS_POINTS: u16 = 10_000;
+pub const AGENT_PROFILE_BIAS_CAP: f64 = 0.05;
+pub const AGENT_PROFILE_COLD_START_OUTCOMES: u32 = 10;
+
+/// Outcome counts learned for one agent/memory pair.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextProfileCounts {
+    pub helpful_count: u32,
+    pub harmful_count: u32,
+    pub ignored_count: u32,
+}
+
+impl AgentContextProfileCounts {
+    #[must_use]
+    pub const fn new(helpful_count: u32, harmful_count: u32, ignored_count: u32) -> Self {
+        Self {
+            helpful_count,
+            harmful_count,
+            ignored_count,
+        }
+    }
+
+    #[must_use]
+    pub const fn observed_outcomes(self) -> u32 {
+        self.helpful_count
+            .saturating_add(self.harmful_count)
+            .saturating_add(self.ignored_count)
+    }
+
+    #[must_use]
+    pub fn bias(self) -> AgentContextProfileBias {
+        let observed_outcomes = self.observed_outcomes();
+        if observed_outcomes < AGENT_PROFILE_COLD_START_OUTCOMES {
+            return AgentContextProfileBias {
+                observed_outcomes,
+                weight: 0.0,
+                cold_start: true,
+            };
+        }
+
+        let helpful = f64::from(self.helpful_count).ln_1p();
+        let harmful = f64::from(self.harmful_count).ln_1p();
+        let ignored_damping = f64::from(self.ignored_count.saturating_add(1)).ln_1p();
+        let raw = AGENT_PROFILE_BIAS_CAP * (helpful - harmful) / ignored_damping.max(f64::EPSILON);
+
+        AgentContextProfileBias {
+            observed_outcomes,
+            weight: raw.clamp(-AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_BIAS_CAP),
+            cold_start: false,
+        }
+    }
+
+    #[must_use]
+    pub fn decayed(self, age_days: f64, half_life_days: f64) -> AgentContextProfileDecayedCounts {
+        let factor = decay_factor(age_days, half_life_days);
+        AgentContextProfileDecayedCounts {
+            helpful_count: f64::from(self.helpful_count) * factor,
+            harmful_count: f64::from(self.harmful_count) * factor,
+            ignored_count: f64::from(self.ignored_count) * factor,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextProfileDecayedCounts {
+    pub helpful_count: f64,
+    pub harmful_count: f64,
+    pub ignored_count: f64,
+}
+
+impl AgentContextProfileDecayedCounts {
+    #[must_use]
+    pub fn observed_outcomes(self) -> f64 {
+        self.helpful_count + self.harmful_count + self.ignored_count
+    }
+
+    #[must_use]
+    pub fn bias(self) -> AgentContextProfileBias {
+        let observed_outcomes = self.observed_outcomes();
+        if observed_outcomes < f64::from(AGENT_PROFILE_COLD_START_OUTCOMES) {
+            return AgentContextProfileBias {
+                observed_outcomes: observed_outcomes.floor() as u32,
+                weight: 0.0,
+                cold_start: true,
+            };
+        }
+
+        let helpful = self.helpful_count.ln_1p();
+        let harmful = self.harmful_count.ln_1p();
+        let ignored_damping = (self.ignored_count + 1.0).ln_1p();
+        let raw = AGENT_PROFILE_BIAS_CAP * (helpful - harmful) / ignored_damping.max(f64::EPSILON);
+
+        AgentContextProfileBias {
+            observed_outcomes: observed_outcomes.floor() as u32,
+            weight: raw.clamp(-AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_BIAS_CAP),
+            cold_start: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextProfileBias {
+    pub observed_outcomes: u32,
+    pub weight: f64,
+    pub cold_start: bool,
+}
+
+#[must_use]
+pub fn decay_factor(age_days: f64, half_life_days: f64) -> f64 {
+    if !age_days.is_finite() || age_days <= 0.0 {
+        return 1.0;
+    }
+    if !half_life_days.is_finite() || half_life_days <= 0.0 {
+        return 0.0;
+    }
+    0.5_f64.powf(age_days / half_life_days)
+}
 
 /// Built-in context profile name.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -600,6 +720,84 @@ mod tests {
             Some(ContextProfileSection::Evidence),
             "section parse",
         )
+    }
+
+    #[test]
+    fn agent_profile_bias_cold_starts_until_threshold() -> TestResult {
+        let bias = AgentContextProfileCounts::new(9, 0, 0).bias();
+        ensure(bias.cold_start, true, "nine outcomes is still cold-start")?;
+        ensure(bias.weight, 0.0, "cold-start applies no bias")?;
+
+        let bias = AgentContextProfileCounts::new(10, 0, 0).bias();
+        ensure(!bias.cold_start, true, "ten outcomes exits cold-start")?;
+        ensure(
+            bias.weight > 0.0,
+            true,
+            "helpful outcomes produce positive bias",
+        )
+    }
+
+    #[test]
+    fn agent_profile_bias_is_capped_for_all_extreme_counts() -> TestResult {
+        for counts in [
+            AgentContextProfileCounts::new(u32::MAX, 0, 0),
+            AgentContextProfileCounts::new(0, u32::MAX, 0),
+            AgentContextProfileCounts::new(u32::MAX, u32::MAX / 2, 0),
+            AgentContextProfileCounts::new(u32::MAX / 2, u32::MAX, u32::MAX),
+        ] {
+            let bias = counts.bias();
+            ensure(
+                bias.weight.abs() <= AGENT_PROFILE_BIAS_CAP,
+                true,
+                "bias must never exceed cap",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn agent_profile_bias_uses_helpful_harmful_and_ignored_counts() -> TestResult {
+        let helpful = AgentContextProfileCounts::new(20, 1, 0).bias();
+        let harmful = AgentContextProfileCounts::new(1, 20, 0).bias();
+        let ignored = AgentContextProfileCounts::new(20, 1, 100).bias();
+
+        ensure(helpful.weight > 0.0, true, "helpful majority is positive")?;
+        ensure(harmful.weight < 0.0, true, "harmful majority is negative")?;
+        ensure(
+            ignored.weight.abs() < helpful.weight.abs(),
+            true,
+            "ignored outcomes damp useful bias",
+        )
+    }
+
+    #[test]
+    fn agent_profile_decay_halves_counts_at_half_life() -> TestResult {
+        let decayed = AgentContextProfileCounts::new(40, 20, 10).decayed(365.0, 365.0);
+        ensure(
+            (decayed.helpful_count - 20.0).abs() < f64::EPSILON,
+            true,
+            "helpful count halves",
+        )?;
+        ensure(
+            (decayed.harmful_count - 10.0).abs() < f64::EPSILON,
+            true,
+            "harmful count halves",
+        )?;
+        ensure(
+            (decayed.ignored_count - 5.0).abs() < f64::EPSILON,
+            true,
+            "ignored count halves",
+        )
+    }
+
+    #[test]
+    fn agent_profile_decay_handles_invalid_boundaries() -> TestResult {
+        ensure(
+            decay_factor(-1.0, 365.0),
+            1.0,
+            "negative age does not amplify counts",
+        )?;
+        ensure(decay_factor(1.0, 0.0), 0.0, "zero half-life expires counts")
     }
 
     #[test]

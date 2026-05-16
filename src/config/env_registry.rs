@@ -42,12 +42,20 @@ pub enum EnvVar {
     IndexPublishLockRetryAttempts,
     /// `EE_JSON`
     Json,
+    /// `EE_L2_PACK_CACHE_BYTES`
+    L2PackCacheBytes,
+    /// `EE_L2_PACK_CACHE_DIR`
+    L2PackCacheDir,
+    /// `EE_L2_PACK_CACHE_DISABLE`
+    L2PackCacheDisable,
     /// `EE_LOG_FORMAT`
     LogFormat,
     /// `EE_LOG_JSON`
     LogJson,
     /// `EE_MAX_TOKENS`
     MaxTokens,
+    /// `EE_MESH_ENABLED`
+    MeshEnabled,
     /// `EE_NO_COLOR`
     NoColor,
     /// `EE_OUTPUT_FORMAT`
@@ -56,6 +64,12 @@ pub enum EnvVar {
     PreflightBypassSecret,
     /// `EE_PROFILE`
     Profile,
+    /// `EE_READ_POOL_DISABLE_PIN`
+    ReadPoolDisablePin,
+    /// `EE_READ_POOL_IDLE_TIMEOUT_S`
+    ReadPoolIdleTimeoutSeconds,
+    /// `EE_READ_POOL_SIZE`
+    ReadPoolSize,
     /// `EE_REMEMBER_CURATION_SYNC_BUDGET_MS`
     RememberCurationSyncBudgetMs,
     /// `EE_SECURITY_PROFILE`
@@ -95,13 +109,20 @@ impl EnvVar {
             Self::IndexDir,
             Self::IndexPublishLockRetryAttempts,
             Self::Json,
+            Self::L2PackCacheBytes,
+            Self::L2PackCacheDir,
+            Self::L2PackCacheDisable,
             Self::LogFormat,
             Self::LogJson,
             Self::MaxTokens,
+            Self::MeshEnabled,
             Self::NoColor,
             Self::OutputFormat,
             Self::PreflightBypassSecret,
             Self::Profile,
+            Self::ReadPoolDisablePin,
+            Self::ReadPoolIdleTimeoutSeconds,
+            Self::ReadPoolSize,
             Self::RememberCurationSyncBudgetMs,
             Self::SecurityProfile,
             Self::ScienceBackendPath,
@@ -133,13 +154,20 @@ impl EnvVar {
             Self::IndexDir => "EE_INDEX_DIR",
             Self::IndexPublishLockRetryAttempts => "EE_INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS",
             Self::Json => "EE_JSON",
+            Self::L2PackCacheBytes => "EE_L2_PACK_CACHE_BYTES",
+            Self::L2PackCacheDir => "EE_L2_PACK_CACHE_DIR",
+            Self::L2PackCacheDisable => "EE_L2_PACK_CACHE_DISABLE",
             Self::LogFormat => "EE_LOG_FORMAT",
             Self::LogJson => "EE_LOG_JSON",
             Self::MaxTokens => "EE_MAX_TOKENS",
+            Self::MeshEnabled => "EE_MESH_ENABLED",
             Self::NoColor => "EE_NO_COLOR",
             Self::OutputFormat => "EE_OUTPUT_FORMAT",
             Self::PreflightBypassSecret => "EE_PREFLIGHT_BYPASS_SECRET",
             Self::Profile => "EE_PROFILE",
+            Self::ReadPoolDisablePin => "EE_READ_POOL_DISABLE_PIN",
+            Self::ReadPoolIdleTimeoutSeconds => "EE_READ_POOL_IDLE_TIMEOUT_S",
+            Self::ReadPoolSize => "EE_READ_POOL_SIZE",
             Self::RememberCurationSyncBudgetMs => "EE_REMEMBER_CURATION_SYNC_BUDGET_MS",
             Self::SecurityProfile => "EE_SECURITY_PROFILE",
             Self::ScienceBackendPath => "EE_SCIENCE_BACKEND_PATH",
@@ -181,13 +209,22 @@ impl EnvVar {
                 "Override index publish advisory-lock retry attempts."
             }
             Self::Json => "Request JSON output from renderer auto-detection.",
+            Self::L2PackCacheBytes => "Override the L2 pack cache byte cap per workspace.",
+            Self::L2PackCacheDir => "Override the L2 pack cache root directory.",
+            Self::L2PackCacheDisable => "Disable L2 pack cache lookup and writes.",
             Self::LogFormat => "Select structured log format.",
             Self::LogJson => "Enable JSON command-start logs on stderr.",
             Self::MaxTokens => "Override the default context pack token budget.",
+            Self::MeshEnabled => "Enable optional mesh-memory surfaces.",
             Self::NoColor => "Disable colored diagnostics.",
             Self::OutputFormat => "Select the default output renderer.",
             Self::PreflightBypassSecret => "Supply preflight bypass secret material.",
             Self::Profile => "Override the default context pack profile.",
+            Self::ReadPoolDisablePin => "Disable read-side snapshot pinning.",
+            Self::ReadPoolIdleTimeoutSeconds => {
+                "Override the read-side connection pool idle timeout in seconds."
+            }
+            Self::ReadPoolSize => "Override the read-side connection pool size.",
             Self::RememberCurationSyncBudgetMs => {
                 "Override remember-time curation sync budget in milliseconds."
             }
@@ -207,6 +244,7 @@ impl EnvVar {
     #[must_use]
     pub const fn default_value(self) -> Option<&'static str> {
         match self {
+            Self::MeshEnabled => Some("false"),
             Self::IndexPublishLockRetryAttempts => Some("200"),
             Self::RememberCurationSyncBudgetMs => Some("50"),
             _ => None,
@@ -227,6 +265,7 @@ impl EnvVar {
             Self::DatabasePath
             | Self::DemoEvidenceRoot
             | Self::IndexDir
+            | Self::L2PackCacheDir
             | Self::Workspace
             | Self::WorkspaceRegistry => "paths",
             Self::DiagForceCapabilityGap => "diagnostics",
@@ -244,10 +283,16 @@ impl EnvVar {
             | Self::TestLogLevel
             | Self::TestLogPath
             | Self::TestLogTestId => "diagnostics",
+            Self::MeshEnabled => "mesh",
             Self::HarmfulBurstWindowSeconds
             | Self::HarmfulPerSourcePerHour
+            | Self::L2PackCacheBytes
+            | Self::L2PackCacheDisable
             | Self::MaxTokens
             | Self::Profile
+            | Self::ReadPoolDisablePin
+            | Self::ReadPoolIdleTimeoutSeconds
+            | Self::ReadPoolSize
             | Self::DisableRememberSearchNeighbors
             | Self::IndexPublishLockRetryAttempts
             | Self::RememberCurationSyncBudgetMs => "tuning",

@@ -12,6 +12,7 @@ use crate::models::{
     ERROR_SCHEMA_V2, MemoryId, MemoryScopeStats, ProvenanceUri, RESPONSE_SCHEMA_V1, RedactionLevel,
     TrustClass, UnitScore,
 };
+use crate::runtime::determinism::{Deterministic, Seed};
 
 pub const SUBSYSTEM: &str = "pack";
 pub const CONTEXT_COMMAND: &str = "context";
@@ -3636,6 +3637,25 @@ pub fn assemble_draft_with_profile_and_options(
     candidates: impl IntoIterator<Item = PackCandidate>,
     options: PackAssemblyOptions,
 ) -> Result<PackDraft, PackValidationError> {
+    let determinism = Deterministic::from_seed(0);
+    assemble_draft_with_profile_and_options_seeded(
+        profile,
+        query,
+        budget,
+        candidates,
+        options,
+        &determinism,
+    )
+}
+
+pub fn assemble_draft_with_profile_and_options_seeded(
+    profile: ContextPackProfile,
+    query: impl Into<String>,
+    budget: TokenBudget,
+    candidates: impl IntoIterator<Item = PackCandidate>,
+    options: PackAssemblyOptions,
+    determinism: &Deterministic<Seed>,
+) -> Result<PackDraft, PackValidationError> {
     match profile {
         ContextPackProfile::Submodular => {
             tracing::info!(
@@ -3657,7 +3677,7 @@ pub fn assemble_draft_with_profile_and_options(
                 profile = profile.as_str(),
                 "starting pack assembly"
             );
-            assemble_mmr_draft(profile, query, budget, candidates, options)
+            assemble_mmr_draft(profile, query, budget, candidates, options, determinism)
         }
     }
 }
@@ -3668,7 +3688,16 @@ fn assemble_mmr_draft(
     budget: TokenBudget,
     candidates: impl IntoIterator<Item = PackCandidate>,
     options: PackAssemblyOptions,
+    determinism: &Deterministic<Seed>,
 ) -> Result<PackDraft, PackValidationError> {
+    let mmr_seed = determinism.shared_child("pack.mmr_tiebreak");
+    tracing::debug!(
+        target: "ee::pack::determinism",
+        seed_scope = %mmr_seed.scope(),
+        seed_hash = %mmr_seed.seed_hash_prefix(),
+        "threaded deterministic token through MMR pack assembly"
+    );
+
     let query = trim_required(query.into(), PackValidationError::EmptyQuery)?;
     let mut candidates: Vec<MmrCandidate> = candidates
         .into_iter()
@@ -5422,12 +5451,14 @@ mod tests {
         SectionQuota, SectionQuotas, TokenBudget, TokenEstimationStrategy,
         WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR, WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR,
         assemble_draft, assemble_draft_with_cache_governor, assemble_draft_with_profile,
-        candidate_similarity, escape_markdown_text, estimate_character_heuristic_tokens,
-        estimate_tokens, estimate_tokens_default, estimate_word_heuristic_tokens,
-        facility_similarity, pack_item_provenance_json, prewarm_pack_hotset, subsystem_name,
+        assemble_draft_with_profile_and_options_seeded, candidate_similarity, escape_markdown_text,
+        estimate_character_heuristic_tokens, estimate_tokens, estimate_tokens_default,
+        estimate_word_heuristic_tokens, facility_similarity, pack_item_provenance_json,
+        prewarm_pack_hotset, subsystem_name,
     };
     use crate::cache::{CacheBudget, MemoryPressure};
     use crate::models::{ContextProfile, MemoryId, ProvenanceUri, TrustClass, UnitScore};
+    use crate::runtime::determinism::Deterministic;
     use crate::testing::ensure_contains;
 
     type TestResult = Result<(), String>;
@@ -7195,6 +7226,49 @@ mod tests {
             &item.redactions,
             &Vec::<PackItemRedaction>::new(),
             "disabled output redaction should not record per-item redactions",
+        )
+    }
+
+    #[test]
+    fn seeded_mmr_pack_assembly_matches_default_selection() -> TestResult {
+        let budget =
+            TokenBudget::new(400).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let candidates = vec![
+            candidate_with_content(45, 0.9, 0.8, 80, "Prefer cargo fmt before release.")?,
+            candidate_with_content(46, 0.7, 0.6, 80, "Run clippy with warnings denied.")?,
+        ];
+        let seeded = assemble_draft_with_profile_and_options_seeded(
+            ContextPackProfile::Balanced,
+            "prepare release",
+            budget,
+            candidates.clone(),
+            PackAssemblyOptions::default(),
+            &Deterministic::from_seed(123),
+        )
+        .map_err(|error| format!("seeded draft rejected: {error:?}"))?;
+        let default = super::assemble_draft_with_profile_and_options(
+            ContextPackProfile::Balanced,
+            "prepare release",
+            budget,
+            candidates,
+            PackAssemblyOptions::default(),
+        )
+        .map_err(|error| format!("default draft rejected: {error:?}"))?;
+
+        let seeded_ids = seeded
+            .items
+            .iter()
+            .map(|item| item.memory_id)
+            .collect::<Vec<_>>();
+        let default_ids = default
+            .items
+            .iter()
+            .map(|item| item.memory_id)
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &seeded_ids,
+            &default_ids,
+            "threading a deterministic token does not alter MMR selection",
         )
     }
 

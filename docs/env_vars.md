@@ -25,13 +25,20 @@ must not expose their current value.
 | `EE_INDEX_DIR` | paths | path | none | Override the configured search index directory. | Equivalent to overriding the storage index directory in config. |
 | `EE_INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS` | tuning | integer count | `200` | Override index publish advisory-lock retry attempts. | Used by Frankensearch writers. |
 | `EE_JSON` | output | boolean flag | none | Request JSON output from renderer auto-detection. | Prefer explicit `--json` for scripts when possible. |
+| `EE_L2_PACK_CACHE_BYTES` | tuning | integer bytes | none | Override the L2 pack cache byte cap per workspace. | Maps to `[cache.pack_l2].max_bytes`; default is 1 GiB. |
+| `EE_L2_PACK_CACHE_DIR` | paths | path | none | Override the L2 pack cache root directory. | Maps to `[cache.pack_l2].directory`; entries are stored below a workspace-specific subdirectory. |
+| `EE_L2_PACK_CACHE_DISABLE` | tuning | boolean flag | none | Disable L2 pack cache lookup and writes. | Inverts `[cache.pack_l2].enabled` for `ee context` once L2 runtime wiring lands. |
 | `EE_LOG_FORMAT` | diagnostics | enum | none | Select structured log format. | `json` selects structured command-start logs on stderr. |
 | `EE_LOG_JSON` | diagnostics | boolean flag | none | Enable JSON command-start logs on stderr. | Shortcut for JSON command logging. |
 | `EE_MAX_TOKENS` | tuning | integer tokens | none | Override the default context pack token budget. | Applies when a command does not pass an explicit token budget. |
+| `EE_MESH_ENABLED` | mesh | boolean flag | `false` | Enable optional mesh-memory surfaces. | Disabled by default; ordinary local-first commands must not open network listeners or require peer configuration when unset. |
 | `EE_NO_COLOR` | output | boolean flag | none | Disable colored diagnostics. | Mirrors the behavior of `NO_COLOR` for ee-specific control. |
 | `EE_OUTPUT_FORMAT` | output | output format | none | Select the default output renderer. | Highest-priority environment output format selector. |
 | `EE_PREFLIGHT_BYPASS_SECRET` | policy | secret string | none | Supply preflight bypass secret material. | Capabilities must never expose this current value. |
 | `EE_PROFILE` | tuning | profile name | none | Override the default context pack profile. | Applies when pack/context profile is not specified explicitly. |
+| `EE_READ_POOL_DISABLE_PIN` | tuning | boolean flag | none | Disable read-side snapshot pinning. | Inverts `[storage.read_pool].pin_snapshot` for read-heavy status/context paths. |
+| `EE_READ_POOL_IDLE_TIMEOUT_S` | tuning | integer seconds | none | Override the read-side connection pool idle timeout in seconds. | Maps to `[storage.read_pool].idle_timeout_seconds`; idle pooled handles are closed after the configured age. |
+| `EE_READ_POOL_SIZE` | tuning | integer count | none | Override the read-side connection pool size. | Maps to `[storage.read_pool].size`; pool construction normalizes zero to one connection. |
 | `EE_REMEMBER_CURATION_SYNC_BUDGET_MS` | tuning | integer milliseconds | `50` | Override remember-time curation sync budget in milliseconds. | Registry-defined default is used when unset. |
 | `EE_SECURITY_PROFILE` | policy | profile name | none | Select security profile. | Controls policy posture for security-sensitive operations. |
 | `EE_SCIENCE_BACKEND_PATH` | integration | path | none | Configure an optional science analytics backend path; missing paths report backend-unavailable. | Used by science-status and analytics commands to surface configured backend outages. |

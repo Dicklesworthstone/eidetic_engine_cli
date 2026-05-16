@@ -15,17 +15,22 @@ use serde::Serialize;
 
 use super::env_registry::EnvVar;
 use super::file::{
-    CassConfig, ConfigFile, CurationConfig, FeedbackConfig, GraphCausalConfig, GraphConfig,
-    GraphCurateConfig, GraphFeatureFlagsConfig, GraphGomoryHuConfig, GraphHealthConfig,
-    GraphHitsConfig, GraphPackDnaConfig, GraphPprConfig, HandoffConfig, LearnConfig,
-    LearnDecayConfig, OutputRedactionConfig, PackConfig, PolicyConfig, PrivacyConfig,
-    RuntimeConfig, SearchConfig, SearchSpeed, SecretDetectorConfig, StorageConfig, TrustConfig,
+    CacheConfig, CassConfig, ConfigFile, CurationConfig, FeedbackConfig, GraphCausalConfig,
+    GraphConfig, GraphCurateConfig, GraphFeatureFlagsConfig, GraphGomoryHuConfig,
+    GraphHealthConfig, GraphHitsConfig, GraphPackDnaConfig, GraphPprConfig, HandoffConfig,
+    LearnConfig, LearnDecayConfig, MeshConfig, OutputRedactionConfig, PackConfig,
+    PackL2CacheConfig, PolicyConfig, PrivacyConfig, ReadPoolConfig, RuntimeConfig, SearchConfig,
+    SearchSpeed, SecretDetectorConfig, StorageConfig, TrustConfig,
 };
 use super::path::{PathExpander, PathExpansionError};
 
 pub const STORAGE_DATABASE_PATH_KEY: &str = "storage.database_path";
 pub const STORAGE_INDEX_DIR_KEY: &str = "storage.index_dir";
 pub const STORAGE_JSONL_EXPORT_KEY: &str = "storage.jsonl_export";
+pub const STORAGE_READ_POOL_SIZE_KEY: &str = "storage.read_pool.size";
+pub const STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY: &str =
+    "storage.read_pool.idle_timeout_seconds";
+pub const STORAGE_READ_POOL_PIN_SNAPSHOT_KEY: &str = "storage.read_pool.pin_snapshot";
 pub const RUNTIME_DAEMON_KEY: &str = "runtime.daemon";
 pub const RUNTIME_JOB_BUDGET_MS_KEY: &str = "runtime.job_budget_ms";
 pub const RUNTIME_IMPORT_BATCH_SIZE_KEY: &str = "runtime.import_batch_size";
@@ -41,6 +46,12 @@ pub const PACK_DEFAULT_FORMAT_KEY: &str = "pack.default_format";
 pub const PACK_DEFAULT_MAX_TOKENS_KEY: &str = "pack.default_max_tokens";
 pub const PACK_MMR_LAMBDA_KEY: &str = "pack.mmr_lambda";
 pub const PACK_CANDIDATE_POOL_KEY: &str = "pack.candidate_pool";
+pub const CACHE_PACK_L2_ENABLED_KEY: &str = "cache.pack_l2.enabled";
+pub const CACHE_PACK_L2_DIRECTORY_KEY: &str = "cache.pack_l2.directory";
+pub const CACHE_PACK_L2_MAX_BYTES_KEY: &str = "cache.pack_l2.max_bytes";
+pub const CACHE_PACK_L2_MAX_AGE_DAYS_KEY: &str = "cache.pack_l2.max_age_days";
+pub const MESH_ENABLED_KEY: &str = "mesh.enabled";
+pub const MESH_PEER_GROUP_BINDINGS_KEY: &str = "mesh.peer_group_bindings";
 pub const GRAPH_PPR_ALPHA_KEY: &str = "graph.ppr.alpha";
 pub const GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY: &str = "graph.health.contradiction_threshold";
 pub const GRAPH_CURATE_ONION_DECAY_MAX_KEY: &str = "graph.curate.onion_decay_max";
@@ -183,6 +194,27 @@ impl MergedConfig {
                 self.source(STORAGE_JSONL_EXPORT_KEY),
             ));
         }
+        if let Some(size) = self.values.storage.read_pool.size {
+            entries.push(ConfigShowEntry::new(
+                STORAGE_READ_POOL_SIZE_KEY,
+                size.to_string(),
+                self.source(STORAGE_READ_POOL_SIZE_KEY),
+            ));
+        }
+        if let Some(seconds) = self.values.storage.read_pool.idle_timeout_seconds {
+            entries.push(ConfigShowEntry::new(
+                STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY,
+                seconds.to_string(),
+                self.source(STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY),
+            ));
+        }
+        if let Some(pin_snapshot) = self.values.storage.read_pool.pin_snapshot {
+            entries.push(ConfigShowEntry::new(
+                STORAGE_READ_POOL_PIN_SNAPSHOT_KEY,
+                pin_snapshot.to_string(),
+                self.source(STORAGE_READ_POOL_PIN_SNAPSHOT_KEY),
+            ));
+        }
 
         // Runtime section
         if let Some(daemon) = self.values.runtime.daemon {
@@ -294,6 +326,52 @@ impl MergedConfig {
                 PACK_CANDIDATE_POOL_KEY,
                 pool.to_string(),
                 self.source(PACK_CANDIDATE_POOL_KEY),
+            ));
+        }
+
+        // Cache section
+        if let Some(enabled) = self.values.cache.pack_l2.enabled {
+            entries.push(ConfigShowEntry::new(
+                CACHE_PACK_L2_ENABLED_KEY,
+                enabled.to_string(),
+                self.source(CACHE_PACK_L2_ENABLED_KEY),
+            ));
+        }
+        if let Some(ref directory) = self.values.cache.pack_l2.directory {
+            entries.push(ConfigShowEntry::new(
+                CACHE_PACK_L2_DIRECTORY_KEY,
+                directory.display().to_string(),
+                self.source(CACHE_PACK_L2_DIRECTORY_KEY),
+            ));
+        }
+        if let Some(max_bytes) = self.values.cache.pack_l2.max_bytes {
+            entries.push(ConfigShowEntry::new(
+                CACHE_PACK_L2_MAX_BYTES_KEY,
+                max_bytes.to_string(),
+                self.source(CACHE_PACK_L2_MAX_BYTES_KEY),
+            ));
+        }
+        if let Some(max_age_days) = self.values.cache.pack_l2.max_age_days {
+            entries.push(ConfigShowEntry::new(
+                CACHE_PACK_L2_MAX_AGE_DAYS_KEY,
+                max_age_days.to_string(),
+                self.source(CACHE_PACK_L2_MAX_AGE_DAYS_KEY),
+            ));
+        }
+
+        // Mesh section
+        if let Some(enabled) = self.values.mesh.enabled {
+            entries.push(ConfigShowEntry::new(
+                MESH_ENABLED_KEY,
+                enabled.to_string(),
+                self.source(MESH_ENABLED_KEY),
+            ));
+        }
+        if let Some(ref bindings) = self.values.mesh.peer_group_bindings {
+            entries.push(ConfigShowEntry::new(
+                MESH_PEER_GROUP_BINDINGS_KEY,
+                bindings.len().to_string(),
+                self.source(MESH_PEER_GROUP_BINDINGS_KEY),
             ));
         }
 
@@ -654,6 +732,11 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
                 expander,
             )?),
             jsonl_export: Some(false),
+            read_pool: ReadPoolConfig {
+                size: Some(1),
+                idle_timeout_seconds: Some(30),
+                pin_snapshot: Some(true),
+            },
         },
         runtime: RuntimeConfig {
             daemon: Some(false),
@@ -679,6 +762,18 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             candidate_pool: Some(100),
         },
         handoff: HandoffConfig::default(),
+        cache: CacheConfig {
+            pack_l2: PackL2CacheConfig {
+                enabled: Some(true),
+                directory: Some(PathBuf::new()),
+                max_bytes: Some(1_073_741_824),
+                max_age_days: Some(30),
+            },
+        },
+        mesh: MeshConfig {
+            enabled: Some(false),
+            peer_group_bindings: Some(Vec::new()),
+        },
         graph: GraphConfig {
             ppr: GraphPprConfig { alpha: Some(0.30) },
             health: GraphHealthConfig {
@@ -777,11 +872,33 @@ pub fn config_from_env(
             database_path: optional_env_path(env, EnvVar::DatabasePath.name(), expander)?,
             index_dir: optional_env_path(env, EnvVar::IndexDir.name(), expander)?,
             jsonl_export: None,
+            read_pool: ReadPoolConfig {
+                size: optional_env_u64(env, EnvVar::ReadPoolSize.name())?,
+                idle_timeout_seconds: optional_env_u64(
+                    env,
+                    EnvVar::ReadPoolIdleTimeoutSeconds.name(),
+                )?,
+                pin_snapshot: optional_env_bool(env, EnvVar::ReadPoolDisablePin.name())?
+                    .map(|disabled| !disabled),
+            },
         },
         runtime: RuntimeConfig::default(),
         cass: CassConfig::default(),
         search: SearchConfig::default(),
         handoff: HandoffConfig::default(),
+        cache: CacheConfig {
+            pack_l2: PackL2CacheConfig {
+                enabled: optional_env_bool(env, EnvVar::L2PackCacheDisable.name())?
+                    .map(|disabled| !disabled),
+                directory: optional_env_path(env, EnvVar::L2PackCacheDir.name(), expander)?,
+                max_bytes: optional_env_u64(env, EnvVar::L2PackCacheBytes.name())?,
+                max_age_days: None,
+            },
+        },
+        mesh: MeshConfig {
+            enabled: optional_env_bool(env, EnvVar::MeshEnabled.name())?,
+            peer_group_bindings: None,
+        },
         graph: GraphConfig::default(),
         pack: PackConfig {
             default_profile: optional_env_string(env, EnvVar::Profile.name())?,
@@ -817,6 +934,10 @@ pub enum EnvironmentConfigError {
         variable: &'static str,
         value: String,
     },
+    InvalidBoolean {
+        variable: &'static str,
+        value: String,
+    },
     PathExpansion {
         variable: &'static str,
         source: PathExpansionError,
@@ -836,6 +957,10 @@ impl fmt::Display for EnvironmentConfigError {
                 formatter,
                 "environment variable `{variable}` must be a non-negative integer, got `{value}`"
             ),
+            Self::InvalidBoolean { variable, value } => write!(
+                formatter,
+                "environment variable `{variable}` must be `true` or `false`, got `{value}`"
+            ),
             Self::PathExpansion { variable, source } => {
                 write!(formatter, "failed to expand `{variable}`: {source}")
             }
@@ -847,7 +972,9 @@ impl std::error::Error for EnvironmentConfigError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::PathExpansion { source, .. } => Some(source),
-            Self::InvalidUnicode { .. } | Self::InvalidUnsignedInteger { .. } => None,
+            Self::InvalidUnicode { .. }
+            | Self::InvalidUnsignedInteger { .. }
+            | Self::InvalidBoolean { .. } => None,
         }
     }
 }
@@ -884,6 +1011,35 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.user.storage.jsonl_export,
                 &layers.defaults.storage.jsonl_export,
             ),
+            read_pool: ReadPoolConfig {
+                size: pick_field(
+                    &mut sources,
+                    STORAGE_READ_POOL_SIZE_KEY,
+                    &layers.cli.storage.read_pool.size,
+                    &layers.environment.storage.read_pool.size,
+                    &layers.project.storage.read_pool.size,
+                    &layers.user.storage.read_pool.size,
+                    &layers.defaults.storage.read_pool.size,
+                ),
+                idle_timeout_seconds: pick_field(
+                    &mut sources,
+                    STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY,
+                    &layers.cli.storage.read_pool.idle_timeout_seconds,
+                    &layers.environment.storage.read_pool.idle_timeout_seconds,
+                    &layers.project.storage.read_pool.idle_timeout_seconds,
+                    &layers.user.storage.read_pool.idle_timeout_seconds,
+                    &layers.defaults.storage.read_pool.idle_timeout_seconds,
+                ),
+                pin_snapshot: pick_field(
+                    &mut sources,
+                    STORAGE_READ_POOL_PIN_SNAPSHOT_KEY,
+                    &layers.cli.storage.read_pool.pin_snapshot,
+                    &layers.environment.storage.read_pool.pin_snapshot,
+                    &layers.project.storage.read_pool.pin_snapshot,
+                    &layers.user.storage.read_pool.pin_snapshot,
+                    &layers.defaults.storage.read_pool.pin_snapshot,
+                ),
+            },
         },
         runtime: RuntimeConfig {
             daemon: pick_field(
@@ -1029,6 +1185,66 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
             ),
         },
         handoff: HandoffConfig::default(),
+        cache: CacheConfig {
+            pack_l2: PackL2CacheConfig {
+                enabled: pick_field(
+                    &mut sources,
+                    CACHE_PACK_L2_ENABLED_KEY,
+                    &layers.cli.cache.pack_l2.enabled,
+                    &layers.environment.cache.pack_l2.enabled,
+                    &layers.project.cache.pack_l2.enabled,
+                    &layers.user.cache.pack_l2.enabled,
+                    &layers.defaults.cache.pack_l2.enabled,
+                ),
+                directory: pick_field(
+                    &mut sources,
+                    CACHE_PACK_L2_DIRECTORY_KEY,
+                    &layers.cli.cache.pack_l2.directory,
+                    &layers.environment.cache.pack_l2.directory,
+                    &layers.project.cache.pack_l2.directory,
+                    &layers.user.cache.pack_l2.directory,
+                    &layers.defaults.cache.pack_l2.directory,
+                ),
+                max_bytes: pick_field(
+                    &mut sources,
+                    CACHE_PACK_L2_MAX_BYTES_KEY,
+                    &layers.cli.cache.pack_l2.max_bytes,
+                    &layers.environment.cache.pack_l2.max_bytes,
+                    &layers.project.cache.pack_l2.max_bytes,
+                    &layers.user.cache.pack_l2.max_bytes,
+                    &layers.defaults.cache.pack_l2.max_bytes,
+                ),
+                max_age_days: pick_field(
+                    &mut sources,
+                    CACHE_PACK_L2_MAX_AGE_DAYS_KEY,
+                    &layers.cli.cache.pack_l2.max_age_days,
+                    &layers.environment.cache.pack_l2.max_age_days,
+                    &layers.project.cache.pack_l2.max_age_days,
+                    &layers.user.cache.pack_l2.max_age_days,
+                    &layers.defaults.cache.pack_l2.max_age_days,
+                ),
+            },
+        },
+        mesh: MeshConfig {
+            enabled: pick_field(
+                &mut sources,
+                MESH_ENABLED_KEY,
+                &layers.cli.mesh.enabled,
+                &layers.environment.mesh.enabled,
+                &layers.project.mesh.enabled,
+                &layers.user.mesh.enabled,
+                &layers.defaults.mesh.enabled,
+            ),
+            peer_group_bindings: pick_field(
+                &mut sources,
+                MESH_PEER_GROUP_BINDINGS_KEY,
+                &layers.cli.mesh.peer_group_bindings,
+                &layers.environment.mesh.peer_group_bindings,
+                &layers.project.mesh.peer_group_bindings,
+                &layers.user.mesh.peer_group_bindings,
+                &layers.defaults.mesh.peer_group_bindings,
+            ),
+        },
         graph: GraphConfig {
             ppr: GraphPprConfig {
                 alpha: pick_field(
@@ -1534,6 +1750,20 @@ fn optional_env_u64(
         .map_err(|_| EnvironmentConfigError::InvalidUnsignedInteger { variable, value })
 }
 
+fn optional_env_bool(
+    env: &BTreeMap<String, OsString>,
+    variable: &'static str,
+) -> Result<Option<bool>, EnvironmentConfigError> {
+    let Some(value) = optional_env_string(env, variable)? else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        "true" => Ok(Some(true)),
+        "false" => Ok(Some(false)),
+        _ => Err(EnvironmentConfigError::InvalidBoolean { variable, value }),
+    }
+}
+
 fn optional_env_path(
     env: &BTreeMap<String, OsString>,
     variable: &'static str,
@@ -1562,23 +1792,26 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        CURATION_SPECIFICITY_MIN_KEY, ConfigLayers, ConfigValueSource, EnvironmentConfigError,
-        GRAPH_CAUSAL_MIN_COST_NORMALIZATION_KEY,
+        CACHE_PACK_L2_DIRECTORY_KEY, CACHE_PACK_L2_ENABLED_KEY, CACHE_PACK_L2_MAX_AGE_DAYS_KEY,
+        CACHE_PACK_L2_MAX_BYTES_KEY, CURATION_SPECIFICITY_MIN_KEY, ConfigLayers, ConfigValueSource,
+        EnvironmentConfigError, GRAPH_CAUSAL_MIN_COST_NORMALIZATION_KEY,
         GRAPH_CURATE_ARTICULATION_PROTECTION_MULTIPLIER_KEY, GRAPH_CURATE_ONION_DECAY_MAX_KEY,
         GRAPH_FEATURE_PPR_ENABLED_KEY, GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
         GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY, GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY,
         GRAPH_HITS_PROFILE_BOOST_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY, GRAPH_PACK_DNA_MAX_ITEMS_KEY,
         GRAPH_PPR_ALPHA_KEY, LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY,
         LEARN_DECAY_DEMOTE_THRESHOLD_KEY, LEARN_DECAY_PROCEDURAL_RULE_HALF_LIFE_DAYS_KEY,
-        PACK_DEFAULT_MAX_TOKENS_KEY, PACK_DEFAULT_PROFILE_KEY,
-        POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY, SEARCH_DEFAULT_SPEED_KEY,
-        STORAGE_DATABASE_PATH_KEY, STORAGE_INDEX_DIR_KEY, built_in_config, config_from_env,
-        merge_config,
+        MESH_ENABLED_KEY, MESH_PEER_GROUP_BINDINGS_KEY, PACK_DEFAULT_MAX_TOKENS_KEY,
+        PACK_DEFAULT_PROFILE_KEY, POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY,
+        SEARCH_DEFAULT_SPEED_KEY, STORAGE_DATABASE_PATH_KEY, STORAGE_INDEX_DIR_KEY,
+        STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY, STORAGE_READ_POOL_PIN_SNAPSHOT_KEY,
+        STORAGE_READ_POOL_SIZE_KEY, built_in_config, config_from_env, merge_config,
     };
     use crate::config::{
-        ConfigFile, CurationConfig, GraphConfig, GraphCurateConfig, GraphFeatureFlagsConfig,
-        GraphGomoryHuConfig, GraphHealthConfig, GraphPprConfig, LearnConfig, LearnDecayConfig,
-        PackConfig, PathExpander, PolicyConfig, SearchConfig, SearchSpeed, SecretDetectorConfig,
+        CacheConfig, ConfigFile, CurationConfig, GraphConfig, GraphCurateConfig,
+        GraphFeatureFlagsConfig, GraphGomoryHuConfig, GraphHealthConfig, GraphPprConfig,
+        LearnConfig, LearnDecayConfig, MeshConfig, PackConfig, PackL2CacheConfig, PathExpander,
+        PolicyConfig, ReadPoolConfig, SearchConfig, SearchSpeed, SecretDetectorConfig,
         StorageConfig,
     };
 
@@ -1649,6 +1882,38 @@ mod tests {
             "default profile",
         )?;
         ensure_equal(&defaults.pack.default_max_tokens, &Some(4000), "max tokens")?;
+        ensure_equal(
+            &defaults.cache.pack_l2.enabled,
+            &Some(true),
+            "pack L2 cache enabled",
+        )?;
+        ensure_equal(
+            &defaults.cache.pack_l2.directory,
+            &Some(PathBuf::new()),
+            "pack L2 cache directory",
+        )?;
+        ensure_equal(
+            &defaults.cache.pack_l2.max_bytes,
+            &Some(1_073_741_824),
+            "pack L2 cache max bytes",
+        )?;
+        ensure_equal(
+            &defaults.cache.pack_l2.max_age_days,
+            &Some(30),
+            "pack L2 cache max age",
+        )?;
+        ensure_equal(&defaults.mesh.enabled, &Some(false), "mesh default off")?;
+        ensure_equal(&defaults.storage.read_pool.size, &Some(1), "read pool size")?;
+        ensure_equal(
+            &defaults.storage.read_pool.idle_timeout_seconds,
+            &Some(30),
+            "read pool idle timeout",
+        )?;
+        ensure_equal(
+            &defaults.storage.read_pool.pin_snapshot,
+            &Some(true),
+            "read pool snapshot pinning",
+        )?;
         ensure_equal(&defaults.graph.ppr.alpha, &Some(0.30), "graph ppr alpha")?;
         ensure_equal(
             &defaults.graph.health.contradiction_threshold,
@@ -1696,6 +1961,28 @@ mod tests {
             OsString::from("~/custom/ee.db"),
         );
         env.insert("EE_INDEX_DIR".to_string(), OsString::from("/tmp/index"));
+        env.insert("EE_READ_POOL_SIZE".to_string(), OsString::from("4"));
+        env.insert(
+            "EE_READ_POOL_IDLE_TIMEOUT_S".to_string(),
+            OsString::from("120"),
+        );
+        env.insert(
+            "EE_READ_POOL_DISABLE_PIN".to_string(),
+            OsString::from("true"),
+        );
+        env.insert(
+            "EE_L2_PACK_CACHE_BYTES".to_string(),
+            OsString::from("268435456"),
+        );
+        env.insert(
+            "EE_L2_PACK_CACHE_DIR".to_string(),
+            OsString::from("~/ee-pack-cache"),
+        );
+        env.insert(
+            "EE_L2_PACK_CACHE_DISABLE".to_string(),
+            OsString::from("true"),
+        );
+        env.insert("EE_MESH_ENABLED".to_string(), OsString::from("true"));
         env.insert("EE_PROFILE".to_string(), OsString::from("thorough"));
         env.insert("EE_MAX_TOKENS".to_string(), OsString::from("8192"));
 
@@ -1721,7 +2008,38 @@ mod tests {
             &parsed.pack.default_max_tokens,
             &Some(8192),
             "env max tokens",
-        )
+        )?;
+        ensure_equal(
+            &parsed.storage.read_pool.size,
+            &Some(4),
+            "env read pool size",
+        )?;
+        ensure_equal(
+            &parsed.storage.read_pool.idle_timeout_seconds,
+            &Some(120),
+            "env read pool idle timeout",
+        )?;
+        ensure_equal(
+            &parsed.storage.read_pool.pin_snapshot,
+            &Some(false),
+            "env read pool disable pin inversion",
+        )?;
+        ensure_equal(
+            &parsed.cache.pack_l2.max_bytes,
+            &Some(268_435_456),
+            "env L2 pack cache max bytes",
+        )?;
+        ensure_equal(
+            &parsed.cache.pack_l2.directory,
+            &Some(PathBuf::from("/home/agent/ee-pack-cache")),
+            "env L2 pack cache directory",
+        )?;
+        ensure_equal(
+            &parsed.cache.pack_l2.enabled,
+            &Some(false),
+            "env L2 pack cache disable inversion",
+        )?;
+        ensure_equal(&parsed.mesh.enabled, &Some(true), "env mesh enabled")
     }
 
     #[test]
@@ -1741,6 +2059,26 @@ mod tests {
                 value: "many".to_string(),
             },
             "invalid integer error",
+        )
+    }
+
+    #[test]
+    fn environment_layer_rejects_invalid_bool() -> TestResult {
+        let mut env = BTreeMap::new();
+        env.insert("EE_MESH_ENABLED".to_string(), OsString::from("yes"));
+
+        let error = match config_from_env(&env, &expander()) {
+            Ok(config) => return Err(format!("expected env error, got {config:?}")),
+            Err(error) => error,
+        };
+
+        ensure_equal(
+            &error,
+            &EnvironmentConfigError::InvalidBoolean {
+                variable: "EE_MESH_ENABLED",
+                value: "yes".to_string(),
+            },
+            "invalid bool error",
         )
     }
 
@@ -1811,11 +2149,25 @@ mod tests {
         let environment = ConfigFile {
             storage: StorageConfig {
                 index_dir: Some(PathBuf::from("/env/index")),
+                read_pool: ReadPoolConfig {
+                    size: Some(8),
+                    ..ReadPoolConfig::default()
+                },
                 ..StorageConfig::default()
             },
             pack: PackConfig {
                 default_profile: Some("env-profile".to_string()),
                 ..PackConfig::default()
+            },
+            cache: CacheConfig {
+                pack_l2: PackL2CacheConfig {
+                    max_bytes: Some(268_435_456),
+                    ..PackL2CacheConfig::default()
+                },
+            },
+            mesh: MeshConfig {
+                enabled: Some(true),
+                peer_group_bindings: None,
             },
             ..ConfigFile::default()
         };
@@ -1856,6 +2208,26 @@ mod tests {
             "index dir source",
         )?;
         ensure_equal(
+            &merged.values.storage.read_pool.size,
+            &Some(8),
+            "env read pool size",
+        )?;
+        ensure_equal(
+            &merged.source(STORAGE_READ_POOL_SIZE_KEY),
+            &Some(ConfigValueSource::Environment),
+            "read pool size source",
+        )?;
+        ensure_equal(
+            &merged.values.storage.read_pool.idle_timeout_seconds,
+            &Some(30),
+            "default read pool idle timeout",
+        )?;
+        ensure_equal(
+            &merged.source(STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY),
+            &Some(ConfigValueSource::Default),
+            "read pool idle timeout source",
+        )?;
+        ensure_equal(
             &merged.values.search.default_speed,
             &Some(SearchSpeed::Thorough),
             "project beats user search speed",
@@ -1879,6 +2251,32 @@ mod tests {
             &merged.source(PACK_DEFAULT_MAX_TOKENS_KEY),
             &Some(ConfigValueSource::Default),
             "default max tokens source",
+        )?;
+        ensure_equal(
+            &merged.values.cache.pack_l2.max_bytes,
+            &Some(268_435_456),
+            "env L2 pack cache max bytes",
+        )?;
+        ensure_equal(
+            &merged.source(CACHE_PACK_L2_MAX_BYTES_KEY),
+            &Some(ConfigValueSource::Environment),
+            "L2 pack cache max bytes source",
+        )?;
+        ensure_equal(
+            &merged.values.cache.pack_l2.max_age_days,
+            &Some(30),
+            "default L2 pack cache max age",
+        )?;
+        ensure_equal(
+            &merged.source(CACHE_PACK_L2_MAX_AGE_DAYS_KEY),
+            &Some(ConfigValueSource::Default),
+            "L2 pack cache max age source",
+        )?;
+        ensure_equal(&merged.values.mesh.enabled, &Some(true), "env mesh enabled")?;
+        ensure_equal(
+            &merged.source(MESH_ENABLED_KEY),
+            &Some(ConfigValueSource::Environment),
+            "mesh enabled source",
         )?;
         ensure_equal(
             &merged.values.graph.ppr.alpha,
@@ -2003,6 +2401,10 @@ mod tests {
         let keys: Vec<&str> = report.entries.iter().map(|entry| entry.key).collect();
 
         for expected in [
+            CACHE_PACK_L2_ENABLED_KEY,
+            CACHE_PACK_L2_DIRECTORY_KEY,
+            CACHE_PACK_L2_MAX_BYTES_KEY,
+            CACHE_PACK_L2_MAX_AGE_DAYS_KEY,
             GRAPH_PPR_ALPHA_KEY,
             GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY,
             GRAPH_CURATE_ONION_DECAY_MAX_KEY,
@@ -2013,6 +2415,11 @@ mod tests {
             GRAPH_PACK_DNA_MAX_EDGES_KEY,
             GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY,
             GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
+            MESH_ENABLED_KEY,
+            MESH_PEER_GROUP_BINDINGS_KEY,
+            STORAGE_READ_POOL_SIZE_KEY,
+            STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY,
+            STORAGE_READ_POOL_PIN_SNAPSHOT_KEY,
         ] {
             if !keys.contains(&expected) {
                 return Err(format!("show report missing {expected}"));

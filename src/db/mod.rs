@@ -17,11 +17,13 @@ use sqlmodel_core::{IsolationLevel, Row, Value};
 use sqlmodel_frankensqlite::FrankenConnection;
 
 use crate::models::{
-    EMBEDDING_METADATA_SCHEMA_V1, EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider,
-    ModelPurpose, ModelRegistryStatus, RATIONALE_TRACE_SCHEMA_V1, RationaleTrace,
-    RationaleTraceKind, RationaleTracePosture, RationaleTraceVisibility, RedactionStatus,
-    validate_rationale_summary,
+    AGENT_PROFILE_BIAS_CAP, AgentContextProfileCounts, EMBEDDING_METADATA_SCHEMA_V1,
+    EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
+    RATIONALE_TRACE_SCHEMA_V1, RationaleTrace, RationaleTraceKind, RationaleTracePosture,
+    RationaleTraceVisibility, RedactionStatus, validate_rationale_summary,
 };
+
+pub mod read_pool;
 
 pub const SUBSYSTEM: &str = "db";
 pub const MIGRATION_TABLE_NAME: &str = "ee_schema_migrations";
@@ -407,6 +409,11 @@ impl DbConnection {
         self.execute_raw_for(DbOperation::BeginTransaction, "BEGIN DEFERRED")
     }
 
+    /// Begin a read snapshot without taking the file write-owner gate.
+    pub(crate) fn begin_read_snapshot(&self) -> Result<()> {
+        self.execute_read_snapshot_raw(DbOperation::BeginTransaction, "BEGIN DEFERRED")
+    }
+
     /// Commit the current transaction.
     ///
     /// # Warning
@@ -416,6 +423,11 @@ impl DbConnection {
         self.execute_raw_for(DbOperation::CommitTransaction, "COMMIT")
     }
 
+    /// Commit a read snapshot without taking the file write-owner gate.
+    pub(crate) fn commit_read_snapshot(&self) -> Result<()> {
+        self.execute_read_snapshot_raw(DbOperation::CommitTransaction, "COMMIT")
+    }
+
     /// Rollback the current transaction.
     ///
     /// # Warning
@@ -423,6 +435,11 @@ impl DbConnection {
     /// write-owner lock. Prefer `with_transaction` for safe transactional writes.
     pub(crate) fn rollback(&self) -> Result<()> {
         self.execute_raw_for(DbOperation::RollbackTransaction, "ROLLBACK")
+    }
+
+    /// Roll back a read snapshot without taking the file write-owner gate.
+    pub(crate) fn rollback_read_snapshot(&self) -> Result<()> {
+        self.execute_read_snapshot_raw(DbOperation::RollbackTransaction, "ROLLBACK")
     }
 
     /// Execute a closure within a transaction.
@@ -926,6 +943,20 @@ impl DbConnection {
         if matches!(self.location, DatabaseLocation::File(_)) {
             return retry_sqlite_contention(operation, || {
                 let _write_owner = lock_file_write_owner_gate(&self.location)?;
+                self.inner
+                    .execute_raw(sql)
+                    .map_err(|source| DbError::sqlmodel(operation, source))
+            });
+        }
+
+        self.inner
+            .execute_raw(sql)
+            .map_err(|source| DbError::sqlmodel(operation, source))
+    }
+
+    fn execute_read_snapshot_raw(&self, operation: DbOperation, sql: &str) -> Result<()> {
+        if matches!(self.location, DatabaseLocation::File(_)) {
+            return retry_sqlite_contention(operation, || {
                 self.inner
                     .execute_raw(sql)
                     .map_err(|source| DbError::sqlmodel(operation, source))
@@ -3895,6 +3926,33 @@ CREATE INDEX idx_preflight_bypass_tokens_revoked
     "blake3:v049_preflight_bypass_tokens_2026_05_15",
 );
 
+/// V050: Store per-agent context profile outcome counts.
+pub const V050_AGENT_CONTEXT_PROFILES: Migration = Migration::new(
+    50,
+    "agent_context_profiles",
+    r#"
+CREATE TABLE agent_context_profiles (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    agent_name TEXT NOT NULL CHECK (length(trim(agent_name)) > 0),
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    helpful_count INTEGER NOT NULL DEFAULT 0 CHECK (helpful_count >= 0),
+    harmful_count INTEGER NOT NULL DEFAULT 0 CHECK (harmful_count >= 0),
+    ignored_count INTEGER NOT NULL DEFAULT 0 CHECK (ignored_count >= 0),
+    last_seen_at TEXT NOT NULL CHECK (length(trim(last_seen_at)) > 0),
+    weight_cached REAL NOT NULL DEFAULT 0.0 CHECK (weight_cached >= -0.05 AND weight_cached <= 0.05),
+    PRIMARY KEY (workspace_id, agent_name, memory_id)
+);
+
+CREATE INDEX idx_agent_context_profiles_workspace_agent
+    ON agent_context_profiles(workspace_id, agent_name);
+CREATE INDEX idx_agent_context_profiles_workspace_memory
+    ON agent_context_profiles(workspace_id, memory_id);
+CREATE INDEX idx_agent_context_profiles_last_seen
+    ON agent_context_profiles(workspace_id, last_seen_at);
+"#,
+    "blake3:v050_agent_context_profiles_2026_05_16",
+);
+
 /// V042: Allow every pack omission reason emitted by the packer.
 pub const V042_PACK_OMISSION_REASONS: Migration = Migration::new(
     42,
@@ -4060,6 +4118,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V047_GRAPH_ALGORITHM_RESULTS,
     V048_WAL_HOLDS,
     V049_PREFLIGHT_BYPASS_TOKENS,
+    V050_AGENT_CONTEXT_PROFILES,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -6243,6 +6302,28 @@ pub struct StoredFeedbackEvent {
     pub created_at: String,
 }
 
+/// Input for updating one per-agent context profile memory row.
+#[derive(Debug, Clone)]
+pub struct UpsertAgentContextProfileInput {
+    pub workspace_id: String,
+    pub agent_name: String,
+    pub memory_id: String,
+    pub counts_delta: AgentContextProfileCounts,
+    pub last_seen_at: Option<String>,
+    pub weight_cached: f64,
+}
+
+/// Stored agent_context_profiles row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredAgentContextProfile {
+    pub workspace_id: String,
+    pub agent_name: String,
+    pub memory_id: String,
+    pub counts: AgentContextProfileCounts,
+    pub last_seen_at: String,
+    pub weight_cached: f64,
+}
+
 /// Input for creating a learning observation ledger row.
 #[derive(Debug, Clone)]
 pub struct CreateLearningObservationInput {
@@ -6470,6 +6551,109 @@ impl DbConnection {
         )?;
 
         Ok(())
+    }
+
+    /// Insert or update one per-agent profile row for a memory.
+    pub fn upsert_agent_context_profile_event(
+        &self,
+        input: &UpsertAgentContextProfileInput,
+    ) -> Result<StoredAgentContextProfile> {
+        if !input.weight_cached.is_finite()
+            || input.weight_cached < -AGENT_PROFILE_BIAS_CAP
+            || input.weight_cached > AGENT_PROFILE_BIAS_CAP
+        {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!(
+                    "agent context profile cached weight {} is outside +/-{}",
+                    input.weight_cached, AGENT_PROFILE_BIAS_CAP
+                ),
+            });
+        }
+
+        let last_seen_at = input
+            .last_seen_at
+            .clone()
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO agent_context_profiles (
+                workspace_id, agent_name, memory_id, helpful_count, harmful_count,
+                ignored_count, last_seen_at, weight_cached
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(workspace_id, agent_name, memory_id) DO UPDATE SET
+                helpful_count = helpful_count + excluded.helpful_count,
+                harmful_count = harmful_count + excluded.harmful_count,
+                ignored_count = ignored_count + excluded.ignored_count,
+                last_seen_at = excluded.last_seen_at,
+                weight_cached = excluded.weight_cached",
+            &[
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.agent_name.clone()),
+                Value::Text(input.memory_id.clone()),
+                Value::BigInt(i64::from(input.counts_delta.helpful_count)),
+                Value::BigInt(i64::from(input.counts_delta.harmful_count)),
+                Value::BigInt(i64::from(input.counts_delta.ignored_count)),
+                Value::Text(last_seen_at),
+                Value::Double(input.weight_cached),
+            ],
+        )?;
+
+        self.get_agent_context_profile(&input.workspace_id, &input.agent_name, &input.memory_id)?
+            .ok_or_else(|| DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "agent context profile row could not be reloaded after upsert".to_owned(),
+            })
+    }
+
+    /// Get a per-agent profile row for one memory.
+    pub fn get_agent_context_profile(
+        &self,
+        workspace_id: &str,
+        agent_name: &str,
+        memory_id: &str,
+    ) -> Result<Option<StoredAgentContextProfile>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, agent_name, memory_id, helpful_count, harmful_count,
+                    ignored_count, last_seen_at, weight_cached
+             FROM agent_context_profiles
+             WHERE workspace_id = ?1 AND agent_name = ?2 AND memory_id = ?3",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(agent_name.to_owned()),
+                Value::Text(memory_id.to_owned()),
+            ],
+        )?;
+
+        rows.first()
+            .map(stored_agent_context_profile_from_row)
+            .transpose()
+    }
+
+    /// List all profile rows needed for pack-time bias application.
+    pub fn list_agent_context_profiles_for_pack(
+        &self,
+        workspace_id: &str,
+        agent_name: &str,
+    ) -> Result<Vec<StoredAgentContextProfile>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, agent_name, memory_id, helpful_count, harmful_count,
+                    ignored_count, last_seen_at, weight_cached
+             FROM agent_context_profiles
+             WHERE workspace_id = ?1 AND agent_name = ?2
+             ORDER BY memory_id ASC",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(agent_name.to_owned()),
+            ],
+        )?;
+
+        rows.iter()
+            .map(stored_agent_context_profile_from_row)
+            .collect()
     }
 
     /// Insert a learning observation ledger row idempotently.
@@ -7456,6 +7640,21 @@ fn stored_feedback_event_from_row(row: &Row) -> Result<StoredFeedbackEvent> {
         session_id: optional_text(row, 10)?.map(str::to_string),
         applied_at: optional_text(row, 11)?.map(str::to_string),
         created_at: required_text(row, 12, DbOperation::Query, "created_at")?.to_string(),
+    })
+}
+
+fn stored_agent_context_profile_from_row(row: &Row) -> Result<StoredAgentContextProfile> {
+    Ok(StoredAgentContextProfile {
+        workspace_id: required_text(row, 0, DbOperation::Query, "workspace_id")?.to_string(),
+        agent_name: required_text(row, 1, DbOperation::Query, "agent_name")?.to_string(),
+        memory_id: required_text(row, 2, DbOperation::Query, "memory_id")?.to_string(),
+        counts: AgentContextProfileCounts::new(
+            required_u32(row, 3, DbOperation::Query, "helpful_count")?,
+            required_u32(row, 4, DbOperation::Query, "harmful_count")?,
+            required_u32(row, 5, DbOperation::Query, "ignored_count")?,
+        ),
+        last_seen_at: required_text(row, 6, DbOperation::Query, "last_seen_at")?.to_string(),
+        weight_cached: required_f64(row, 7, DbOperation::Query, "weight_cached")?,
     })
 }
 
@@ -14290,9 +14489,9 @@ mod tests {
         Migration, MigrationRecord, MigrationTableColumn, StoredEpisodeAction, subsystem_name,
     };
     use crate::models::{
-        EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose,
-        ModelRegistryStatus, RationaleTrace, RationaleTraceKind, RationaleTracePosture,
-        RationaleTraceVisibility, RedactionStatus,
+        AgentContextProfileCounts, EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider,
+        ModelPurpose, ModelRegistryStatus, RationaleTrace, RationaleTraceKind,
+        RationaleTracePosture, RationaleTraceVisibility, RedactionStatus,
     };
 
     type TestResult = std::result::Result<(), TestFailure>;
@@ -16368,6 +16567,29 @@ mod tests {
         Ok(())
     }
 
+    fn seed_memory(connection: &DbConnection, memory_id: &str) -> TestResult {
+        connection.insert_memory(
+            memory_id,
+            &super::CreateMemoryInput {
+                workspace_id: "wsp_01234567890123456789012345".to_string(),
+                level: "procedural".to_string(),
+                kind: "rule".to_string(),
+                content: format!("agent profile test memory {memory_id}"),
+                workflow_id: None,
+                confidence: 0.8,
+                utility: 0.6,
+                importance: 0.7,
+                provenance_uri: None,
+                trust_class: "agent_assertion".to_string(),
+                trust_subclass: None,
+                tags: vec!["agent-profile".to_string()],
+                valid_from: None,
+                valid_to: None,
+            },
+        )?;
+        Ok(())
+    }
+
     fn rationale_trace_fixture(
         id: &str,
         created_at: &str,
@@ -17710,6 +17932,120 @@ mod tests {
         )?;
         ensure_equal(&event.applied_at, &None, "applied_at is null initially")?;
         ensure(!event.created_at.is_empty(), "created_at is populated")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn agent_context_profiles_migration_and_upsert_are_deterministic() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        seed_memory(&connection, "mem_01234567890123456789012345")?;
+
+        let input = super::UpsertAgentContextProfileInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            agent_name: "CloudyHawk".to_string(),
+            memory_id: "mem_01234567890123456789012345".to_string(),
+            counts_delta: AgentContextProfileCounts::new(7, 1, 2),
+            last_seen_at: Some("2026-05-16T01:12:00Z".to_string()),
+            weight_cached: 0.04,
+        };
+        let first = connection.upsert_agent_context_profile_event(&input)?;
+        ensure_equal(&first.counts, &input.counts_delta, "first counts")?;
+
+        let update = super::UpsertAgentContextProfileInput {
+            counts_delta: AgentContextProfileCounts::new(3, 4, 5),
+            last_seen_at: Some("2026-05-16T01:13:00Z".to_string()),
+            weight_cached: -0.01,
+            ..input
+        };
+        let second = connection.upsert_agent_context_profile_event(&update)?;
+        ensure_equal(
+            &second.counts,
+            &AgentContextProfileCounts::new(10, 5, 7),
+            "counts accumulate deterministically",
+        )?;
+        ensure_equal(&second.weight_cached, &-0.01, "cached weight updates")?;
+        ensure_equal(
+            &second.last_seen_at.as_str(),
+            &"2026-05-16T01:13:00Z",
+            "last seen updates",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn agent_context_profiles_list_for_pack_orders_by_memory_id() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        seed_memory(&connection, "mem_b1234567890123456789012345")?;
+        seed_memory(&connection, "mem_a1234567890123456789012345")?;
+
+        for memory_id in [
+            "mem_b1234567890123456789012345",
+            "mem_a1234567890123456789012345",
+        ] {
+            connection.upsert_agent_context_profile_event(
+                &super::UpsertAgentContextProfileInput {
+                    workspace_id: "wsp_01234567890123456789012345".to_string(),
+                    agent_name: "CloudyHawk".to_string(),
+                    memory_id: memory_id.to_string(),
+                    counts_delta: AgentContextProfileCounts::new(10, 0, 0),
+                    last_seen_at: Some("2026-05-16T01:12:00Z".to_string()),
+                    weight_cached: 0.05,
+                },
+            )?;
+        }
+
+        let rows = connection
+            .list_agent_context_profiles_for_pack("wsp_01234567890123456789012345", "CloudyHawk")?;
+        ensure_equal(&rows.len(), &2_usize, "two profile rows")?;
+        ensure_equal(
+            &rows[0].memory_id.as_str(),
+            &"mem_a1234567890123456789012345",
+            "first row is sorted by memory id",
+        )?;
+        ensure_equal(
+            &rows[1].memory_id.as_str(),
+            &"mem_b1234567890123456789012345",
+            "second row is sorted by memory id",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn agent_context_profiles_reject_invalid_cached_weight() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        seed_memory(&connection, "mem_01234567890123456789012345")?;
+
+        let result =
+            connection.upsert_agent_context_profile_event(&super::UpsertAgentContextProfileInput {
+                workspace_id: "wsp_01234567890123456789012345".to_string(),
+                agent_name: "CloudyHawk".to_string(),
+                memory_id: "mem_01234567890123456789012345".to_string(),
+                counts_delta: AgentContextProfileCounts::new(10, 0, 0),
+                last_seen_at: Some("2026-05-16T01:12:00Z".to_string()),
+                weight_cached: 0.051,
+            });
+        ensure(
+            matches!(
+                result,
+                Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "cached weight beyond cap is rejected before storage",
+        )?;
 
         connection.close()?;
         Ok(())

@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 #[cfg(unix)]
@@ -39,7 +39,7 @@ use rustix::io::Errno;
 
 use crate::config::{
     ConfigFile, GRAPH_FEATURE_PACK_DNA_ENABLED_KEY, GRAPH_FEATURE_PPR_ENABLED_KEY,
-    WorkspaceLocation,
+    GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, WorkspaceLocation,
 };
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
@@ -50,12 +50,15 @@ use crate::core::search::{
     SearchOptions, SearchReport, SearchStatus, elapsed_timing_json, performance_redaction_json,
     query_observation_json, run_search,
 };
+use crate::db::read_pool::{PoolConfig, ReadConnectionPool};
 use crate::db::{
-    CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, DbConnection, StoredMemory,
+    CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, DatabaseConfig,
+    DbConnection, StoredMemory,
 };
 use crate::models::degradation::{GRAPH_PPR_EMPTY_SEED_SET_CODE, GRAPH_PPR_SNAPSHOT_STALE_CODE};
 use crate::models::{
-    MemoryId, MemoryScope, MemoryScopeStats, PackId, ProvenanceUri, TrustClass, UnitScore,
+    MemoryId, MemoryScope, MemoryScopeStats, PackId, ProvenanceUri, RedactionLevel, TrustClass,
+    UnitScore,
     WorkspaceId, posture_for_trust_class,
 };
 use crate::pack::{
@@ -70,6 +73,7 @@ use crate::pack::{
 static PACK_HASH_LOG_RUN_INDEX: AtomicU64 = AtomicU64::new(0);
 static PACK_SLOT_PROCESS_GATES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
 const PACK_SLOT_RETRY_AFTER_MS: u64 = 250;
+pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V1: &str = "ee.pack.l2_cache_key.v1";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
 
 #[derive(Debug)]
@@ -873,13 +877,21 @@ pub fn run_context_pack_with_performance(
         )));
     }
 
-    let db_open_start = Instant::now();
-    let connection = DbConnection::open_file(&database_path)
+    let mut degraded = Vec::new();
+
+    let (read_pool_config, pin_snapshot) =
+        context_read_pool_config(&options.workspace_path, &mut degraded);
+    let snapshot_open_start = Instant::now();
+    let read_pool = ReadConnectionPool::new(
+        DatabaseConfig::file(database_path.clone()),
+        read_pool_config,
+    );
+    let read_snapshot = read_pool
+        .acquire_snapshot(pin_snapshot)
         .map_err(|error| ContextPackError::Storage(format!("Failed to open database: {error}")))?;
     trace.db_open_count = trace.db_open_count.saturating_add(1);
-    trace.record_elapsed("dbOpen", db_open_start);
+    trace.record_elapsed("dbOpen", snapshot_open_start);
 
-    let mut degraded = Vec::new();
     let output_redaction_enabled =
         crate::config::workspace_output_redaction_enabled(&options.workspace_path);
     if !output_redaction_enabled {
@@ -944,7 +956,7 @@ pub fn run_context_pack_with_performance(
         SearchStatus::IndexError | SearchStatus::IndexNotFound
     ) {
         let fallback_hits = lexical_memory_fallback_hits(
-            &connection,
+            &read_snapshot,
             &options.workspace_path,
             &request.query,
             request.candidate_pool,
@@ -1010,7 +1022,7 @@ pub fn run_context_pack_with_performance(
     let candidate_start = Instant::now();
     let candidate_filter_input_count = search_report.results.len();
     let (mut candidates, mut candidate_metrics) = candidates_from_search_with_metrics(
-        &connection,
+        &read_snapshot,
         &options.workspace_path,
         &search_report,
         &effective_filters,
@@ -1080,7 +1092,7 @@ pub fn run_context_pack_with_performance(
         );
     }
     let graph_metrics = apply_graph_hints(
-        &connection,
+        &read_snapshot,
         &options.workspace_path,
         &effective_filters,
         options.include_tombstoned,
@@ -1100,7 +1112,7 @@ pub fn run_context_pack_with_performance(
         Ok(Some(focus_state)) => {
             trace.focus_state_hits = trace.focus_state_hits.saturating_add(1);
             let focus_candidates = focus_candidates_from_state(
-                &connection,
+                &read_snapshot,
                 &options.workspace_path,
                 &focus_state,
                 options.include_tombstoned,
@@ -1128,7 +1140,7 @@ pub fn run_context_pack_with_performance(
         options.strict_scope,
     );
     let scope_stats = filter_candidates_by_memory_scope(
-        &connection,
+        &read_snapshot,
         &mut candidates,
         &scope_context,
         &mut degraded,
@@ -1180,7 +1192,7 @@ pub fn run_context_pack_with_performance(
     }
 
     let ppr_metrics = apply_personalized_pagerank_rerank(
-        &connection,
+        &read_snapshot,
         &options.workspace_path,
         &search_report,
         &mut candidates,
@@ -1190,8 +1202,13 @@ pub fn run_context_pack_with_performance(
     candidate_metrics.graph_boosted_candidates = candidate_metrics
         .graph_boosted_candidates
         .saturating_add(ppr_metrics.reranked_candidates);
-    let proximity_metrics =
-        apply_proximity_to_seed_scores(&connection, &search_report, &mut candidates, &mut degraded);
+    let proximity_metrics = apply_proximity_to_seed_scores(
+        &read_snapshot,
+        &options.workspace_path,
+        &search_report,
+        &mut candidates,
+        &mut degraded,
+    );
     candidate_metrics.graph_boosted_candidates = candidate_metrics
         .graph_boosted_candidates
         .saturating_add(proximity_metrics.annotated_candidates);
@@ -1328,13 +1345,19 @@ pub fn run_context_pack_with_performance(
 
     let persist_start = Instant::now();
     trace.pack_record_writes = trace.pack_record_writes.saturating_add(1);
-    if let Err(persist_error) = persist_pack_record(
-        &connection,
-        &options.workspace_path,
-        &request,
-        &draft,
-        &degraded,
-    ) {
+    let persist_result = DbConnection::open_file(&database_path)
+        .map_err(|error| error.to_string())
+        .and_then(|connection| {
+            persist_pack_record(
+                &connection,
+                &options.workspace_path,
+                &request,
+                &draft,
+                &degraded,
+            )
+            .map_err(|error| error.to_string())
+        });
+    if let Err(persist_error) = persist_result {
         push_degradation(
             &mut response_degraded,
             "context_pack_persist_failed",
@@ -2413,6 +2436,156 @@ fn push_coordination_snapshot_degradations(
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PackL2CacheKeyInput {
+    pub(crate) workspace_id: String,
+    pub(crate) database_generation: u64,
+    pub(crate) index_generation: u64,
+    pub(crate) graph_generation: Option<u64>,
+    pub(crate) redaction_level: RedactionLevel,
+    pub(crate) request: ContextRequest,
+    pub(crate) output_options: ContextPackOutputOptions,
+    pub(crate) memory_scope: MemoryScope,
+    pub(crate) strict_scope: bool,
+    pub(crate) context_feature_flags_hash: String,
+    pub(crate) personalization_generation: Option<u64>,
+}
+
+pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hash_labeled_bytes(
+        &mut hasher,
+        "schema",
+        PACK_L2_CACHE_KEY_SCHEMA_V1.as_bytes(),
+    );
+    hash_labeled_bytes(&mut hasher, "workspace_id", input.workspace_id.as_bytes());
+    hash_labeled_u64(
+        &mut hasher,
+        "database_generation",
+        input.database_generation,
+    );
+    hash_labeled_u64(&mut hasher, "index_generation", input.index_generation);
+    hash_labeled_optional_u64(&mut hasher, "graph_generation", input.graph_generation);
+    hash_labeled_bytes(
+        &mut hasher,
+        "redaction_level",
+        input.redaction_level.as_str().as_bytes(),
+    );
+    hash_labeled_bytes(&mut hasher, "query", input.request.query.as_bytes());
+    hash_labeled_bytes(
+        &mut hasher,
+        "context_profile",
+        input.request.profile.as_str().as_bytes(),
+    );
+    hash_labeled_u64(
+        &mut hasher,
+        "max_tokens",
+        u64::from(input.request.budget.max_tokens()),
+    );
+    hash_labeled_u64(
+        &mut hasher,
+        "candidate_pool",
+        u64::from(input.request.candidate_pool),
+    );
+    hash_labeled_optional_u64(
+        &mut hasher,
+        "max_results",
+        input.request.max_results.map(u64::from),
+    );
+    hash_labeled_u64(
+        &mut hasher,
+        "section_count",
+        input.request.sections.len() as u64,
+    );
+    for section in &input.request.sections {
+        hash_labeled_bytes(&mut hasher, "section", section.as_str().as_bytes());
+    }
+    hash_labeled_bytes(
+        &mut hasher,
+        "output_profile",
+        input.output_options.profile.as_str().as_bytes(),
+    );
+    hash_labeled_bytes(
+        &mut hasher,
+        "resource_profile",
+        input.output_options.resource_profile.as_str().as_bytes(),
+    );
+    hash_labeled_bool(
+        &mut hasher,
+        "include_coverage_fill",
+        input.output_options.include_coverage_fill,
+    );
+    hash_labeled_bool(
+        &mut hasher,
+        "include_rendered_text",
+        input.output_options.include_rendered_text,
+    );
+    hash_labeled_bool(
+        &mut hasher,
+        "include_skipped",
+        input.output_options.include_skipped,
+    );
+    hash_labeled_bool(
+        &mut hasher,
+        "include_meta",
+        input.output_options.include_meta,
+    );
+    hash_labeled_bool(
+        &mut hasher,
+        "include_verbose_meta",
+        input.output_options.include_verbose_meta,
+    );
+    hash_labeled_bool(
+        &mut hasher,
+        "include_non_affecting_degradations",
+        input.output_options.include_non_affecting_degradations,
+    );
+    hash_labeled_bytes(
+        &mut hasher,
+        "memory_scope",
+        input.memory_scope.as_str().as_bytes(),
+    );
+    hash_labeled_bool(&mut hasher, "strict_scope", input.strict_scope);
+    hash_labeled_bytes(
+        &mut hasher,
+        "context_feature_flags_hash",
+        input.context_feature_flags_hash.as_bytes(),
+    );
+    hash_labeled_optional_u64(
+        &mut hasher,
+        "personalization_generation",
+        input.personalization_generation,
+    );
+    finalize_blake3(hasher)
+}
+
+fn hash_labeled_bytes(hasher: &mut blake3::Hasher, label: &str, value: &[u8]) {
+    hasher.update(&(label.len() as u64).to_le_bytes());
+    hasher.update(label.as_bytes());
+    hasher.update(&(value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+fn hash_labeled_u64(hasher: &mut blake3::Hasher, label: &str, value: u64) {
+    hash_labeled_bytes(hasher, label, &value.to_le_bytes());
+}
+
+fn hash_labeled_optional_u64(hasher: &mut blake3::Hasher, label: &str, value: Option<u64>) {
+    match value {
+        Some(value) => {
+            hash_labeled_bool(hasher, &format!("{label}.present"), true);
+            hash_labeled_u64(hasher, label, value);
+        }
+        None => {
+            hash_labeled_bool(hasher, &format!("{label}.present"), false);
+        }
+    }
+}
+
+fn hash_labeled_bool(hasher: &mut blake3::Hasher, label: &str, value: bool) {
+    hash_labeled_bytes(hasher, label, &[u8::from(value)]);
+}
+
 fn compute_pack_hash(
     request: &ContextRequest,
     draft: &crate::pack::PackDraft,
@@ -2914,34 +3087,17 @@ fn apply_personalized_pagerank_rerank(
         return PersonalizedPageRankRerankMetrics::default();
     }
 
-    let projection = match crate::graph::build_memory_graph(
-        connection,
-        &crate::graph::ProjectionOptions::default(),
-    ) {
-        Ok(projection) => projection,
-        Err(error) => {
-            push_degradation(
-                degraded,
-                "context_graph_snapshot_unavailable",
-                ContextResponseSeverity::Low,
-                format!(
-                    "Personalized PageRank rerank skipped because memory graph projection failed: {error}"
-                ),
-                Some("ee graph centrality-refresh".to_string()),
-            );
-            return PersonalizedPageRankRerankMetrics::default();
-        }
-    };
-
     let seed_weights = seed_map
         .iter()
         .map(|(memory_id, weight)| (memory_id.to_string(), *weight))
         .collect::<BTreeMap<_, _>>();
+    let seed_signature = personalized_pagerank_cache_seed_signature(&seed_weights);
     let policy = crate::graph::ppr::PersonalizedPageRankPolicy::default();
     let ppr_params = serde_json::json!({
         "alpha": policy.alpha,
         "maxIterations": policy.max_iterations,
         "seedCount": seed_weights.len(),
+        "seedWeights": &seed_signature,
         "tolerance": policy.tolerance,
     });
     let cache_spec = crate::graph::algorithms::AlgorithmResultCacheSpec {
@@ -2954,11 +3110,17 @@ fn apply_personalized_pagerank_rerank(
         ttl_seconds: 300,
     };
     let ppr_start = Instant::now();
-    let cache_run = match crate::graph::ppr::compute_personalized_pagerank_result_cached(
+    let cache_run = match crate::graph::ppr::compute_personalized_pagerank_result_cached_with_graph(
         &cache_spec,
-        &projection.graph,
         &seed_weights,
         policy,
+        || {
+            crate::graph::build_memory_graph(
+                connection,
+                &crate::graph::ProjectionOptions::default(),
+            )
+            .map(|projection| projection.graph)
+        },
     ) {
         Ok(result) => result,
         Err(error) => {
@@ -3036,6 +3198,15 @@ fn apply_personalized_pagerank_rerank(
     }
 }
 
+fn personalized_pagerank_cache_seed_signature(
+    seed_weights: &BTreeMap<String, f64>,
+) -> BTreeMap<String, String> {
+    seed_weights
+        .iter()
+        .map(|(memory_id, weight)| (memory_id.clone(), format!("{weight:.6}")))
+        .collect()
+}
+
 fn context_ppr_feature_enabled(workspace_path: &Path) -> Result<bool, String> {
     let config = context_workspace_config(workspace_path, "Personalized PageRank rerank")?;
     Ok(config
@@ -3068,6 +3239,39 @@ fn context_workspace_config(
         .map(Some)
 }
 
+fn context_read_pool_config(
+    workspace_path: &Path,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> (PoolConfig, bool) {
+    match context_workspace_config(workspace_path, "Read-pool snapshot pin") {
+        Ok(config) => {
+            let read_pool = config
+                .map(|config| config.storage.read_pool)
+                .unwrap_or_default();
+            let max_size = read_pool
+                .size
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(1);
+            let idle_timeout_seconds = read_pool.idle_timeout_seconds.unwrap_or(30);
+            let pin_snapshot = read_pool.pin_snapshot.unwrap_or(true);
+            (
+                PoolConfig::new(max_size, Duration::from_secs(idle_timeout_seconds)),
+                pin_snapshot,
+            )
+        }
+        Err(message) => {
+            push_degradation(
+                degraded,
+                "context_config_unavailable",
+                ContextResponseSeverity::Medium,
+                message,
+                Some("Fix or remove .ee/config.toml.".to_string()),
+            );
+            (PoolConfig::default_single(), true)
+        }
+    }
+}
+
 fn push_ppr_feature_disabled_degradation(degraded: &mut Vec<ContextResponseDegradation>) {
     push_degradation(
         degraded,
@@ -3082,12 +3286,30 @@ fn push_ppr_feature_disabled_degradation(degraded: &mut Vec<ContextResponseDegra
 
 fn apply_proximity_to_seed_scores(
     connection: &DbConnection,
+    workspace_path: &Path,
     search_report: &SearchReport,
     candidates: &mut [PackCandidate],
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> ProximityToSeedMetrics {
     if candidates.is_empty() {
         return ProximityToSeedMetrics::default();
+    }
+    match context_proximity_feature_enabled(workspace_path) {
+        Ok(true) => {}
+        Ok(false) => {
+            push_proximity_feature_disabled_degradation(degraded);
+            return ProximityToSeedMetrics::default();
+        }
+        Err(message) => {
+            push_degradation(
+                degraded,
+                "context_config_unavailable",
+                ContextResponseSeverity::Medium,
+                message,
+                Some("Fix or remove .ee/config.toml.".to_string()),
+            );
+            return ProximityToSeedMetrics::default();
+        }
     }
 
     let seed_map = personalized_pagerank_seed_map(search_report, candidates);
@@ -3152,6 +3374,25 @@ fn apply_proximity_to_seed_scores(
     ProximityToSeedMetrics {
         annotated_candidates,
     }
+}
+
+fn context_proximity_feature_enabled(workspace_path: &Path) -> Result<bool, String> {
+    let config = context_workspace_config(workspace_path, "Proximity-to-seed scoring")?;
+    Ok(config
+        .and_then(|config| config.graph.feature.proximity_enabled)
+        .unwrap_or(false))
+}
+
+fn push_proximity_feature_disabled_degradation(degraded: &mut Vec<ContextResponseDegradation>) {
+    push_degradation(
+        degraded,
+        "graph_feature_disabled",
+        ContextResponseSeverity::Medium,
+        format!("Proximity-to-seed scoring is disabled by {GRAPH_FEATURE_PROXIMITY_ENABLED_KEY}."),
+        Some(format!(
+            "ee config set {GRAPH_FEATURE_PROXIMITY_ENABLED_KEY} true"
+        )),
+    );
 }
 
 fn context_proximity_graph(connection: &DbConnection) -> Result<fnx_classes::Graph, String> {
@@ -5005,6 +5246,16 @@ mod tests {
         .map_err(|error| error.to_string())
     }
 
+    fn enable_context_proximity_feature(workspace_path: &Path) -> Result<(), String> {
+        let config_dir = workspace_path.join(".ee");
+        std::fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[graph.feature.proximity]\nenabled = true\n",
+        )
+        .map_err(|error| error.to_string())
+    }
+
     fn context_response_with_pack_item(
         memory_id: MemoryId,
     ) -> Result<crate::pack::ContextResponse, String> {
@@ -5114,6 +5365,78 @@ mod tests {
         assert_eq!(
             disabled.repair.as_deref(),
             Some("ee config set graph.feature.ppr.enabled true")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_proximity_feature_disabled_skips_annotation() -> Result<(), String> {
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        let mut candidates = vec![
+            ppr_candidate(fixture.seed, 0.80)?,
+            ppr_candidate(fixture.neighbor, 0.20)?,
+        ];
+        let search_report = ppr_search_report(vec![ppr_hit(fixture.seed, 0.90, Some(0.95))]);
+        let mut degraded = Vec::new();
+
+        let metrics = super::apply_proximity_to_seed_scores(
+            &fixture.connection,
+            &fixture.workspace_path,
+            &search_report,
+            &mut candidates,
+            &mut degraded,
+        );
+
+        assert_eq!(metrics.annotated_candidates, 0);
+        assert!(
+            candidates
+                .iter()
+                .all(|item| item.proximity_to_seed.is_none())
+        );
+        let disabled = degraded
+            .iter()
+            .find(|entry| entry.code == "graph_feature_disabled")
+            .ok_or_else(|| "expected graph_feature_disabled degradation".to_string())?;
+        assert_eq!(disabled.severity, ContextResponseSeverity::Medium);
+        assert!(disabled.message.contains("graph.feature.proximity.enabled"));
+        assert_eq!(
+            disabled.repair.as_deref(),
+            Some("ee config set graph.feature.proximity.enabled true")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_proximity_feature_enabled_annotates_seed_neighbor() -> Result<(), String> {
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        enable_context_proximity_feature(&fixture.workspace_path)?;
+        let mut candidates = vec![
+            ppr_candidate(fixture.seed, 0.80)?,
+            ppr_candidate(fixture.neighbor, 0.20)?,
+        ];
+        let search_report = ppr_search_report(vec![ppr_hit(fixture.seed, 0.90, Some(0.95))]);
+        let mut degraded = Vec::new();
+
+        let metrics = super::apply_proximity_to_seed_scores(
+            &fixture.connection,
+            &fixture.workspace_path,
+            &search_report,
+            &mut candidates,
+            &mut degraded,
+        );
+
+        assert_eq!(metrics.annotated_candidates, 2);
+        assert_eq!(candidates[0].proximity_to_seed, Some(0.0));
+        let neighbor_proximity = candidates[1]
+            .proximity_to_seed
+            .ok_or_else(|| "neighbor should be annotated".to_string())?;
+        assert!(
+            neighbor_proximity >= 1.0,
+            "neighbor proximity should reflect seeded support link, got {neighbor_proximity}"
+        );
+        assert!(
+            degraded.is_empty(),
+            "enabled proximity should not degrade: {degraded:?}"
         );
         Ok(())
     }
@@ -5935,6 +6258,115 @@ mod tests {
             .collect();
         assert!(degraded_codes.contains("index_missing"));
         assert!(degraded_codes.contains("context_lexical_fallback"));
+        Ok(())
+    }
+
+    #[test]
+    fn context_read_pool_size_preserves_pack_hash() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let db_path = ee_dir.join("ee.db");
+        let empty_index_dir = tempdir.path().join("empty-index");
+        std::fs::create_dir_all(&empty_index_dir).map_err(|error| error.to_string())?;
+
+        let connection = DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = super::stable_context_workspace_id(&workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("workspace".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                &MemoryId::from_uuid(uuid::Uuid::from_u128(44)).to_string(),
+                &CreateMemoryInput {
+                    workspace_id,
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Run the read pool determinism gate before release.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.95,
+                    utility: 0.80,
+                    importance: 0.70,
+                    provenance_uri: None,
+                    trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                    trust_subclass: Some("test".to_owned()),
+                    tags: vec!["release".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let base_options = super::ContextPackOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(db_path.clone()),
+            index_dir: Some(empty_index_dir),
+            query: "read pool determinism release".to_owned(),
+            speed: crate::search::SpeedMode::Default,
+            filters: crate::models::QueryFilters::default(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(400),
+            candidate_pool: Some(10),
+            max_results: None,
+            include_tombstoned: false,
+            as_of: None,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            ppr_weight: None,
+            pagination: None,
+            coordination_snapshot_path: None,
+            coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            output_options: Default::default(),
+        };
+
+        let single_response = super::run_context_pack(&base_options)
+            .map_err(|error| format!("single-pool context pack failed: {error:?}"))?;
+        let single_hash = single_response
+            .data
+            .pack
+            .hash
+            .clone()
+            .ok_or_else(|| "single-pool response missing pack hash".to_string())?;
+
+        std::fs::write(
+            ee_dir.join("config.toml"),
+            "[storage.read_pool]\nsize = 4\nidle_timeout_seconds = 30\npin_snapshot = true\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let pooled_response = super::run_context_pack(&base_options)
+            .map_err(|error| format!("pooled context pack failed: {error:?}"))?;
+        let pooled_hash = pooled_response
+            .data
+            .pack
+            .hash
+            .clone()
+            .ok_or_else(|| "pooled response missing pack hash".to_string())?;
+
+        assert_eq!(pooled_hash, single_hash);
+        assert!(
+            pooled_response
+                .data
+                .degraded
+                .iter()
+                .all(|entry| entry.code != "context_config_unavailable")
+        );
         Ok(())
     }
 
@@ -6828,6 +7260,145 @@ mod tests {
         // Same inputs produce same hash (determinism check).
         let hash_repeat = compute_pack_hash(&request, &base_draft, &base_degraded);
         assert_eq!(hash_base, hash_repeat, "same inputs must produce same hash");
+        Ok(())
+    }
+
+    #[test]
+    fn pack_l2_cache_key_tracks_canonical_inputs() -> Result<(), String> {
+        use super::{
+            ContextPackOutputOptions, PackL2CacheKeyInput, compute_pack_l2_cache_key,
+        };
+        use crate::models::{MemoryScope, RedactionLevel};
+        use crate::pack::{
+            ContextPackProfile, ContextRequest, ContextRequestInput, PackResourceProfile,
+            PackSection,
+        };
+
+        let request = ContextRequest::new(ContextRequestInput {
+            query: " prepare release ".to_string(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(4_000),
+            candidate_pool: Some(64),
+            max_results: Some(12),
+            sections: vec![PackSection::ProceduralRules, PackSection::Evidence],
+        })
+        .map_err(|error| error.to_string())?;
+        let base = PackL2CacheKeyInput {
+            workspace_id: "wsp_test_001".to_string(),
+            database_generation: 10,
+            index_generation: 20,
+            graph_generation: Some(30),
+            redaction_level: RedactionLevel::Standard,
+            request,
+            output_options: ContextPackOutputOptions::default()
+                .with_resource_profile(PackResourceProfile::SwarmHeavy),
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: true,
+            context_feature_flags_hash: "blake3:features-a".to_string(),
+            personalization_generation: Some(40),
+        };
+
+        let key = compute_pack_l2_cache_key(&base);
+        assert!(
+            key.starts_with("blake3:"),
+            "L2 cache key should use the existing BLAKE3 key prefix"
+        );
+        assert_eq!(
+            key,
+            compute_pack_l2_cache_key(&base),
+            "same canonical inputs must reproduce the same key"
+        );
+
+        let mut changed_query = base.clone();
+        changed_query.request = ContextRequest::new(ContextRequestInput {
+            query: "prepare hotfix".to_string(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(4_000),
+            candidate_pool: Some(64),
+            max_results: Some(12),
+            sections: vec![PackSection::ProceduralRules, PackSection::Evidence],
+        })
+        .map_err(|error| error.to_string())?;
+        assert_ne!(
+            key,
+            compute_pack_l2_cache_key(&changed_query),
+            "normalized query changes must alter the L2 key"
+        );
+
+        let mut changed_profile = base.clone();
+        changed_profile.request = ContextRequest::new(ContextRequestInput {
+            query: "prepare release".to_string(),
+            profile: Some(ContextPackProfile::Thorough),
+            max_tokens: Some(4_000),
+            candidate_pool: Some(64),
+            max_results: Some(12),
+            sections: vec![PackSection::ProceduralRules, PackSection::Evidence],
+        })
+        .map_err(|error| error.to_string())?;
+        assert_ne!(
+            key,
+            compute_pack_l2_cache_key(&changed_profile),
+            "context profile changes must alter the L2 key"
+        );
+
+        let mut changed_tokens = base.clone();
+        changed_tokens.request = ContextRequest::new(ContextRequestInput {
+            query: "prepare release".to_string(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(2_000),
+            candidate_pool: Some(64),
+            max_results: Some(12),
+            sections: vec![PackSection::ProceduralRules, PackSection::Evidence],
+        })
+        .map_err(|error| error.to_string())?;
+        assert_ne!(
+            key,
+            compute_pack_l2_cache_key(&changed_tokens),
+            "max token budget changes must alter the L2 key"
+        );
+
+        let mut changed_redaction = base.clone();
+        changed_redaction.redaction_level = RedactionLevel::Strict;
+        assert_ne!(
+            key,
+            compute_pack_l2_cache_key(&changed_redaction),
+            "redaction level changes must alter the L2 key"
+        );
+
+        for (label, changed) in [
+            ("database generation", {
+                let mut changed = base.clone();
+                changed.database_generation = 11;
+                changed
+            }),
+            ("index generation", {
+                let mut changed = base.clone();
+                changed.index_generation = 21;
+                changed
+            }),
+            ("graph generation", {
+                let mut changed = base.clone();
+                changed.graph_generation = Some(31);
+                changed
+            }),
+            ("personalization generation", {
+                let mut changed = base.clone();
+                changed.personalization_generation = Some(41);
+                changed
+            }),
+            ("feature flag set hash", {
+                let mut changed = base.clone();
+                changed.context_feature_flags_hash = "blake3:features-b".to_string();
+                changed
+            }),
+        ] {
+            assert_ne!(
+                key,
+                compute_pack_l2_cache_key(&changed),
+                "{label} changes must alter the L2 key"
+            );
+        }
+
         Ok(())
     }
 
