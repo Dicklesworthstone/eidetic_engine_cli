@@ -6,10 +6,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SNAPSHOT="$REPO_ROOT/tests/fixtures/ownership/ownership_posture_e2e_snapshot.json"
 ATTRIBUTION_SNAPSHOT="$REPO_ROOT/tests/snapshots/ownership_snapshot__compile_blocker_attribution.snap"
 SWARM_CASES="$REPO_ROOT/tests/fixtures/swarm/ownership_posture_cases.json"
+ROUTER="$REPO_ROOT/scripts/rch_compile_blocker_router.py"
 EVENT_DIR="${EE_TEST_EVENT_DIR:-${TMPDIR:-/Volumes/USBNVME16TB/temp_agent_space/tmp}/ee-ownership-posture-events}"
 EVENT_LOG="$EVENT_DIR/ownership_posture.jsonl"
 AS_OF="2026-05-15T06:30:00Z"
 FIRST_BLOCKER_PATH="src/graph/hits.rs"
+FIRST_BLOCKER_OWNER="NobleStork"
 LIVE_MODE="${EE_OWNERSHIP_POSTURE_LIVE:-0}"
 LIVE_FIRST_BLOCKER_PATH="${EE_OWNERSHIP_FIRST_BLOCKER_PATH:-src/core/outcome.rs}"
 LIVE_RESERVATIONS_DIR="${EE_OWNERSHIP_RESERVATIONS_DIR:-$HOME/.local/share/mcp_agent_mail_rust/projects/users-jemanuel-projects-eidetic-engine-cli/file_reservations}"
@@ -26,9 +28,118 @@ if ! command -v shasum >/dev/null 2>&1; then
   printf 'error: shasum is required for ownership posture e2e\n' >&2
   exit 1
 fi
+if ! command -v python3 >/dev/null 2>&1; then
+  printf 'error: python3 is required for ownership posture e2e\n' >&2
+  exit 1
+fi
 
 file_hash() {
   shasum -a 256 "$1" | awk '{print "sha256:" $1}'
+}
+
+router_reservations_from_snapshot() {
+  local snapshot_file="$1"
+  local output_file="$2"
+  jq '
+    [
+      .reservations[]
+      | {
+          agent: .holderAgent,
+          path_pattern: .pathPattern,
+          expires_ts: .expiresAt
+        }
+    ]
+  ' "$snapshot_file" > "$output_file"
+}
+
+run_router_replay() {
+  local snapshot_file="$1"
+  local blocker_path="$2"
+  local expected_owner="$3"
+  local now="$4"
+  local prefix="$5"
+  local reservations_file="$EVENT_DIR/${prefix}_router_reservations.json"
+  local transcript_file="$EVENT_DIR/${prefix}_rch_failure.txt"
+  local report_one="$EVENT_DIR/${prefix}_router_report_1.json"
+  local report_two="$EVENT_DIR/${prefix}_router_report_2.json"
+
+  router_reservations_from_snapshot "$snapshot_file" "$reservations_file"
+  cat > "$transcript_file" <<EOF
+error[E0425]: cannot find function \`insert_feedback_event_audited_with_id\` in this scope
+  --> $blocker_path:901:20
+   |
+901 |     insert_feedback_event_audited_with_id(connection, event_id, input, audit_id)?;
+EOF
+
+  python3 "$ROUTER" "$transcript_file" \
+    --command "cargo test --lib ownership_posture_replay -- --nocapture" \
+    --bead-id "bd-1zb7k.16.5" \
+    --agent-name "EmeraldCarp" \
+    --reservations "$reservations_file" \
+    --now "$now" \
+    --json > "$report_one"
+
+  python3 "$ROUTER" "$transcript_file" \
+    --command "cargo test --lib ownership_posture_replay -- --nocapture" \
+    --bead-id "bd-1zb7k.16.5" \
+    --agent-name "EmeraldCarp" \
+    --reservations "$reservations_file" \
+    --now "$now" \
+    --json > "$report_two"
+
+  cmp -s "$report_one" "$report_two" \
+    || fail_check "router" "compile-blocker router replay was not deterministic for $blocker_path"
+
+  assert_jq "router" "$report_one" \
+    "router must attribute first compile blocker to expected owner" \
+    --arg path "$blocker_path" \
+    --arg owner "$expected_owner" \
+    '.schema == "ee.rch.compile_blocker_route.v1" and .routing_decision == "reserved_by_other_agent" and .first_error.file == $path and .owner_agent == $owner'
+
+  if grep -Eiq '(body_md|fileContents|envDump|Bearer[[:space:]]+[A-Za-z0-9._-]+|api[_-]?key[[:space:]]*[:=]|token[[:space:]]*=)' "$report_one"; then
+    fail_check "redaction" "router replay leaked raw coordination or secret-like content"
+  fi
+
+  emit_event "router" true "compile-blocker router replay attributed $blocker_path to $expected_owner" "$(file_hash "$report_one")"
+}
+
+run_router_environment_replay() {
+  local prefix="$1"
+  local transcript_file="$EVENT_DIR/${prefix}_environment_failure.txt"
+  local report_one="$EVENT_DIR/${prefix}_environment_report_1.json"
+  local report_two="$EVENT_DIR/${prefix}_environment_report_2.json"
+
+  cat > "$transcript_file" <<'EOF'
+[RCH] local (dependency preflight RCH-E327: Path dependency topology policy failed.)
+[RCH] remote required; refusing local fallback (dependency preflight failed)
+EOF
+
+  python3 "$ROUTER" "$transcript_file" \
+    --command "cargo test --lib ownership_posture_replay -- --nocapture" \
+    --bead-id "bd-1zb7k.16.5" \
+    --agent-name "EmeraldCarp" \
+    --now "$AS_OF" \
+    --json > "$report_one"
+
+  python3 "$ROUTER" "$transcript_file" \
+    --command "cargo test --lib ownership_posture_replay -- --nocapture" \
+    --bead-id "bd-1zb7k.16.5" \
+    --agent-name "EmeraldCarp" \
+    --now "$AS_OF" \
+    --json > "$report_two"
+
+  cmp -s "$report_one" "$report_two" \
+    || fail_check "router" "environment-failure router replay was not deterministic"
+
+  assert_jq "router" "$report_one" \
+    "router must classify RCH topology refusal as environment failure" \
+    '.schema == "ee.rch.compile_blocker_route.v1" and .routing_decision == "environment_failure" and .owner_agent == null and (.first_error.file == null)'
+
+  if grep -Eiq '(body_md|fileContents|envDump|Bearer[[:space:]]+[A-Za-z0-9._-]+|api[_-]?key[[:space:]]*[:=]|token[[:space:]]*=)' "$report_one"; then
+    fail_check "redaction" "environment router replay leaked raw coordination or secret-like content"
+  fi
+
+  emit_event "router_environment" true "compile-blocker router replay classified RCH topology refusal as environment failure" "$(file_hash "$report_one")"
 }
 
 build_live_snapshot() {
@@ -162,7 +273,7 @@ assert_jq() {
   fi
 }
 
-for required in "$SNAPSHOT" "$ATTRIBUTION_SNAPSHOT" "$SWARM_CASES"; do
+for required in "$SNAPSHOT" "$ATTRIBUTION_SNAPSHOT" "$SWARM_CASES" "$ROUTER"; do
   [[ -s "$required" ]] || fail_check "setup" "missing artifact $required"
 done
 
@@ -224,6 +335,9 @@ fi
 
 emit_event "attribution" true "compile blocker attribution golden covers attributed and fallback paths" "$(file_hash "$ATTRIBUTION_SNAPSHOT")"
 
+run_router_replay "$SNAPSHOT" "$FIRST_BLOCKER_PATH" "$FIRST_BLOCKER_OWNER" "$AS_OF" "fixture"
+run_router_environment_replay "fixture"
+
 assert_jq "swarm_cases" "$SWARM_CASES" \
   "ownership posture fixture catalog must include required cases" \
   '.schema == "ee.swarm.ownership_posture_cases.v1" and (.cases | length) >= 3' \
@@ -277,6 +391,13 @@ if [[ "$LIVE_MODE" == "1" ]]; then
   done
 
   emit_event "live_snapshot" true "live ownership snapshot invariants passed" "$(file_hash "$LIVE_SNAPSHOT")"
+
+  run_router_replay \
+    "$LIVE_SNAPSHOT" \
+    "$LIVE_FIRST_BLOCKER_PATH" \
+    "$(jq -r --arg path "$LIVE_FIRST_BLOCKER_PATH" --arg as_of "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '[.reservations[] | select(.pathPattern == $path and .exclusive == true and (.expiresAt > $as_of))] | sort_by(.holderAgent)[0].holderAgent' "$LIVE_SNAPSHOT")" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "live"
 fi
 
 event_count="$(wc -l < "$EVENT_LOG" | tr -d ' ')"
