@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -314,12 +315,41 @@ fn serialize_regression_fixture(fixture: &DeterminismRegressionFixture) -> Resul
     Ok(serde_json::to_string_pretty(fixture).map_err(|error| error.to_string())? + "\n")
 }
 
+fn reject_symlinked_regression_fixture_dir(dir: &Path, operation: &str) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(dir)
+        .map_err(|error| format!("metadata {}: {error}", dir.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "{operation} {}: regression fixture directory is a symlink",
+            dir.display()
+        ));
+    }
+    Ok(())
+}
+
+fn reject_existing_symlinked_regression_fixture_path(
+    path: &Path,
+    operation: &str,
+) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+            "{operation} {}: regression fixture path is a symlink",
+            path.display()
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("metadata {}: {error}", path.display())),
+    }
+}
+
 fn persist_regression_fixture(
     dir: &Path,
     fixture: &DeterminismRegressionFixture,
 ) -> Result<PathBuf, String> {
     fs::create_dir_all(dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+    reject_symlinked_regression_fixture_dir(dir, "write")?;
     let path = dir.join(regression_fixture_file_name(&fixture.input_hash)?);
+    reject_existing_symlinked_regression_fixture_path(&path, "write")?;
     fs::write(&path, serialize_regression_fixture(fixture)?)
         .map_err(|error| format!("write {}: {error}", path.display()))?;
     Ok(path)
@@ -329,14 +359,7 @@ fn load_regression_fixtures(dir: &Path) -> Result<Vec<DeterminismRegressionFixtu
     if !dir.exists() {
         return Ok(Vec::new());
     }
-    let dir_metadata = fs::symlink_metadata(dir)
-        .map_err(|error| format!("metadata {}: {error}", dir.display()))?;
-    if dir_metadata.file_type().is_symlink() {
-        return Err(format!(
-            "read {}: regression fixture directory is a symlink",
-            dir.display()
-        ));
-    }
+    reject_symlinked_regression_fixture_dir(dir, "read")?;
 
     let mut entries = Vec::new();
     for entry in fs::read_dir(dir).map_err(|error| format!("read {}: {error}", dir.display()))? {
@@ -345,14 +368,7 @@ fn load_regression_fixtures(dir: &Path) -> Result<Vec<DeterminismRegressionFixtu
         if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
             continue;
         }
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|error| format!("metadata {}: {error}", path.display()))?;
-        if metadata.file_type().is_symlink() {
-            return Err(format!(
-                "read {}: regression fixture path is a symlink",
-                path.display()
-            ));
-        }
+        reject_existing_symlinked_regression_fixture_path(&path, "read")?;
         let file_name = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -821,6 +837,50 @@ fn determinism_regression_fixture_persists_to_stable_file_name() -> Result<(), S
 
     let loaded = load_regression_fixtures(tempdir.path())?;
     assert_eq!(loaded, vec![fixture]);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn determinism_regression_fixture_persist_rejects_symlinked_fixture_dir() -> Result<(), String> {
+    use std::os::unix::fs::symlink;
+
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let real_dir = tempdir.path().join("real-fixtures");
+    fs::create_dir(&real_dir).map_err(|error| error.to_string())?;
+    let symlink_dir = tempdir.path().join("linked-fixtures");
+    symlink(&real_dir, &symlink_dir).map_err(|error| error.to_string())?;
+    let fixture = regression_fixture_for_mismatch(124, b"symlinked-dir", b"expected", b"observed")
+        .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+
+    let error = persist_regression_fixture(&symlink_dir, &fixture)
+        .expect_err("persist should reject symlinked fixture directories");
+
+    assert!(error.contains("regression fixture directory is a symlink"));
+    assert!(error.contains(&symlink_dir.display().to_string()));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn determinism_regression_fixture_persist_rejects_symlinked_fixture_file() -> Result<(), String> {
+    use std::os::unix::fs::symlink;
+
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let outside = tempdir.path().join("outside.json");
+    fs::write(&outside, "{}\n").map_err(|error| error.to_string())?;
+    let fixture = regression_fixture_for_mismatch(125, b"symlinked-file", b"expected", b"observed")
+        .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    let symlink_path = tempdir
+        .path()
+        .join(regression_fixture_file_name(&fixture.input_hash)?);
+    symlink(&outside, &symlink_path).map_err(|error| error.to_string())?;
+
+    let error = persist_regression_fixture(tempdir.path(), &fixture)
+        .expect_err("persist should reject symlinked fixture files");
+
+    assert!(error.contains("regression fixture path is a symlink"));
+    assert!(error.contains(&symlink_path.display().to_string()));
     Ok(())
 }
 
