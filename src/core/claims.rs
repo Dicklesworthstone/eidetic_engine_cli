@@ -420,6 +420,7 @@ fn manifest_path_for_claim(artifacts_root: &Path, claim_id: &ClaimId) -> PathBuf
 
 fn read_claims_file(path: &Path) -> Result<Vec<ParsedClaim>, ClaimParseError> {
     ensure_no_claim_metadata_symlink_components(path, "read claims file")?;
+    ensure_claim_metadata_regular_file(path, "claims file")?;
     let input = fs::read_to_string(path).map_err(|error| {
         ClaimParseError::new(format!("failed to read {}: {error}", path.display()))
     })?;
@@ -676,6 +677,7 @@ fn parse_demo_ids(ids: &[String], claim_index: usize) -> Result<Vec<DemoId>, Cla
 
 fn read_claim_manifest(path: &Path) -> Result<ParsedManifest, ClaimParseError> {
     ensure_no_claim_metadata_symlink_components(path, "read claim manifest")?;
+    ensure_claim_metadata_regular_file(path, "claim manifest")?;
     let input = fs::read_to_string(path).map_err(|error| {
         ClaimParseError::new(format!("failed to read {}: {error}", path.display()))
     })?;
@@ -929,6 +931,23 @@ fn ensure_no_claim_metadata_symlink_components(
         }
     }
     Ok(())
+}
+
+fn ensure_claim_metadata_regular_file(
+    path: &Path,
+    label: &'static str,
+) -> Result<(), ClaimParseError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        ClaimParseError::new(format!("failed to inspect {}: {error}", path.display()))
+    })?;
+    if metadata.file_type().is_file() {
+        Ok(())
+    } else {
+        Err(ClaimParseError::new(format!(
+            "refusing to read {label} `{}` because it is not a regular file",
+            path.display()
+        )))
+    }
 }
 
 fn resolve_claim_artifact_path_no_symlinks(
@@ -1749,6 +1768,25 @@ claims:
         }
     }
 
+    #[test]
+    fn claim_list_rejects_non_regular_workspace_claims_file() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let claims_path = temp.path().join(".ee").join("claims.yaml");
+        std::fs::create_dir_all(&claims_path).map_err(|error| error.to_string())?;
+
+        let error = build_claim_list_report(&ClaimListOptions {
+            workspace_path: temp.path().to_path_buf(),
+            ..Default::default()
+        })
+        .expect_err("directory claims file should be rejected")
+        .to_string();
+        if error.contains("not a regular file") {
+            Ok(())
+        } else {
+            Err(format!("unexpected non-regular claims error: {error}"))
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn claim_show_rejects_symlinked_manifest_file() -> TestResult {
@@ -1780,6 +1818,33 @@ claims:
             Ok(())
         } else {
             Err(format!("unexpected symlink error: {error}"))
+        }
+    }
+
+    #[test]
+    fn claim_show_rejects_non_regular_manifest_file() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::write(temp.path().join("claims.yaml"), VALID_CLAIMS_YAML)
+            .map_err(|error| error.to_string())?;
+        let manifest_path = temp
+            .path()
+            .join("artifacts")
+            .join("claim_fixture_001")
+            .join("manifest.json");
+        std::fs::create_dir_all(&manifest_path).map_err(|error| error.to_string())?;
+
+        let error = build_claim_show_report(&ClaimShowOptions {
+            workspace_path: temp.path().to_path_buf(),
+            claim_id: "claim_fixture_001".to_owned(),
+            include_manifest: true,
+            ..Default::default()
+        })
+        .expect_err("directory claim manifest should be rejected")
+        .to_string();
+        if error.contains("not a regular file") {
+            Ok(())
+        } else {
+            Err(format!("unexpected non-regular manifest error: {error}"))
         }
     }
 }
