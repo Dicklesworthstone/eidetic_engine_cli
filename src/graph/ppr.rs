@@ -189,10 +189,9 @@ where
     F: FnOnce() -> GraphResult<DiGraph>,
 {
     let cx = current_or_testing_cx();
-    let seed_map = seed_map.clone();
     run_with_result_cache(spec, || {
         let graph = build_graph()?;
-        compute_personalized_pagerank_result_with_cx(&cx, &graph, &seed_map, policy)
+        compute_personalized_pagerank_result_with_cx(&cx, &graph, seed_map, policy)
     })
 }
 
