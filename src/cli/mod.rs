@@ -36724,6 +36724,7 @@ mod tests {
         TaskFrameSubgoalCommand, VerifyCommand, WorkflowCommand, decay_settings_from_config, run,
         write_index_rebuild_error,
     };
+    use crate::config::MeshCommandMode;
     use crate::core::index::IndexRebuildError;
     use crate::core::search::{
         ScoreExplanation, ScoreFactor, ScoreSource, SearchHit, SearchReport, SearchSourceMode,
