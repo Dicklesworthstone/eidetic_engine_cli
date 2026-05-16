@@ -3238,14 +3238,8 @@ fn workspace_git_status_entry(
 
 fn normalize_workspace_git_path(path: &str) -> Option<String> {
     let trimmed = path.trim();
-    let unquoted = trimmed
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .unwrap_or(trimmed);
-    if unquoted.is_empty() {
-        return None;
-    }
-    let path = Path::new(unquoted);
+    let unquoted = unquote_git_path(trimmed)?;
+    let path = Path::new(&unquoted);
     if path.is_absolute() {
         return None;
     }
@@ -3256,6 +3250,54 @@ fn normalize_workspace_git_path(path: &str) -> Option<String> {
         return None;
     }
     Some(redact_path_label(path))
+}
+
+fn unquote_git_path(path: &str) -> Option<String> {
+    let quoted = path
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'));
+    let Some(quoted) = quoted else {
+        return (!path.is_empty()).then(|| path.to_string());
+    };
+
+    let mut unquoted = String::with_capacity(quoted.len());
+    let mut chars = quoted.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            unquoted.push(ch);
+            continue;
+        }
+        let escaped = chars.next()?;
+        match escaped {
+            '\\' => unquoted.push('\\'),
+            '"' => unquoted.push('"'),
+            'n' => unquoted.push('\n'),
+            'r' => unquoted.push('\r'),
+            't' => unquoted.push('\t'),
+            'b' => unquoted.push('\u{0008}'),
+            'f' => unquoted.push('\u{000c}'),
+            '0'..='7' => {
+                let mut value = escaped.to_digit(8)?;
+                for _ in 0..2 {
+                    let Some(next) = chars.clone().next() else {
+                        break;
+                    };
+                    let Some(digit) = next.to_digit(8) else {
+                        break;
+                    };
+                    chars.next();
+                    value = (value * 8) + digit;
+                }
+                let byte = u8::try_from(value).ok()?;
+                unquoted.push(char::from(byte));
+            }
+            _ => return None,
+        }
+    }
+    if unquoted.is_empty() {
+        return None;
+    }
+    Some(unquoted)
 }
 
 fn attach_workspace_git_metadata(
@@ -5272,6 +5314,50 @@ mod tests {
                 ("src/both.rs", "M", "M", "ordinary"),
             ]
         );
+    }
+
+    #[test]
+    fn workspace_git_porcelain_v2_parser_unquotes_git_escaped_paths() {
+        let entries = parse_workspace_git_status_porcelain_v2(concat!(
+            "1 .M N... 100644 100644 100644 abc def \"src/quote\\\"name.rs\"\n",
+            "? \"scratch/tab\\011name.txt\"\n",
+            "2 R. N... 100644 100644 100644 abc def R100 \"src/new\\\\name.rs\"\t\"src/old\\\\name.rs\"\n",
+        ));
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (
+                    entry.path.as_str(),
+                    entry.original_path.as_deref(),
+                    entry.staged.as_str(),
+                    entry.unstaged.as_str(),
+                    entry.entry_kind.as_str(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("scratch/tab\tname.txt", None, "?", "?", "untracked"),
+                (
+                    "src/new\\name.rs",
+                    Some("src/old\\name.rs"),
+                    "R",
+                    ".",
+                    "renamed_or_copied"
+                ),
+                ("src/quote\"name.rs", None, ".", "M", "ordinary"),
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_git_porcelain_v2_parser_rejects_malformed_quoted_paths() {
+        let entries = parse_workspace_git_status_porcelain_v2(concat!(
+            "1 .M N... 100644 100644 100644 abc def \"src/bad\\q.rs\"\n",
+            "? \"\"\n",
+            "? \"../escaped-outside.rs\"\n",
+        ));
+
+        assert!(entries.is_empty());
     }
 
     #[test]
