@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use super::{DatabaseConfig, DbConnection, Result};
+use super::{DatabaseConfig, DbConnection, DbError, DbOperation, Result};
 
 const DEFAULT_MAX_SIZE: usize = 1;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -463,6 +463,22 @@ impl SnapshotPin<'_> {
     #[must_use]
     pub fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Acquire)
+    }
+
+    pub fn checked_connection(&self) -> Result<&DbConnection> {
+        if self.is_poisoned() {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: format!(
+                    "snapshot pin {} was poisoned by the read-pool lifecycle watchdog; release it and acquire a fresh snapshot",
+                    self.pin_id
+                        .map(|pin_id| pin_id.to_string())
+                        .unwrap_or_else(|| "<unpinned>".to_string())
+                ),
+            });
+        }
+
+        Ok(self.connection().deref())
     }
 
     pub fn commit(mut self) -> Result<()> {
@@ -1125,6 +1141,34 @@ mod tests {
         assert_eq!(stats.idle, 2);
         assert_eq!(stats.active_pins, 0);
         assert_eq!(stats.expired_pins, 0);
+    }
+
+    #[test]
+    fn poisoned_snapshot_pin_checked_connection_returns_clean_error() {
+        let (_tempdir, _database_path, pool) = file_pool(1);
+        let pin = must(pool.pin_snapshot(), "snapshot pin opens");
+
+        assert_eq!(
+            snapshot_item_count(must(pin.checked_connection(), "pin is usable")),
+            1
+        );
+        let poisoned = pool.force_poison_active_pins();
+        assert_eq!(poisoned.len(), 1);
+
+        let error = match pin.checked_connection() {
+            Ok(_) => panic!("poisoned pin should not return checked connection"),
+            Err(error) => error,
+        };
+        assert_eq!(error.operation(), Some(DbOperation::Query));
+        assert!(error.to_string().contains("snapshot pin"));
+        assert!(error.to_string().contains("poisoned"));
+        assert!(pin.is_poisoned());
+
+        drop(pin);
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 1);
+        assert_eq!(stats.active_pins, 0);
     }
 
     #[test]
