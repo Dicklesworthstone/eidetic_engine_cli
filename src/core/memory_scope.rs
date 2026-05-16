@@ -1412,6 +1412,12 @@ fn metadata_contains_mesh_marker(metadata: &JsonValue) -> bool {
         "material_lane",
         "policyDecision",
         "policy_decision",
+        "policyDecisionJson",
+        "policy_decision_json",
+        "policyFailureSurface",
+        "policy_failure_surface",
+        "policyFailureSurfaceJson",
+        "policy_failure_surface_json",
     ]
     .iter()
     .any(|key| metadata.get(key).is_some())
@@ -2670,6 +2676,13 @@ max_bytes = 0
                 "action": "allow"
             }
         });
+        let standalone_policy_failure = json!({
+            "policyFailureSurface": {
+                "schema": "ee.mesh.policy_failure_surface.v1",
+                "code": "mesh_peer_policy_denied",
+                "action": "deny"
+            }
+        });
 
         assert_eq!(
             mesh_query_visibility(Some(&denied)),
@@ -2697,6 +2710,10 @@ max_bytes = 0
         );
         assert_eq!(
             mesh_query_visibility(Some(&standalone_policy_decision)),
+            MeshQueryVisibility::Blocked
+        );
+        assert_eq!(
+            mesh_query_visibility(Some(&standalone_policy_failure)),
             MeshQueryVisibility::Blocked
         );
         assert_eq!(
