@@ -209,7 +209,7 @@ where
     #[must_use]
     pub fn new(capacity: usize) -> Self {
         let capacity = capacity.max(1);
-        let small_capacity = (capacity / 10).max(capacity / 3).max(1);
+        let small_capacity = (capacity / 10).max(1);
         Self {
             capacity,
             small_capacity,
