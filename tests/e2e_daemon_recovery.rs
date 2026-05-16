@@ -21,6 +21,9 @@ use ee::db::{CreateFeedbackEventInput, DbConnection, audit_actions};
 use ee::serve::DaemonJobRow;
 use serde_json::Value;
 
+#[path = "support/test_tracing.rs"]
+mod test_tracing;
+
 type TestResult = Result<(), String>;
 
 const EXIT_SUCCESS: i32 = 0;
@@ -29,6 +32,12 @@ const JOB_KIND: &str = "health_check";
 #[cfg(unix)]
 #[test]
 fn daemon_supervised_job_recovery_after_kill_restart() -> TestResult {
+    let trace = test_tracing::init_test_tracing(
+        "bd-3usjw.54",
+        "daemon_supervised_job_recovery_after_kill_restart",
+    );
+    trace.setup("daemon_recovery", "created daemon recovery trace guard");
+
     let artifact_dir = unique_artifact_dir("kill-restart")?;
     let workspace = artifact_dir.join("workspace");
     fs::create_dir_all(&workspace).map_err(|error| {
@@ -40,9 +49,11 @@ fn daemon_supervised_job_recovery_after_kill_restart() -> TestResult {
 
     let init = run_ee_json(&workspace, ["init"], "init")?;
     assert_success(&init, "init")?;
+    trace.exercise("daemon_recovery", "ee init", "initialized test workspace");
     let database_path = PathBuf::from(json_string(&init.json, "/data/databasePath", "init")?);
 
     let mut child = spawn_foreground_daemon(&workspace)?;
+    trace.exercise("daemon_recovery", child.id(), "spawned foreground daemon");
     let status_before_kill = match wait_for_open_daemon_jobs(&workspace, 2, Duration::from_secs(10))
     {
         Ok(status) => status,
@@ -52,6 +63,15 @@ fn daemon_supervised_job_recovery_after_kill_restart() -> TestResult {
             return Err(error);
         }
     };
+    trace.verify(
+        "daemon_recovery",
+        status_before_kill
+            .pointer("/data/durable/openJobCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        2_u64,
+        "daemon wrote durable planned rows before termination",
+    );
 
     let killed = terminate_child(child, "foreground daemon")?;
     ensure(
@@ -82,6 +102,11 @@ fn daemon_supervised_job_recovery_after_kill_restart() -> TestResult {
         "daemon restart",
     )?;
     assert_success(&restart, "daemon restart")?;
+    trace.exercise(
+        "daemon_recovery",
+        "ee daemon --foreground --once",
+        "restarted daemon for orphan recovery",
+    );
     ensure_equal(
         &restart.json.pointer("/data/schema"),
         &Some(&Value::String("ee.steward.daemon_foreground.v1".to_owned())),
@@ -100,6 +125,16 @@ fn daemon_supervised_job_recovery_after_kill_restart() -> TestResult {
 
     let status_after_recovery = run_ee_json(&workspace, ["daemon", "status"], "daemon status")?;
     assert_success(&status_after_recovery, "daemon status after recovery")?;
+    trace.verify(
+        "daemon_recovery",
+        status_after_recovery
+            .json
+            .pointer("/data/durable/openJobCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        0_u64,
+        "daemon restart recovered all open durable rows",
+    );
     ensure_equal(
         &status_after_recovery
             .json
@@ -111,6 +146,12 @@ fn daemon_supervised_job_recovery_after_kill_restart() -> TestResult {
     let rows = load_daemon_rows(&workspace)?;
     assert_recovery_rows(&rows)?;
     assert_successful_job_after_recovery(&rows)?;
+    trace.verify(
+        "daemon_recovery",
+        rows.len(),
+        ">=3",
+        "daemon rows include cancelled orphans plus a later successful job",
+    );
 
     info!(
         jobs_in_flight = 2,
@@ -140,6 +181,12 @@ fn daemon_supervised_job_recovery_after_kill_restart() {
 
 #[test]
 fn maintenance_job_decay_sweep_persists_history_and_mutates_db() -> TestResult {
+    let trace = test_tracing::init_test_tracing(
+        "bd-3usjw.54",
+        "maintenance_job_decay_sweep_persists_history_and_mutates_db",
+    );
+    trace.setup("maintenance_decay_sweep", "created decay sweep trace guard");
+
     let artifact_dir = unique_artifact_dir("maintenance-decay-sweep")?;
     let workspace = artifact_dir.join("workspace");
     fs::create_dir_all(&workspace).map_err(|error| {
@@ -151,6 +198,11 @@ fn maintenance_job_decay_sweep_persists_history_and_mutates_db() -> TestResult {
 
     let init = run_ee_json(&workspace, ["init"], "init")?;
     assert_success(&init, "init")?;
+    trace.exercise(
+        "maintenance_decay_sweep",
+        "ee init",
+        "initialized decay sweep workspace",
+    );
     let database_path = PathBuf::from(json_string(&init.json, "/data/databasePath", "init")?);
 
     let remembered = run_ee_json(
@@ -170,6 +222,11 @@ fn maintenance_job_decay_sweep_persists_history_and_mutates_db() -> TestResult {
     assert_success(&remembered, "remember decay fixture")?;
     let memory_id = json_string(&remembered.json, "/data/memory_id", "remember")?;
     let workspace_id = json_string(&remembered.json, "/data/workspace_id", "remember")?;
+    trace.exercise(
+        "maintenance_decay_sweep",
+        &memory_id,
+        "seeded memory and harmful feedback fixture",
+    );
 
     {
         let connection =
@@ -205,6 +262,11 @@ fn maintenance_job_decay_sweep_persists_history_and_mutates_db() -> TestResult {
         "job run decay_sweep",
     )?;
     assert_success(&run, "job run decay_sweep")?;
+    trace.exercise(
+        "maintenance_decay_sweep",
+        "ee job run decay_sweep",
+        "ran durable decay sweep job",
+    );
     ensure_equal(
         &run.json.pointer("/data/schema"),
         &Some(&Value::String("ee.maintenance.run.v1".to_owned())),
@@ -271,6 +333,12 @@ fn maintenance_job_decay_sweep_persists_history_and_mutates_db() -> TestResult {
 
     let shown = run_ee_json(&workspace, ["job", "show", &job_row_id], "job show")?;
     assert_success(&shown, "job show")?;
+    trace.verify(
+        "maintenance_decay_sweep",
+        &job_row_id,
+        "persisted job row",
+        "job show can reload the persisted decay history row",
+    );
     ensure_equal(
         &shown.json.pointer("/data/job/id"),
         &Some(&Value::String(job_row_id)),
@@ -282,6 +350,12 @@ fn maintenance_job_decay_sweep_persists_history_and_mutates_db() -> TestResult {
         .get_memory(&memory_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "decay fixture memory missing after job".to_owned())?;
+    trace.verify(
+        "maintenance_decay_sweep",
+        memory.confidence,
+        "<0.8",
+        "decay sweep reduced confidence after harmful feedback",
+    );
     ensure(
         memory.confidence < 0.8,
         format!(
@@ -388,6 +462,11 @@ fn terminate_child(mut child: Child, context: &str) -> Result<Output, String> {
     info!(daemon_pid = raw_pid, "Sending SIGTERM to {}", context);
     let term_start = Instant::now();
 
+    info!(
+        daemon_pid = raw_pid,
+        signal_sent = "SIGTERM",
+        "Sending daemon termination signal"
+    );
     kill_process(pid, Signal::Term)
         .map_err(|error| format!("failed to send SIGTERM to {context}: {error}"))?;
 
