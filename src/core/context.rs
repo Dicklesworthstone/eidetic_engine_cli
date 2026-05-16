@@ -3416,15 +3416,8 @@ fn apply_personalized_pagerank_rerank(
         .iter()
         .map(|(memory_id, weight)| (memory_id.to_string(), *weight))
         .collect::<BTreeMap<_, _>>();
-    let seed_signature = personalized_pagerank_cache_seed_signature(&seed_weights);
     let policy = crate::graph::ppr::PersonalizedPageRankPolicy::default();
-    let ppr_params = serde_json::json!({
-        "alpha": policy.alpha,
-        "maxIterations": policy.max_iterations,
-        "seedCount": seed_weights.len(),
-        "seedWeights": &seed_signature,
-        "tolerance": policy.tolerance,
-    });
+    let ppr_params = crate::graph::ppr::personalized_pagerank_cache_params(policy, &seed_weights);
     let cache_spec = crate::graph::algorithms::AlgorithmResultCacheSpec {
         conn: connection,
         workspace_id: &snapshot.workspace_id,
@@ -3521,15 +3514,6 @@ fn apply_personalized_pagerank_rerank(
     PersonalizedPageRankRerankMetrics {
         reranked_candidates,
     }
-}
-
-fn personalized_pagerank_cache_seed_signature(
-    seed_weights: &BTreeMap<String, f64>,
-) -> BTreeMap<String, String> {
-    seed_weights
-        .iter()
-        .map(|(memory_id, weight)| (memory_id.clone(), format!("{weight:.6}")))
-        .collect()
 }
 
 fn context_ppr_feature_enabled(workspace_path: &Path) -> Result<bool, String> {
