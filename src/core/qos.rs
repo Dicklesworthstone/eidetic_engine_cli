@@ -134,6 +134,47 @@ pub struct QosRegistryDegradation {
     pub repair: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QosThrottleCheckpoint {
+    BeforeExpensivePhase,
+    CheckpointBoundary,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QosBackgroundThrottleAction {
+    Continue,
+    ShrinkItemBudget,
+    Yield,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QosBackgroundThrottleInput {
+    pub lane: QosLane,
+    pub checkpoint: QosThrottleCheckpoint,
+    pub remaining_item_budget: u32,
+    pub minimum_item_budget: u32,
+    pub may_yield: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QosBackgroundThrottleDecision {
+    pub action: QosBackgroundThrottleAction,
+    pub foreground_pressure: bool,
+    pub adjusted_item_budget: Option<u32>,
+    pub reason: String,
+}
+
+impl QosBackgroundThrottleDecision {
+    #[must_use]
+    pub const fn behavior_changed(&self) -> bool {
+        !matches!(self.action, QosBackgroundThrottleAction::Continue)
+    }
+}
+
 impl QosRegistryDegradation {
     #[must_use]
     pub fn registry_unavailable(message: impl Into<String>) -> Self {
@@ -145,6 +186,45 @@ impl QosRegistryDegradation {
                 .to_owned(),
         }
     }
+}
+
+#[must_use]
+pub fn decide_background_throttle(
+    summary: &QosLaneSummary,
+    input: QosBackgroundThrottleInput,
+) -> QosBackgroundThrottleDecision {
+    let foreground_pressure = summary.foreground_active_count > 0;
+    if !is_background_work_lane(input.lane) {
+        return continue_decision(foreground_pressure, "lane_not_background_or_maintenance");
+    }
+    if !summary.degraded.is_empty() {
+        return continue_decision(foreground_pressure, "qos_summary_degraded_fail_open");
+    }
+    if !foreground_pressure {
+        return continue_decision(false, "no_foreground_pressure");
+    }
+    if input.may_yield && input.checkpoint == QosThrottleCheckpoint::CheckpointBoundary {
+        return QosBackgroundThrottleDecision {
+            action: QosBackgroundThrottleAction::Yield,
+            foreground_pressure: true,
+            adjusted_item_budget: Some(0),
+            reason: "foreground_pressure_at_checkpoint".to_owned(),
+        };
+    }
+
+    let floor = input.minimum_item_budget.min(input.remaining_item_budget);
+    if input.remaining_item_budget > floor {
+        let halved = input.remaining_item_budget / 2;
+        let adjusted = halved.max(floor);
+        return QosBackgroundThrottleDecision {
+            action: QosBackgroundThrottleAction::ShrinkItemBudget,
+            foreground_pressure: true,
+            adjusted_item_budget: Some(adjusted),
+            reason: "foreground_pressure_shrink_budget".to_owned(),
+        };
+    }
+
+    continue_decision(true, "foreground_pressure_minimum_budget_reached")
 }
 
 impl QosLaneRecord {
@@ -505,6 +585,25 @@ fn capped_count(count: usize) -> u32 {
     u32::try_from(count).unwrap_or(u32::MAX)
 }
 
+const fn is_background_work_lane(lane: QosLane) -> bool {
+    matches!(
+        lane,
+        QosLane::BackgroundDerived | QosLane::MaintenanceSteward
+    )
+}
+
+fn continue_decision(
+    foreground_pressure: bool,
+    reason: &'static str,
+) -> QosBackgroundThrottleDecision {
+    QosBackgroundThrottleDecision {
+        action: QosBackgroundThrottleAction::Continue,
+        foreground_pressure,
+        adjusted_item_budget: None,
+        reason: reason.to_owned(),
+    }
+}
+
 impl Default for QosActiveLaneRegistry {
     fn default() -> Self {
         Self {
@@ -595,6 +694,143 @@ mod tests {
         assert_eq!(summary.stale_ignored_count, 1);
         assert_eq!(summary.active_records[0].lane, QosLane::ForegroundRead);
         assert_eq!(summary.active_records[1].lane, QosLane::VerificationRch);
+        Ok(())
+    }
+
+    #[test]
+    fn throttle_decision_continues_without_foreground_pressure() -> TestResult {
+        let background = QosLaneRecord::from_input(&record_input(
+            QosLane::BackgroundDerived,
+            "index",
+            "background work",
+            100,
+        ));
+        let summary = summarize_qos_records("workspace-hash".to_owned(), vec![background], 500);
+
+        let decision = decide_background_throttle(
+            &summary,
+            QosBackgroundThrottleInput {
+                lane: QosLane::BackgroundDerived,
+                checkpoint: QosThrottleCheckpoint::BeforeExpensivePhase,
+                remaining_item_budget: 100,
+                minimum_item_budget: 10,
+                may_yield: true,
+            },
+        );
+
+        assert_eq!(decision.action, QosBackgroundThrottleAction::Continue);
+        assert!(!decision.foreground_pressure);
+        assert!(!decision.behavior_changed());
+        assert_eq!(decision.reason, "no_foreground_pressure");
+        Ok(())
+    }
+
+    #[test]
+    fn throttle_decision_shrinks_background_budget_under_foreground_pressure() -> TestResult {
+        let foreground = QosLaneRecord::from_input(&record_input(
+            QosLane::ForegroundRead,
+            "context",
+            "foreground query",
+            100,
+        ));
+        let background = QosLaneRecord::from_input(&record_input(
+            QosLane::MaintenanceSteward,
+            "steward",
+            "maintenance work",
+            120,
+        ));
+        let summary = summarize_qos_records(
+            "workspace-hash".to_owned(),
+            vec![foreground, background],
+            500,
+        );
+
+        let decision = decide_background_throttle(
+            &summary,
+            QosBackgroundThrottleInput {
+                lane: QosLane::MaintenanceSteward,
+                checkpoint: QosThrottleCheckpoint::BeforeExpensivePhase,
+                remaining_item_budget: 99,
+                minimum_item_budget: 30,
+                may_yield: false,
+            },
+        );
+
+        assert_eq!(
+            decision.action,
+            QosBackgroundThrottleAction::ShrinkItemBudget
+        );
+        assert!(decision.foreground_pressure);
+        assert_eq!(decision.adjusted_item_budget, Some(49));
+        assert!(decision.behavior_changed());
+        assert_eq!(decision.reason, "foreground_pressure_shrink_budget");
+        Ok(())
+    }
+
+    #[test]
+    fn throttle_decision_yields_at_checkpoint_when_allowed() -> TestResult {
+        let foreground = QosLaneRecord::from_input(&record_input(
+            QosLane::ForegroundWrite,
+            "remember",
+            "foreground write",
+            100,
+        ));
+        let background = QosLaneRecord::from_input(&record_input(
+            QosLane::BackgroundDerived,
+            "graph-refresh",
+            "derived work",
+            120,
+        ));
+        let summary = summarize_qos_records(
+            "workspace-hash".to_owned(),
+            vec![foreground, background],
+            500,
+        );
+
+        let decision = decide_background_throttle(
+            &summary,
+            QosBackgroundThrottleInput {
+                lane: QosLane::BackgroundDerived,
+                checkpoint: QosThrottleCheckpoint::CheckpointBoundary,
+                remaining_item_budget: 100,
+                minimum_item_budget: 20,
+                may_yield: true,
+            },
+        );
+
+        assert_eq!(decision.action, QosBackgroundThrottleAction::Yield);
+        assert_eq!(decision.adjusted_item_budget, Some(0));
+        assert_eq!(decision.reason, "foreground_pressure_at_checkpoint");
+        Ok(())
+    }
+
+    #[test]
+    fn throttle_decision_fails_open_when_registry_summary_is_degraded() -> TestResult {
+        let foreground = QosLaneRecord::from_input(&record_input(
+            QosLane::ForegroundRead,
+            "context",
+            "foreground query",
+            100,
+        ));
+        let mut summary = summarize_qos_records("workspace-hash".to_owned(), vec![foreground], 500);
+        summary
+            .degraded
+            .push(QosRegistryDegradation::registry_unavailable("synthetic"));
+
+        let decision = decide_background_throttle(
+            &summary,
+            QosBackgroundThrottleInput {
+                lane: QosLane::BackgroundDerived,
+                checkpoint: QosThrottleCheckpoint::CheckpointBoundary,
+                remaining_item_budget: 100,
+                minimum_item_budget: 10,
+                may_yield: true,
+            },
+        );
+
+        assert_eq!(decision.action, QosBackgroundThrottleAction::Continue);
+        assert!(decision.foreground_pressure);
+        assert_eq!(decision.reason, "qos_summary_degraded_fail_open");
         Ok(())
     }
 
