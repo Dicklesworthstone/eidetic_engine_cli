@@ -112,6 +112,28 @@ where
     Ok(())
 }
 
+/// Stable-sort by canonical ULID payload when all keys support it, otherwise
+/// fall back to ordinary lexical key ordering.
+///
+/// This is intended for production hot paths that should benefit from radix
+/// sorting for normal public `ee` IDs while still accepting synthetic fixtures
+/// and imported IDs that do not end in canonical ULID payloads.
+pub fn sort_by_ulid_payload_or_lexical<T, F>(items: &mut Vec<T>, key: F)
+where
+    F: Fn(&T) -> &str,
+{
+    if items
+        .iter()
+        .enumerate()
+        .all(|(index, item)| validate_payload_key(index, key(item)).is_ok())
+    {
+        sort_by_ulid_payload(items, key)
+            .expect("all ULID payload keys were validated before sorting");
+    } else {
+        items.sort_by(|left, right| key(left).cmp(key(right)));
+    }
+}
+
 fn validate_payload_key(index: usize, key: &str) -> Result<usize, RadixUlidSortError> {
     let offset = payload_offset_opt(key).ok_or_else(|| RadixUlidSortError {
         index,
@@ -170,7 +192,7 @@ fn digit_value_checked(byte: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RadixUlidSortErrorKind, sort_by_ulid_payload};
+    use super::{RadixUlidSortErrorKind, sort_by_ulid_payload, sort_by_ulid_payload_or_lexical};
 
     #[test]
     fn stable_radix_sort_matches_lexical_payload_order() -> Result<(), String> {
@@ -219,6 +241,23 @@ mod tests {
                 offset: 25,
                 byte: b'I'
             }
+        );
+    }
+
+    #[test]
+    fn fallback_sort_accepts_non_ulid_fixture_ids() {
+        let mut rows = vec![
+            ("mem_fixture_c".to_owned(), 0_usize),
+            ("mem_fixture_a".to_owned(), 1),
+            ("mem_fixture_b".to_owned(), 2),
+        ];
+
+        sort_by_ulid_payload_or_lexical(&mut rows, |row| &row.0);
+
+        let sorted_ids = rows.iter().map(|row| row.0.as_str()).collect::<Vec<_>>();
+        assert_eq!(
+            sorted_ids,
+            vec!["mem_fixture_a", "mem_fixture_b", "mem_fixture_c"]
         );
     }
 }

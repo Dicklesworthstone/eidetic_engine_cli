@@ -13,6 +13,7 @@ use crate::db::{
 };
 use crate::models::MemoryId;
 use crate::models::{CapabilityStatus, GRAPH_MODULE_SCHEMA_V1};
+use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 pub use fnx_algorithms::{
     BetweennessCentralityResult, PageRankResult, betweenness_centrality_directed, pagerank_directed,
@@ -2842,14 +2843,13 @@ fn refresh_centrality_from_links(
 
     let mut scores = merge_centrality_scores(&pagerank.scores, &betweenness.scores);
 
-    scores.sort_by(|a, b| compare_score_desc_then_memory_id(a, b, |score| score.pagerank));
+    sort_scores_by_metric_desc_then_memory_id(&mut scores, |score| score.pagerank);
 
     let mut top_pagerank = scores.clone();
     top_pagerank.truncate(10);
 
     let mut top_betweenness = scores.clone();
-    top_betweenness
-        .sort_by(|a, b| compare_score_desc_then_memory_id(a, b, |score| score.betweenness));
+    sort_scores_by_metric_desc_then_memory_id(&mut top_betweenness, |score| score.betweenness);
     top_betweenness.truncate(10);
 
     let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
@@ -2870,15 +2870,16 @@ fn refresh_centrality_from_links(
     })
 }
 
-fn compare_score_desc_then_memory_id(
-    left: &MemoryCentralityScore,
-    right: &MemoryCentralityScore,
+fn sort_scores_by_metric_desc_then_memory_id(
+    scores: &mut Vec<MemoryCentralityScore>,
     metric: impl Fn(&MemoryCentralityScore) -> f64,
-) -> std::cmp::Ordering {
-    metric(right)
-        .partial_cmp(&metric(left))
-        .unwrap_or(std::cmp::Ordering::Equal)
-        .then_with(|| left.memory_id.cmp(&right.memory_id))
+) {
+    sort_by_ulid_payload_or_lexical(scores, |score| score.memory_id.as_str());
+    scores.sort_by(|left, right| {
+        metric(right)
+            .partial_cmp(&metric(left))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 }
 
 fn merge_centrality_scores(
