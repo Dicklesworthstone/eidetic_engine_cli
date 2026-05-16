@@ -56,6 +56,7 @@ const AUDIT_FILE: &str = "audit.jsonl";
 const CAPABILITIES_FILE: &str = "capabilities.json";
 const SCHEMA_FILE: &str = "schema_version.json";
 const PROFILE_EVIDENCE_FILE: &str = "profile_evidence.json";
+const AGENT_PROFILE_EVIDENCE_FILE: &str = "agent_profile_evidence.json";
 const SCALE_BENCHMARK_SUMMARY_FILE: &str = "scale_benchmark_summary.json";
 const SCALE_FIXTURE_MANIFEST_FILE: &str = "scale_fixture_manifest.json";
 const CACHE_REPORTS_FILE: &str = "scale_cache_reports.json";
@@ -220,6 +221,7 @@ struct CollectedDiagnostics {
     capabilities_json: String,
     schema_json: String,
     profile_evidence_json: String,
+    agent_profile_evidence_json: String,
     scale_benchmark_summary_json: String,
     scale_fixture_manifest_json: String,
     cache_reports_json: String,
@@ -295,6 +297,10 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         (CAPABILITIES_FILE, &diagnostics.capabilities_json),
         (SCHEMA_FILE, &diagnostics.schema_json),
         (PROFILE_EVIDENCE_FILE, &diagnostics.profile_evidence_json),
+        (
+            AGENT_PROFILE_EVIDENCE_FILE,
+            &diagnostics.agent_profile_evidence_json,
+        ),
         (
             SCALE_BENCHMARK_SUMMARY_FILE,
             &diagnostics.scale_benchmark_summary_json,
@@ -747,6 +753,7 @@ fn collect_diagnostics(
     .to_string();
 
     let profile_evidence_json = profile_evidence_json(workspace);
+    let agent_profile_evidence_json = agent_profile_evidence_json(workspace);
     let swarm_reports = discover_swarm_report_summaries(workspace);
     let scale_benchmark_summary_json = scale_benchmark_summary_json(workspace, &swarm_reports);
     let scale_fixture_manifest_json = scale_fixture_manifest_json();
@@ -765,6 +772,7 @@ fn collect_diagnostics(
         capabilities_json,
         schema_json,
         profile_evidence_json,
+        agent_profile_evidence_json,
         scale_benchmark_summary_json,
         scale_fixture_manifest_json,
         cache_reports_json,
@@ -850,6 +858,121 @@ fn profile_evidence_json(workspace: &Path) -> String {
             }
         ],
     }))
+}
+
+fn agent_profile_evidence_json(workspace: &Path) -> String {
+    stable_json(&collect_agent_profile_evidence(workspace))
+}
+
+fn collect_agent_profile_evidence(workspace: &Path) -> Value {
+    let database_path = workspace.join(".ee").join("ee.db");
+    let mut database = json!({
+        "present": database_path.is_file(),
+        "readable": false,
+        "workspaceRowPresent": false,
+        "schemaVersion": null,
+        "profileRowCount": 0,
+        "summarizedAgentCount": 0,
+    });
+
+    if !database_path.is_file() {
+        return agent_profile_evidence_value("database_missing", database, Vec::new());
+    }
+
+    let Ok(connection) = DbConnection::open_file(&database_path) else {
+        return agent_profile_evidence_value("database_unreadable", database, Vec::new());
+    };
+    database["readable"] = json!(true);
+    database["schemaVersion"] = connection
+        .schema_version()
+        .ok()
+        .flatten()
+        .map_or(Value::Null, Value::from);
+
+    let workspace_path = workspace.display().to_string();
+    let Ok(Some(workspace_row)) = connection.get_workspace_by_path(&workspace_path) else {
+        return agent_profile_evidence_value("workspace_missing", database, Vec::new());
+    };
+    database["workspaceRowPresent"] = json!(true);
+    database["profileRowCount"] = json!(query_cache_count(
+        &connection,
+        "SELECT COUNT(*) FROM agent_context_profiles WHERE workspace_id = ?1",
+        &workspace_row.id,
+    ));
+
+    let Ok(rows) = connection.query(
+        "SELECT agent_name, COUNT(*) AS memory_profile_count,
+                SUM(helpful_count) AS helpful_count,
+                SUM(harmful_count) AS harmful_count,
+                SUM(ignored_count) AS ignored_count,
+                MAX(last_seen_at) AS last_seen_at
+         FROM agent_context_profiles
+         WHERE workspace_id = ?1
+         GROUP BY agent_name
+         ORDER BY agent_name ASC
+         LIMIT 64",
+        &[SqlValue::Text(workspace_row.id)],
+    ) else {
+        return agent_profile_evidence_value("query_failed", database, Vec::new());
+    };
+
+    let agents = rows
+        .iter()
+        .filter_map(agent_profile_row_summary)
+        .collect::<Vec<_>>();
+    database["summarizedAgentCount"] = json!(agents.len());
+
+    agent_profile_evidence_value("available", database, agents)
+}
+
+fn agent_profile_evidence_value(status: &str, database: Value, agents: Vec<Value>) -> Value {
+    json!({
+        "schema": "ee.support_bundle.agent_profile_evidence.v1",
+        "sourceSchema": crate::models::AGENT_CONTEXT_PROFILE_SCHEMA_V1,
+        "source": "workspace_agent_context_profiles",
+        "status": status,
+        "redactionStatus": "agent_names_hashed_counts_only_no_raw_agent_names",
+        "limits": {
+            "maxAgents": 64,
+        },
+        "database": database,
+        "agents": agents,
+        "provenance": [
+            {
+                "field": "agents[].agentNameHash",
+                "sourceKind": "agent_context_profile_row",
+                "source": "agent_context_profiles.agent_name",
+                "redaction": "blake3_hash",
+            },
+            {
+                "field": "agents[].counts",
+                "sourceKind": "agent_context_profile_row",
+                "source": "agent_context_profiles helpful/harmful/ignored aggregates",
+                "redaction": "counts_only",
+            }
+        ],
+    })
+}
+
+fn agent_profile_row_summary(row: &SqlRow) -> Option<Value> {
+    let agent_name = row_text(row, 0)?;
+    Some(json!({
+        "agentNameIncluded": false,
+        "agentNameHash": support_agent_name_hash(agent_name),
+        "memoryProfileCount": row_u64(row, 1),
+        "observedOutcomes": row_u64(row, 2)
+            .saturating_add(row_u64(row, 3))
+            .saturating_add(row_u64(row, 4)),
+        "helpfulCount": row_u64(row, 2),
+        "harmfulCount": row_u64(row, 3),
+        "ignoredCount": row_u64(row, 4),
+        "lastSeenAt": row_text(row, 5),
+    }))
+}
+
+fn support_agent_name_hash(agent_name: &str) -> String {
+    let digest = blake3::hash(agent_name.as_bytes()).to_hex().to_string();
+    format!("blake3:{}", &digest[..12])
 }
 
 fn scale_benchmark_summary_json(workspace: &Path, swarm_reports: &[Value]) -> String {
@@ -1868,6 +1991,7 @@ fn planned_files() -> Vec<String> {
         CAPABILITIES_FILE.to_owned(),
         SCHEMA_FILE.to_owned(),
         PROFILE_EVIDENCE_FILE.to_owned(),
+        AGENT_PROFILE_EVIDENCE_FILE.to_owned(),
         SCALE_BENCHMARK_SUMMARY_FILE.to_owned(),
         SCALE_FIXTURE_MANIFEST_FILE.to_owned(),
         CACHE_REPORTS_FILE.to_owned(),
@@ -1983,6 +2107,7 @@ mod tests {
         let files = planned_files();
         for required in [
             PROFILE_EVIDENCE_FILE,
+            AGENT_PROFILE_EVIDENCE_FILE,
             SCALE_BENCHMARK_SUMMARY_FILE,
             SCALE_FIXTURE_MANIFEST_FILE,
             CACHE_REPORTS_FILE,
@@ -2067,6 +2192,159 @@ mod tests {
                     .any(|entry| entry.pointer("/field") == Some(&json!(required))),
                 "profile evidence provenance must include {required}"
             );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn agent_profile_evidence_hashes_agent_names_by_default() -> TestResult {
+        let root = unique_test_path("agent-profile-evidence");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(workspace.join(".ee"))
+            .map_err(|error| format!("failed to create workspace metadata dir: {error}"))?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| format!("failed to canonicalize workspace: {error}"))?;
+
+        let database_path = workspace.join(".ee").join("ee.db");
+        let connection = DbConnection::open_file(&database_path)
+            .map_err(|error| format!("failed to open test db: {error}"))?;
+        connection
+            .migrate()
+            .map_err(|error| format!("failed to migrate test db: {error}"))?;
+
+        let workspace_id = "wsp_01234567890123456789012347";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("agent-profile-evidence".to_owned()),
+                },
+            )
+            .map_err(|error| format!("failed to insert workspace: {error}"))?;
+
+        let memory_id = "mem_00000000000000000000aprof1";
+        connection
+            .insert_memory(
+                memory_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Prefer the memory that produced helpful agent outcomes.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: Some("test://support-bundle/agent-profile".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: Some("test".to_owned()),
+                    tags: vec!["agent-profile".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| format!("failed to insert memory: {error}"))?;
+
+        for (agent_name, helpful_count, harmful_count) in [
+            ("AgentProfileAlpha", 12_u32, 1_u32),
+            ("AgentProfileBeta", 1_u32, 12_u32),
+        ] {
+            connection
+                .upsert_agent_context_profile_event(&crate::db::UpsertAgentContextProfileInput {
+                    workspace_id: workspace_id.to_owned(),
+                    agent_name: agent_name.to_owned(),
+                    memory_id: memory_id.to_owned(),
+                    counts_delta: crate::models::AgentContextProfileCounts::new(
+                        helpful_count,
+                        harmful_count,
+                        2,
+                    ),
+                    last_seen_at: Some("2026-05-16T00:00:00Z".to_owned()),
+                    weight_cached: 0.0,
+                })
+                .map_err(|error| format!("failed to upsert agent profile: {error}"))?;
+        }
+        connection
+            .close()
+            .map_err(|error| format!("failed to close test db: {error}"))?;
+
+        let output_dir = root.join("out");
+        fs::create_dir_all(&output_dir)
+            .map_err(|error| format!("failed to create output dir: {error}"))?;
+        let report = create_bundle(&BundleOptions {
+            workspace,
+            output_dir: Some(output_dir),
+            dry_run: false,
+            redacted: true,
+            include_raw: false,
+            audit_limit: 5,
+        })
+        .map_err(|error| error.message())?;
+
+        assert!(
+            report
+                .files_collected
+                .contains(&AGENT_PROFILE_EVIDENCE_FILE.to_owned()),
+            "support bundle must include agent profile evidence"
+        );
+        let bundle_dir = report
+            .output_path
+            .clone()
+            .ok_or_else(|| "created bundle must report output path".to_owned())?;
+        let evidence_text = fs::read_to_string(bundle_dir.join(AGENT_PROFILE_EVIDENCE_FILE))
+            .map_err(|error| format!("failed to read agent profile evidence: {error}"))?;
+
+        assert!(
+            !evidence_text.contains("AgentProfileAlpha"),
+            "agent profile evidence must not leak raw alpha agent name"
+        );
+        assert!(
+            !evidence_text.contains("AgentProfileBeta"),
+            "agent profile evidence must not leak raw beta agent name"
+        );
+
+        let evidence: Value = serde_json::from_str(&evidence_text)
+            .map_err(|error| format!("agent profile evidence must parse: {error}"))?;
+        assert_eq!(
+            evidence.pointer("/schema"),
+            Some(&json!("ee.support_bundle.agent_profile_evidence.v1"))
+        );
+        assert_eq!(evidence.pointer("/status"), Some(&json!("available")));
+        assert_eq!(
+            evidence.pointer("/redactionStatus"),
+            Some(&json!("agent_names_hashed_counts_only_no_raw_agent_names"))
+        );
+        assert_eq!(
+            evidence.pointer("/database/profileRowCount"),
+            Some(&json!(2))
+        );
+        assert_eq!(
+            evidence.pointer("/database/summarizedAgentCount"),
+            Some(&json!(2))
+        );
+        let agents = evidence
+            .pointer("/agents")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "agent profile evidence must include agents array".to_owned())?;
+        assert_eq!(agents.len(), 2);
+        for agent in agents {
+            assert_eq!(
+                agent.pointer("/agentNameIncluded"),
+                Some(&json!(false)),
+                "agent evidence must explicitly mark raw names as omitted"
+            );
+            assert!(
+                agent
+                    .pointer("/agentNameHash")
+                    .and_then(Value::as_str)
+                    .is_some_and(|hash| hash.starts_with("blake3:")),
+                "agent evidence must expose a stable hash instead of raw name"
+            );
+            assert!(agent.pointer("/helpfulCount").is_some());
+            assert!(agent.pointer("/harmfulCount").is_some());
         }
 
         Ok(())
