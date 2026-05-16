@@ -3677,12 +3677,17 @@ fn context_read_pool_config(
                 .and_then(|value| usize::try_from(value).ok())
                 .unwrap_or(1);
             let idle_timeout_seconds = read_pool.idle_timeout_seconds.unwrap_or(30);
+            let max_pin_duration_seconds = read_env_var(EnvVar::ReadPoolMaxPinSeconds)
+                .and_then(|raw| raw.parse::<u64>().ok())
+                .or(read_pool.max_pin_duration_seconds)
+                .unwrap_or(30);
             let acquire_timeout_ms = read_env_var(EnvVar::ReadPoolAcquireTimeoutMs)
                 .and_then(|raw| raw.parse::<u64>().ok())
                 .unwrap_or(5000);
             let pin_snapshot = read_pool.pin_snapshot.unwrap_or(true);
             (
                 PoolConfig::new(max_size, Duration::from_secs(idle_timeout_seconds))
+                    .with_max_pin_duration(Duration::from_secs(max_pin_duration_seconds))
                     .with_acquire_timeout(Duration::from_millis(acquire_timeout_ms)),
                 pin_snapshot,
             )
@@ -7417,6 +7422,29 @@ mod tests {
             "expired pin should return a storage error with clean context, got {error:?}"
         );
         assert!(read_snapshot.is_poisoned());
+        Ok(())
+    }
+
+    #[test]
+    fn context_read_pool_config_honors_max_pin_duration_seconds() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            ee_dir.join("config.toml"),
+            "[storage.read_pool]\nsize = 2\nidle_timeout_seconds = 11\nmax_pin_duration_seconds = 7\npin_snapshot = true\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let mut degraded = Vec::new();
+        let (config, pin_snapshot) = super::context_read_pool_config(&workspace, &mut degraded);
+
+        assert!(degraded.is_empty());
+        assert!(pin_snapshot);
+        assert_eq!(config.max_size(), 2);
+        assert_eq!(config.idle_timeout(), Duration::from_secs(11));
+        assert_eq!(config.max_pin_duration(), Duration::from_secs(7));
         Ok(())
     }
 
