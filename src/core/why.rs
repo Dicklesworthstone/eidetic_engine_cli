@@ -19,7 +19,11 @@ use crate::core::memory::{
     EvidenceFreshness, EvidenceFreshnessStatus, assess_memory_evidence_freshness, memory_validity,
 };
 use crate::db::DbConnection;
-use crate::models::{RationaleTrace, RationaleTraceVisibility, VerificationEvidenceRecord};
+use crate::models::{
+    AGENT_CONTEXT_PROFILE_SCHEMA_V1, AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_COLD_START_OUTCOMES,
+    AgentContextProfileCounts, RationaleTrace, RationaleTraceVisibility,
+    VerificationEvidenceRecord,
+};
 use sqlmodel_core::{Row, Value};
 
 /// Why a memory was stored with certain characteristics.
@@ -171,6 +175,22 @@ pub struct SelectionExplanation {
     pub score_breakdown: String,
     /// Most recent persisted context-pack selection for this memory, if any.
     pub latest_pack_selection: Option<PackSelectionExplanation>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentProfileSelectionExplanation {
+    pub schema: &'static str,
+    pub agent_name: String,
+    pub agent_name_hash: String,
+    pub helpful_count: u32,
+    pub harmful_count: u32,
+    pub ignored_count: u32,
+    pub observed_outcomes: u32,
+    pub bias: f64,
+    pub max_bias_magnitude: f64,
+    pub cold_start: bool,
+    pub cold_start_threshold: u32,
+    pub last_seen_at: String,
 }
 
 /// Memory lifecycle state surfaced by `ee why`.
@@ -434,6 +454,8 @@ pub struct WhyReport {
     pub graph_retrieval: Option<GraphRetrievalExplanation>,
     /// Selection explanation.
     pub selection: Option<SelectionExplanation>,
+    /// Per-agent outcome counts and capped selection bias for this memory.
+    pub agent_profile: Option<AgentProfileSelectionExplanation>,
     /// Lifecycle explanation.
     pub lifecycle: Option<LifecycleExplanation>,
     /// Bayesian (alpha, beta) posterior over the memory's latent
@@ -479,6 +501,7 @@ impl WhyReport {
             retrieval: Some(retrieval),
             graph_retrieval: None,
             selection: Some(selection),
+            agent_profile: None,
             lifecycle: None,
             bayes_posterior: None,
             causal_explanation: None,
@@ -513,6 +536,7 @@ impl WhyReport {
             retrieval: None,
             graph_retrieval: None,
             selection: None,
+            agent_profile: None,
             lifecycle: None,
             bayes_posterior: None,
             causal_explanation: None,
@@ -539,6 +563,7 @@ impl WhyReport {
             retrieval: None,
             graph_retrieval: None,
             selection: None,
+            agent_profile: None,
             lifecycle: None,
             bayes_posterior: None,
             causal_explanation: None,
@@ -665,6 +690,16 @@ impl WhyReport {
     #[must_use]
     pub fn with_graph_retrieval(mut self, graph_retrieval: GraphRetrievalExplanation) -> Self {
         self.graph_retrieval = Some(graph_retrieval);
+        self
+    }
+
+    /// Add per-agent profile counts and bias explanation to the report.
+    #[must_use]
+    pub fn with_agent_profile(
+        mut self,
+        agent_profile: Option<AgentProfileSelectionExplanation>,
+    ) -> Self {
+        self.agent_profile = agent_profile;
         self
     }
 
@@ -903,6 +938,8 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
     let selection_score =
         compute_selection_score(memory.confidence, memory.utility, memory.importance);
     let above_threshold = memory.confidence >= options.confidence_threshold;
+    let agent_profile =
+        fetch_agent_profile_selection_explanation(&conn, &memory.workspace_id, memory_id);
 
     let latest_pack_selection = match latest_pack_selection(&conn, memory_id) {
         Ok(selection) => selection,
@@ -924,6 +961,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
                     verification_evidence: Vec::new(),
                     graph_retrieval,
                     degraded: evidence_degradations,
+                    agent_profile,
                 },
             )
             .with_content(memory.content.clone());
@@ -960,6 +998,7 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
             verification_evidence,
             graph_retrieval,
             degraded: evidence_degradations,
+            agent_profile,
         },
     )
     .with_content(memory.content.clone());
@@ -1377,6 +1416,7 @@ struct ReportSelectionInputs {
     verification_evidence: Vec<VerificationEvidenceRecord>,
     graph_retrieval: GraphRetrievalExplanation,
     degraded: Vec<WhyDegradation>,
+    agent_profile: Option<AgentProfileSelectionExplanation>,
 }
 
 fn build_report(
@@ -1400,6 +1440,7 @@ fn build_report(
     };
 
     WhyReport::found(memory_id.to_string(), storage, retrieval, selection)
+        .with_agent_profile(selection_inputs.agent_profile)
         .with_lifecycle(selection_inputs.lifecycle)
         .with_contradictions(selection_inputs.contradictions)
         .with_links(selection_inputs.links)
@@ -1711,6 +1752,50 @@ fn compute_selection_score(confidence: f32, utility: f32, importance: f32) -> f3
     0.5 * confidence + 0.3 * utility + 0.2 * importance
 }
 
+fn fetch_agent_profile_selection_explanation(
+    conn: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+) -> Option<AgentProfileSelectionExplanation> {
+    let agent_name = crate::core::memory_scope::current_agent_name()?;
+    let profile = conn
+        .get_agent_context_profile(workspace_id, &agent_name, memory_id)
+        .ok()
+        .flatten()?;
+    Some(agent_profile_selection_explanation(
+        agent_name,
+        profile.counts,
+        profile.last_seen_at,
+    ))
+}
+
+fn agent_profile_selection_explanation(
+    agent_name: String,
+    counts: AgentContextProfileCounts,
+    last_seen_at: String,
+) -> AgentProfileSelectionExplanation {
+    let bias = counts.bias();
+    AgentProfileSelectionExplanation {
+        schema: AGENT_CONTEXT_PROFILE_SCHEMA_V1,
+        agent_name_hash: agent_context_profile_agent_hash(&agent_name),
+        agent_name,
+        helpful_count: counts.helpful_count,
+        harmful_count: counts.harmful_count,
+        ignored_count: counts.ignored_count,
+        observed_outcomes: counts.observed_outcomes(),
+        bias: bias.weight,
+        max_bias_magnitude: AGENT_PROFILE_BIAS_CAP,
+        cold_start: bias.cold_start,
+        cold_start_threshold: AGENT_PROFILE_COLD_START_OUTCOMES,
+        last_seen_at,
+    }
+}
+
+fn agent_context_profile_agent_hash(agent_name: &str) -> String {
+    let digest = blake3::hash(agent_name.as_bytes()).to_hex().to_string();
+    format!("blake3:{}", &digest[..12])
+}
+
 fn latest_pack_selection(
     conn: &DbConnection,
     memory_id: &str,
@@ -2003,6 +2088,36 @@ mod tests {
     }
 
     #[test]
+    fn agent_profile_selection_explanation_reports_counts_and_cap() -> TestResult {
+        let explanation = agent_profile_selection_explanation(
+            "FrostyMoose".to_string(),
+            AgentContextProfileCounts::new(20, 1, 3),
+            "2026-05-16T01:12:00Z".to_string(),
+        );
+
+        ensure(
+            explanation.schema,
+            AGENT_CONTEXT_PROFILE_SCHEMA_V1,
+            "schema",
+        )?;
+        ensure(explanation.helpful_count, 20, "helpful count")?;
+        ensure(explanation.harmful_count, 1, "harmful count")?;
+        ensure(explanation.ignored_count, 3, "ignored count")?;
+        ensure(explanation.observed_outcomes, 24, "observed outcomes")?;
+        ensure(explanation.cold_start, false, "cold start")?;
+        ensure(
+            explanation.bias.abs() <= AGENT_PROFILE_BIAS_CAP,
+            true,
+            "bias cap",
+        )?;
+        ensure(
+            explanation.cold_start_threshold,
+            AGENT_PROFILE_COLD_START_OUTCOMES,
+            "cold start threshold",
+        )
+    }
+
+    #[test]
     fn result_target_resolves_to_search_doc_id() -> TestResult {
         ensure(
             resolve_why_memory_id("result:mem_00000000000000000000000001"),
@@ -2127,6 +2242,7 @@ mod tests {
                     &[],
                 ),
                 degraded: Vec::new(),
+                agent_profile: None,
             },
         );
 

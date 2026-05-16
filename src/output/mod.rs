@@ -2186,6 +2186,9 @@ pub fn render_context_response_json_with_options(
             if let Some(pack_dna) = &response.data.pack_dna {
                 pack.field_raw("packDna", &pack_dna.to_string());
             }
+            if let Some(agent_profile) = &response.data.agent_profile {
+                pack.field_raw("agentProfile", &agent_profile.to_string());
+            }
             if options.include_legacy_selection_certificate {
                 pack.field_object("deprecation", |deprecation| {
                     deprecation.field_str("deprecatedField", "selectionCertificate");

@@ -53,12 +53,13 @@ use crate::core::search::{
 use crate::db::read_pool::{PoolConfig, ReadConnectionPool};
 use crate::db::{
     CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, DatabaseConfig,
-    DbConnection, StoredMemory,
+    DbConnection, StoredAgentContextProfile, StoredMemory,
 };
 use crate::models::degradation::{GRAPH_PPR_EMPTY_SEED_SET_CODE, GRAPH_PPR_SNAPSHOT_STALE_CODE};
 use crate::models::{
-    MemoryId, MemoryScope, MemoryScopeStats, PackId, ProvenanceUri, RedactionLevel, TrustClass,
-    UnitScore, WorkspaceId, posture_for_trust_class,
+    AGENT_CONTEXT_PROFILE_SCHEMA_V1, AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_COLD_START_OUTCOMES,
+    AgentContextProfileCounts, MemoryId, MemoryScope, MemoryScopeStats, PackId, ProvenanceUri,
+    RedactionLevel, TrustClass, UnitScore, WorkspaceId, posture_for_trust_class,
 };
 use crate::pack::{
     ConflictKind, ConflictRecommendedAction, ConsensusConflictReport, ContextPackProfile,
@@ -1216,6 +1217,8 @@ pub fn run_context_pack_with_performance(
     candidate_metrics.graph_boosted_candidates = candidate_metrics
         .graph_boosted_candidates
         .saturating_add(proximity_metrics.annotated_candidates);
+    let mut agent_profile =
+        apply_agent_context_profile_bias(&read_snapshot, &options.workspace_path, &mut candidates);
     trace.candidate_resolution = candidate_metrics;
 
     sort_context_candidates(&mut candidates);
@@ -1321,6 +1324,9 @@ pub fn run_context_pack_with_performance(
         options.output_options,
         coordination.as_ref(),
     ));
+    if let Some(profile) = agent_profile.as_mut() {
+        set_agent_profile_base_pack_hash(profile, draft.hash.as_deref());
+    }
     trace.record_elapsed("packAssembly", pack_start);
     let slo = if let Some(retry_after_ms) = concurrent_limit_retry_after_ms {
         let actuals = PackAssemblySloActuals::from_pack_run(
@@ -1391,6 +1397,7 @@ pub fn run_context_pack_with_performance(
     );
     let mut response = ContextResponse::new(request, draft, response_degraded)
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    response.data.agent_profile = agent_profile;
     response.data.slo = Some(slo);
     response.data.scope_stats = Some(scope_stats);
     response.data.consensus = consensus_conflicts.consensus;
@@ -2231,6 +2238,207 @@ fn sort_context_candidates(candidates: &mut [PackCandidate]) {
             .then_with(|| left.section.cmp(&right.section))
             .then_with(|| left.memory_id.to_string().cmp(&right.memory_id.to_string()))
     });
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct AppliedAgentProfileBias {
+    memory_id: String,
+    bias: f64,
+    counts: AgentContextProfileCounts,
+    last_seen_at: String,
+}
+
+fn apply_agent_context_profile_bias(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    candidates: &mut [PackCandidate],
+) -> Option<serde_json::Value> {
+    let agent_name = crate::core::memory_scope::current_agent_name()?;
+    let workspace_id =
+        resolve_context_profile_workspace_id(connection, workspace_path, candidates)?;
+    let profiles = connection
+        .list_agent_context_profiles_for_pack(&workspace_id, &agent_name)
+        .ok()?;
+    if profiles.is_empty() {
+        return None;
+    }
+
+    let summary =
+        summarize_agent_context_profiles(&agent_name, &workspace_id, profiles, candidates);
+    Some(summary.into_json())
+}
+
+fn resolve_context_profile_workspace_id(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    candidates: &[PackCandidate],
+) -> Option<String> {
+    let workspace_path = workspace_path.display().to_string();
+    if let Ok(Some(workspace)) = connection.get_workspace_by_path(&workspace_path) {
+        return Some(workspace.id);
+    }
+
+    candidates.iter().find_map(|candidate| {
+        connection
+            .get_memory(&candidate.memory_id.to_string())
+            .ok()
+            .flatten()
+            .map(|memory| memory.workspace_id)
+    })
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct AgentContextProfileSummary {
+    agent_name: String,
+    workspace_id: String,
+    counts: AgentContextProfileCounts,
+    bias_magnitude: f64,
+    memory_bias_applied: u32,
+    cold_start: bool,
+    top_biases: Vec<AppliedAgentProfileBias>,
+}
+
+impl AgentContextProfileSummary {
+    fn into_json(self) -> serde_json::Value {
+        let agent_name_hash = agent_context_profile_agent_hash(&self.agent_name);
+        let top_biases = self
+            .top_biases
+            .iter()
+            .map(|bias| {
+                serde_json::json!({
+                    "memoryId": bias.memory_id,
+                    "bias": score_json_f64(bias.bias),
+                    "helpfulCount": bias.counts.helpful_count,
+                    "harmfulCount": bias.counts.harmful_count,
+                    "ignoredCount": bias.counts.ignored_count,
+                    "lastSeenAt": bias.last_seen_at,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        serde_json::json!({
+            "schema": AGENT_CONTEXT_PROFILE_SCHEMA_V1,
+            "agentName": self.agent_name,
+            "agentNameHash": agent_name_hash.clone(),
+            "workspaceId": self.workspace_id,
+            "observedOutcomes": self.counts.observed_outcomes(),
+            "helpfulCount": self.counts.helpful_count,
+            "harmfulCount": self.counts.harmful_count,
+            "ignoredCount": self.counts.ignored_count,
+            "biasMagnitude": score_json_f64(self.bias_magnitude),
+            "maxBiasMagnitude": AGENT_PROFILE_BIAS_CAP,
+            "memoryBiasApplied": self.memory_bias_applied,
+            "coldStart": self.cold_start,
+            "coldStartThreshold": AGENT_PROFILE_COLD_START_OUTCOMES,
+            "halfLifeDays": serde_json::Value::Null,
+            "determinismKey": {
+                "workspaceGeneration": 0,
+                "profileGeneration": self.counts.observed_outcomes(),
+                "agentNameHash": agent_name_hash,
+                "basePackHash": serde_json::Value::Null,
+            },
+            "topBiases": top_biases,
+            "degraded": [],
+        })
+    }
+}
+
+fn summarize_agent_context_profiles(
+    agent_name: &str,
+    workspace_id: &str,
+    profiles: Vec<StoredAgentContextProfile>,
+    candidates: &mut [PackCandidate],
+) -> AgentContextProfileSummary {
+    let mut counts = AgentContextProfileCounts::default();
+    let mut by_memory = HashMap::with_capacity(profiles.len());
+    for profile in profiles {
+        counts = AgentContextProfileCounts::new(
+            counts
+                .helpful_count
+                .saturating_add(profile.counts.helpful_count),
+            counts
+                .harmful_count
+                .saturating_add(profile.counts.harmful_count),
+            counts
+                .ignored_count
+                .saturating_add(profile.counts.ignored_count),
+        );
+        by_memory.insert(profile.memory_id.clone(), profile);
+    }
+
+    let mut top_biases = Vec::new();
+    let mut memory_bias_applied = 0_u32;
+    let mut bias_magnitude = 0.0_f64;
+    for candidate in candidates {
+        let memory_id = candidate.memory_id.to_string();
+        let Some(profile) = by_memory.get(&memory_id) else {
+            continue;
+        };
+        let bias = profile.counts.bias();
+        if bias.cold_start || bias.weight == 0.0 {
+            continue;
+        }
+
+        let base_relevance = candidate.relevance.into_inner();
+        let adjusted_relevance = (f64::from(base_relevance) + bias.weight).clamp(0.0, 1.0) as f32;
+        if let Ok(relevance) = UnitScore::parse(adjusted_relevance) {
+            candidate.relevance = relevance;
+            memory_bias_applied = memory_bias_applied.saturating_add(1);
+            bias_magnitude = bias_magnitude.max(bias.weight.abs());
+            top_biases.push(AppliedAgentProfileBias {
+                memory_id,
+                bias: bias.weight,
+                counts: profile.counts,
+                last_seen_at: profile.last_seen_at.clone(),
+            });
+        }
+    }
+
+    top_biases.sort_by(|left, right| {
+        right
+            .bias
+            .abs()
+            .total_cmp(&left.bias.abs())
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+    top_biases.truncate(8);
+
+    AgentContextProfileSummary {
+        agent_name: agent_name.to_owned(),
+        workspace_id: workspace_id.to_owned(),
+        counts,
+        bias_magnitude,
+        memory_bias_applied,
+        cold_start: memory_bias_applied == 0,
+        top_biases,
+    }
+}
+
+fn set_agent_profile_base_pack_hash(profile: &mut serde_json::Value, pack_hash: Option<&str>) {
+    if let Some(determinism_key) = profile
+        .get_mut("determinismKey")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        determinism_key.insert(
+            "basePackHash".to_owned(),
+            pack_hash.map_or(serde_json::Value::Null, |hash| {
+                serde_json::Value::String(hash.to_owned())
+            }),
+        );
+    }
+}
+
+fn agent_context_profile_agent_hash(agent_name: &str) -> String {
+    let digest = blake3::hash(agent_name.as_bytes()).to_hex().to_string();
+    format!("blake3:{}", &digest[..12])
+}
+
+fn score_json_f64(value: f64) -> serde_json::Value {
+    if value.is_finite() {
+        serde_json::json!((value * 1000.0).round() / 1000.0)
+    } else {
+        serde_json::Value::Null
+    }
 }
 
 fn compare_optional_f32_desc(left: Option<f32>, right: Option<f32>) -> std::cmp::Ordering {
@@ -5047,12 +5255,13 @@ mod tests {
     };
     use crate::db::read_pool::{PoolConfig, ReadConnectionPool};
     use crate::db::{
-        CreateMemoryInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, StoredMemory,
+        CreateMemoryInput, CreateWorkspaceInput, DatabaseConfig, DbConnection,
+        StoredAgentContextProfile, StoredMemory,
     };
     use crate::models::{
-        FocusItem, FocusState, MemoryId, MemoryScope, MemoryScopeStats, ProvenanceUri,
-        QueryTemporalFilters, QueryTemporalValidity, QueryTemporalValidityPosture, TrustClass,
-        UnitScore, WorkspaceId,
+        AgentContextProfileCounts, FocusItem, FocusState, MemoryId, MemoryScope, MemoryScopeStats,
+        ProvenanceUri, QueryTemporalFilters, QueryTemporalValidity, QueryTemporalValidityPosture,
+        TrustClass, UnitScore, WorkspaceId,
     };
     use crate::pack::{
         ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponseSeverity,
@@ -5247,6 +5456,90 @@ mod tests {
             why: "selected by fixture".to_string(),
         })
         .map_err(|error| error.to_string())
+    }
+
+    fn stored_agent_profile(
+        agent_name: &str,
+        memory_id: MemoryId,
+        counts: AgentContextProfileCounts,
+    ) -> StoredAgentContextProfile {
+        StoredAgentContextProfile {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            agent_name: agent_name.to_string(),
+            memory_id: memory_id.to_string(),
+            counts,
+            last_seen_at: "2026-05-16T01:12:00Z".to_string(),
+            weight_cached: counts.bias().weight,
+        }
+    }
+
+    #[test]
+    fn agent_context_profile_bias_is_capped_and_deterministic() -> Result<(), String> {
+        let boosted = MemoryId::from_uuid(uuid::Uuid::from_u128(920));
+        let neutral = MemoryId::from_uuid(uuid::Uuid::from_u128(921));
+        let mut candidates = vec![ppr_candidate(boosted, 0.50)?, ppr_candidate(neutral, 0.51)?];
+        let summary = super::summarize_agent_context_profiles(
+            "FrostyMoose",
+            "wsp_01234567890123456789012345",
+            vec![stored_agent_profile(
+                "FrostyMoose",
+                boosted,
+                AgentContextProfileCounts::new(100, 0, 0),
+            )],
+            &mut candidates,
+        );
+
+        assert_eq!(summary.memory_bias_applied, 1);
+        assert!(!summary.cold_start);
+        assert!(summary.bias_magnitude <= crate::models::AGENT_PROFILE_BIAS_CAP);
+        assert!(
+            candidates[0].relevance.into_inner() <= 0.55,
+            "profile bias must stay within +0.05"
+        );
+        super::sort_context_candidates(&mut candidates);
+        assert_eq!(candidates[0].memory_id, boosted);
+
+        let json = summary.into_json();
+        assert_eq!(
+            json["schema"],
+            crate::models::AGENT_CONTEXT_PROFILE_SCHEMA_V1
+        );
+        assert_eq!(json["memoryBiasApplied"], 1);
+        assert_eq!(json["coldStart"], false);
+        assert_eq!(json["topBiases"][0]["memoryId"], boosted.to_string());
+        Ok(())
+    }
+
+    #[test]
+    fn agent_context_profile_cold_start_does_not_change_ranking() -> Result<(), String> {
+        let cold = MemoryId::from_uuid(uuid::Uuid::from_u128(922));
+        let winner = MemoryId::from_uuid(uuid::Uuid::from_u128(923));
+        let mut candidates = vec![ppr_candidate(cold, 0.50)?, ppr_candidate(winner, 0.51)?];
+        let before = candidates
+            .iter()
+            .map(|candidate| candidate.relevance.into_inner())
+            .collect::<Vec<_>>();
+        let summary = super::summarize_agent_context_profiles(
+            "FrostyMoose",
+            "wsp_01234567890123456789012345",
+            vec![stored_agent_profile(
+                "FrostyMoose",
+                cold,
+                AgentContextProfileCounts::new(9, 0, 0),
+            )],
+            &mut candidates,
+        );
+        let after = candidates
+            .iter()
+            .map(|candidate| candidate.relevance.into_inner())
+            .collect::<Vec<_>>();
+
+        assert_eq!(before, after);
+        assert_eq!(summary.memory_bias_applied, 0);
+        assert!(summary.cold_start);
+        super::sort_context_candidates(&mut candidates);
+        assert_eq!(candidates[0].memory_id, winner);
+        Ok(())
     }
 
     fn ppr_search_report(hits: Vec<SearchHit>) -> SearchReport {
