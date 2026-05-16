@@ -24457,6 +24457,33 @@ fn db_status_degraded(report: &DbStatusReport) -> Vec<serde_json::Value> {
     aggregate_cli_degraded_json(degraded)
 }
 
+fn db_diagnostic_failure_degraded(
+    source: &'static str,
+    message: Option<&str>,
+) -> Vec<serde_json::Value> {
+    let Some(message) = message.map(str::trim).filter(|message| !message.is_empty()) else {
+        return Vec::new();
+    };
+    let (code, severity, repair) = if message.contains("not found")
+        || message.contains("Failed to open database")
+    {
+        (
+            "storage_unavailable",
+            "high",
+            "Run `ee db status --json` to confirm the database path, then run `ee init --workspace .` if the workspace is not initialized.",
+        )
+    } else {
+        (
+            "storage_degraded",
+            "medium",
+            "Run `ee db check --full --json` and inspect the report before relying on derived database diagnostics.",
+        )
+    };
+    aggregate_cli_degraded_json([DegradationAggregationInput::new(
+        source, code, severity, message, repair,
+    )])
+}
+
 #[derive(Debug, serde::Serialize)]
 struct DbStatusReport {
     database_path: String,
@@ -24594,6 +24621,7 @@ fn write_db_inspect_output<W: Write>(
     stdout: &mut W,
 ) -> ProcessExitCode {
     let success = report.error.is_none();
+    let degraded = db_diagnostic_failure_degraded("db_inspect", report.error.as_deref());
     let exit_code = if success {
         ProcessExitCode::Success
     } else {
@@ -24623,7 +24651,7 @@ fn write_db_inspect_output<W: Write>(
                         "error": report.error,
                     }
                 },
-                "degraded": []
+                "degraded": degraded
             });
             let _ = write_stdout(
                 stdout,
@@ -24909,6 +24937,7 @@ fn write_db_reindex_output<W: Write>(
     stdout: &mut W,
 ) -> ProcessExitCode {
     let success = report.error.is_none();
+    let degraded = db_diagnostic_failure_degraded("db_reindex", report.error.as_deref());
     let exit_code = if success {
         ProcessExitCode::Success
     } else {
@@ -24943,7 +24972,7 @@ fn write_db_reindex_output<W: Write>(
                         "error": report.error,
                     }
                 },
-                "degraded": []
+                "degraded": degraded
             });
             let _ = write_stdout(
                 stdout,
@@ -25231,6 +25260,11 @@ fn write_db_check_output<W: Write>(
     stdout: &mut W,
     command_name: &'static str,
 ) -> ProcessExitCode {
+    let degraded = if report.passed {
+        Vec::new()
+    } else {
+        db_diagnostic_failure_degraded("db_check", Some(report.message.as_str()))
+    };
     let exit_code = if report.passed {
         ProcessExitCode::Success
     } else {
@@ -25261,7 +25295,7 @@ fn write_db_check_output<W: Write>(
                         "message": report.message,
                     }
                 },
-                "degraded": []
+                "degraded": degraded
             });
             let _ = write_stdout(
                 stdout,

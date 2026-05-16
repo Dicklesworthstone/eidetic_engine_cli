@@ -88,6 +88,23 @@ fn report(stdout: &str) -> Value {
         .unwrap_or_else(|| panic!("missing data.report in {stdout}"))
 }
 
+fn assert_degraded_code(parsed: &Value, code: &str, source: &str) {
+    let degraded = parsed["degraded"]
+        .as_array()
+        .unwrap_or_else(|| panic!("missing degraded array in {parsed}"));
+    assert!(
+        degraded.iter().any(|entry| {
+            entry["code"] == Value::String(code.to_string())
+                && entry["sources"].as_array().is_some_and(|sources| {
+                    sources
+                        .iter()
+                        .any(|candidate| candidate.as_str() == Some(source))
+                })
+        }),
+        "expected degraded code {code} from {source}, got {degraded:?}"
+    );
+}
+
 fn pretty_json(value: &Value) -> String {
     let mut rendered = serde_json::to_string_pretty(value).expect("render golden JSON");
     rendered.push('\n');
@@ -473,6 +490,7 @@ fn db_reindex_dry_run_reports_missing_database_without_writing() {
         parsed["data"]["command"],
         Value::String("db reindex".into())
     );
+    assert_degraded_code(&parsed, "storage_unavailable", "db_reindex");
     let report = parsed["data"]["report"].clone();
     assert_eq!(report["exists"], Value::Bool(false));
     assert_eq!(report["mutationAllowed"], Value::Bool(false));
@@ -558,6 +576,7 @@ fn db_inspect_rejects_unknown_table_without_running_arbitrary_sql() {
     assert_eq!(exit, ee::models::ProcessExitCode::Storage);
     let parsed = parse_response(&stdout);
     assert_eq!(parsed["success"], Value::Bool(false));
+    assert_degraded_code(&parsed, "storage_unavailable", "db_inspect");
     let report = parsed["data"]["report"].clone();
     assert!(
         report["error"]
@@ -719,7 +738,9 @@ fn db_check_reports_missing_database_with_storage_exit_code() {
         OsString::from("--json"),
     ]);
     assert_eq!(exit, ee::models::ProcessExitCode::Storage);
-    let report = report(&stdout);
+    let parsed = parse_response(&stdout);
+    assert_degraded_code(&parsed, "storage_unavailable", "db_check");
+    let report = parsed["data"]["report"].clone();
     assert_eq!(report["passed"], Value::Bool(false));
     assert!(
         report["message"]
