@@ -11347,6 +11347,31 @@ fn aggregate_clustering_degraded_json(
     }))
 }
 
+fn aggregate_backup_export_degraded_json(
+    degraded: &[crate::core::backup::BackupDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "backup_export",
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry.next_action.clone(),
+        )
+    }))
+    .into_iter()
+    .map(|entry| {
+        serde_json::json!({
+            "code": entry.code,
+            "severity": entry.severity,
+            "message": entry.message,
+            "nextAction": entry.repair,
+            "sources": entry.sources,
+        })
+    })
+    .collect()
+}
+
 fn handle_analyze_drift<W>(cli: &Cli, args: &AnalyzeDriftArgs, stdout: &mut W) -> ProcessExitCode
 where
     W: Write,
@@ -11640,7 +11665,7 @@ fn export_report_data(report: &BackupCreateReport) -> serde_json::Value {
         },
         "verificationStatus": report.verification_status,
         "artifacts": report.artifacts.iter().map(|artifact| artifact.data_json()).collect::<Vec<_>>(),
-        "degraded": report.degraded.iter().map(|degraded| degraded.data_json()).collect::<Vec<_>>(),
+        "degraded": aggregate_backup_export_degraded_json(&report.degraded),
     })
 }
 
@@ -35531,26 +35556,40 @@ fn render_swarm_brief_json(
                     "suggestedCommands": &recommendation.suggested_commands,
                 })
             }).collect::<Vec<_>>(),
-            "degraded": report.degraded.iter().map(|degradation| {
-                serde_json::json!({
-                    "source": degradation.source.as_str(),
-                    "code": &degradation.code,
-                    "severity": degradation.severity,
-                    "message": &degradation.message,
-                    "repair": &degradation.repair,
-                })
-            }).collect::<Vec<_>>(),
+            "degraded": aggregate_swarm_brief_degraded_json(&report.degraded),
         }),
-        output::FieldProfile::Standard | output::FieldProfile::Full => serde_json::to_value(report)
-            .map_err(|error| DomainError::Storage {
+        output::FieldProfile::Standard | output::FieldProfile::Full => {
+            let mut data = serde_json::to_value(report).map_err(|error| DomainError::Storage {
                 message: format!("Failed to serialize swarm brief report: {error}."),
                 repair: Some("Fix the swarm brief serializer before emitting JSON.".to_string()),
-            })?,
+            })?;
+            if let Some(object) = data.as_object_mut() {
+                object.insert(
+                    "degraded".to_string(),
+                    serde_json::Value::Array(aggregate_swarm_brief_degraded_json(&report.degraded)),
+                );
+            }
+            data
+        }
     };
 
     Ok(output::ResponseEnvelope::success()
         .data_raw(&data.to_string())
         .finish())
+}
+
+fn aggregate_swarm_brief_degraded_json(
+    degraded: &[crate::core::swarm_brief::SwarmBriefDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_cli_degraded_json(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            entry.source.as_str(),
+            entry.code.as_str(),
+            entry.severity,
+            entry.message.as_str(),
+            entry.repair.as_deref().unwrap_or_default(),
+        )
+    }))
 }
 
 fn render_swarm_brief_markdown(report: &SwarmBriefReport) -> String {
@@ -44499,6 +44538,128 @@ default_half_life_days = 45
             &rendered[0]["sources"],
             &serde_json::json!(["hits"]),
             "HITS source label",
+        )
+    }
+
+    #[test]
+    fn export_report_degraded_entries_are_aggregated() -> TestResult {
+        let report = super::BackupCreateReport {
+            schema: crate::core::backup::BACKUP_CREATE_SCHEMA_V1,
+            backup_id: "backup-1".to_string(),
+            label: None,
+            status: "complete".to_string(),
+            dry_run: false,
+            workspace_path: ".".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            database_path: ".ee/ee.db".to_string(),
+            backup_path: "backup".to_string(),
+            manifest_path: "backup/manifest.json".to_string(),
+            records_path: "backup/records.jsonl".to_string(),
+            manifest_hash: None,
+            records_hash: None,
+            redaction_level: crate::models::RedactionLevel::Standard,
+            export_scope: crate::models::ExportScope::All,
+            include_derived: false,
+            include_graph_cache: false,
+            graph_cache_schema_version: None,
+            total_records: 1,
+            memory_count: 1,
+            link_count: 0,
+            tag_count: 0,
+            audit_count: 0,
+            verification_status: "not_checked".to_string(),
+            artifacts: Vec::new(),
+            derived: Vec::new(),
+            degraded: vec![
+                crate::core::backup::BackupDegradation {
+                    code: "backup_index_unavailable".to_string(),
+                    severity: "warning".to_string(),
+                    message: "index manifest unavailable".to_string(),
+                    next_action: "run ee index rebuild --workspace .".to_string(),
+                },
+                crate::core::backup::BackupDegradation {
+                    code: "backup_index_unavailable".to_string(),
+                    severity: "high".to_string(),
+                    message: "index manifest and graph cache unavailable".to_string(),
+                    next_action: "rerun export after rebuilding derived assets".to_string(),
+                },
+            ],
+        };
+
+        let data = super::export_report_data(&report);
+        let degraded = data["degraded"]
+            .as_array()
+            .ok_or_else(|| "expected degraded array".to_string())?;
+        ensure_equal(&degraded.len(), &1, "export degraded count")?;
+        ensure_equal(
+            &degraded[0]["code"],
+            &serde_json::json!("backup_index_unavailable"),
+            "export aggregated code",
+        )?;
+        ensure_equal(
+            &degraded[0]["severity"],
+            &serde_json::json!("high"),
+            "export severity escalates",
+        )?;
+        ensure_equal(
+            &degraded[0]["nextAction"],
+            &serde_json::json!("rerun export after rebuilding derived assets"),
+            "export next action follows highest severity",
+        )?;
+        ensure_equal(
+            &degraded[0]["sources"],
+            &serde_json::json!(["backup_export"]),
+            "export source label",
+        )
+    }
+
+    #[test]
+    fn swarm_brief_degraded_entries_are_aggregated() -> TestResult {
+        let mut report = crate::core::swarm_brief::SwarmBriefReport::empty(Path::new("."));
+        report.degraded = vec![
+            crate::core::swarm_brief::SwarmBriefDegradation::warning(
+                crate::core::swarm_brief::SwarmBriefSourceKind::AgentMail,
+                "swarm_source_unavailable",
+                "agent mail snapshot unavailable",
+                Some("check Agent Mail health".to_string()),
+            ),
+            crate::core::swarm_brief::SwarmBriefDegradation {
+                code: "swarm_source_unavailable".to_string(),
+                source: crate::core::swarm_brief::SwarmBriefSourceKind::Rch,
+                severity: "high",
+                message: "RCH worker probe unavailable".to_string(),
+                repair: Some("run rch status".to_string()),
+            },
+        ];
+
+        let rendered = super::render_swarm_brief_json(&report, output::FieldProfile::Summary)
+            .map_err(|error| error.message())?;
+        let value: serde_json::Value =
+            serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+        let degraded = value["data"]["degraded"]
+            .as_array()
+            .ok_or_else(|| "expected degraded array".to_string())?;
+
+        ensure_equal(&degraded.len(), &1, "swarm brief degraded count")?;
+        ensure_equal(
+            &degraded[0]["code"],
+            &serde_json::json!("swarm_source_unavailable"),
+            "swarm brief aggregated code",
+        )?;
+        ensure_equal(
+            &degraded[0]["severity"],
+            &serde_json::json!("high"),
+            "swarm brief severity escalates",
+        )?;
+        ensure_equal(
+            &degraded[0]["repair"],
+            &serde_json::json!("run rch status"),
+            "swarm brief repair follows highest severity",
+        )?;
+        ensure_equal(
+            &degraded[0]["sources"],
+            &serde_json::json!(["agent_mail", "rch"]),
+            "swarm brief source labels",
         )
     }
 

@@ -80,22 +80,29 @@ Current conventions:
 | `status` | Top-level `ee status` posture, capability, or subsystem degradation. |
 | `skyline` | `ee status --skyline` structural skyline degradation. |
 | `agent_detection` | Agent inventory and agent-status detection degradation. |
+| `agent_mail` | Swarm brief Agent Mail source degradation. |
 | `artifact_register` | `ee artifact register` artifact metadata, redaction, or indexing degradation. |
 | `backup_create` | `ee backup create` export, redaction, index, or graph-cache degradation. |
+| `backup_export` | Legacy `ee export` backup JSONL export degradation. |
 | `backup_inspect` | `ee backup inspect` manifest or artifact-inspection degradation. |
 | `backup_list` | `ee backup list` backup-root or manifest-listing degradation. |
 | `backup_manifest` | Persisted backup manifest degradation records. |
 | `backup_restore` | `ee backup restore` import, side-path, or derived-asset degradation. |
+| `beads` | Swarm brief Beads source degradation. |
 | `build` | Binary version and build-provenance degradation. |
+| `bv` | Swarm brief BV source degradation. |
 | `db_status` | `ee db status` migration or sidecar-file degradation. |
 | `dependency_contract` | `ee diag dependencies` dependency-contract degradation. |
+| `git` | Swarm brief Git source degradation. |
 | `graph_centrality_read` | `ee graph centrality` persisted centrality read degradation. |
 | `hits` | `ee graph hits` HITS algorithm degradation. |
+| `host_profile` | Swarm brief host-profile source degradation. |
 | `integrity` | `ee diag integrity` database, schema, canary, or provenance-sample degradation. |
 | `lab_counterfactual` | `ee lab counterfactual` replay-evidence degradation. |
 | `lab_replay` | `ee lab replay` replay-evidence degradation. |
 | `learn_cluster` | `ee learn cluster` deterministic clustering degradation. |
 | `quarantine` | `ee diag quarantine` trust or feedback quarantine degradation. |
+| `rch` | Swarm brief RCH source degradation. |
 | `structural_health` | `ee health structural` graph-health degradation. |
 | `science_drift` | `ee analyze drift` science/evaluation drift degradation. |
 | `science_clustering` | `ee analyze clustering` candidate clustering degradation. |
