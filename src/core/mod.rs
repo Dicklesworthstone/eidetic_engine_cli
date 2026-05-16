@@ -68,6 +68,7 @@ pub mod status;
 pub mod streams;
 pub mod support_bundle;
 pub mod swarm_brief;
+pub mod tailscale_probe;
 pub mod task_frame;
 pub mod tripwire;
 pub mod verify;
