@@ -305,21 +305,14 @@ fn read_project_config(
     expander: &PathExpander,
 ) -> Result<Option<ConfigFile>, ConfigSurfaceError> {
     let path = effective_config_path(&options.workspace_root, options.config_path.as_deref());
-    ensure_no_config_symlink_components(&path, "read").map_err(|source| {
-        ConfigSurfaceError::Read {
-            path: path.clone(),
-            source,
-        }
-    })?;
-    match fs::read_to_string(&path) {
-        Ok(contents) => ConfigFile::parse_with_expander(&contents, expander)
+    match read_optional_config_contents(&path)? {
+        Some(contents) => ConfigFile::parse_with_expander(&contents, expander)
             .map(Some)
             .map_err(|source| ConfigSurfaceError::Parse {
                 path,
                 message: source.to_string(),
             }),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(ConfigSurfaceError::Read { path, source }),
+        None => Ok(None),
     }
 }
 
@@ -368,20 +361,51 @@ fn effective_config_path(workspace_root: &Path, config_path: Option<&Path>) -> P
 }
 
 fn read_optional_config(path: &Path) -> Result<(bool, String), ConfigSurfaceError> {
+    match read_optional_config_contents(path)? {
+        Some(contents) => Ok((true, contents)),
+        None => Ok((false, String::new())),
+    }
+}
+
+fn read_optional_config_contents(path: &Path) -> Result<Option<String>, ConfigSurfaceError> {
     ensure_no_config_symlink_components(path, "read").map_err(|source| {
         ConfigSurfaceError::Read {
             path: path.to_path_buf(),
             source,
         }
     })?;
-    match fs::read_to_string(path) {
-        Ok(contents) => Ok((true, contents)),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok((false, String::new())),
-        Err(source) => Err(ConfigSurfaceError::Read {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(ConfigSurfaceError::Read {
+                path: path.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "config path is not a regular file",
+                ),
+            });
+        }
+        Err(source)
+            if matches!(
+                source.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(source) => {
+            return Err(ConfigSurfaceError::Read {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    }
+    fs::read_to_string(path)
+        .map(Some)
+        .map_err(|source| ConfigSurfaceError::Read {
             path: path.to_path_buf(),
             source,
-        }),
-    }
+        })
 }
 
 fn ensure_no_config_symlink_components(
@@ -858,6 +882,22 @@ mod tests {
             Ok(())
         } else {
             Err(format!("unexpected symlink error: {error}"))
+        }
+    }
+
+    #[test]
+    fn graph_get_rejects_non_regular_config_path() -> TestResult {
+        let temp = workspace()?;
+        let config_path = temp.path().join(".ee").join("config.toml");
+        fs::create_dir_all(&config_path).map_err(|error| error.to_string())?;
+
+        let error = get_config(&options(temp.path()), "graph.ppr.alpha")
+            .expect_err("directory config path should reject config get")
+            .to_string();
+        if error.contains("not a regular file") {
+            Ok(())
+        } else {
+            Err(format!("unexpected non-regular config error: {error}"))
         }
     }
 }
