@@ -3097,14 +3097,9 @@ fn ensure_side_path_outside_workspace(
     workspace_path: &Path,
     side_path: &Path,
 ) -> Result<(), DomainError> {
-    let absolute_side_path = if side_path.is_absolute() {
-        side_path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|current_dir| current_dir.join(side_path))
-            .unwrap_or_else(|_| side_path.to_path_buf())
-    };
-    if absolute_side_path.starts_with(workspace_path) {
+    let absolute_side_path = lexical_absolute_path(side_path);
+    let workspace_path = lexical_absolute_path(workspace_path);
+    if absolute_side_path.starts_with(&workspace_path) {
         return Err(DomainError::PolicyDenied {
             message: format!(
                 "side path '{}' must be outside source workspace '{}'",
@@ -3115,6 +3110,29 @@ fn ensure_side_path_outside_workspace(
         });
     }
     Ok(())
+}
+
+fn lexical_absolute_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|current_dir| current_dir.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+        }
+    }
+    normalized
 }
 
 fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, DomainError> {
@@ -4463,6 +4481,49 @@ mod tests {
         ensure(
             !side_path.exists(),
             "restore must not create a side path inside the source workspace",
+        )
+    }
+
+    #[test]
+    fn restore_backup_rejects_parent_dir_side_path_inside_workspace() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let out = workspace.join("backups");
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(out),
+            label: Some("restore-parent-dir-inside-workspace".to_owned()),
+            redaction_level: RedactionLevel::None,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let outside_prefix = tempdir.path().join("outside-prefix");
+        fs::create_dir_all(&outside_prefix).map_err(|error| error.to_string())?;
+        let side_path = outside_prefix
+            .join("..")
+            .join("workspace")
+            .join("restore-side-path");
+
+        let result = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace.clone(),
+            backup_path: PathBuf::from(&created.backup_path),
+            side_path: side_path.clone(),
+            restore_graph_cache: true,
+            dry_run: false,
+        });
+
+        match result {
+            Err(DomainError::PolicyDenied { message, .. }) => ensure(
+                message.contains("outside source workspace"),
+                "parent-dir workspace-contained side path is rejected",
+            )?,
+            other => return Err(format!("expected policy denied error, got {other:?}")),
+        }
+        ensure(
+            !workspace.join("restore-side-path").exists(),
+            "restore must not resolve a parent-dir side path into the source workspace",
         )
     }
 
