@@ -100,6 +100,7 @@ Current conventions:
 | `search` | Search, index, recall, filtering, or visibility degradation carried into context output. |
 | `status` | Top-level `ee status` posture, capability, or subsystem degradation. |
 | `skyline` | `ee status --skyline` structural skyline degradation. |
+| `tripwire_check` | `ee tripwire check` deterministic condition-evaluation degradation. |
 | `agent_detection` | Agent inventory and agent-status detection degradation. |
 | `agent_mail` | Swarm brief Agent Mail source degradation. |
 | `artifact_register` | `ee artifact register` artifact metadata, redaction, or indexing degradation. |

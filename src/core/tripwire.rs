@@ -14,8 +14,9 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
+use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::feedback::{
     RecordFeedbackReport, RecordTripwireFeedbackOptions, TaskOutcome, record_tripwire_feedback,
 };
@@ -304,6 +305,7 @@ pub struct CheckReport {
     pub durable_mutation: bool,
     pub mutation_posture: String,
     pub feedback: Option<RecordFeedbackReport>,
+    #[serde(serialize_with = "serialize_tripwire_degradations")]
     pub degraded: Vec<TripwireDegradation>,
 }
 
@@ -375,6 +377,32 @@ impl TripwireDegradation {
             ),
         }
     }
+}
+
+fn serialize_tripwire_degradations<S>(
+    degraded: &[TripwireDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_tripwire_degradations(degraded).serialize(serializer)
+}
+
+fn aggregate_tripwire_degradations(
+    degraded: &[TripwireDegradation],
+) -> Vec<crate::core::degraded_aggregation::AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "tripwire_check",
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry.repair.clone().unwrap_or_else(|| {
+                "Inspect tripwire check payload and rerun `ee tripwire check --json`.".to_owned()
+            }),
+        )
+    }))
 }
 
 /// List tripwires matching the given options.
@@ -1683,6 +1711,53 @@ mod tests {
 
         assert!(json.contains(TRIPWIRE_CHECK_SCHEMA_V1));
         assert!(json.contains("tw_test"));
+    }
+
+    #[test]
+    fn check_report_json_aggregates_duplicate_degraded_entries() -> TestResult {
+        let mut report = CheckReport::new("tw_test");
+        report.degraded = vec![
+            TripwireDegradation {
+                code: "tripwire_inputs_incomplete".to_owned(),
+                severity: "low".to_owned(),
+                message: "low duplicate".to_owned(),
+                repair: Some("low repair".to_owned()),
+            },
+            TripwireDegradation {
+                code: "tripwire_inputs_incomplete".to_owned(),
+                severity: "high".to_owned(),
+                message: "high duplicate".to_owned(),
+                repair: Some("high repair".to_owned()),
+            },
+        ];
+
+        let value: serde_json::Value =
+            serde_json::from_str(&report.to_json()).map_err(|error| error.to_string())?;
+        let degraded = value
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("degraded array missing: {value}"))?;
+
+        ensure(
+            degraded.len(),
+            1usize,
+            "duplicate tripwire degraded entries aggregate",
+        )?;
+        ensure(
+            degraded[0]["severity"].as_str(),
+            Some("high"),
+            "tripwire highest severity wins",
+        )?;
+        ensure(
+            degraded[0]["repair"].as_str(),
+            Some("high repair"),
+            "tripwire highest-severity repair wins",
+        )?;
+        ensure(
+            degraded[0]["sources"].clone(),
+            serde_json::json!(["tripwire_check"]),
+            "tripwire source label",
+        )
     }
 
     #[test]
