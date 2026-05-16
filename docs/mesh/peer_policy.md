@@ -89,6 +89,13 @@ that later export/status callers can embed directly:
 | `quarantine` | `mesh_outbound_policy_quarantined` |
 | `reject` | `mesh_outbound_policy_rejected` |
 
+The mesh import ledger persists the same `ee.mesh.policy_failure_surface.v1`
+JSON in `policy_failure_surface_json` when an imported event is retained after
+a denied or quarantined policy decision. Rejected events may be discarded before
+ledger insertion; callers that do retain them must keep the same redaction-safe
+surface shape rather than storing raw peer paths, memory bodies, or policy file
+locations.
+
 ## Config Registry
 
 Workspace-local peer policies are registered in `.ee/config.toml` under

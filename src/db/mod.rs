@@ -157,8 +157,7 @@ pub mod audit_actions {
     //               Schema: `ee.mesh.auto_enrollment_outcome.v1`.
     // ----------------------------------------------------------------------
     pub const MESH_AUTO_ENROLLMENT_INTENDED: &str = "mesh.auto_enrollment_intended";
-    pub const MESH_AUTO_ENROLLMENT_OUTCOME_RECORDED: &str =
-        "mesh.auto_enrollment_outcome_recorded";
+    pub const MESH_AUTO_ENROLLMENT_OUTCOME_RECORDED: &str = "mesh.auto_enrollment_outcome_recorded";
 }
 
 const MIGRATION_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS ee_schema_migrations (
@@ -4191,6 +4190,18 @@ CREATE INDEX idx_mesh_body_cache_status
     "blake3:v052_mesh_storage_2026_05_16",
 );
 
+/// V053: Persist structured mesh policy failure surfaces on replay ledger rows.
+pub const V053_MESH_IMPORT_LEDGER_POLICY_FAILURE: Migration = Migration::new(
+    53,
+    "mesh_import_ledger_policy_failure",
+    r#"
+ALTER TABLE mesh_import_ledger
+    ADD COLUMN policy_failure_surface_json TEXT
+    CHECK (policy_failure_surface_json IS NULL OR json_valid(policy_failure_surface_json));
+"#,
+    "blake3:v053_mesh_import_ledger_policy_failure_2026_05_16",
+);
+
 /// V042: Allow every pack omission reason emitted by the packer.
 pub const V042_PACK_OMISSION_REASONS: Migration = Migration::new(
     42,
@@ -4359,6 +4370,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V050_AGENT_CONTEXT_PROFILES,
     V051_AGENT_CONTEXT_PROFILE_PACK_INDEX,
     V052_MESH_STORAGE,
+    V053_MESH_IMPORT_LEDGER_POLICY_FAILURE,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -6645,6 +6657,7 @@ pub struct InsertMeshImportLedgerEventInput {
     pub import_decision: String,
     pub local_memory_id: Option<String>,
     pub body_cache_key: Option<String>,
+    pub policy_failure_surface_json: Option<String>,
     pub event_json: String,
     pub imported_at: Option<String>,
 }
@@ -6669,6 +6682,7 @@ pub struct StoredMeshImportLedgerEvent {
     pub import_decision: String,
     pub local_memory_id: Option<String>,
     pub body_cache_key: Option<String>,
+    pub policy_failure_surface_json: Option<String>,
     pub event_json: String,
     pub imported_at: String,
 }
@@ -7331,10 +7345,10 @@ impl DbConnection {
                 producer_peer_id, seq, prev_event_hash, event_hash, event_kind,
                 logical_memory_id, content_hash, material_lane, redaction_class,
                 trust_lane, import_decision, local_memory_id, body_cache_key,
-                event_json, imported_at
+                policy_failure_surface_json, event_json, imported_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
+                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
             )",
             &[
                 Value::Text(input.workspace_id.clone()),
@@ -7364,6 +7378,10 @@ impl DbConnection {
                     .map_or(Value::Null, |value| Value::Text(value.clone())),
                 input
                     .body_cache_key
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .policy_failure_surface_json
                     .as_ref()
                     .map_or(Value::Null, |value| Value::Text(value.clone())),
                 Value::Text(input.event_json.clone()),
@@ -7400,7 +7418,7 @@ impl DbConnection {
                     producer_peer_id, seq, prev_event_hash, event_hash, event_kind,
                     logical_memory_id, content_hash, material_lane, redaction_class,
                     trust_lane, import_decision, local_memory_id, body_cache_key,
-                    event_json, imported_at
+                    policy_failure_surface_json, event_json, imported_at
              FROM mesh_import_ledger
              WHERE workspace_id = ?1
                AND origin_node_id = ?2
@@ -7431,7 +7449,7 @@ impl DbConnection {
                     producer_peer_id, seq, prev_event_hash, event_hash, event_kind,
                     logical_memory_id, content_hash, material_lane, redaction_class,
                     trust_lane, import_decision, local_memory_id, body_cache_key,
-                    event_json, imported_at
+                    policy_failure_surface_json, event_json, imported_at
              FROM mesh_import_ledger
              WHERE workspace_id = ?1
                AND origin_node_id = ?2
@@ -8719,8 +8737,9 @@ fn stored_mesh_import_ledger_event_from_row(row: &Row) -> Result<StoredMeshImpor
         import_decision: required_text(row, 14, DbOperation::Query, "import_decision")?.to_string(),
         local_memory_id: optional_text(row, 15)?.map(str::to_string),
         body_cache_key: optional_text(row, 16)?.map(str::to_string),
-        event_json: required_text(row, 17, DbOperation::Query, "event_json")?.to_string(),
-        imported_at: required_text(row, 18, DbOperation::Query, "imported_at")?.to_string(),
+        policy_failure_surface_json: optional_text(row, 17)?.map(str::to_string),
+        event_json: required_text(row, 18, DbOperation::Query, "event_json")?.to_string(),
+        imported_at: required_text(row, 19, DbOperation::Query, "imported_at")?.to_string(),
     })
 }
 
@@ -17751,6 +17770,7 @@ mod tests {
             import_decision: "allow".to_string(),
             local_memory_id: None,
             body_cache_key: None,
+            policy_failure_surface_json: None,
             event_json: r#"{"schema":"ee.mesh.event.v1","eventKind":"create"}"#.to_string(),
             imported_at: Some("2026-05-16T15:22:00Z".to_string()),
         }
@@ -19467,6 +19487,43 @@ mod tests {
         )?;
         ensure_equal(&rows.len(), &1_usize, "conflict preserves one ledger row")?;
         ensure_equal(&rows[0].seq, &1, "ledger list ordered by seq")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_import_ledger_persists_policy_failure_surface_json() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let policy_failure_surface = r#"{"schema":"ee.mesh.policy_failure_surface.v1","code":"mesh_peer_policy_denied","action":"deny","reason":"peer_policy_redaction_denied","policyRef":"mesh_pol_7d4b19e22c","materialLane":"body","redaction":"deny","trustLane":"peerAgent"}"#;
+        let input = super::InsertMeshImportLedgerEventInput {
+            material_lane: "body".to_string(),
+            redaction_class: "secretDenied".to_string(),
+            import_decision: "deny".to_string(),
+            policy_failure_surface_json: Some(policy_failure_surface.to_string()),
+            ..mesh_import_event_input(2, hash('5'), hash('6'))
+        };
+
+        let inserted = connection.insert_mesh_import_ledger_event(&input)?;
+        ensure_equal(
+            &inserted.policy_failure_surface_json.as_deref(),
+            &Some(policy_failure_surface),
+            "inserted ledger row stores policy failure surface",
+        )?;
+
+        let rows = connection.list_mesh_import_ledger_events(
+            "wsp_01234567890123456789012345",
+            "node_alpha_000001",
+            "wsp_remote_000001",
+        )?;
+        ensure_equal(
+            &rows[0].policy_failure_surface_json.as_deref(),
+            &Some(policy_failure_surface),
+            "listed ledger row stores policy failure surface",
+        )?;
 
         connection.close()?;
         Ok(())
