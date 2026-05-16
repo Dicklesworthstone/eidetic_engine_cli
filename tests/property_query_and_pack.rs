@@ -2,11 +2,13 @@ use std::{
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
+    process::{Command, Output},
     str::FromStr,
 };
 
 use chrono::{DateTime, Duration, Utc};
 use ee::models::{MemoryId, ProvenanceUri, RedactionLevel, UnitScore};
+use ee::obs::strip_volatile_fields;
 use ee::pack::{
     ContextPackProfile, PackAssemblyOptions, PackCandidate, PackCandidateInput, PackDraft,
     PackProvenance, PackSection, TokenBudget, assemble_draft,
@@ -104,6 +106,197 @@ fn profile_for(raw: u8) -> ContextPackProfile {
 
 fn redaction_level_for(raw: usize) -> RedactionLevel {
     RedactionLevel::all()[raw % RedactionLevel::all().len()]
+}
+
+fn ee_binary() -> &'static str {
+    env!("CARGO_BIN_EXE_ee")
+}
+
+fn run_ee(workspace: &Path, args: &[String]) -> Result<Output, String> {
+    Command::new(ee_binary())
+        .arg("--workspace")
+        .arg(workspace)
+        .args(args)
+        .env_remove("EE_WORKSPACE")
+        .env_remove("EE_WORKSPACE_REGISTRY")
+        .output()
+        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+}
+
+fn run_ee_checked(workspace: &Path, args: &[String], context: &str) -> Result<String, String> {
+    let output = run_ee(workspace, args)?;
+    if !output.status.success() {
+        return Err(format!(
+            "{context} failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| format!("{context}: stdout not UTF-8: {error}"))
+}
+
+fn init_cli_workspace(workspace: &Path) -> Result<(), String> {
+    run_ee_checked(
+        workspace,
+        &["init".to_string(), "--json".to_string()],
+        "ee init",
+    )
+    .map(|_| ())
+}
+
+fn remember_cli_memory(workspace: &Path, content: &str) -> Result<(), String> {
+    run_ee_checked(
+        workspace,
+        &[
+            "remember".to_string(),
+            content.to_string(),
+            "--level".to_string(),
+            "procedural".to_string(),
+            "--kind".to_string(),
+            "rule".to_string(),
+            "--json".to_string(),
+        ],
+        "ee remember",
+    )
+    .map(|_| ())
+}
+
+fn context_memory_content(index: usize, content_shape: u8) -> String {
+    match content_shape % 4 {
+        0 => format!("Run cargo fmt before release candidate {index}."),
+        1 => format!("Database index rebuild finished before release candidate {index}."),
+        2 => format!("Context pack failure {index}: stale index was repaired deterministically."),
+        _ => format!("Agent handoff decision {index}: preserve provenance before pack assembly."),
+    }
+}
+
+fn write_context_config(
+    workspace: &Path,
+    read_pool_size: u64,
+    pin_snapshot: bool,
+) -> Result<(), String> {
+    let ee_dir = workspace.join(".ee");
+    fs::create_dir_all(&ee_dir).map_err(|error| format!("create {}: {error}", ee_dir.display()))?;
+    let config = format!(
+        "[storage.read_pool]\nsize = {read_pool_size}\nidle_timeout_seconds = 30\npin_snapshot = {pin_snapshot}\n\n[graph.feature.ppr]\nenabled = false\n\n[graph.feature.pack_dna]\nenabled = false\n\n[graph.feature.proximity]\nenabled = false\n"
+    );
+    let path = ee_dir.join("config.toml");
+    fs::write(&path, config).map_err(|error| format!("write {}: {error}", path.display()))
+}
+
+fn setup_context_tuple_workspace(
+    workspace: &Path,
+    memory_shapes: &[u8],
+    read_pool_size: u64,
+    pin_snapshot: bool,
+) -> Result<(), String> {
+    init_cli_workspace(workspace)?;
+    write_context_config(workspace, read_pool_size, pin_snapshot)?;
+    for (index, content_shape) in memory_shapes.iter().enumerate() {
+        remember_cli_memory(workspace, &context_memory_content(index, *content_shape))?;
+    }
+    Ok(())
+}
+
+fn copy_dir_all(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination)
+        .map_err(|error| format!("create {}: {error}", destination.display()))?;
+    for entry in
+        fs::read_dir(source).map_err(|error| format!("read {}: {error}", source.display()))?
+    {
+        let entry = entry.map_err(|error| format!("read {} entry: {error}", source.display()))?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&source_path)
+            .map_err(|error| format!("metadata {}: {error}", source_path.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "refusing to copy symlinked context tuple fixture path {}",
+                source_path.display()
+            ));
+        }
+        if metadata.is_dir() {
+            copy_dir_all(&source_path, &destination_path)?;
+        } else if metadata.is_file() {
+            fs::copy(&source_path, &destination_path).map_err(|error| {
+                format!(
+                    "copy {} to {}: {error}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn context_query_for(raw: u8) -> &'static str {
+    match raw % 4 {
+        0 => "prepare release",
+        1 => "database index release",
+        2 => "stale index repair",
+        _ => "agent handoff provenance",
+    }
+}
+
+fn context_cli_args(
+    query: &str,
+    profile: ContextPackProfile,
+    max_tokens: u32,
+    candidate_pool: u32,
+    no_rendered_text: bool,
+    no_skipped: bool,
+    no_meta: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        "context".to_string(),
+        query.to_string(),
+        "--max-tokens".to_string(),
+        max_tokens.to_string(),
+        "--candidate-pool".to_string(),
+        candidate_pool.to_string(),
+        "--profile".to_string(),
+        profile.as_str().to_string(),
+        "--json".to_string(),
+    ];
+    if no_rendered_text {
+        args.push("--no-rendered-text".to_string());
+    }
+    if no_skipped {
+        args.push("--no-skipped".to_string());
+    }
+    if no_meta {
+        args.push("--no-meta".to_string());
+    }
+    args
+}
+
+fn canonicalize_json(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(canonicalize_json).collect())
+        }
+        serde_json::Value::Object(object) => {
+            let mut entries = object.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            let mut sorted = serde_json::Map::new();
+            for (key, value) in entries {
+                sorted.insert(key, canonicalize_json(value));
+            }
+            serde_json::Value::Object(sorted)
+        }
+        other => other,
+    }
+}
+
+fn context_canonical_json_bytes(workspace: &Path, args: &[String]) -> Result<Vec<u8>, String> {
+    let stdout = run_ee_checked(workspace, args, "ee context")?;
+    let mut value: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("context stdout not JSON: {error}"))?;
+    strip_volatile_fields(&mut value);
+    let value = canonicalize_json(value);
+    serde_json::to_vec(&value).map_err(|error| error.to_string())
 }
 
 fn pack_options() -> impl Strategy<Value = PackAssemblyOptions> {
@@ -1459,5 +1652,52 @@ proptest! {
         )
         .map_err(TestCaseError::fail)?;
         prop_assert_eq!(first_bytes, reordered_bytes);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    #[test]
+    fn context_pack_json_replays_across_copied_workspace_tuple(
+        memory_shapes in prop::collection::vec(0_u8..=7, 1..=6),
+        query_raw in any::<u8>(),
+        profile_raw in any::<u8>(),
+        max_tokens in 64_u32..=512,
+        candidate_pool in 1_u32..=16,
+        read_pool_size in 1_u64..=2,
+        pin_snapshot in any::<bool>(),
+        no_rendered_text in any::<bool>(),
+        no_skipped in any::<bool>(),
+        no_meta in any::<bool>(),
+    ) {
+        let source = tempfile::tempdir()
+            .map_err(|error| TestCaseError::fail(error.to_string()))?;
+        let clone = tempfile::tempdir()
+            .map_err(|error| TestCaseError::fail(error.to_string()))?;
+        setup_context_tuple_workspace(source.path(), &memory_shapes, read_pool_size, pin_snapshot)
+            .map_err(TestCaseError::fail)?;
+        copy_dir_all(&source.path().join(".ee"), &clone.path().join(".ee"))
+            .map_err(TestCaseError::fail)?;
+
+        let query = context_query_for(query_raw);
+        let profile = profile_for(profile_raw);
+        let args = context_cli_args(
+            query,
+            profile,
+            max_tokens,
+            candidate_pool,
+            no_rendered_text,
+            no_skipped,
+            no_meta,
+        );
+
+        let source_bytes = context_canonical_json_bytes(source.path(), &args)
+            .map_err(TestCaseError::fail)?;
+        let clone_bytes = context_canonical_json_bytes(clone.path(), &args)
+            .map_err(TestCaseError::fail)?;
+
+        prop_assert_eq!(hash_bytes(&source_bytes), hash_bytes(&clone_bytes));
+        prop_assert_eq!(source_bytes, clone_bytes);
     }
 }
