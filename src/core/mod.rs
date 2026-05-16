@@ -70,6 +70,7 @@ pub mod task_frame;
 pub mod tripwire;
 pub mod verify;
 pub mod why;
+pub mod witness_retention;
 pub mod workspace;
 pub mod write_owner;
 
