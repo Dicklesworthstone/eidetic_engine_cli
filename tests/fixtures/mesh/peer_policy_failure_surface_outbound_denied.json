@@ -1,0 +1,10 @@
+{
+  "schema": "ee.mesh.policy_failure_surface.v1",
+  "code": "mesh_outbound_policy_denied",
+  "action": "deny",
+  "reason": "outbound_payload_requires_redaction",
+  "policyRef": "mesh_pol_7d4b19e22c",
+  "materialLane": "embedding",
+  "redaction": "redact",
+  "trustLane": "peerAgent"
+}

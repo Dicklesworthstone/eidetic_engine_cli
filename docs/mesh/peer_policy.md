@@ -140,5 +140,7 @@ Initial fixtures live under `tests/fixtures/mesh/`:
   trusted peer-agent lane.
 - `peer_policy_redacted_body_allowed.json` allows bounded body fetch only with
   consent and redacted body payloads while embeddings remain denied.
+- `peer_policy_failure_surface_outbound_denied.json` pins an outbound
+  embedding export denial when policy requires a redacted payload.
 
 These fixtures are intentionally local and do not require real Tailscale.

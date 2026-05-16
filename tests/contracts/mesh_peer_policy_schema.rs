@@ -16,8 +16,10 @@ const FIXTURES: &[&str] = &[
     "tests/fixtures/mesh/peer_policy_body_denied.json",
     "tests/fixtures/mesh/peer_policy_redacted_body_allowed.json",
 ];
-const FAILURE_SURFACE_FIXTURES: &[&str] =
-    &["tests/fixtures/mesh/peer_policy_failure_surface_denied.json"];
+const FAILURE_SURFACE_FIXTURES: &[&str] = &[
+    "tests/fixtures/mesh/peer_policy_failure_surface_denied.json",
+    "tests/fixtures/mesh/peer_policy_failure_surface_outbound_denied.json",
+];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -211,6 +213,44 @@ fn peer_policy_failure_surface_fixtures_are_redaction_safe() -> TestResult {
         }
     }
     Ok(())
+}
+
+#[test]
+fn peer_policy_failure_surface_fixtures_pin_inbound_and_outbound_codes() -> TestResult {
+    let inbound = read_json("tests/fixtures/mesh/peer_policy_failure_surface_denied.json")?;
+    ensure_equal(
+        &inbound.pointer("/code").and_then(Value::as_str),
+        &Some("mesh_peer_policy_denied"),
+        "inbound failure code",
+    )?;
+    ensure_equal(
+        &inbound.pointer("/reason").and_then(Value::as_str),
+        &Some("peer_policy_redaction_denied"),
+        "inbound reason",
+    )?;
+
+    let outbound =
+        read_json("tests/fixtures/mesh/peer_policy_failure_surface_outbound_denied.json")?;
+    ensure_equal(
+        &outbound.pointer("/code").and_then(Value::as_str),
+        &Some("mesh_outbound_policy_denied"),
+        "outbound failure code",
+    )?;
+    ensure_equal(
+        &outbound.pointer("/reason").and_then(Value::as_str),
+        &Some("outbound_payload_requires_redaction"),
+        "outbound reason",
+    )?;
+    ensure_equal(
+        &outbound.pointer("/materialLane").and_then(Value::as_str),
+        &Some("embedding"),
+        "outbound material lane",
+    )?;
+    ensure_equal(
+        &outbound.pointer("/redaction").and_then(Value::as_str),
+        &Some("redact"),
+        "outbound redaction posture",
+    )
 }
 
 #[test]
