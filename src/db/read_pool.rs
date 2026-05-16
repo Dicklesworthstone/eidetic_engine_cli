@@ -106,6 +106,7 @@ pub struct PoolStats {
     pub max_size: usize,
     pub max_seen: usize,
     pub drops: u64,
+    pub release_failures: u64,
     pub ad_hoc_bypass_count: u64,
     pub acquire_wait: AcquireWaitStats,
     pub size_was_zero: bool,
@@ -133,6 +134,7 @@ struct PoolState {
     active_pins: BTreeMap<u64, ActivePinRecord>,
     max_seen: usize,
     drops: u64,
+    release_failures: u64,
     ad_hoc_bypass_count: u64,
 }
 
@@ -156,6 +158,7 @@ pub struct PooledReadConnection<'pool> {
 }
 
 pub struct SnapshotPin<'pool> {
+    pool: Option<&'pool ReadConnectionPool>,
     connection: Option<PooledReadConnection<'pool>>,
     snapshot_active: bool,
     pin_id: Option<u64>,
@@ -194,6 +197,7 @@ impl ReadConnectionPool {
                 active_pins: BTreeMap::new(),
                 max_seen: 0,
                 drops: 0,
+                release_failures: 0,
                 ad_hoc_bypass_count: 0,
             }),
         }
@@ -296,6 +300,7 @@ impl ReadConnectionPool {
         };
 
         Ok(SnapshotPin {
+            pool: if pin_snapshot { Some(self) } else { None },
             connection: Some(connection),
             snapshot_active: pin_snapshot,
             pin_id,
@@ -316,6 +321,7 @@ impl ReadConnectionPool {
             max_size: self.config.max_size(),
             max_seen: state.max_seen,
             drops: state.drops,
+            release_failures: state.release_failures,
             ad_hoc_bypass_count: state.ad_hoc_bypass_count,
             acquire_wait: acquire_wait_stats(&state.acquire_wait_ns),
             size_was_zero: self.config.size_was_zero(),
@@ -348,6 +354,11 @@ impl ReadConnectionPool {
             state.drops = state.drops.saturating_add(1);
         }
         let _ = connection.close();
+    }
+
+    fn note_release_failure(&self) {
+        let mut state = self.lock_state();
+        state.release_failures = state.release_failures.saturating_add(1);
     }
 
     pub fn expire_stale_pins(&self) -> Vec<ExpiredSnapshotPin> {
@@ -535,11 +546,16 @@ impl SnapshotPin<'_> {
         if self.snapshot_active {
             self.snapshot_active = false;
             self.unregister_pin();
+            let mut rollback_error = None;
             if let Some(connection) = self.connection.as_mut() {
                 if let Err(error) = connection.rollback_read_snapshot() {
                     connection.abandon();
-                    return Err(error);
+                    rollback_error = Some(error);
                 }
+            }
+            if let Some(error) = rollback_error {
+                self.note_release_failure();
+                return Err(error);
             }
         }
         Ok(())
@@ -552,18 +568,27 @@ impl SnapshotPin<'_> {
 
         self.snapshot_active = false;
         self.unregister_pin();
+        let mut release_failed = false;
         if let Some(connection) = self.connection.as_mut() {
             if connection.rollback_read_snapshot().is_err() {
                 connection.abandon();
+                release_failed = true;
             }
+        }
+        if release_failed {
+            self.note_release_failure();
         }
     }
 
     fn unregister_pin(&mut self) {
-        if let (Some(pin_id), Some(connection)) = (self.pin_id.take(), self.connection.as_ref())
-            && let Some(pool) = connection.pool
-        {
+        if let (Some(pin_id), Some(pool)) = (self.pin_id.take(), self.pool) {
             pool.unregister_pin(pin_id);
+        }
+    }
+
+    fn note_release_failure(&self) {
+        if let Some(pool) = self.pool {
+            pool.note_release_failure();
         }
     }
 
@@ -881,6 +906,7 @@ mod tests {
                 max_size: 2,
                 max_seen: 2,
                 drops: 0,
+                release_failures: 0,
                 ad_hoc_bypass_count: 0,
                 acquire_wait: pool.stats().acquire_wait,
                 size_was_zero: false,
@@ -987,6 +1013,7 @@ mod tests {
         assert_eq!(stats.active, 0);
         assert_eq!(stats.idle, 0);
         assert_eq!(stats.drops, 1);
+        assert_eq!(stats.release_failures, 1);
         let fresh = must(pool.acquire(), "fresh connection opens after abandon");
         assert_ne!(fresh.slot_id(), Some(1));
     }
@@ -1072,12 +1099,43 @@ mod tests {
         assert_eq!(stats.idle, 0);
         assert_eq!(stats.active_pins, 0);
         assert_eq!(stats.drops, 1);
+        assert_eq!(stats.release_failures, 1);
 
         let fresh = must(
             pool.acquire(),
             "fresh connection opens after rollback abandon",
         );
         assert_ne!(fresh.slot_id(), slot_id);
+    }
+
+    #[test]
+    fn ad_hoc_snapshot_pin_unregisters_active_pin_on_drop() {
+        let pool = ReadConnectionPool::new(
+            DatabaseConfig::memory(),
+            PoolConfig::new(1, Duration::from_secs(30)).with_acquire_timeout(Duration::ZERO),
+        );
+        let pooled = must(pool.acquire(), "first pooled connection opens");
+        let ad_hoc_pin = must(
+            pool.pin_snapshot(),
+            "saturated pool opens ad-hoc snapshot pin",
+        );
+
+        assert!(ad_hoc_pin.is_pinned());
+        assert!(ad_hoc_pin.slot_id().is_none());
+        assert_eq!(pool.stats().active, 1);
+        assert_eq!(pool.stats().active_pins, 1);
+        assert_eq!(pool.stats().ad_hoc_bypass_count, 1);
+
+        drop(ad_hoc_pin);
+
+        let stats = pool.stats();
+        assert_eq!(stats.active, 1);
+        assert_eq!(stats.active_pins, 0);
+        assert_eq!(stats.expired_pins, 0);
+        assert_eq!(stats.release_failures, 0);
+
+        drop(pooled);
+        assert_eq!(pool.stats().active, 0);
     }
 
     #[test]

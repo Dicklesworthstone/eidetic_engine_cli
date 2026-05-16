@@ -33,10 +33,11 @@ Snapshot pins are explicit read transactions over pooled FrankenSQLite
 connections. A clean pin release returns the connection to the LIFO idle pool.
 If release fails, `ee` abandons that connection instead of returning a possibly
 dirty transaction state to later readers; this is reported through the
-`snapshot_release_failed` degradation family. Long-held pins are tracked against
-`max_pin_duration_seconds`; expired or force-released pins surface through
-`snapshot_pin_expired` and `snapshot_pin_force_released` so they cannot grow the
-WAL without a visible repair path.
+`snapshot_release_failed` degradation family and the in-process
+`ReadConnectionPool` `release_failures` counter. Long-held pins are tracked
+against `max_pin_duration_seconds`; expired or force-released pins surface
+through `snapshot_pin_expired` and `snapshot_pin_force_released` so they cannot
+grow the WAL without a visible repair path.
 
 ## Acquire Backpressure And Bypass
 
