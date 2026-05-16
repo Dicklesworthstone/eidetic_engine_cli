@@ -5,6 +5,9 @@ use std::io::{self, Write};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
+use crate::core::degraded_aggregation::{
+    AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
+};
 use crate::pack::{ContextResponse, ContextResponseDegradation, ContextResponseSeverity};
 
 use super::{ContextJsonRenderOptions, render_context_response_json_with_options};
@@ -18,6 +21,8 @@ pub struct StreamDegradation {
     pub severity: StreamSeverity,
     pub message: String,
     pub repair: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub details: BTreeMap<String, JsonValue>,
 }
@@ -35,8 +40,15 @@ impl StreamDegradation {
             severity,
             message: message.into(),
             repair,
+            sources: Vec::new(),
             details: BTreeMap::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_sources(mut self, sources: Vec<String>) -> Self {
+        self.sources = sources;
+        self
     }
 
     #[must_use]
@@ -609,12 +621,7 @@ pub fn context_response_stream_frames(
     trailer.provenance_footer = optional_object(&pack, "provenanceFooter")?.unwrap_or_default();
     trailer.coordination = optional_object(&pack, "coordination")?.unwrap_or_default();
     trailer.pack_dna = optional_object(&pack, "packDna")?.unwrap_or_default();
-    trailer.degraded = response
-        .data
-        .degraded
-        .iter()
-        .map(stream_degradation_from_context)
-        .collect();
+    trailer.degraded = stream_degradations_from_context(&response.data.degraded);
     frames.push(PackStreamFrame::Trailer(trailer));
 
     validate_generated_frames(&frames)?;
@@ -649,13 +656,43 @@ fn item_frame_from_batch_item(
     Ok(frame)
 }
 
-fn stream_degradation_from_context(degradation: &ContextResponseDegradation) -> StreamDegradation {
+fn stream_degradations_from_context(
+    degradations: &[ContextResponseDegradation],
+) -> Vec<StreamDegradation> {
+    aggregate_degraded_entries(degradations.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            super::context_degradation_source(&entry.code),
+            entry.code.clone(),
+            entry.severity.as_str(),
+            entry.message.clone(),
+            entry.repair.clone().unwrap_or_default(),
+        )
+    }))
+    .into_iter()
+    .map(stream_degradation_from_aggregate)
+    .collect()
+}
+
+fn stream_degradation_from_aggregate(degradation: AggregatedDegradation) -> StreamDegradation {
     StreamDegradation::new(
-        degradation.code.clone(),
-        StreamSeverity::from(degradation.severity),
-        degradation.message.clone(),
-        degradation.repair.clone(),
+        degradation.code,
+        stream_severity_from_str(&degradation.severity),
+        degradation.message,
+        (!degradation.repair.is_empty()).then_some(degradation.repair),
     )
+    .with_sources(degradation.sources)
+}
+
+fn stream_severity_from_str(severity: &str) -> StreamSeverity {
+    match severity {
+        "info" => StreamSeverity::Info,
+        "low" => StreamSeverity::Low,
+        "warning" => StreamSeverity::Warning,
+        "medium" => StreamSeverity::Medium,
+        "high" => StreamSeverity::High,
+        "critical" => StreamSeverity::Critical,
+        _ => StreamSeverity::Info,
+    }
 }
 
 fn validate_generated_frames(frames: &[PackStreamFrame]) -> Result<(), ContextStreamAdapterError> {
@@ -1092,6 +1129,41 @@ mod tests {
         assert_eq!(trailer.degraded.len(), 1);
         assert_eq!(trailer.degraded[0].code, "stream_fixture_degraded");
         assert_eq!(trailer.degraded[0].severity, StreamSeverity::Medium);
+    }
+
+    #[test]
+    fn context_response_stream_trailer_aggregates_duplicate_degraded_codes() {
+        let mut response = context_response_fixture();
+        response.data.degraded = vec![
+            crate::pack::ContextResponseDegradation::new(
+                "search_weak_recall",
+                crate::pack::ContextResponseSeverity::Low,
+                "Weak recall from the initial search pass.",
+                Some("try a more specific query".to_string()),
+            )
+            .unwrap(),
+            crate::pack::ContextResponseDegradation::new(
+                "search_weak_recall",
+                crate::pack::ContextResponseSeverity::High,
+                "Weak recall remained after fallback expansion.",
+                Some("run ee search --explain".to_string()),
+            )
+            .unwrap(),
+        ];
+
+        let frames = context_response_stream_frames(&response, stream_options()).unwrap();
+        let PackStreamFrame::Trailer(trailer) = frames.last().unwrap() else {
+            panic!("last frame should be trailer");
+        };
+
+        assert_eq!(trailer.degraded.len(), 1);
+        assert_eq!(trailer.degraded[0].code, "search_weak_recall");
+        assert_eq!(trailer.degraded[0].severity, StreamSeverity::High);
+        assert_eq!(
+            trailer.degraded[0].repair.as_deref(),
+            Some("run ee search --explain")
+        );
+        assert_eq!(trailer.degraded[0].sources, vec!["search".to_string()]);
     }
 
     #[test]
