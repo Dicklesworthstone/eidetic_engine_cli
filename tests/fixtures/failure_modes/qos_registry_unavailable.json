@@ -1,0 +1,35 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "qos_registry_unavailable",
+  "introduced_by": {
+    "bead": "bd-1zb7k.20.2",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "qos registry",
+    "status",
+    "doctor",
+    "swarm brief"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The QoS active-lane registry side-path exists but cannot be parsed or read, so foreground/background pressure summaries are unavailable.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "mkdir -p .ee/qos",
+      "printf '{not-json\\n' > .ee/qos/active-lanes.json"
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "qos_registry_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "QoS active-lane registry",
+      "failed"
+    ],
+    "repair_contains": ".ee/qos permissions",
+    "repair_string": "Inspect workspace .ee/qos permissions or disable QoS registry reads."
+  }
+}

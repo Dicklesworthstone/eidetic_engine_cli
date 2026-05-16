@@ -57,6 +57,7 @@ pub mod preflight_token;
 pub mod procedure;
 pub mod profile;
 pub mod proof_verify;
+pub mod qos;
 pub mod quarantine;
 pub mod recorder;
 pub mod rehearse;
