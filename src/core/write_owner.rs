@@ -1831,7 +1831,9 @@ mod tests {
                         .is_some_and(|record| record.status == WriteSpoolRecordStatus::Pending)
                 });
             let committed_count = if failed {
-                spool.mark_batch_failed(batch.batch_id, 30_000 + batch.batch_id, "fsync")
+                let _failed_count =
+                    spool.mark_batch_failed(batch.batch_id, 30_000 + batch.batch_id, "fsync");
+                0
             } else {
                 spool.mark_batch_committed(batch.batch_id, 30_000 + batch.batch_id)
             };
