@@ -6,6 +6,7 @@
 
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
@@ -626,6 +627,7 @@ fn find_workspace_id_read_only(
 }
 
 fn open_registry_read_only(registry_path: &Path) -> Result<DbConnection, DomainError> {
+    ensure_registry_path_has_no_symlink_components(registry_path)?;
     let conn = DbConnection::open(DatabaseConfig::file(registry_path))
         .map_err(|error| storage_error("failed to open workspace registry", error))?;
     if conn
@@ -644,6 +646,7 @@ fn open_registry_read_only(registry_path: &Path) -> Result<DbConnection, DomainE
 }
 
 fn open_registry_write(registry_path: &Path) -> Result<DbConnection, DomainError> {
+    ensure_registry_path_has_no_symlink_components(registry_path)?;
     if let Some(parent) = registry_path.parent() {
         fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
             message: format!(
@@ -655,6 +658,7 @@ fn open_registry_write(registry_path: &Path) -> Result<DbConnection, DomainError
             ),
         })?;
     }
+    ensure_registry_path_has_no_symlink_components(registry_path)?;
     let conn = DbConnection::open(DatabaseConfig::file(registry_path))
         .map_err(|error| storage_error("failed to open workspace registry", error))?;
     conn.migrate()
@@ -686,6 +690,52 @@ fn normalize_alias(raw: &str) -> Result<String, String> {
         );
     }
     Ok(alias.to_string())
+}
+
+fn ensure_registry_path_has_no_symlink_components(path: &Path) -> Result<(), DomainError> {
+    match registry_path_has_symlink_component(path) {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(DomainError::Storage {
+            message: format!(
+                "refusing workspace registry path with symlink component: {}",
+                path.display()
+            ),
+            repair: Some(
+                "Set EE_WORKSPACE_REGISTRY to a non-symlinked path under a trusted directory."
+                    .to_string(),
+            ),
+        }),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "failed to inspect workspace registry path {}: {error}",
+                path.display()
+            ),
+            repair: Some(
+                "Check permissions or set EE_WORKSPACE_REGISTRY to a readable path.".to_string(),
+            ),
+        }),
+    }
+}
+
+fn registry_path_has_symlink_component(path: &Path) -> io::Result<bool> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(true),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
 }
 
 fn alias_usage_error(message: String) -> DomainError {
@@ -878,6 +928,55 @@ mod tests {
 
         assert!(!report.persisted);
         assert!(!registry.exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_write_rejects_symlinked_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_parent = temp.path().join("outside-registry-parent");
+        fs::create_dir_all(&outside_parent).map_err(|error| error.to_string())?;
+        let linked_parent = temp.path().join("linked-registry-parent");
+        symlink(&outside_parent, &linked_parent).map_err(|error| error.to_string())?;
+        let registry = linked_parent.join("registry.db");
+
+        let error = open_registry_write(&registry).expect_err("symlinked parent must be rejected");
+        assert!(
+            error.message().contains("symlink component"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert!(
+            !outside_parent.join("registry.db").exists(),
+            "registry write must not follow a symlinked parent"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_read_rejects_symlinked_registry_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_registry = temp.path().join("outside-registry.db");
+        fs::write(&outside_registry, b"not a trusted registry")
+            .map_err(|error| error.to_string())?;
+        let registry = temp.path().join("registry.db");
+        symlink(&outside_registry, &registry).map_err(|error| error.to_string())?;
+
+        let error =
+            open_registry_read_only(&registry).expect_err("symlinked registry must be rejected");
+        assert!(
+            error.message().contains("symlink component"),
+            "unexpected error: {}",
+            error.message()
+        );
+
         Ok(())
     }
 }
