@@ -212,6 +212,63 @@ fn entry_by_path<'a>(
 }
 
 #[test]
+fn workspace_git_snapshot_provider_is_read_only_for_clean_repo() -> TestResult {
+    let temp = tempfile::Builder::new()
+        .prefix("ee-workspace-git-clean-readonly-")
+        .tempdir()
+        .map_err(|error| format!("tempdir: {error}"))?;
+    let workspace = temp.path();
+
+    run_git(workspace, &["init", "-q", "-b", "main"])?;
+    run_git(
+        workspace,
+        &["config", "user.email", "ee-test@example.invalid"],
+    )?;
+    run_git(workspace, &["config", "user.name", "ee test"])?;
+
+    write_file(&workspace.join("README.md"), "# clean repo\n")?;
+    run_git(workspace, &["add", "README.md"])?;
+    run_git(workspace, &["commit", "-q", "-m", "seed"])?;
+
+    let before_status = status_digest(workspace)?;
+    let before_files = file_state_digest(workspace)?;
+
+    let options = WorkspaceGitSnapshotOptions::for_workspace(workspace);
+    let started = Instant::now();
+    let snapshot = collect_workspace_git_snapshot(&options, &SystemSwarmBriefCommandRunner)
+        .map_err(|error| format!("collect workspace git snapshot: {error:?}"))?;
+    let elapsed_ms = started.elapsed().as_millis();
+
+    let after_status = status_digest(workspace)?;
+    let after_files = file_state_digest(workspace)?;
+    let log = read_only_e2e_log(
+        "clean_repo",
+        workspace,
+        elapsed_ms,
+        &before_status,
+        &after_status,
+        &before_files,
+        &after_files,
+    );
+    assert_read_only_e2e_log(&log, "clean_repo")?;
+    assert_eq!(
+        after_status, before_status,
+        "provider must not change clean git status"
+    );
+    assert_eq!(
+        after_files, before_files,
+        "provider must not change clean repo files"
+    );
+    assert!(
+        snapshot.entries.is_empty(),
+        "clean repository should not report dirty snapshot entries: {:#?}",
+        snapshot.entries
+    );
+
+    Ok(())
+}
+
+#[test]
 fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
     let temp = tempfile::Builder::new()
         .prefix("ee-workspace-git-readonly-")
