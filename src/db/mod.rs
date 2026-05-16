@@ -15833,6 +15833,18 @@ mod tests {
 
     impl StdError for TestFailure {}
 
+    impl From<String> for TestFailure {
+        fn from(error: String) -> Self {
+            Self(error)
+        }
+    }
+
+    impl From<&str> for TestFailure {
+        fn from(error: &str) -> Self {
+            Self(error.to_owned())
+        }
+    }
+
     impl From<DbError> for TestFailure {
         fn from(error: DbError) -> Self {
             Self(error.to_string())
