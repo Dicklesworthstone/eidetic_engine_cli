@@ -4,6 +4,7 @@ use std::{
     str::FromStr,
 };
 
+use chrono::{DateTime, Duration, Utc};
 use ee::models::{MemoryId, ProvenanceUri, RedactionLevel, UnitScore};
 use ee::pack::{
     ContextPackProfile, PackAssemblyOptions, PackCandidate, PackCandidateInput, PackDraft,
@@ -264,6 +265,31 @@ fn parse_regression_fixture_entries(
     Ok(fixtures)
 }
 
+fn stale_regression_fixture_hashes(
+    fixtures: &[DeterminismRegressionFixture],
+    now: &str,
+    stale_after_days: i64,
+) -> Result<Vec<String>, String> {
+    let now = parse_fixture_timestamp("now", now)?;
+    let stale_after = Duration::days(stale_after_days);
+    let mut stale = Vec::new();
+    for fixture in fixtures {
+        let last_verified_at =
+            parse_fixture_timestamp(&fixture.input_hash, &fixture.last_verified_at)?;
+        if now.signed_duration_since(last_verified_at) > stale_after {
+            stale.push(fixture.input_hash.clone());
+        }
+    }
+    stale.sort();
+    Ok(stale)
+}
+
+fn parse_fixture_timestamp(label: &str, value: &str) -> Result<DateTime<Utc>, String> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|error| format!("parse {label} timestamp {value:?}: {error}"))
+}
+
 fn hash_bytes(bytes: &[u8]) -> String {
     format!("blake3:{}", blake3::hash(bytes).to_hex())
 }
@@ -480,6 +506,38 @@ fn determinism_regression_fixture_persists_to_stable_file_name() -> Result<(), S
 
     let loaded = load_regression_fixtures(tempdir.path())?;
     assert_eq!(loaded, vec![fixture]);
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_staleness_detection_is_stable() -> Result<(), String> {
+    let mut fresh =
+        regression_fixture_for_mismatch(1, b"fresh", b"expected-fresh", b"observed-fresh")
+            .ok_or_else(|| "fresh fixture should detect mismatch".to_owned())?;
+    fresh.last_verified_at = "2026-05-01T00:00:00Z".to_string();
+
+    let mut stale =
+        regression_fixture_for_mismatch(2, b"stale", b"expected-stale", b"observed-stale")
+            .ok_or_else(|| "stale fixture should detect mismatch".to_owned())?;
+    stale.last_verified_at = "2026-01-01T00:00:00Z".to_string();
+
+    let stale_hashes =
+        stale_regression_fixture_hashes(&[fresh, stale.clone()], "2026-05-16T00:00:00Z", 90)?;
+
+    assert_eq!(stale_hashes, vec![stale.input_hash]);
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_staleness_rejects_invalid_timestamp() -> Result<(), String> {
+    let mut fixture = regression_fixture_for_mismatch(3, b"invalid-date", b"expected", b"observed")
+        .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    fixture.last_verified_at = "not-a-date".to_string();
+
+    let error = stale_regression_fixture_hashes(&[fixture], "2026-05-16T00:00:00Z", 90)
+        .expect_err("invalid fixture timestamp should be rejected");
+
+    assert!(error.contains("not-a-date"));
     Ok(())
 }
 
