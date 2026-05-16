@@ -34,7 +34,7 @@ use crate::pack::{
     PackCacheGovernor, PackHotset, PackHotsetEntry, PackHotsetEntryKind, PackSection,
     prewarm_pack_hotset,
 };
-use crate::policy::redact_secret_like_content;
+use crate::policy::{redact_secret_like_content, redaction_placeholder};
 use crate::search::{SearchCacheGovernor, SearchHotset, SearchHotsetEntry, prewarm_search_hotset};
 
 use super::doctor::DoctorReport;
@@ -1724,6 +1724,12 @@ fn blake3_text_hash(value: &str) -> String {
     format!("blake3:{}", compute_hash(value))
 }
 
+struct SupportDiagnosticRedaction {
+    content: String,
+    redacted: bool,
+    redacted_reasons: Vec<String>,
+}
+
 fn discover_performance_explain_samples(workspace: &Path) -> Vec<Value> {
     let report_dir = workspace.join(".ee").join(PERFORMANCE_EXPLAIN_SAMPLE_DIR);
     let Ok(entries) = fs::read_dir(report_dir) else {
@@ -1746,19 +1752,15 @@ fn discover_performance_explain_samples(workspace: &Path) -> Vec<Value> {
 
 fn summarize_performance_explain_sample(workspace: &Path, path: &Path) -> Option<Value> {
     let raw_content = fs::read_to_string(path).ok()?;
-    let redaction = redact_secret_like_content(&raw_content);
+    let redaction = redact_support_diagnostic_content(&raw_content);
     let parsed = serde_json::from_str::<Value>(&raw_content).ok()?;
     if parsed.get("schema") != Some(&json!(super::search::PERFORMANCE_EXPLAIN_SCHEMA_V1)) {
         return None;
     }
     let data = parsed.get("data")?;
     let relative_path = path.strip_prefix(workspace).unwrap_or(path);
-    let relative_path = redact_secret_like_content(&relative_path.display().to_string()).content;
-    let redaction_reasons = redaction
-        .redacted_reasons
-        .iter()
-        .map(|reason| (*reason).to_owned())
-        .collect::<Vec<_>>();
+    let relative_path = redact_support_diagnostic_text(&relative_path.display().to_string());
+    let redaction_reasons = redaction.redacted_reasons.clone();
     let fallback_count = data
         .get("fallbacks")
         .and_then(Value::as_array)
@@ -1892,15 +1894,11 @@ fn discover_swarm_report_summaries(workspace: &Path) -> Vec<Value> {
 
 fn summarize_swarm_report(workspace: &Path, path: &Path) -> Option<Value> {
     let raw_content = fs::read_to_string(path).ok()?;
-    let redaction = redact_secret_like_content(&raw_content);
+    let redaction = redact_support_diagnostic_content(&raw_content);
     let parsed = serde_json::from_str::<Value>(&raw_content).ok()?;
     let relative_path = path.strip_prefix(workspace).unwrap_or(path);
-    let relative_path = redact_secret_like_content(&relative_path.display().to_string()).content;
-    let redaction_reasons = redaction
-        .redacted_reasons
-        .iter()
-        .map(|reason| (*reason).to_owned())
-        .collect::<Vec<_>>();
+    let relative_path = redact_support_diagnostic_text(&relative_path.display().to_string());
+    let redaction_reasons = redaction.redacted_reasons.clone();
 
     Some(json!({
         "path": relative_path,
@@ -1921,7 +1919,7 @@ fn summarize_swarm_report(workspace: &Path, path: &Path) -> Option<Value> {
 
 fn redact_json_value(value: &Value) -> Value {
     match value {
-        Value::String(text) => Value::String(redact_secret_like_content(text).content),
+        Value::String(text) => Value::String(redact_support_diagnostic_text(text)),
         Value::Array(items) => Value::Array(items.iter().map(redact_json_value).collect()),
         Value::Object(map) => Value::Object(
             map.iter()
@@ -1930,6 +1928,77 @@ fn redact_json_value(value: &Value) -> Value {
         ),
         Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
     }
+}
+
+fn redact_support_diagnostic_text(text: &str) -> String {
+    redact_support_diagnostic_content(text).content
+}
+
+fn redact_support_diagnostic_content(text: &str) -> SupportDiagnosticRedaction {
+    let secret_redacted = redact_secret_like_content(text);
+    let path_redacted_content = redact_path_like_segments(&secret_redacted.content);
+    let path_redacted = path_redacted_content != secret_redacted.content;
+    let mut redacted_reasons = secret_redacted
+        .redacted_reasons
+        .iter()
+        .map(|reason| (*reason).to_owned())
+        .collect::<Vec<_>>();
+    if path_redacted {
+        redacted_reasons.push("path_like_segment".to_owned());
+    }
+    redacted_reasons.sort();
+    redacted_reasons.dedup();
+
+    SupportDiagnosticRedaction {
+        content: path_redacted_content,
+        redacted: secret_redacted.redacted || path_redacted,
+        redacted_reasons,
+    }
+}
+
+fn redact_path_like_segments(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let placeholder = redaction_placeholder("path");
+    let mut index = 0;
+    while index < input.len() {
+        if path_like_prefix_at(input, index) {
+            output.push_str(&placeholder);
+            index = path_like_segment_end(input, index);
+            continue;
+        }
+        let Some(ch) = input[index..].chars().next() else {
+            break;
+        };
+        output.push(ch);
+        index += ch.len_utf8();
+    }
+    output
+}
+
+fn path_like_prefix_at(input: &str, index: usize) -> bool {
+    [
+        "/Users/",
+        "/home/",
+        "/private/",
+        "/Volumes/",
+        "/var/folders/",
+    ]
+    .iter()
+    .any(|prefix| input[index..].starts_with(prefix))
+}
+
+fn path_like_segment_end(input: &str, start: usize) -> usize {
+    input[start..]
+        .char_indices()
+        .find_map(|(offset, ch)| {
+            (ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '"' | '\'' | ',' | '}' | ']' | ')' | '(' | '<' | '>' | ';'
+                ))
+            .then_some(start + offset)
+        })
+        .unwrap_or(input.len())
 }
 
 fn stable_json(value: &Value) -> String {
@@ -2813,7 +2882,11 @@ mod tests {
                 "query": {
                     "textIncluded": false,
                     "lengthBytes": 31,
-                    "fingerprint": "blake3:samplequeryhash"
+                    "fingerprint": "blake3:samplequeryhash",
+                    "meshProvenance": {
+                        "originWorkspaceLabel": "/Users/alice/private/repo",
+                        "producerPeerLabel": "/Users/alice/private/peer-agent"
+                    }
                 },
                 "queryPlan": {
                     "retrievalMode": "thorough",
@@ -2887,6 +2960,11 @@ mod tests {
             .ok_or_else(|| "created bundle must report output path".to_owned())?;
         let samples_json = fs::read_to_string(bundle_dir.join(PERFORMANCE_EXPLAIN_SAMPLES_FILE))
             .map_err(|error| format!("failed to read performance samples: {error}"))?;
+        assert!(
+            !samples_json.contains("/Users/alice/private/repo")
+                && !samples_json.contains("/Users/alice/private/peer-agent"),
+            "performance samples must not leak raw mesh workspace or producer peer paths"
+        );
         let samples: Value = serde_json::from_str(&samples_json)
             .map_err(|error| format!("performance samples must parse: {error}"))?;
 
@@ -2906,6 +2984,26 @@ mod tests {
         assert_eq!(
             samples.pointer("/samples/0/queryPlan/candidateBudget"),
             Some(&json!(888))
+        );
+        assert_eq!(
+            samples.pointer("/samples/0/query/meshProvenance/originWorkspaceLabel"),
+            Some(&json!("[REDACTED:path]"))
+        );
+        assert_eq!(
+            samples.pointer("/samples/0/query/meshProvenance/producerPeerLabel"),
+            Some(&json!("[REDACTED:path]"))
+        );
+        assert_eq!(samples.pointer("/samples/0/redacted"), Some(&json!(true)));
+        assert!(
+            samples
+                .pointer("/samples/0/redactionReasons")
+                .and_then(Value::as_array)
+                .is_some_and(|reasons| {
+                    reasons
+                        .iter()
+                        .any(|reason| reason.as_str() == Some("path_like_segment"))
+                }),
+            "performance sample must report path-like redaction"
         );
         assert_eq!(
             samples.pointer("/samples/0/measurements/searchElapsed/elapsedMs"),
