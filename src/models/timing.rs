@@ -115,7 +115,9 @@ impl TimingCapture {
     #[must_use]
     pub fn finish(self) -> DiagnosticTiming {
         let end = Instant::now();
-        let elapsed = end.checked_duration_since(self.start).unwrap_or(Duration::ZERO);
+        let elapsed = end
+            .checked_duration_since(self.start)
+            .unwrap_or(Duration::ZERO);
 
         if self.phases.is_empty() {
             return DiagnosticTiming::elapsed_only(elapsed);
@@ -125,7 +127,9 @@ impl TimingCapture {
         let mut prev = self.start;
 
         for (instant, name) in &self.phases {
-            let duration = instant.checked_duration_since(prev).unwrap_or(Duration::ZERO);
+            let duration = instant
+                .checked_duration_since(prev)
+                .unwrap_or(Duration::ZERO);
             phases.push(TimingPhase::new(name, duration));
             prev = *instant;
         }

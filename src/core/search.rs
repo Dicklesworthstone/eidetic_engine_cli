@@ -2675,7 +2675,11 @@ fn cached_index_status_for_search(
     let cache = SEARCH_INDEX_STATUS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
     if let Ok(mut guard) = cache.lock() {
-        guard.retain(|_, cached| now.checked_duration_since(cached.checked_at).unwrap_or(Duration::ZERO) <= INDEX_STATUS_CACHE_TTL);
+        guard.retain(|_, cached| {
+            now.checked_duration_since(cached.checked_at)
+                .unwrap_or(Duration::ZERO)
+                <= INDEX_STATUS_CACHE_TTL
+        });
         if let Some(cached) = guard.get(&cache_key) {
             return Ok(cached.report.clone());
         }
@@ -2690,7 +2694,11 @@ fn cached_index_status_for_search(
     let index_status = get_index_status(&status_options)?;
 
     if let Ok(mut guard) = cache.lock() {
-        guard.retain(|_, cached| now.checked_duration_since(cached.checked_at).unwrap_or(Duration::ZERO) <= INDEX_STATUS_CACHE_TTL);
+        guard.retain(|_, cached| {
+            now.checked_duration_since(cached.checked_at)
+                .unwrap_or(Duration::ZERO)
+                <= INDEX_STATUS_CACHE_TTL
+        });
         guard.insert(
             cache_key,
             CachedIndexStatus {

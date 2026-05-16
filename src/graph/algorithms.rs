@@ -379,7 +379,7 @@ where
 
 fn algorithm_cache_lock(cache_key: &str) -> Arc<Mutex<()>> {
     static CLEANUP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    
+
     let mut locks = ALGORITHM_CACHE_LOCKS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()

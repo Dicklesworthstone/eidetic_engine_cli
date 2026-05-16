@@ -14,7 +14,7 @@ use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rustix::process::{kill_process, Pid, Signal};
+use rustix::process::{Pid, Signal, kill_process};
 use tracing::info;
 
 use ee::db::{CreateFeedbackEventInput, DbConnection, audit_actions};
@@ -111,7 +111,7 @@ fn daemon_supervised_job_recovery_after_kill_restart() -> TestResult {
     let rows = load_daemon_rows(&workspace)?;
     assert_recovery_rows(&rows)?;
     assert_successful_job_after_recovery(&rows)?;
-    
+
     info!(
         jobs_in_flight = 2,
         recovery_outcome = "success",
@@ -384,14 +384,17 @@ fn spawn_foreground_daemon(workspace: &Path) -> Result<Child, String> {
 fn terminate_child(mut child: Child, context: &str) -> Result<Output, String> {
     let raw_pid = child.id() as i32;
     let pid = Pid::from_raw(raw_pid).ok_or_else(|| format!("Invalid PID {raw_pid}"))?;
-    
+
     info!(daemon_pid = raw_pid, "Sending SIGTERM to {}", context);
     let term_start = Instant::now();
-    
+
     kill_process(pid, Signal::Term)
         .map_err(|error| format!("failed to send SIGTERM to {context}: {error}"))?;
-        
-    info!(daemon_pid = raw_pid, "SIGTERM sent successfully to {}", context);
+
+    info!(
+        daemon_pid = raw_pid,
+        "SIGTERM sent successfully to {}", context
+    );
 
     let deadline = Instant::now() + Duration::from_millis(1500); // Increased timeout to 1.5s
     while Instant::now() < deadline {
@@ -403,7 +406,7 @@ fn terminate_child(mut child: Child, context: &str) -> Result<Output, String> {
             let output = child
                 .wait_with_output()
                 .map_err(|error| format!("failed to collect {context} output: {error}"));
-            
+
             info!(
                 daemon_pid = raw_pid,
                 signal_received_ms = term_start.elapsed().as_millis(),
@@ -414,7 +417,10 @@ fn terminate_child(mut child: Child, context: &str) -> Result<Output, String> {
         thread::sleep(Duration::from_millis(25));
     }
 
-    info!(daemon_pid = raw_pid, "Daemon did not exit cleanly, sending SIGKILL");
+    info!(
+        daemon_pid = raw_pid,
+        "Daemon did not exit cleanly, sending SIGKILL"
+    );
     child
         .kill()
         .map_err(|error| format!("failed to send SIGKILL to {context}: {error}"))?;

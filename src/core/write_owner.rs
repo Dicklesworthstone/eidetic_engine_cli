@@ -137,26 +137,26 @@ fn write_recovery_state(workspace_path: &Path, state: &str) -> std::io::Result<(
     let payload = format!(
         "{{\"schema\":\"{WRITE_SPOOL_RECOVERY_STATE_SCHEMA_V1}\",\"state\":\"{state}\"}}\n"
     );
-    
+
     let mut temp_path = path.clone();
     temp_path.set_extension("tmp");
-    
+
     {
         use std::io::Write;
         let mut file = fs::File::create(&temp_path)?;
         file.write_all(payload.as_bytes())?;
         file.sync_data()?;
     }
-    
+
     fs::rename(temp_path, path)?;
-    
+
     // Attempt to sync the parent directory to persist the rename
     if let Some(parent) = write_spool_recovery_state_path(workspace_path).parent() {
         if let Ok(dir) = fs::File::open(parent) {
             let _ = dir.sync_data();
         }
     }
-    
+
     Ok(())
 }
 

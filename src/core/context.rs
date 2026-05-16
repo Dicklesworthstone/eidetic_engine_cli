@@ -7758,8 +7758,8 @@ mod tests {
                 )
                 .map_err(|error| error.to_string())?;
 
-            let request = ContextRequest::from_query("seeded pack id")
-                .map_err(|error| error.to_string())?;
+            let request =
+                ContextRequest::from_query("seeded pack id").map_err(|error| error.to_string())?;
             let mut draft = assemble_draft(
                 "seeded pack id",
                 TokenBudget::default_context(),
