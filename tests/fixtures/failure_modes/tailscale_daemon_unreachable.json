@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "tailscale_daemon_unreachable",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.1",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "status"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Mesh status probing is enabled and a tailscale binary is present, but status JSON is malformed or the daemon command fails.",
+    "setup_commands": [
+      "source scripts/e2e_overhaul/lib/fake_tailscale.sh",
+      "ft_init /tmp/ee-tailnet-daemon-unreachable",
+      "ft_corrupt_status_json truncated"
+    ],
+    "invocation": "EE_MESH_ENABLED=1 ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "tailscale_daemon_unreachable",
+    "severity": "warning",
+    "message_contains": [
+      "Tailscale daemon",
+      "reachable"
+    ],
+    "repair_contains": "tailscale status",
+    "repair_string": "Run tailscale status and inspect the local tailscaled service.",
+    "repair_command_regex": "(?P<cmd>tailscale status)"
+  }
+}

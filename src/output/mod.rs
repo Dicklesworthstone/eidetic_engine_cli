@@ -36,6 +36,7 @@ use crate::core::rule::{
     RuleProtectReport, RuleShowReport, RuleUpdateReport,
 };
 use crate::core::status::{DegradationReport, StatusReport, StatusSkylineReport};
+use crate::core::tailscale_probe::{TailscaleLocalReport, TailscaleProbeDegradation};
 use crate::core::why::WhyReport;
 use crate::core::{BuildProvenanceDegradation, VERSION_PROVENANCE_SCHEMA_V1, VersionReport};
 use crate::eval::{EvaluationReport, EvaluationStatus, FixtureListEntry, ScenarioValidationResult};
@@ -3165,6 +3166,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
         render_graph_compute_json(d, &report.graph_compute);
         render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
         render_derived_assets_json(d, &report.derived_assets, true);
+        render_mesh_status_json(d, report.tailscale_local.as_ref());
         render_agent_inventory_json(d, "agentInventory", &report.agent_inventory, false);
         let degraded = aggregate_status_degradations("status", &report.degradations);
         d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
@@ -3420,6 +3422,72 @@ fn render_read_pool_status_json(
         pool.field_raw("max_seen", &report.max_seen.to_string());
         pool.field_raw("drops", &report.drops.to_string());
     });
+}
+
+fn render_mesh_status_json(parent: &mut JsonBuilder, tailscale: Option<&TailscaleLocalReport>) {
+    let Some(tailscale) = tailscale else {
+        return;
+    };
+
+    parent.field_object("mesh", |mesh| {
+        render_tailscale_local_status_json(mesh, tailscale);
+    });
+}
+
+fn render_tailscale_local_status_json(parent: &mut JsonBuilder, report: &TailscaleLocalReport) {
+    parent.field_object("tailscale", |tailscale| {
+        tailscale.field_str("schema", report.schema);
+        tailscale.field_bool("installed", report.installed);
+        tailscale.field_bool("daemonReachable", report.daemon_reachable);
+        tailscale.field_bool("authenticated", report.authenticated);
+        tailscale.field_bool("binaryAuthentic", report.binary_authentic);
+        if let Some(version_raw) = report.binary_version_raw.as_deref() {
+            tailscale.field_str("binaryVersionRaw", version_raw);
+        }
+        if let Some(path) = report.binary_absolute_path.as_ref() {
+            tailscale.field_str("binaryAbsolutePath", &path.display().to_string());
+        }
+        if let Some(shields_up) = report.shields_up {
+            tailscale.field_bool("shieldsUp", shields_up);
+        }
+        if let Some(tailnet_id) = report.tailnet_id.as_deref() {
+            tailscale.field_str("tailnetId", tailnet_id);
+        }
+        if let Some(tailnet_display_name) = report.tailnet_display_name.as_deref() {
+            tailscale.field_str("tailnetDisplayName", tailnet_display_name);
+        }
+        if let Some(self_node_key) = report.self_node_key.as_deref() {
+            tailscale.field_str("selfNodeKey", self_node_key);
+        }
+        if let Some(self_tailscale_ip) = report.self_tailscale_ip.as_deref() {
+            tailscale.field_str("selfTailscaleIp", self_tailscale_ip);
+        }
+        if let Some(self_magic_dns_name) = report.self_magic_dns_name.as_deref() {
+            tailscale.field_str("selfMagicDnsName", self_magic_dns_name);
+        }
+        tailscale.field_array_of_strings("selfAdvertisedTags", &report.self_advertised_tags);
+        if let Some(version) = report.version.as_deref() {
+            tailscale.field_str("version", version);
+        }
+        tailscale.field_str("probeMethod", report.probe_method.as_str());
+        tailscale.field_raw("probeElapsedMs", &report.probe_elapsed_ms.to_string());
+        tailscale.field_str("platform", report.platform.as_str());
+        tailscale.field_array_of_objects(
+            "degraded",
+            &report.degradations,
+            render_tailscale_probe_degradation_json,
+        );
+    });
+}
+
+fn render_tailscale_probe_degradation_json(
+    obj: &mut JsonBuilder,
+    degradation: &TailscaleProbeDegradation,
+) {
+    obj.field_str("code", degradation.code);
+    obj.field_str("severity", degradation.severity);
+    obj.field_str("message", &degradation.message);
+    obj.field_str("repair", degradation.repair);
 }
 
 fn render_memory_health_json(
@@ -3719,6 +3787,7 @@ pub fn render_status_json_with_meta(
         render_graph_compute_json(d, &report.graph_compute);
         render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
         render_derived_assets_json(d, &report.derived_assets, true);
+        render_mesh_status_json(d, report.tailscale_local.as_ref());
         render_agent_inventory_json(d, "agentInventory", &report.agent_inventory, false);
         let degraded = aggregate_status_degradations("status", &report.degradations);
         d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
@@ -8931,6 +9000,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
                 &report.derived_assets,
                 profile.include_verbose_details(),
             );
+            render_mesh_status_json(d, report.tailscale_local.as_ref());
             render_agent_inventory_json(
                 d,
                 "agentInventory",

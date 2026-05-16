@@ -45,6 +45,16 @@ pub const VOLATILE_FIELD_NAMES: &[&str] = &[
     "databasePath",
     "workspacePath",
     "indexDir",
+    // Tailscale local-probe identity fields are machine/network specific and
+    // sensitive in shared support bundles.
+    "selfNodeKey",
+    "selfTailscaleIp",
+    "selfMagicDnsName",
+    "tailnetId",
+    "tailnetDisplayName",
+    "selfAdvertisedTags",
+    "binaryVersionRaw",
+    "binaryAbsolutePath",
 ];
 
 /// Report emitted by a volatile-field strip operation.
@@ -263,6 +273,69 @@ mod tests {
         ] {
             if !report.fields_stripped.contains(&expected) {
                 return Err(format!("report missing stripped capsule field {expected}"));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn strip_volatile_fields_covers_tailscale_local_probe_identity() -> TestResult {
+        let mut value = serde_json::json!({
+            "schema": "ee.response.v2",
+            "data": {
+                "mesh": {
+                    "tailscale": {
+                        "schema": "ee.tailscale.local.v1",
+                        "tailnetId": "tailnet-alpha",
+                        "tailnetDisplayName": "alpha.example",
+                        "selfNodeKey": "nodekey:selfalpha",
+                        "selfTailscaleIp": "100.64.0.10",
+                        "selfMagicDnsName": "ee-local.tailnet.test.",
+                        "selfAdvertisedTags": ["tag:ee-mesh"],
+                        "binaryVersionRaw": "1.66.0\n  tailscale commit: abc",
+                        "binaryAbsolutePath": "/opt/homebrew/bin/tailscale",
+                        "probeMethod": "cli"
+                    }
+                }
+            }
+        });
+        let report = strip_volatile_fields(&mut value);
+
+        for pointer in [
+            "/data/mesh/tailscale/tailnetId",
+            "/data/mesh/tailscale/tailnetDisplayName",
+            "/data/mesh/tailscale/selfNodeKey",
+            "/data/mesh/tailscale/selfTailscaleIp",
+            "/data/mesh/tailscale/selfMagicDnsName",
+            "/data/mesh/tailscale/selfAdvertisedTags",
+            "/data/mesh/tailscale/binaryVersionRaw",
+            "/data/mesh/tailscale/binaryAbsolutePath",
+        ] {
+            if value.pointer(pointer).is_some() {
+                return Err(format!("{pointer} was not stripped: {value}"));
+            }
+        }
+        if value
+            .pointer("/data/mesh/tailscale/probeMethod")
+            .and_then(|v| v.as_str())
+            != Some("cli")
+        {
+            return Err("non-volatile tailscale field was stripped".to_owned());
+        }
+        for expected in [
+            "tailnetId",
+            "tailnetDisplayName",
+            "selfNodeKey",
+            "selfTailscaleIp",
+            "selfMagicDnsName",
+            "selfAdvertisedTags",
+            "binaryVersionRaw",
+            "binaryAbsolutePath",
+        ] {
+            if !report.fields_stripped.contains(&expected) {
+                return Err(format!(
+                    "report missing stripped tailscale field {expected}"
+                ));
             }
         }
         Ok(())

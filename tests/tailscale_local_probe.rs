@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use ee::core::status::StatusReport;
 use ee::core::tailscale_probe::{
     TAILSCALE_BINARY_INAUTHENTIC_CODE, TAILSCALE_DAEMON_UNREACHABLE_CODE,
     TAILSCALE_LOCAL_SCHEMA_V1, TAILSCALE_NOT_AUTHENTICATED_CODE, TAILSCALE_PROBE_TIMEOUT_CODE,
@@ -9,6 +10,7 @@ use ee::core::tailscale_probe::{
     probe_tailscale_cli_with_runner, tailscale_probe_timeout_ms_from_env_value,
     validate_binary_path,
 };
+use ee::output::render_status_json;
 
 type TestResult = Result<(), String>;
 
@@ -409,5 +411,45 @@ fn local_probe_timeout_report_is_deterministic() -> TestResult {
     let second = TailscaleLocalReport::timed_out(TailscaleProbeMethod::Cli, 1_501);
     assert_eq!(first, second);
     assert_eq!(first.degradations[0].code, TAILSCALE_PROBE_TIMEOUT_CODE);
+    Ok(())
+}
+
+#[test]
+fn status_json_embeds_tailscale_report_under_mesh_block() -> TestResult {
+    let tailscale = classify_status_payload(TailscaleStatusProbeInput {
+        status_json: healthy_status(),
+        prefs_json: Some(br#"{"ShieldsUp": false}"#),
+        binary: Some(good_binary()),
+        method: TailscaleProbeMethod::Cli,
+        elapsed_ms: 14,
+        platform_hint: TailscalePlatform::Linux,
+    });
+    let mut report = StatusReport::gather();
+    report.tailscale_local = Some(tailscale);
+
+    let rendered = render_status_json(&report);
+    let value: serde_json::Value =
+        serde_json::from_str(&rendered).map_err(|error| format!("parse status JSON: {error}"))?;
+    let mesh = value
+        .pointer("/data/mesh/tailscale")
+        .ok_or_else(|| "missing /data/mesh/tailscale".to_owned())?;
+
+    assert_eq!(
+        mesh.get("schema").and_then(serde_json::Value::as_str),
+        Some(TAILSCALE_LOCAL_SCHEMA_V1)
+    );
+    assert_eq!(
+        mesh.get("tailnetId").and_then(serde_json::Value::as_str),
+        Some("tailnet-alpha")
+    );
+    assert_eq!(
+        mesh.get("selfTailscaleIp")
+            .and_then(serde_json::Value::as_str),
+        Some("100.64.0.10")
+    );
+    assert_eq!(
+        mesh.get("probeMethod").and_then(serde_json::Value::as_str),
+        Some("cli")
+    );
     Ok(())
 }

@@ -1201,6 +1201,7 @@ fn status_missing_db_report() -> StatusReport {
             },
             graph_snapshot_empty_asset(),
         ],
+        tailscale_local: None,
         agent_inventory: AgentInventoryReport::not_inspected(),
         degradations: vec![
             DegradationReport {
@@ -1259,6 +1260,7 @@ fn status_pending_migration_report() -> StatusReport {
             },
             graph_snapshot_empty_asset(),
         ],
+        tailscale_local: None,
         agent_inventory: AgentInventoryReport::not_inspected(),
         degradations: vec![
             DegradationReport {
@@ -1317,6 +1319,7 @@ fn status_stale_index_lexical_only_report() -> StatusReport {
             },
             graph_snapshot_empty_asset(),
         ],
+        tailscale_local: None,
         agent_inventory: AgentInventoryReport::not_inspected(),
         degradations: vec![DegradationReport {
             code: "search_index_degraded",
@@ -1364,6 +1367,7 @@ fn status_search_unimplemented_report() -> StatusReport {
             },
             graph_snapshot_empty_asset(),
         ],
+        tailscale_local: None,
         agent_inventory: AgentInventoryReport::not_inspected(),
         degradations: vec![],
     }

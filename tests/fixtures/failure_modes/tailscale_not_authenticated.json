@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "tailscale_not_authenticated",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.1",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "status"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Mesh status probing reaches tailscaled, but the local node is logged out or reports NeedsLogin.",
+    "setup_commands": [
+      "source scripts/e2e_overhaul/lib/fake_tailscale.sh",
+      "ft_init /tmp/ee-tailnet-not-authenticated",
+      "ft_set_self --authenticated false"
+    ],
+    "invocation": "EE_MESH_ENABLED=1 ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "tailscale_not_authenticated",
+    "severity": "warning",
+    "message_contains": [
+      "Tailscale daemon",
+      "not authenticated"
+    ],
+    "repair_contains": "tailscale up",
+    "repair_string": "Run tailscale up.",
+    "repair_command_regex": "(?P<cmd>tailscale up)"
+  }
+}

@@ -33,6 +33,13 @@ use super::agent_detect::AgentInventoryReport;
 use super::curate::stable_workspace_id;
 use super::index::{IndexHealth, IndexStatusOptions, get_index_status};
 use super::outcome::{DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR};
+use super::tailscale_probe::{
+    SystemTailscaleCliProbeRunner, TAILSCALE_BINARY_INAUTHENTIC_CODE,
+    TAILSCALE_DAEMON_UNREACHABLE_CODE, TAILSCALE_NOT_AUTHENTICATED_CODE,
+    TAILSCALE_NOT_INSTALLED_CODE, TAILSCALE_PROBE_TIMEOUT_CODE, TAILSCALE_PROBE_UNAVAILABLE_CODE,
+    TAILSCALE_SHIELDS_UP_CODE, TailscaleCliProbeConfig, TailscaleLocalReport, TailscalePlatform,
+    probe_tailscale_cli_with_runner, tailscale_probe_timeout_ms_from_env_value,
+};
 use super::{build_info, runtime_status};
 
 const GRAPH_SNAPSHOT_ASSET_NAME: &str = "graph_snapshot_artifact";
@@ -1013,6 +1020,7 @@ pub struct StatusReport {
     pub graph_compute: GraphComputeReport,
     pub graph_snapshot_artifact: GraphSnapshotArtifactReport,
     pub derived_assets: Vec<DerivedAssetReport>,
+    pub tailscale_local: Option<TailscaleLocalReport>,
     pub agent_inventory: AgentInventoryReport,
     pub degradations: Vec<DegradationReport>,
 }
@@ -1063,6 +1071,7 @@ impl StatusReport {
         let (feedback_health, feedback_degradations) =
             gather_feedback_health(options.workspace_path.as_deref());
         let singleflight_posture = super::singleflight::singleflight_posture_report();
+        let tailscale_local = gather_tailscale_local_report();
         let agent_inventory = AgentInventoryReport::not_inspected();
 
         let mut degradations = Vec::new();
@@ -1089,6 +1098,9 @@ impl StatusReport {
         degradations.extend(memory_health_degradations);
         degradations.extend(curation_degradations);
         degradations.extend(feedback_degradations);
+        if let Some(tailscale) = tailscale_local.as_ref() {
+            push_tailscale_local_degradations(&mut degradations, tailscale);
+        }
 
         let posture = status_posture_report(
             options,
@@ -1116,9 +1128,108 @@ impl StatusReport {
             graph_compute,
             graph_snapshot_artifact,
             derived_assets,
+            tailscale_local,
             agent_inventory,
             degradations,
         }
+    }
+}
+
+fn gather_tailscale_local_report() -> Option<TailscaleLocalReport> {
+    if !mesh_enabled_for_tailscale_probe() {
+        return None;
+    }
+
+    let timeout_ms = tailscale_probe_timeout_ms_from_env_value(
+        read_env_var(EnvVar::TailscaleProbeTimeoutMs).as_deref(),
+    );
+    let mut config = TailscaleCliProbeConfig::mesh_enabled();
+    config.timeout_ms = timeout_ms;
+    config.binary_override = read_env_var(EnvVar::TailscaleBinaryOverride).map(PathBuf::from);
+    config.platform_hint = current_tailscale_platform();
+
+    let mut runner = SystemTailscaleCliProbeRunner;
+    Some(probe_tailscale_cli_with_runner(&config, &mut runner))
+}
+
+fn mesh_enabled_for_tailscale_probe() -> bool {
+    read_env_var(EnvVar::MeshEnabled)
+        .as_deref()
+        .is_some_and(|value| matches_truthy_env(value))
+}
+
+fn matches_truthy_env(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn current_tailscale_platform() -> TailscalePlatform {
+    if cfg!(target_os = "linux") {
+        TailscalePlatform::Linux
+    } else if cfg!(target_os = "macos") {
+        TailscalePlatform::MacosOpen
+    } else if cfg!(target_os = "windows") {
+        TailscalePlatform::Windows
+    } else {
+        TailscalePlatform::Other
+    }
+}
+
+fn push_tailscale_local_degradations(
+    degradations: &mut Vec<DegradationReport>,
+    report: &TailscaleLocalReport,
+) {
+    for degradation in &report.degradations {
+        degradations.push(tailscale_degradation_report(degradation.code));
+    }
+}
+
+fn tailscale_degradation_report(code: &'static str) -> DegradationReport {
+    match code {
+        TAILSCALE_NOT_INSTALLED_CODE => DegradationReport {
+            code: TAILSCALE_NOT_INSTALLED_CODE,
+            severity: "warning",
+            message: "Tailscale binary and local daemon socket were not found.",
+            repair: "Install Tailscale, then run tailscale up if you want optional mesh memory.",
+        },
+        TAILSCALE_DAEMON_UNREACHABLE_CODE => DegradationReport {
+            code: TAILSCALE_DAEMON_UNREACHABLE_CODE,
+            severity: "warning",
+            message: "Tailscale daemon was not reachable.",
+            repair: "Run tailscale status and inspect the local tailscaled service.",
+        },
+        TAILSCALE_NOT_AUTHENTICATED_CODE => DegradationReport {
+            code: TAILSCALE_NOT_AUTHENTICATED_CODE,
+            severity: "warning",
+            message: "Tailscale daemon is running but this node is not authenticated.",
+            repair: "Run tailscale up.",
+        },
+        TAILSCALE_BINARY_INAUTHENTIC_CODE => DegradationReport {
+            code: TAILSCALE_BINARY_INAUTHENTIC_CODE,
+            severity: "high",
+            message: "Tailscale binary authenticity check failed.",
+            repair: "Run which tailscale, verify provenance, and reinstall Tailscale if needed.",
+        },
+        TAILSCALE_SHIELDS_UP_CODE => DegradationReport {
+            code: TAILSCALE_SHIELDS_UP_CODE,
+            severity: "warning",
+            message: "Tailscale shields-up mode is enabled; peers cannot initiate discovery.",
+            repair: "Run tailscale set --shields-up=false if you want symmetric mesh discovery.",
+        },
+        TAILSCALE_PROBE_TIMEOUT_CODE => DegradationReport {
+            code: TAILSCALE_PROBE_TIMEOUT_CODE,
+            severity: "warning",
+            message: "Tailscale probe exceeded its configured timeout budget.",
+            repair: "Run tailscale status directly or raise EE_TAILSCALE_PROBE_TIMEOUT_MS.",
+        },
+        _ => DegradationReport {
+            code: TAILSCALE_PROBE_UNAVAILABLE_CODE,
+            severity: "info",
+            message: "Tailscale probe skipped because mesh is disabled.",
+            repair: "Set EE_MESH_ENABLED=1 to enable optional mesh-memory probes.",
+        },
     }
 }
 

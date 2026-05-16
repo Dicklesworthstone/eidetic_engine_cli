@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "tailscale_probe_unavailable",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.1",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "status"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "The local Tailscale probe is explicitly skipped because optional mesh-memory probing is disabled.",
+    "setup_commands": [
+      "unset EE_MESH_ENABLED"
+    ],
+    "invocation": "EE_MESH_ENABLED=0 ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "tailscale_probe_unavailable",
+    "severity": "info",
+    "message_contains": [
+      "Tailscale probe skipped",
+      "mesh is disabled"
+    ],
+    "repair_contains": "EE_MESH_ENABLED=1",
+    "repair_string": "Set EE_MESH_ENABLED=1 to enable optional mesh-memory probes."
+  }
+}

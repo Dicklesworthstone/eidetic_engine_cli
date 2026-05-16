@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "tailscale_not_installed",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.1",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "status"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Mesh status probing is enabled, but no trusted absolute tailscale binary candidate exists and no local daemon socket can be used.",
+    "setup_commands": [
+      "EE_MESH_ENABLED=1 EE_TAILSCALE_BINARY_OVERRIDE=/tmp/missing-tailscale ee status --workspace . --json"
+    ],
+    "invocation": "EE_MESH_ENABLED=1 ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "tailscale_not_installed",
+    "severity": "warning",
+    "message_contains": [
+      "Tailscale",
+      "not found"
+    ],
+    "repair_contains": "Install Tailscale",
+    "repair_string": "Install Tailscale, then run tailscale up if you want optional mesh memory."
+  }
+}

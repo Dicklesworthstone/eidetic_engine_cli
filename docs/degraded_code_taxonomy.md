@@ -355,6 +355,17 @@ memory bodies in `sources[]`.
 | `situation_decisioning_unavailable` | medium | (TBD) |
 | `test_degraded` | info | testing harness (synthetic; not emitted in production paths) |
 
+#### Tailscale local probe (7)
+| Code | Severity | Bead |
+|------|----------|------|
+| `tailscale_binary_inauthentic` | high | bd-36bbk.1.1 |
+| `tailscale_daemon_unreachable` | warning | bd-36bbk.1.1 |
+| `tailscale_not_authenticated` | warning | bd-36bbk.1.1 |
+| `tailscale_not_installed` | warning | bd-36bbk.1.1 |
+| `tailscale_probe_timeout` | warning | bd-36bbk.1.1 |
+| `tailscale_probe_unavailable` | info | bd-36bbk.1.1 |
+| `tailscale_shields_up` | warning | bd-36bbk.1.1 |
+
 #### Causal lab (13)
 | Code | Severity | Bead |
 |------|----------|------|

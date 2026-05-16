@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "tailscale_binary_inauthentic",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.1",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "status"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "Mesh status probing resolves a tailscale binary whose path is relative or whose version output does not match the expected Tailscale Inc. shape.",
+    "setup_commands": [
+      "printf '#!/bin/sh\\necho not tailscale\\n' > /tmp/tailscale-shim",
+      "chmod +x /tmp/tailscale-shim"
+    ],
+    "invocation": "EE_MESH_ENABLED=1 EE_TAILSCALE_BINARY_OVERRIDE=/tmp/tailscale-shim ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "tailscale_binary_inauthentic",
+    "severity": "high",
+    "message_contains": [
+      "Tailscale binary",
+      "authenticity"
+    ],
+    "repair_contains": "reinstall Tailscale",
+    "repair_string": "Run which tailscale, verify provenance, and reinstall Tailscale if needed.",
+    "repair_command_regex": "(?P<cmd>which tailscale)"
+  }
+}

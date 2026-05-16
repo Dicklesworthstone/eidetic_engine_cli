@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.tailscale.local.v1.json",
+  "title": "ee.tailscale.local.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "installed",
+    "daemonReachable",
+    "authenticated",
+    "binaryAuthentic",
+    "selfAdvertisedTags",
+    "probeMethod",
+    "probeElapsedMs",
+    "platform",
+    "degraded"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ee.tailscale.local.v1"
+    },
+    "installed": {
+      "type": "boolean"
+    },
+    "daemonReachable": {
+      "type": "boolean"
+    },
+    "authenticated": {
+      "type": "boolean"
+    },
+    "binaryAuthentic": {
+      "type": "boolean"
+    },
+    "binaryVersionRaw": {
+      "type": "string"
+    },
+    "binaryAbsolutePath": {
+      "type": "string"
+    },
+    "shieldsUp": {
+      "type": "boolean"
+    },
+    "tailnetId": {
+      "type": "string"
+    },
+    "tailnetDisplayName": {
+      "type": "string"
+    },
+    "selfNodeKey": {
+      "type": "string",
+      "pattern": "^nodekey:[A-Za-z0-9_:-]+$"
+    },
+    "selfTailscaleIp": {
+      "type": "string"
+    },
+    "selfMagicDnsName": {
+      "type": "string"
+    },
+    "selfAdvertisedTags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+"
+    },
+    "probeMethod": {
+      "enum": [
+        "cli",
+        "socket",
+        "skipped"
+      ]
+    },
+    "probeElapsedMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "platform": {
+      "enum": [
+        "linux",
+        "macos_sandboxed",
+        "macos_open",
+        "windows",
+        "other"
+      ]
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/degradation"
+      }
+    }
+  },
+  "$defs": {
+    "degradation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "severity",
+        "message",
+        "repair"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "tailscale_not_installed",
+            "tailscale_daemon_unreachable",
+            "tailscale_not_authenticated",
+            "tailscale_binary_inauthentic",
+            "tailscale_shields_up",
+            "tailscale_probe_unavailable",
+            "tailscale_probe_timeout"
+          ]
+        },
+        "severity": {
+          "enum": [
+            "info",
+            "warning",
+            "high"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repair": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}
