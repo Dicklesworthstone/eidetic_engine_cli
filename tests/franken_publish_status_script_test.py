@@ -7,6 +7,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -77,6 +78,41 @@ class FrankenPublishStatusScriptTest(unittest.TestCase):
                 "fnx-algorithms",
             ],
         )
+
+    def test_workflow_tag_gate_accepts_generic_tag_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workflow_dir = root / ".github" / "workflows"
+            workflow_dir.mkdir(parents=True)
+            (workflow_dir / "release.yml").write_text(
+                """
+name: release
+jobs:
+  publish:
+    if: ${{ (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') && !contains(github.ref, '-') }}
+    steps:
+      - run: |
+          crates=(sqlmodel-frankensqlite sqlmodel)
+          cargo publish -p "${crate}"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+""",
+                encoding="utf-8",
+            )
+
+            status = self.mod.workflow_status(
+                root,
+                ".github/workflows/release.yml",
+                ["sqlmodel-frankensqlite", "sqlmodel"],
+            )
+
+        self.assertTrue(status["tag_gate"])
+        self.assertEqual(status["missing_from_publish_order"], [])
+        self.assertTrue(status["dependency_order_ok"])
+
+    def test_sqlmodel_expected_publish_order_puts_driver_before_umbrella(self) -> None:
+        expected = self.mod.GROUPS["sqlmodel"]["expected_publish_order"]
+        self.assertLess(expected.index("sqlmodel-frankensqlite"), expected.index("sqlmodel"))
 
     def test_fixture_run_emits_golden_fnx_missing_status(self) -> None:
         output = subprocess.check_output(

@@ -50,7 +50,7 @@ GROUPS: dict[str, dict[str, Any]] = {
         "crate_root": "crates",
         "workflow": ".github/workflows/release.yml",
         "crate_names": ["sqlmodel", "sqlmodel-frankensqlite"],
-        "expected_publish_order": ["sqlmodel", "sqlmodel-frankensqlite"],
+        "expected_publish_order": ["sqlmodel-frankensqlite", "sqlmodel"],
     },
     "frankensearch": {
         "display_name": "frankensearch",
@@ -232,6 +232,15 @@ def parse_publish_order(workflow_text: str) -> list[str]:
     return re.findall(r"([A-Za-z0-9][A-Za-z0-9_-]*)", match.group(1))
 
 
+def has_tag_gate(workflow_text: str) -> bool:
+    return bool(
+        re.search(
+            r"startsWith\(\s*github\.ref\s*,\s*['\"]refs/tags/(?:v)?['\"]\s*\)",
+            workflow_text,
+        )
+    )
+
+
 def workflow_status(root: Path, workflow_rel: str, expected_order: list[str]) -> dict[str, Any]:
     workflow_path = root / workflow_rel
     try:
@@ -254,8 +263,7 @@ def workflow_status(root: Path, workflow_rel: str, expected_order: list[str]) ->
     return {
         "status": "ok",
         "path": workflow_rel,
-        "tag_gate": "startsWith(github.ref, 'refs/tags/v')" in text
-        or 'startsWith(github.ref, "refs/tags/v")' in text,
+        "tag_gate": has_tag_gate(text),
         "token_required": "CARGO_REGISTRY_TOKEN" in text,
         "publish_job_present": "cargo publish" in text,
         "publish_order": publish_order,
