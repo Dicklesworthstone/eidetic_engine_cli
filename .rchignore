@@ -39,6 +39,27 @@ clippy_out_dump
 exit_code_test_out
 recent_commits.txt
 
+# Machine-local ee workspace runtime state. Remote Cargo verification should
+# build and test source, not copy this checkout's local database/index/cache
+# stores into worker project roots.
+.ee/
+.ee/**
+
+# Root-level scratch artifacts observed from agent diagnostics and ad hoc
+# verifier probes. Keep these exact so source, fixtures, migrations, docs, and
+# tests remain visible to RCH.
+/--help
+/.plan-drift-report.json
+/critical.json
+/functions.txt
+/test_ln_1p
+/test_ln_1p.rs
+/test_multibyte
+/test_multibyte.rs
+/ubs.json
+/ubs_findings.jsonl
+/ubs_full.txt
+
 # Volatile Beads SQLite sidecars and temp files. Keep .beads/issues.jsonl
 # visible for tests and coordination, but do not let transient DB files make
 # RCH fall back to local execution when they vanish during rsync.
