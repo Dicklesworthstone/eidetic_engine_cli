@@ -400,12 +400,13 @@ pub fn compare_versions(current: &str, target: &str) -> Ordering {
 
 #[must_use]
 pub fn is_safe_install_path(path: &Path) -> bool {
-    path.components().all(|component| {
-        !matches!(
-            component,
-            std::path::Component::ParentDir | std::path::Component::CurDir
-        )
-    })
+    path.is_absolute()
+        && path.components().all(|component| {
+            !matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
 }
 
 #[must_use]
@@ -511,6 +512,7 @@ mod tests {
     #[test]
     fn safe_install_path_rejects_relative_traversal() -> TestResult {
         ensure(is_safe_install_path(Path::new("/tmp/ee")), "absolute path")?;
+        ensure(!is_safe_install_path(Path::new("bin/ee")), "relative path")?;
         ensure(
             !is_safe_install_path(Path::new("/tmp/../ee")),
             "parent traversal",

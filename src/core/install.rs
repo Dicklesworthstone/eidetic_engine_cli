@@ -111,6 +111,17 @@ pub fn check_install(options: &InstallCheckOptions) -> InstallCheckReport {
         ));
     }
 
+    if !is_safe_install_path(Path::new(&target.install_path)) {
+        findings.push(InstallFinding::error(
+            InstallFindingCode::UnsafeTargetPath,
+            format!(
+                "install target '{}' contains unsafe path components",
+                target.install_path
+            ),
+            "Choose an absolute install directory without traversal components.",
+        ));
+    }
+
     if path.binaries.is_empty() {
         findings.push(InstallFinding::warning(
             InstallFindingCode::BinaryNotOnPath,
@@ -1448,6 +1459,47 @@ mod tests {
                 .any(|finding| matches!(finding.code, InstallFindingCode::OfflineNoManifest)),
             "offline_no_manifest finding",
         )
+    }
+
+    #[test]
+    fn install_check_rejects_relative_install_dir() -> TestResult {
+        let options = InstallCheckOptions {
+            install_dir: Some(PathBuf::from("relative-bin")),
+            current_binary: Some(PathBuf::from("/tmp/not-ee")),
+            path_env: Some(OsString::from("")),
+            target_triple: Some("x86_64-unknown-linux-gnu".to_owned()),
+            manifest: None,
+            offline: true,
+        };
+        let report = check_install(&options);
+
+        ensure(
+            report
+                .findings
+                .iter()
+                .any(|finding| matches!(finding.code, InstallFindingCode::UnsafeTargetPath)),
+            "unsafe_target_path finding",
+        )
+    }
+
+    #[test]
+    fn install_plan_rejects_relative_install_dir() -> TestResult {
+        let options = InstallPlanOptions {
+            target_triple: Some("x86_64-unknown-linux-gnu".to_owned()),
+            install_dir: Some(PathBuf::from("relative-bin")),
+            offline: true,
+            ..InstallPlanOptions::default()
+        };
+        let report = plan_install(&options);
+
+        ensure(
+            report
+                .findings
+                .iter()
+                .any(|finding| matches!(finding.code, InstallFindingCode::UnsafeTargetPath)),
+            "unsafe_target_path finding",
+        )?;
+        ensure_equal(report.status, InstallPlanStatus::Blocked, "status")
     }
 
     #[test]
