@@ -45,6 +45,7 @@ snapshot() {
 before_snapshot="$(snapshot)"
 
 EE_UNDER_TEST="${EE_BIN:-${EE_BINARY:-}}"
+IMPOSSIBLE_MIN_FREE_BYTES="18446744073709551615"
 if [ -n "$EE_UNDER_TEST" ]; then
     report="$("$EE_UNDER_TEST" --workspace "$WORKSPACE" diag disk-pressure --json \
         --top-limit 3 --consumer-depth 1 --consumer-entry-limit 100)"
@@ -54,6 +55,11 @@ if [ -n "$EE_UNDER_TEST" ]; then
         EE_E2E_RETENTION_MANIFEST="$WORKSPACE/tmp/e2e_retention_manifest.json" \
         "$EE_UNDER_TEST" --workspace "$WORKSPACE" diag artifacts --json \
         --top-limit 3 --consumer-depth 1 --consumer-entry-limit 100)"
+    build_admission_report="$(CARGO_TARGET_DIR="$WORKSPACE/target" \
+        TMPDIR="$WORKSPACE/tmp" \
+        "$EE_UNDER_TEST" --workspace "$WORKSPACE" diag build-admission --json \
+        --min-free-bytes "$IMPOSSIBLE_MIN_FREE_BYTES" \
+        --artifact-destination "$WORKSPACE/target/ee-e2e/sync-down")"
 else
     report="$(cd "$REPO_ROOT" && cargo run --quiet -- --workspace "$WORKSPACE" \
         diag disk-pressure --json --top-limit 3 --consumer-depth 1 \
@@ -64,6 +70,11 @@ else
         EE_E2E_RETENTION_MANIFEST="$WORKSPACE/tmp/e2e_retention_manifest.json" \
         cargo run --quiet -- --workspace "$WORKSPACE" diag artifacts --json \
         --top-limit 3 --consumer-depth 1 --consumer-entry-limit 100)"
+    build_admission_report="$(cd "$REPO_ROOT" && CARGO_TARGET_DIR="$WORKSPACE/target" \
+        TMPDIR="$WORKSPACE/tmp" \
+        cargo run --quiet -- --workspace "$WORKSPACE" diag build-admission --json \
+        --min-free-bytes "$IMPOSSIBLE_MIN_FREE_BYTES" \
+        --artifact-destination "$WORKSPACE/target/ee-e2e/sync-down")"
 fi
 
 after_snapshot="$(snapshot)"
@@ -118,11 +129,40 @@ assert_jq "$artifacts_report" '(.data.roots | all(
     and (.budget.degradedBytes >= .budget.warningBytes)))' "true" \
     "artifact_retention_budget_metadata"
 
+assert_jq "$build_admission_report" '.schema' "ee.response.v1" \
+    "build_admission_response_schema"
+assert_jq "$build_admission_report" '.success' "true" \
+    "build_admission_response_success"
+assert_jq "$build_admission_report" '.data.schema' "ee.build_admission.diagnostics.v1" \
+    "build_admission_data_schema"
+assert_jq "$build_admission_report" '.data.sideEffectFree' "true" \
+    "build_admission_side_effect_free"
+assert_jq "$build_admission_report" '.data.mutationPolicy' \
+    "read_only_report_no_files_modified" \
+    "build_admission_mutation_policy"
+assert_jq "$build_admission_report" '.data.admitted' "false" \
+    "build_admission_denied"
+assert_jq "$build_admission_report" \
+    '(.data.degraded | map(.code) | index("build_admission_denied") != null)' \
+    "true" "build_admission_denied_degradation"
+assert_jq "$build_admission_report" \
+    '(.data.recoveryActions | any(.target == "build_admission"
+        and .kind == "ask_human"))' \
+    "true" "build_admission_ask_human_recovery"
+assert_jq "$build_admission_report" \
+    '(.data.checks | map(.label) |
+        index("workspace") != null
+        and index("cargo_target") != null
+        and index("tmpdir") != null
+        and index("artifact_destination") != null)' \
+    "true" "build_admission_expected_checks"
+
 jq -n \
     --arg schema "ee.disk_pressure.e2e.v1" \
     --arg workspace "$WORKSPACE" \
     --arg posture "$(printf '%s\n' "$report" | jq -r '.data.posture')" \
     --arg artifact_roots "$(printf '%s\n' "$artifacts_report" | jq -r '.data.summary.rootCount')" \
+    --arg build_admitted "$(printf '%s\n' "$build_admission_report" | jq -r '.data.admitted')" \
     --arg mutation "none" \
     '{
       schema: $schema,
@@ -130,6 +170,7 @@ jq -n \
       workspace: $workspace,
       posture: $posture,
       artifactRoots: ($artifact_roots | tonumber),
+      buildAdmissionAdmitted: ($build_admitted == "true"),
       mutation: $mutation,
       note: "Synthetic workspace intentionally left in place for audit."
     }'
