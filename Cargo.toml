@@ -187,6 +187,10 @@ name = "graph_hits"
 harness = false
 
 [[bench]]
+name = "agent_profile"
+harness = false
+
+[[bench]]
 name = "curate_candidates"
 harness = false
 

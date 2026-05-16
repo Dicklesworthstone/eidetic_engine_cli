@@ -1,0 +1,45 @@
+---
+source: tests/agent_profile_e2e.rs
+expression: value
+---
+{
+  "agentName": "AgentProfileAlpha",
+  "agentNameHash": "<agent-hash>",
+  "biasMagnitude": 0.05,
+  "coldStart": false,
+  "coldStartThreshold": 10,
+  "degraded": [],
+  "determinismKey": {
+    "agentNameHash": "<agent-hash>",
+    "basePackHash": "<pack-hash>",
+    "profileGeneration": 20,
+    "workspaceGeneration": 0
+  },
+  "halfLifeDays": null,
+  "harmfulCount": 10,
+  "helpfulCount": 10,
+  "ignoredCount": 0,
+  "maxBiasMagnitude": 0.05,
+  "memoryBiasApplied": 2,
+  "observedOutcomes": 20,
+  "schema": "ee.context.agent_profile.v1",
+  "topBiases": [
+    {
+      "bias": 0.05,
+      "harmfulCount": 0,
+      "helpfulCount": 10,
+      "ignoredCount": 0,
+      "lastSeenAt": "<timestamp>",
+      "memoryId": "<alpha-memory>"
+    },
+    {
+      "bias": -0.05,
+      "harmfulCount": 10,
+      "helpfulCount": 0,
+      "ignoredCount": 0,
+      "lastSeenAt": "<timestamp>",
+      "memoryId": "<beta-memory>"
+    }
+  ],
+  "workspaceId": "<workspace-id>"
+}

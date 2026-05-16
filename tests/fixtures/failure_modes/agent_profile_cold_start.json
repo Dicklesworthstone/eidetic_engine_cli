@@ -1,0 +1,34 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "agent_profile_cold_start",
+  "introduced_by": {
+    "bead": "bd-1prrl.2.5",
+    "epic_letter": "swarmx.5"
+  },
+  "surfaces": [
+    "context"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "An agent has fewer than the configured cold-start threshold of outcome events for the current workspace, so per-agent profile rows are reported but no ranking bias is applied.",
+    "setup_commands": [
+      "ee remember --workspace . --level procedural --kind rule \"Profile cold-start fixture.\" --json",
+      "EE_AGENT_NAME=AgentProfileColdStart ee outcome <memory-id> --signal helpful --json"
+    ],
+    "invocation": "EE_AGENT_NAME=AgentProfileColdStart ee context \"Profile cold-start fixture\" --workspace . --explain --json"
+  },
+  "expected_emission": {
+    "code": "agent_profile_cold_start",
+    "severity": "info",
+    "message_contains": [
+      "agent profile",
+      "cold start"
+    ],
+    "repair_contains": "Record enough high-quality outcomes before relying on profile bias.",
+    "repair_strings": [
+      "Use the unbiased ranking until the profile reaches the cold-start threshold.",
+      "Record real helpful or harmful outcomes from completed work before expecting profile bias."
+    ]
+  }
+}
