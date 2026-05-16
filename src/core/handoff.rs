@@ -40,6 +40,7 @@ use crate::models::{
     SingleFlightLastKeyPosture, SingleFlightSurface, SingleFlightSurfaceCounters,
     SingleFlightSurfacePosture,
 };
+use crate::policy::{redact_secret_like_content, redaction_placeholder};
 
 /// Schema for handoff capsule format.
 pub const HANDOFF_CAPSULE_SCHEMA_V1: &str = "ee.handoff.capsule.v1";
@@ -1940,18 +1941,18 @@ fn task_frame_evidence_ids(frame: &TaskFrameRecord) -> Vec<String> {
 fn render_task_frame_section(frame: &TaskFrameRecord) -> String {
     let mut lines = vec![
         format!("Task frame: {}", frame.id),
-        format!("Goal: {}", frame.root_goal),
+        format!("Goal: {}", redact_handoff_text(&frame.root_goal)),
         format!("Status: {}", frame.status.as_str()),
         format!("Redaction: {}", frame.redaction_status),
         format!("Contract: {NON_EXECUTING_CONTRACT}"),
     ];
     if let Some(focus) = &frame.current_focus {
-        lines.push(format!("Current focus: {focus}"));
+        lines.push(format!("Current focus: {}", redact_handoff_text(focus)));
     }
     if !frame.blockers.is_empty() {
         lines.push("Blockers:".to_owned());
         for blocker in &frame.blockers {
-            lines.push(format!("- {blocker}"));
+            lines.push(format!("- {}", redact_handoff_text(blocker)));
         }
     }
     if !frame.subgoals.is_empty() {
@@ -1989,7 +1990,78 @@ fn read_handoff_task_frame(
 }
 
 fn task_frame_json(frame: &TaskFrameRecord) -> Option<serde_json::Value> {
-    serde_json::to_value(frame).ok()
+    let mut value = serde_json::to_value(frame).ok()?;
+    redact_handoff_value(&mut value);
+    Some(value)
+}
+
+fn redact_handoff_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => {
+            *text = redact_handoff_text(text);
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_handoff_value(item);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for value in object.values_mut() {
+                redact_handoff_value(value);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+fn redact_handoff_text(text: &str) -> String {
+    let secret_redacted = redact_secret_like_content(text).content;
+    redact_handoff_path_segments(&secret_redacted)
+}
+
+fn redact_handoff_path_segments(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let placeholder = redaction_placeholder("path");
+    let mut index = 0;
+    while index < input.len() {
+        if handoff_path_prefix_at(input, index) {
+            output.push_str(&placeholder);
+            index = handoff_path_segment_end(input, index);
+            continue;
+        }
+        let Some(ch) = input[index..].chars().next() else {
+            break;
+        };
+        output.push(ch);
+        index += ch.len_utf8();
+    }
+    output
+}
+
+fn handoff_path_prefix_at(input: &str, index: usize) -> bool {
+    [
+        "/Users/",
+        "/home/",
+        "/private/",
+        "/Volumes/",
+        "/var/folders/",
+    ]
+    .iter()
+    .any(|prefix| input[index..].starts_with(prefix))
+}
+
+fn handoff_path_segment_end(input: &str, start: usize) -> usize {
+    input[start..]
+        .char_indices()
+        .find_map(|(offset, ch)| {
+            (ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '"' | '\'' | ',' | '}' | ']' | ')' | '(' | '<' | '>' | ';'
+                ))
+            .then_some(start + offset)
+        })
+        .unwrap_or(input.len())
 }
 
 fn add_task_frame_to_resume(report: &mut ResumeReport, task_frame: serde_json::Value) {
@@ -4053,6 +4125,99 @@ mod tests {
                 .iter()
                 .any(|artifact| artifact.id == "pack_task_frame"),
             "resume links task-frame artifacts",
+        )
+    }
+
+    #[test]
+    fn handoff_task_frame_redacts_path_like_mesh_labels() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let origin_workspace = "/Users/alice/private/repo";
+        let producer_peer = "/Users/alice/private/peer-agent";
+        let created = crate::core::task_frame::create_task_frame(
+            &crate::core::task_frame::TaskFrameCreateOptions {
+                workspace_path: dir.path().to_path_buf(),
+                goal: format!("Continue mesh handoff for origin {origin_workspace}."),
+                actor: "cod-pane6".to_owned(),
+                status: crate::core::task_frame::TaskFrameStatus::Active,
+                current_focus: Some(format!("Verify producer peer {producer_peer}.")),
+                blockers: vec![format!(
+                    "Do not leak cached mesh material from {origin_workspace}."
+                )],
+                evidence_links: vec![crate::core::task_frame::TaskEvidenceLink {
+                    kind: "memory".to_owned(),
+                    id: "mem_mesh_task_frame".to_owned(),
+                }],
+                created_at: Some("2026-05-16T00:00:00Z".to_owned()),
+                dry_run: false,
+            },
+        )
+        .map_err(|error| error.message())?;
+        let frame_id = created.frame.ok_or_else(|| "missing frame".to_owned())?.id;
+
+        let preview = preview_handoff(&PreviewOptions {
+            workspace: dir.path().to_path_buf(),
+            profile: CapsuleProfile::Resume,
+            since: None,
+            include_estimates: true,
+            task_frame_id: Some(frame_id.clone()),
+        })
+        .map_err(|error| error.message())?;
+        let preview_text = serde_json::to_string(&preview.to_json())
+            .map_err(|error| format!("preview report must serialize: {error}"))?;
+        ensure(
+            !preview_text.contains(origin_workspace) && !preview_text.contains(producer_peer),
+            "preview handoff task frame must not leak raw mesh workspace or producer peer paths",
+        )?;
+
+        let output = dir.path().join("handoff.json");
+        let create = create_handoff(&CreateOptions {
+            workspace: dir.path().to_path_buf(),
+            output: output.clone(),
+            profile: CapsuleProfile::Resume,
+            since: None,
+            dry_run: false,
+            task_frame_id: Some(frame_id),
+            bind_to_machine: false,
+            machine_salt_path: None,
+            redaction_level: RedactionLevel::Standard,
+        })
+        .map_err(|error| error.message())?;
+        let create_text = serde_json::to_string(&create.to_json())
+            .map_err(|error| format!("create report must serialize: {error}"))?;
+        ensure(
+            !create_text.contains(origin_workspace) && !create_text.contains(producer_peer),
+            "create report task frame must not leak raw mesh workspace or producer peer paths",
+        )?;
+
+        let capsule_text = std::fs::read_to_string(&output).map_err(|error| error.to_string())?;
+        ensure(
+            !capsule_text.contains(origin_workspace) && !capsule_text.contains(producer_peer),
+            "handoff capsule must not leak raw mesh workspace or producer peer paths",
+        )?;
+        ensure(
+            capsule_text.contains(&crate::policy::redaction_placeholder("path")),
+            "handoff capsule should preserve an explicit path-redaction marker",
+        )?;
+
+        let resume = resume_handoff(&ResumeOptions {
+            path: output,
+            use_latest: false,
+            workspace: dir.path().to_path_buf(),
+            max_sections: None,
+            task_frame_id: None,
+            bound_workspace_id: None,
+            bound_workspace_identity: None,
+            include_prompt_fragment: true,
+            require_fresh: false,
+            insecure_skip_hmac: false,
+            machine_salt_path: None,
+        })
+        .map_err(|error| error.message())?;
+        let resume_text = serde_json::to_string(&resume.to_json())
+            .map_err(|error| format!("resume report must serialize: {error}"))?;
+        ensure(
+            !resume_text.contains(origin_workspace) && !resume_text.contains(producer_peer),
+            "resume report must not leak raw mesh workspace or producer peer paths",
         )
     }
 
