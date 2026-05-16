@@ -3,6 +3,9 @@ use std::error::Error;
 use std::fmt;
 use std::time::Duration;
 
+use crate::core::degraded_aggregation::{
+    AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
+};
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
     DbOperation,
@@ -3234,6 +3237,20 @@ pub struct GraphFeatureEnrichmentDegradation {
     pub repair: String,
 }
 
+fn aggregate_graph_feature_enrichment_degraded(
+    degraded: &[GraphFeatureEnrichmentDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "graph_feature_enrichment",
+            entry.code,
+            entry.severity,
+            entry.message.clone(),
+            entry.repair.clone(),
+        )
+    }))
+}
+
 /// Pinned source metadata for graph feature enrichment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphFeatureEnrichmentSource {
@@ -3315,18 +3332,7 @@ impl GraphFeatureEnrichmentReport {
                 })
             })
             .collect();
-        let degraded: Vec<_> = self
-            .degraded
-            .iter()
-            .map(|entry| {
-                serde_json::json!({
-                    "code": entry.code,
-                    "severity": entry.severity,
-                    "message": entry.message,
-                    "repair": entry.repair,
-                })
-            })
-            .collect();
+        let degraded = aggregate_graph_feature_enrichment_degraded(&self.degraded);
         let snapshot = self.source.snapshot.as_ref().map(|snapshot| {
             serde_json::json!({
                 "id": snapshot.id,
@@ -3356,7 +3362,7 @@ impl GraphFeatureEnrichmentReport {
             "maxSelectionBoost": score_json(self.max_selection_boost),
             "summary": {
                 "featureCount": self.features.len(),
-                "degradedCount": self.degraded.len(),
+                "degradedCount": degraded.len(),
             },
             "features": features,
             "degraded": degraded,
@@ -4158,6 +4164,20 @@ pub struct GraphExportDegradation {
     pub repair: String,
 }
 
+fn aggregate_graph_export_degraded(
+    degraded: &[GraphExportDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "graph_export",
+            entry.code,
+            entry.severity,
+            entry.message.clone(),
+            entry.repair.clone(),
+        )
+    }))
+}
+
 /// Report from exporting a graph snapshot.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GraphExportReport {
@@ -4189,18 +4209,7 @@ impl GraphExportReport {
             })
         });
 
-        let degraded: Vec<serde_json::Value> = self
-            .degraded
-            .iter()
-            .map(|entry| {
-                serde_json::json!({
-                    "code": entry.code,
-                    "severity": entry.severity,
-                    "message": entry.message,
-                    "repair": entry.repair,
-                })
-            })
-            .collect();
+        let degraded = aggregate_graph_export_degraded(&self.degraded);
 
         serde_json::json!({
             "command": "graph export",
@@ -7128,6 +7137,54 @@ mod tests {
     }
 
     #[test]
+    fn graph_feature_data_json_aggregates_degraded_entries() {
+        let report = super::GraphFeatureEnrichmentReport {
+            schema: super::GRAPH_FEATURE_ENRICHMENT_SCHEMA_V1,
+            version: env!("CARGO_PKG_VERSION"),
+            status: super::GraphFeatureEnrichmentStatus::ScoresUnavailable,
+            source_status: super::CentralityRefreshStatus::GraphFeatureDisabled,
+            source: super::GraphFeatureEnrichmentSource {
+                kind: "live_centrality",
+                workspace_id: None,
+                graph_type: None,
+                snapshot: None,
+            },
+            limited: false,
+            max_features: 0,
+            max_selection_boost: 0.0,
+            features: Vec::new(),
+            degraded: vec![
+                super::GraphFeatureEnrichmentDegradation {
+                    code: "graph_feature_disabled",
+                    severity: "medium",
+                    message: "graph feature support is disabled".to_owned(),
+                    repair: "enable the graph feature".to_owned(),
+                },
+                super::GraphFeatureEnrichmentDegradation {
+                    code: "graph_feature_disabled",
+                    severity: "medium",
+                    message: "graph feature support is still disabled".to_owned(),
+                    repair: "enable the graph feature".to_owned(),
+                },
+            ],
+        };
+
+        let json = report.data_json();
+        let degraded = json["degraded"]
+            .as_array()
+            .expect("degraded entries should serialize as an array");
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(json["summary"]["degradedCount"], 1);
+        assert_eq!(degraded[0]["code"], "graph_feature_disabled");
+        assert_eq!(degraded[0]["severity"], "medium");
+        assert_eq!(
+            degraded[0]["sources"],
+            serde_json::json!(["graph_feature_enrichment"])
+        );
+    }
+
+    #[test]
     fn graph_feature_enrichment_uses_persisted_snapshot_scores() -> TestResult {
         let snapshot = StoredGraphSnapshot {
             id: "gsnap_0000000000000000000000999".to_owned(),
@@ -7486,6 +7543,46 @@ mod tests {
             super::GraphExportStatus::UnsupportedSnapshot.as_str(),
             "unsupported_snapshot"
         );
+    }
+
+    #[test]
+    fn graph_export_data_json_aggregates_degraded_entries() {
+        let report = super::GraphExportReport {
+            schema: super::GRAPH_EXPORT_SCHEMA_V1,
+            version: env!("CARGO_PKG_VERSION"),
+            status: super::GraphExportStatus::NoSnapshot,
+            format: super::GraphExportFormat::Mermaid,
+            workspace_id: WORKSPACE_ID.to_owned(),
+            graph_type: GraphSnapshotType::MemoryLinks.as_str().to_owned(),
+            snapshot: None,
+            node_count: 0,
+            edge_count: 0,
+            diagram: "flowchart TD\n".to_owned(),
+            degraded: vec![
+                super::GraphExportDegradation {
+                    code: "graph_snapshot_missing",
+                    severity: "medium",
+                    message: "no graph snapshot is available".to_owned(),
+                    repair: "refresh graph snapshots".to_owned(),
+                },
+                super::GraphExportDegradation {
+                    code: "graph_snapshot_missing",
+                    severity: "medium",
+                    message: "still no graph snapshot is available".to_owned(),
+                    repair: "refresh graph snapshots".to_owned(),
+                },
+            ],
+        };
+
+        let json = report.data_json();
+        let degraded = json["degraded"]
+            .as_array()
+            .expect("degraded entries should serialize as an array");
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0]["code"], "graph_snapshot_missing");
+        assert_eq!(degraded[0]["severity"], "medium");
+        assert_eq!(degraded[0]["sources"], serde_json::json!(["graph_export"]));
     }
 
     #[test]
