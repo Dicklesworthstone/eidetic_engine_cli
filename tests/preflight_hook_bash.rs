@@ -25,7 +25,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use ee::hooks::{PreflightHookShell, PreflightHookShellOptions, generate_preflight_shell_snippet};
-use tempfile::TempDir;
+use tempfile::{Builder as TempDirBuilder, TempDir};
 
 type TestResult = Result<(), String>;
 
@@ -53,6 +53,24 @@ fn bash_or_skip() -> Option<String> {
     match probe {
         Ok(out) if out.status.success() => Some(bash),
         _ => None,
+    }
+}
+
+fn worker_local_tempdir(prefix: &str) -> Result<TempDir, String> {
+    // RCH workers are Linux hosts. If the Mac-side TMPDIR points at the
+    // USB-NVMe mount, TempDir::new() inherits a path that does not exist on
+    // the worker after sync. Keep these integration temp files worker-local.
+    let tmp_root = Path::new("/tmp");
+    if tmp_root.is_dir() {
+        TempDirBuilder::new()
+            .prefix(prefix)
+            .tempdir_in(tmp_root)
+            .map_err(|e| e.to_string())
+    } else {
+        TempDirBuilder::new()
+            .prefix(prefix)
+            .tempdir()
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -108,7 +126,7 @@ fn bash_snippet_syntax_check_passes() -> TestResult {
         eprintln!("skipping: bash not available on PATH");
         return Ok(());
     };
-    let temp = TempDir::new().map_err(|e| e.to_string())?;
+    let temp = worker_local_tempdir("ee-preflight-bash-")?;
     let stub_path = write_stub_ee_binary(temp.path(), "high", 7)?;
     let (snippet_path, _version) = write_snippet_to_temp(temp.path(), &stub_path)?;
 
@@ -133,7 +151,7 @@ fn bash_snippet_source_defines_hook_function_and_activation_flag() -> TestResult
         eprintln!("skipping: bash not available on PATH");
         return Ok(());
     };
-    let temp = TempDir::new().map_err(|e| e.to_string())?;
+    let temp = worker_local_tempdir("ee-preflight-bash-")?;
     let stub_path = write_stub_ee_binary(temp.path(), "high", 7)?;
     let (snippet_path, _) = write_snippet_to_temp(temp.path(), &stub_path)?;
 
@@ -176,7 +194,7 @@ fn bash_snippet_invokes_stub_ee_with_expected_arguments_via_function_call() -> T
         eprintln!("skipping: bash not available on PATH");
         return Ok(());
     };
-    let temp = TempDir::new().map_err(|e| e.to_string())?;
+    let temp = worker_local_tempdir("ee-preflight-bash-")?;
     // Stub records its argv so the test can verify the snippet calls
     // `ee preflight check --cmd <cmd> --json` with the right shape.
     let stub_path = temp.path().join("ee");
