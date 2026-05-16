@@ -288,6 +288,24 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         category: EnvVar::Json.category(),
     },
     EnvVarEntry {
+        name: EnvVar::L2PackCacheBytes.name(),
+        description: EnvVar::L2PackCacheBytes.description(),
+        default: EnvVar::L2PackCacheBytes.default_value(),
+        category: EnvVar::L2PackCacheBytes.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::L2PackCacheDir.name(),
+        description: EnvVar::L2PackCacheDir.description(),
+        default: EnvVar::L2PackCacheDir.default_value(),
+        category: EnvVar::L2PackCacheDir.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::L2PackCacheDisable.name(),
+        description: EnvVar::L2PackCacheDisable.description(),
+        default: EnvVar::L2PackCacheDisable.default_value(),
+        category: EnvVar::L2PackCacheDisable.category(),
+    },
+    EnvVarEntry {
         name: EnvVar::LogFormat.name(),
         description: EnvVar::LogFormat.description(),
         default: EnvVar::LogFormat.default_value(),
@@ -304,6 +322,12 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         description: EnvVar::MaxTokens.description(),
         default: EnvVar::MaxTokens.default_value(),
         category: EnvVar::MaxTokens.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::MeshEnabled.name(),
+        description: EnvVar::MeshEnabled.description(),
+        default: EnvVar::MeshEnabled.default_value(),
+        category: EnvVar::MeshEnabled.category(),
     },
     EnvVarEntry {
         name: EnvVar::NoColor.name(),
@@ -328,6 +352,24 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         description: EnvVar::Profile.description(),
         default: EnvVar::Profile.default_value(),
         category: EnvVar::Profile.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::ReadPoolDisablePin.name(),
+        description: EnvVar::ReadPoolDisablePin.description(),
+        default: EnvVar::ReadPoolDisablePin.default_value(),
+        category: EnvVar::ReadPoolDisablePin.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::ReadPoolIdleTimeoutSeconds.name(),
+        description: EnvVar::ReadPoolIdleTimeoutSeconds.description(),
+        default: EnvVar::ReadPoolIdleTimeoutSeconds.default_value(),
+        category: EnvVar::ReadPoolIdleTimeoutSeconds.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::ReadPoolSize.name(),
+        description: EnvVar::ReadPoolSize.description(),
+        default: EnvVar::ReadPoolSize.default_value(),
+        category: EnvVar::ReadPoolSize.category(),
     },
     EnvVarEntry {
         name: EnvVar::RememberCurationSyncBudgetMs.name(),
