@@ -1446,6 +1446,21 @@ fn broker_exact_match(
             Some(source_hash) => record.source_hash.as_deref() == Some(source_hash),
             None => true,
         }
+        && broker_env_match(record, request)
+}
+
+fn broker_env_match(
+    record: &VerificationRunRecord,
+    request: &VerificationBrokerViewRequest<'_>,
+) -> bool {
+    match (
+        request.env_fingerprint_class,
+        record.cargo_target_dir_hash_or_class.as_deref(),
+    ) {
+        (Some(req), Some(rec)) => req == rec,
+        (None, _) => true,
+        (Some(_), None) => false,
+    }
 }
 
 fn broker_command_match(

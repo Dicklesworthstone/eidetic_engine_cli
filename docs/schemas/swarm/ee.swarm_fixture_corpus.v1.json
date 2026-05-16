@@ -250,9 +250,9 @@
     }
   ],
   "x-ee-status": {
-    "shipped": false,
-    "tracking_bead": "bd-bife.17",
-    "available_in_build": false,
+    "shipped": true,
+    "tracking_bead": "bd-1zb7k.6",
+    "available_in_build": true,
     "feature_flag": null,
     "expected_version": "0.3.0"
   },

@@ -86,8 +86,8 @@
     "suggestedAction": { "type": "string", "minLength": 1 }
   },
   "x-ee-status": {
-    "shipped": false,
-    "available_in_build": false,
+    "shipped": true,
+    "available_in_build": true,
     "tracking_bead": "bd-6boyo.2"
   },
   "x-ee-doc": "docs/swarm/verification_broker_view.md",

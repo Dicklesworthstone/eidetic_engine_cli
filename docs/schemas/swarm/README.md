@@ -15,8 +15,8 @@ support-bundle or `ee why` inclusion.
 
 The verification broker view schema is `ee.verification.broker_view.v1`.
 `ee verify broker lookup --json` emits it as the derived broker block over
-retained verification run records, but the schema remains marked unshipped
-until `bd-6boyo.2` is closed.
+retained verification run records. It is marked shipped because `bd-6boyo.2`
+is closed and the lookup surface is available in current builds.
 
 Each schema carries `x-ee-status` so agents can distinguish implemented
 surfaces from documented future contracts. A schema with `"shipped": false`

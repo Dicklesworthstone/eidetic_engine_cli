@@ -225,9 +225,9 @@
     }
   ],
   "x-ee-status": {
-    "shipped": false,
+    "shipped": true,
     "tracking_bead": "bd-1zb7k.16.4",
-    "available_in_build": false,
+    "available_in_build": true,
     "feature_flag": null,
     "expected_version": "0.3.0"
   },

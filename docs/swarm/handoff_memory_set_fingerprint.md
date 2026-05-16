@@ -14,7 +14,7 @@ jq '.memorySetHash' handoff-fingerprint.json
 
 Related schemas: `ee.producer.metadata.v1`, `ee.pack.slo.v1`.
 
-Non-goals: this schema is not shipped yet and should not be treated as emitted
-runtime output.
+Non-goals: this schema describes the fingerprint contract only; it is not a
+complete handoff capsule schema and should not be used as the resume envelope.
 
 Tracking Bead: `bd-17c65.13.5`

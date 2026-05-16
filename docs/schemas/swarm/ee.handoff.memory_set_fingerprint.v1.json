@@ -25,9 +25,9 @@
     }
   ],
   "x-ee-status": {
-    "shipped": false,
+    "shipped": true,
     "tracking_bead": "bd-17c65.13.5",
-    "available_in_build": false,
+    "available_in_build": true,
     "feature_flag": null,
     "expected_version": "0.3.0"
   },
