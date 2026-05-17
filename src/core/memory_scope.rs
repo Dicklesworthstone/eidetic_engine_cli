@@ -1033,10 +1033,7 @@ pub fn decide_mesh_outbound_policy(
             redaction,
         );
     }
-    if matches!(input.material_lane, MeshLane::Body | MeshLane::Embedding)
-        && redaction == MeshRedactionDecision::Redact
-        && !input.payload_is_redacted
-    {
+    if redaction == MeshRedactionDecision::Redact && !input.payload_is_redacted {
         return mesh_outbound_policy_decision(
             input,
             policy_id,
@@ -2205,6 +2202,28 @@ max_bytes = 0
         assert!(!raw.permits_payload_export());
 
         let mut redacted_input = outbound_policy_input(MeshLane::Body);
+        redacted_input.payload_is_redacted = true;
+        let redacted = decide_mesh_outbound_policy(&redacted_input, Some(&policy));
+        assert_eq!(redacted.action, MeshImportDecisionKind::Allow);
+        assert_eq!(redacted.reason, "outbound_lane_allowed");
+        assert_eq!(redacted.redaction, MeshRedactionDecision::Redact);
+        assert!(redacted.permits_payload_export());
+        assert!(!redacted.permits_raw_payload_export());
+        assert!(redacted.requires_redacted_payload());
+    }
+
+    #[test]
+    fn mesh_outbound_policy_requires_redacted_metadata_when_metadata_redaction_is_required() {
+        let mut policy = peer_policy();
+        policy.redaction.metadata = MeshRedactionDecision::Redact;
+
+        let raw =
+            decide_mesh_outbound_policy(&outbound_policy_input(MeshLane::Metadata), Some(&policy));
+        assert_eq!(raw.action, MeshImportDecisionKind::Deny);
+        assert_eq!(raw.reason, "outbound_payload_requires_redaction");
+        assert!(!raw.permits_payload_export());
+
+        let mut redacted_input = outbound_policy_input(MeshLane::Metadata);
         redacted_input.payload_is_redacted = true;
         let redacted = decide_mesh_outbound_policy(&redacted_input, Some(&policy));
         assert_eq!(redacted.action, MeshImportDecisionKind::Allow);
