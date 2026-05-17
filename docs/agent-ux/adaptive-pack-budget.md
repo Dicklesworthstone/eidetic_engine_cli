@@ -7,6 +7,20 @@ explicit `--max-tokens` value remains authoritative.
 
 The budget decision block uses schema `ee.context.budget.v1`.
 
+## Configuration
+
+Once context wiring lands, opt in with:
+
+```toml
+[pack]
+adaptive_budget = true
+```
+
+The built-in default is `false`, so existing `ee context` calls keep using
+`[pack].default_max_tokens` until an operator opts in. The key is the rollout
+gate for adaptive selection; the configured maximum token bound still caps
+every computed budget.
+
 ## What To Read
 
 Start with these fields:

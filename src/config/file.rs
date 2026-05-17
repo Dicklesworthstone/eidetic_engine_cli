@@ -233,6 +233,7 @@ pub struct PackConfig {
     pub default_profile: Option<String>,
     pub default_format: Option<String>,
     pub default_max_tokens: Option<u64>,
+    pub adaptive_budget: Option<bool>,
     pub mmr_lambda: Option<f64>,
     pub candidate_pool: Option<u64>,
 }
@@ -243,6 +244,7 @@ impl PackConfig {
             default_profile: optional_string(document, "pack", "default_profile")?,
             default_format: optional_string(document, "pack", "default_format")?,
             default_max_tokens: optional_u64(document, "pack", "default_max_tokens")?,
+            adaptive_budget: optional_bool(document, "pack", "adaptive_budget")?,
             mmr_lambda: optional_unit_float(document, "pack", "mmr_lambda")?,
             candidate_pool: optional_u64(document, "pack", "candidate_pool")?,
         })
@@ -2055,6 +2057,7 @@ graph_weight = 0.10
 default_profile = "balanced"
 default_format = "markdown"
 default_max_tokens = 4000
+adaptive_budget = true
 mmr_lambda = 0.7
 candidate_pool = 100
 
@@ -2242,6 +2245,11 @@ prompt_injection_guard = true
             "pack default format",
         )?;
         ensure_equal(&config.pack.default_max_tokens, &Some(4000), "max tokens")?;
+        ensure_equal(
+            &config.pack.adaptive_budget,
+            &Some(true),
+            "adaptive pack budget",
+        )?;
         ensure_equal(
             &config.handoff.stale_threshold.memories_added,
             &Some(20),

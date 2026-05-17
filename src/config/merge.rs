@@ -49,6 +49,7 @@ pub const SEARCH_GRAPH_WEIGHT_KEY: &str = "search.graph_weight";
 pub const PACK_DEFAULT_PROFILE_KEY: &str = "pack.default_profile";
 pub const PACK_DEFAULT_FORMAT_KEY: &str = "pack.default_format";
 pub const PACK_DEFAULT_MAX_TOKENS_KEY: &str = "pack.default_max_tokens";
+pub const PACK_ADAPTIVE_BUDGET_KEY: &str = "pack.adaptive_budget";
 pub const PACK_MMR_LAMBDA_KEY: &str = "pack.mmr_lambda";
 pub const PACK_CANDIDATE_POOL_KEY: &str = "pack.candidate_pool";
 pub const CACHE_PACK_L2_ENABLED_KEY: &str = "cache.pack_l2.enabled";
@@ -332,6 +333,13 @@ impl MergedConfig {
                 PACK_DEFAULT_MAX_TOKENS_KEY,
                 tokens.to_string(),
                 self.source(PACK_DEFAULT_MAX_TOKENS_KEY),
+            ));
+        }
+        if let Some(adaptive) = self.values.pack.adaptive_budget {
+            entries.push(ConfigShowEntry::new(
+                PACK_ADAPTIVE_BUDGET_KEY,
+                adaptive.to_string(),
+                self.source(PACK_ADAPTIVE_BUDGET_KEY),
             ));
         }
         if let Some(lambda) = self.values.pack.mmr_lambda {
@@ -851,6 +859,7 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             default_profile: Some("balanced".to_string()),
             default_format: Some("markdown".to_string()),
             default_max_tokens: Some(4000),
+            adaptive_budget: Some(false),
             mmr_lambda: Some(0.7),
             candidate_pool: Some(100),
         },
@@ -1036,6 +1045,7 @@ pub fn config_from_env(
             default_profile: optional_env_string(env, EnvVar::Profile.name())?,
             default_format: None,
             default_max_tokens: optional_env_u64(env, EnvVar::MaxTokens.name())?,
+            adaptive_budget: None,
             mmr_lambda: None,
             candidate_pool: None,
         },
@@ -1319,6 +1329,15 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.pack.default_max_tokens,
                 &layers.user.pack.default_max_tokens,
                 &layers.defaults.pack.default_max_tokens,
+            ),
+            adaptive_budget: pick_field(
+                &mut sources,
+                PACK_ADAPTIVE_BUDGET_KEY,
+                &layers.cli.pack.adaptive_budget,
+                &layers.environment.pack.adaptive_budget,
+                &layers.project.pack.adaptive_budget,
+                &layers.user.pack.adaptive_budget,
+                &layers.defaults.pack.adaptive_budget,
             ),
             mmr_lambda: pick_field(
                 &mut sources,
@@ -2048,9 +2067,9 @@ mod tests {
         GRAPH_PPR_ALPHA_KEY, LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY,
         LEARN_DECAY_DEMOTE_THRESHOLD_KEY, LEARN_DECAY_PROCEDURAL_RULE_HALF_LIFE_DAYS_KEY,
         MESH_COMMAND_MODE_KEY, MESH_ENABLED_KEY, MESH_PEER_GROUP_BINDINGS_KEY,
-        MESH_PEER_POLICIES_KEY, PACK_DEFAULT_MAX_TOKENS_KEY, PACK_DEFAULT_PROFILE_KEY,
-        POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY, SEARCH_DEFAULT_SPEED_KEY,
-        STORAGE_DATABASE_PATH_KEY, STORAGE_INDEX_DIR_KEY,
+        MESH_PEER_POLICIES_KEY, PACK_ADAPTIVE_BUDGET_KEY, PACK_DEFAULT_MAX_TOKENS_KEY,
+        PACK_DEFAULT_PROFILE_KEY, POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY,
+        SEARCH_DEFAULT_SPEED_KEY, STORAGE_DATABASE_PATH_KEY, STORAGE_INDEX_DIR_KEY,
         STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY, STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY,
         STORAGE_READ_POOL_PIN_SNAPSHOT_KEY, STORAGE_READ_POOL_SIZE_KEY, built_in_config,
         config_from_env, merge_config,
@@ -2130,6 +2149,11 @@ mod tests {
             "default profile",
         )?;
         ensure_equal(&defaults.pack.default_max_tokens, &Some(4000), "max tokens")?;
+        ensure_equal(
+            &defaults.pack.adaptive_budget,
+            &Some(false),
+            "adaptive budget default off",
+        )?;
         ensure_equal(
             &defaults.cache.pack_l2.enabled,
             &Some(true),
@@ -2399,6 +2423,10 @@ mod tests {
                 default_speed: Some(SearchSpeed::Thorough),
                 ..SearchConfig::default()
             },
+            pack: PackConfig {
+                adaptive_budget: Some(true),
+                ..PackConfig::default()
+            },
             graph: GraphConfig {
                 ppr: GraphPprConfig { alpha: Some(0.40) },
                 health: GraphHealthConfig {
@@ -2556,6 +2584,16 @@ mod tests {
             &merged.source(PACK_DEFAULT_MAX_TOKENS_KEY),
             &Some(ConfigValueSource::Default),
             "default max tokens source",
+        )?;
+        ensure_equal(
+            &merged.values.pack.adaptive_budget,
+            &Some(true),
+            "project adaptive budget",
+        )?;
+        ensure_equal(
+            &merged.source(PACK_ADAPTIVE_BUDGET_KEY),
+            &Some(ConfigValueSource::Project),
+            "adaptive budget source",
         )?;
         ensure_equal(
             &merged.values.cache.pack_l2.max_bytes,
@@ -2734,6 +2772,7 @@ mod tests {
             MESH_COMMAND_MODE_KEY,
             MESH_PEER_GROUP_BINDINGS_KEY,
             MESH_PEER_POLICIES_KEY,
+            PACK_ADAPTIVE_BUDGET_KEY,
             STORAGE_READ_POOL_SIZE_KEY,
             STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY,
             STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY,
