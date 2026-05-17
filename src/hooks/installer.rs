@@ -524,6 +524,38 @@ fn preflight_hook_target(target_path: &Path) -> Result<(), DomainError> {
     }
 }
 
+fn preflight_hook_temp_target(temp_path: &Path) -> Result<(), DomainError> {
+    match std::fs::symlink_metadata(temp_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(DomainError::PolicyDenied {
+            message: format!(
+                "Refusing to write temporary hook '{}': path is a symlink (could overwrite arbitrary target)",
+                temp_path.display()
+            ),
+            repair: Some("Remove the symlink before installing hooks.".to_owned()),
+        }),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write temporary hook '{}': temporary hook path already exists",
+                temp_path.display()
+            ),
+            repair: Some(
+                "Remove the stale temporary hook file after confirming no install is running."
+                    .to_owned(),
+            ),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect temporary hook target '{}': {error}",
+                temp_path.display()
+            ),
+            repair: Some(
+                "Choose a writable hook directory or re-run with corrected permissions.".to_owned(),
+            ),
+        }),
+    }
+}
+
 fn preflight_hook_writes(hook_dir: &Path, writes: &[PlannedHookWrite]) -> Result<(), DomainError> {
     ensure_hook_dir_is_not_symlink(hook_dir)?;
     std::fs::create_dir_all(hook_dir).map_err(|error| DomainError::Storage {
@@ -538,7 +570,7 @@ fn preflight_hook_writes(hook_dir: &Path, writes: &[PlannedHookWrite]) -> Result
 
     for write in writes {
         preflight_hook_target(&write.target_path)?;
-        preflight_hook_target(&hook_temp_path(&write.target_path))?;
+        preflight_hook_temp_target(&hook_temp_path(&write.target_path))?;
     }
 
     Ok(())
@@ -546,18 +578,6 @@ fn preflight_hook_writes(hook_dir: &Path, writes: &[PlannedHookWrite]) -> Result
 
 fn write_hook_file(hook_dir: &Path, target_path: &Path, content: &str) -> Result<(), DomainError> {
     ensure_hook_dir_is_not_symlink(hook_dir)?;
-
-    if let Ok(metadata) = std::fs::symlink_metadata(target_path) {
-        if metadata.file_type().is_symlink() {
-            return Err(DomainError::PolicyDenied {
-                message: format!(
-                    "Refusing to write hook '{}': path is a symlink (could overwrite arbitrary target)",
-                    target_path.display()
-                ),
-                repair: Some("Remove the symlink before installing hooks.".to_owned()),
-            });
-        }
-    }
 
     std::fs::create_dir_all(hook_dir).map_err(|error| DomainError::Storage {
         message: format!(
@@ -570,17 +590,22 @@ fn write_hook_file(hook_dir: &Path, target_path: &Path, content: &str) -> Result
     })?;
 
     let temp_path = hook_temp_path(target_path);
-    preflight_hook_target(&temp_path)?;
+    preflight_hook_target(target_path)?;
+    preflight_hook_temp_target(&temp_path)?;
 
     {
         use std::io::Write;
-        let mut file = std::fs::File::create(&temp_path).map_err(|error| DomainError::Storage {
-            message: format!(
-                "Failed to create temporary hook '{}': {error}",
-                temp_path.display()
-            ),
-            repair: Some("Check hook path permissions.".to_owned()),
-        })?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to create temporary hook '{}': {error}",
+                    temp_path.display()
+                ),
+                repair: Some("Check hook path permissions.".to_owned()),
+            })?;
         file.write_all(content.as_bytes())
             .map_err(|error| DomainError::Storage {
                 message: format!(
@@ -1552,6 +1577,83 @@ mod tests {
         assert!(
             !hook_dir.join("pre-task").exists(),
             "first hook must not be written when a later special file target fails preflight"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn write_hook_file_rechecks_non_regular_target_before_temp_write() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_dir = temp.path().join("hooks");
+        fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
+        let hook_path = hook_dir.join("pre-task");
+        fs::create_dir(&hook_path).map_err(|e| e.to_string())?;
+
+        let error = match write_hook_file(
+            &hook_dir,
+            &hook_path,
+            &generate_hook_content(HookType::PreTask, &fixed_ee_binary()),
+        ) {
+            Ok(_) => return Err("write should reject non-regular hook target".to_owned()),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "storage");
+        assert!(
+            error.message().contains("path is a directory"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert!(
+            !hook_dir.join("pre-task.tmp").exists(),
+            "temp hook must not be written when final target recheck fails"
+        );
+        assert!(
+            hook_path.is_dir(),
+            "non-regular hook target must remain untouched"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn install_rejects_existing_temp_hook_without_truncating_it() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_dir = temp.path().join("hooks");
+        fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
+        let temp_hook_path = hook_dir.join("pre-task.tmp");
+        fs::write(&temp_hook_path, "stale temp content").map_err(|e| e.to_string())?;
+
+        let options = HookInstallOptions {
+            hook_dir: hook_dir.clone(),
+            hooks: vec![HookType::PreTask],
+            dry_run: false,
+            preserve_existing: false,
+            force: false,
+        };
+
+        let error = match install_hooks_for_test(&options) {
+            Ok(_) => return Err("install should reject existing temp hook path".to_owned()),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "storage");
+        assert!(
+            error
+                .message()
+                .contains("temporary hook path already exists"),
+            "unexpected error: {}",
+            error.message()
+        );
+        let temp_content = fs::read_to_string(&temp_hook_path).map_err(|e| e.to_string())?;
+        assert_eq!(
+            temp_content, "stale temp content",
+            "existing temp hook must not be truncated"
+        );
+        assert!(
+            !hook_dir.join("pre-task").exists(),
+            "final hook target must not be written when temp path exists"
         );
 
         Ok(())
