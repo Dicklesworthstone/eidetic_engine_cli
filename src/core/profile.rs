@@ -2954,6 +2954,55 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn profile_config_publish_rechecks_temp_symlink_before_rename() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_path = temp.path().join(".ee").join("config.toml");
+        let temp_path = config_path.with_extension("toml.tmp");
+        let preserved_temp = config_path.with_extension("toml.tmp.preserved");
+        fs::create_dir_all(temp_path.parent().expect("profile config temp parent"))
+            .map_err(|error| error.to_string())?;
+        write_profile_config_temp_file(&temp_path, b"[profile]\nselected = \"swarm\"\n")
+            .map_err(|error| error.to_string())?;
+        fs::rename(&temp_path, &preserved_temp).map_err(|error| error.to_string())?;
+
+        let outside_config = temp.path().join("outside-config.toml");
+        fs::write(&outside_config, "outside sentinel").map_err(|error| error.to_string())?;
+        symlink(&outside_config, &temp_path).map_err(|error| error.to_string())?;
+
+        let error = publish_profile_config_temp_file(&temp_path, &config_path)
+            .expect_err("temp symlink must be rejected before profile config publish");
+        ensure_true(
+            error.to_string().contains("symlinked path component")
+                || error.to_string().contains("not a regular file"),
+            "temp symlink publish error message",
+        )?;
+        ensure_true(
+            !config_path.exists(),
+            "profile config must not publish through swapped temp symlink",
+        )?;
+        ensure(
+            fs::read_to_string(&outside_config).map_err(|error| error.to_string())?,
+            "outside sentinel".to_owned(),
+            "outside symlink target remains unchanged",
+        )?;
+        ensure_true(
+            fs::symlink_metadata(&temp_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "rejected temp config symlink remains for inspection",
+        )?;
+        ensure(
+            fs::read_to_string(&preserved_temp).map_err(|error| error.to_string())?,
+            "[profile]\nselected = \"swarm\"\n".to_owned(),
+            "preserved temp config remains available after simulated swap",
+        )
+    }
+
     #[test]
     fn profile_config_conflict_blocks_write() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
