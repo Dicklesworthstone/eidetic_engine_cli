@@ -5,6 +5,7 @@
 //! commands, route tools, or mutate workspace source files.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -583,9 +584,13 @@ fn write_store(store_path: &Path, store: &TaskFrameStoreDocument) -> Result<(), 
         message: format!("Failed to serialize task-frame store: {error}"),
         repair: Some("Report this serialization bug.".to_owned()),
     })? + "\n";
-    fs::write(store_path, text).map_err(|error| DomainError::Storage {
+    let temp_path = store_path.with_extension("json.tmp");
+    ensure_no_symlink_components(&temp_path, "write")?;
+    ensure_write_store_temp_path(&temp_path)?;
+    write_store_temp_file(&temp_path, &text)?;
+    fs::rename(&temp_path, store_path).map_err(|error| DomainError::Storage {
         message: format!(
-            "Failed to write task-frame store `{}`: {error}",
+            "Failed to publish task-frame store `{}`: {error}",
             store_path.display()
         ),
         repair: Some("Check workspace .ee permissions.".to_owned()),
@@ -611,6 +616,62 @@ fn ensure_write_store_final_path(store_path: &Path) -> Result<(), DomainError> {
             repair: Some("Check workspace .ee permissions.".to_owned()),
         }),
     }
+}
+
+fn ensure_write_store_temp_path(temp_path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(temp_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write task-frame temp store `{}` because it already exists.",
+                temp_path.display()
+            ),
+            repair: Some("Remove stale .ee/task_frames.json.tmp and retry.".to_owned()),
+        }),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write task-frame temp store `{}` because it is not a regular file.",
+                temp_path.display()
+            ),
+            repair: Some("Replace .ee/task_frames.json.tmp with a regular file.".to_owned()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect task-frame temp store `{}` before write: {error}",
+                temp_path.display()
+            ),
+            repair: Some("Check workspace .ee permissions.".to_owned()),
+        }),
+    }
+}
+
+fn write_store_temp_file(temp_path: &Path, text: &str) -> Result<(), DomainError> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp_path)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to create task-frame temp store `{}`: {error}",
+                temp_path.display()
+            ),
+            repair: Some("Check workspace .ee permissions.".to_owned()),
+        })?;
+    file.write_all(text.as_bytes())
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to write task-frame temp store `{}`: {error}",
+                temp_path.display()
+            ),
+            repair: Some("Check workspace .ee permissions.".to_owned()),
+        })?;
+    file.sync_all().map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to sync task-frame temp store `{}`: {error}",
+            temp_path.display()
+        ),
+        repair: Some("Check workspace .ee permissions.".to_owned()),
+    })
 }
 
 fn ensure_no_symlink_components(path: &Path, operation: &'static str) -> Result<(), DomainError> {
@@ -1016,6 +1077,39 @@ mod tests {
         assert!(
             task_frame_store_path(&workspace).is_dir(),
             "task-frame write must leave non-regular final path untouched"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn create_frame_rejects_existing_temp_store_without_truncating() -> TestResult {
+        let workspace = temp_workspace("write-existing-temp")?;
+        let store_path = task_frame_store_path(&workspace);
+        let temp_path = store_path.with_extension("json.tmp");
+        let parent = temp_path
+            .parent()
+            .ok_or_else(|| "missing temp parent".to_owned())?;
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        fs::write(&temp_path, b"keep me").map_err(|error| error.to_string())?;
+
+        let error = match create_task_frame(&create_options(workspace.clone())) {
+            Ok(report) => return Err(format!("existing temp file should fail, got {report:?}")),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "storage");
+        assert!(
+            error.message().contains("already exists"),
+            "error should mention existing temp file"
+        );
+        assert_eq!(
+            fs::read_to_string(&temp_path).map_err(|error| error.to_string())?,
+            "keep me",
+            "task-frame write must not truncate an existing temp file"
+        );
+        assert!(
+            !store_path.exists(),
+            "task-frame write must not publish final store after temp collision"
         );
         Ok(())
     }
