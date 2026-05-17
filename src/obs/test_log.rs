@@ -638,6 +638,8 @@ mod tests {
             EventKind::AssertOk,
             EventKind::AssertFail,
             EventKind::CommandEnd,
+            EventKind::ProptestRun,
+            EventKind::RedactionApply,
         ] {
             log_event_to(tmp.path(), LogLevel::Quiet, &TestEvent::new("smoke", kind));
         }
@@ -645,7 +647,15 @@ mod tests {
             .iter()
             .map(|l| l["kind"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(kinds, vec!["assert_fail", "command_end"]);
+        assert_eq!(
+            kinds,
+            vec![
+                "assert_fail",
+                "command_end",
+                "proptest_run",
+                "redaction_apply"
+            ]
+        );
     }
 
     #[test]
