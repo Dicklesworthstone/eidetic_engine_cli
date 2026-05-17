@@ -108,30 +108,22 @@ pub fn discover_with_override(
     // Check EE_CASS_BINARY env var first
     if let Some(env_path) = read(EnvVar::CassBinary) {
         let path = PathBuf::from(&env_path);
-        if path.is_file() {
-            return Ok(DiscoveredBinary::new(
-                canonicalize_path(&path)?,
-                DiscoverySource::EnvVar,
-            ));
+        match validate_discovery_binary_path(&path) {
+            Ok(canonical) => {
+                return Ok(DiscoveredBinary::new(canonical, DiscoverySource::EnvVar));
+            }
+            Err(error) => return Err(error),
         }
-        return Err(CassError::InvalidBinary {
-            binary: path,
-            reason: "EE_CASS_BINARY path does not exist or is not a file".to_string(),
-        });
     }
 
     // Check config override
     if let Some(override_path) = config_override {
-        if override_path.is_file() {
-            return Ok(DiscoveredBinary::new(
-                canonicalize_path(override_path)?,
-                DiscoverySource::Config,
-            ));
+        match validate_discovery_binary_path(override_path) {
+            Ok(canonical) => {
+                return Ok(DiscoveredBinary::new(canonical, DiscoverySource::Config));
+            }
+            Err(error) => return Err(error),
         }
-        return Err(CassError::InvalidBinary {
-            binary: override_path.to_path_buf(),
-            reason: "config [cass.binary] path does not exist or is not a file".to_string(),
-        });
     }
 
     // Search $PATH
@@ -245,6 +237,21 @@ fn validate_import_binary(
     Ok(DiscoveredBinary::new(canonicalize_path(path)?, source))
 }
 
+fn validate_discovery_binary_path(path: &Path) -> Result<PathBuf, CassError> {
+    reject_existing_symlink_component(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => canonicalize_path(path),
+        Ok(_) => Err(CassError::InvalidBinary {
+            binary: path.to_path_buf(),
+            reason: "CASS binary path does not exist or is not a file".to_string(),
+        }),
+        Err(error) => Err(CassError::InvalidBinary {
+            binary: path.to_path_buf(),
+            reason: format!("CASS binary metadata is unavailable: {error}"),
+        }),
+    }
+}
+
 fn reject_existing_symlink_component(path: &Path) -> Result<(), CassError> {
     let mut current = PathBuf::new();
     for component in path.components() {
@@ -254,7 +261,7 @@ fn reject_existing_symlink_component(path: &Path) -> Result<(), CassError> {
                 return Err(CassError::InvalidBinary {
                     binary: path.to_path_buf(),
                     reason: format!(
-                        "CASS import binary path contains symlink component `{}`",
+                        "CASS binary path contains symlink component `{}`",
                         current.display()
                     ),
                 });
@@ -264,9 +271,7 @@ fn reject_existing_symlink_component(path: &Path) -> Result<(), CassError> {
             Err(error) => {
                 return Err(CassError::InvalidBinary {
                     binary: path.to_path_buf(),
-                    reason: format!(
-                        "CASS import binary path component metadata is unavailable: {error}"
-                    ),
+                    reason: format!("CASS binary path component metadata is unavailable: {error}"),
                 });
             }
         }
@@ -393,10 +398,8 @@ fn search_path_for(name: &str) -> Option<PathBuf> {
 fn search_path_for_in(name: &str, path_var: &OsStr) -> Option<PathBuf> {
     for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join(name);
-        if candidate.is_file() {
-            if let Ok(path) = candidate.canonicalize() {
-                return Some(path);
-            }
+        if let Ok(path) = validate_discovery_binary_path(&candidate) {
+            return Some(path);
         }
     }
     None
@@ -911,6 +914,36 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn discover_with_override_rejects_symlinked_config_path() -> TestResult {
+        let dir = unique_test_dir("symlinked-config-binary")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let real_binary = dir.join("real-cass");
+        let binary_link = dir.join(DEFAULT_BINARY);
+        write_test_cass_binary(&real_binary, 0o755)?;
+        std::os::unix::fs::symlink(&real_binary, &binary_link)
+            .map_err(|error| error.to_string())?;
+
+        let result = discover_with_override(Some(&binary_link));
+        let error = match result {
+            Ok(discovered) => {
+                return Err(format!(
+                    "symlinked config binary should be rejected, got {}",
+                    discovered.path.display()
+                ));
+            }
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind_str(), "invalid_binary");
+        assert!(
+            error.to_string().contains("symlink"),
+            "unexpected error: {error}",
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn path_search_canonicalizes_relative_matches() -> TestResult {
         let relative_dir = PathBuf::from("target")
             .join("ee-cass-client-tests")
@@ -934,6 +967,24 @@ mod tests {
             discovered,
             binary.canonicalize().map_err(|error| error.to_string())?
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_search_rejects_symlinked_candidate() -> TestResult {
+        let dir = unique_test_dir("symlinked-path-binary")?;
+        let path_dir = dir.join("path");
+        fs::create_dir_all(&path_dir).map_err(|error| error.to_string())?;
+        let real_binary = dir.join("real-cass");
+        let binary_link = path_dir.join(DEFAULT_BINARY);
+        write_test_cass_binary(&real_binary, 0o755)?;
+        std::os::unix::fs::symlink(&real_binary, &binary_link)
+            .map_err(|error| error.to_string())?;
+
+        let discovered = search_path_for_in(DEFAULT_BINARY, path_dir.as_os_str());
+
+        assert_eq!(discovered, None);
         Ok(())
     }
 
