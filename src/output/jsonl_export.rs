@@ -445,9 +445,7 @@ fn redact_link_metadata_field(key: &str, value: &mut serde_json::Value, level: R
             }
         }
         serde_json::Value::String(text) if link_metadata_path_key(key) => {
-            if level.redacts_paths() {
-                *text = redact_content(text, level);
-            } else if level.redacts_secrets() {
+            if level.redacts_paths() || level.redacts_secrets() {
                 *text = redact_content(text, level);
             }
         }
