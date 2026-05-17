@@ -662,6 +662,20 @@ mod tests {
             handle.join().expect("thread joins");
         }
 
+        {
+            let mut guard = cache.write().expect("cache lock");
+            for index in 0..8 {
+                let key = key(&format!("seed-{index}"), 1);
+                let expected_scores = scores(&[(&format!("mem-{index}"), index as f64)]);
+                let hit = guard.get(&key).expect("inserted entry remains readable");
+                assert_eq!(hit.scores, expected_scores);
+                assert_eq!(
+                    hit.result_hash,
+                    ppr_prefetch_result_hash(&key, &expected_scores)
+                );
+            }
+        }
+
         let guard = cache.read().expect("cache lock");
         let dump = guard.debug_dump();
 
