@@ -831,16 +831,24 @@ fn pack_file_metadata_no_symlinks(
     else {
         return Ok(None);
     };
-    fs::metadata(&target_path)
-        .map(Some)
-        .map_err(|error| DomainError::Storage {
+    let metadata = fs::symlink_metadata(&target_path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "pack_artifact_metadata_unavailable: {}: {}",
+            target_path.display(),
+            error
+        ),
+        repair: None,
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(DomainError::Storage {
             message: format!(
-                "pack_artifact_metadata_unavailable: {}: {}",
-                target_path.display(),
-                error
+                "pack_artifact_metadata_unavailable: {}: not a regular file",
+                target_path.display()
             ),
-            repair: None,
-        })
+            repair: Some("Use regular repro pack member files without symbolic links".to_string()),
+        });
+    }
+    Ok(Some(metadata))
 }
 
 fn resolve_pack_file_path_no_symlinks(
@@ -1263,6 +1271,33 @@ mod tests {
 
         assert_eq!(error.code(), "storage");
         assert!(error.message().contains("symlink"));
+        Ok(())
+    }
+
+    #[test]
+    fn minimize_pack_rejects_non_regular_required_member() -> TestResult {
+        let workspace = temp_root("ee_repro_minimize_non_regular_member_")?;
+        let pack = workspace.join("pack");
+        fs::create_dir_all(pack.join("env.json")).map_err(|e| e.to_string())?;
+
+        let error = minimize_pack(&MinimizeOptions {
+            pack_path: pack.clone(),
+            output_dir: workspace.join("minimized"),
+            dry_run: true,
+            ..Default::default()
+        })
+        .expect_err("non-regular required pack member must be rejected");
+
+        assert_eq!(error.code(), "storage");
+        assert!(
+            error.message().contains("not a regular file"),
+            "expected non-regular metadata failure, got: {}",
+            error.message()
+        );
+        assert!(
+            pack.join("env.json").is_dir(),
+            "non-regular repro pack member should remain untouched"
+        );
         Ok(())
     }
 
