@@ -3919,8 +3919,7 @@ pub fn parse_rch_local_capability_snapshot(
         && !queue_start_stalled
         && !queue_capacity_blocked
         && dry_run_would_offload.unwrap_or(true)
-        && status_socket_consistent.unwrap_or(true)
-        && (!remote_only_required || route_available);
+        && status_socket_consistent.unwrap_or(true);
     let mut degraded = Vec::new();
     let mut recovery = Vec::new();
 
