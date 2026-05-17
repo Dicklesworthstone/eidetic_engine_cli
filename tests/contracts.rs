@@ -207,3 +207,6 @@ mod workspace_git_snapshot_read_only;
 
 #[path = "contracts/workspace_secret_risk_no_leak.rs"]
 mod workspace_secret_risk_no_leak;
+
+#[path = "contracts/hygiene_reason_code_vocabulary.rs"]
+mod hygiene_reason_code_vocabulary;

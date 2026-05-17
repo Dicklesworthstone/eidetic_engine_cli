@@ -300,7 +300,7 @@ pub fn classify_beads_state(inputs: BeadsHygieneInputs<'_>) -> BeadsHygieneState
             parse_error_line,
             reservation_holders: other_agent_reservations,
             degraded_codes: maybe_with_self_reservation_code(
-                content_degraded.clone(),
+                content_degraded,
                 saw_self_reservation,
             ),
         };
@@ -316,7 +316,7 @@ pub fn classify_beads_state(inputs: BeadsHygieneInputs<'_>) -> BeadsHygieneState
             parse_error_line,
             reservation_holders: other_agent_reservations,
             degraded_codes: maybe_with_self_reservation_code(
-                content_degraded.clone(),
+                content_degraded,
                 saw_self_reservation,
             ),
         };
