@@ -420,6 +420,12 @@ pub fn get_or_create_installation_salt() -> Result<Vec<u8>, CanonicalizationErro
 fn read_existing_installation_salt(
     salt_path: &Path,
 ) -> Result<Option<Vec<u8>>, CanonicalizationError> {
+    ensure_installation_salt_path_has_no_symlink_components(salt_path).map_err(|source| {
+        CanonicalizationError::SaltReadFailure {
+            path: salt_path.to_path_buf(),
+            source,
+        }
+    })?;
     let metadata = match fs::symlink_metadata(salt_path).map_err(|source| {
         CanonicalizationError::SaltReadFailure {
             path: salt_path.to_path_buf(),
@@ -468,12 +474,24 @@ fn get_salt_path() -> PathBuf {
 fn create_installation_salt(salt_path: &Path) -> Result<Vec<u8>, CanonicalizationError> {
     use std::os::unix::fs::OpenOptionsExt;
 
+    ensure_installation_salt_path_has_no_symlink_components(salt_path).map_err(|source| {
+        CanonicalizationError::SaltCreateFailure {
+            path: salt_path.to_path_buf(),
+            source,
+        }
+    })?;
     if let Some(parent) = salt_path.parent() {
         fs::create_dir_all(parent).map_err(|source| CanonicalizationError::SaltCreateFailure {
             path: salt_path.to_path_buf(),
             source,
         })?;
     }
+    ensure_installation_salt_path_has_no_symlink_components(salt_path).map_err(|source| {
+        CanonicalizationError::SaltCreateFailure {
+            path: salt_path.to_path_buf(),
+            source,
+        }
+    })?;
 
     // Generate 32 bytes of OS-backed random salt.
     let salt = rand_salt().map_err(|source| CanonicalizationError::SaltCreateFailure {
@@ -501,6 +519,45 @@ fn create_installation_salt(salt_path: &Path) -> Result<Vec<u8>, Canonicalizatio
     })?;
 
     Ok(salt.to_vec())
+}
+
+fn ensure_installation_salt_path_has_no_symlink_components(salt_path: &Path) -> io::Result<()> {
+    let mut current = PathBuf::new();
+    for component in salt_path.components() {
+        match component {
+            Component::Prefix(_)
+            | Component::RootDir
+            | Component::CurDir
+            | Component::ParentDir => {
+                current.push(component.as_os_str());
+            }
+            Component::Normal(part) => {
+                current.push(part);
+            }
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "installation salt path contains symlinked component '{}'",
+                        current.display()
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn rand_salt() -> io::Result<[u8; 32]> {
@@ -1657,7 +1714,7 @@ mod tests {
 
     use super::{
         CanonicalizationError, PlatformCaseHandling, SymlinkPolicy, canonicalize_workspace_path,
-        rand_salt, read_existing_installation_salt,
+        create_installation_salt, rand_salt, read_existing_installation_salt,
     };
 
     #[test]
@@ -1836,6 +1893,59 @@ mod tests {
             }
             other => Err(format!("unexpected error: {other}")),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installation_salt_rejects_symlinked_parent_before_read() -> TestResult {
+        let scratch = ScratchDir::new("salt-symlink-parent-read")?;
+        let real_data = scratch.make_dir("real-data/ee")?;
+        let salt_path = real_data.join(".salt");
+        fs::write(&salt_path, "outside-salt").map_err(|error| error.to_string())?;
+        let linked_data = scratch.path().join("linked-data");
+        std::os::unix::fs::symlink(scratch.path().join("real-data"), &linked_data)
+            .map_err(|error| format!("symlink salt parent: {error}"))?;
+        let linked_salt_path = linked_data.join("ee/.salt");
+
+        let error = read_existing_installation_salt(&linked_salt_path)
+            .expect_err("expected symlinked salt parent to be rejected");
+
+        match error {
+            CanonicalizationError::SaltReadFailure { path, source } => {
+                assert_eq!(path, linked_salt_path);
+                assert_eq!(source.kind(), io::ErrorKind::InvalidData);
+                assert!(source.to_string().contains("symlinked component"));
+                Ok(())
+            }
+            other => Err(format!("unexpected error: {other}")),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installation_salt_create_rejects_symlinked_parent_before_write() -> TestResult {
+        let scratch = ScratchDir::new("salt-symlink-parent-create")?;
+        let real_data = scratch.make_dir("real-data/ee")?;
+        let linked_data = scratch.path().join("linked-data");
+        std::os::unix::fs::symlink(scratch.path().join("real-data"), &linked_data)
+            .map_err(|error| format!("symlink salt parent: {error}"))?;
+        let linked_salt_path = linked_data.join("ee/.salt");
+
+        let error = create_installation_salt(&linked_salt_path)
+            .expect_err("expected symlinked salt parent to reject before write");
+
+        match error {
+            CanonicalizationError::SaltCreateFailure { path, source } => {
+                assert_eq!(path, linked_salt_path);
+                assert_eq!(source.kind(), io::ErrorKind::InvalidData);
+                assert!(source.to_string().contains("symlinked component"));
+            }
+            other => return Err(format!("unexpected error: {other}")),
+        }
+        if real_data.join(".salt").exists() {
+            return Err("salt create must not write through symlinked parent".to_owned());
+        }
+        Ok(())
     }
 
     #[test]
