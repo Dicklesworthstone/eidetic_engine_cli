@@ -3738,7 +3738,8 @@ fn render_feedback_health_json(
             "perSourceHarmfulCounts",
             &health.per_source_harmful_counts,
             |obj, source| {
-                obj.field_str("sourceId", &source.source_id);
+                let source_id = redact_memory_output_provenance_uri(&source.source_id);
+                obj.field_str("sourceId", &source_id);
                 obj.field_u32("harmfulCount", source.harmful_count);
             },
         );
@@ -12921,7 +12922,10 @@ mod tests {
         AdvisoryLevel, QuarantineEntry, QuarantineReport, QuarantineStorageStatus,
         QuarantineSummary,
     };
-    use crate::core::status::{DegradationReport, MeshStorageStatusReport, StatusReport};
+    use crate::core::status::{
+        DegradationReport, FeedbackHealthReport, FeedbackHealthStatus, FeedbackSourceHealth,
+        MeshStorageStatusReport, StatusReport,
+    };
     use crate::core::tailscale_probe::{TailscaleLocalReport, TailscaleProbeMethod};
     use crate::core::{
         BUILD_TIMESTAMP_POLICY, BuildFeature, BuildInfo, BuildProvenanceDegradation,
@@ -13329,6 +13333,58 @@ mod tests {
                 format!("quarantine report {surface} leaked sensitive source id: {rendered}"),
             )?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn status_feedback_health_redacts_sensitive_source_ids() -> TestResult {
+        let mut report = StatusReport::gather();
+        report.feedback_health = FeedbackHealthReport {
+            status: FeedbackHealthStatus::ReviewQueued,
+            harmful_per_source_per_hour: 5,
+            harmful_burst_window_seconds: 60,
+            per_source_harmful_counts: vec![
+                FeedbackSourceHealth {
+                    source_id:
+                        "file:///Users/alice/private/feedback.jsonl?api_key=redaction-fixture"
+                            .to_owned(),
+                    harmful_count: 7,
+                },
+                FeedbackSourceHealth {
+                    source_id: "cass://safe-source".to_owned(),
+                    harmful_count: 1,
+                },
+            ],
+            quarantine_queue_depth: 1,
+            protected_rule_count: 0,
+            last_inversion_event: None,
+            next_deterministic_action: "review quarantined feedback".to_owned(),
+        };
+
+        for (surface, rendered) in [
+            ("json", render_status_json(&report)),
+            ("toon", render_status_toon(&report)),
+            (
+                "filtered",
+                render_status_json_filtered(&report, FieldProfile::Full),
+            ),
+        ] {
+            ensure_contains(
+                &rendered,
+                "[REDACTED_PATH]",
+                format!("status feedback-health {surface} path redaction").as_str(),
+            )?;
+            ensure_contains(
+                &rendered,
+                "cass://safe-source",
+                format!("status feedback-health {surface} safe source preserved").as_str(),
+            )?;
+            ensure(
+                !rendered.contains("/Users/alice") && !rendered.contains("redaction-fixture"),
+                format!("status feedback-health {surface} leaked source id: {rendered}"),
+            )?;
+        }
+
         Ok(())
     }
 
