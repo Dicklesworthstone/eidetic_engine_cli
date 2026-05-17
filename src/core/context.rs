@@ -52,7 +52,7 @@ use crate::core::search::{
     SearchOptions, SearchReport, SearchStatus, elapsed_timing_json, performance_redaction_json,
     query_observation_json, run_search_with_read_connection_seeded, search_degraded_data_json,
 };
-use crate::db::read_pool::{PoolConfig, ReadConnectionPool, SnapshotPin};
+use crate::db::read_pool::{PoolConfig, ReadConnectionPool, SnapshotPin, SnapshotPinMetadata};
 use crate::db::{
     CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, DatabaseConfig,
     DbConnection, StoredAgentContextProfileForPack, StoredMemory,
@@ -1060,9 +1060,12 @@ fn run_context_pack_with_performance_inner(
         DatabaseConfig::file(database_path.clone()),
         read_pool_config,
     );
-    let read_snapshot = read_pool
-        .acquire_snapshot(pin_snapshot)
-        .map_err(|error| ContextPackError::Storage(format!("Failed to open database: {error}")))?;
+    let read_snapshot = if pin_snapshot {
+        read_pool.pin_snapshot_with_metadata(context_snapshot_pin_metadata(&request))
+    } else {
+        read_pool.acquire_snapshot(false)
+    }
+    .map_err(|error| ContextPackError::Storage(format!("Failed to open database: {error}")))?;
     trace.db_open_count = trace.db_open_count.saturating_add(1);
     trace.record_elapsed("dbOpen", snapshot_open_start);
 
@@ -3896,6 +3899,13 @@ fn context_read_pool_config_from_values(
             .with_acquire_timeout(Duration::from_millis(acquire_timeout_ms)),
         pin_snapshot,
     )
+}
+
+fn context_snapshot_pin_metadata(request: &ContextRequest) -> SnapshotPinMetadata {
+    SnapshotPinMetadata {
+        workflow_id: Some("context".to_owned()),
+        request_id: Some(crate::obs::audit_events::query_hash(&request.query)),
+    }
 }
 
 fn read_env_u64(var: EnvVar) -> Option<u64> {
@@ -7895,6 +7905,29 @@ mod tests {
             "expired pin should return a storage error with clean context, got {error:?}"
         );
         assert!(read_snapshot.is_poisoned());
+        Ok(())
+    }
+
+    #[test]
+    fn context_snapshot_pin_metadata_hashes_query_without_raw_text() -> Result<(), String> {
+        let request =
+            ContextRequest::from_query("investigate forbidden dependencies and API tokens")
+                .map_err(|error| error.to_string())?;
+
+        let metadata = super::context_snapshot_pin_metadata(&request);
+        let request_id = metadata
+            .request_id
+            .as_deref()
+            .ok_or_else(|| "context snapshot metadata missing request id".to_string())?;
+
+        assert_eq!(metadata.workflow_id.as_deref(), Some("context"));
+        assert_eq!(
+            request_id,
+            crate::obs::audit_events::query_hash(&request.query)
+        );
+        assert!(request_id.starts_with("blake3:"));
+        assert!(!request_id.contains("forbidden"));
+        assert!(!request_id.contains("tokens"));
         Ok(())
     }
 
