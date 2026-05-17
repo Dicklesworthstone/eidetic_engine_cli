@@ -12,7 +12,7 @@
 //! written to the bundle directory.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
+use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
@@ -2478,16 +2478,87 @@ fn generate_bundle_id() -> String {
 fn write_file_with_hash(path: &Path, content: &str) -> Result<u64, DomainError> {
     reject_existing_symlink_component(path, "support bundle file")?;
     ensure_support_bundle_file_final_path_regular_or_missing(path)?;
-    let mut file = File::create(path).map_err(|e| DomainError::Storage {
-        message: format!("Failed to create file {}: {e}", path.display()),
-        repair: None,
-    })?;
-    file.write_all(content.as_bytes())
+    let temp_path = support_bundle_temp_path(path)?;
+    ensure_support_bundle_file_temp_path_absent(&temp_path)?;
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
         .map_err(|e| DomainError::Storage {
-            message: format!("Failed to write file {}: {e}", path.display()),
+            message: format!(
+                "Failed to create temporary support bundle file {}: {e}",
+                temp_path.display()
+            ),
             repair: None,
         })?;
+    file.write_all(content.as_bytes())
+        .map_err(|e| DomainError::Storage {
+            message: format!(
+                "Failed to write temporary support bundle file {}: {e}",
+                temp_path.display()
+            ),
+            repair: None,
+        })?;
+    file.sync_data().map_err(|e| DomainError::Storage {
+        message: format!(
+            "Failed to sync temporary support bundle file {}: {e}",
+            temp_path.display()
+        ),
+        repair: None,
+    })?;
+    drop(file);
+
+    ensure_support_bundle_file_final_path_regular_or_missing(path)?;
+    fs::rename(&temp_path, path).map_err(|e| DomainError::Storage {
+        message: format!(
+            "Failed to publish temporary support bundle file {} to {}: {e}",
+            temp_path.display(),
+            path.display()
+        ),
+        repair: None,
+    })?;
+
     Ok(content.len() as u64)
+}
+
+fn support_bundle_temp_path(path: &Path) -> Result<PathBuf, DomainError> {
+    let Some(file_name) = path.file_name() else {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Failed to derive temporary support bundle file for {}: missing file name.",
+                path.display()
+            ),
+            repair: None,
+        });
+    };
+    let mut temp_name = file_name.to_os_string();
+    temp_name.push(".tmp");
+    Ok(path.with_file_name(temp_name))
+}
+
+fn ensure_support_bundle_file_temp_path_absent(path: &Path) -> Result<(), DomainError> {
+    reject_existing_symlink_component(path, "support bundle temp file")?;
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to create support bundle temp file {} because it already exists.",
+                path.display()
+            ),
+            repair: Some(
+                "Remove the stale support bundle temp file or choose a fresh output directory."
+                    .to_owned(),
+            ),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect support bundle temp file {} before create: {error}",
+                path.display()
+            ),
+            repair: Some("Check support bundle temp path permissions.".to_owned()),
+        }),
+    }
 }
 
 fn ensure_support_bundle_file_final_path_regular_or_missing(
@@ -2997,7 +3068,7 @@ mod tests {
             .map_err(|error| format!("failed to create non-regular final path: {error}"))?;
 
         let error = write_file_with_hash(&file_path, "{}")
-            .expect_err("non-regular final path should be rejected before File::create");
+            .expect_err("non-regular final path should be rejected before publish");
 
         assert!(
             error.message().contains("not a regular file"),
@@ -3010,6 +3081,41 @@ mod tests {
                 .file_type()
                 .is_dir(),
             "support bundle writer must leave non-regular final path untouched"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn write_file_with_hash_rejects_existing_temp_without_truncating() -> TestResult {
+        let root = unique_test_path("write-existing-temp");
+        let file_path = root.join("bundle").join("evidence.json");
+        let temp_path = support_bundle_temp_path(&file_path).map_err(|error| error.message())?;
+        fs::create_dir_all(
+            file_path
+                .parent()
+                .ok_or_else(|| "file path missing parent".to_owned())?,
+        )
+        .map_err(|error| format!("failed to create bundle dir: {error}"))?;
+        fs::write(&temp_path, "stale temp content")
+            .map_err(|error| format!("failed to write stale temp: {error}"))?;
+
+        let error = write_file_with_hash(&file_path, "{}")
+            .expect_err("existing temp path should reject support bundle publish");
+
+        assert!(
+            error.message().contains("already exists"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert_eq!(
+            fs::read_to_string(&temp_path)
+                .map_err(|error| format!("failed to read stale temp: {error}"))?,
+            "stale temp content",
+            "support bundle writer must leave existing temp content untouched"
+        );
+        assert!(
+            !file_path.exists(),
+            "final support bundle file must not be published when temp exists"
         );
         Ok(())
     }
