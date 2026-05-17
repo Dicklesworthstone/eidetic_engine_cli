@@ -911,7 +911,14 @@ fn http_response_body(response: &[u8]) -> Result<&[u8], String> {
         .lines()
         .next()
         .ok_or_else(|| "local API response did not include an HTTP status line".to_owned())?;
-    let status_code = status_line.split_whitespace().nth(1);
+    let mut status_parts = status_line.split_whitespace();
+    let http_version = status_parts.next();
+    if !matches!(http_version, Some(version) if version.starts_with("HTTP/")) {
+        return Err(format!(
+            "local API response had invalid HTTP status line {status_line}"
+        ));
+    }
+    let status_code = status_parts.next();
     if status_code != Some("200") {
         return Err(format!("local API returned {status_line}"));
     }
@@ -1115,6 +1122,40 @@ mod tests {
     fn relative_binary_path_is_rejected() {
         let err = validate_binary_path(Path::new("tailscale")).expect_err("relative path rejected");
         assert_eq!(err.code, TAILSCALE_BINARY_INAUTHENTIC_CODE);
+    }
+
+    #[test]
+    fn localapi_http_response_body_extracts_success_payload() -> TestResult {
+        let body = http_response_body(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"BackendState\":\"Running\"}",
+        )?;
+
+        assert_eq!(body, br#"{"BackendState":"Running"}"#);
+        Ok(())
+    }
+
+    #[test]
+    fn localapi_http_response_body_rejects_non_200_status() {
+        let error = http_response_body(b"HTTP/1.1 503 Service Unavailable\r\n\r\nbusy")
+            .expect_err("non-200 localapi response should fail");
+
+        assert!(error.contains("HTTP/1.1 503 Service Unavailable"));
+    }
+
+    #[test]
+    fn localapi_http_response_body_rejects_malformed_status_line() {
+        let error = http_response_body(b"not-http 200 OK\r\n\r\n{}")
+            .expect_err("malformed localapi status line should fail");
+
+        assert!(error.contains("invalid HTTP status line not-http 200 OK"));
+    }
+
+    #[test]
+    fn localapi_http_response_body_rejects_missing_header_terminator() {
+        let error = http_response_body(b"HTTP/1.1 200 OK\n\n{}")
+            .expect_err("localapi response without CRLF header terminator should fail");
+
+        assert!(error.contains("HTTP header terminator"));
     }
 
     #[test]
