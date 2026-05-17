@@ -1061,12 +1061,22 @@ pub fn check_perf_budget_summary(
 }
 
 fn normalize_artifact_summary(summary: &models::ArtifactSummary) -> ArtifactSummary {
+    let mut redacted = false;
+    let source_path = summary
+        .source_path
+        .as_ref()
+        .map(|path| redact_perf_public_source_ref(path, &mut redacted));
+    let provenance = summary
+        .provenance
+        .iter()
+        .map(|entry| convert_provenance_entry(entry, &mut redacted))
+        .collect();
     let mut normalized = ArtifactSummary {
         schema: summary.schema.clone(),
         artifact_id: summary.artifact_id.clone(),
         artifact_kind: convert_artifact_kind(summary.artifact_kind),
         source_schema: Some(summary.source_schema.clone()),
-        source_path: summary.source_path.clone(),
+        source_path,
         content_hash: summary.content_hash.clone(),
         observed_hash: summary.observed_hash.clone(),
         profile: summary
@@ -1082,11 +1092,7 @@ fn normalize_artifact_summary(summary: &models::ArtifactSummary) -> ArtifactSumm
             .map(convert_summary_degradation)
             .collect(),
         redaction: convert_redaction(summary.redaction),
-        provenance: summary
-            .provenance
-            .iter()
-            .map(convert_provenance_entry)
-            .collect(),
+        provenance,
     };
 
     for (name, metric) in &summary.metrics {
@@ -1117,6 +1123,9 @@ fn normalize_artifact_summary(summary: &models::ArtifactSummary) -> ArtifactSumm
         normalized
             .degraded
             .push(SummaryDegradation::redaction_uncertain("*"));
+    }
+    if redacted {
+        normalized.redaction.applied = true;
     }
 
     normalized
@@ -1178,16 +1187,77 @@ fn convert_redaction(redaction: models::RedactionPosture) -> RedactionPosture {
     }
 }
 
-fn convert_provenance_entry(entry: &models::ProvenanceEntry) -> ProvenanceEntry {
+fn convert_provenance_entry(
+    entry: &models::ProvenanceEntry,
+    redacted: &mut bool,
+) -> ProvenanceEntry {
+    let source_path = redact_perf_public_source_ref(&entry.source_path, redacted);
     let source = entry.source_line.map_or_else(
-        || entry.source_path.clone(),
-        |line| format!("{}:{line}", entry.source_path),
+        || source_path.clone(),
+        |line| format!("{source_path}:{line}"),
     );
     ProvenanceEntry {
         field: entry.field.clone(),
         source,
         confidence: None,
     }
+}
+
+fn redact_perf_public_source_ref(value: &str, redacted: &mut bool) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    let replacement = redact_perf_public_source_path_segments(&secret_redacted);
+    if replacement != value {
+        *redacted = true;
+    }
+    replacement
+}
+
+fn redact_perf_public_source_path_segments(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, ch)| *ch == '/')
+        else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        let start = cursor + relative_index;
+        if !perf_public_source_path_starts_sensitive_segment(&value[start..]) {
+            output.push_str(&value[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        output.push_str(&value[cursor..start]);
+        output.push_str("[REDACTED_PATH]");
+        cursor = value[start..]
+            .char_indices()
+            .find_map(|(index, ch)| perf_public_source_path_boundary(ch).then_some(start + index))
+            .unwrap_or(value.len());
+    }
+    output
+}
+
+fn perf_public_source_path_starts_sensitive_segment(value: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/home/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+    ];
+
+    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+}
+
+fn perf_public_source_path_boundary(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
 }
 
 fn infer_metric_volatility(name: &str, unit: Option<&str>) -> Volatility {
@@ -1834,6 +1904,81 @@ mod tests {
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0]["code"], "metric_missing");
         assert_eq!(degraded[0]["sources"], serde_json::json!(["perf_compare"]));
+    }
+
+    #[test]
+    fn compare_report_redacts_public_artifact_source_refs() {
+        let mut baseline = models::ArtifactSummary::new(
+            "baseline",
+            models::ArtifactKind::BenchmarkReport,
+            "ee.bench.v1",
+        )
+        .with_source_path(
+            "/Users/jemanuel/projects/eidetic_engine_cli/report.json?api_key=sk-test-secret-123456",
+        );
+        baseline.add_metric("elapsed_ms", models::MetricValue::measured(42.0, "ms"));
+        baseline.add_provenance(models::ProvenanceEntry {
+            field: "metrics.elapsed_ms".to_owned(),
+            source_path:
+                "/Volumes/USBNVME16TB/temp_agent_space/perf/summary.json?api_key=sk-test-secret"
+                    .to_owned(),
+            source_line: Some(17),
+        });
+        let candidate = baseline.clone();
+
+        let report = compare_normalized_artifacts(&baseline, &candidate);
+        let value = serde_json::to_value(&report).expect("compare report serializes");
+        let rendered = value.to_string();
+
+        assert!(rendered.contains("[REDACTED_PATH]"));
+        assert!(!rendered.contains("/Users/"));
+        assert!(!rendered.contains("/Volumes/"));
+        assert!(!rendered.contains("sk-test-secret"));
+        assert_eq!(
+            value["artifacts"]["baseline"]["redaction"]["applied"],
+            serde_json::json!(true)
+        );
+        let provenance_source = value["artifacts"]["baseline"]["provenance"][0]["source"]
+            .as_str()
+            .expect("provenance source is a string");
+        assert!(provenance_source.starts_with("[REDACTED_PATH]?api_key="));
+        assert!(provenance_source.ends_with(":17"));
+    }
+
+    #[test]
+    fn compare_report_preserves_safe_artifact_source_refs() {
+        let mut baseline = models::ArtifactSummary::new(
+            "baseline",
+            models::ArtifactKind::CacheReport,
+            "ee.cache.v1",
+        )
+        .with_source_path("artifact://perf/smoke-cache-summary");
+        baseline.add_metric(
+            "cache_hit_rate",
+            models::MetricValue::measured(0.95, "ratio"),
+        );
+        baseline.add_provenance(models::ProvenanceEntry {
+            field: "metrics.cache_hit_rate".to_owned(),
+            source_path: "bench://cache/smoke".to_owned(),
+            source_line: Some(9),
+        });
+        let candidate = baseline.clone();
+
+        let report = compare_normalized_artifacts(&baseline, &candidate);
+        let value = serde_json::to_value(&report).expect("compare report serializes");
+
+        assert_eq!(
+            value["artifacts"]["baseline"]["sourcePath"],
+            serde_json::json!("artifact://perf/smoke-cache-summary")
+        );
+        assert_eq!(
+            value["artifacts"]["baseline"]["provenance"][0]["source"],
+            serde_json::json!("bench://cache/smoke:9")
+        );
+        assert_eq!(
+            value["artifacts"]["baseline"]["redaction"]["applied"],
+            serde_json::json!(false)
+        );
     }
 
     #[test]
