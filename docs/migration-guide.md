@@ -468,6 +468,189 @@ See `tests/migration_guide.rs` for the test harness.
 
 ---
 
+## v0.3.0: Optional Tailscale Mesh Auto-Enrollment (SRR6.46)
+
+The v0.3.0 release introduces an opt-in **mesh auto-enrollment** UX layer on
+top of the SRR6 mesh primitives (transport, peer trust, workspace scope,
+peer enrollment). When the user has `tailscaled` running and authenticated,
+running `ee mesh auto-enroll --workspace . --json` materializes the
+peer-group binding in one command — no manual peer-list editing, no
+identity-key generation, no policy hand-rolling.
+
+Mesh defaults to OFF. With `EE_MESH_ENABLED=0` (the default), no v0.3.0
+code path executes, and ordinary `ee remember/search/context/why` output
+is byte-identical to v0.2.x. This invariant is gated by
+`tests/mesh_off_no_network.rs` and remains release-blocking.
+
+### Quick upgrade decision tree
+
+- **You don't run multiple machines that share an ee tailnet** — set
+  nothing. The default off state is the right state. v0.3.0 is identical
+  to v0.2.x for you.
+- **You have multiple machines on a tailnet and want shared memory** —
+  set `EE_MESH_ENABLED=1`, run `tailscale up` if not already
+  authenticated, run `ee daemon --foreground` (so peers can discover you),
+  then run `ee mesh auto-enroll --workspace . --json` once per workspace.
+- **You had a manual mesh peer-group from v0.2.x** — your manual config
+  continues to work as-is. v0.3.0 auto-enrollment will REFUSE to overwrite
+  it; opt in to migration via `ee mesh auto-enroll
+  --replace-manual-with-auto --workspace .`. The migration is audited
+  via `mesh.manual_to_auto_migration_intended`.
+- **You restore an ee database from a backup taken on a different
+  machine** — v0.3.0 detects the node-key mismatch and refuses
+  auto-enrollment with `auto_enrollment_node_key_changed` (medium
+  severity). Reversal is `ee mesh disable --reason "restored from
+  different machine" && ee mesh auto-enroll`.
+
+### Environment variables added
+
+| Env var | Default | Owner bead | Purpose |
+|---|---|---|---|
+| `EE_MESH_ENABLED` | `0` | bd-36bbk umbrella | Master kill-switch; `0` disables every mesh code path |
+| `EE_MESH_MODE` | `auto` | bd-36bbk umbrella | `auto` (default) or `manual` — `manual` disables auto-enrollment commands |
+| `EE_TAILSCALE_BINARY_OVERRIDE` | unset | bd-36bbk.1.1 | Test-only: pin the `tailscale` binary path (production code rejects relative paths) |
+| `EE_TAILSCALE_PROBE_SOCKET_OVERRIDE` | unset | bd-36bbk.1.1 | Test-only: pin the tailscaled socket path |
+| `EE_TAILSCALE_PROBE_TIMEOUT_MS` | `1500` | bd-36bbk.1.1 | Hard budget for the local probe subprocess/socket call |
+
+Future v0.3.x point releases will register further `EE_MESH_*` and
+`EE_TAILSCALE_*` env vars as the remaining SRR6.46 sub-beads land
+(discovery cache TTL, drift grace thresholds, hello port, steward
+interval, daily cap, etc.). Every new var is registered in
+`src/config/env_registry.rs` and documented in `docs/env_vars.md`.
+
+### Schemas added
+
+| Schema | Owner bead | Surface |
+|---|---|---|
+| `ee.tailscale.local.v1` | bd-36bbk.1.1 | Local `tailscaled` probe report block on `ee status` |
+| `ee.mesh.auto_enrollment_summary.v1` | bd-36bbk.1.5 | Forensic audit-row payload before any peer-group write |
+| `ee.mesh.auto_enrollment_outcome.v1` | bd-36bbk.1.5 | Back-fill outcome row referencing the prior summary |
+| `ee.mesh.peer_group_binding.v1` | bd-2jb3s (SRR6.30) | Workspace-scoped peer-group authorization record |
+| `ee.mesh.peer_policy.v1` | bd-29ulx (SRR6.5) | Per-peer trust, lane policy, and redaction grant |
+| `ee.mesh.policy_decision.v1` | bd-29ulx | Per-call policy evaluation outcome |
+| `ee.mesh.policy_failure_surface.v1` | bd-29ulx | Structured redaction-safe policy failure surface |
+| `ee.mesh.event.v1` | bd-2gtjn (SRR6.3) | Mesh event envelope (append-only export/import) |
+| `ee.mesh.storage_status.v1` | bd-2cndm (SRR6.4) | Mesh peer/cursor/import-ledger storage posture |
+
+Each schema has a JSON Schema file at `docs/schemas/<name>.json` and is
+covered by the J6 drift gate (`tests/contracts/swarm_schema_lifecycle.rs`
+or the equivalent for non-swarm schemas). Adding a new schema without
+the corresponding fixture and drift entry will fail CI.
+
+### Audit event types added
+
+| Event type | Owner bead | When emitted |
+|---|---|---|
+| `mesh.auto_enrollment_intended` | bd-36bbk.1.5 | BEFORE any durable peer-group write; fail-closed if this row fails |
+| `mesh.auto_enrollment_outcome_recorded` | bd-36bbk.1.5 | Back-fill once SRR6.46.3 knows materialized/rolled_back/dry_run/audit_only |
+
+Future v0.3.x will register additional event types as further sub-beads
+land (`mesh.auto_enrollment_materialized`, `mesh.auto_enrollment_rolled_back`,
+`mesh.peer_revoked`, `mesh.manual_to_auto_migration_intended`,
+`mesh.hello_responder_started/stopped/crashed_restarted`,
+`mesh.steward_reconciliation_skipped/triggered/refused/daily_cap_reached`,
+`mesh.discovery_policy_changed`, etc.).
+
+Every new event type is added to the `audit_actions` module in
+`src/db/mod.rs` and surfaces through `ee audit timeline
+--event-type <name> --json`.
+
+### Degraded codes added (highlights)
+
+Full catalog lives in `docs/degraded_code_taxonomy.md`. The high-level
+families introduced in v0.3.0 are:
+
+- `tailscale_*` — probe-side issues (`not_installed`, `daemon_unreachable`,
+  `not_authenticated`, `binary_inauthentic`, `shields_up`, `probe_timeout`,
+  `probe_unavailable`).
+- `hello_responder_*` — daemon-side responder lifecycle
+  (`not_running`, `port_in_use`, `no_tailscale_ip`, `crash_loop`,
+  `rate_limited_storm`, `node_key_mismatch`).
+- `auto_enrollment_*` — orchestrator outcomes
+  (`no_eligible_peers`, `partial_failure`, `blocked_by_policy`,
+  `already_complete`, `concurrent_attempt`, `tailnet_changed`,
+  `node_key_changed`, `manual_config_present`, `audit_failed`,
+  `sync_once_failed`, `invalid_override_node_key`,
+  `manual_migration_unmatched_peer_set`).
+- `mesh_disable_*` and `mesh_revoke_*` — rollback path outcomes.
+- `discovery_policy_*` — service-tag / allowlist / denylist surfacing.
+- `steward_auto_enroll_*` — steward periodic reconciliation outcomes.
+- `lane_grant_preview_*` — pre-grant visibility audit outcomes.
+- `mesh_outbound_policy_denied/quarantined/rejected` and
+  `mesh_peer_policy_denied/quarantined/rejected` — SRR6.5 policy
+  failure surfaces.
+
+Every code has a fixture under
+`tests/fixtures/failure_modes/<code>.json` matching
+`ee.failure_mode_fixture.v1`, gated by the J6 catalog validator.
+
+### Database schema migration
+
+No manual migration step is required.
+
+New tables created idempotently on first `ee mesh status` invocation
+after upgrade:
+
+- `ee_mesh_discovery_cache` — TTL cache rows keyed by
+  (workspace_id, tailnet_id) for autodiscovery results (SRR6.46.13).
+- `ee_mesh_peer_state` — per-peer state machine rows tracking
+  active / soft_stale / hard_stale / denylisted with consecutive missed
+  probe count + first observed at (SRR6.46.13).
+
+New columns added to existing tables (additive only):
+
+- Peer-group table gains `materialized_on_node_key`, `peer_set_hash`,
+  `enrollment_source` (auto / manual / auto_replaced_manual).
+
+Rollback: `ee mesh disable --workspace .` removes the peer-group +
+trust + workspace-binding rows transactionally. Per-peer revocation
+is via `ee mesh revoke <node-key>`.
+
+### Backward compatibility
+
+- **Mesh-off byte-stability**: the project's release-blocking
+  invariant. With `EE_MESH_ENABLED=0`, `ee remember`, `ee search`,
+  `ee context`, `ee why`, `ee status` produce byte-identical JSON
+  to v0.2.x. Gated by `tests/mesh_off_no_network.rs`.
+- **Manual peer-group preservation**: v0.2.x manual `ee mesh enroll`
+  configurations continue to work. v0.3.0 auto-enrollment refuses to
+  overwrite manual config without an explicit
+  `--replace-manual-with-auto` flag.
+- **Network-off-with-mesh-enabled byte-stability**: even with
+  `EE_MESH_ENABLED=1`, if the tailscale socket is unreachable,
+  ordinary `ee` commands still produce byte-identical output and
+  exit 0. The probe degrades; it does not block.
+- **No new forbidden dependencies**: the SRR6.46 surface uses
+  `std::process::Command` + raw socket I/O. No Tokio/Hyper/Axum/Reqwest
+  was added. Audited by the existing forbidden-dep gate.
+
+### Known limitations in v0.3.0
+
+- Opt-in real-tailscale smoke test (`bd-36bbk.1.11`) is gated behind
+  `EE_E2E_REAL_TAILSCALE=1`; not part of default CI.
+- Idle daemon 24h memory slope test (`bd-36bbk.1.15`) runs nightly
+  with `EE_E2E_NIGHTLY=1`.
+- The 500-peer scale workload is documented but advisory; budgets are
+  calibrated on `mac-m3-pro` hardware class.
+- Steward periodic reconciliation (`bd-36bbk.1.14`) is opt-in via
+  `EE_MESH_AUTO_ENROLL_ON_DEMAND=1` and disabled by default.
+
+### Related ADRs
+
+- `docs/adr/0037-optional-mesh-memory.md` — SRR6 mesh umbrella; the
+  load-bearing invariants for any optional mesh feature.
+- `docs/adr/0038-auto-enrollment-zero-touch.md` — SRR6.46 design
+  decisions (wizard rejected; consent via forensic audit row;
+  multi-workspace per peer-group; hello responder in `ee daemon`;
+  identity guard covers tailnet + node-key; discovery cache + drift
+  grace; shared `ee.repair_action_graph.v1`; conservative default
+  lane policy; pre-grant lane visibility preview).
+
+See `docs/agent-ux/auto_enrollment_onboarding.md` for the agent-facing
+walkthrough.
+
+---
+
 ## No Features Dropped
 
 This migration **splits responsibilities**, it does not remove functionality:
