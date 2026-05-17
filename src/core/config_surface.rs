@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -272,16 +272,18 @@ pub fn set_config(
                 source,
             }
         })?;
-        ensure_config_temp_path_is_regular_or_missing(&temp_path).map_err(|source| {
+        ensure_config_temp_path_is_missing(&temp_path).map_err(|source| {
             ConfigSurfaceError::Write {
                 path: temp_path.clone(),
                 source,
             }
         })?;
         {
-            use std::io::Write;
-            let mut file =
-                fs::File::create(&temp_path).map_err(|source| ConfigSurfaceError::Write {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)
+                .map_err(|source| ConfigSurfaceError::Write {
                     path: temp_path.clone(),
                     source,
                 })?;
@@ -467,9 +469,15 @@ fn ensure_config_write_path_is_regular_or_missing(path: &Path) -> Result<(), io:
     }
 }
 
-fn ensure_config_temp_path_is_regular_or_missing(path: &Path) -> Result<(), io::Error> {
+fn ensure_config_temp_path_is_missing(path: &Path) -> Result<(), io::Error> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(metadata) if metadata.file_type().is_file() => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "refusing to write config temp `{}` because it already exists",
+                path.display()
+            ),
+        )),
         Ok(_) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
@@ -1043,6 +1051,30 @@ mod tests {
         }
         if !temp_path.is_dir() {
             return Err("config set should leave non-regular temp path untouched".to_owned());
+        }
+        if config_dir.join("config.toml").exists() {
+            return Err("config final path should not be created after temp rejection".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn graph_set_rejects_existing_regular_temp_config_without_truncating() -> TestResult {
+        let temp = workspace()?;
+        let config_dir = temp.path().join(".ee");
+        let temp_path = config_dir.join("config.tmp");
+        fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        fs::write(&temp_path, "stale config temp").map_err(|error| error.to_string())?;
+
+        let error = set_config(&options(temp.path()), "graph.ppr.alpha", "0.5", false)
+            .expect_err("existing regular temp path should reject config set")
+            .to_string();
+        if !error.contains("already exists") {
+            return Err(format!("unexpected existing temp error: {error}"));
+        }
+        let temp_after = fs::read_to_string(&temp_path).map_err(|error| error.to_string())?;
+        if temp_after != "stale config temp" {
+            return Err("config set must not truncate an existing regular temp file".to_owned());
         }
         if config_dir.join("config.toml").exists() {
             return Err("config final path should not be created after temp rejection".to_owned());
