@@ -995,10 +995,63 @@ pub struct FeedbackSourceHealth {
 impl From<FeedbackSourceHarmfulCount> for FeedbackSourceHealth {
     fn from(value: FeedbackSourceHarmfulCount) -> Self {
         Self {
-            source_id: value.source_id,
+            source_id: redact_feedback_health_source_id(&value.source_id),
             harmful_count: value.harmful_count,
         }
     }
+}
+
+fn redact_feedback_health_source_id(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    redact_feedback_health_source_path_segments(&secret_redacted)
+}
+
+fn redact_feedback_health_source_path_segments(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, c)| *c == '/')
+        else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        let start = cursor + relative_index;
+        if !feedback_health_source_path_starts_sensitive_segment(&value[start..]) {
+            output.push_str(&value[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        output.push_str(&value[cursor..start]);
+        output.push_str("[REDACTED_PATH]");
+        cursor = value[start..]
+            .char_indices()
+            .find_map(|(index, c)| feedback_health_source_path_boundary(c).then_some(start + index))
+            .unwrap_or(value.len());
+    }
+    output
+}
+
+fn feedback_health_source_path_starts_sensitive_segment(value: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/home/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+    ];
+
+    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+}
+
+fn feedback_health_source_path_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
 }
 
 /// Read-only feedback health snapshot for `ee status --json`.
@@ -3647,6 +3700,48 @@ mod tests {
             reason: "relative PATH lookup is not trusted".to_owned(),
         }));
         ensure(degraded, CapabilityStatus::Degraded, "invalid cass binary")
+    }
+
+    #[test]
+    fn feedback_health_source_counts_redact_sensitive_source_ids() -> TestResult {
+        let health = FeedbackSourceHealth::from(FeedbackSourceHarmfulCount {
+            source_id: "file:///Users/alice/private/outcome.jsonl?api_key=redaction-fixture"
+                .to_owned(),
+            harmful_count: 3,
+        });
+
+        ensure(health.harmful_count, 3, "harmful count should be preserved")?;
+        assert!(
+            health.source_id.contains("[REDACTED_PATH]"),
+            "source ID should redact path-like segments: {}",
+            health.source_id
+        );
+        assert!(
+            health.source_id.contains("[REDACTED:"),
+            "source ID should redact secret-like segments: {}",
+            health.source_id
+        );
+        assert!(
+            !health.source_id.contains("/Users/alice")
+                && !health.source_id.contains("redaction-fixture"),
+            "source ID leaked sensitive material: {}",
+            health.source_id
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn feedback_health_source_counts_preserve_safe_source_ids() -> TestResult {
+        let health = FeedbackSourceHealth::from(FeedbackSourceHarmfulCount {
+            source_id: "agent://run/public-feedback".to_owned(),
+            harmful_count: 1,
+        });
+
+        ensure(
+            health.source_id,
+            "agent://run/public-feedback".to_owned(),
+            "safe source IDs should remain readable",
+        )
     }
 
     #[test]
