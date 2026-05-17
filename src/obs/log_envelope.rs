@@ -170,10 +170,27 @@ impl AuditEvent {
 
     pub fn append_to_path(&self, path: &Path) -> io::Result<()> {
         ensure_append_path_has_no_symlink_components(path)?;
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        let mut file = open_audit_append_file(path)?;
         self.write_to(&mut file)
     }
 }
+
+fn open_audit_append_file(path: &Path) -> io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    configure_audit_append_options(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_audit_append_options(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_audit_append_options(_options: &mut OpenOptions) {}
 
 fn ensure_append_path_has_no_symlink_components(path: &Path) -> io::Result<()> {
     if let Some(symlink_path) = first_existing_symlink_component(path)? {
@@ -361,6 +378,30 @@ mod tests {
                 .map_err(|error| error.to_string())?
                 .is_empty(),
             "audit append must not write through symlinked file"
+        );
+        Ok(())
+    }
+
+    #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+    #[test]
+    fn audit_append_open_rejects_symlinked_final_path() -> TestResult {
+        use super::open_audit_append_file;
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_audit = tempdir.path().join("outside-audit.jsonl");
+        std::fs::write(&outside_audit, "outside\n").map_err(|error| error.to_string())?;
+        let linked_audit = tempdir.path().join("audit.jsonl");
+        symlink(&outside_audit, &linked_audit).map_err(|error| error.to_string())?;
+
+        match open_audit_append_file(&linked_audit) {
+            Ok(_) => return Err("append open should reject symlinked audit file".to_owned()),
+            Err(_) => {}
+        }
+        assert_eq!(
+            std::fs::read_to_string(&outside_audit).map_err(|error| error.to_string())?,
+            "outside\n",
+            "audit append open must not mutate the linked target"
         );
         Ok(())
     }
