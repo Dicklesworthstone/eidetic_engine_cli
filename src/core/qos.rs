@@ -545,6 +545,7 @@ fn write_registry_document(
         message: format!("failed to serialize QoS active-lane registry: {error}"),
         repair: Some("report the QoS registry serialization failure".to_owned()),
     })?;
+    ensure_registry_final_path_writable(path)?;
     let temp_path = path.with_extension("json.tmp");
     if let Some(symlink) = first_existing_symlink_component(&temp_path)? {
         return Err(DomainError::Storage {
@@ -570,6 +571,37 @@ fn write_registry_document(
         ),
         repair: Some("check workspace .ee/qos permissions and retry".to_owned()),
     })
+}
+
+fn ensure_registry_final_path_writable(path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "refusing to publish QoS active-lane registry '{}' because it is not a regular file",
+                path.display()
+            ),
+            repair: Some(
+                "replace .ee/qos/active-lanes.json with a regular JSON file or remove it"
+                    .to_owned(),
+            ),
+        }),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "failed to inspect QoS active-lane registry '{}' before publish: {error}",
+                path.display()
+            ),
+            repair: Some("check workspace .ee/qos permissions".to_owned()),
+        }),
+    }
 }
 
 fn ensure_registry_temp_path_writable(path: &Path) -> Result<(), DomainError> {
@@ -1142,6 +1174,36 @@ mod tests {
             fs::symlink_metadata(&path)
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
             "final registry path must not be created"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn registry_write_rejects_non_regular_final_path_before_temp_write() -> TestResult {
+        let tempdir = tempfile::tempdir()?;
+        let workspace = tempdir.path().join("workspace");
+        let path = qos_registry_path(&workspace);
+        fs::create_dir_all(&path)?;
+
+        let error = publish_qos_lane_record(
+            &workspace,
+            &record_input(QosLane::VerificationRch, "cargo-test", "query", 100),
+        )
+        .expect_err("non-regular final registry path should reject registry write");
+
+        assert!(
+            error.message().contains("not a regular file"),
+            "unexpected non-regular final-path error: {}",
+            error.message()
+        );
+        assert!(
+            fs::symlink_metadata(&path)?.file_type().is_dir(),
+            "non-regular final path must remain a directory"
+        );
+        assert!(
+            fs::symlink_metadata(path.with_extension("json.tmp"))
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "temp file should not be written when final registry path is non-regular"
         );
         Ok(())
     }
