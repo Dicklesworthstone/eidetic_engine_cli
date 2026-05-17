@@ -691,7 +691,7 @@ printf '[RCH] remote trj (0.1s)\n'
 }
 
 #[test]
-fn committed_tree_manifest_ignores_dirty_checkout_and_refuses_before_rch() -> TestResult {
+fn committed_tree_manifest_ignores_dirty_checkout_and_runs_from_export() -> TestResult {
     let workspace = seed_git_workspace("rch-committed-tree-dirty")?;
     fs::write(workspace.join("tracked.txt"), "dirty live checkout\n")
         .map_err(|error| format!("dirty tracked fixture: {error}"))?;
@@ -700,10 +700,13 @@ fn committed_tree_manifest_ignores_dirty_checkout_and_refuses_before_rch() -> Te
     let before_status = git_status_porcelain_v2(&workspace)?;
     let invocation_log = unique_tmp_path("rch-committed-tree-invocations");
     let fake_rch = write_fake_rch(
-        "fake-rch-committed-tree-should-not-run.sh",
+        "fake-rch-committed-tree-runs-from-export.sh",
         r#"#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+printf 'PWD=%s\n' "$PWD"
+printf 'tracked=%s\n' "$(cat tracked.txt)"
+test ! -e credential-note.txt
 printf '[RCH] remote trj (0.1s)\n'
 "#,
     )?;
@@ -732,23 +735,21 @@ printf '[RCH] remote trj (0.1s)\n'
         &workspace,
     )?;
     assert_git_status_unchanged(&workspace, &before_status, "committed-tree preflight")?;
-    if status.success() {
+    if !status.success() {
         return Err(format!(
-            "committed-tree mode should refuse before unsafe source materialization\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            "committed-tree mode should run from the generated source export\nstdout:\n{stdout}\nstderr:\n{stderr}"
         ));
     }
-    if invocation_log.exists() {
-        let invocations = fs::read_to_string(&invocation_log)
-            .map_err(|error| format!("read committed-tree invocation log: {error}"))?;
-        if !invocations.is_empty() {
-            return Err(format!(
-                "committed-tree unsupported mode should not invoke fake RCH: {invocations:?}"
-            ));
-        }
+    let invocations = fs::read_to_string(&invocation_log)
+        .map_err(|error| format!("read committed-tree invocation log: {error}"))?;
+    if invocations.lines().count() != 1 {
+        return Err(format!(
+            "committed-tree mode should invoke fake RCH once: {invocations:?}"
+        ));
     }
     let report: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("parse committed-tree report: {error}"))?;
-    if report["status"] != "committed_tree_unsupported"
+    if report["status"] != "remote_pass"
         || report["verification_attribution"] != "committed_tree"
         || report["requested_treeish"] != "HEAD"
         || report["resolved_commit"].as_str().map(str::len) != Some(40)
@@ -776,10 +777,20 @@ printf '[RCH] remote trj (0.1s)\n'
             return Err(format!("missing excluded class {expected}: {report}"));
         }
     }
-    if !source_degraded_contains(&report, "rch_verify_committed_tree_unsupported")?
-        || !degraded_contains(&report, "rch_verify_committed_tree_unsupported")?
+    if source_degraded_contains(&report, "rch_verify_committed_tree_unsupported")?
+        || degraded_contains(&report, "rch_verify_committed_tree_unsupported")?
     {
-        return Err(format!("missing committed-tree unsupported code: {report}"));
+        return Err(format!(
+            "simple committed-tree fixture unexpectedly remained unsupported: {report}"
+        ));
+    }
+    let stdout_tail = report["stdout_tail"]
+        .as_str()
+        .ok_or_else(|| "missing stdout_tail".to_owned())?;
+    if !stdout_tail.contains("tracked=seed") || stdout_tail.contains("credential-note") {
+        return Err(format!(
+            "committed-tree verifier did not run from clean committed export: {report}"
+        ));
     }
     let first_manifest_hash = report["source_manifest_hash"]
         .as_str()
@@ -795,8 +806,8 @@ printf '[RCH] remote trj (0.1s)\n'
         &[("FAKE_RCH_INVOCATIONS", invocation_log_arg)],
         &workspace,
     )?;
-    if second_status.success() {
-        return Err("second committed-tree unsupported run should still refuse".to_owned());
+    if !second_status.success() {
+        return Err("second committed-tree run should still succeed".to_owned());
     }
     let second_report: Value = serde_json::from_str(&second_stdout)
         .map_err(|error| format!("parse second committed-tree report: {error}"))?;

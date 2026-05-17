@@ -22,7 +22,7 @@ Options:
   --project-root <path>     Local project root (default: cwd)
   --env <NAME=VALUE>        Pass an explicit environment override to the remote verifier command
   --require-clean-tree      Refuse before RCH when the git checkout is dirty
-  --committed-tree          Resolve --treeish as the source proof and refuse until safe materialization exists
+  --committed-tree          Verify the committed --treeish from a generated source export when safe
   --treeish <ref>           Committed-tree ref to prove (default: HEAD)
   --json                    Accepted for symmetry; output is always JSON
   -h, --help                Show this help
@@ -747,9 +747,10 @@ manifest = "\n".join(
 )
 manifest_hash = "sha256:" + hashlib.sha256(manifest.encode("utf-8")).hexdigest()
 
-codes = ["rch_verify_committed_tree_unsupported"]
+codes = []
 show_cargo = git(["show", f"{commit}:Cargo.toml"])
 if show_cargo.returncode == 0 and "path" in show_cargo.stdout and "path =" in show_cargo.stdout:
+    codes.append("rch_verify_committed_tree_unsupported")
     codes.append("rch_verify_committed_tree_path_deps_unsupported")
 
 print(json.dumps({
@@ -777,6 +778,38 @@ print(json.dumps({
     "source_manifest_excluded_path_classes": ["dirty_tracked", "untracked", "ignored"],
 }, sort_keys=True, separators=(",", ":")))
 PY
+}
+
+json_field_string() {
+    JSON_INPUT="${1:?json input required}" \
+    JSON_FIELD="${2:?json field required}" \
+    python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["JSON_INPUT"])
+value = payload.get(os.environ["JSON_FIELD"])
+print("" if value is None else str(value))
+PY
+}
+
+materialize_committed_tree() {
+    local commit export_base export_root short_commit
+    commit="$(json_field_string "$SOURCE_STATE_JSON" "resolved_commit")"
+    if [ -z "$commit" ]; then
+        echo "rch_verify: committed-tree materialization missing resolved commit" >&2
+        return 1
+    fi
+
+    short_commit="${commit:0:12}"
+    export_base="${RCH_VERIFY_COMMITTED_TREE_BASE:-${TMPDIR:-/tmp}/ee-rch-committed-tree}"
+    mkdir -p "$export_base"
+    export_root="$(mktemp -d "$export_base/$short_commit.XXXXXX")"
+
+    git -C "$PROJECT_ROOT" archive --format=tar "$commit" | tar -x -f - -C "$export_root"
+    PROJECT_ROOT="$export_root"
+    REMOTE_PROJECT_ROOT="/data/projects/$(basename "$PROJECT_ROOT")"
+    REMOTE_PROJECT_ROOT_JSON="$(json_quote "$REMOTE_PROJECT_ROOT")"
 }
 
 remote_checkout_missing_tracked_paths() {
@@ -824,7 +857,7 @@ run_rch_invocation_once() {
         RCH_TEST_SLOTS="${RCH_TEST_SLOTS:-2}" \
         RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
         RCH_DAEMON_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
-        RCH_CANONICAL_PROJECT_ROOT="${RCH_CANONICAL_PROJECT_ROOT:-/Users/jemanuel/projects}" \
+        RCH_CANONICAL_PROJECT_ROOT="${RCH_CANONICAL_PROJECT_ROOT:-$(dirname "$PROJECT_ROOT")}" \
         RCH_ALIAS_PROJECT_ROOT="${RCH_ALIAS_PROJECT_ROOT:-/data/projects}" \
         RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
         "${RCH_INVOCATION[@]}" 2>&1
@@ -845,7 +878,7 @@ run_rch_invocation_retry() {
         RCH_TEST_SLOTS="${RCH_TEST_SLOTS:-2}" \
         RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
         RCH_DAEMON_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
-        RCH_CANONICAL_PROJECT_ROOT="${RCH_CANONICAL_PROJECT_ROOT:-/Users/jemanuel/projects}" \
+        RCH_CANONICAL_PROJECT_ROOT="${RCH_CANONICAL_PROJECT_ROOT:-$(dirname "$PROJECT_ROOT")}" \
         RCH_ALIAS_PROJECT_ROOT="${RCH_ALIAS_PROJECT_ROOT:-/data/projects}" \
         RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
         "${RCH_INVOCATION[@]}" 2>&1
@@ -1213,10 +1246,13 @@ if [ "$REQUIRE_CLEAN_TREE" -eq 1 ] && [ -n "$SOURCE_STATE_DEGRADED_CODES" ]; the
     exit 1
 fi
 if [ "$COMMITTED_TREE" -eq 1 ]; then
-    RCH_INVOCATION=()
-    mapfile -t source_degraded_array <<<"$SOURCE_STATE_DEGRADED_CODES"
-    emit_json true 1 0 "committed-tree preflight computed source manifest but cannot safely materialize it for RCH yet" "" "${source_degraded_array[@]}"
-    exit 1
+    if [ -n "$SOURCE_STATE_DEGRADED_CODES" ]; then
+        RCH_INVOCATION=()
+        mapfile -t source_degraded_array <<<"$SOURCE_STATE_DEGRADED_CODES"
+        emit_json true 1 0 "committed-tree preflight computed source manifest but cannot safely materialize it for RCH" "" "${source_degraded_array[@]}"
+        exit 1
+    fi
+    materialize_committed_tree
 fi
 
 if [ "$COMMAND_KIND" = "raw" ] || [ "$COMMAND_KIND" = "cargo_fmt_check" ]; then
