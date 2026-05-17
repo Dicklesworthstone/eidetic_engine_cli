@@ -1,0 +1,27 @@
+{
+  "name": "dry_run",
+  "surface": "remember",
+  "mcpTool": "ee_remember",
+  "cliArgs": [
+    "ee",
+    "remember",
+    "Test memory content for parity check.",
+    "--workspace",
+    "__WORKSPACE__",
+    "--kind",
+    "fact",
+    "--level",
+    "semantic",
+    "--confidence",
+    "0.85",
+    "--dry-run",
+    "--json"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "content": "Test memory content for parity check.",
+    "kind": "fact",
+    "level": "semantic",
+    "confidence": 0.85
+  }
+}

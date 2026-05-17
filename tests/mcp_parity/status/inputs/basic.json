@@ -1,0 +1,9 @@
+{
+  "name": "basic",
+  "surface": "status",
+  "mcpTool": "ee_status",
+  "cliArgs": ["ee", "status", "--workspace", "__WORKSPACE__", "--json"],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__"
+  }
+}

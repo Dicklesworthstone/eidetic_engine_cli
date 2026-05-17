@@ -1,0 +1,9 @@
+{
+  "name": "basic",
+  "surface": "doctor",
+  "mcpTool": "ee_doctor",
+  "cliArgs": ["ee", "doctor", "--workspace", "__WORKSPACE__", "--json"],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__"
+  }
+}

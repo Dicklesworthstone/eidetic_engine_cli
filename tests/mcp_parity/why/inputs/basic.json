@@ -1,0 +1,18 @@
+{
+  "name": "basic",
+  "surface": "why",
+  "mcpTool": "ee_why",
+  "seedMemoryContent": "Explain why this release rule was selected.",
+  "cliArgs": [
+    "ee",
+    "why",
+    "__MEMORY_ID__",
+    "--workspace",
+    "__WORKSPACE__",
+    "--json"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "memoryId": "__MEMORY_ID__"
+  }
+}

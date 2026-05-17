@@ -1,0 +1,21 @@
+{
+  "name": "basic",
+  "surface": "context",
+  "mcpTool": "ee_context",
+  "seedMemoryContent": "Run cargo fmt --check before committing.",
+  "cliArgs": [
+    "ee",
+    "context",
+    "prepare a release",
+    "--workspace",
+    "__WORKSPACE__",
+    "--max-tokens",
+    "2000",
+    "--json"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "query": "prepare a release",
+    "maxTokens": 2000
+  }
+}

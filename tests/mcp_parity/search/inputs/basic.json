@@ -1,0 +1,21 @@
+{
+  "name": "basic",
+  "surface": "search",
+  "mcpTool": "ee_search",
+  "seedMemoryContent": "Always run cargo test before release.",
+  "cliArgs": [
+    "ee",
+    "search",
+    "cargo test release",
+    "--workspace",
+    "__WORKSPACE__",
+    "--limit",
+    "5",
+    "--json"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "query": "cargo test release",
+    "limit": 5
+  }
+}
