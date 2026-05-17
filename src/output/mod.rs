@@ -4040,6 +4040,7 @@ pub fn render_doctor_json(report: &DoctorReport) -> String {
         d.field_str("posture", report.posture.as_str());
         d.field_bool("healthy", report.overall_healthy);
         render_singleflight_posture_json(d, &report.singleflight_posture);
+        render_qos_status_json(d, &report.qos_posture, false);
         d.field_array_of_objects("checks", &report.checks, |obj, check| {
             obj.field_str("name", check.name);
             obj.field_str("severity", check.severity.as_str());
@@ -4078,6 +4079,18 @@ pub fn render_doctor_human(report: &DoctorReport) -> String {
         report.singleflight_posture.active_leader_count,
         report.singleflight_posture.follower_wait_count,
         report.singleflight_posture.follower_timeout_count
+    ));
+    output.push_str(&format!(
+        "qos: foreground active {}, background active {}, verification active {}, maintenance active {}, registry {}\n",
+        report.qos_posture.foreground_active_count,
+        report.qos_posture.background_active_count,
+        report.qos_posture.verification_active_count,
+        report.qos_posture.maintenance_active_count,
+        if report.qos_posture.degraded.is_empty() {
+            "healthy"
+        } else {
+            "degraded"
+        }
     ));
 
     if report.overall_healthy {
@@ -9295,6 +9308,7 @@ pub fn render_doctor_json_filtered(report: &DoctorReport, profile: FieldProfile)
 
         if profile.include_summary_metrics() {
             render_singleflight_posture_json(d, &report.singleflight_posture);
+            render_qos_status_json(d, &report.qos_posture, profile.include_verbose_details());
         }
 
         if profile.include_arrays() {

@@ -8,6 +8,8 @@
 
 use std::path::{Path, PathBuf};
 
+use chrono::Utc;
+
 use crate::core::agent_detect::{AgentInventoryReport, AgentInventoryStatus};
 use crate::db::{
     CreateMemoryInput, DbConnection, ForeignKeyCheckResult, IntegrityCheckResult,
@@ -18,6 +20,7 @@ use crate::models::{SingleFlightPostureReport, TrustClass};
 
 use super::build_cli_runtime;
 use super::index::{IndexHealth, IndexStatusOptions, get_index_status};
+use super::qos::{QosLaneSummary, summarize_qos_lane_registry};
 use super::singleflight::singleflight_posture_report;
 use super::status::{default_workspace_path, probe_cass_capability};
 
@@ -201,6 +204,8 @@ pub struct DoctorReport {
     pub posture: Posture,
     /// Redaction-safe duplicate-work coalescing posture for agent operators.
     pub singleflight_posture: SingleFlightPostureReport,
+    /// Redaction-safe foreground/background QoS lane posture for agent operators.
+    pub qos_posture: QosLaneSummary,
     pub checks: Vec<CheckResult>,
 }
 
@@ -220,6 +225,7 @@ impl DoctorReport {
     #[must_use]
     pub fn gather_with_workspace(workspace_path: Option<&Path>) -> Self {
         let singleflight_posture = singleflight_posture_report();
+        let qos_posture = gather_qos_posture(workspace_path);
         let checks = vec![
             check_runtime(),
             check_workspace(workspace_path),
@@ -241,6 +247,7 @@ impl DoctorReport {
             overall_healthy,
             posture,
             singleflight_posture,
+            qos_posture,
             checks,
         }
     }
@@ -288,6 +295,16 @@ impl DoctorReport {
             cass_import_guidance: CassImportGuidance::from_agent_inventory(agent_inventory),
         }
     }
+}
+
+fn gather_qos_posture(workspace_path: Option<&Path>) -> QosLaneSummary {
+    let workspace = workspace_path.unwrap_or_else(|| Path::new("."));
+    let workspace_identity = workspace
+        .to_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(".");
+    let now_epoch_ms = Utc::now().timestamp_millis().try_into().unwrap_or_default();
+    summarize_qos_lane_registry(workspace, workspace_identity, now_epoch_ms)
 }
 
 /// A structured repair plan generated from doctor checks.
@@ -1980,6 +1997,7 @@ mod tests {
             overall_healthy: true,
             posture: Posture::Ok,
             singleflight_posture: singleflight_posture_report(),
+            qos_posture: super::gather_qos_posture(None),
             checks: vec![
                 CheckResult::ok("test1", "All good"),
                 CheckResult::ok("test2", "Also good"),
@@ -1999,6 +2017,7 @@ mod tests {
             overall_healthy: true,
             posture: Posture::Ok,
             singleflight_posture: singleflight_posture_report(),
+            qos_posture: super::gather_qos_posture(None),
             checks: vec![],
         };
         let plan = report.to_fix_plan();
@@ -2033,6 +2052,7 @@ mod tests {
             overall_healthy: false,
             posture: Posture::DegradedRecoverable,
             singleflight_posture: singleflight_posture_report(),
+            qos_posture: super::gather_qos_posture(None),
             checks: vec![CheckResult::warning(
                 "cass",
                 "CASS import dry-run recommended.",
@@ -2608,6 +2628,7 @@ mod tests {
             overall_healthy: true,
             posture: Posture::Ok,
             singleflight_posture: singleflight_posture_report(),
+            qos_posture: super::gather_qos_posture(None),
             checks: vec![CheckResult::ok("runtime", "ok")],
         };
         assert_eq!(report.posture, Posture::Ok);

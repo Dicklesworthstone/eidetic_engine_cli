@@ -1465,6 +1465,7 @@ fn doctor_missing_db_report() -> DoctorReport {
         overall_healthy: false,
         posture: Posture::DegradedRecoverable,
         singleflight_posture: fixture_singleflight_posture(),
+        qos_posture: fixture_qos_posture(),
         checks: vec![
             CheckResult::ok("runtime", "Asupersync runtime initialized successfully."),
             CheckResult::warning(
@@ -1497,6 +1498,7 @@ fn doctor_pending_migration_report() -> DoctorReport {
         overall_healthy: false,
         posture: Posture::Blocked,
         singleflight_posture: fixture_singleflight_posture(),
+        qos_posture: fixture_qos_posture(),
         checks: vec![
             CheckResult::ok("runtime", "Asupersync runtime initialized successfully."),
             CheckResult::ok("workspace", "Workspace inspected at /workspace."),

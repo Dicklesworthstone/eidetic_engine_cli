@@ -12,6 +12,7 @@ use ee::core::procedure::{
     ProcedurePromotionCurationPlan, ProcedurePromotionEffect,
     ProcedurePromotionVerificationSummary,
 };
+use ee::core::qos::{QOS_ACTIVE_LANE_SUMMARY_SCHEMA_V1, QosLaneSummary};
 use ee::core::singleflight::singleflight_posture_report;
 use ee::core::why::{
     MemoryLinkSummary, PackSelectionExplanation, RationaleTraceSummary, RetrievalExplanation,
@@ -188,6 +189,17 @@ fn doctor_fixture() -> DoctorReport {
         overall_healthy: false,
         posture: Posture::DegradedRecoverable,
         singleflight_posture: singleflight_posture_report(),
+        qos_posture: QosLaneSummary {
+            schema: QOS_ACTIVE_LANE_SUMMARY_SCHEMA_V1.to_owned(),
+            workspace_hash: "sha256:fixture-qos-workspace".to_owned(),
+            active_records: Vec::new(),
+            foreground_active_count: 0,
+            background_active_count: 0,
+            verification_active_count: 0,
+            maintenance_active_count: 0,
+            stale_ignored_count: 0,
+            degraded: Vec::new(),
+        },
         checks: vec![
             CheckResult {
                 name: "database",

@@ -7,14 +7,16 @@
 use std::fs;
 use std::path::PathBuf;
 
+use ee::core::doctor::DoctorReport;
 use ee::core::status::{ReadPoolStatusReport, StatusReport};
 use ee::db::read_pool::{AcquireWaitStats, PoolStats};
-use ee::output::render_status_json;
+use ee::output::{render_doctor_json, render_status_json};
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
 
 const STATUS_SCHEMA_PATH: &str = "docs/schemas/ee.status.v1.json";
+const DOCTOR_SCHEMA_PATH: &str = "docs/schemas/ee.doctor.v1.json";
 const READ_POOL_FIELDS: &[&str] = &[
     "active",
     "idle",
@@ -247,6 +249,48 @@ fn qos_status_schema_declares_compact_lane_summary() -> TestResult {
 }
 
 #[test]
+fn qos_doctor_schema_declares_compact_lane_summary() -> TestResult {
+    let schema = read_json(DOCTOR_SCHEMA_PATH)?;
+
+    ensure_string_array_contains(&schema, "/properties/data/required", "qos")?;
+    ensure_string_array_contains(&schema, "/field_presets/summary", "qos")?;
+    ensure_string_array_contains(&schema, "/field_presets/standard", "qos")?;
+    ensure_str_eq(
+        &schema,
+        "/properties/data/properties/qos/$ref",
+        "#/$defs/qosStatus",
+    )?;
+    ensure_str_eq(&schema, "/$defs/qosStatus/type", "object")?;
+    ensure_bool_eq(&schema, "/$defs/qosStatus/additionalProperties", false)?;
+    for field in QOS_STATUS_FIELDS {
+        ensure_string_array_contains(&schema, "/$defs/qosStatus/required", field)?;
+    }
+    ensure_object_keys_eq(
+        &schema,
+        "/$defs/qosStatus/properties",
+        &[
+            "schema",
+            "workspaceHash",
+            "foregroundActiveCount",
+            "backgroundActiveCount",
+            "verificationActiveCount",
+            "maintenanceActiveCount",
+            "staleIgnoredCount",
+            "foregroundPressure",
+            "backgroundWorkActive",
+            "registryHealthy",
+            "activeRecords",
+            "degraded",
+        ],
+    )?;
+    ensure_str_eq(
+        &schema,
+        "/$defs/qosStatus/properties/schema/const",
+        "ee.qos.active_lane_summary.v1",
+    )
+}
+
+#[test]
 fn read_pool_status_report_default_emits_zero_counters() -> TestResult {
     let report = ReadPoolStatusReport::default();
     if report.active != 0
@@ -357,6 +401,50 @@ fn rendered_status_json_includes_qos_posture_without_active_records_by_default()
     if qos.get("activeRecords").is_some() {
         return Err(
             "default status JSON should keep QoS compact and omit activeRecords".to_owned(),
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn rendered_doctor_json_includes_qos_posture_without_active_records_by_default() -> TestResult {
+    let report = DoctorReport::gather();
+    let rendered = render_doctor_json(&report);
+    let parsed: Value = serde_json::from_str(&rendered)
+        .map_err(|error| format!("doctor JSON did not parse: {error}"))?;
+
+    let qos = parsed
+        .pointer("/data/qos")
+        .ok_or_else(|| format!("data.qos missing from rendered doctor JSON: {parsed}"))?;
+    ensure_object_keys_eq(&parsed, "/data/qos", QOS_STATUS_FIELDS)?;
+    ensure_str_eq(qos, "/schema", "ee.qos.active_lane_summary.v1")?;
+    for counter in [
+        "foregroundActiveCount",
+        "backgroundActiveCount",
+        "verificationActiveCount",
+        "maintenanceActiveCount",
+        "staleIgnoredCount",
+    ] {
+        qos.pointer(&format!("/{counter}"))
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("data.qos.{counter} not a u64"))?;
+    }
+    qos.pointer("/foregroundPressure")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "data.qos.foregroundPressure not a bool".to_owned())?;
+    qos.pointer("/backgroundWorkActive")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "data.qos.backgroundWorkActive not a bool".to_owned())?;
+    qos.pointer("/registryHealthy")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "data.qos.registryHealthy not a bool".to_owned())?;
+    qos.pointer("/degraded")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "data.qos.degraded not an array".to_owned())?;
+    if qos.get("activeRecords").is_some() {
+        return Err(
+            "default doctor JSON should keep QoS compact and omit activeRecords".to_owned(),
         );
     }
 

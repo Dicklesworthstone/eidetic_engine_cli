@@ -12,7 +12,7 @@
     "fields": {"type": "string"},
     "data": {
       "type": "object",
-      "required": ["command", "version", "posture", "healthy", "singleFlight", "checks"],
+      "required": ["command", "version", "posture", "healthy", "singleFlight", "qos", "checks"],
       "additionalProperties": false,
       "properties": {
         "command": {"type": "string", "const": "doctor"},
@@ -20,6 +20,7 @@
         "posture": {"type": "string"},
         "healthy": {"type": "boolean"},
         "singleFlight": {"$ref": "#/$defs/singleFlightPosture"},
+        "qos": {"$ref": "#/$defs/qosStatus"},
         "checks": {
           "type": "array",
           "items": {
@@ -38,14 +39,51 @@
   },
   "field_presets": {
     "minimal": ["command", "version", "posture", "healthy"],
-    "summary": ["command", "version", "posture", "healthy", "singleFlight"],
-    "standard": ["command", "version", "posture", "healthy", "singleFlight", "checks"],
+    "summary": ["command", "version", "posture", "healthy", "singleFlight", "qos"],
+    "standard": ["command", "version", "posture", "healthy", "singleFlight", "qos", "checks"],
     "full": ["*"]
   },
   "$defs": {
     "singleFlightStatus": {
       "type": "string",
       "enum": ["idle", "active", "observed_failures", "state_poisoned", "unconfigured"]
+    },
+    "qosStatus": {
+      "type": "object",
+      "required": [
+        "schema",
+        "workspaceHash",
+        "foregroundActiveCount",
+        "backgroundActiveCount",
+        "verificationActiveCount",
+        "maintenanceActiveCount",
+        "staleIgnoredCount",
+        "foregroundPressure",
+        "backgroundWorkActive",
+        "registryHealthy",
+        "degraded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.qos.active_lane_summary.v1"},
+        "workspaceHash": {"type": "string", "minLength": 8},
+        "foregroundActiveCount": {"type": "integer", "minimum": 0},
+        "backgroundActiveCount": {"type": "integer", "minimum": 0},
+        "verificationActiveCount": {"type": "integer", "minimum": 0},
+        "maintenanceActiveCount": {"type": "integer", "minimum": 0},
+        "staleIgnoredCount": {"type": "integer", "minimum": 0},
+        "foregroundPressure": {"type": "boolean"},
+        "backgroundWorkActive": {"type": "boolean"},
+        "registryHealthy": {"type": "boolean"},
+        "activeRecords": {
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": true}
+        },
+        "degraded": {
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": true}
+        }
+      }
     },
     "singleFlightPosture": {
       "type": "object",
