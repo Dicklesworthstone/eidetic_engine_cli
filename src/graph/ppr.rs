@@ -737,6 +737,53 @@ mod tests {
     }
 
     #[test]
+    fn personalized_pagerank_weighted_multi_seed_star_ranks_seed_mass_first() -> TestResult {
+        let mut graph = DiGraph::strict();
+        let a = memory_id(14);
+        let b = memory_id(15);
+        let c = memory_id(16);
+        let d = memory_id(17);
+        for (source, target) in [(a, c), (a, d), (b, c), (b, d)] {
+            graph
+                .add_edge_with_attrs(
+                    source.to_string(),
+                    target.to_string(),
+                    edge_attrs("supports", 1.0, 1.0),
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let seeds = HashMap::from([(a, 0.8), (b, 0.2)]);
+
+        let result = graph_result(compute_personalized_pagerank_with_policy(
+            &graph,
+            &seeds,
+            PersonalizedPageRankPolicy {
+                alpha: 0.25,
+                tolerance: 1.0e-6,
+                ..PersonalizedPageRankPolicy::default()
+            },
+        ))?;
+
+        let a_score = result.get(&a).copied().unwrap_or(0.0);
+        let b_score = result.get(&b).copied().unwrap_or(0.0);
+        let c_score = result.get(&c).copied().unwrap_or(0.0);
+        let d_score = result.get(&d).copied().unwrap_or(0.0);
+        assert!(
+            a_score > b_score,
+            "heavier seed should outrank lighter seed: {result:?}"
+        );
+        assert!(
+            b_score > c_score,
+            "lighter seed should still outrank symmetric non-seeds: {result:?}"
+        );
+        assert!(
+            (c_score - d_score).abs() < 1.0e-12,
+            "symmetric non-seed leaves should tie: {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn personalized_pagerank_uses_relation_weighted_edges() -> TestResult {
         let mut graph = DiGraph::strict();
         let seed = memory_id(21);
