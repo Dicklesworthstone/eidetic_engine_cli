@@ -700,7 +700,7 @@ impl LearnObserveReport {
             "success": true,
             "status": self.status,
             "dryRun": self.dry_run,
-            "observation": self.observation.data_json(),
+            "observation": learning_observation_public_json(&self.observation),
             "feedback": self.feedback.as_ref().map(OutcomeRecordReport::data_json),
             "generatedAt": self.generated_at,
         })
@@ -764,7 +764,7 @@ impl LearnOutcomeEconomyScoreEffect {
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         serde_json::json!({
-            "affectedArtifactIds": self.affected_artifact_ids,
+            "affectedArtifactIds": redact_learning_public_refs(&self.affected_artifact_ids),
             "promotedCount": self.promoted_count,
             "demotedCount": self.demoted_count,
             "utilityDelta": self.utility_delta,
@@ -790,7 +790,7 @@ impl LearnOutcomeProcedureDriftEffect {
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         serde_json::json!({
-            "procedureArtifactIds": self.procedure_artifact_ids,
+            "procedureArtifactIds": redact_learning_public_refs(&self.procedure_artifact_ids),
             "driftSignal": self.drift_signal,
             "driftScoreDelta": self.drift_score_delta,
             "requiresRevalidation": self.requires_revalidation,
@@ -813,7 +813,7 @@ impl LearnOutcomeTripwireFalseAlarmEffect {
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         serde_json::json!({
-            "tripwireArtifactIds": self.tripwire_artifact_ids,
+            "tripwireArtifactIds": redact_learning_public_refs(&self.tripwire_artifact_ids),
             "falseAlarmCostDelta": self.false_alarm_cost_delta,
             "confidenceDelta": self.confidence_delta,
             "action": self.action,
@@ -835,7 +835,7 @@ impl LearnOutcomeSituationConfidenceEffect {
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         serde_json::json!({
-            "situationArtifactIds": self.situation_artifact_ids,
+            "situationArtifactIds": redact_learning_public_refs(&self.situation_artifact_ids),
             "confidenceDelta": self.confidence_delta,
             "confidenceDirection": self.confidence_direction,
             "action": self.action,
@@ -860,7 +860,7 @@ impl LearnOutcomeDownstreamAudit {
         serde_json::json!({
             "durableFeedbackRecorded": self.durable_feedback_recorded,
             "sourceType": self.source_type,
-            "sourceId": self.source_id,
+            "sourceId": redact_learning_public_ref(&self.source_id),
             "feedbackEventId": self.feedback_event_id,
             "auditId": self.audit_id,
             "silentMutation": self.silent_mutation,
@@ -915,7 +915,7 @@ impl LearnCloseReport {
             "success": true,
             "status": self.status,
             "dryRun": self.dry_run,
-            "outcome": self.outcome.data_json(),
+            "outcome": experiment_outcome_public_json(&self.outcome),
             "feedback": self.feedback.as_ref().map(OutcomeRecordReport::data_json),
             "downstreamEffects": self.downstream_effects.data_json(),
             "generatedAt": self.generated_at,
@@ -968,6 +968,133 @@ impl LearnCloseReport {
             self.downstream_effects.mutation_mode
         )
     }
+}
+
+fn learning_observation_public_json(observation: &LearningObservation) -> serde_json::Value {
+    let redacted_evidence_ids = redact_learning_public_refs(&observation.evidence_ids);
+    let redaction_status = if redacted_evidence_ids != observation.evidence_ids
+        && observation.redaction_status == "not_required"
+    {
+        "standard"
+    } else {
+        observation.redaction_status.as_str()
+    };
+    serde_json::json!({
+        "schema": observation.schema,
+        "observationId": observation.observation_id,
+        "experimentId": observation.experiment_id,
+        "observedAt": observation.observed_at,
+        "observer": observation.observer,
+        "signal": observation.signal.as_str(),
+        "measurementName": observation.measurement_name,
+        "measurementValue": observation.measurement_value,
+        "evidenceIds": redacted_evidence_ids,
+        "note": observation.note,
+        "redactionStatus": redaction_status,
+    })
+}
+
+fn experiment_outcome_public_json(outcome: &ExperimentOutcome) -> serde_json::Value {
+    serde_json::json!({
+        "schema": outcome.schema,
+        "outcomeId": outcome.outcome_id,
+        "experimentId": outcome.experiment_id,
+        "status": outcome.status.as_str(),
+        "closedAt": outcome.closed_at,
+        "decisionImpact": outcome.decision_impact,
+        "confidenceDelta": rounded_metric(outcome.confidence_delta),
+        "priorityDelta": outcome.priority_delta,
+        "promotedArtifactIds": redact_learning_public_refs(&outcome.promoted_artifact_ids),
+        "demotedArtifactIds": redact_learning_public_refs(&outcome.demoted_artifact_ids),
+        "safetyNotes": outcome.safety_notes,
+        "auditIds": redact_learning_public_refs(&outcome.audit_ids),
+    })
+}
+
+fn experiment_run_observation_preview_public_json(
+    observation: &ExperimentRunObservationPreview,
+) -> serde_json::Value {
+    serde_json::json!({
+        "signal": observation.signal,
+        "measurementName": observation.measurement_name,
+        "measurementValue": observation.measurement_value,
+        "evidenceIds": redact_learning_public_refs(&observation.evidence_ids),
+        "note": observation.note,
+    })
+}
+
+fn experiment_run_outcome_preview_public_json(
+    outcome: &ExperimentRunOutcomePreview,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": outcome.status,
+        "decisionImpact": outcome.decision_impact,
+        "confidenceDelta": outcome.confidence_delta,
+        "priorityDelta": outcome.priority_delta,
+        "promotedArtifactIds": redact_learning_public_refs(&outcome.promoted_artifact_ids),
+        "demotedArtifactIds": redact_learning_public_refs(&outcome.demoted_artifact_ids),
+        "safetyNotes": outcome.safety_notes,
+    })
+}
+
+fn redact_learning_public_refs(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| redact_learning_public_ref(value))
+        .collect()
+}
+
+fn redact_learning_public_ref(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    redact_learning_public_path_like_segments(&secret_redacted)
+}
+
+fn redact_learning_public_path_like_segments(value: &str) -> String {
+    const REDACTED_PATH: &str = "[REDACTED_PATH]";
+    const PREFIXES: &[&str] = &[
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/home/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+    ];
+
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, c)| *c == '/')
+        else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        let start = cursor + relative_index;
+        if !PREFIXES
+            .iter()
+            .any(|prefix| value[start..].starts_with(prefix))
+        {
+            output.push_str(&value[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        output.push_str(&value[cursor..start]);
+        output.push_str(REDACTED_PATH);
+        cursor = value[start..]
+            .char_indices()
+            .find_map(|(index, c)| learning_public_path_boundary(c).then_some(start + index))
+            .unwrap_or(value.len());
+    }
+    output
+}
+
+fn learning_public_path_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
 }
 
 /// Attach evidence observed during a learning experiment.
@@ -1906,7 +2033,13 @@ pub struct LearnExperimentProposalReport {
 impl LearnExperimentProposalReport {
     #[must_use]
     pub fn to_json(&self) -> String {
-        crate::core::serialize_or_error(self)
+        let mut public = self.clone();
+        for proposal in &mut public.proposals {
+            proposal.evidence_ids = redact_learning_public_refs(&proposal.evidence_ids);
+            proposal.decision_impact.target_artifact_ids =
+                redact_learning_public_refs(&proposal.decision_impact.target_artifact_ids);
+        }
+        crate::core::serialize_or_error(&public)
     }
 }
 
@@ -1992,8 +2125,12 @@ impl LearnExperimentRunReport {
             "budget": self.budget,
             "safety": self.safety,
             "steps": self.steps,
-            "observations": self.observations,
-            "outcomePreview": self.outcome_preview,
+            "observations": self
+                .observations
+                .iter()
+                .map(experiment_run_observation_preview_public_json)
+                .collect::<Vec<_>>(),
+            "outcomePreview": experiment_run_outcome_preview_public_json(&self.outcome_preview),
             "nextActions": self.next_actions,
             "generatedAt": self.generated_at,
         })
@@ -3482,6 +3619,48 @@ mod tests {
     }
 
     #[test]
+    fn observe_experiment_public_json_redacts_sensitive_evidence_ids() -> TestResult {
+        let raw_evidence =
+            "/Users/alice/private/learning/evidence.json?api_key=sk-FAKEabc123def456ghi789";
+        let report = observe_experiment(&LearnObserveOptions {
+            workspace: PathBuf::from("/workspace"),
+            database_path: None,
+            workspace_id: None,
+            experiment_id: "exp_sensitive_evidence".to_string(),
+            observation_id: Some("lobs_sensitive".to_string()),
+            observed_at: Some("2026-01-01T00:00:00Z".to_string()),
+            observer: Some("MistySalmon".to_string()),
+            signal: LearningObservationSignal::Positive,
+            measurement_name: "contract_status".to_string(),
+            measurement_value: Some(1.0),
+            evidence_ids: vec![raw_evidence.to_string()],
+            note: Some("Contract fixture passed.".to_string()),
+            redaction_status: None,
+            session_id: None,
+            event_id: None,
+            actor: Some("MistySalmon".to_string()),
+            dry_run: true,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(
+            report.observation.evidence_ids,
+            vec![raw_evidence.to_string()]
+        );
+        let rendered = report.data_json().to_string();
+        assert!(rendered.contains("[REDACTED_PATH]"));
+        assert!(rendered.contains("[REDACTED:"));
+        assert!(!rendered.contains(raw_evidence));
+        assert!(!rendered.contains("/Users/alice"));
+        assert!(!rendered.contains("sk-FAKE"));
+        assert_eq!(
+            report.data_json().pointer("/observation/redactionStatus"),
+            Some(&serde_json::json!("standard"))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn observe_experiment_records_feedback_and_audit() -> TestResult {
         let (dir, database, _) = seed_learning_workspace("ee-learn-observe")?;
         let report = observe_experiment(&LearnObserveOptions {
@@ -3573,6 +3752,56 @@ mod tests {
         assert!(!report.downstream_effects.audit.durable_feedback_recorded);
         assert!(!report.downstream_effects.audit.silent_mutation);
         assert!(report.feedback.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn close_experiment_public_json_redacts_sensitive_artifact_refs() -> TestResult {
+        let promoted = "/Users/alice/private/procedure.md?token=ghp_FAKEabc123def456ghi7890";
+        let demoted = "tw:///Volumes/Secret/tripwire.json?api_key=sk-FAKEabc123def456ghi789";
+        let audit = "/tmp/learning/audit.json?secret=redaction-fixture";
+        let report = close_experiment(&LearnCloseOptions {
+            workspace: PathBuf::from("/workspace"),
+            database_path: None,
+            workspace_id: None,
+            experiment_id: "exp_sensitive_outcome".to_string(),
+            outcome_id: Some("lout_sensitive".to_string()),
+            closed_at: Some("2026-01-02T00:00:00Z".to_string()),
+            status: ExperimentOutcomeStatus::Rejected,
+            decision_impact: "Reject sensitive local evidence.".to_string(),
+            confidence_delta: -0.25,
+            priority_delta: 4,
+            promoted_artifact_ids: vec![promoted.to_string()],
+            demoted_artifact_ids: vec![demoted.to_string()],
+            safety_notes: Vec::new(),
+            audit_ids: vec![audit.to_string()],
+            session_id: None,
+            event_id: None,
+            actor: Some("MistySalmon".to_string()),
+            dry_run: true,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(
+            report.outcome.promoted_artifact_ids,
+            vec![promoted.to_string()]
+        );
+        assert_eq!(
+            report.outcome.demoted_artifact_ids,
+            vec![demoted.to_string()]
+        );
+        assert_eq!(report.outcome.audit_ids, vec![audit.to_string()]);
+        let rendered = report.data_json().to_string();
+        assert!(rendered.contains("[REDACTED_PATH]"));
+        assert!(rendered.contains("[REDACTED:"));
+        assert!(!rendered.contains(promoted));
+        assert!(!rendered.contains(demoted));
+        assert!(!rendered.contains(audit));
+        assert!(!rendered.contains("/Users/alice"));
+        assert!(!rendered.contains("/Volumes/Secret"));
+        assert!(!rendered.contains("/tmp/learning"));
+        assert!(!rendered.contains("ghp_FAKE"));
+        assert!(!rendered.contains("sk-FAKE"));
         Ok(())
     }
 
@@ -3774,6 +4003,66 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].source_type, "feedback_event");
         connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn experiment_proposal_json_redacts_sensitive_evidence_ids() -> TestResult {
+        let raw_evidence = "/data/private/cluster.json?token=ghp_FAKEabc123def456ghi7890";
+        let report = LearnExperimentProposalReport {
+            schema: LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1.to_string(),
+            proposals: vec![ExperimentProposal {
+                experiment_id: "exp_sensitive".to_string(),
+                question_id: "q_sensitive".to_string(),
+                title: "Review sensitive evidence".to_string(),
+                hypothesis: "Sensitive evidence can be reviewed safely.".to_string(),
+                status: "proposed".to_string(),
+                topic: "sensitive".to_string(),
+                expected_value: 0.5,
+                uncertainty_reduction: 0.25,
+                confidence: 0.4,
+                budget: ExperimentBudget {
+                    attention_tokens: 100,
+                    max_runtime_seconds: 30,
+                    dry_run_required: true,
+                    budget_class: "small".to_string(),
+                },
+                safety: ExperimentSafetyPlan {
+                    boundary: "dry_run_only".to_string(),
+                    dry_run_first: true,
+                    mutation_allowed: false,
+                    review_required: true,
+                    stop_conditions: Vec::new(),
+                    denied_reasons: Vec::new(),
+                },
+                decision_impact: ExperimentDecisionImpact {
+                    decision_id: "decision_sensitive".to_string(),
+                    target_artifact_ids: vec![raw_evidence.to_string()],
+                    current_decision: "retain".to_string(),
+                    possible_change: "review".to_string(),
+                    impact_score: 0.5,
+                },
+                evidence_ids: vec![raw_evidence.to_string()],
+                next_command: "ee learn experiment run exp_sensitive --dry-run --json".to_string(),
+            }],
+            total_candidates: 1,
+            returned: 1,
+            min_expected_value: 0.0,
+            max_attention_tokens: 100,
+            max_runtime_seconds: 30,
+            generated_at: stable_learning_generated_at(),
+        };
+
+        let rendered = report.to_json();
+        assert!(rendered.contains("[REDACTED_PATH]"));
+        assert!(rendered.contains("[REDACTED:"));
+        assert!(!rendered.contains(raw_evidence));
+        assert!(!rendered.contains("/data/private"));
+        assert!(!rendered.contains("ghp_FAKE"));
+        assert_eq!(
+            report.proposals[0].evidence_ids,
+            vec![raw_evidence.to_string()]
+        );
+        Ok(())
     }
 
     #[test]
