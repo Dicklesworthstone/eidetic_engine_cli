@@ -22,16 +22,18 @@ fn g5_curate_decay_script_passes_with_cargo_built_binary() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let log = std::fs::read_to_string(&log_path)
+        .unwrap_or_else(|error| format!("<failed to read {}: {error}>", log_path.display()));
     assert!(
         output.status.success(),
-        "g5 curate decay e2e script failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+        "g5 curate decay e2e script failed with status {:?}\nstdout:\n{}\nstderr:\n{}\nlog path: {}\nlog:\n{}",
         output.status.code(),
         stdout,
-        stderr
+        stderr,
+        log_path.display(),
+        log
     );
 
-    let log = std::fs::read_to_string(&log_path)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", log_path.display()));
     assert!(
         log.contains("g5_curate_decay_data_schema"),
         "structured log should include the disposition schema assertion; log path: {}\nlog:\n{}",
