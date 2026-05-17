@@ -555,6 +555,7 @@ fn write_registry_document(
             repair: Some("replace the symlinked .ee/qos temp path with a real file".to_owned()),
         });
     }
+    ensure_registry_temp_path_writable(&temp_path)?;
     fs::write(&temp_path, format!("{json}\n")).map_err(|error| DomainError::Storage {
         message: format!(
             "failed to write QoS active-lane registry temp file '{}': {error}",
@@ -569,6 +570,36 @@ fn write_registry_document(
         ),
         repair: Some("check workspace .ee/qos permissions and retry".to_owned()),
     })
+}
+
+fn ensure_registry_temp_path_writable(path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "refusing to write QoS active-lane registry temp file '{}' because it is not a regular file",
+                path.display()
+            ),
+            repair: Some(
+                "replace .ee/qos/active-lanes.json.tmp with a regular file or remove it".to_owned(),
+            ),
+        }),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "failed to inspect QoS active-lane registry temp file '{}': {error}",
+                path.display()
+            ),
+            repair: Some("check workspace .ee/qos permissions".to_owned()),
+        }),
+    }
 }
 
 fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, DomainError> {
@@ -1080,6 +1111,38 @@ mod tests {
             error.message()
         );
         assert_eq!(fs::read_to_string(&outside)?, "outside sentinel");
+        Ok(())
+    }
+
+    #[test]
+    fn registry_write_rejects_non_regular_temp_file() -> TestResult {
+        let tempdir = tempfile::tempdir()?;
+        let workspace = tempdir.path().join("workspace");
+        let path = qos_registry_path(&workspace);
+        let temp_path = path.with_extension("json.tmp");
+        fs::create_dir_all(path.parent().expect("registry parent"))?;
+        fs::create_dir(&temp_path)?;
+
+        let error = publish_qos_lane_record(
+            &workspace,
+            &record_input(QosLane::VerificationRch, "cargo-test", "query", 100),
+        )
+        .expect_err("non-regular temp file should reject registry write");
+
+        assert!(
+            error.message().contains("not a regular file"),
+            "unexpected non-regular temp error: {}",
+            error.message()
+        );
+        assert!(
+            fs::symlink_metadata(&temp_path)?.file_type().is_dir(),
+            "non-regular temp path must remain a directory"
+        );
+        assert!(
+            fs::symlink_metadata(&path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "final registry path must not be created"
+        );
         Ok(())
     }
 
