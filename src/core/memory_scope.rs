@@ -1653,6 +1653,22 @@ team_members = ["OutsideAgent"]
     }
 
     #[test]
+    fn team_scope_ignores_non_regular_workspace_config_file() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_path = tempdir.path().join(".ee").join("config.toml");
+        std::fs::create_dir_all(&config_path).map_err(|error| error.to_string())?;
+
+        let context = MemoryScopeContext::for_workspace(tempdir.path(), MemoryScope::Team, false);
+
+        assert!(context.team_members.is_empty());
+        assert!(
+            config_path.is_dir(),
+            "team scope config read must leave non-regular config path untouched"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn workspace_and_swarm_scopes_include_any_memory() {
         let mut context = MemoryScopeContext {
             scope: MemoryScope::Workspace,
