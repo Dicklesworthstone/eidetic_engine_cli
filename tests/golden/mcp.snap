@@ -6,10 +6,12 @@ schema:
   manifest: ee.mcp.manifest.v1
 contracts:
   - mcp manifest lists all public CLI commands as MCP tools
+  - ee mcp serve-stdio is the explicit CLI entrypoint for the stdio adapter
+  - default ee mcp serve-stdio reports mcp_feature_disabled instead of starting an adapter
   - tools mirror CLI contract with ee_ prefix naming
   - responseEnvelope and errorEnvelope reference stable schemas
   - capabilities.resources and capabilities.prompts require mcp feature
-  - degraded array reports MCP_FEATURE_DISABLED when feature is off
+  - capabilityGap reports mcp_feature_disabled when feature is off
   - adapter.transport is stdio (no HTTP in MCP path)
   - adapter.runtime is asupersync (no tokio in default tree)
   - adapter.businessLogic is cli_core_services (adapter only, no separate logic)
@@ -23,7 +25,9 @@ feature_requirements:
   - MCP adapter wraps CLI commands, does not add business logic
 evidence:
   - McpCommand::Manifest
+  - McpCommand::ServeStdio
   - render_mcp_manifest_json()
+  - handle_mcp_serve_stdio()
   - MCP_MANIFEST_SCHEMA_V1
   - MCP_PROTOCOL_VERSION
   - MCP_FEATURE_DISABLED_DEGRADATION

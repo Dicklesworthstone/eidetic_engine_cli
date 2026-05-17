@@ -182,7 +182,7 @@ memory bodies in `sources[]`.
 | `daemon_background_mode_unimplemented` | serve | (daemon background-mode build) | Background daemon mode not built; foreground still works. |
 | `diagram_backend_unavailable` | doctor, dependency contract | (mermaid renderer feature) | Mermaid backend not linked. |
 | `lexical_unavailable` | search | `frankensearch/lexical` | BM25 arm disabled at build. |
-| `mcp_feature_disabled` | mcp manifest | `mcp` | MCP manifest remains available, but the stdio adapter is disabled in this build. |
+| `mcp_feature_disabled` | mcp manifest, mcp serve-stdio | `mcp` | MCP discovery remains available, but the stdio adapter is disabled in this build. |
 | `mcp_unavailable` | doctor, dependency contract | `mcp` | MCP adapter feature off. |
 | `runtime_unavailable` | status, doctor | `asupersync` | Runtime feature off (defensive; should never fire in a real build). |
 | `search_unimplemented` | status | `frankensearch` core feature | Whole search subsystem disabled. |

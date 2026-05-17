@@ -7325,6 +7325,9 @@ pub enum SchemaCommand {
 pub enum McpCommand {
     /// Print the MCP tool and schema manifest.
     Manifest,
+    /// Run the optional MCP stdio adapter; default builds report the disabled feature gap.
+    #[command(name = "serve-stdio")]
+    ServeStdio,
     /// Validate the MCP manifest against the public schema contract.
     Validate(McpValidateArgs),
 }
@@ -9257,6 +9260,7 @@ where
                 write_stdout(stdout, &(output::render_mcp_manifest_json() + "\n"))
             }
         },
+        Some(Command::Mcp(McpCommand::ServeStdio)) => handle_mcp_serve_stdio(&cli, stdout, stderr),
         Some(Command::Mcp(McpCommand::Validate(ref args))) => {
             handle_mcp_validate(&cli, args, stdout)
         }
@@ -10020,6 +10024,73 @@ fn default_mcp_capability_gap() -> serde_json::Value {
         "feature": "mcp",
         "capabilitiesCommand": "ee capabilities --json",
     })
+}
+
+#[cfg(feature = "mcp")]
+fn handle_mcp_serve_stdio<W, E>(_cli: &Cli, _stdout: &mut W, stderr: &mut E) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match crate::mcp::run_stdio_server() {
+        Ok(()) => ProcessExitCode::Success,
+        Err(error) => {
+            let _ = writeln!(stderr, "error: MCP stdio server failed: {error}");
+            ProcessExitCode::Configuration
+        }
+    }
+}
+
+#[cfg(not(feature = "mcp"))]
+fn handle_mcp_serve_stdio<W, E>(cli: &Cli, stdout: &mut W, _stderr: &mut E) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let report = serde_json::json!({
+        "command": "mcp serve-stdio",
+        "manifestSchema": output::MCP_MANIFEST_SCHEMA_V1,
+        "status": "disabled",
+        "adapter": {
+            "name": "ee",
+            "transport": "stdio",
+            "feature": "mcp",
+            "featureEnabled": false,
+            "runtime": "asupersync",
+            "businessLogic": "cli_core_services",
+        },
+        "capabilityGap": default_mcp_capability_gap(),
+        "degraded": [],
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            "ee mcp serve-stdio\n\nStatus: disabled\nCapability gap: mcp_feature_disabled\nMCP stdio adapter feature is not enabled in this build.\nBuild ee with the mcp feature enabled, or use `ee mcp manifest --json` and the CLI surfaces directly.\n",
+        ),
+        output::Renderer::Toon => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": report,
+            });
+            write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&json.to_string()) + "\n"),
+            )
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": report,
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
 }
 
 fn mcp_validate_human(report: &serde_json::Value) -> String {
@@ -37808,7 +37879,7 @@ const MAINTENANCE_SUBCOMMANDS: &[&str] = &[
 ];
 const MEMORY_SUBCOMMANDS: &[&str] = &["expire", "list", "show", "history", "revise", "tags"];
 const MIGRATE_SUBCOMMANDS: &[&str] = &["status", "run"];
-const MCP_SUBCOMMANDS: &[&str] = &["manifest"];
+const MCP_SUBCOMMANDS: &[&str] = &["manifest", "serve-stdio", "validate"];
 const MODEL_SUBCOMMANDS: &[&str] = &["status", "list"];
 const OUTCOME_QUARANTINE_SUBCOMMANDS: &[&str] = &["list", "release"];
 const PERF_SUBCOMMANDS: &[&str] = &["compare", "budget"];
@@ -38133,6 +38204,7 @@ impl NormalizedInvocation {
                 Command::History(_) => "history".to_string(),
                 Command::Mcp(mcp) => match mcp {
                     McpCommand::Manifest => "mcp manifest".to_string(),
+                    McpCommand::ServeStdio => "mcp serve-stdio".to_string(),
                     McpCommand::Validate(_) => "mcp validate".to_string(),
                 },
                 Command::Hook(hook) => match hook {
@@ -38904,11 +38976,11 @@ mod tests {
         GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY,
         GraphCommand, GraphSnapshotCommand, HandoffCommand, HealthArgs, ImportCommand, JobCommand,
         LearnCommand, LearnExperimentCommand, MaintenanceCommand,
-        MaintenanceGraphWitnessesPruneArgs, MemoryCommand, OutcomeQuarantineCommand, OutputFormat,
-        PackCommand, PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, RuleCommand,
-        SERVE_UNAVAILABLE_CODE, ShadowMode, SituationCommand, StatusArgs, SupportCommand,
-        SwarmBriefArgs, SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand, VerifyCommand,
-        WorkflowCommand, db_inspect_redact_source_uri, decay_settings_from_config,
+        MaintenanceGraphWitnessesPruneArgs, McpCommand, MemoryCommand, OutcomeQuarantineCommand,
+        OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand, RedactionLevelSource,
+        RuleCommand, SERVE_UNAVAILABLE_CODE, ShadowMode, SituationCommand, StatusArgs,
+        SupportCommand, SwarmBriefArgs, SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand,
+        VerifyCommand, WorkflowCommand, db_inspect_redact_source_uri, decay_settings_from_config,
         load_maintenance_decay_settings, load_witness_retention_policy, run,
         write_index_rebuild_error,
     };
@@ -46313,6 +46385,30 @@ default_half_life_days = 45
             &parsed.command,
             &Some(Command::Introspect),
             "introspect command",
+        )
+    }
+
+    #[test]
+    fn mcp_serve_stdio_command_parses_and_normalizes() -> TestResult {
+        let raw_args = [
+            OsString::from("ee"),
+            OsString::from("--json"),
+            OsString::from("mcp"),
+            OsString::from("serve-stdio"),
+        ];
+        let parsed = Cli::try_parse_from(raw_args.clone())
+            .map_err(|e| format!("failed to parse mcp serve-stdio: {:?}", e.kind()))?;
+
+        ensure_equal(
+            &parsed.command,
+            &Some(Command::Mcp(McpCommand::ServeStdio)),
+            "mcp serve-stdio command",
+        )?;
+        let normalized = super::NormalizedInvocation::from_cli(&parsed, &raw_args);
+        ensure_equal(
+            &normalized.command_path,
+            &"mcp serve-stdio".to_string(),
+            "mcp serve-stdio normalized command path",
         )
     }
 

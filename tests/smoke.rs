@@ -8429,6 +8429,10 @@ fn mcp_validate_json_real_binary_smoke() -> TestResult {
         "mcp help should exit successfully",
     )?;
     ensure(
+        help_stdout.contains("serve-stdio"),
+        "mcp help should list serve-stdio subcommand",
+    )?;
+    ensure(
         help_stdout.contains("validate"),
         "mcp help should list validate subcommand",
     )?;
@@ -8505,6 +8509,64 @@ fn mcp_validate_json_real_binary_smoke() -> TestResult {
             "capability gap code",
         )?;
     }
+
+    Ok(())
+}
+
+#[test]
+fn mcp_serve_stdio_default_build_reports_capability_gap() -> TestResult {
+    if cfg!(feature = "mcp") {
+        return Ok(());
+    }
+
+    let output = run_ee(&["--json", "mcp", "serve-stdio"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    ensure(
+        output.status.success(),
+        format!("default mcp serve-stdio should report disabled capability gap; stderr: {stderr}"),
+    )?;
+    ensure(
+        output.stderr.is_empty(),
+        "default mcp serve-stdio stderr must be empty",
+    )?;
+    ensure_no_ansi(&stdout, "mcp serve-stdio stdout")?;
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("mcp serve-stdio stdout must be valid JSON: {error}"))?;
+    ensure_equal(
+        &parsed["schema"],
+        &serde_json::json!("ee.response.v1"),
+        "response schema",
+    )?;
+    ensure_equal(&parsed["success"], &serde_json::json!(true), "success")?;
+    ensure_equal(
+        &parsed["data"]["command"],
+        &serde_json::json!("mcp serve-stdio"),
+        "serve-stdio command",
+    )?;
+    ensure_equal(
+        &parsed["data"]["status"],
+        &serde_json::json!("disabled"),
+        "serve-stdio status",
+    )?;
+    ensure_equal(
+        &parsed["data"]["adapter"]["featureEnabled"],
+        &serde_json::json!(false),
+        "adapter feature status",
+    )?;
+    ensure_equal(
+        &parsed["data"]["capabilityGap"]["code"],
+        &serde_json::json!("mcp_feature_disabled"),
+        "capability gap code",
+    )?;
+    ensure(
+        parsed["data"]["degraded"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "default mcp serve-stdio should keep build-time feature gap out of degraded[]",
+    )?;
 
     Ok(())
 }
