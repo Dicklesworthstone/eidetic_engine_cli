@@ -1502,9 +1502,7 @@ fn public_search_metadata(
                 "content_truncated".to_string(),
                 search_metadata_truncated_value(value),
             );
-        } else if let Some(content) = public_fields
-            .get("content")
-            .and_then(serde_json::Value::as_str)
+        } else if let Some(content) = public_fields.get("content").and_then(serde_json::Value::as_str)
         {
             public_fields.insert(
                 "content_truncated".to_string(),
@@ -5165,7 +5163,10 @@ mod tests {
             json["results"][0]["metadata"]["content"].as_str(),
             Some("Rotate api_key=[REDACTED:api_key] before release.")
         );
-        assert_eq!(json["results"][0]["metadata"].get("contentPreview"), None);
+        assert_eq!(
+            json["results"][0]["metadata"].get("contentPreview"),
+            None
+        );
         assert_eq!(
             json["results"][0]["metadata"]["content_truncated"].as_bool(),
             Some(false)
@@ -5221,7 +5222,10 @@ mod tests {
             json["results"][0]["metadata"]["content"].as_str(),
             Some(expected_preview.as_str())
         );
-        assert_eq!(json["results"][0]["metadata"].get("contentPreview"), None);
+        assert_eq!(
+            json["results"][0]["metadata"].get("contentPreview"),
+            None
+        );
         assert_eq!(
             json["results"][0]["metadata"]["content_truncated"].as_bool(),
             Some(false)

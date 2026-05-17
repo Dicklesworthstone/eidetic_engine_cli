@@ -22385,10 +22385,13 @@ where
                     projection_ms: 0.0,
                     pagerank_ms: 0.0,
                     betweenness_ms: 0.0,
+                    hits_ms: 0.0,
                     total_ms: 0.0,
                     scores: Vec::new(),
                     top_pagerank: Vec::new(),
                     top_betweenness: Vec::new(),
+                    top_authorities: Vec::new(),
+                    top_hubs: Vec::new(),
                 };
                 crate::graph::enrich_graph_features(&centrality, &enrichment_options)
             },

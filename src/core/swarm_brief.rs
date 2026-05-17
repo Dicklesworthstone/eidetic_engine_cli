@@ -403,7 +403,7 @@ impl SwarmBriefDegradation {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Ord, PartialOrd)]
 #[serde(rename_all = "camelCase")]
 pub struct SwarmBriefDirtyFile {
     pub path: String,
