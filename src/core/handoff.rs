@@ -2210,7 +2210,21 @@ fn write_regular_file_no_symlinks(
     reject_existing_symlink_component(&temp_path, label)?;
     ensure_handoff_temp_path_is_missing(&temp_path, label)?;
     write_handoff_temp_file(&temp_path, content, label)?;
-    fs::rename(&temp_path, path).map_err(|error| DomainError::Storage {
+    publish_handoff_temp_file(&temp_path, path, label)?;
+    reject_existing_symlink_component(path, label)?;
+    ensure_handoff_write_path_is_regular_file(path, label)
+}
+
+fn publish_handoff_temp_file(
+    temp_path: &Path,
+    path: &Path,
+    label: &str,
+) -> Result<(), DomainError> {
+    reject_existing_symlink_component(path, label)?;
+    ensure_handoff_write_path_is_regular_or_missing(path, label)?;
+    reject_existing_symlink_component(temp_path, label)?;
+    ensure_handoff_created_temp_path_is_regular_file(temp_path, label)?;
+    fs::rename(temp_path, path).map_err(|error| DomainError::Storage {
         message: format!("Failed to publish {label}: {error}"),
         repair: Some(format!("Check write permissions for {}", path.display())),
     })?;
@@ -2240,6 +2254,32 @@ fn ensure_handoff_temp_path_is_missing(path: &Path, label: &str) -> Result<(), D
         Err(error) => Err(DomainError::Storage {
             message: format!(
                 "Failed to inspect {label} temp file {} before write: {error}",
+                path.display()
+            ),
+            repair: Some(format!("Check permissions for {}", path.display())),
+        }),
+    }
+}
+
+fn ensure_handoff_created_temp_path_is_regular_file(
+    path: &Path,
+    label: &str,
+) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to publish {label} from non-regular temp path: {}",
+                path.display()
+            ),
+            repair: Some(format!(
+                "Remove stale temp file {} and retry.",
+                path.display()
+            )),
+        }),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect {label} temp file {} before publish: {error}",
                 path.display()
             ),
             repair: Some(format!("Check permissions for {}", path.display())),
@@ -5061,6 +5101,78 @@ memories_revised = 3
         ensure(
             !capsule_path.exists(),
             "final capsule should not be published after temp rejection",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_capsule_publish_rechecks_final_symlink_before_rename() -> TestResult {
+        let dir = repo_tempdir()?;
+        let capsule_path = dir.path().join("capsule.json");
+        let temp_path = handoff_temp_publish_path(&capsule_path);
+        fs::write(&temp_path, "{}").map_err(|error| error.to_string())?;
+        let outside_path = dir.path().join("outside-capsule.json");
+        fs::write(&outside_path, "outside capsule").map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_path, &capsule_path)
+            .map_err(|error| error.to_string())?;
+
+        let error = publish_handoff_temp_file(&temp_path, &capsule_path, "handoff capsule")
+            .expect_err("symlinked final capsule path should reject before publish");
+
+        ensure(
+            error.message().contains("symlink"),
+            format!("unexpected final symlink error: {}", error.message()),
+        )?;
+        ensure_equal(
+            &fs::read_to_string(&outside_path).map_err(|error| error.to_string())?,
+            &"outside capsule".to_owned(),
+            "outside capsule content",
+        )?;
+        ensure(
+            temp_path.is_file(),
+            "temp capsule should remain available after final path rejection",
+        )?;
+        ensure(
+            fs::symlink_metadata(&capsule_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "final capsule symlink should remain untouched",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_capsule_publish_rechecks_temp_symlink_before_rename() -> TestResult {
+        let dir = repo_tempdir()?;
+        let capsule_path = dir.path().join("capsule.json");
+        let temp_path = handoff_temp_publish_path(&capsule_path);
+        let outside_path = dir.path().join("outside-capsule.json");
+        fs::write(&outside_path, "outside capsule").map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_path, &temp_path).map_err(|error| error.to_string())?;
+
+        let error = publish_handoff_temp_file(&temp_path, &capsule_path, "handoff capsule")
+            .expect_err("symlinked temp capsule path should reject before publish");
+
+        ensure(
+            error.message().contains("symlink"),
+            format!("unexpected temp symlink error: {}", error.message()),
+        )?;
+        ensure(
+            !capsule_path.exists(),
+            "final capsule should not be published from a swapped temp symlink",
+        )?;
+        ensure_equal(
+            &fs::read_to_string(&outside_path).map_err(|error| error.to_string())?,
+            &"outside capsule".to_owned(),
+            "outside capsule content",
+        )?;
+        ensure(
+            fs::symlink_metadata(&temp_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "temp capsule symlink should remain untouched",
         )
     }
 
