@@ -44560,7 +44560,7 @@ mod tests {
         let output_database = tempdir.path().join("skew.db");
         fs::create_dir(&output_database).map_err(|error| error.to_string())?;
 
-        let error = match ensure_diag_database_output_path_is_safe(&output_database) {
+        let error = match super::ensure_diag_database_output_path_is_safe(&output_database) {
             Ok(()) => return Err("directory output path should be rejected".to_string()),
             Err(error) => error,
         };
@@ -44584,7 +44584,7 @@ mod tests {
         symlink(&real_parent, &linked_parent).map_err(|error| error.to_string())?;
         let output_database = linked_parent.join("skew.db");
 
-        let error = match ensure_diag_database_output_path_is_safe(&output_database) {
+        let error = match super::ensure_diag_database_output_path_is_safe(&output_database) {
             Ok(()) => return Err("symlinked parent output path should be rejected".to_string()),
             Err(error) => error,
         };
@@ -44606,7 +44606,7 @@ mod tests {
         let outside_target = tempdir.path().join("outside.db");
         symlink(&outside_target, &output_database).map_err(|error| error.to_string())?;
 
-        let error = match ensure_diag_database_output_path_is_safe(&output_database) {
+        let error = match super::ensure_diag_database_output_path_is_safe(&output_database) {
             Ok(()) => return Err("symlinked final output path should be rejected".to_string()),
             Err(error) => error,
         };
