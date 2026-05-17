@@ -66,6 +66,9 @@ pub const DISCOVERY_DENYLIST_FILE: &str = "discovery_denylist.toml";
 /// Default file name for the responder-side allowlist (`<workspace>/.ee/respond_allowlist.toml`).
 pub const RESPOND_ALLOWLIST_FILE: &str = "respond_allowlist.toml";
 
+const NODE_KEY_PREFIX: &str = "nodekey:";
+const NODE_KEY_HEX_LEN: usize = 64;
+
 /// The three discovery modes that gate both probing (caller side) and
 /// admission (responder side). The same enum is reused for both surfaces
 /// so the discovery-policy schema is symmetric.
@@ -337,7 +340,10 @@ impl std::error::Error for LoadListError {}
 /// Expected file shape:
 ///
 /// ```toml
-/// node_keys = ["nodekey:alpha", "nodekey:bravo"]
+/// node_keys = [
+///   "nodekey:0000000000000000000000000000000000000000000000000000000000000001",
+///   "nodekey:0000000000000000000000000000000000000000000000000000000000000002",
+/// ]
 /// ```
 ///
 /// Trims whitespace from each entry and skips empty entries; preserves
@@ -376,10 +382,30 @@ pub fn load_node_key_list(path: &Path) -> Result<BTreeSet<String>, LoadListError
         };
         let trimmed = s.trim();
         if !trimmed.is_empty() {
+            validate_node_key_list_entry(index, trimmed)?;
             out.insert(trimmed.to_owned());
         }
     }
     Ok(out)
+}
+
+fn validate_node_key_list_entry(index: usize, value: &str) -> Result<(), LoadListError> {
+    if is_valid_node_key(value) {
+        return Ok(());
+    }
+    Err(LoadListError::InvalidShape(format!(
+        "expected `node_keys[{index}]` to be a Tailscale node key formatted as `{NODE_KEY_PREFIX}` plus {NODE_KEY_HEX_LEN} lowercase hex characters",
+    )))
+}
+
+fn is_valid_node_key(value: &str) -> bool {
+    let Some(body) = value.strip_prefix(NODE_KEY_PREFIX) else {
+        return false;
+    };
+    body.len() == NODE_KEY_HEX_LEN
+        && body
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn node_key_list_path_is_regular(path: &Path) -> Result<bool, LoadListError> {
@@ -520,6 +546,13 @@ pub struct PolicyDegradation {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    const NODE_KEY_A: &str =
+        "nodekey:0000000000000000000000000000000000000000000000000000000000000001";
+    const NODE_KEY_B: &str =
+        "nodekey:0000000000000000000000000000000000000000000000000000000000000002";
+    const NODE_KEY_C: &str =
+        "nodekey:0000000000000000000000000000000000000000000000000000000000000003";
 
     fn empty_set() -> BTreeSet<String> {
         BTreeSet::new()
@@ -790,12 +823,12 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let path = tempdir.path().join("list.toml");
         let mut file = std::fs::File::create(&path).expect("create");
-        writeln!(file, "node_keys = [\"nodekey:alpha\", \"nodekey:bravo\"]").expect("write");
+        writeln!(file, "node_keys = [\"{NODE_KEY_A}\", \"{NODE_KEY_B}\"]").expect("write");
         drop(file);
         let result = load_node_key_list(&path).expect("parse");
         assert_eq!(result.len(), 2);
-        assert!(result.contains("nodekey:alpha"));
-        assert!(result.contains("nodekey:bravo"));
+        assert!(result.contains(NODE_KEY_A));
+        assert!(result.contains(NODE_KEY_B));
     }
 
     #[cfg(unix)]
@@ -840,7 +873,7 @@ mod tests {
         let mut file = std::fs::File::create(&path).expect("create");
         writeln!(
             file,
-            "node_keys = [\"nodekey:alpha\", \"  nodekey:alpha  \", \"\", \"   \"]"
+            "node_keys = [\"{NODE_KEY_A}\", \"  {NODE_KEY_A}  \", \"\", \"   \"]"
         )
         .expect("write");
         drop(file);
@@ -850,7 +883,37 @@ mod tests {
             1,
             "expected dedup + empty drop, got {result:?}"
         );
-        assert!(result.contains("nodekey:alpha"));
+        assert!(result.contains(NODE_KEY_A));
+    }
+
+    #[test]
+    fn load_node_key_list_rejects_non_node_key_entries() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("list.toml");
+        std::fs::write(&path, "node_keys = [\"machinekey:alpha\"]\n").expect("write");
+
+        let result = load_node_key_list(&path);
+
+        let Err(LoadListError::InvalidShape(message)) = result else {
+            panic!("expected malformed node key to fail closed, got {result:?}");
+        };
+        assert!(message.contains("node_keys[0]"));
+        assert!(message.contains("nodekey:"));
+    }
+
+    #[test]
+    fn load_node_key_list_rejects_path_like_node_key_entries() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("list.toml");
+        std::fs::write(&path, "node_keys = [\"nodekey:../../secret\"]\n").expect("write");
+
+        let result = load_node_key_list(&path);
+
+        let Err(LoadListError::InvalidShape(message)) = result else {
+            panic!("expected path-like node key to fail closed, got {result:?}");
+        };
+        assert!(message.contains("node_keys[0]"));
+        assert!(message.contains("lowercase hex"));
     }
 
     #[test]
@@ -879,17 +942,17 @@ mod tests {
         let ee_dir = tempdir.path().join(".ee");
         std::fs::create_dir(&ee_dir).expect("mkdir");
         for (name, key) in [
-            (DISCOVERY_ALLOWLIST_FILE, "nodekey:allowed"),
-            (DISCOVERY_DENYLIST_FILE, "nodekey:denied"),
-            (RESPOND_ALLOWLIST_FILE, "nodekey:respond"),
+            (DISCOVERY_ALLOWLIST_FILE, NODE_KEY_A),
+            (DISCOVERY_DENYLIST_FILE, NODE_KEY_B),
+            (RESPOND_ALLOWLIST_FILE, NODE_KEY_C),
         ] {
             let path = ee_dir.join(name);
             std::fs::write(&path, format!("node_keys = [\"{key}\"]\n")).expect("write");
         }
         let lists = load_workspace_lists(tempdir.path()).expect("ok");
-        assert!(lists.allowlist.contains("nodekey:allowed"));
-        assert!(lists.denylist.contains("nodekey:denied"));
-        assert!(lists.respond_allowlist.contains("nodekey:respond"));
+        assert!(lists.allowlist.contains(NODE_KEY_A));
+        assert!(lists.denylist.contains(NODE_KEY_B));
+        assert!(lists.respond_allowlist.contains(NODE_KEY_C));
     }
 
     // ---- Degradation evaluation --------------------------------------------
