@@ -959,6 +959,16 @@ pub fn execute_install_plan(
 
     let install_dir = install_path.parent().unwrap_or(Path::new("."));
 
+    if let Err(error) = ensure_install_target_path_is_regular_or_missing(install_path) {
+        return InstallExecutionResult {
+            success: false,
+            artifact_verified: true,
+            binary_installed: false,
+            backup_path: None,
+            error_message: Some(error),
+        };
+    }
+
     // Create install directory if needed
     if !install_dir.exists() {
         if let Err(error) = fs::create_dir_all(install_dir) {
@@ -975,6 +985,7 @@ pub fn execute_install_plan(
         }
     }
 
+    // Re-check after creating the parent to catch races or newly materialized final paths.
     if let Err(error) = ensure_install_target_path_is_regular_or_missing(install_path) {
         return InstallExecutionResult {
             success: false,
@@ -2125,6 +2136,53 @@ mod tests {
                 .as_ref()
                 .is_some_and(|message| message.contains("symbolic link")),
             "execute error should report symlink artifact",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_install_plan_rejects_symlinked_install_parent_before_create() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let artifact_root = tempdir.path().join("artifacts");
+        fs::create_dir_all(&artifact_root).map_err(|error| error.to_string())?;
+        let artifact_name = "ee-x86_64-unknown-linux-gnu.tar.xz";
+        let artifact_bytes = b"not a real archive";
+        fs::write(artifact_root.join(artifact_name), artifact_bytes)
+            .map_err(|error| error.to_string())?;
+        let outside_dir = tempdir.path().join("outside-bin-root");
+        fs::create_dir_all(&outside_dir).map_err(|error| error.to_string())?;
+        let linked_bin = tempdir.path().join("bin");
+        std::os::unix::fs::symlink(&outside_dir, &linked_bin).map_err(|error| error.to_string())?;
+        let install_path = linked_bin.join("nested").join("ee");
+        let artifact = InstallArtifactSelection {
+            artifact_id: "ee-9.9.9-x86_64-unknown-linux-gnu".to_owned(),
+            release_version: "9.9.9".to_owned(),
+            file_name: artifact_name.to_owned(),
+            target_triple: "x86_64-unknown-linux-gnu".to_owned(),
+            archive_format: "tar_xz".to_owned(),
+            checksum_algorithm: "blake3".to_owned(),
+            checksum: blake3::hash(artifact_bytes).to_hex().to_string(),
+            signature: "missing".to_owned(),
+        };
+        let report = executable_plan_for_artifact(artifact, &install_path);
+
+        let result = execute_install_plan(&report, &artifact_root);
+
+        ensure(!result.success, "symlink install parent should fail")?;
+        ensure(
+            result.artifact_verified,
+            "artifact should verify before target guard",
+        )?;
+        ensure(
+            result
+                .error_message
+                .as_ref()
+                .is_some_and(|message| message.contains("symbolic link")),
+            "execute error should report symlink parent",
+        )?;
+        ensure(
+            !outside_dir.join("nested").exists(),
+            "install must not create missing directories through symlinked parent",
         )
     }
 
