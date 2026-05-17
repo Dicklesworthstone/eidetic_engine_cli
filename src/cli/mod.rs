@@ -37231,7 +37231,7 @@ where
     W: Write,
     E: Write,
 {
-    let enabled_sources = match parse_swarm_brief_sources(&args.sources, args.include_rch) {
+    let enabled_sources = match parse_swarm_next_action_sources(&args.sources, args.include_rch) {
         Ok(sources) => sources,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
@@ -37294,6 +37294,22 @@ fn parse_swarm_brief_sources(
     raw: &str,
     include_rch: bool,
 ) -> Result<BTreeSet<SwarmBriefSourceKind>, DomainError> {
+    parse_swarm_sources(raw, include_rch, false, "swarm brief")
+}
+
+fn parse_swarm_next_action_sources(
+    raw: &str,
+    include_rch: bool,
+) -> Result<BTreeSet<SwarmBriefSourceKind>, DomainError> {
+    parse_swarm_sources(raw, include_rch, true, "swarm next-action")
+}
+
+fn parse_swarm_sources(
+    raw: &str,
+    include_rch: bool,
+    default_includes_rch: bool,
+    surface_name: &str,
+) -> Result<BTreeSet<SwarmBriefSourceKind>, DomainError> {
     let mut sources = BTreeSet::new();
     let mut saw_token = false;
     for token in raw
@@ -37304,7 +37320,12 @@ fn parse_swarm_brief_sources(
         saw_token = true;
         let normalized = token.to_ascii_lowercase().replace('_', "-");
         match normalized.as_str() {
-            "default" => sources.extend(default_swarm_brief_sources()),
+            "default" => {
+                sources.extend(default_swarm_brief_sources());
+                if default_includes_rch {
+                    sources.insert(SwarmBriefSourceKind::Rch);
+                }
+            }
             "all" => sources = all_swarm_brief_sources(),
             "none" => sources.clear(),
             "agent-inventory" => {
@@ -37330,7 +37351,7 @@ fn parse_swarm_brief_sources(
             }
             _ => {
                 return Err(DomainError::Usage {
-                    message: format!("Unknown swarm brief source `{token}`."),
+                    message: format!("Unknown {surface_name} source `{token}`."),
                     repair: Some(
                         "Use --sources default, all, none, git, beads, bv, agent-mail, rch, host-profile, or agent-inventory."
                             .to_string(),
@@ -37341,6 +37362,9 @@ fn parse_swarm_brief_sources(
     }
     if !saw_token {
         sources = default_swarm_brief_sources();
+        if default_includes_rch {
+            sources.insert(SwarmBriefSourceKind::Rch);
+        }
     }
     if include_rch {
         sources.insert(SwarmBriefSourceKind::Rch);
@@ -39665,6 +39689,30 @@ mod tests {
         ensure(
             super::parse_swarm_brief_sources("unknown-source", false).is_err(),
             "unknown swarm brief source fails",
+        )
+    }
+
+    #[test]
+    fn swarm_next_action_source_parser_includes_rch_in_default_only() -> TestResult {
+        let default_sources = super::parse_swarm_next_action_sources("default", false)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            default_sources.contains(&crate::core::swarm_brief::SwarmBriefSourceKind::Rch),
+            "next-action default includes rch",
+        )?;
+
+        let explicit_sources = super::parse_swarm_next_action_sources("git,beads", false)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            !explicit_sources.contains(&crate::core::swarm_brief::SwarmBriefSourceKind::Rch),
+            "next-action explicit source list leaves rch optional",
+        )?;
+
+        let reset_sources = super::parse_swarm_next_action_sources("default,none", false)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            !reset_sources.contains(&crate::core::swarm_brief::SwarmBriefSourceKind::Rch),
+            "none still clears next-action default rch",
         )
     }
 
