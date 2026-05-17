@@ -988,25 +988,62 @@ fn write_export_file(path: &Path, content: &str) -> Result<(), DomainError> {
             repair: Some("choose a new --output path".to_owned()),
         });
     }
+    let temp_path = procedure_export_temp_path(path)?;
+    ensure_no_procedure_path_symlink_components(&temp_path, "write procedure export temp")
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "failed to create procedure export temp file at {}: {error}",
+                temp_path.display()
+            ),
+            repair: Some("choose a real output path without symlinked components".to_owned()),
+        })?;
+    ensure_procedure_export_temp_path_absent(&temp_path)?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)
+        .open(&temp_path)
         .map_err(|error| DomainError::Storage {
             message: format!(
-                "failed to create procedure export at {}: {error}",
-                path.display()
+                "failed to create procedure export temp file at {}: {error}",
+                temp_path.display()
             ),
             repair: Some("choose a writable output path whose parent exists".to_owned()),
         })?;
     file.write_all(content.as_bytes())
         .map_err(|error| DomainError::Storage {
             message: format!(
-                "failed to write procedure export at {}: {error}",
-                path.display()
+                "failed to write procedure export temp file at {}: {error}",
+                temp_path.display()
             ),
             repair: Some("retry with a writable output path".to_owned()),
-        })
+        })?;
+    file.sync_all().map_err(|error| DomainError::Storage {
+        message: format!(
+            "failed to sync procedure export temp file at {}: {error}",
+            temp_path.display()
+        ),
+        repair: Some("retry with a writable output path".to_owned()),
+    })?;
+    drop(file);
+
+    ensure_no_procedure_path_symlink_components(path, "publish procedure export").map_err(
+        |error| DomainError::Storage {
+            message: format!(
+                "failed to publish procedure export at {}: {error}",
+                path.display()
+            ),
+            repair: Some("choose a real output path without symlinked components".to_owned()),
+        },
+    )?;
+    ensure_procedure_export_path_is_regular_or_missing(path)?;
+    std::fs::rename(&temp_path, path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "failed to publish procedure export temp file {} to {}: {error}",
+            temp_path.display(),
+            path.display()
+        ),
+        repair: Some("retry with a writable output path".to_owned()),
+    })
 }
 
 fn ensure_procedure_export_path_is_regular_or_missing(path: &Path) -> Result<(), DomainError> {
@@ -1038,6 +1075,45 @@ fn ensure_procedure_export_path_is_regular_or_missing(path: &Path) -> Result<(),
             repair: Some("choose a readable parent directory for --output".to_owned()),
         }),
     }
+}
+
+fn ensure_procedure_export_temp_path_absent(path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(DomainError::PolicyDenied {
+            message: format!(
+                "refusing to overwrite existing procedure export temp path: {}",
+                path.display()
+            ),
+            repair: Some("choose a new --output path or remove the stale temp file".to_owned()),
+        }),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "failed to inspect procedure export temp path '{}': {error}",
+                path.display()
+            ),
+            repair: Some("choose a readable parent directory for --output".to_owned()),
+        }),
+    }
+}
+
+fn procedure_export_temp_path(path: &Path) -> Result<PathBuf, DomainError> {
+    let Some(file_name) = path.file_name() else {
+        return Err(DomainError::Usage {
+            message: "procedure export output path has no file name".to_owned(),
+            repair: Some("choose a file path for --output".to_owned()),
+        });
+    };
+    let mut temp_name = file_name.to_os_string();
+    temp_name.push(".tmp");
+    Ok(path.with_file_name(temp_name))
 }
 
 // ============================================================================
@@ -4077,6 +4153,38 @@ mod tests {
             output_path.is_dir(),
             "export must leave the non-regular output path untouched"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn export_rejects_existing_temp_output_without_truncating() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let output_path = temp.path().join("procedure.md");
+        let temp_path =
+            procedure_export_temp_path(&output_path).map_err(|error| error.message())?;
+        fs::write(&temp_path, "stale export temp").map_err(|error| error.to_string())?;
+        let options = ProcedureExportOptions {
+            workspace: PathBuf::new(),
+            procedure_id: "proc_test".to_owned(),
+            format: "markdown".to_owned(),
+            output_path: Some(output_path.clone()),
+        };
+
+        let error = export_procedure_from_records(&options, &[procedure_record("candidate")])
+            .expect_err("existing temp output should reject export");
+
+        assert_eq!(error.code(), "policy_denied");
+        assert!(
+            error.message().contains("temp path"),
+            "unexpected temp output error: {}",
+            error.message()
+        );
+        assert!(
+            !output_path.exists(),
+            "export must not publish final output when temp exists"
+        );
+        let stale_temp = fs::read_to_string(&temp_path).map_err(|error| error.to_string())?;
+        assert_eq!(stale_temp, "stale export temp");
         Ok(())
     }
 
