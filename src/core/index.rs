@@ -1377,16 +1377,39 @@ fn write_index_metadata(
     let meta_path = index_dir.join(INDEX_METADATA_FILE);
     ensure_index_path_has_no_symlinks(&meta_path, "write index metadata")?;
     ensure_index_metadata_path_is_regular_or_missing(&meta_path, "write index metadata")?;
-    let mut file = std::fs::File::create(&meta_path).map_err(|e| {
-        IndexRebuildError::Index(format!("Failed to open index metadata for writing: {e}"))
-    })?;
+    let temp_path = meta_path.with_extension("json.tmp");
+    ensure_index_path_has_no_symlinks(&temp_path, "write temporary index metadata")?;
+    ensure_index_metadata_temp_path_is_missing(&temp_path, "write temporary index metadata")?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .map_err(|e| {
+            IndexRebuildError::Index(format!(
+                "Failed to create temporary index metadata {}: {e}",
+                temp_path.display()
+            ))
+        })?;
 
     use std::io::Write;
-    file.write_all(&serialized)
-        .map_err(|e| IndexRebuildError::Index(format!("Failed to write index metadata: {e}")))?;
+    file.write_all(&serialized).map_err(|e| {
+        IndexRebuildError::Index(format!("Failed to write temporary index metadata: {e}"))
+    })?;
 
-    file.sync_data()
-        .map_err(|e| IndexRebuildError::Index(format!("Failed to sync index metadata: {e}")))?;
+    file.sync_data().map_err(|e| {
+        IndexRebuildError::Index(format!("Failed to sync temporary index metadata: {e}"))
+    })?;
+    drop(file);
+
+    ensure_index_path_has_no_symlinks(&meta_path, "publish index metadata")?;
+    ensure_index_metadata_path_is_regular_or_missing(&meta_path, "publish index metadata")?;
+    std::fs::rename(&temp_path, &meta_path).map_err(|e| {
+        IndexRebuildError::Index(format!(
+            "Failed to publish index metadata from {} to {}: {e}",
+            temp_path.display(),
+            meta_path.display()
+        ))
+    })?;
 
     Ok(())
 }
@@ -1543,6 +1566,27 @@ fn ensure_index_metadata_path_is_regular_or_missing(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(IndexRebuildError::Index(format!(
             "Failed to inspect index metadata path {} before {action}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn ensure_index_metadata_temp_path_is_missing(
+    path: &Path,
+    action: &str,
+) -> Result<(), IndexRebuildError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Err(IndexRebuildError::Index(format!(
+            "Refusing to {action} because temporary index metadata already exists: {}",
+            path.display()
+        ))),
+        Ok(_) => Err(IndexRebuildError::Index(format!(
+            "Refusing to {action} because temporary index metadata path is not a regular file: {}",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(IndexRebuildError::Index(format!(
+            "Failed to inspect temporary index metadata path {} before {action}: {error}",
             path.display()
         ))),
     }
@@ -3954,6 +3998,34 @@ mod tests {
         ensure(
             metadata_dir.is_dir(),
             "metadata directory must be left untouched",
+        )
+    }
+
+    #[test]
+    fn write_index_metadata_rejects_existing_temp_without_truncating() -> TestResult {
+        let root = unique_test_dir("metadata-write-existing-temp");
+        let index_dir = root.join("index");
+        std::fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
+        let metadata_path = index_dir.join(INDEX_METADATA_FILE);
+        let temp_path = metadata_path.with_extension("json.tmp");
+        std::fs::write(&temp_path, "stale metadata temp").map_err(|error| error.to_string())?;
+
+        let error = write_index_metadata(&index_dir, 42, 7)
+            .map(|()| "unexpected metadata write success".to_owned())
+            .expect_err("existing temporary metadata should reject before write");
+
+        ensure(
+            error.to_string().contains("already exists"),
+            format!("unexpected temporary metadata write error: {error}"),
+        )?;
+        ensure(
+            std::fs::read_to_string(&temp_path).map_err(|error| error.to_string())?
+                == "stale metadata temp",
+            "temporary metadata content must remain untouched",
+        )?;
+        ensure(
+            !metadata_path.exists(),
+            "metadata must not be published when temporary metadata exists",
         )
     }
 
