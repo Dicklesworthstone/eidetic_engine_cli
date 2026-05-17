@@ -441,6 +441,7 @@ fn write_manifest_no_overwrite(
     let mut temp_path = manifest_path.to_owned();
     temp_path.set_extension("tmp");
     reject_existing_symlink_component(&temp_path)?;
+    ensure_relocation_manifest_temp_path_regular_or_missing(&temp_path)?;
 
     {
         use std::io::Write;
@@ -487,6 +488,29 @@ fn write_manifest_no_overwrite(
     }
 
     Ok(())
+}
+
+fn ensure_relocation_manifest_temp_path_regular_or_missing(
+    temp_path: &Path,
+) -> Result<(), DomainError> {
+    match fs::symlink_metadata(temp_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "temporary relocation manifest path is not a regular file: {}",
+                temp_path.display()
+            ),
+            repair: Some("Remove the non-regular temporary manifest path and retry.".to_owned()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "failed to inspect temporary relocation manifest {} before create: {error}",
+                temp_path.display()
+            ),
+            repair: Some("Check manifest path permissions.".to_owned()),
+        }),
+    }
 }
 
 fn read_manifest(path: &Path) -> Result<ArtifactRelocationManifest, DomainError> {
@@ -959,6 +983,56 @@ mod tests {
         }
         if expected_copy.exists() {
             return Err("copy happened before symlinked manifest parent was rejected".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn relocation_apply_rejects_non_regular_temp_manifest_before_create() -> TestResult {
+        let workspace = temp_path("directory-temp-manifest-workspace");
+        let source = workspace.join("target/debug/sample.o");
+        fs::create_dir_all(parent_dir(&source)?).map_err(|error| error.to_string())?;
+        fs::write(&source, "artifact bytes\n").map_err(|error| error.to_string())?;
+        let destination = temp_path("directory-temp-manifest-destination");
+        let manifest = temp_path("directory-temp-manifest").join("relocation.json");
+        let mut temp_manifest = manifest.clone();
+        temp_manifest.set_extension("tmp");
+        fs::create_dir_all(&temp_manifest).map_err(|error| error.to_string())?;
+
+        let result = relocate_artifacts(&ArtifactRelocationOptions {
+            workspace_path: &workspace,
+            source_path: Some(&source),
+            destination_root: Some(&destination),
+            manifest_path: &manifest,
+            actor: Some("test"),
+            mode: ArtifactRelocationMode::Apply,
+            force_with_explicit_path: false,
+        });
+
+        match result {
+            Err(DomainError::Storage { message, repair }) => {
+                if !message.contains("temporary relocation manifest path")
+                    || !message.contains("not a regular file")
+                {
+                    return Err(format!("unexpected storage error message: {message}"));
+                }
+                if repair.as_deref()
+                    != Some("Remove the non-regular temporary manifest path and retry.")
+                {
+                    return Err(format!("unexpected repair hint: {repair:?}"));
+                }
+            }
+            other => {
+                return Err(format!(
+                    "expected temp manifest storage error, got {other:?}"
+                ));
+            }
+        }
+        if manifest.exists() {
+            return Err("final manifest was written after temp path rejection".to_owned());
+        }
+        if !temp_manifest.is_dir() {
+            return Err("non-regular temp manifest path was unexpectedly replaced".to_owned());
         }
         Ok(())
     }
