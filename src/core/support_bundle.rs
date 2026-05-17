@@ -488,7 +488,7 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
                 repair: Some("Regenerate the support bundle.".to_owned()),
             });
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(error) => {
             return Err(DomainError::Storage {
                 message: format!(
