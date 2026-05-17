@@ -1380,12 +1380,29 @@ fn run_context_pack_with_performance_inner(
 
     let ppr_rerank_start = Instant::now();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+    let configured_ppr_weight = if options.ppr_weight.is_some() {
+        None
+    } else {
+        match configured_context_ppr_weight(&options.workspace_path) {
+            Ok(weight) => weight,
+            Err(message) => {
+                push_degradation(
+                    &mut degraded,
+                    "context_config_unavailable",
+                    ContextResponseSeverity::Medium,
+                    message,
+                    Some("Fix or remove .ee/config.toml.".to_string()),
+                );
+                None
+            }
+        }
+    };
     let ppr_metrics = apply_personalized_pagerank_rerank(
         read_connection,
         &options.workspace_path,
         &search_report,
         &mut candidates,
-        effective_context_ppr_weight(options.ppr_weight),
+        effective_context_ppr_weight(options.ppr_weight, configured_ppr_weight),
         &mut degraded,
     );
     trace.record_elapsed("pprRerank", ppr_rerank_start);
@@ -4155,11 +4172,29 @@ fn context_proximity_graph(connection: &DbConnection) -> Result<fnx_classes::Gra
     Ok(graph)
 }
 
-fn effective_context_ppr_weight(value: Option<f32>) -> f32 {
+fn configured_context_ppr_weight(workspace_path: &Path) -> Result<Option<f32>, String> {
+    let Some(config) = context_workspace_config(workspace_path, "Personalized PageRank weight")?
+    else {
+        return Ok(None);
+    };
+    if !config.graph.feature.ppr_enabled.unwrap_or(false) {
+        return Ok(None);
+    }
+    Ok(Some(
+        config
+            .graph
+            .ppr
+            .alpha
+            .map(|alpha| alpha as f32)
+            .unwrap_or(DEFAULT_CONTEXT_PPR_WEIGHT),
+    ))
+}
+
+fn effective_context_ppr_weight(value: Option<f32>, configured: Option<f32>) -> f32 {
     match value {
         Some(value) if value.is_finite() => value.clamp(0.0, 1.0),
         Some(_) => DEFAULT_CONTEXT_PPR_WEIGHT,
-        None => 0.0,
+        None => configured.unwrap_or(0.0).clamp(0.0, 1.0),
     }
 }
 
@@ -6252,6 +6287,12 @@ mod tests {
         .map_err(|error| error.to_string())
     }
 
+    fn write_context_graph_config(workspace_path: &Path, body: &str) -> Result<(), String> {
+        let config_dir = workspace_path.join(".ee");
+        std::fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        std::fs::write(config_dir.join("config.toml"), body).map_err(|error| error.to_string())
+    }
+
     fn enable_context_proximity_feature(workspace_path: &Path) -> Result<(), String> {
         let config_dir = workspace_path.join(".ee");
         std::fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
@@ -6287,13 +6328,47 @@ mod tests {
 
     #[test]
     fn context_ppr_weight_defaults_to_disabled() {
-        assert_eq!(super::effective_context_ppr_weight(None), 0.0);
-        assert_eq!(super::effective_context_ppr_weight(Some(0.75)), 0.75);
-        assert_eq!(super::effective_context_ppr_weight(Some(2.0)), 1.0);
+        assert_eq!(super::effective_context_ppr_weight(None, None), 0.0);
+        assert_eq!(super::effective_context_ppr_weight(None, Some(0.50)), 0.50);
+        assert_eq!(super::effective_context_ppr_weight(Some(0.75), None), 0.75);
         assert_eq!(
-            super::effective_context_ppr_weight(Some(f32::NAN)),
+            super::effective_context_ppr_weight(Some(0.25), Some(0.80)),
+            0.25
+        );
+        assert_eq!(super::effective_context_ppr_weight(Some(2.0), None), 1.0);
+        assert_eq!(
+            super::effective_context_ppr_weight(Some(f32::NAN), Some(0.25)),
             super::DEFAULT_CONTEXT_PPR_WEIGHT
         );
+    }
+
+    #[test]
+    fn context_ppr_configured_weight_requires_feature_enabled() -> Result<(), String> {
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        write_context_graph_config(&fixture.workspace_path, "[graph.ppr]\nalpha = 0.50\n")?;
+        assert_eq!(
+            super::configured_context_ppr_weight(&fixture.workspace_path)?,
+            None
+        );
+
+        write_context_graph_config(
+            &fixture.workspace_path,
+            "[graph.ppr]\nalpha = 0.50\n[graph.feature.ppr]\nenabled = true\n",
+        )?;
+        assert_eq!(
+            super::configured_context_ppr_weight(&fixture.workspace_path)?,
+            Some(0.50)
+        );
+
+        write_context_graph_config(
+            &fixture.workspace_path,
+            "[graph.feature.ppr]\nenabled = true\n",
+        )?;
+        assert_eq!(
+            super::configured_context_ppr_weight(&fixture.workspace_path)?,
+            Some(super::DEFAULT_CONTEXT_PPR_WEIGHT)
+        );
+        Ok(())
     }
 
     #[test]
@@ -6335,6 +6410,55 @@ mod tests {
             candidates[1].why.contains("Personalized PageRank rerank"),
             "rerank should annotate candidate why: {}",
             candidates[1].why
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_ppr_omitted_weight_uses_enabled_graph_config_alpha() -> Result<(), String> {
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        write_context_graph_config(
+            &fixture.workspace_path,
+            "[graph.ppr]\nalpha = 0.50\n[graph.feature.ppr]\nenabled = true\n",
+        )?;
+        let mut candidates = vec![
+            ppr_candidate(fixture.seed, 0.80)?,
+            ppr_candidate(fixture.neighbor, 0.20)?,
+            ppr_candidate(fixture.orphan, 0.60)?,
+        ];
+        let search_report = ppr_search_report(vec![ppr_hit(fixture.seed, 0.90, Some(0.95))]);
+        let mut degraded = Vec::new();
+        let configured = super::configured_context_ppr_weight(&fixture.workspace_path)?;
+        let effective = super::effective_context_ppr_weight(None, configured);
+
+        let metrics = super::apply_personalized_pagerank_rerank(
+            &fixture.connection,
+            &fixture.workspace_path,
+            &search_report,
+            &mut candidates,
+            effective,
+            &mut degraded,
+        );
+
+        assert_eq!(configured, Some(0.50));
+        assert_eq!(effective, 0.50);
+        assert_eq!(metrics.reranked_candidates, 3);
+        assert!(
+            degraded.is_empty(),
+            "enabled graph.ppr.alpha rerank should not degrade: {degraded:?}"
+        );
+        let neighbor = candidates
+            .iter()
+            .find(|candidate| candidate.memory_id == fixture.neighbor)
+            .ok_or_else(|| "neighbor candidate should remain present".to_string())?;
+        let breakdown = neighbor
+            .score_breakdown
+            .ok_or_else(|| "configured PPR rerank should add score breakdown".to_string())?;
+        assert_eq!(breakdown.text_score, 0.20);
+        assert_eq!(breakdown.combined_score, neighbor.relevance.into_inner());
+        assert!(
+            breakdown.combined_score > breakdown.text_score,
+            "configured PPR weight should boost graph-linked neighbor: {breakdown:?}"
         );
         Ok(())
     }
