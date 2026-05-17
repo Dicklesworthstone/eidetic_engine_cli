@@ -5658,8 +5658,8 @@ mod tests {
     };
     use crate::pack::{
         ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponseSeverity,
-        PackCandidate, PackCandidateInput, PackProvenance, PackResourceProfile, PackSection,
-        TokenBudget, assemble_draft_with_profile,
+        PackCandidate, PackCandidateInput, PackProvenance, PackResourceProfile, PackScoreBreakdown,
+        PackSection, TokenBudget, assemble_draft_with_profile,
     };
 
     fn workspace_at(root: &str) -> WorkspaceLocation {
@@ -6623,6 +6623,64 @@ mod tests {
             assert_eq!(score_breakdown.combined_score, score_breakdown.ppr_score);
         }
         assert!(degraded.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn context_ppr_weight_half_reranks_more_than_default_weight() -> Result<(), String> {
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        enable_context_ppr_feature(&fixture.workspace_path)?;
+        let search_report = ppr_search_report(vec![ppr_hit(fixture.seed, 0.90, Some(0.95))]);
+
+        let run_with_weight = |ppr_weight: f32| -> Result<(f32, PackScoreBreakdown), String> {
+            let mut candidates = vec![
+                ppr_candidate(fixture.seed, 0.80)?,
+                ppr_candidate(fixture.neighbor, 0.20)?,
+                ppr_candidate(fixture.orphan, 0.60)?,
+            ];
+            let mut degraded = Vec::new();
+
+            let metrics = super::apply_personalized_pagerank_rerank(
+                &fixture.connection,
+                &fixture.workspace_path,
+                &search_report,
+                &mut candidates,
+                ppr_weight,
+                &mut degraded,
+            );
+
+            assert_eq!(metrics.reranked_candidates, 3);
+            assert!(
+                degraded.is_empty(),
+                "valid snapshot should not degrade at weight {ppr_weight}: {degraded:?}"
+            );
+            let neighbor = candidates
+                .iter()
+                .find(|candidate| candidate.memory_id == fixture.neighbor)
+                .ok_or_else(|| "neighbor candidate should remain present".to_string())?;
+            let breakdown = neighbor
+                .score_breakdown
+                .ok_or_else(|| "reranked neighbor should carry score breakdown".to_string())?;
+            Ok((neighbor.relevance.into_inner(), breakdown))
+        };
+
+        let (default_score, default_breakdown) =
+            run_with_weight(super::DEFAULT_CONTEXT_PPR_WEIGHT)?;
+        let (half_score, half_breakdown) = run_with_weight(0.50)?;
+
+        assert_eq!(default_breakdown.text_score, 0.20);
+        assert_eq!(half_breakdown.text_score, default_breakdown.text_score);
+        assert_eq!(half_breakdown.ppr_score, default_breakdown.ppr_score);
+        assert!(
+            default_breakdown.ppr_score > default_breakdown.text_score,
+            "fixture neighbor must receive a graph boost: {default_breakdown:?}"
+        );
+        assert!(
+            half_score > default_score,
+            "higher PPR weight should move the linked neighbor farther toward its PPR score"
+        );
+        assert_eq!(default_breakdown.combined_score, default_score);
+        assert_eq!(half_breakdown.combined_score, half_score);
         Ok(())
     }
 
