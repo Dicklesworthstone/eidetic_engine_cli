@@ -2751,6 +2751,20 @@ fn aggregate_tailscale_status_degradations(
     }))
 }
 
+fn aggregate_qos_status_degradations(
+    degraded: &[crate::core::qos::QosRegistryDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "qos_registry",
+            entry.code.as_str(),
+            entry.severity.as_str(),
+            entry.message.as_str(),
+            entry.repair.as_str(),
+        )
+    }))
+}
+
 fn aggregate_build_provenance_degradations(
     degraded: &[BuildProvenanceDegradation],
 ) -> Vec<AggregatedDegradation> {
@@ -3476,12 +3490,8 @@ fn render_qos_status_json(
                 render_qos_lane_record_json(obj, record);
             });
         }
-        qos.field_array_of_objects("degraded", &report.degraded, |obj, degradation| {
-            obj.field_str("code", &degradation.code);
-            obj.field_str("severity", &degradation.severity);
-            obj.field_str("message", &degradation.message);
-            obj.field_str("repair", &degradation.repair);
-        });
+        let degraded = aggregate_qos_status_degradations(&report.degraded);
+        qos.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     });
 }
 

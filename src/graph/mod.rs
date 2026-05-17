@@ -2127,6 +2127,8 @@ pub struct MemoryCentralityScore {
     pub memory_id: String,
     pub pagerank: f64,
     pub betweenness: f64,
+    pub hub: f64,
+    pub authority: f64,
 }
 
 /// Report from a centrality refresh operation.
@@ -2140,10 +2142,13 @@ pub struct CentralityRefreshReport {
     pub projection_ms: f64,
     pub pagerank_ms: f64,
     pub betweenness_ms: f64,
+    pub hits_ms: f64,
     pub total_ms: f64,
     pub scores: Vec<MemoryCentralityScore>,
     pub top_pagerank: Vec<MemoryCentralityScore>,
     pub top_betweenness: Vec<MemoryCentralityScore>,
+    pub top_hubs: Vec<MemoryCentralityScore>,
+    pub top_authorities: Vec<MemoryCentralityScore>,
 }
 
 /// Snapshot metadata produced by a graph refresh job.
@@ -2192,8 +2197,12 @@ impl CentralityRefreshReport {
         output.push_str(&format!("  Nodes: {}\n", self.node_count));
         output.push_str(&format!("  Edges: {}\n", self.edge_count));
         output.push_str(&format!(
-            "  Time: {:.1}ms (projection: {:.1}ms, pagerank: {:.1}ms, betweenness: {:.1}ms)\n",
-            self.total_ms, self.projection_ms, self.pagerank_ms, self.betweenness_ms
+            "  Time: {:.1}ms (projection: {:.1}ms, pagerank: {:.1}ms, betweenness: {:.1}ms, hits: {:.1}ms)\n",
+            self.total_ms,
+            self.projection_ms,
+            self.pagerank_ms,
+            self.betweenness_ms,
+            self.hits_ms
         ));
 
         if !self.top_pagerank.is_empty() {
@@ -2216,6 +2225,30 @@ impl CentralityRefreshReport {
                     i + 1,
                     score.memory_id,
                     score.betweenness
+                ));
+            }
+        }
+
+        if !self.top_hubs.is_empty() {
+            output.push_str("\n  Top Hubs:\n");
+            for (i, score) in self.top_hubs.iter().take(5).enumerate() {
+                output.push_str(&format!(
+                    "    {}. {} (hub={:.4})\n",
+                    i + 1,
+                    score.memory_id,
+                    score.hub
+                ));
+            }
+        }
+
+        if !self.top_authorities.is_empty() {
+            output.push_str("\n  Top Authorities:\n");
+            for (i, score) in self.top_authorities.iter().take(5).enumerate() {
+                output.push_str(&format!(
+                    "    {}. {} (auth={:.4})\n",
+                    i + 1,
+                    score.memory_id,
+                    score.authority
                 ));
             }
         }
@@ -2244,6 +2277,8 @@ impl CentralityRefreshReport {
                     "memoryId": s.memory_id,
                     "pagerank": score_json(s.pagerank),
                     "betweenness": score_json(s.betweenness),
+                    "hub": score_json(s.hub),
+                    "authority": score_json(s.authority),
                 })
             })
             .collect();
@@ -2272,6 +2307,30 @@ impl CentralityRefreshReport {
             })
             .collect();
 
+        let top_hubs: Vec<serde_json::Value> = self
+            .top_hubs
+            .iter()
+            .take(10)
+            .map(|s| {
+                serde_json::json!({
+                    "memoryId": s.memory_id,
+                    "hub": score_json(s.hub),
+                })
+            })
+            .collect();
+
+        let top_authorities: Vec<serde_json::Value> = self
+            .top_authorities
+            .iter()
+            .take(10)
+            .map(|s| {
+                serde_json::json!({
+                    "memoryId": s.memory_id,
+                    "authority": score_json(s.authority),
+                })
+            })
+            .collect();
+
         serde_json::json!({
             "command": "graph centrality refresh",
             "version": self.version,
@@ -2285,11 +2344,14 @@ impl CentralityRefreshReport {
                 "projectionMs": score_json(self.projection_ms),
                 "pagerankMs": score_json(self.pagerank_ms),
                 "betweennessMs": score_json(self.betweenness_ms),
+                "hitsMs": score_json(self.hits_ms),
                 "totalMs": score_json(self.total_ms),
             },
             "scores": scores,
             "topPagerank": top_pagerank,
             "topBetweenness": top_betweenness,
+            "topHubs": top_hubs,
+            "topAuthorities": top_authorities,
         })
     }
 }
@@ -2495,10 +2557,13 @@ fn refresh_typed_graph_snapshot_with_owner(
         projection_ms,
         pagerank_ms: 0.0,
         betweenness_ms: 0.0,
+        hits_ms: 0.0,
         total_ms: total_start.elapsed().as_secs_f64() * 1000.0,
         scores: Vec::new(),
         top_pagerank: Vec::new(),
         top_betweenness: Vec::new(),
+        top_hubs: Vec::new(),
+        top_authorities: Vec::new(),
     };
     let mut report = GraphRefreshJobReport {
         centrality,
@@ -2892,10 +2957,13 @@ fn refresh_centrality_from_links(
             projection_ms: projection.build_ms,
             pagerank_ms: 0.0,
             betweenness_ms: 0.0,
+            hits_ms: 0.0,
             total_ms: total_start.elapsed().as_secs_f64() * 1000.0,
             scores: vec![],
             top_pagerank: vec![],
             top_betweenness: vec![],
+            top_hubs: vec![],
+            top_authorities: vec![],
         });
     }
 
@@ -2911,10 +2979,13 @@ fn refresh_centrality_from_links(
             projection_ms: projection.build_ms,
             pagerank_ms: 0.0,
             betweenness_ms: 0.0,
+            hits_ms: 0.0,
             total_ms: total_start.elapsed().as_secs_f64() * 1000.0,
             scores: vec![],
             top_pagerank: vec![],
             top_betweenness: vec![],
+            top_hubs: vec![],
+            top_authorities: vec![],
         });
     }
 
@@ -2926,7 +2997,11 @@ fn refresh_centrality_from_links(
     let betweenness = compute_betweenness(&projection)?;
     let betweenness_ms = betweenness_start.elapsed().as_secs_f64() * 1000.0;
 
-    let mut scores = merge_centrality_scores(&pagerank.scores, &betweenness.scores);
+    let hits_start = Instant::now();
+    let hits = crate::graph::hits::compute_hits(&projection.graph)?;
+    let hits_ms = hits_start.elapsed().as_secs_f64() * 1000.0;
+
+    let mut scores = merge_centrality_scores(&pagerank.scores, &betweenness.scores, &hits);
 
     sort_scores_by_metric_desc_then_memory_id(&mut scores, |score| score.pagerank);
 
@@ -2936,6 +3011,14 @@ fn refresh_centrality_from_links(
     let mut top_betweenness = scores.clone();
     sort_scores_by_metric_desc_then_memory_id(&mut top_betweenness, |score| score.betweenness);
     top_betweenness.truncate(10);
+
+    let mut top_hubs = scores.clone();
+    sort_scores_by_metric_desc_then_memory_id(&mut top_hubs, |score| score.hub);
+    top_hubs.truncate(10);
+
+    let mut top_authorities = scores.clone();
+    sort_scores_by_metric_desc_then_memory_id(&mut top_authorities, |score| score.authority);
+    top_authorities.truncate(10);
 
     let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -2948,10 +3031,13 @@ fn refresh_centrality_from_links(
         projection_ms: projection.build_ms,
         pagerank_ms,
         betweenness_ms,
+        hits_ms,
         total_ms,
         scores,
         top_pagerank,
         top_betweenness,
+        top_hubs,
+        top_authorities,
     })
 }
 
@@ -2970,6 +3056,7 @@ fn sort_scores_by_metric_desc_then_memory_id(
 fn merge_centrality_scores(
     pagerank_scores: &[fnx_algorithms::CentralityScore],
     betweenness_scores: &[fnx_algorithms::CentralityScore],
+    hits: &crate::graph::hits::HitsScores,
 ) -> Vec<MemoryCentralityScore> {
     let mut betweenness_by_node = HashMap::with_capacity(betweenness_scores.len());
     for score in betweenness_scores {
@@ -2984,6 +3071,12 @@ fn merge_centrality_scores(
             memory_id: score.node.clone(),
             pagerank: score.score,
             betweenness: betweenness_by_node
+                .get(score.node.as_str())
+                .copied()
+                .unwrap_or(0.0),
+            hub: hits.hubs.get(score.node.as_str()).copied().unwrap_or(0.0),
+            authority: hits
+                .authorities
                 .get(score.node.as_str())
                 .copied()
                 .unwrap_or(0.0),
@@ -3011,6 +3104,8 @@ fn graph_snapshot_metrics_json(
                 "label": memory_id,
                 "pagerank": score_json(score.pagerank),
                 "betweenness": score_json(score.betweenness),
+                "hub": score_json(score.hub),
+                "authority": score_json(score.authority),
             })
         })
         .collect();
@@ -3717,12 +3812,16 @@ pub fn graph_snapshot_centrality_report(
         let pagerank = first_number(node, &["pagerank", "pageRank"]).unwrap_or(0.0);
         let betweenness =
             first_number(node, &["betweenness", "betweennessCentrality"]).unwrap_or(0.0);
+        let hub = first_number(node, &["hub", "hubScore"]).unwrap_or(0.0);
+        let authority = first_number(node, &["authority", "authorityScore"]).unwrap_or(0.0);
         scores_by_memory.insert(
             memory_id.clone(),
             MemoryCentralityScore {
                 memory_id,
                 pagerank,
                 betweenness,
+                hub,
+                authority,
             },
         );
     }
@@ -3755,6 +3854,26 @@ pub fn graph_snapshot_centrality_report(
     });
     top_betweenness.truncate(10);
 
+    let mut top_hubs = scores.clone();
+    top_hubs.sort_by(|left, right| {
+        right
+            .hub
+            .total_cmp(&left.hub)
+            .then_with(|| right.pagerank.total_cmp(&left.pagerank))
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+    top_hubs.truncate(10);
+
+    let mut top_authorities = scores.clone();
+    top_authorities.sort_by(|left, right| {
+        right
+            .authority
+            .total_cmp(&left.authority)
+            .then_with(|| right.pagerank.total_cmp(&left.pagerank))
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+    top_authorities.truncate(10);
+
     Ok(CentralityRefreshReport {
         version: env!("CARGO_PKG_VERSION"),
         status: CentralityRefreshStatus::Refreshed,
@@ -3764,10 +3883,13 @@ pub fn graph_snapshot_centrality_report(
         projection_ms: 0.0,
         pagerank_ms: 0.0,
         betweenness_ms: 0.0,
+        hits_ms: 0.0,
         total_ms: 0.0,
         scores,
         top_pagerank,
         top_betweenness,
+        top_hubs,
+        top_authorities,
     })
 }
 
@@ -7062,9 +7184,12 @@ mod tests {
             projection_ms: 1.0,
             pagerank_ms: 2.0,
             betweenness_ms: 3.0,
-            total_ms: 6.0,
+            hits_ms: 4.0,
+            total_ms: 10.0,
             top_pagerank: Vec::new(),
             top_betweenness: Vec::new(),
+            top_hubs: Vec::new(),
+            top_authorities: Vec::new(),
             scores,
         }
     }
@@ -7078,6 +7203,8 @@ mod tests {
             memory_id: memory_id.to_owned(),
             pagerank,
             betweenness,
+            hub: 0.0,
+            authority: 0.0,
         }
     }
 
@@ -7100,8 +7227,10 @@ mod tests {
             raw_centrality_score(MEMORY_A, 0.2),
             raw_centrality_score(MEMORY_A, 0.7),
         ];
+        let hits = super::hits::HitsScores::default();
 
-        let scores = super::merge_centrality_scores(&pagerank_scores, &betweenness_scores);
+        let scores =
+            super::merge_centrality_scores(&pagerank_scores, &betweenness_scores, &hits);
         let scores_by_id: std::collections::BTreeMap<&str, &super::MemoryCentralityScore> = scores
             .iter()
             .map(|score| (score.memory_id.as_str(), score))
@@ -7122,10 +7251,145 @@ mod tests {
 
         assert_eq!(a.pagerank, 0.4);
         assert_eq!(a.betweenness, 0.2);
+        assert_eq!(a.hub, 0.0);
+        assert_eq!(a.authority, 0.0);
         assert_eq!(b.pagerank, 0.3);
         assert_eq!(b.betweenness, 0.0);
         assert_eq!(c.pagerank, 0.2);
         assert_eq!(c.betweenness, 0.9);
+        Ok(())
+    }
+
+    fn stored_memory_link(id: &str, src: &str, dst: &str) -> crate::db::StoredMemoryLink {
+        crate::db::StoredMemoryLink {
+            id: id.to_owned(),
+            src_memory_id: src.to_owned(),
+            dst_memory_id: dst.to_owned(),
+            relation: "relates_to".to_owned(),
+            weight: 1.0,
+            confidence: 1.0,
+            directed: true,
+            evidence_count: 1,
+            last_reinforced_at: None,
+            source: "test".to_owned(),
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            created_by: None,
+            metadata_json: None,
+        }
+    }
+
+    #[test]
+    fn refresh_centrality_from_links_emits_hits_scores_and_top_hubs_authorities() -> TestResult
+    {
+        let links = vec![
+            stored_memory_link("link_aaaaaaaaaaaaaaaaaaaaaaaaaaaa01", MEMORY_A, MEMORY_B),
+            stored_memory_link("link_aaaaaaaaaaaaaaaaaaaaaaaaaaaa02", MEMORY_A, MEMORY_C),
+            stored_memory_link("link_aaaaaaaaaaaaaaaaaaaaaaaaaaaa03", MEMORY_B, MEMORY_C),
+        ];
+
+        let report = graph_result(super::refresh_centrality_from_links(&links, false))?;
+
+        assert_eq!(report.status, super::CentralityRefreshStatus::Refreshed);
+        if report.hits_ms < 0.0 {
+            return Err(format!("hits_ms should be >= 0.0, got {}", report.hits_ms));
+        }
+        if report.top_hubs.is_empty() {
+            return Err("top_hubs should be populated for a non-empty graph".to_owned());
+        }
+        if report.top_authorities.is_empty() {
+            return Err("top_authorities should be populated for a non-empty graph".to_owned());
+        }
+        // Every score carries the new hub/authority columns.
+        if report.scores.iter().any(|s| s.hub.is_nan() || s.authority.is_nan()) {
+            return Err("hub/authority must be finite".to_owned());
+        }
+        // top_hubs is descending by hub.
+        let hubs_descending = report
+            .top_hubs
+            .windows(2)
+            .all(|w| w[0].hub >= w[1].hub - f64::EPSILON);
+        if !hubs_descending {
+            return Err(format!(
+                "top_hubs not descending by hub: {:?}",
+                report
+                    .top_hubs
+                    .iter()
+                    .map(|s| (s.memory_id.clone(), s.hub))
+                    .collect::<Vec<_>>()
+            ));
+        }
+        // A is the pure hub (out-degree 2, in-degree 0) so it must rank first by hub.
+        let top_hub = &report.top_hubs[0];
+        if top_hub.memory_id != MEMORY_A {
+            return Err(format!(
+                "expected MEMORY_A as top hub, got {}",
+                top_hub.memory_id
+            ));
+        }
+        // C is the pure authority (in-degree 2, out-degree 0) so it must rank
+        // first by authority.
+        let top_authority = &report.top_authorities[0];
+        if top_authority.memory_id != MEMORY_C {
+            return Err(format!(
+                "expected MEMORY_C as top authority, got {}",
+                top_authority.memory_id
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn refresh_centrality_from_links_dry_run_initializes_hits_fields_to_default() -> TestResult {
+        let report = graph_result(super::refresh_centrality_from_links(&[], true))?;
+        assert_eq!(report.status, super::CentralityRefreshStatus::DryRun);
+        assert_eq!(report.hits_ms, 0.0);
+        assert!(report.top_hubs.is_empty());
+        assert!(report.top_authorities.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn merge_centrality_scores_carries_hub_and_authority_lookup() -> TestResult {
+        let pagerank_scores = vec![
+            raw_centrality_score(MEMORY_A, 0.4),
+            raw_centrality_score(MEMORY_B, 0.3),
+            raw_centrality_score(MEMORY_C, 0.2),
+        ];
+        let betweenness_scores = vec![raw_centrality_score(MEMORY_A, 0.1)];
+        let mut hubs = std::collections::BTreeMap::new();
+        hubs.insert(MEMORY_A.to_owned(), 0.7);
+        hubs.insert(MEMORY_C.to_owned(), 0.1);
+        let mut authorities = std::collections::BTreeMap::new();
+        authorities.insert(MEMORY_B.to_owned(), 0.9);
+        authorities.insert(MEMORY_C.to_owned(), 0.2);
+        let hits = super::hits::HitsScores { hubs, authorities };
+
+        let scores =
+            super::merge_centrality_scores(&pagerank_scores, &betweenness_scores, &hits);
+        let scores_by_id: std::collections::BTreeMap<&str, &super::MemoryCentralityScore> = scores
+            .iter()
+            .map(|score| (score.memory_id.as_str(), score))
+            .collect();
+
+        let a = scores_by_id
+            .get(MEMORY_A)
+            .copied()
+            .ok_or_else(|| "MEMORY_A score missing".to_owned())?;
+        let b = scores_by_id
+            .get(MEMORY_B)
+            .copied()
+            .ok_or_else(|| "MEMORY_B score missing".to_owned())?;
+        let c = scores_by_id
+            .get(MEMORY_C)
+            .copied()
+            .ok_or_else(|| "MEMORY_C score missing".to_owned())?;
+
+        assert_eq!(a.hub, 0.7);
+        assert_eq!(a.authority, 0.0);
+        assert_eq!(b.hub, 0.0);
+        assert_eq!(b.authority, 0.9);
+        assert_eq!(c.hub, 0.1);
+        assert_eq!(c.authority, 0.2);
         Ok(())
     }
 

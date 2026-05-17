@@ -1102,11 +1102,15 @@ mod tests {
                 memory_id: "mem_a".to_owned(),
                 pagerank: 0.9,
                 betweenness: 0.2,
+                hub: 0.0,
+                authority: 0.0,
             },
             MemoryCentralityScore {
                 memory_id: "mem_b".to_owned(),
                 pagerank: 0.3,
                 betweenness: 0.8,
+                hub: 0.0,
+                authority: 0.0,
             },
         ];
         CentralityRefreshReport {
@@ -1118,9 +1122,12 @@ mod tests {
             projection_ms: 0.0,
             pagerank_ms: 0.0,
             betweenness_ms: 0.0,
+            hits_ms: 0.0,
             total_ms: 0.0,
             top_pagerank: scores.clone(),
             top_betweenness: scores.clone(),
+            top_hubs: Vec::new(),
+            top_authorities: Vec::new(),
             scores,
         }
     }
