@@ -62,10 +62,12 @@ pub struct ParseMeshTrustLaneError {
 
 impl std::fmt::Display for ParseMeshTrustLaneError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let input_ref = redaction_safe_label(&self.input)
+            .unwrap_or_else(|| stable_mesh_alias("mesh_trust_lane", &self.input));
         write!(
             formatter,
             "unknown mesh trust lane `{}`; expected one of localHuman, peerHumanViaPeer, peerAgent, peerDerived, untrusted",
-            self.input
+            input_ref
         )
     }
 }
@@ -1559,6 +1561,27 @@ mod tests {
             valid_from: None,
             valid_to: None,
         }
+    }
+
+    #[test]
+    fn mesh_trust_lane_parse_error_preserves_safe_typos() {
+        let error = MeshTrustLane::from_str("peerAgnt").expect_err("typo should be rejected");
+        let message = error.to_string();
+
+        assert!(message.contains("peerAgnt"));
+        assert!(message.contains("expected one of"));
+    }
+
+    #[test]
+    fn mesh_trust_lane_parse_error_redacts_unsafe_input() {
+        let input = "/Users/alice/private/trust-token";
+
+        let error = MeshTrustLane::from_str(input).expect_err("path-like input should be rejected");
+        let message = error.to_string();
+
+        assert!(message.contains(&stable_mesh_alias("mesh_trust_lane", input)));
+        assert!(!message.contains("/Users/alice"));
+        assert!(!message.contains("trust-token"));
     }
 
     #[test]
