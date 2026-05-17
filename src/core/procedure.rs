@@ -860,6 +860,7 @@ fn write_export_file(path: &Path, content: &str) -> Result<(), DomainError> {
             repair: Some("choose a real output path without symlinked components".to_owned()),
         },
     )?;
+    ensure_procedure_export_path_is_regular_or_missing(path)?;
     if path.exists() {
         return Err(DomainError::PolicyDenied {
             message: format!(
@@ -888,6 +889,37 @@ fn write_export_file(path: &Path, content: &str) -> Result<(), DomainError> {
             ),
             repair: Some("retry with a writable output path".to_owned()),
         })
+}
+
+fn ensure_procedure_export_path_is_regular_or_missing(path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::PolicyDenied {
+            message: format!(
+                "procedure export path '{}' is not a regular file",
+                path.display()
+            ),
+            repair: Some(
+                "choose a new --output path that does not already name a directory or special file"
+                    .to_owned(),
+            ),
+        }),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "failed to inspect procedure export path '{}': {error}",
+                path.display()
+            ),
+            repair: Some("choose a readable parent directory for --output".to_owned()),
+        }),
+    }
 }
 
 // ============================================================================
@@ -3866,6 +3898,33 @@ mod tests {
         assert!(
             !real_output_dir.join("procedure.md").exists(),
             "export must not write through symlinked output parent"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn export_rejects_non_regular_output_path() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let output_path = temp.path().join("procedure.md");
+        fs::create_dir(&output_path).map_err(|error| error.to_string())?;
+        let options = ProcedureExportOptions {
+            workspace: PathBuf::new(),
+            procedure_id: "proc_test".to_owned(),
+            format: "markdown".to_owned(),
+            output_path: Some(output_path.clone()),
+        };
+
+        let error = export_procedure_from_records(&options, &[procedure_record("candidate")])
+            .expect_err("non-regular output path should reject export");
+        assert_eq!(error.code(), "policy_denied");
+        assert!(
+            error.message().contains("not a regular file"),
+            "unexpected non-regular output error: {}",
+            error.message()
+        );
+        assert!(
+            output_path.is_dir(),
+            "export must leave the non-regular output path untouched"
         );
         Ok(())
     }
