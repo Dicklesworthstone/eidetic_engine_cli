@@ -3307,8 +3307,10 @@ fn unquote_git_path(path: &str) -> Option<String> {
             'n' => unquoted.push(b'\n'),
             'r' => unquoted.push(b'\r'),
             't' => unquoted.push(b'\t'),
+            'a' => unquoted.push(0x07),
             'b' => unquoted.push(0x08),
             'f' => unquoted.push(0x0c),
+            'v' => unquoted.push(0x0b),
             '0'..='7' => {
                 let mut value = escaped.to_digit(8)?;
                 for _ in 0..2 {
@@ -5354,6 +5356,8 @@ mod tests {
         let entries = parse_workspace_git_status_porcelain_v2(concat!(
             "1 .M N... 100644 100644 100644 abc def \"src/quote\\\"name.rs\"\n",
             "? \"scratch/tab\\011name.txt\"\n",
+            "? \"scratch/bel\\aname.txt\"\n",
+            "? \"scratch/vtab\\vname.txt\"\n",
             "2 R. N... 100644 100644 100644 abc def R100 \"src/new\\\\name.rs\"\t\"src/old\\\\name.rs\"\n",
         ));
 
@@ -5369,7 +5373,9 @@ mod tests {
                 ))
                 .collect::<Vec<_>>(),
             vec![
+                ("scratch/bel\u{0007}name.txt", None, "?", "?", "untracked"),
                 ("scratch/tab\tname.txt", None, "?", "?", "untracked"),
+                ("scratch/vtab\u{000b}name.txt", None, "?", "?", "untracked"),
                 (
                     "src/new\\name.rs",
                     Some("src/old\\name.rs"),
