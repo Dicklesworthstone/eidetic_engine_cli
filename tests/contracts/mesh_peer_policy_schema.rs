@@ -22,7 +22,11 @@ const FIXTURES: &[&str] = &[
 ];
 const FAILURE_SURFACE_FIXTURES: &[&str] = &[
     "tests/fixtures/mesh/peer_policy_failure_surface_denied.json",
+    "tests/fixtures/mesh/peer_policy_failure_surface_quarantined.json",
+    "tests/fixtures/mesh/peer_policy_failure_surface_rejected.json",
     "tests/fixtures/mesh/peer_policy_failure_surface_outbound_denied.json",
+    "tests/fixtures/mesh/peer_policy_failure_surface_outbound_quarantined.json",
+    "tests/fixtures/mesh/peer_policy_failure_surface_outbound_rejected.json",
 ];
 const DECISION_FIXTURES: &[&str] = &[
     "tests/fixtures/mesh/peer_policy_decision_inbound_allowed.json",
@@ -416,40 +420,87 @@ fn peer_policy_decision_fixtures_are_redaction_safe_and_directional() -> TestRes
 
 #[test]
 fn peer_policy_failure_surface_fixtures_pin_inbound_and_outbound_codes() -> TestResult {
-    let inbound = read_json("tests/fixtures/mesh/peer_policy_failure_surface_denied.json")?;
-    ensure_equal(
-        &inbound.pointer("/code").and_then(Value::as_str),
-        &Some("mesh_peer_policy_denied"),
-        "inbound failure code",
-    )?;
-    ensure_equal(
-        &inbound.pointer("/reason").and_then(Value::as_str),
-        &Some("peer_policy_redaction_denied"),
-        "inbound reason",
-    )?;
+    let cases = [
+        (
+            "tests/fixtures/mesh/peer_policy_failure_surface_denied.json",
+            "mesh_peer_policy_denied",
+            "deny",
+            "peer_policy_redaction_denied",
+            "body",
+            "deny",
+        ),
+        (
+            "tests/fixtures/mesh/peer_policy_failure_surface_quarantined.json",
+            "mesh_peer_policy_quarantined",
+            "quarantine",
+            "peer_policy_lane_quarantined",
+            "curationSignal",
+            "share",
+        ),
+        (
+            "tests/fixtures/mesh/peer_policy_failure_surface_rejected.json",
+            "mesh_peer_policy_rejected",
+            "reject",
+            "peer_import_local_human_trust_lane",
+            "metadata",
+            "deny",
+        ),
+        (
+            "tests/fixtures/mesh/peer_policy_failure_surface_outbound_denied.json",
+            "mesh_outbound_policy_denied",
+            "deny",
+            "outbound_payload_requires_redaction",
+            "embedding",
+            "redact",
+        ),
+        (
+            "tests/fixtures/mesh/peer_policy_failure_surface_outbound_quarantined.json",
+            "mesh_outbound_policy_quarantined",
+            "quarantine",
+            "outbound_lane_quarantined",
+            "curationSignal",
+            "share",
+        ),
+        (
+            "tests/fixtures/mesh/peer_policy_failure_surface_outbound_rejected.json",
+            "mesh_outbound_policy_rejected",
+            "reject",
+            "non_deny_default_action",
+            "metadata",
+            "deny",
+        ),
+    ];
 
-    let outbound =
-        read_json("tests/fixtures/mesh/peer_policy_failure_surface_outbound_denied.json")?;
-    ensure_equal(
-        &outbound.pointer("/code").and_then(Value::as_str),
-        &Some("mesh_outbound_policy_denied"),
-        "outbound failure code",
-    )?;
-    ensure_equal(
-        &outbound.pointer("/reason").and_then(Value::as_str),
-        &Some("outbound_payload_requires_redaction"),
-        "outbound reason",
-    )?;
-    ensure_equal(
-        &outbound.pointer("/materialLane").and_then(Value::as_str),
-        &Some("embedding"),
-        "outbound material lane",
-    )?;
-    ensure_equal(
-        &outbound.pointer("/redaction").and_then(Value::as_str),
-        &Some("redact"),
-        "outbound redaction posture",
-    )
+    for (fixture, code, action, reason, material_lane, redaction) in cases {
+        let value = read_json(fixture)?;
+        ensure_equal(
+            &value.pointer("/code").and_then(Value::as_str),
+            &Some(code),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/action").and_then(Value::as_str),
+            &Some(action),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/reason").and_then(Value::as_str),
+            &Some(reason),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/materialLane").and_then(Value::as_str),
+            &Some(material_lane),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/redaction").and_then(Value::as_str),
+            &Some(redaction),
+            fixture,
+        )?;
+    }
+
+    Ok(())
 }
 
 #[test]

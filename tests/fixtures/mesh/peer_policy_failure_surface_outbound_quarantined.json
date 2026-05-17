@@ -1,0 +1,10 @@
+{
+  "schema": "ee.mesh.policy_failure_surface.v1",
+  "code": "mesh_outbound_policy_quarantined",
+  "action": "quarantine",
+  "reason": "outbound_lane_quarantined",
+  "policyRef": "mesh_pol_84c01a9b2f",
+  "materialLane": "curationSignal",
+  "redaction": "share",
+  "trustLane": "peerHumanViaPeer"
+}

@@ -1,0 +1,10 @@
+{
+  "schema": "ee.mesh.policy_failure_surface.v1",
+  "code": "mesh_peer_policy_rejected",
+  "action": "reject",
+  "reason": "peer_import_local_human_trust_lane",
+  "policyRef": "mesh_pol_3a67d1f04e",
+  "materialLane": "metadata",
+  "redaction": "deny",
+  "trustLane": "localHuman"
+}

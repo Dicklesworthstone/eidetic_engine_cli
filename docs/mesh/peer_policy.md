@@ -171,7 +171,15 @@ Initial fixtures live under `tests/fixtures/mesh/`:
   redacted body export decision shape.
 - `peer_policy_failure_surface_denied.json` pins the standalone inbound body
   denial failure surface.
+- `peer_policy_failure_surface_quarantined.json` pins the standalone inbound
+  quarantine failure surface.
+- `peer_policy_failure_surface_rejected.json` pins the standalone inbound
+  rejected-import failure surface.
 - `peer_policy_failure_surface_outbound_denied.json` pins an outbound
   embedding export denial when policy requires a redacted payload.
+- `peer_policy_failure_surface_outbound_quarantined.json` pins an outbound
+  quarantine failure surface.
+- `peer_policy_failure_surface_outbound_rejected.json` pins an outbound
+  rejected-export failure surface.
 
 These fixtures are intentionally local and do not require real Tailscale.

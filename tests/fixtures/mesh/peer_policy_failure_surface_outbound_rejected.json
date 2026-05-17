@@ -1,0 +1,10 @@
+{
+  "schema": "ee.mesh.policy_failure_surface.v1",
+  "code": "mesh_outbound_policy_rejected",
+  "action": "reject",
+  "reason": "non_deny_default_action",
+  "policyRef": "mesh_pol_a4fb7182d9",
+  "materialLane": "metadata",
+  "redaction": "deny",
+  "trustLane": "peerHumanViaPeer"
+}
