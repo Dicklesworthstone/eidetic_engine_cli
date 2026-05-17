@@ -611,6 +611,7 @@ fn create_boilerplate_file(
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            ensure_existing_boilerplate_path_is_file(path, allow_symlink)?;
             return Ok(BoilerplateCreateStatus::Exists);
         }
         Err(error) => return Err(error),
@@ -619,6 +620,27 @@ fn create_boilerplate_file(
     file.write_all(contents.as_bytes())?;
     file.sync_all()?;
     Ok(BoilerplateCreateStatus::Created)
+}
+
+fn ensure_existing_boilerplate_path_is_file(
+    path: &Path,
+    allow_symlink: bool,
+) -> Result<(), io::Error> {
+    let metadata = if allow_symlink {
+        fs::metadata(path)
+    } else {
+        fs::symlink_metadata(path)
+    }?;
+    if metadata.file_type().is_file() {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "refusing to treat existing init boilerplate path {} as a file because it is not a regular file",
+            path.display()
+        ),
+    ))
 }
 
 fn init_path_safety_status(path: &Path, allow_symlink: bool) -> Option<&'static str> {
@@ -1051,6 +1073,28 @@ mod tests {
             "first\n".to_string(),
             "existing file contents are preserved",
         )
+    }
+
+    #[test]
+    fn boilerplate_creation_rejects_existing_directory() -> TestResult {
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let path = temp_dir.path().join("AGENTS.md");
+        std::fs::create_dir(&path).map_err(|e| e.to_string())?;
+
+        let error = create_boilerplate_file(&path, "contents\n", false)
+            .expect_err("directory boilerplate path should reject");
+
+        ensure(
+            error.kind(),
+            ErrorKind::InvalidInput,
+            "non-regular boilerplate error kind",
+        )?;
+        ensure(
+            error.to_string().contains("not a regular file"),
+            true,
+            "non-regular boilerplate error message",
+        )?;
+        ensure(path.is_dir(), true, "directory path remains untouched")
     }
 
     #[test]
