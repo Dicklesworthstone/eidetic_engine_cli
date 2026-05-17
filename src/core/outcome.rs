@@ -1546,7 +1546,7 @@ fn feedback_quarantine_review_audit_details(
         "status": status,
         "targetType": &row.target_type,
         "targetId": &row.target_id,
-        "sourceId": &row.source_id,
+        "sourceId": redact_outcome_public_source_ref(&row.source_id),
         "eventWeight": score_json_value(row.weight),
         "eventSourceType": &row.source_type,
         "eventReasonPresent": row.event_reason.is_some(),
@@ -1876,7 +1876,7 @@ fn insert_feedback_event_audited_with_id(
             "signal": &input.event.signal,
             "weight": input.event.weight,
             "sourceType": &input.event.source_type,
-            "sourceId": &input.event.source_id,
+            "sourceId": redacted_outcome_public_source_id(input.event.source_id.as_deref()),
             "reasonPresent": input.event.reason.is_some(),
             "evidenceJsonPresent": input.event.evidence_json.is_some(),
             "sessionId": &input.event.session_id,
@@ -2113,7 +2113,7 @@ fn outcome_audit_details(event_id: &str, input: &CreateFeedbackEventInput) -> St
         "signal": &input.signal,
         "weight": score_json_value(input.weight),
         "sourceType": &input.source_type,
-        "sourceId": &input.source_id,
+        "sourceId": redacted_outcome_public_source_id(input.source_id.as_deref()),
         "reasonPresent": input.reason.is_some(),
         "evidenceJsonPresent": input.evidence_json.is_some(),
         "sessionId": &input.session_id,
@@ -2131,14 +2131,14 @@ fn feedback_quarantine_audit_details(
         "targetType": &input.target_type,
         "targetId": &input.target_id,
         "signal": &input.signal,
-        "sourceId": &input.source_id,
+        "sourceId": redact_outcome_public_source_ref(&input.source_id),
         "eventWeight": score_json_value(input.weight),
         "eventSourceType": &input.source_type,
         "eventReasonPresent": input.event_reason.is_some(),
         "eventEvidenceJsonPresent": input.evidence_json.is_some(),
         "eventSessionId": &input.session_id,
         "recordedAt": &input.recorded_at,
-        "reason": &input.reason,
+        "reason": redact_outcome_public_source_ref(&input.reason),
         "rawEventHash": &input.raw_event_hash,
     })
     .to_string()
@@ -2637,6 +2637,88 @@ mod tests {
         ensure(
             !rendered.contains("[REDACTED_PATH]"),
             "safe source id is not path-redacted",
+        )
+    }
+
+    #[test]
+    fn outcome_audit_details_redact_sensitive_source_refs() -> TestResult {
+        let source_id =
+            "file:///Users/alice/private/outcome.json?api_key=redaction-fixture".to_string();
+        let event_input = CreateFeedbackEventInput {
+            workspace_id: OUTCOME_TEST_WORKSPACE_ID.to_string(),
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            signal: "harmful".to_string(),
+            weight: 1.0,
+            source_type: "outcome_observed".to_string(),
+            source_id: Some(source_id.clone()),
+            reason: Some("sensitive source should not be echoed".to_string()),
+            evidence_json: None,
+            session_id: None,
+        };
+        let quarantine_input = CreateFeedbackQuarantineInput {
+            workspace_id: OUTCOME_TEST_WORKSPACE_ID.to_string(),
+            source_id: source_id.clone(),
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            signal: "harmful".to_string(),
+            weight: 1.0,
+            source_type: "outcome_observed".to_string(),
+            proposed_event_id: Some("fb_00000000000000000000000003".to_string()),
+            recorded_at: "2026-05-17T00:00:00Z".to_string(),
+            reason: format!("source {source_id} exceeded the limit"),
+            event_reason: Some("harmful outcome".to_string()),
+            evidence_json: None,
+            session_id: None,
+            raw_event_hash: "blake3:fixture".to_string(),
+        };
+        let quarantine_row = StoredFeedbackQuarantine {
+            id: "fq_00000000000000000000000003".to_string(),
+            workspace_id: OUTCOME_TEST_WORKSPACE_ID.to_string(),
+            source_id: source_id.clone(),
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            signal: "harmful".to_string(),
+            weight: 1.0,
+            source_type: "outcome_observed".to_string(),
+            proposed_event_id: Some("fb_00000000000000000000000003".to_string()),
+            recorded_at: "2026-05-17T00:00:00Z".to_string(),
+            reason: format!("source {source_id} exceeded the limit"),
+            event_reason: Some("harmful outcome".to_string()),
+            evidence_json: None,
+            session_id: None,
+            raw_event_hash: "blake3:fixture".to_string(),
+            status: "pending".to_string(),
+            reviewed_at: None,
+            reviewed_by: None,
+            released_feedback_event_id: None,
+        };
+
+        let rendered = [
+            outcome_audit_details("fb_00000000000000000000000003", &event_input),
+            feedback_quarantine_audit_details(
+                "fq_00000000000000000000000003",
+                &quarantine_input,
+            ),
+            feedback_quarantine_review_audit_details(&quarantine_row, "released", None),
+        ]
+        .join("\n");
+
+        ensure(
+            rendered.contains("[REDACTED_PATH]"),
+            "audit details redact path-like source ids",
+        )?;
+        ensure(
+            rendered.contains("[REDACTED:"),
+            "audit details redact secret-like source ids",
+        )?;
+        ensure(
+            !rendered.contains("/Users/alice"),
+            "audit details do not leak source path",
+        )?;
+        ensure(
+            !rendered.contains("redaction-fixture"),
+            "audit details do not leak source secret",
         )
     }
 
