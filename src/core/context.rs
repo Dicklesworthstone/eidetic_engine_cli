@@ -180,13 +180,7 @@ fn try_acquire_pack_slot(
             };
         }
 
-        let file = match OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&slot_path)
-        {
+        let file = match open_pack_slot_lock_file(&slot_path) {
             Ok(file) => file,
             Err(error) => {
                 release_pack_slot_process_gate(&slot_path);
@@ -219,6 +213,23 @@ fn try_acquire_pack_slot(
         retry_after_ms: PACK_SLOT_RETRY_AFTER_MS,
     }
 }
+
+fn open_pack_slot_lock_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    configure_pack_slot_lock_options(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_pack_slot_lock_options(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_pack_slot_lock_options(_options: &mut OpenOptions) {}
 
 fn ensure_pack_slot_path_is_not_symlink(path: &Path, path_type: &str) -> Result<(), String> {
     if let Some(symlink_path) = first_existing_pack_slot_symlink_component(path)? {
@@ -5950,6 +5961,33 @@ mod tests {
             other => Err(format!(
                 "symlinked pack slot lock should be unavailable: {other:?}"
             )),
+        }
+    }
+
+    #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+    #[test]
+    fn open_pack_slot_lock_file_rejects_symlinked_final_path() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_lock = tempdir.path().join("outside.lock");
+        std::fs::write(&outside_lock, "outside").map_err(|error| error.to_string())?;
+        let slot_path = tempdir.path().join("pack-slot.lock");
+        std::os::unix::fs::symlink(&outside_lock, &slot_path).map_err(|error| error.to_string())?;
+
+        match open_pack_slot_lock_file(&slot_path) {
+            Ok(_) => Err("symlinked pack slot lock final open unexpectedly succeeded".to_owned()),
+            Err(error) => {
+                let outside =
+                    std::fs::read_to_string(&outside_lock).map_err(|error| error.to_string())?;
+                assert_eq!(
+                    outside, "outside",
+                    "pack slot lock final open must not mutate the symlink target"
+                );
+                assert!(
+                    error.raw_os_error().is_some() || error.kind() == std::io::ErrorKind::Other,
+                    "expected OS no-follow error for final open, got: {error}"
+                );
+                Ok(())
+            }
         }
     }
 
