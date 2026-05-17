@@ -398,8 +398,12 @@ impl SessionDocumentBuilder {
     /// Build a canonical search document from a stored CASS session row.
     #[must_use]
     pub fn build(self, session: &crate::db::StoredSession) -> CanonicalSearchDocument {
+        let safe_source_path = session
+            .source_path
+            .as_deref()
+            .map(redact_session_search_ref);
         let mut lines = vec![format!("CASS session: {}", session.cass_session_id)];
-        push_optional_labeled_line(&mut lines, "Source path", session.source_path.as_deref());
+        push_optional_labeled_line(&mut lines, "Source path", safe_source_path.as_deref());
         push_optional_labeled_line(&mut lines, "Agent", session.agent_name.as_deref());
         push_optional_labeled_line(&mut lines, "Model", session.model.as_deref());
         push_optional_labeled_line(&mut lines, "Started at", session.started_at.as_deref());
@@ -431,7 +435,7 @@ impl SessionDocumentBuilder {
         if let Some(workspace) = self.workspace_path {
             doc = doc.with_workspace(workspace);
         }
-        if let Some(source_path) = &session.source_path {
+        if let Some(source_path) = &safe_source_path {
             doc = doc.with_metadata_entry("source_path", source_path);
         }
         if let Some(agent_name) = &session.agent_name {
@@ -589,6 +593,10 @@ impl ArtifactDocumentBuilder {
 }
 
 fn redact_artifact_search_ref(value: &str) -> String {
+    redact_search_projection_ref(value)
+}
+
+fn redact_session_search_ref(value: &str) -> String {
     redact_search_projection_ref(value)
 }
 
@@ -2713,6 +2721,13 @@ mod tests {
         assert!(doc.content().contains("Model: gpt-5"));
         assert!(doc.content().contains("Tokens: 12345"));
         assert!(doc.content().contains("Metadata: {\"source\":\"cass\""));
+        assert!(doc.content().contains("Source path: [REDACTED_PATH]"));
+        assert!(
+            !doc.content()
+                .contains("/home/user/.cass/sessions/session.jsonl"),
+            "session search content leaked raw source path: {}",
+            doc.content()
+        );
 
         let indexable = doc.into_indexable();
         assert_eq!(
@@ -2745,8 +2760,47 @@ mod tests {
             Some(&r#"{"source":"cass","schema":"cass.session.v1"}"#.to_owned())
         );
         assert_eq!(
+            indexable.metadata.get("source_path"),
+            Some(&"[REDACTED_PATH]".to_owned())
+        );
+        assert_eq!(
             indexable.metadata.get("tags"),
             Some(&"cass,session".to_owned())
+        );
+    }
+
+    #[test]
+    fn session_document_builder_redacts_sensitive_source_path() {
+        let mut session = make_test_session();
+        session.source_path = Some(
+            "file:///Volumes/USBNVME16TB/private/session.jsonl?api_key=redaction-fixture"
+                .to_string(),
+        );
+
+        let doc = super::session_to_document(&session);
+        let content = doc.content().to_string();
+        let indexable = doc.into_indexable();
+        let rendered = format!("{}\n{:?}", content, indexable.metadata);
+
+        assert!(
+            rendered.contains("[REDACTED_PATH]"),
+            "redacted session source should retain path placeholders"
+        );
+        assert!(
+            rendered.contains("[REDACTED:api_key]"),
+            "redacted session source should retain secret placeholders"
+        );
+        assert!(
+            !rendered.contains("/Volumes/USBNVME16TB/private/session.jsonl"),
+            "session search document leaked source path: {rendered}"
+        );
+        assert!(
+            !rendered.contains("redaction-fixture"),
+            "session search document leaked secret-like source path: {rendered}"
+        );
+        assert_eq!(
+            indexable.metadata.get("source_path"),
+            Some(&"file://[REDACTED_PATH]?api_key=[REDACTED:api_key]".to_owned())
         );
     }
 
