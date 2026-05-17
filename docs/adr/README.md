@@ -43,3 +43,5 @@ including rejected alternatives and verification hooks.
 - [ADR 0035: Structural Decay Policy](0035-structural-decay-policy.md)
 - [ADR 0036: Pack DNA Explanation Contract](0036-pack-dna-explanation-contract.md)
 - [ADR 0037: Optional Mesh Memory](0037-optional-mesh-memory.md)
+- [ADR 0038: Optional Zero-Touch Tailscale Mesh Auto-Enrollment](0038-auto-enrollment-zero-touch.md)
+- [ADR 0039: Write-Hot-Path V2 Implementation Gate](0039-write-hot-path-v2-implementation-gate.md)
