@@ -471,9 +471,7 @@ fn append_daemon_job_rows(table_path: &Path, rows: &[DaemonJobRow]) -> Result<()
     file.write_all(&buffer)
         .map_err(|error| format!("Failed to write daemon job rows: {error}"))?;
 
-    file.flush()
-        .map_err(|error| format!("Failed to flush daemon job table: {error}"))?;
-    file.sync_data()
+    file.sync_all()
         .map_err(|error| format!("Failed to sync daemon job table: {error}"))
 }
 

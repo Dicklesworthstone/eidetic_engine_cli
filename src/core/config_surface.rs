@@ -264,10 +264,36 @@ pub fn set_config(
                 source,
             }
         })?;
-        fs::write(&path, planned_toml.as_bytes()).map_err(|source| ConfigSurfaceError::Write {
+        let mut temp_path = path.clone();
+        temp_path.set_extension("tmp");
+        {
+            use std::io::Write;
+            let mut file =
+                fs::File::create(&temp_path).map_err(|source| ConfigSurfaceError::Write {
+                    path: temp_path.clone(),
+                    source,
+                })?;
+            file.write_all(planned_toml.as_bytes()).map_err(|source| {
+                ConfigSurfaceError::Write {
+                    path: temp_path.clone(),
+                    source,
+                }
+            })?;
+            file.sync_data()
+                .map_err(|source| ConfigSurfaceError::Write {
+                    path: temp_path.clone(),
+                    source,
+                })?;
+        }
+        fs::rename(&temp_path, &path).map_err(|source| ConfigSurfaceError::Write {
             path: path.clone(),
             source,
         })?;
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = fs::File::open(parent) {
+                let _ = dir.sync_data();
+            }
+        }
     }
 
     Ok(ConfigSetReport {
