@@ -890,6 +890,7 @@ fn read_claim_artifact_bytes(
 ) -> Result<Vec<u8>, String> {
     let artifact_path =
         resolve_claim_artifact_path_no_symlinks(claim_artifacts_dir, relative_path)?;
+    ensure_claim_artifact_regular_file(&artifact_path)?;
     fs::read(&artifact_path)
         .map_err(|error| format!("artifact_not_found: {}: {}", artifact_path.display(), error))
 }
@@ -964,6 +965,19 @@ fn resolve_claim_artifact_path_no_symlinks(
         reject_symlink_component(&artifact_path)?;
     }
     Ok(artifact_path)
+}
+
+fn ensure_claim_artifact_regular_file(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("artifact_not_found: {}: {}", path.display(), error))?;
+    if metadata.file_type().is_file() {
+        Ok(())
+    } else {
+        Err(format!(
+            "artifact_not_regular: {} is not a regular file",
+            path.display()
+        ))
+    }
 }
 
 fn reject_symlink_component(path: &Path) -> Result<(), String> {
@@ -1085,6 +1099,7 @@ fn verify_file_hash_evidence(
         .as_deref()
         .ok_or_else(|| format!("missing_expected_hash: {}", evidence.target))?;
     let path = resolve_claim_artifact_path_no_symlinks(workspace_path, &evidence.target)?;
+    ensure_claim_artifact_regular_file(&path)?;
     let bytes = fs::read(&path)
         .map_err(|error| format!("artifact_not_found: {}: {error}", path.display()))?;
     let actual_hash = blake3::hash(&bytes).to_hex().to_string();
@@ -1845,6 +1860,88 @@ claims:
             Ok(())
         } else {
             Err(format!("unexpected non-regular manifest error: {error}"))
+        }
+    }
+
+    #[test]
+    fn claim_verify_rejects_non_regular_manifest_artifact_before_read() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::write(temp.path().join("claims.yaml"), VALID_CLAIMS_YAML)
+            .map_err(|error| error.to_string())?;
+        let claim_dir = temp.path().join("artifacts").join("claim_fixture_001");
+        std::fs::create_dir_all(&claim_dir).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(claim_dir.join("stdout.json"))
+            .map_err(|error| error.to_string())?;
+        let manifest = serde_json::json!({
+            "schema": "ee.claim_manifest.v1",
+            "claimId": "claim_fixture_001",
+            "artifacts": [
+                {
+                    "path": "stdout.json",
+                    "artifactType": "report",
+                    "blake3Hash": blake3::hash(b"").to_hex().to_string(),
+                    "sizeBytes": 0,
+                    "createdAt": "2026-01-02T03:04:05Z"
+                }
+            ]
+        });
+        std::fs::write(
+            claim_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report = build_claim_verify_report(&ClaimVerifyOptions {
+            workspace_path: temp.path().to_path_buf(),
+            claim_id: "claim_fixture_001".to_owned(),
+            ..Default::default()
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(&report.failed_count, &1, "failed count")?;
+        if report
+            .results
+            .iter()
+            .flat_map(|result| result.errors.iter())
+            .any(|error| error.contains("artifact_not_regular"))
+        {
+            Ok(())
+        } else {
+            Err(format!("missing artifact_not_regular error: {report:?}"))
+        }
+    }
+
+    #[test]
+    fn claim_verify_rejects_non_regular_file_hash_evidence_before_read() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(temp.path().join("evidence").join("payload.txt"))
+            .map_err(|error| error.to_string())?;
+        let expected_hash = blake3::hash(b"").to_hex().to_string();
+        std::fs::write(
+            temp.path().join("claims.yaml"),
+            format!(
+                "schema: ee.claims_file.v1\nversion: 1\nclaims:\n  - id: claim_fixture_001\n    title: File evidence claim\n    status: active\n    frequency: weekly\n    evidence:\n      kind: file-hash\n      target: evidence/payload.txt\n      expected_hash: {expected_hash}\n"
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report = build_claim_verify_report(&ClaimVerifyOptions {
+            workspace_path: temp.path().to_path_buf(),
+            claim_id: "claim_fixture_001".to_owned(),
+            ..Default::default()
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(&report.failed_count, &1, "failed count")?;
+        if report
+            .results
+            .iter()
+            .flat_map(|result| result.errors.iter())
+            .any(|error| error.contains("artifact_not_regular"))
+        {
+            Ok(())
+        } else {
+            Err(format!("missing artifact_not_regular error: {report:?}"))
         }
     }
 }
