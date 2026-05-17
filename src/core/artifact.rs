@@ -142,16 +142,16 @@ impl ArtifactView {
             "workspaceId": self.artifact.workspace_id,
             "sourceKind": self.artifact.source_kind,
             "artifactType": self.artifact.artifact_type,
-            "originalPath": self.artifact.original_path,
-            "canonicalPath": self.artifact.canonical_path,
-            "externalRef": self.artifact.external_ref,
+            "originalPath": redacted_artifact_public_field(self.artifact.original_path.as_deref()),
+            "canonicalPath": redacted_artifact_public_field(self.artifact.canonical_path.as_deref()),
+            "externalRef": redacted_artifact_public_field(self.artifact.external_ref.as_deref()),
             "contentHash": self.artifact.content_hash,
             "mediaType": self.artifact.media_type,
             "sizeBytes": self.artifact.size_bytes,
             "redactionStatus": self.artifact.redaction_status,
             "snippet": self.artifact.snippet,
             "snippetHash": self.artifact.snippet_hash,
-            "provenanceUri": self.artifact.provenance_uri,
+            "provenanceUri": redacted_artifact_public_field(self.artifact.provenance_uri.as_deref()),
             "metadata": serde_json::from_str::<serde_json::Value>(&self.artifact.metadata_json)
                 .unwrap_or_else(|_| serde_json::json!({})),
             "createdAt": self.artifact.created_at,
@@ -206,10 +206,13 @@ impl ArtifactRegisterReport {
             self.index_status
         );
         if let Some(path) = &self.artifact.artifact.original_path {
-            output.push_str(&format!("  Path: {path}\n"));
+            output.push_str(&format!("  Path: {}\n", redact_artifact_public_text(path)));
         }
         if let Some(external_ref) = &self.artifact.artifact.external_ref {
-            output.push_str(&format!("  External ref: {external_ref}\n"));
+            output.push_str(&format!(
+                "  External ref: {}\n",
+                redact_artifact_public_text(external_ref)
+            ));
         }
         if !self.degraded.is_empty() {
             output.push_str("\nDegraded:\n");
@@ -927,7 +930,7 @@ fn artifact_audit_details(artifact_id: &str, input: &CreateArtifactInput) -> Str
         "contentHash": input.content_hash,
         "redactionStatus": input.redaction_status,
         "sizeBytes": input.size_bytes,
-        "provenanceUri": input.provenance_uri,
+        "provenanceUri": redacted_artifact_public_field(input.provenance_uri.as_deref()),
     })
     .to_string()
 }
@@ -1141,6 +1144,63 @@ fn media_type_for_path(path: &Path, is_text: bool) -> String {
     .to_string()
 }
 
+fn redacted_artifact_public_field(value: Option<&str>) -> Option<String> {
+    value.map(redact_artifact_public_text)
+}
+
+fn redact_artifact_public_text(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    redact_artifact_public_path_like_segments(&secret_redacted)
+}
+
+fn redact_artifact_public_path_like_segments(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, c)| *c == '/')
+        else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        let start = cursor + relative_index;
+        if !artifact_public_path_starts_sensitive_segment(&value[start..]) {
+            output.push_str(&value[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        output.push_str(&value[cursor..start]);
+        output.push_str("[REDACTED_PATH]");
+        cursor = value[start..]
+            .char_indices()
+            .find_map(|(index, c)| artifact_public_path_boundary(c).then_some(start + index))
+            .unwrap_or(value.len());
+    }
+    output
+}
+
+fn artifact_public_path_starts_sensitive_segment(value: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/home/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+    ];
+
+    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+}
+
+fn artifact_public_path_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
+}
+
 fn link_json(link: &StoredArtifactLink) -> serde_json::Value {
     serde_json::json!({
         "artifactId": link.artifact_id,
@@ -1273,6 +1333,86 @@ mod tests {
                         == [serde_json::Value::String("artifact_register".to_owned())].as_slice()
                 }),
             format!("unexpected sources: {:?}", degraded[0]),
+        )
+    }
+
+    #[test]
+    fn artifact_public_output_redacts_sensitive_paths_and_refs() -> TestResult {
+        let mut artifact = stored_artifact_fixture();
+        artifact.original_path = Some("/Users/alice/private/logs/build.log".to_owned());
+        artifact.canonical_path = Some("/Volumes/USBNVME16TB/private/logs/build.log".to_owned());
+        artifact.external_ref =
+            Some("https://example.invalid/artifacts?api_key=redaction-fixture".to_owned());
+        artifact.provenance_uri =
+            Some("file:///Users/alice/private/logs/build.log?api_key=redaction-fixture".to_owned());
+
+        let report = ArtifactRegisterReport {
+            schema: ARTIFACT_REGISTER_SCHEMA_V1,
+            status: "registered".to_owned(),
+            dry_run: false,
+            persisted: true,
+            artifact: ArtifactView {
+                artifact: artifact.clone(),
+                links: Vec::new(),
+            },
+            audit_id: Some("audit_00000000000000000000000001".to_owned()),
+            index_status: "queued".to_owned(),
+            degraded: Vec::new(),
+        };
+
+        let rendered_json = report.data_json().to_string();
+        ensure(
+            rendered_json.contains("[REDACTED_PATH]"),
+            "artifact JSON includes path redaction marker",
+        )?;
+        ensure(
+            rendered_json.contains("[REDACTED:api_key]"),
+            "artifact JSON includes secret redaction marker",
+        )?;
+        ensure(
+            !rendered_json.contains("/Users/alice")
+                && !rendered_json.contains("/Volumes/USBNVME16TB")
+                && !rendered_json.contains("redaction-fixture"),
+            format!("artifact JSON leaked sensitive material: {rendered_json}"),
+        )?;
+
+        let rendered_human = report.human_summary();
+        ensure(
+            rendered_human.contains("[REDACTED_PATH]")
+                && rendered_human.contains("[REDACTED:api_key]"),
+            "artifact human summary includes redaction markers",
+        )?;
+        ensure(
+            !rendered_human.contains("/Users/alice")
+                && !rendered_human.contains("redaction-fixture"),
+            format!("artifact human summary leaked sensitive material: {rendered_human}"),
+        )?;
+
+        let input = CreateArtifactInput {
+            workspace_id: artifact.workspace_id,
+            source_kind: artifact.source_kind,
+            artifact_type: artifact.artifact_type,
+            original_path: artifact.original_path,
+            canonical_path: artifact.canonical_path,
+            external_ref: artifact.external_ref,
+            content_hash: artifact.content_hash,
+            media_type: artifact.media_type,
+            size_bytes: artifact.size_bytes,
+            redaction_status: artifact.redaction_status,
+            snippet: artifact.snippet,
+            snippet_hash: artifact.snippet_hash,
+            provenance_uri: artifact.provenance_uri,
+            metadata_json: Some(artifact.metadata_json),
+        };
+        let audit_details = artifact_audit_details("art_00000000000000000000000001", &input);
+        ensure(
+            audit_details.contains("[REDACTED_PATH]")
+                && audit_details.contains("[REDACTED:api_key]"),
+            "artifact audit details include redaction markers",
+        )?;
+        ensure(
+            !audit_details.contains("/Users/alice") && !audit_details.contains("redaction-fixture"),
+            format!("artifact audit details leaked sensitive material: {audit_details}"),
         )
     }
 
