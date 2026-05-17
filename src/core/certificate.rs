@@ -37,8 +37,8 @@
 //!
 //! A forged signature produced from public inputs alone MUST fail verification.
 
-use std::fs;
-use std::io::{self, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use ring::rand::SystemRandom;
@@ -1821,8 +1821,32 @@ fn read_key_file_no_symlinks(path: &Path) -> io::Result<Vec<u8>> {
             format!("certificate key path is not a file: {}", path.display()),
         ));
     }
-    fs::read(path)
+    read_certificate_key_file(path)
 }
+
+fn read_certificate_key_file(path: &Path) -> io::Result<Vec<u8>> {
+    let mut file = open_certificate_key_file_for_read(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn open_certificate_key_file_for_read(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_certificate_key_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_certificate_key_open_no_follow(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_certificate_key_open_no_follow(_options: &mut OpenOptions) {}
 
 fn write_key_file_no_symlinks(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
@@ -3048,6 +3072,38 @@ mod tests {
             Ok(_) => Err("final key path must not be published".to_owned()),
             Err(error) => Err(format!("final key metadata failed: {error}")),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn certificate_key_final_read_open_rejects_symlinked_key_path() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let key_path = dir.path().join("keys").join("workspace.ed25519");
+        fs::create_dir_all(key_path.parent().expect("key parent"))
+            .map_err(|error| error.to_string())?;
+        let outside_path = dir.path().join("outside-key.ed25519");
+        fs::write(&outside_path, b"outside key").map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_path, &key_path).map_err(|error| error.to_string())?;
+
+        let error = open_certificate_key_file_for_read(&key_path)
+            .expect_err("final certificate key read open must reject symlinks");
+
+        ensure(
+            error.kind() != io::ErrorKind::NotFound,
+            "final symlink read should fail because the path is a symlink",
+        )?;
+        ensure_equal(
+            &fs::read(&outside_path).map_err(|error| error.to_string())?,
+            &b"outside key".to_vec(),
+            "outside key content",
+        )?;
+        ensure(
+            fs::symlink_metadata(&key_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "final key symlink should remain untouched",
+        )
     }
 
     #[cfg(unix)]
