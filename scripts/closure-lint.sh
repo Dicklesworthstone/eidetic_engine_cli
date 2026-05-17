@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Closure Linter: forbid abstention-as-implementation closures (EE-ut0q)
 #
 # Enforces the honesty-only vs implements-surface bead taxonomy:

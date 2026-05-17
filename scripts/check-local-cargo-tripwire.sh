@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # bd-1h8ji.2 — Local Cargo tripwire / RCH hook-bypass detector.
 #
 # Classifies a candidate cargo invocation against the bd-1h8ji.1 verifier

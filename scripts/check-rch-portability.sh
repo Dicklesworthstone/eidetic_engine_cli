@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # bd-1h8ji.4 — RCH remote-portability transcript diagnostic.
 #
 # Reads a remote-verifier transcript (from stdin OR a file path arg) and

@@ -120,6 +120,8 @@ jobs:
         self.assertLess(expected.index("sqlmodel-frankensqlite"), expected.index("sqlmodel"))
 
     def test_fixture_run_emits_golden_fnx_missing_status(self) -> None:
+        # Run script with default arguments
+        # nosec B603
         output = subprocess.check_output(
             [
                 sys.executable,
@@ -149,6 +151,8 @@ jobs:
         self.assertIn("workflow_missing_publish_crate", generator["blocking_reasons"])
 
     def test_markdown_summary_is_beads_ready_and_redaction_safe(self) -> None:
+        # Run script with format arg
+        # nosec B603
         output = subprocess.check_output(
             [
                 sys.executable,

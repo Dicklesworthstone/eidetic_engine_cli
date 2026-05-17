@@ -276,6 +276,7 @@ def git_status_summary(root: Path, enabled: bool) -> dict[str, Any]:
     if not enabled:
         return {"checked": False, "dirty": None, "entry_count": None}
     try:
+        # nosec B603
         output = subprocess.check_output(
             ["git", "-C", str(root), "status", "--short"],
             text=True,
