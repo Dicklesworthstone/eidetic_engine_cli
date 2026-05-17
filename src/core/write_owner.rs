@@ -173,10 +173,18 @@ fn write_recovery_state(workspace_path: &Path, state: &str) -> std::io::Result<(
         file.sync_data()?;
     }
 
+    publish_recovery_state_temp_file(&path, &temp_path)?;
+
+    Ok(())
+}
+
+fn publish_recovery_state_temp_file(path: &Path, temp_path: &Path) -> io::Result<()> {
+    ensure_recovery_state_path_has_no_symlink_components(path)?;
+    ensure_recovery_state_final_path_is_regular_or_missing(path)?;
     fs::rename(temp_path, path)?;
 
-    // Attempt to sync the parent directory to persist the rename
-    if let Some(parent) = write_spool_recovery_state_path(workspace_path).parent() {
+    // Attempt to sync the parent directory to persist the rename.
+    if let Some(parent) = path.parent() {
         if let Ok(dir) = fs::File::open(parent) {
             let _ = dir.sync_data();
         }
@@ -2564,6 +2572,50 @@ mod tests {
         assert!(
             !marker_path.exists(),
             "final recovery marker must not be written after temp collision"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_recovery_state_rechecks_final_symlink_before_rename() -> Result<(), String> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let marker_path = write_spool_recovery_state_path(temp.path());
+        let parent = marker_path
+            .parent()
+            .ok_or_else(|| "marker parent missing".to_owned())?;
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let mut temp_path = marker_path.clone();
+        temp_path.set_extension("tmp");
+        fs::write(
+            &temp_path,
+            format!(
+                "{{\"schema\":\"{WRITE_SPOOL_RECOVERY_STATE_SCHEMA_V1}\",\"state\":\"{WRITE_SPOOL_RECOVERY_STATE_REPLAY_REQUIRED}\"}}\n"
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        let outside_marker = temp.path().join("outside-recovery-state.json");
+        fs::write(&outside_marker, "outside sentinel").map_err(|error| error.to_string())?;
+        symlink(&outside_marker, &marker_path).map_err(|error| error.to_string())?;
+
+        let error = publish_recovery_state_temp_file(&marker_path, &temp_path)
+            .expect_err("final recovery marker symlink should be rejected");
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            fs::read_to_string(&outside_marker).map_err(|error| error.to_string())?,
+            "outside sentinel",
+            "outside recovery marker target must not be overwritten"
+        );
+        assert!(
+            fs::symlink_metadata(&temp_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_file(),
+            "temp recovery marker must remain available after publish rejection"
         );
 
         Ok(())
