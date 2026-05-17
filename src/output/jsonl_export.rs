@@ -409,6 +409,9 @@ fn redact_link_metadata(value: &mut serde_json::Value, level: RedactionLevel) {
 
 fn redact_link_metadata_field(key: &str, value: &mut serde_json::Value, level: RedactionLevel) {
     match value {
+        serde_json::Value::String(text) if link_metadata_json_surface_key(key) => {
+            redact_link_metadata_json_surface(text, level);
+        }
         serde_json::Value::String(text) if link_metadata_identifier_key(key) => {
             let original = text.clone();
             if level.redacts_paths() {
@@ -427,6 +430,34 @@ fn redact_link_metadata_field(key: &str, value: &mut serde_json::Value, level: R
         }
         child => redact_link_metadata(child, level),
     }
+}
+
+fn redact_link_metadata_json_surface(text: &mut String, level: RedactionLevel) {
+    let original = text.clone();
+    if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&original) {
+        redact_link_metadata(&mut parsed, level);
+        if let Ok(redacted) = serde_json::to_string(&parsed) {
+            *text = redacted;
+            return;
+        }
+    }
+
+    if level.redacts_paths() || level.redacts_secrets() {
+        *text = redact_content(text, level);
+    }
+    if level.redacts_identifiers() && *text == original {
+        *text = redact_identifier(text, level);
+    }
+}
+
+fn link_metadata_json_surface_key(key: &str) -> bool {
+    matches!(
+        key,
+        "policyDecisionJson"
+            | "policy_decision_json"
+            | "policyFailureSurfaceJson"
+            | "policy_failure_surface_json"
+    )
 }
 
 fn link_metadata_identifier_key(key: &str) -> bool {
@@ -1185,6 +1216,69 @@ mod tests {
         assert!(!written.contains(producer_peer));
         assert!(!written.contains(import_decision));
         assert!(!written.contains(policy_ref));
+        assert!(written.contains(r#""source":"agent""#));
+        assert!(written.contains(r#""workspaceScopeDecision":"allow""#));
+        Ok(())
+    }
+
+    #[test]
+    fn jsonl_exporter_standard_redacts_string_mesh_policy_surfaces() -> TestResult {
+        let mut output = Vec::new();
+        let origin_workspace = "/Users/example/private/string-policy-workspace";
+        let producer_peer = "nodekey:abcdef0123456789abcdef0123456789";
+        let policy_ref = "mesh_policy_string_abcdef0123456789";
+        let failure_policy_ref = "mesh_failure_policy_abcdef0123456789";
+        let policy_decision_json = serde_json::json!({
+            "schema": "ee.mesh.policy_decision.v1",
+            "direction": "inbound",
+            "action": "allow",
+            "policyRef": policy_ref,
+            "producerPeer": producer_peer,
+            "originWorkspaceAlias": origin_workspace
+        })
+        .to_string();
+        let policy_failure_json = serde_json::json!({
+            "schema": "ee.mesh.policy_failure_surface.v1",
+            "code": "mesh_peer_policy_denied",
+            "action": "deny",
+            "policyRef": failure_policy_ref,
+            "originWorkspaceAlias": origin_workspace
+        })
+        .to_string();
+
+        let link = ExportLinkRecord::builder()
+            .link_id("link_string_policy_redaction")
+            .source_memory_id("mem_source_string_policy_redaction")
+            .target_memory_id("mem_target_string_policy_redaction")
+            .link_type("supports")
+            .created_at("2026-04-30T12:00:00Z")
+            .metadata(serde_json::json!({
+                "mesh": {
+                    "workspaceScopeDecision": "allow",
+                    "policyDecisionJson": policy_decision_json,
+                    "policyFailureSurfaceJson": policy_failure_json
+                },
+                "source": "agent"
+            }))
+            .build()
+            .map_err(|error| format!("build link: {error}"))?;
+
+        let link_count = {
+            let mut exporter =
+                JsonlExporter::new(&mut output, RedactionLevel::Standard, ExportScope::All);
+            exporter
+                .write_link(link)
+                .map_err(|error| format!("write link: {error}"))?;
+            exporter.link_count
+        };
+
+        let written = String::from_utf8(output).map_err(|error| format!("valid utf8: {error}"))?;
+        ensure(link_count, 1, "link count")?;
+        assert!(written.contains(REDACTED_PATH_PLACEHOLDER));
+        assert!(!written.contains(origin_workspace));
+        assert!(!written.contains(producer_peer));
+        assert!(!written.contains(policy_ref));
+        assert!(!written.contains(failure_policy_ref));
         assert!(written.contains(r#""source":"agent""#));
         assert!(written.contains(r#""workspaceScopeDecision":"allow""#));
         Ok(())
