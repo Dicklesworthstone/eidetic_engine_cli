@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.context.budget.v1.json",
+  "title": "ee.context.budget.v1",
+  "description": "Adaptive context-pack token budget decision and contribution breakdown for ee context explain output.",
+  "type": "object",
+  "required": [
+    "schema",
+    "adaptive",
+    "baseTokens",
+    "maxTokens",
+    "computedTokens",
+    "multiplier",
+    "classifierContributions"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.context.budget.v1"},
+    "adaptive": {"type": "boolean"},
+    "baseTokens": {"type": "integer", "minimum": 1},
+    "maxTokens": {"type": "integer", "minimum": 1},
+    "computedTokens": {"type": "integer", "minimum": 1},
+    "multiplier": {"type": "number", "minimum": 1.0},
+    "classifierContributions": {"$ref": "#/$defs/classifierContributions"},
+    "explicitOverride": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["source", "tokens"],
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": ["cli_max_tokens", "query_file", "config"]
+        },
+        "tokens": {"type": "integer", "minimum": 1}
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradation"}
+    }
+  },
+  "$defs": {
+    "classifierContributions": {
+      "type": "object",
+      "required": [
+        "retrievalEntropy",
+        "retrievalEntropyMultiplier",
+        "graphFanout",
+        "graphFanoutMultiplier",
+        "taskKeywordScore",
+        "taskKeywordMultiplier"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "retrievalEntropy": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "retrievalEntropyMultiplier": {"type": "number", "minimum": 0.0, "maximum": 0.5},
+        "graphFanout": {"type": "number", "minimum": 0.0, "maximum": 3.0},
+        "graphFanoutMultiplier": {"type": "number", "minimum": 0.0, "maximum": 0.9},
+        "taskKeywordScore": {"type": "number", "minimum": 0.0, "maximum": 0.3},
+        "taskKeywordMultiplier": {"type": "number", "minimum": 0.0, "maximum": 0.06}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {"type": "string"},
+        "repair": {"type": ["string", "null"]},
+        "details": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}
