@@ -1,8 +1,8 @@
 //! Proof artifact discovery and check result modeling for `ee verify proofs`.
 
 use std::ffi::OsStr;
-use std::fs;
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -256,7 +256,7 @@ fn extract_invariants(path: &Path) -> io::Result<Vec<String>> {
             ),
         ));
     }
-    let body = fs::read_to_string(path)?;
+    let body = read_proof_artifact_file(path)?;
     let mut invariants = body
         .lines()
         .filter_map(|line| {
@@ -269,6 +269,30 @@ fn extract_invariants(path: &Path) -> io::Result<Vec<String>> {
     invariants.dedup();
     Ok(invariants)
 }
+
+fn read_proof_artifact_file(path: &Path) -> io::Result<String> {
+    let mut file = open_proof_artifact_file_for_read(path)?;
+    let mut body = String::new();
+    file.read_to_string(&mut body)?;
+    Ok(body)
+}
+
+fn open_proof_artifact_file_for_read(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_proof_artifact_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_proof_artifact_open_no_follow(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_proof_artifact_open_no_follow(_options: &mut OpenOptions) {}
 
 fn ensure_no_proof_path_symlink_components(path: &Path, operation: &'static str) -> io::Result<()> {
     let mut current = PathBuf::new();
@@ -484,6 +508,34 @@ mod tests {
         } else {
             Err(format!("unexpected symlink error: {error}"))
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proof_artifact_final_read_open_rejects_symlinked_path() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_proof = temp.path().join("outside.lean");
+        fs::write(&outside_proof, "-- invariant: outside proof\n")
+            .map_err(|error| error.to_string())?;
+        let linked_proof = temp.path().join("linked.lean");
+        symlink(&outside_proof, &linked_proof).map_err(|error| error.to_string())?;
+
+        let error = open_proof_artifact_file_for_read(&linked_proof)
+            .expect_err("final proof artifact read open must reject symlinks");
+
+        assert_ne!(
+            error.kind(),
+            io::ErrorKind::NotFound,
+            "final symlink read should fail because the path is a symlink"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_proof).map_err(|error| error.to_string())?,
+            "-- invariant: outside proof\n",
+            "proof artifact read helper must not follow the symlink target"
+        );
+        Ok(())
     }
 
     #[test]
