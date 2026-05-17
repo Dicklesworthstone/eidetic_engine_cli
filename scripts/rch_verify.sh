@@ -966,6 +966,26 @@ codes = error_codes(combined_tail)
 
 exit_code = proof.get("exit_code")
 degraded = list(proof.get("degraded_codes") or [])
+source_state_degraded = list(proof.get("source_state_degraded_codes") or [])
+source_state_code_set = set(source_state_degraded)
+
+worker_state_code_set = {
+    "rch_verify_capacity_or_timeout",
+    "rch_verify_local_fallback_refused",
+    "rch_verify_not_offloaded",
+    "rch_verify_remote_checkout_incomplete",
+    "rch_verify_remote_marker_missing",
+    "rch_verify_retry_after_worker_disk_full",
+    "rch_verify_topology_blocked",
+    "rch_verify_worker_disk_full",
+    "rch_verify_worker_filter_ignored",
+    "rch_verify_worker_quarantine_ignored",
+}
+worker_state_degraded = [
+    code
+    for code in degraded
+    if code in worker_state_code_set and code not in source_state_code_set
+]
 if proof.get("success") is not True:
     status = "refused"
 elif exit_code is None:
@@ -1003,6 +1023,7 @@ proof["completed_at"] = proof.get("generated_at")
 proof["first_error_file"] = first_error_file
 proof["first_error_line"] = first_error_line
 proof["error_codes"] = codes
+proof["worker_state_degraded_codes"] = worker_state_degraded
 if bead_id:
     proof["bead_id"] = bead_id
 
@@ -1035,9 +1056,10 @@ if degraded:
     summary_lines.append("- degraded_codes: `" + "`, `".join(degraded) + "`")
 else:
     summary_lines.append("- degraded_codes: none")
-source_degraded = proof.get("source_state_degraded_codes") or []
-if source_degraded:
-    summary_lines.append("- source_state_degraded_codes: `" + "`, `".join(source_degraded) + "`")
+if source_state_degraded:
+    summary_lines.append("- source_state_degraded_codes: `" + "`, `".join(source_state_degraded) + "`")
+if worker_state_degraded:
+    summary_lines.append("- worker_state_degraded_codes: `" + "`, `".join(worker_state_degraded) + "`")
 if proof.get("requested_treeish"):
     summary_lines.append(f"- requested_treeish: `{proof.get('requested_treeish')}`")
 if proof.get("source_manifest_hash"):
@@ -1076,6 +1098,8 @@ if ledger_path:
             "stderr_tail": proof.get("stderr_tail"),
             "transcript_path": None,
             "degraded_codes": proof.get("degraded_codes") or [],
+            "source_state_degraded_codes": proof.get("source_state_degraded_codes") or [],
+            "worker_state_degraded_codes": proof.get("worker_state_degraded_codes") or [],
             "error_codes": codes,
             "summary_markdown": summary,
         }
@@ -1113,6 +1137,8 @@ if event_log_path:
             "git_tree": proof.get("git_tree"),
             "dirty_status_hash": proof.get("dirty_status_hash"),
             "verification_attribution": proof.get("verification_attribution"),
+            "source_state_degraded_codes": proof.get("source_state_degraded_codes") or [],
+            "worker_state_degraded_codes": proof.get("worker_state_degraded_codes") or [],
             "fake_rch_invoked": fake_invocation_count > 0,
             "fake_rch_invocation_count": fake_invocation_count,
             "source_manifest_hash": proof.get("source_manifest_hash"),

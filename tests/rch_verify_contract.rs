@@ -82,6 +82,14 @@ fn source_degraded_contains(report: &Value, expected: &str) -> Result<bool, Stri
         .any(|code| code == expected))
 }
 
+fn worker_degraded_contains(report: &Value, expected: &str) -> Result<bool, String> {
+    Ok(report["worker_state_degraded_codes"]
+        .as_array()
+        .ok_or_else(|| "missing worker-state degraded codes".to_owned())?
+        .iter()
+        .any(|code| code == expected))
+}
+
 fn unique_tmp_path(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -370,6 +378,11 @@ printf '[RCH] remote css (0.1s)\n'
         if !degraded_contains(&report, expected)? || !source_degraded_contains(&report, expected)? {
             return Err(format!("missing {expected} in dirty refusal: {report}"));
         }
+    }
+    if report["worker_state_degraded_codes"] != serde_json::json!([]) {
+        return Err(format!(
+            "dirty source refusal should not report worker-state codes: {report}"
+        ));
     }
     if report["rch_invocation"] != serde_json::json!([]) {
         return Err(format!(
@@ -665,6 +678,8 @@ printf '[RCH] remote trj (0.1s)\n'
     if fields["status"] != "remote_pass"
         || fields["bead_id"] != "bd-9ygik.3"
         || fields["verification_attribution"] != "strict_clean_tree"
+        || fields["source_state_degraded_codes"] != serde_json::json!([])
+        || fields["worker_state_degraded_codes"] != serde_json::json!([])
         || fields["fake_rch_invoked"] != true
         || fields["fake_rch_invocation_count"] != 1
         || fields["dirty_status_hash"]
@@ -1310,6 +1325,21 @@ fn synthetic_worker_filter_ignored_reports_requested_and_configured_workers() ->
         if !degraded_contains(&report, expected)? {
             return Err(format!("missing {expected} in degraded codes: {report}"));
         }
+        if !worker_degraded_contains(&report, expected)? {
+            return Err(format!(
+                "missing {expected} in worker-state codes: {report}"
+            ));
+        }
+    }
+    if report["source_state_degraded_codes"] != serde_json::json!([]) {
+        return Err(format!(
+            "worker failure should keep source-state codes empty: {report}"
+        ));
+    }
+    if worker_degraded_contains(&report, "rch_verify_remote_command_failed")? {
+        return Err(format!(
+            "generic remote failure should not be listed as worker-state: {report}"
+        ));
     }
     if report["requested_workers"] != serde_json::json!(["css", "trj"])
         || report["configured_workers"] != serde_json::json!(["css", "trj"])
@@ -1326,6 +1356,7 @@ fn synthetic_worker_filter_ignored_reports_requested_and_configured_workers() ->
         "requested_workers: `css, trj`",
         "configured_workers: `css, trj`",
         "daemon_workers: `css, trj, csd`",
+        "worker_state_degraded_codes: `rch_verify_worker_disk_full`, `rch_verify_worker_filter_ignored`",
     ] {
         if !summary.contains(expected) {
             return Err(format!("summary missing {expected}: {summary}"));
