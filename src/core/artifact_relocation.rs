@@ -1448,6 +1448,56 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn relocation_manifest_publish_rechecks_temp_symlink_before_rename() -> TestResult {
+        let root = temp_path("manifest-temp-symlink-recheck");
+        let manifest = root.join("relocation.json");
+        fs::create_dir_all(parent_dir(&manifest)?).map_err(|error| error.to_string())?;
+        let mut temp_manifest = manifest.clone();
+        temp_manifest.set_extension("tmp");
+        let temp_backup = manifest.with_extension("tmp.preserved");
+        fs::write(&temp_manifest, r#"{"schema":"sentinel"}"#).map_err(|error| error.to_string())?;
+        fs::rename(&temp_manifest, &temp_backup).map_err(|error| error.to_string())?;
+
+        let outside_manifest = root.join("outside-temp-relocation.json");
+        fs::write(&outside_manifest, "outside sentinel").map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_manifest, &temp_manifest)
+            .map_err(|error| error.to_string())?;
+
+        let result = publish_relocation_manifest_temp_file(&temp_manifest, &manifest);
+        match result {
+            Err(DomainError::PolicyDenied { message, .. }) => {
+                if !message.contains("symlink component") {
+                    return Err(format!("unexpected policy error message: {message}"));
+                }
+            }
+            other => {
+                return Err(format!(
+                    "expected temp symlink policy denial before publish, got {other:?}"
+                ));
+            }
+        }
+        let outside_content =
+            fs::read_to_string(&outside_manifest).map_err(|error| error.to_string())?;
+        if outside_content != "outside sentinel" {
+            return Err("outside temp manifest target was unexpectedly mutated".to_owned());
+        }
+        if !fs::symlink_metadata(&temp_manifest)
+            .map_err(|error| error.to_string())?
+            .file_type()
+            .is_symlink()
+        {
+            return Err("temporary manifest symlink was unexpectedly removed".to_owned());
+        }
+        if manifest.exists() {
+            return Err(
+                "relocation manifest was unexpectedly published from temp symlink".to_owned(),
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn relocation_apply_rejects_non_regular_temp_manifest_before_create() -> TestResult {
         let workspace = temp_path("directory-temp-manifest-workspace");
