@@ -519,6 +519,18 @@ impl ArtifactDocumentBuilder {
     /// Build a canonical search document from a stored artifact row.
     #[must_use]
     pub fn build(self, artifact: &crate::db::StoredArtifact) -> CanonicalSearchDocument {
+        let safe_original_path = artifact
+            .original_path
+            .as_deref()
+            .map(redact_artifact_search_ref);
+        let safe_external_ref = artifact
+            .external_ref
+            .as_deref()
+            .map(redact_artifact_search_ref);
+        let safe_provenance_uri = artifact
+            .provenance_uri
+            .as_deref()
+            .map(redact_artifact_search_ref);
         let mut lines = vec![
             format!("Artifact: {}", artifact.id),
             format!("Artifact type: {}", artifact.artifact_type),
@@ -527,20 +539,19 @@ impl ArtifactDocumentBuilder {
             format!("Redaction status: {}", artifact.redaction_status),
             format!("Content hash: {}", artifact.content_hash),
         ];
-        if let Some(path) = &artifact.original_path {
+        if let Some(path) = &safe_original_path {
             push_labeled_line(&mut lines, "Path", path);
         }
-        if let Some(external_ref) = &artifact.external_ref {
+        if let Some(external_ref) = &safe_external_ref {
             push_labeled_line(&mut lines, "External ref", external_ref);
         }
         if let Some(snippet) = &artifact.snippet {
             push_labeled_line(&mut lines, "Snippet", snippet);
         }
 
-        let title = artifact
-            .original_path
+        let title = safe_original_path
             .as_deref()
-            .or(artifact.external_ref.as_deref())
+            .or(safe_external_ref.as_deref())
             .unwrap_or(artifact.id.as_str());
 
         let mut doc =
@@ -560,13 +571,13 @@ impl ArtifactDocumentBuilder {
         if let Some(workspace) = self.workspace_path {
             doc = doc.with_workspace(workspace);
         }
-        if let Some(path) = &artifact.original_path {
+        if let Some(path) = &safe_original_path {
             doc = doc.with_metadata_entry("path", path);
         }
-        if let Some(external_ref) = &artifact.external_ref {
+        if let Some(external_ref) = &safe_external_ref {
             doc = doc.with_metadata_entry("external_ref", external_ref);
         }
-        if let Some(provenance_uri) = &artifact.provenance_uri {
+        if let Some(provenance_uri) = &safe_provenance_uri {
             doc = doc.with_metadata_entry("provenance_uri", provenance_uri);
         }
         if let Some(snippet_hash) = &artifact.snippet_hash {
@@ -575,6 +586,62 @@ impl ArtifactDocumentBuilder {
 
         doc
     }
+}
+
+fn redact_artifact_search_ref(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    redact_artifact_search_absolute_path_like_segments(&secret_redacted)
+}
+
+fn redact_artifact_search_absolute_path_like_segments(input: &str) -> String {
+    const REDACTED_PATH: &str = "[REDACTED_PATH]";
+    const PATH_PREFIXES: &[&str] = &[
+        "/home/",
+        "/Users/",
+        "/data/",
+        "/workspace/",
+        "/Volumes/",
+        "C:\\",
+        "D:\\",
+    ];
+
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0usize;
+    while cursor < input.len() {
+        let remaining = &input[cursor..];
+        if let Some(prefix) = PATH_PREFIXES
+            .iter()
+            .find(|prefix| remaining.starts_with(**prefix))
+        {
+            output.push_str(REDACTED_PATH);
+            cursor += prefix.len();
+            while cursor < input.len() {
+                let next = input[cursor..]
+                    .chars()
+                    .next()
+                    .expect("cursor stays on a character boundary");
+                if next.is_whitespace()
+                    || matches!(
+                        next,
+                        '"' | '\'' | '`' | '<' | '>' | ')' | ']' | '}' | ',' | ';' | '|'
+                    )
+                {
+                    break;
+                }
+                cursor += next.len_utf8();
+            }
+            continue;
+        }
+
+        let next = remaining
+            .chars()
+            .next()
+            .expect("cursor stays on a character boundary");
+        output.push(next);
+        cursor += next.len_utf8();
+    }
+
+    output
 }
 
 impl Default for ArtifactDocumentBuilder {
@@ -2730,6 +2797,56 @@ mod tests {
                 &"blake3:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
                     .to_owned()
             )
+        );
+    }
+
+    #[test]
+    fn artifact_document_builder_redacts_sensitive_registry_refs() {
+        let mut artifact = make_test_artifact();
+        artifact.original_path = Some("/Users/alice/private/logs/build.log".to_string());
+        artifact.external_ref =
+            Some("https://example.invalid/artifacts?api_key=redaction-fixture".to_string());
+        artifact.provenance_uri =
+            Some("file:///workspace/project/logs/build.log?api_key=redaction-fixture".to_string());
+
+        let doc = super::artifact_to_document(&artifact);
+        assert!(doc.content().contains("Path: [REDACTED_PATH]"));
+        assert!(
+            doc.content()
+                .contains("External ref: https://example.invalid/artifacts?")
+        );
+
+        let content = doc.content().to_string();
+        let indexable = doc.into_indexable();
+        let rendered = format!(
+            "{}\n{:?}\n{:?}",
+            content, indexable.title, indexable.metadata
+        );
+
+        assert!(
+            rendered.contains("[REDACTED_PATH]"),
+            "redacted artifact refs should retain path placeholders"
+        );
+        assert!(
+            rendered.contains("[REDACTED:api_key]"),
+            "redacted artifact refs should retain secret placeholders"
+        );
+        assert!(
+            !rendered.contains("/Users/alice/private/logs/build.log"),
+            "artifact search document leaked original path: {rendered}"
+        );
+        assert!(
+            !rendered.contains("/workspace/project/logs/build.log"),
+            "artifact search document leaked provenance path: {rendered}"
+        );
+        assert!(
+            !rendered.contains("redaction-fixture"),
+            "artifact search document leaked secret-like external ref: {rendered}"
+        );
+        assert_eq!(indexable.title.as_deref(), Some("Artifact [REDACTED_PATH]"));
+        assert_eq!(
+            indexable.metadata.get("path"),
+            Some(&"[REDACTED_PATH]".to_string())
         );
     }
 
