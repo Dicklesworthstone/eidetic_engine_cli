@@ -69,8 +69,9 @@ use crate::pack::{
     ContextResponseSeverity, PackAssemblySlo, PackAssemblySloActuals, PackCandidate,
     PackCandidateInput, PackCoordinationSnapshot, PackItemLifecycle, PackProvenance,
     PackResourceProfile, PackScoreBreakdown, PackSection, PackTrustSignal,
-    assemble_draft_with_profile_and_options_seeded, estimate_tokens_default,
-    pack_item_provenance_json,
+    assemble_draft_with_profile_and_options_seeded,
+    budget_classifier::{AdaptiveBudgetDecision, AdaptiveBudgetInput, classify_adaptive_budget},
+    estimate_tokens_default, pack_item_provenance_json,
 };
 use crate::runtime::determinism::{Deterministic, Seed};
 
@@ -1202,6 +1203,36 @@ fn run_context_pack_with_performance_inner(
         );
     }
 
+    let mut adaptive_budget_decision = None;
+    match adaptive_budget_decision_for_context(
+        &options.workspace_path,
+        options.max_tokens,
+        &request,
+        &search_report,
+        &runtime_profile,
+    ) {
+        Ok(Some(decision)) => {
+            request = ContextRequest::new(ContextRequestInput {
+                query: request.query.clone(),
+                profile: Some(request.profile),
+                max_tokens: Some(decision.computed_tokens),
+                candidate_pool: Some(request.candidate_pool),
+                max_results: request.max_results,
+                sections: request.sections.clone(),
+            })
+            .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+            adaptive_budget_decision = Some(decision);
+        }
+        Ok(None) => {}
+        Err(message) => push_degradation(
+            &mut degraded,
+            "context_config_unavailable",
+            ContextResponseSeverity::Medium,
+            message,
+            Some("Fix or remove .ee/config.toml.".to_string()),
+        ),
+    }
+
     let candidate_start = Instant::now();
     let candidate_filter_input_count = search_report.results.len();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
@@ -1613,6 +1644,7 @@ fn run_context_pack_with_performance_inner(
     );
     let mut response = ContextResponse::new(request, draft, response_degraded)
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    response.data.adaptive_budget = adaptive_budget_decision;
     response.data.agent_profile = agent_profile;
     response.data.slo = Some(slo);
     response.data.scope_stats = Some(scope_stats);
@@ -1668,6 +1700,7 @@ fn audit_context_pack_assembly(
         "objectiveValue": response.data.pack.selection_audit.total_objective_value,
         "budget": response.data.pack.budget.max_tokens(),
         "usedTokens": response.data.pack.used_tokens,
+        "adaptiveBudget": response.data.adaptive_budget.as_ref(),
     })
     .to_string();
     let assembled_input = crate::db::CreateAuditInput {
@@ -3832,6 +3865,39 @@ fn context_ppr_feature_enabled(workspace_path: &Path) -> Result<bool, String> {
     Ok(config
         .and_then(|config| config.graph.feature.ppr_enabled)
         .unwrap_or(false))
+}
+
+fn adaptive_budget_decision_for_context(
+    workspace_path: &Path,
+    explicit_max_tokens: Option<u32>,
+    request: &ContextRequest,
+    search_report: &SearchReport,
+    runtime_profile: &RuntimeProfileReport,
+) -> Result<Option<AdaptiveBudgetDecision>, String> {
+    if explicit_max_tokens.is_some() {
+        return Ok(None);
+    }
+    let Some(config) = context_workspace_config(workspace_path, "Adaptive pack budget")? else {
+        return Ok(None);
+    };
+    if !config.pack.adaptive_budget.unwrap_or(false) {
+        return Ok(None);
+    }
+    let configured_max_tokens = config
+        .pack
+        .default_max_tokens
+        .and_then(|tokens| u32::try_from(tokens).ok())
+        .unwrap_or_else(|| request.budget.max_tokens());
+    let (effective_max_tokens, _) = runtime_profile.cap_pack_max_tokens(configured_max_tokens);
+    let retrieval_scores = search_report
+        .results
+        .iter()
+        .map(|hit| hit.score)
+        .collect::<Vec<_>>();
+    Ok(Some(classify_adaptive_budget(
+        AdaptiveBudgetInput::new(&request.query, &retrieval_scores, 0.0)
+            .with_max_tokens(effective_max_tokens),
+    )))
 }
 
 fn context_workspace_config(
