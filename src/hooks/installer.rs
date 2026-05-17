@@ -472,6 +472,12 @@ struct PlannedHookWrite {
     content: String,
 }
 
+fn hook_temp_path(target_path: &Path) -> PathBuf {
+    let mut temp_path = target_path.to_owned();
+    temp_path.set_extension("tmp");
+    temp_path
+}
+
 fn preflight_hook_target(target_path: &Path) -> Result<(), DomainError> {
     match std::fs::symlink_metadata(target_path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(DomainError::PolicyDenied {
@@ -532,6 +538,7 @@ fn preflight_hook_writes(hook_dir: &Path, writes: &[PlannedHookWrite]) -> Result
 
     for write in writes {
         preflight_hook_target(&write.target_path)?;
+        preflight_hook_target(&hook_temp_path(&write.target_path))?;
     }
 
     Ok(())
@@ -562,8 +569,8 @@ fn write_hook_file(hook_dir: &Path, target_path: &Path, content: &str) -> Result
         ),
     })?;
 
-    let mut temp_path = target_path.to_owned();
-    temp_path.set_extension("tmp");
+    let temp_path = hook_temp_path(target_path);
+    preflight_hook_target(&temp_path)?;
 
     {
         use std::io::Write;
@@ -1629,6 +1636,60 @@ mod tests {
         assert_eq!(
             original_content, "original content",
             "symlink target must not be modified"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_hook_temp_target_is_rejected_before_writing() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_dir = temp.path().join("hooks");
+        fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
+
+        let sensitive_path = temp.path().join("sensitive-file");
+        fs::write(&sensitive_path, "original content").map_err(|e| e.to_string())?;
+
+        let temp_hook_path = hook_dir.join("pre-task.tmp");
+        symlink(&sensitive_path, &temp_hook_path).map_err(|e| e.to_string())?;
+
+        let options = HookInstallOptions {
+            hook_dir: hook_dir.clone(),
+            hooks: vec![HookType::PreTask],
+            dry_run: false,
+            preserve_existing: false,
+            force: false,
+        };
+
+        let error = match install_hooks_for_test(&options) {
+            Ok(_) => return Err("install should reject symlinked hook temp path".to_owned()),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "policy_denied");
+        assert!(
+            error.message().contains("path is a symlink"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert!(
+            !hook_dir.join("pre-task").exists(),
+            "final hook target must not be written when temp path preflight fails"
+        );
+        let sensitive_content = fs::read_to_string(&sensitive_path).map_err(|e| e.to_string())?;
+        assert_eq!(
+            sensitive_content, "original content",
+            "symlinked temp target must not be modified"
+        );
+        assert!(
+            temp_hook_path
+                .symlink_metadata()
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false),
+            "temp path symlink should remain untouched"
         );
 
         Ok(())
