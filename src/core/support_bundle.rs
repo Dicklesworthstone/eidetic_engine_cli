@@ -2517,6 +2517,7 @@ fn write_file_with_hash(path: &Path, content: &str) -> Result<u64, DomainError> 
 fn publish_support_bundle_temp_file(temp_path: &Path, path: &Path) -> Result<(), DomainError> {
     reject_existing_symlink_component(path, "support bundle file")?;
     ensure_support_bundle_file_final_path_regular_or_missing(path)?;
+    reject_existing_symlink_component(temp_path, "support bundle temp file")?;
     ensure_support_bundle_created_temp_path_regular(temp_path)?;
     fs::rename(temp_path, path).map_err(|e| DomainError::Storage {
         message: format!(
@@ -3192,6 +3193,55 @@ mod tests {
                 .file_type()
                 .is_symlink(),
             "final symlink should remain untouched"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_support_bundle_temp_rechecks_temp_component_symlink_before_rename() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_path("publish-temp-component-symlink");
+        let bundle_dir = root.join("bundle");
+        let file_path = bundle_dir.join("evidence.json");
+        let outside_dir = root.join("outside-temp-dir");
+        let symlinked_temp_dir = root.join("symlinked-temp-dir");
+        fs::create_dir_all(&bundle_dir)
+            .map_err(|error| format!("failed to create bundle dir: {error}"))?;
+        fs::create_dir_all(&outside_dir)
+            .map_err(|error| format!("failed to create outside temp dir: {error}"))?;
+        symlink(&outside_dir, &symlinked_temp_dir)
+            .map_err(|error| format!("failed to create symlinked temp dir: {error}"))?;
+        let temp_path = symlinked_temp_dir.join("evidence.json.tmp");
+        let outside_temp = outside_dir.join("evidence.json.tmp");
+        fs::write(&outside_temp, "{}")
+            .map_err(|error| format!("failed to write outside temp file: {error}"))?;
+
+        let error = publish_support_bundle_temp_file(&temp_path, &file_path)
+            .expect_err("symlinked temp component should reject support bundle publish");
+
+        assert!(
+            error.message().contains("symlinked path component"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert!(
+            !file_path.exists(),
+            "final support bundle file must not be published through symlinked temp component"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_temp)
+                .map_err(|error| format!("failed to read outside temp file: {error}"))?,
+            "{}",
+            "outside temp file must remain unchanged"
+        );
+        assert!(
+            fs::symlink_metadata(&symlinked_temp_dir)
+                .map_err(|error| format!("failed to inspect symlinked temp dir: {error}"))?
+                .file_type()
+                .is_symlink(),
+            "symlinked temp component should remain untouched"
         );
         Ok(())
     }
