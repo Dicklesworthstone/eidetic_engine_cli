@@ -24,7 +24,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -3016,8 +3016,32 @@ fn read_coordination_snapshot_contents(path: &Path) -> Result<String, String> {
         Ok(_) => return Err("path is not a regular file".to_string()),
         Err(error) => return Err(format!("failed to inspect path: {error}")),
     }
-    fs::read_to_string(path).map_err(|error| error.to_string())
+    read_context_file_to_string_no_follow(path).map_err(|error| error.to_string())
 }
+
+fn read_context_file_to_string_no_follow(path: &Path) -> io::Result<String> {
+    let mut file = open_context_file_for_read_no_follow(path)?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+fn open_context_file_for_read_no_follow(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_context_file_read_options(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_context_file_read_options(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_context_file_read_options(_options: &mut OpenOptions) {}
 
 fn push_coordination_snapshot_degradations(
     degraded: &mut Vec<ContextResponseDegradation>,
@@ -3926,7 +3950,7 @@ fn context_workspace_config(
             ));
         }
     }
-    let contents = match fs::read_to_string(&config_path) {
+    let contents = match read_context_file_to_string_no_follow(&config_path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
@@ -6092,6 +6116,33 @@ mod tests {
             degradation.message.contains("symbolic link"),
             "expected symlink path degradation, got: {}",
             degradation.message
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_file_final_read_open_rejects_symlinked_path() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_file = tempdir.path().join("outside-context-file.toml");
+        std::fs::write(&outside_file, "[graph.feature]\nppr_enabled = true\n")
+            .map_err(|error| error.to_string())?;
+        let linked_file = tempdir.path().join("context-file.toml");
+        std::os::unix::fs::symlink(&outside_file, &linked_file)
+            .map_err(|error| error.to_string())?;
+
+        let error = super::open_context_file_for_read_no_follow(&linked_file)
+            .expect_err("final context file read open must reject symlinks");
+
+        assert_ne!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "final symlink read should fail because the path is a symlink"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outside_file).map_err(|error| error.to_string())?,
+            "[graph.feature]\nppr_enabled = true\n",
+            "context file read helper must not follow the symlink target"
         );
         Ok(())
     }
