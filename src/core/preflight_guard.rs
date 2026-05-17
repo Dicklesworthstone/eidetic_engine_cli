@@ -245,17 +245,30 @@ fn validate_preflight_rules_path(path: &Path) -> Result<(), DomainError> {
     }
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(());
+        }
         Err(error) => {
             return Err(DomainError::Storage {
-                message: format!("Failed to inspect preflight rule file {}: {error}", path.display()),
+                message: format!(
+                    "Failed to inspect preflight rule file {}: {error}",
+                    path.display()
+                ),
                 repair: Some("Fix or remove .ee/preflight_rules.toml.".to_owned()),
             });
         }
     };
     if !metadata.is_file() {
         return Err(DomainError::Configuration {
-            message: format!("Preflight rule path is not a regular file: {}", path.display()),
+            message: format!(
+                "Preflight rule path is not a regular file: {}",
+                path.display()
+            ),
             repair: Some("Replace .ee/preflight_rules.toml with a regular TOML file.".to_owned()),
         });
     }
@@ -1373,6 +1386,23 @@ message = "Reject curl|sh installers per workspace policy."
                 path: "test.toml".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn workspace_rules_not_directory_path_is_treated_as_absent() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::write(tempdir.path().join(".ee"), "not a metadata directory\n")
+            .map_err(|error| error.to_string())?;
+
+        let registry =
+            PreflightGuardRegistry::load(tempdir.path()).map_err(|error| error.to_string())?;
+        let mut options = opts("echo ok");
+        options.workspace = tempdir.path().to_path_buf();
+        let report = run_preflight_guard(&registry, &options);
+
+        assert_eq!(report.exit_code, 0);
+        assert!(report.matches.is_empty());
+        Ok(())
     }
 
     #[test]
