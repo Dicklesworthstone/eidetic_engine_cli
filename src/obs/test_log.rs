@@ -267,10 +267,21 @@ pub fn log_event_to(path: &Path, level: LogLevel, event: &TestEvent) -> bool {
     if test_log_path_has_symlink_component(path).unwrap_or(true) {
         return false;
     }
+    if !test_log_final_path_is_regular_or_missing(path) {
+        return false;
+    }
     let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
         return false;
     };
     writeln!(file, "{serialized}").is_ok()
+}
+
+fn test_log_final_path_is_regular_or_missing(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata.file_type().is_file(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
 }
 
 fn test_log_path_has_symlink_component(path: &Path) -> io::Result<bool> {
@@ -567,6 +578,27 @@ mod tests {
             std::fs::read_to_string(&outside_log).expect("outside content"),
             "outside\n",
             "test-event logging must not append through symlinked file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_event_to_rejects_non_regular_log_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log_path = tmp.path().join("events.jsonl");
+        std::fs::create_dir(&log_path).expect("directory at log path");
+
+        assert!(
+            !log_event_to(
+                &log_path,
+                LogLevel::Normal,
+                &TestEvent::new("smoke", EventKind::Note)
+            ),
+            "test-event logging should reject non-regular final log paths"
+        );
+        assert!(
+            log_path.is_dir(),
+            "test-event logging must leave a non-regular final path untouched"
         );
     }
 
