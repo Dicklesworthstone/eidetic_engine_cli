@@ -42,6 +42,7 @@
 //! are sorted by `(path, bucket.rank(), kind.rank(), first_reason)`.
 
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
 use serde::Serialize;
 
@@ -89,6 +90,10 @@ pub mod reason {
     pub const UNKNOWN_UNTRACKED: &str = "unknown_untracked";
     pub const UNKNOWN_TRACKED: &str = "unknown_tracked";
     pub const SECRET_RISK_OVERRIDES_TRACKED: &str = "secret_risk_overrides_tracked";
+    pub const CONFIG_ALWAYS_REVIEW_PATTERN: &str = "config_always_review_pattern";
+    pub const CONFIG_GENERATED_PATTERN: &str = "config_generated_pattern";
+    pub const CONFIG_LOCAL_MACHINE_PATTERN: &str = "config_local_machine_pattern";
+    pub const CONFIG_SCRATCH_PATTERN: &str = "config_scratch_pattern";
 }
 
 /// Top-level classification bucket — the action recommendation.
@@ -238,6 +243,161 @@ pub struct ClassificationRow {
 /// secret-risk hits on its own.
 pub type SecretEvidenceLookup = BTreeMap<String, WorkspaceSecretRiskReport>;
 
+/// Simple deterministic path matcher used by the optional classifier
+/// configuration. The CLI/config layer owns parsing from TOML or
+/// `EE_*`; this core module only consumes already-normalized patterns.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HygienePathPattern {
+    Exact(String),
+    Prefix(String),
+    Suffix(String),
+    Contains(String),
+}
+
+impl HygienePathPattern {
+    #[must_use]
+    pub fn exact(pattern: impl Into<String>) -> Self {
+        Self::Exact(pattern.into())
+    }
+
+    #[must_use]
+    pub fn prefix(pattern: impl Into<String>) -> Self {
+        Self::Prefix(pattern.into())
+    }
+
+    #[must_use]
+    pub fn suffix(pattern: impl Into<String>) -> Self {
+        Self::Suffix(pattern.into())
+    }
+
+    #[must_use]
+    pub fn contains(pattern: impl Into<String>) -> Self {
+        Self::Contains(pattern.into())
+    }
+
+    #[must_use]
+    fn matches(&self, path: &str) -> bool {
+        match self {
+            Self::Exact(pattern) => path == pattern,
+            Self::Prefix(pattern) => path.starts_with(pattern),
+            Self::Suffix(pattern) => path.ends_with(pattern),
+            Self::Contains(pattern) => path.contains(pattern),
+        }
+    }
+}
+
+impl FromStr for HygienePathPattern {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let trimmed = value.trim();
+        let (kind, pattern) = trimmed.split_once(':').ok_or_else(|| {
+            format!("workspace hygiene path pattern {trimmed:?} must use kind:value syntax")
+        })?;
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            return Err(format!(
+                "workspace hygiene path pattern {trimmed:?} has an empty value"
+            ));
+        }
+        match kind.trim() {
+            "exact" => Ok(Self::exact(pattern)),
+            "prefix" => Ok(Self::prefix(pattern)),
+            "suffix" => Ok(Self::suffix(pattern)),
+            "contains" => Ok(Self::contains(pattern)),
+            other => Err(format!(
+                "workspace hygiene path pattern kind {other:?} is not supported"
+            )),
+        }
+    }
+}
+
+/// Optional caller-supplied classifier configuration. Built-in rules
+/// always remain active; these lists only add local patterns.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HygieneClassifierConfig {
+    pub generated_patterns: Vec<HygienePathPattern>,
+    pub scratch_patterns: Vec<HygienePathPattern>,
+    pub local_machine_patterns: Vec<HygienePathPattern>,
+    pub always_review_patterns: Vec<HygienePathPattern>,
+}
+
+impl HygieneClassifierConfig {
+    /// Build classifier config from raw environment/config values. The
+    /// caller owns reading `EE_*` through `config::env_registry`; this
+    /// parser stays pure and deterministic.
+    pub fn from_raw_pattern_values(
+        generated: Option<&str>,
+        scratch: Option<&str>,
+        local_machine: Option<&str>,
+        always_review: Option<&str>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            generated_patterns: parse_pattern_list(generated, "generated")?,
+            scratch_patterns: parse_pattern_list(scratch, "scratch")?,
+            local_machine_patterns: parse_pattern_list(local_machine, "local_machine")?,
+            always_review_patterns: parse_pattern_list(always_review, "always_review")?,
+        })
+    }
+
+    /// Merge a lower-priority base layer with a higher-priority
+    /// overlay. Duplicate patterns are deduplicated deterministically.
+    #[must_use]
+    pub fn merged_with(&self, overlay: &Self) -> Self {
+        Self {
+            generated_patterns: merge_pattern_lists(
+                &self.generated_patterns,
+                &overlay.generated_patterns,
+            ),
+            scratch_patterns: merge_pattern_lists(
+                &self.scratch_patterns,
+                &overlay.scratch_patterns,
+            ),
+            local_machine_patterns: merge_pattern_lists(
+                &self.local_machine_patterns,
+                &overlay.local_machine_patterns,
+            ),
+            always_review_patterns: merge_pattern_lists(
+                &self.always_review_patterns,
+                &overlay.always_review_patterns,
+            ),
+        }
+    }
+}
+
+fn parse_pattern_list(value: Option<&str>, label: &str) -> Result<Vec<HygienePathPattern>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let mut patterns = Vec::new();
+    for raw in value.split(',') {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let pattern = trimmed.parse::<HygienePathPattern>().map_err(|err| {
+            format!("invalid workspace hygiene {label} pattern {trimmed:?}: {err}")
+        })?;
+        patterns.push(pattern);
+    }
+    patterns.sort();
+    patterns.dedup();
+    Ok(patterns)
+}
+
+fn merge_pattern_lists(
+    base: &[HygienePathPattern],
+    overlay: &[HygienePathPattern],
+) -> Vec<HygienePathPattern> {
+    let mut merged = base.to_vec();
+    merged.extend_from_slice(overlay);
+    merged.sort();
+    merged.dedup();
+    merged
+}
+
 /// Confidence tiers. The exact values are stable and may be asserted
 /// in golden tests.
 const CONFIDENCE_HIGH: f32 = 0.95;
@@ -252,10 +412,26 @@ pub fn classify_workspace(
     snapshot: &WorkspaceGitSnapshot,
     secret_evidence: &SecretEvidenceLookup,
 ) -> Vec<ClassificationRow> {
+    classify_workspace_with_config(
+        snapshot,
+        secret_evidence,
+        &HygieneClassifierConfig::default(),
+    )
+}
+
+/// Top-level entry point with caller-supplied config. Returns
+/// classification rows sorted by `(path, bucket.rank(), kind.rank(),
+/// first_reason)` for determinism.
+#[must_use]
+pub fn classify_workspace_with_config(
+    snapshot: &WorkspaceGitSnapshot,
+    secret_evidence: &SecretEvidenceLookup,
+    config: &HygieneClassifierConfig,
+) -> Vec<ClassificationRow> {
     let mut rows: Vec<ClassificationRow> = snapshot
         .entries
         .iter()
-        .map(|entry| classify_entry(entry, secret_evidence))
+        .map(|entry| classify_entry(entry, secret_evidence, config))
         .collect();
     rows.sort_by(|left, right| {
         left.path
@@ -276,6 +452,7 @@ pub fn classify_workspace(
 fn classify_entry(
     entry: &WorkspaceGitStatusEntry,
     secret_evidence: &SecretEvidenceLookup,
+    config: &HygieneClassifierConfig,
 ) -> ClassificationRow {
     let git_state = GitState::from_entry(entry);
     let path = entry.path.clone();
@@ -315,6 +492,58 @@ fn classify_entry(
             reasons,
             Some("secret_risk".to_owned()),
             redacted_evidence,
+        );
+    }
+
+    if matches_any(&config.always_review_patterns, &path) {
+        return assemble_row(
+            path,
+            git_state,
+            Bucket::NeedsHumanReview,
+            Kind::Unknown,
+            CONFIDENCE_MEDIUM_HIGH,
+            vec![reason::CONFIG_ALWAYS_REVIEW_PATTERN],
+            Some("human_review".to_owned()),
+            Vec::new(),
+        );
+    }
+
+    if matches_any(&config.local_machine_patterns, &path) {
+        return assemble_row(
+            path,
+            git_state,
+            Bucket::DoNotCommit,
+            Kind::LocalMachine,
+            CONFIDENCE_MEDIUM_HIGH,
+            vec![reason::CONFIG_LOCAL_MACHINE_PATTERN],
+            Some("local_machine".to_owned()),
+            Vec::new(),
+        );
+    }
+
+    if matches_any(&config.generated_patterns, &path) {
+        return assemble_row(
+            path,
+            git_state,
+            Bucket::DoNotCommit,
+            Kind::Generated,
+            CONFIDENCE_MEDIUM_HIGH,
+            vec![reason::CONFIG_GENERATED_PATTERN],
+            Some("generated".to_owned()),
+            Vec::new(),
+        );
+    }
+
+    if matches_any(&config.scratch_patterns, &path) {
+        return assemble_row(
+            path,
+            git_state,
+            Bucket::DoNotCommit,
+            Kind::Scratch,
+            CONFIDENCE_MEDIUM_HIGH,
+            vec![reason::CONFIG_SCRATCH_PATTERN],
+            Some("scratch".to_owned()),
+            Vec::new(),
         );
     }
 
@@ -452,6 +681,10 @@ fn assemble_row(
 }
 
 // --- per-kind classification helpers ----------------------------------------
+
+fn matches_any(patterns: &[HygienePathPattern], path: &str) -> bool {
+    patterns.iter().any(|pattern| pattern.matches(path))
+}
 
 fn secret_risk_classification(
     path: &str,
@@ -1010,6 +1243,183 @@ mod tests {
         assert_eq!(rows[0].bucket, Bucket::DoNotCommit);
         assert!(rows[0].reasons.contains(&reason::SECRET_PATH_PATTERN));
         assert!(rows[0].redacted_evidence.is_empty());
+    }
+
+    #[test]
+    fn config_patterns_extend_generated_scratch_and_local_machine_classification() {
+        let config = HygieneClassifierConfig {
+            generated_patterns: vec![HygienePathPattern::prefix("fixtures/generated/")],
+            scratch_patterns: vec![HygienePathPattern::suffix(".scratch.json")],
+            local_machine_patterns: vec![HygienePathPattern::exact(".local-agent-state")],
+            always_review_patterns: Vec::new(),
+        };
+        let snap = snapshot(vec![
+            untracked("fixtures/generated/report.json"),
+            untracked("notes.scratch.json"),
+            untracked(".local-agent-state"),
+        ]);
+        let rows = classify_workspace_with_config(&snap, &no_secret_evidence(), &config);
+        assert_eq!(rows.len(), 3);
+        let generated = rows
+            .iter()
+            .find(|row| row.path == "fixtures/generated/report.json")
+            .unwrap();
+        assert_eq!(generated.kind, Kind::Generated);
+        assert_eq!(generated.bucket, Bucket::DoNotCommit);
+        assert!(
+            generated
+                .reasons
+                .contains(&reason::CONFIG_GENERATED_PATTERN)
+        );
+
+        let scratch = rows
+            .iter()
+            .find(|row| row.path == "notes.scratch.json")
+            .unwrap();
+        assert_eq!(scratch.kind, Kind::Scratch);
+        assert_eq!(scratch.bucket, Bucket::DoNotCommit);
+        assert!(scratch.reasons.contains(&reason::CONFIG_SCRATCH_PATTERN));
+
+        let local = rows
+            .iter()
+            .find(|row| row.path == ".local-agent-state")
+            .unwrap();
+        assert_eq!(local.kind, Kind::LocalMachine);
+        assert_eq!(local.bucket, Bucket::DoNotCommit);
+        assert!(
+            local
+                .reasons
+                .contains(&reason::CONFIG_LOCAL_MACHINE_PATTERN)
+        );
+    }
+
+    #[test]
+    fn config_always_review_overrides_stage_candidate_paths() {
+        let config = HygieneClassifierConfig {
+            always_review_patterns: vec![HygienePathPattern::prefix("src/generated/")],
+            ..HygieneClassifierConfig::default()
+        };
+        let snap = snapshot(vec![untracked("src/generated/api.rs")]);
+        let rows = classify_workspace_with_config(&snap, &no_secret_evidence(), &config);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].bucket, Bucket::NeedsHumanReview);
+        assert_eq!(rows[0].kind, Kind::Unknown);
+        assert!(
+            rows[0]
+                .reasons
+                .contains(&reason::CONFIG_ALWAYS_REVIEW_PATTERN)
+        );
+        assert_eq!(rows[0].suggested_group.as_deref(), Some("human_review"));
+    }
+
+    #[test]
+    fn secret_risk_overrides_configured_scratch_or_generated_patterns() {
+        let config = HygieneClassifierConfig {
+            scratch_patterns: vec![HygienePathPattern::exact(".env")],
+            generated_patterns: vec![HygienePathPattern::suffix(".env")],
+            ..HygieneClassifierConfig::default()
+        };
+        let snap = snapshot(vec![untracked(".env")]);
+        let rows = classify_workspace_with_config(&snap, &no_secret_evidence(), &config);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, Kind::SecretRisk);
+        assert_eq!(rows[0].bucket, Bucket::DoNotCommit);
+        assert!(rows[0].reasons.contains(&reason::SECRET_PATH_PATTERN));
+        assert!(!rows[0].reasons.contains(&reason::CONFIG_SCRATCH_PATTERN));
+        assert!(!rows[0].reasons.contains(&reason::CONFIG_GENERATED_PATTERN));
+    }
+
+    #[test]
+    fn classifier_config_merge_deduplicates_patterns_deterministically() {
+        let base = HygieneClassifierConfig {
+            generated_patterns: vec![
+                HygienePathPattern::prefix("generated/"),
+                HygienePathPattern::suffix(".pb.rs"),
+            ],
+            scratch_patterns: vec![HygienePathPattern::exact("scratch.json")],
+            local_machine_patterns: Vec::new(),
+            always_review_patterns: vec![HygienePathPattern::contains("/review/")],
+        };
+        let overlay = HygieneClassifierConfig {
+            generated_patterns: vec![
+                HygienePathPattern::suffix(".pb.rs"),
+                HygienePathPattern::prefix("out/"),
+            ],
+            scratch_patterns: Vec::new(),
+            local_machine_patterns: vec![HygienePathPattern::exact(".machine-state")],
+            always_review_patterns: vec![HygienePathPattern::contains("/review/")],
+        };
+        let merged = base.merged_with(&overlay);
+        assert_eq!(
+            merged.generated_patterns,
+            vec![
+                HygienePathPattern::Prefix("generated/".to_owned()),
+                HygienePathPattern::Prefix("out/".to_owned()),
+                HygienePathPattern::Suffix(".pb.rs".to_owned()),
+            ]
+        );
+        assert_eq!(
+            merged.scratch_patterns,
+            vec![HygienePathPattern::Exact("scratch.json".to_owned())]
+        );
+        assert_eq!(
+            merged.local_machine_patterns,
+            vec![HygienePathPattern::Exact(".machine-state".to_owned())]
+        );
+        assert_eq!(
+            merged.always_review_patterns,
+            vec![HygienePathPattern::Contains("/review/".to_owned())]
+        );
+    }
+
+    #[test]
+    fn raw_pattern_values_parse_documented_env_syntax_and_deduplicate() {
+        let config = HygieneClassifierConfig::from_raw_pattern_values(
+            Some("prefix:target/, suffix:.rlib, prefix:target/"),
+            Some("exact:--help,contains:/tmp-probe/"),
+            Some("suffix:.local.db"),
+            Some("contains:/manual-review/"),
+        )
+        .expect("config parses");
+        assert_eq!(
+            config.generated_patterns,
+            vec![
+                HygienePathPattern::Prefix("target/".to_owned()),
+                HygienePathPattern::Suffix(".rlib".to_owned()),
+            ]
+        );
+        assert_eq!(
+            config.scratch_patterns,
+            vec![
+                HygienePathPattern::Exact("--help".to_owned()),
+                HygienePathPattern::Contains("/tmp-probe/".to_owned()),
+            ]
+        );
+        assert_eq!(
+            config.local_machine_patterns,
+            vec![HygienePathPattern::Suffix(".local.db".to_owned())]
+        );
+        assert_eq!(
+            config.always_review_patterns,
+            vec![HygienePathPattern::Contains("/manual-review/".to_owned())]
+        );
+    }
+
+    #[test]
+    fn raw_pattern_values_reject_unknown_matcher_kinds_and_empty_values() {
+        let bad_kind = HygieneClassifierConfig::from_raw_pattern_values(
+            Some("glob:target/**"),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(bad_kind.contains("glob"));
+
+        let empty_value =
+            HygieneClassifierConfig::from_raw_pattern_values(None, Some("prefix:"), None, None)
+                .unwrap_err();
+        assert!(empty_value.contains("empty value"));
     }
 
     #[test]

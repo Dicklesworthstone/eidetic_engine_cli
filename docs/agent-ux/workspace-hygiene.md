@@ -111,13 +111,25 @@ The classifier should add new root scratch patterns only when they are common
 agent or verifier artifacts. It should not classify every root `.json`, `.txt`,
 or `.rs` file as scratch by extension alone.
 
-## Configuration Status
+## Configuration
 
-The current implementation has built-in classifier defaults only. The
-configuration layer for custom generated, scratch, local-machine, and
-always-review patterns is still tracked by `bd-1eq3l.7`; any future `EE_*`
-variable must be registered in `src/config/env_registry.rs` and documented in
-`docs/env_vars.md`.
+The classifier accepts caller-supplied generated, scratch, local-machine, and
+always-review path patterns in addition to the built-in defaults. The pure core
+classifier consumes normalized matchers only; CLI/config code is responsible for
+parsing `EE_*` values from the registry.
+
+Registered environment variables:
+
+| Variable | Effect |
+| --- | --- |
+| `EE_WORKSPACE_HYGIENE_GENERATED_PATTERNS` | Adds generated-artifact path matchers. |
+| `EE_WORKSPACE_HYGIENE_SCRATCH_PATTERNS` | Adds scratch-artifact path matchers. |
+| `EE_WORKSPACE_HYGIENE_LOCAL_MACHINE_PATTERNS` | Adds machine-local artifact path matchers. |
+| `EE_WORKSPACE_HYGIENE_ALWAYS_REVIEW_PATTERNS` | Forces matching paths into `needs_human_review`. |
+
+Matcher syntax is `exact:<path>`, `prefix:<path>`, `suffix:<path>`, or
+`contains:<text>`, with comma separation for multiple matchers. Patterns are
+repo-relative and should stay narrow.
 
 Local configuration must never mark secret-risk files safe. Secret-risk evidence,
 active reservations, and Beads ownership always override local stage preferences.

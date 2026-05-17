@@ -98,6 +98,14 @@ pub enum EnvVar {
     TailscaleProbeTimeoutMs,
     /// `EE_TAILSCALE_PROBE_SOCKET_OVERRIDE`
     TailscaleProbeSocketOverride,
+    /// `EE_WORKSPACE_HYGIENE_ALWAYS_REVIEW_PATTERNS`
+    WorkspaceHygieneAlwaysReviewPatterns,
+    /// `EE_WORKSPACE_HYGIENE_GENERATED_PATTERNS`
+    WorkspaceHygieneGeneratedPatterns,
+    /// `EE_WORKSPACE_HYGIENE_LOCAL_MACHINE_PATTERNS`
+    WorkspaceHygieneLocalMachinePatterns,
+    /// `EE_WORKSPACE_HYGIENE_SCRATCH_PATTERNS`
+    WorkspaceHygieneScratchPatterns,
     /// `EE_WORKSPACE`
     Workspace,
     /// `EE_WORKSPACE_CLOSE_DRAIN_TIMEOUT_S`
@@ -155,6 +163,10 @@ impl EnvVar {
             Self::TailscaleBinaryOverride,
             Self::TailscaleProbeTimeoutMs,
             Self::TailscaleProbeSocketOverride,
+            Self::WorkspaceHygieneAlwaysReviewPatterns,
+            Self::WorkspaceHygieneGeneratedPatterns,
+            Self::WorkspaceHygieneLocalMachinePatterns,
+            Self::WorkspaceHygieneScratchPatterns,
             Self::Workspace,
             Self::WorkspaceCloseDrainTimeoutSeconds,
             Self::WorkspaceRegistry,
@@ -209,6 +221,14 @@ impl EnvVar {
             Self::TailscaleBinaryOverride => "EE_TAILSCALE_BINARY_OVERRIDE",
             Self::TailscaleProbeTimeoutMs => "EE_TAILSCALE_PROBE_TIMEOUT_MS",
             Self::TailscaleProbeSocketOverride => "EE_TAILSCALE_PROBE_SOCKET_OVERRIDE",
+            Self::WorkspaceHygieneAlwaysReviewPatterns => {
+                "EE_WORKSPACE_HYGIENE_ALWAYS_REVIEW_PATTERNS"
+            }
+            Self::WorkspaceHygieneGeneratedPatterns => "EE_WORKSPACE_HYGIENE_GENERATED_PATTERNS",
+            Self::WorkspaceHygieneLocalMachinePatterns => {
+                "EE_WORKSPACE_HYGIENE_LOCAL_MACHINE_PATTERNS"
+            }
+            Self::WorkspaceHygieneScratchPatterns => "EE_WORKSPACE_HYGIENE_SCRATCH_PATTERNS",
             Self::Workspace => "EE_WORKSPACE",
             Self::WorkspaceCloseDrainTimeoutSeconds => "EE_WORKSPACE_CLOSE_DRAIN_TIMEOUT_S",
             Self::WorkspaceRegistry => "EE_WORKSPACE_REGISTRY",
@@ -288,6 +308,18 @@ impl EnvVar {
             Self::TailscaleProbeTimeoutMs => "Override the local Tailscale probe timeout budget.",
             Self::TailscaleProbeSocketOverride => {
                 "Test-only override for fake mesh hello responder socket discovery."
+            }
+            Self::WorkspaceHygieneAlwaysReviewPatterns => {
+                "Add local workspace-hygiene patterns that force matching paths into human review."
+            }
+            Self::WorkspaceHygieneGeneratedPatterns => {
+                "Add local workspace-hygiene generated-artifact path patterns."
+            }
+            Self::WorkspaceHygieneLocalMachinePatterns => {
+                "Add local workspace-hygiene machine-local artifact path patterns."
+            }
+            Self::WorkspaceHygieneScratchPatterns => {
+                "Add local workspace-hygiene scratch-artifact path patterns."
             }
             Self::Workspace => "Override workspace root discovery.",
             Self::WorkspaceCloseDrainTimeoutSeconds => {
@@ -370,7 +402,12 @@ impl EnvVar {
             | Self::IndexPublishLockRetryAttempts
             | Self::RememberCurationSyncBudgetMs => "tuning",
             Self::ScienceBackendPath => "integration",
-            Self::PreflightBypassSecret | Self::SecurityProfile => "policy",
+            Self::PreflightBypassSecret
+            | Self::SecurityProfile
+            | Self::WorkspaceHygieneAlwaysReviewPatterns
+            | Self::WorkspaceHygieneGeneratedPatterns
+            | Self::WorkspaceHygieneLocalMachinePatterns
+            | Self::WorkspaceHygieneScratchPatterns => "policy",
         }
     }
 

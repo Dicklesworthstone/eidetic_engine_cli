@@ -41,6 +41,7 @@ pub mod handoff;
 pub mod health;
 pub mod hygiene_beads_state;
 pub mod hygiene_classifier;
+pub mod hygiene_coordination;
 pub mod index;
 pub mod init;
 pub mod install;
