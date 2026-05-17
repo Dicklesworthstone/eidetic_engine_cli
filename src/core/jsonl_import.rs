@@ -899,7 +899,12 @@ fn prepare_memory(
     parsed: &ParsedJsonlImport,
 ) -> Result<PreparedMemory, JsonlImportIssue> {
     let import_memory_id = import_memory_id(memory, parsed)?;
-    let trust_class = trust_class_for_memory(memory, trust_class)?;
+    let import_source = parsed
+        .header
+        .as_ref()
+        .map(|header| header.import_source)
+        .unwrap_or(ImportSource::Unknown);
+    let trust_class = trust_class_for_memory(memory, trust_class, import_source)?;
     let trust_subclass = trust_subclass_for_memory(memory, trust_subclass);
     let level: MemoryLevel = memory.level.parse().map_err(|error| {
         JsonlImportIssue::error(
@@ -1066,6 +1071,7 @@ fn trust_class_for_header(header: Option<&ExportHeader>) -> TrustClass {
 fn trust_class_for_memory(
     memory: &ExportMemoryRecord,
     fallback: TrustClass,
+    import_source: ImportSource,
 ) -> Result<TrustClass, JsonlImportIssue> {
     let Some(raw) = memory.trust_class.as_deref() else {
         return Ok(fallback);
@@ -1078,7 +1084,7 @@ fn trust_class_for_memory(
             format!("memory `{}` has blank trust_class", memory.memory_id),
         ));
     }
-    TrustClass::from_str(raw).map_err(|error| {
+    let trust_class = TrustClass::from_str(raw).map_err(|error| {
         JsonlImportIssue::error(
             None,
             "invalid_memory_trust_class",
@@ -1087,7 +1093,19 @@ fn trust_class_for_memory(
                 memory.memory_id
             ),
         )
-    })
+    })?;
+    if import_source.is_external() && trust_class == TrustClass::HumanExplicit {
+        return Err(JsonlImportIssue::error(
+            None,
+            "external_import_human_explicit_trust_class",
+            format!(
+                "memory `{}` from {} cannot import as human_explicit; use agent_assertion or agent_validated for peer or external material",
+                memory.memory_id,
+                import_source.as_str()
+            ),
+        ));
+    }
+    Ok(trust_class)
 }
 
 fn trust_subclass_for_memory(memory: &ExportMemoryRecord, fallback: &str) -> Option<String> {
@@ -1578,6 +1596,33 @@ mod tests {
             memory.input.trust_subclass.as_deref(),
             None,
             "missing record trust_subclass stays absent",
+        )
+    }
+
+    #[test]
+    fn prepare_memories_rejects_external_human_explicit_trust_override() -> TestResult {
+        let input = sample_jsonl()
+            .replace(
+                r#""import_source":"native""#,
+                r#""import_source":"external_import""#,
+            )
+            .replace(
+                r#""utility":0.7,"created_at""#,
+                r#""utility":0.7,"trust_class":"human_explicit","created_at""#,
+            );
+        let parsed = parse_jsonl_source(&input);
+        let prepared = prepare_memories(&parsed, "wsp_01234567890123456789012345");
+
+        ensure(prepared.has_errors(), true, "prepared has errors")?;
+        ensure(prepared.memories.len(), 0, "external human memory blocked")?;
+        ensure(
+            prepared.issues.iter().any(|issue| {
+                issue.code == "external_import_human_explicit_trust_class"
+                    && issue.message.contains("external_import")
+                    && issue.message.contains("agent_assertion")
+            }),
+            true,
+            "external human_explicit issue",
         )
     }
 
