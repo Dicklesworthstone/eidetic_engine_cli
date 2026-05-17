@@ -41,7 +41,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use asupersync::channel::{mpsc, oneshot};
@@ -131,7 +131,7 @@ pub fn workspace_write_replay_required(workspace_path: &Path) -> bool {
     if !metadata.file_type().is_file() {
         return false;
     }
-    let Ok(raw) = fs::read_to_string(path) else {
+    let Ok(raw) = read_recovery_state_file(&path) else {
         return false;
     };
     serde_json::from_str::<serde_json::Value>(&raw)
@@ -145,6 +145,30 @@ pub fn workspace_write_replay_required(workspace_path: &Path) -> bool {
         .as_deref()
         == Some(WRITE_SPOOL_RECOVERY_STATE_REPLAY_REQUIRED)
 }
+
+fn read_recovery_state_file(path: &Path) -> io::Result<String> {
+    let mut file = open_recovery_state_file_for_read(path)?;
+    let mut raw = String::new();
+    file.read_to_string(&mut raw)?;
+    Ok(raw)
+}
+
+fn open_recovery_state_file_for_read(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_recovery_state_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_recovery_state_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_recovery_state_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 fn write_recovery_state(workspace_path: &Path, state: &str) -> std::io::Result<()> {
     let path = write_spool_recovery_state_path(workspace_path);
@@ -2509,6 +2533,51 @@ mod tests {
         assert!(
             !workspace_write_replay_required(temp.path()),
             "status must not trust a symlinked recovery marker file"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_state_final_read_open_rejects_symlinked_marker_file() -> Result<(), String> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let spool_dir = temp.path().join(".ee").join("write-spool");
+        fs::create_dir_all(&spool_dir).map_err(|error| error.to_string())?;
+        let outside_marker = temp.path().join("outside-recovery-state.json");
+        fs::write(
+            &outside_marker,
+            format!(
+                "{{\"schema\":\"{WRITE_SPOOL_RECOVERY_STATE_SCHEMA_V1}\",\"state\":\"{WRITE_SPOOL_RECOVERY_STATE_REPLAY_REQUIRED}\"}}\n"
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        let marker_path = write_spool_recovery_state_path(temp.path());
+        symlink(&outside_marker, &marker_path).map_err(|error| error.to_string())?;
+
+        let error = open_recovery_state_file_for_read(&marker_path)
+            .expect_err("final recovery marker symlink must not be followed");
+
+        assert_ne!(
+            error.kind(),
+            io::ErrorKind::NotFound,
+            "symlink should be rejected by the final open, not treated as missing"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_marker).map_err(|error| error.to_string())?,
+            format!(
+                "{{\"schema\":\"{WRITE_SPOOL_RECOVERY_STATE_SCHEMA_V1}\",\"state\":\"{WRITE_SPOOL_RECOVERY_STATE_REPLAY_REQUIRED}\"}}\n"
+            ),
+            "outside recovery marker target must remain unchanged"
+        );
+        assert!(
+            fs::symlink_metadata(&marker_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "rejected recovery marker symlink must remain available for inspection"
         );
 
         Ok(())
