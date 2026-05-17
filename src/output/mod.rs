@@ -7052,6 +7052,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: host_profile_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::swarm_next_action::SWARM_NEXT_ACTION_SCHEMA_V1,
+            version: "1",
+            description: "Read-only swarm next-action input snapshot for agent work selection",
+            category: "coordination",
+            definition: swarm_next_action_schema_definition,
+        },
+        SchemaEntry {
             id: crate::models::IMPORT_CASS_SCHEMA_V1,
             version: "1",
             description: "CASS import response envelope",
@@ -7399,6 +7406,10 @@ fn capabilities_response_schema_definition() -> String {
 
 fn host_profile_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.host_profile.v1.json").to_string()
+}
+
+fn swarm_next_action_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.swarm_next_action.v1.json").to_string()
 }
 
 fn import_cass_response_schema_definition() -> String {

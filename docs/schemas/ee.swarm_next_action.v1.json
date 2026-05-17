@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.swarm_next_action.v1.json",
+  "title": "ee.swarm_next_action.v1",
+  "description": "Read-only swarm next-action snapshot response envelope.",
+  "type": "object",
+  "required": ["schema", "success", "data", "degraded"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v1"},
+    "success": {"type": "boolean", "const": true},
+    "data": {
+      "type": "object",
+      "required": ["schema", "workspace", "redactionStatus"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.swarm_next_action.v1"},
+        "workspace": {"type": "string"},
+        "redactionStatus": {"type": "string"},
+        "candidateCount": {"type": "integer", "minimum": 0},
+        "dirtyPathCount": {"type": "integer", "minimum": 0},
+        "degradedCount": {"type": "integer", "minimum": 0},
+        "inputs": {"$ref": "#/$defs/inputSummary"},
+        "coordination": {"$ref": "#/$defs/coordinationSummary"},
+        "checkout": {"$ref": "#/$defs/checkoutSummary"},
+        "verification": {"$ref": "#/$defs/verificationSummary"},
+        "environment": {"$ref": "#/$defs/environmentSummary"},
+        "candidates": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/candidate"}
+        },
+        "topCandidates": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/candidate"}
+        },
+        "degraded": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/degradation"}
+        }
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradation"}
+    }
+  },
+  "field_presets": {
+    "minimal": ["schema", "workspace", "redactionStatus", "candidateCount", "dirtyPathCount", "degradedCount"],
+    "summary": ["schema", "workspace", "redactionStatus", "inputs", "coordination", "checkout", "verification", "environment", "topCandidates", "degraded"],
+    "standard": ["schema", "workspace", "redactionStatus", "inputs", "candidates", "coordination", "checkout", "verification", "environment", "degraded"],
+    "full": ["*"]
+  },
+  "examples": [
+    {
+      "schema": "ee.response.v1",
+      "success": true,
+      "data": {
+        "schema": "ee.swarm_next_action.v1",
+        "workspace": "/repo",
+        "redactionStatus": "counts_ids_statuses_paths_redacted_no_mail_body_no_file_content",
+        "inputs": {
+          "sourceCount": 5,
+          "readyBeadCount": 2,
+          "inProgressBeadCount": 1,
+          "blockedBeadCount": 3,
+          "bvTopPickCount": 1
+        },
+        "candidates": [
+          {
+            "id": "bd-123",
+            "title": "Add next-action schema",
+            "source": "bv_top_pick",
+            "scoreMilli": 900,
+            "status": "open",
+            "priority": 2,
+            "assignee": null,
+            "blockedBy": [],
+            "actionHint": "inspect_and_reserve_before_editing"
+          }
+        ],
+        "coordination": {
+          "activeReservationCount": 1,
+          "reservationHolders": ["GoldenCompass"],
+          "unreadInboxCount": 0,
+          "ackRequiredCount": 0
+        },
+        "checkout": {
+          "dirtyPathCount": 1,
+          "dirtyPaths": ["docs/schemas/ee.swarm_next_action.v1.json"]
+        },
+        "verification": {
+          "rchSourceEnabled": true,
+          "remoteOnlyRequired": true,
+          "remoteOnlySafe": false,
+          "healthyWorkerCount": 1,
+          "activeRemoteBuildCount": 4,
+          "queuedRemoteBuildCount": 0,
+          "slotsAvailable": 0
+        },
+        "environment": {
+          "cargoTargetExternalized": true,
+          "tmpdirExternalized": true,
+          "externalAgentSpacePresent": true,
+          "diskPressureHintCount": 0
+        },
+        "degraded": [
+          {
+            "code": "rch_saturated",
+            "source": "rch",
+            "severity": "warning",
+            "message": "Remote workers are healthy but no slots are currently available.",
+            "repair": "Wait for a slot or choose source-only work."
+          }
+        ]
+      },
+      "degraded": [
+        {
+          "code": "rch_saturated",
+          "source": "rch",
+          "severity": "warning",
+          "message": "Remote workers are healthy but no slots are currently available.",
+          "repair": "Wait for a slot or choose source-only work."
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "inputSummary": {
+      "type": "object",
+      "required": ["sourceCount", "readyBeadCount", "inProgressBeadCount", "blockedBeadCount", "bvTopPickCount"],
+      "additionalProperties": false,
+      "properties": {
+        "sourceCount": {"type": "integer", "minimum": 0},
+        "readyBeadCount": {"type": "integer", "minimum": 0},
+        "inProgressBeadCount": {"type": "integer", "minimum": 0},
+        "blockedBeadCount": {"type": "integer", "minimum": 0},
+        "bvTopPickCount": {"type": "integer", "minimum": 0}
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "required": ["id", "title", "source", "scoreMilli", "status", "priority", "assignee", "blockedBy", "actionHint"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "title": {"type": "string"},
+        "source": {"type": "string", "enum": ["bv_top_pick", "beads_ready"]},
+        "scoreMilli": {"type": ["integer", "null"], "minimum": 0},
+        "status": {"type": "string"},
+        "priority": {"type": ["integer", "null"]},
+        "assignee": {"type": ["string", "null"]},
+        "blockedBy": {"type": "array", "items": {"type": "string"}},
+        "actionHint": {"type": "string"}
+      }
+    },
+    "coordinationSummary": {
+      "type": "object",
+      "required": ["activeReservationCount", "reservationHolders", "unreadInboxCount", "ackRequiredCount"],
+      "additionalProperties": false,
+      "properties": {
+        "activeReservationCount": {"type": "integer", "minimum": 0},
+        "reservationHolders": {"type": "array", "items": {"type": "string"}},
+        "unreadInboxCount": {"type": "integer", "minimum": 0},
+        "ackRequiredCount": {"type": "integer", "minimum": 0}
+      }
+    },
+    "checkoutSummary": {
+      "type": "object",
+      "required": ["dirtyPathCount"],
+      "additionalProperties": false,
+      "properties": {
+        "dirtyPathCount": {"type": "integer", "minimum": 0},
+        "dirtyPaths": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "verificationSummary": {
+      "type": "object",
+      "required": ["rchSourceEnabled", "remoteOnlyRequired", "remoteOnlySafe", "healthyWorkerCount", "activeRemoteBuildCount", "queuedRemoteBuildCount", "slotsAvailable"],
+      "additionalProperties": false,
+      "properties": {
+        "rchSourceEnabled": {"type": "boolean"},
+        "remoteOnlyRequired": {"type": "boolean"},
+        "remoteOnlySafe": {"type": ["boolean", "null"]},
+        "healthyWorkerCount": {"type": ["integer", "null"], "minimum": 0},
+        "activeRemoteBuildCount": {"type": ["integer", "null"], "minimum": 0},
+        "queuedRemoteBuildCount": {"type": ["integer", "null"], "minimum": 0},
+        "slotsAvailable": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "environmentSummary": {
+      "type": "object",
+      "required": ["cargoTargetExternalized", "tmpdirExternalized", "externalAgentSpacePresent", "diskPressureHintCount"],
+      "additionalProperties": false,
+      "properties": {
+        "cargoTargetExternalized": {"type": "boolean"},
+        "tmpdirExternalized": {"type": "boolean"},
+        "externalAgentSpacePresent": {"type": "boolean"},
+        "diskPressureHintCount": {"type": "integer", "minimum": 0}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "source", "severity", "message", "repair"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "source": {"type": "string"},
+        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
+        "message": {"type": "string"},
+        "repair": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

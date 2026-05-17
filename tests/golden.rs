@@ -499,6 +499,8 @@ mod tests {
                 id: "eidetic_engine_cli-pdav".to_string(),
                 title: "[swarm-brief][contracts] Freeze schema and goldens".to_string(),
                 score_milli: Some(970),
+                action_hint: None,
+                blocked_by: Vec::new(),
             }],
         });
         all_sources.recent_commits.push(SwarmBriefCommit {

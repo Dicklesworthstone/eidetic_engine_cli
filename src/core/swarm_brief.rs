@@ -463,6 +463,8 @@ pub struct SwarmBriefBvPick {
     pub id: String,
     pub title: String,
     pub score_milli: Option<u32>,
+    pub action_hint: Option<String>,
+    pub blocked_by: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -3521,10 +3523,19 @@ pub fn parse_bv_triage_json(input: &str) -> Result<SwarmBriefBvSummary, String> 
         .iter()
         .filter_map(parse_bv_pick)
         .collect::<Vec<_>>();
+    if let Some(recommendations) = value
+        .pointer("/triage/recommendations")
+        .or_else(|| value.get("recommendations"))
+        .and_then(Value::as_array)
+    {
+        top_picks.extend(recommendations.iter().filter_map(parse_bv_pick));
+    }
     top_picks.sort_by(|left, right| {
         right
             .score_milli
             .cmp(&left.score_milli)
+            .then_with(|| right.blocked_by.len().cmp(&left.blocked_by.len()))
+            .then_with(|| right.action_hint.is_some().cmp(&left.action_hint.is_some()))
             .then_with(|| left.id.cmp(&right.id))
             .then_with(|| left.title.cmp(&right.title))
     });
@@ -3553,6 +3564,9 @@ fn parse_bv_pick(item: &Value) -> Option<SwarmBriefBvPick> {
         id: redact_brief_text(&id),
         title: redact_brief_text(&title),
         score_milli,
+        action_hint: string_field(item, &["action", "action_hint", "actionHint"])
+            .map(|value| redact_brief_text(&value)),
+        blocked_by: string_array_field(item, &["blocked_by", "blockedBy"]),
     })
 }
 
@@ -4480,6 +4494,23 @@ fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
     })
 }
 
+fn string_array_field(value: &Value, keys: &[&str]) -> Vec<String> {
+    let mut values = keys
+        .iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_array))
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(redact_brief_text)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    values.sort();
+    values.dedup();
+    values
+}
+
 fn string_field_any(value: &Value, keys: &[&str]) -> Option<String> {
     string_field(value, keys)
         .or_else(|| value.get("data").and_then(|data| string_field(data, keys)))
@@ -4991,6 +5022,8 @@ mod tests {
                 id: "eidetic_engine_cli-u7r5".to_string(),
                 title: "top".to_string(),
                 score_milli: Some(900),
+                action_hint: None,
+                blocked_by: Vec::new(),
             }],
         });
 
@@ -5588,10 +5621,18 @@ mod tests {
                   "blocked_count": 12,
                   "in_progress_count": 1,
                   "top_picks": [
-                    {"id":"work-2","title":"second","score":0.25},
-                    {"id":"work-1","title":"first","score":0.5}
+                    {"id":"work-2","title":"second","score":0.25}
                   ]
                 },
+                "recommendations": [
+                  {
+                    "id":"work-1",
+                    "title":"first",
+                    "score":0.5,
+                    "action":"Work on bd-parent first",
+                    "blocked_by":["bd-parent","bd-parent"]
+                  }
+                ],
                 "recommendations_by_track": [
                   {"track_id":"track-A"},
                   {"track_id":"track-B"}
@@ -5606,6 +5647,11 @@ mod tests {
         assert_eq!(summary.track_count, Some(2));
         assert_eq!(summary.top_picks[0].id, "work-1");
         assert_eq!(summary.top_picks[0].score_milli, Some(500));
+        assert_eq!(
+            summary.top_picks[0].action_hint.as_deref(),
+            Some("Work on bd-parent first")
+        );
+        assert_eq!(summary.top_picks[0].blocked_by, vec!["bd-parent"]);
     }
 
     #[test]

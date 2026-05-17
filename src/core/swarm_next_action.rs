@@ -203,8 +203,11 @@ fn candidates_from_brief(brief: &SwarmBriefReport) -> Vec<SwarmNextActionCandida
                 status: bead.map_or_else(|| "unknown".to_owned(), |bead| bead.status.clone()),
                 priority: bead.and_then(|bead| bead.priority),
                 assignee: bead.and_then(|bead| bead.assignee.clone()),
-                blocked_by: Vec::new(),
-                action_hint: "inspect_and_reserve_before_editing".to_owned(),
+                blocked_by: pick.blocked_by.clone(),
+                action_hint: pick
+                    .action_hint
+                    .clone()
+                    .unwrap_or_else(|| "inspect_and_reserve_before_editing".to_owned()),
             });
         }
     }
@@ -321,6 +324,8 @@ mod tests {
                 id: "bd-b".to_owned(),
                 title: "Second".to_owned(),
                 score_milli: Some(900),
+                action_hint: Some("Work on bd-a first".to_owned()),
+                blocked_by: vec!["bd-a".to_owned()],
             }],
         });
 
@@ -338,6 +343,8 @@ mod tests {
         );
         assert_eq!(snapshot.candidates[1].source, "bv_top_pick");
         assert_eq!(snapshot.candidates[1].score_milli, Some(900));
+        assert_eq!(snapshot.candidates[1].blocked_by, vec!["bd-a"]);
+        assert_eq!(snapshot.candidates[1].action_hint, "Work on bd-a first");
     }
 
     #[test]

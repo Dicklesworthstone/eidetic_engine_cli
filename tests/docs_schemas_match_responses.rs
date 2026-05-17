@@ -22,6 +22,7 @@ use ee::core::curate::{
 use ee::core::memory::{
     MemoryDetails, MemoryListFilter, MemoryListReport, MemoryShowReport, MemorySummary,
 };
+use ee::core::swarm_next_action::SWARM_NEXT_ACTION_SCHEMA_V1;
 use ee::db::{GraphSnapshotType, StoredMemory};
 use ee::graph::{GRAPH_EXPORT_SCHEMA_V1, GraphExportFormat, GraphExportReport, GraphExportStatus};
 use ee::models::{DomainError, IMPORT_CASS_SCHEMA_V1, RESPONSE_SCHEMA_V1};
@@ -43,6 +44,7 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
     ("ee.status.v1", "ee.status.v1.json"),
     ("ee.doctor.v1", "ee.doctor.v1.json"),
     ("ee.capabilities.v1", "ee.capabilities.v1.json"),
+    (SWARM_NEXT_ACTION_SCHEMA_V1, "ee.swarm_next_action.v1.json"),
     ("ee.import.cass.v1", "ee.import.cass.v1.json"),
     ("ee.export.v1", "ee.export.v1.json"),
     ("ee.curate.candidates.v1", "ee.curate.candidates.v1.json"),
@@ -474,6 +476,7 @@ fn canonical_response_fixtures_match_docs_schemas() -> TestResult {
         ("ee.import.cass.v1", import_cass_sample()),
         ("ee.export.v1", export_sample()),
         ("ee.curate.candidates.v1", curate_candidates_sample()?),
+        (SWARM_NEXT_ACTION_SCHEMA_V1, swarm_next_action_sample()),
         ("ee.graph.export.v1", graph_export_sample()),
         ("ee.db.inspect.v1", db_inspect_sample()?),
         (
@@ -518,6 +521,70 @@ fn domain_error_sample() -> Result<Value, String> {
         repair: Some("ee doctor --fix-plan --json".to_string()),
     }))
     .map_err(|error| error.to_string())
+}
+
+fn swarm_next_action_sample() -> Value {
+    let degraded = json!([{
+        "code": "rch_saturated",
+        "source": "rch",
+        "severity": "warning",
+        "message": "Remote workers are healthy but no slots are currently available.",
+        "repair": "Wait for a slot or choose source-only work."
+    }]);
+    json!({
+        "schema": RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "schema": SWARM_NEXT_ACTION_SCHEMA_V1,
+            "workspace": "/repo",
+            "redactionStatus": "counts_ids_statuses_paths_redacted_no_mail_body_no_file_content",
+            "inputs": {
+                "sourceCount": 5,
+                "readyBeadCount": 2,
+                "inProgressBeadCount": 1,
+                "blockedBeadCount": 3,
+                "bvTopPickCount": 1
+            },
+            "candidates": [{
+                "id": "bd-123",
+                "title": "Add next-action schema",
+                "source": "bv_top_pick",
+                "scoreMilli": 900,
+                "status": "open",
+                "priority": 2,
+                "assignee": null,
+                "blockedBy": [],
+                "actionHint": "inspect_and_reserve_before_editing"
+            }],
+            "coordination": {
+                "activeReservationCount": 1,
+                "reservationHolders": ["GoldenCompass"],
+                "unreadInboxCount": 0,
+                "ackRequiredCount": 0
+            },
+            "checkout": {
+                "dirtyPathCount": 1,
+                "dirtyPaths": ["docs/schemas/ee.swarm_next_action.v1.json"]
+            },
+            "verification": {
+                "rchSourceEnabled": true,
+                "remoteOnlyRequired": true,
+                "remoteOnlySafe": false,
+                "healthyWorkerCount": 1,
+                "activeRemoteBuildCount": 4,
+                "queuedRemoteBuildCount": 0,
+                "slotsAvailable": 0
+            },
+            "environment": {
+                "cargoTargetExternalized": true,
+                "tmpdirExternalized": true,
+                "externalAgentSpacePresent": true,
+                "diskPressureHintCount": 0
+            },
+            "degraded": degraded.clone()
+        },
+        "degraded": degraded
+    })
 }
 
 fn memory_show_sample() -> Result<Value, String> {
