@@ -2890,6 +2890,31 @@ mod tests {
     }
 
     #[test]
+    fn srr3_fake_runner_rejects_durable_row_from_failed_fsync_batch() -> Result<(), String> {
+        let schedule = srr3_fake_runner_fsync_schedule();
+        let mut observed = interpret_srr3_write_spool(&schedule);
+        observed.durable_rows.push(Srr3DurableRow {
+            request_id: 2,
+            producer_id: 1,
+            producer_sequence: 0,
+            batch_id: 2,
+            kind: WriteSpoolIntentKind::Remember,
+            payload_bytes: 64,
+        });
+
+        let event_line = srr3_fake_runner_event_line(&schedule, &observed);
+        assert_eq!(
+            srr3_fake_runner_first_failure(&event_line)?,
+            WRITE_HOT_PATH_FSYNC_FAILURE_CODE
+        );
+        assert!(
+            event_line.contains("auditChainDigest"),
+            "fsync diagnostic must carry sanitized audit-chain evidence"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn srr3_fake_runner_rejects_audit_chain_discontinuity() -> Result<(), String> {
         let schedule = srr3_fake_runner_fsync_schedule();
         let mut observed = interpret_srr3_write_spool(&schedule);
