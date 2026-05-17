@@ -141,7 +141,7 @@ def manifest_version(package: dict[str, Any], root_version: str | None) -> str |
     version = package.get("version")
     if isinstance(version, str):
         return version
-    if isinstance(version, dict) and version.get("workspace") is True:
+    if isinstance(version, dict) and version.get("workspace") == True:
         return root_version
     return None
 

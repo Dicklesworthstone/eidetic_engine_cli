@@ -34099,6 +34099,11 @@ fn execute_demo_command(ctx: DemoCommandContext<'_>) -> Result<DemoCommandExecut
     } else {
         let mut command = std::process::Command::new("sh");
         command.arg("-c");
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         command
     };
     install_current_ee_on_path(&mut process);
@@ -34118,6 +34123,9 @@ fn execute_demo_command(ctx: DemoCommandContext<'_>) -> Result<DemoCommandExecut
         message: format!("Failed to execute demo command: {error}"),
         repair: Some("Check demo.yaml command and working directory.".to_owned()),
     })?;
+    #[cfg(unix)]
+    let child_group = rustix::process::Pid::from_child(&child);
+
     let timeout = Duration::from_millis(ctx.command.timeout_ms.max(1));
     let mut timed_out = false;
     let status = loop {
@@ -34125,6 +34133,13 @@ fn execute_demo_command(ctx: DemoCommandContext<'_>) -> Result<DemoCommandExecut
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= timeout => {
                 timed_out = true;
+                #[cfg(unix)]
+                {
+                    if let Some(pid) = child_group {
+                        let _ =
+                            rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+                    }
+                }
                 let _ = child.kill();
                 break child.wait().map_err(|error| DomainError::Storage {
                     message: format!("Failed to wait for timed-out demo command: {error}"),
