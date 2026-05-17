@@ -589,11 +589,19 @@ impl ArtifactDocumentBuilder {
 }
 
 fn redact_artifact_search_ref(value: &str) -> String {
-    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
-    redact_artifact_search_absolute_path_like_segments(&secret_redacted)
+    redact_search_projection_ref(value)
 }
 
-fn redact_artifact_search_absolute_path_like_segments(input: &str) -> String {
+fn redact_curation_candidate_search_ref(value: &str) -> String {
+    redact_search_projection_ref(value)
+}
+
+fn redact_search_projection_ref(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    redact_search_projection_absolute_path_like_segments(&secret_redacted)
+}
+
+fn redact_search_projection_absolute_path_like_segments(input: &str) -> String {
     const REDACTED_PATH: &str = "[REDACTED_PATH]";
     const PATH_PREFIXES: &[&str] = &[
         "/home/",
@@ -703,6 +711,10 @@ impl CurationCandidateDocumentBuilder {
     /// Build a canonical search document from a curation candidate row.
     #[must_use]
     pub fn build(self, candidate: &crate::db::StoredCurationCandidate) -> CanonicalSearchDocument {
+        let safe_source_id = candidate
+            .source_id
+            .as_deref()
+            .map(redact_curation_candidate_search_ref);
         let content = crate::curate::candidate_embedding_text(
             &crate::curate::CurationCandidateEmbeddingText {
                 id: &candidate.id,
@@ -713,7 +725,7 @@ impl CurationCandidateDocumentBuilder {
                 proposed_confidence: candidate.proposed_confidence,
                 proposed_trust_class: candidate.proposed_trust_class.as_deref(),
                 source_type: &candidate.source_type,
-                source_id: candidate.source_id.as_deref(),
+                source_id: safe_source_id.as_deref(),
                 reason: &candidate.reason,
                 confidence: candidate.confidence,
                 status: &candidate.status,
@@ -737,7 +749,7 @@ impl CurationCandidateDocumentBuilder {
         if let Some(workspace) = self.workspace_path {
             doc = doc.with_workspace(workspace);
         }
-        if let Some(source_id) = &candidate.source_id {
+        if let Some(source_id) = &safe_source_id {
             doc = doc.with_metadata_entry("source_id", source_id);
         }
         if let Some(proposed_confidence) = candidate.proposed_confidence {
@@ -2901,6 +2913,7 @@ mod tests {
             doc.content()
                 .contains("Target memory content: Always run cargo fmt")
         );
+        assert!(doc.content().contains("Source id: eval-run-001"));
 
         let indexable = doc.into_indexable();
         assert_eq!(
@@ -2918,6 +2931,43 @@ mod tests {
         assert_eq!(
             indexable.metadata.get("target_memory_id"),
             Some(&"mem_01234567890123456789012345".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("source_id"),
+            Some(&"eval-run-001".to_owned())
+        );
+    }
+
+    #[test]
+    fn curation_candidate_document_builder_redacts_sensitive_source_id() {
+        let mut candidate = make_test_candidate();
+        candidate.source_id =
+            Some("file:///Users/alice/private/review.jsonl?api_key=redaction-fixture".to_string());
+
+        let doc = super::CurationCandidateDocumentBuilder::new().build(&candidate);
+        let content = doc.content().to_string();
+        let indexable = doc.into_indexable();
+        let rendered = format!("{}\n{:?}", content, indexable.metadata);
+
+        assert!(
+            rendered.contains("[REDACTED_PATH]"),
+            "redacted curation source should retain path placeholders"
+        );
+        assert!(
+            rendered.contains("[REDACTED:api_key]"),
+            "redacted curation source should retain secret placeholders"
+        );
+        assert!(
+            !rendered.contains("/Users/alice/private/review.jsonl"),
+            "curation candidate search document leaked source path: {rendered}"
+        );
+        assert!(
+            !rendered.contains("redaction-fixture"),
+            "curation candidate search document leaked secret-like source id: {rendered}"
+        );
+        assert_eq!(
+            indexable.metadata.get("source_id"),
+            Some(&"file://[REDACTED_PATH]?api_key=[REDACTED:api_key]".to_string())
         );
     }
 
