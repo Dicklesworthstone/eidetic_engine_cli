@@ -68,10 +68,17 @@ fn ambient_chrono_clock(_: &ee::runtime::determinism::Deterministic<Seed>) {
     let _ = chrono::Local::now();
 }
 
+#[determinism::required]
+fn ambient_domain_id(_: &ee::runtime::determinism::Deterministic<Seed>) {
+    let _ = ee::models::MemoryId::now();
+    let _ = RuleId::now();
+}
+
 fn benign_documentation_mentions() {
-    let _ = "rand::random::<u64>() Instant::now() SystemTime::now() chrono::Utc::now() std::fs::read_dir(.)";
+    let _ = "rand::random::<u64>() Instant::now() SystemTime::now() chrono::Utc::now() MemoryId::now() std::fs::read_dir(.)";
     // rand::thread_rng();
     // chrono::Local::now();
+    // RuleId::now();
     // std::env::var("EE_SEED");
     // std::env::var_os("EE_SEED");
     // std::env::vars();
@@ -84,7 +91,8 @@ fn benign_block_comment_and_raw_string_mentions() {
      * Uuid::new_v4();
      * Uuid::now_v7();
      * chrono::Utc::now();
+     * MemoryId::now();
      * std::fs::read_dir(".");
      */
-    let _ = r#"std::env::var("EE_SEED") Instant::now() SystemTime::now() chrono::Local::now()"#;
+    let _ = r#"std::env::var("EE_SEED") Instant::now() SystemTime::now() chrono::Local::now() RuleId::now()"#;
 }

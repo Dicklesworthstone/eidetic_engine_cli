@@ -102,6 +102,13 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "inject local timestamps at the boundary instead of calling Local::now",
             });
         }
+        if domain_id_now_call(line) {
+            findings.push(Finding {
+                line: line_no,
+                code: "ambient_domain_id_now",
+                message: "use seeded ID helpers instead of ambient typed Id::now",
+            });
+        }
         if line.contains("std::env::var(") {
             findings.push(Finding {
                 line: line_no,
@@ -332,6 +339,19 @@ fn hash_map_iteration_call(line: &str) -> bool {
         .any(|needle| line.contains(needle))
 }
 
+fn domain_id_now_call(line: &str) -> bool {
+    let Some(now_index) = line.find("::now(") else {
+        return false;
+    };
+    let prefix = &line[..now_index];
+    let type_name = prefix
+        .rsplit(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .next()
+        .unwrap_or_default();
+
+    type_name.ends_with("Id")
+}
+
 fn render_report(findings: &[Finding]) -> String {
     let mut output = String::from("schema: ee.determinism_lint_fixture.v1\n");
     for finding in findings {
@@ -437,5 +457,18 @@ mod self_tests {
         "#;
         let report = render_report(&scan_fixture(fixture));
         assert_eq!(report.matches("hashmap_iteration").count(), 3);
+    }
+
+    #[test]
+    fn domain_id_now_calls_emit_known_violations() {
+        let fixture = r#"
+            fn ambient() {
+                let _ = ee::models::MemoryId::now();
+                let _ = RuleId::now();
+                let _ = uuid::Uuid::now_v7();
+            }
+        "#;
+        let report = render_report(&scan_fixture(fixture));
+        assert_eq!(report.matches("ambient_domain_id_now").count(), 2);
     }
 }
