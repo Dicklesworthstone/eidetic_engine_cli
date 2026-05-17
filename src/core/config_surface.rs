@@ -266,6 +266,18 @@ pub fn set_config(
         })?;
         let mut temp_path = path.clone();
         temp_path.set_extension("tmp");
+        ensure_no_config_symlink_components(&temp_path, "write temp").map_err(|source| {
+            ConfigSurfaceError::Write {
+                path: temp_path.clone(),
+                source,
+            }
+        })?;
+        ensure_config_temp_path_is_regular_or_missing(&temp_path).map_err(|source| {
+            ConfigSurfaceError::Write {
+                path: temp_path.clone(),
+                source,
+            }
+        })?;
         {
             use std::io::Write;
             let mut file =
@@ -447,6 +459,21 @@ fn ensure_config_write_path_is_regular_or_missing(path: &Path) -> Result<(), io:
             io::ErrorKind::InvalidInput,
             format!(
                 "refusing to write config `{}` because it is not a regular file",
+                path.display()
+            ),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn ensure_config_temp_path_is_regular_or_missing(path: &Path) -> Result<(), io::Error> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to write config temp `{}` because it is not a regular file",
                 path.display()
             ),
         )),
@@ -967,6 +994,58 @@ mod tests {
             return Err(
                 "write preflight should leave non-regular config path untouched".to_owned(),
             );
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graph_set_rejects_symlinked_temp_config_before_write() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = workspace()?;
+        let config_dir = temp.path().join(".ee");
+        fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        let outside_config = temp.path().join("outside-config.toml");
+        fs::write(&outside_config, "outside sentinel").map_err(|error| error.to_string())?;
+        symlink(&outside_config, config_dir.join("config.tmp"))
+            .map_err(|error| error.to_string())?;
+
+        let error = set_config(&options(temp.path()), "graph.ppr.alpha", "0.5", false)
+            .expect_err("symlinked config temp path should reject config set")
+            .to_string();
+        if !error.contains("symlinked path component") {
+            return Err(format!("unexpected symlink temp error: {error}"));
+        }
+        let outside_after =
+            fs::read_to_string(&outside_config).map_err(|error| error.to_string())?;
+        if outside_after != "outside sentinel" {
+            return Err("config set must not write through a symlinked temp path".to_owned());
+        }
+        if config_dir.join("config.toml").exists() {
+            return Err("config final path should not be created after temp rejection".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn graph_set_rejects_non_regular_temp_config_before_write() -> TestResult {
+        let temp = workspace()?;
+        let config_dir = temp.path().join(".ee");
+        let temp_path = config_dir.join("config.tmp");
+        fs::create_dir_all(&temp_path).map_err(|error| error.to_string())?;
+
+        let error = set_config(&options(temp.path()), "graph.ppr.alpha", "0.5", false)
+            .expect_err("directory config temp path should reject config set")
+            .to_string();
+        if !error.contains("not a regular file") {
+            return Err(format!("unexpected non-regular temp error: {error}"));
+        }
+        if !temp_path.is_dir() {
+            return Err("config set should leave non-regular temp path untouched".to_owned());
+        }
+        if config_dir.join("config.toml").exists() {
+            return Err("config final path should not be created after temp rejection".to_owned());
         }
         Ok(())
     }
