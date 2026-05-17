@@ -1783,6 +1783,29 @@ fn key_path_exists_no_symlinks(path: &Path) -> io::Result<bool> {
     }
 }
 
+fn key_dir_exists_no_symlinks(path: &Path) -> io::Result<bool> {
+    reject_key_symlink_chain(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "certificate key directory symlink refused: {}",
+                path.display()
+            ),
+        )),
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(true),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "certificate key directory is not a directory: {}",
+                path.display()
+            ),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 fn read_key_file_no_symlinks(path: &Path) -> io::Result<Vec<u8>> {
     reject_key_symlink_chain(path)?;
     let metadata = fs::symlink_metadata(path)?;
@@ -2097,7 +2120,7 @@ fn find_public_key_by_fingerprint(
     key_dir: &Path,
     fingerprint: &str,
 ) -> io::Result<Option<Vec<u8>>> {
-    if !key_path_exists_no_symlinks(key_dir)? {
+    if !key_dir_exists_no_symlinks(key_dir)? {
         return Ok(None);
     }
 
@@ -2955,6 +2978,33 @@ mod tests {
                 .file_type()
                 .is_dir(),
             "non-regular key path must remain a directory",
+        )
+    }
+
+    #[test]
+    fn certificate_key_directory_accepts_real_directory_for_lookup() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let key_dir = dir.path().join("keys");
+        fs::create_dir_all(&key_dir).map_err(|error| error.to_string())?;
+
+        let exists = key_dir_exists_no_symlinks(&key_dir).map_err(|error| error.to_string())?;
+
+        ensure(exists, "real key directory should be accepted")
+    }
+
+    #[test]
+    fn certificate_key_directory_rejects_non_directory_lookup_path() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let key_dir = dir.path().join("keys");
+        fs::write(&key_dir, b"not a directory").map_err(|error| error.to_string())?;
+
+        let error = key_dir_exists_no_symlinks(&key_dir)
+            .expect_err("file key directory path should reject lookup preflight");
+
+        ensure_equal(&error.kind(), &io::ErrorKind::InvalidInput, "error kind")?;
+        ensure(
+            error.to_string().contains("not a directory"),
+            "error should mention non-directory key path",
         )
     }
 
