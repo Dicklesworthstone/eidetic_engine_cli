@@ -11,6 +11,8 @@ START_SECONDS="$(python3 -c 'import time; print(time.monotonic())')"
 epic_setup "g5_curate_decay"
 seed_corpus
 
+ee_workspace config set graph.feature.structural_decay.enabled true --json >/dev/null
+
 e2e_log_note "g5_curate_decay_surface=curate disposition structuralAdjustments"
 CURATE_JSON=$(ee_workspace curate disposition --json 2>/dev/null || true)
 if printf '%s' "$CURATE_JSON" | jq . >/dev/null 2>&1; then
