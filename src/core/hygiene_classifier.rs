@@ -1084,25 +1084,23 @@ mod tests {
     #[test]
     fn purity_module_does_not_perform_io() {
         // Compile-time evidence is what we really want: this module's
-        // `use` declarations name no `std::fs::*` writer, no
-        // `std::process::Command`, no `std::net::*`. To make the
-        // contract testable, we re-stringify the source file path and
-        // assert the assembly path resolves; the actual no-io property
-        // is enforced by the absence of those imports above. This
-        // test exists so that anyone adding such an import sees a
-        // local failure marker.
+        // `use` declarations name no filesystem writers, process
+        // commands, or networking APIs. This guard keeps that contract
+        // visible without embedding the forbidden tokens contiguously
+        // in the source it scans.
         let source = include_str!("hygiene_classifier.rs");
-        for forbidden in [
-            "std::fs::write",
-            "std::fs::create_dir",
-            "std::fs::remove_file",
-            "std::fs::rename",
-            "std::process::Command",
-            "std::process::Child",
-            "tokio::process",
+        for (prefix, suffix) in [
+            ("std::fs::", "write"),
+            ("std::fs::", "create_dir"),
+            ("std::fs::", "remove_file"),
+            ("std::fs::", "rename"),
+            ("std::process::", "Command"),
+            ("std::process::", "Child"),
+            ("tokio::", "process"),
         ] {
+            let forbidden = format!("{prefix}{suffix}");
             assert!(
-                !source.contains(forbidden),
+                !source.contains(&forbidden),
                 "hygiene_classifier.rs is supposed to be pure but contains `{forbidden}`"
             );
         }
