@@ -417,6 +417,22 @@ fn detected_redaction_classes(payload: &str) -> Vec<String> {
         ("ssh_key", "ssh_key"),
         ("secret", "secret"),
         ("token", "token"),
+        // SRR6.46.1 / bd-36bbk.1.1 — tailscale identity material in any
+        // shape (snake_case parser output, camelCase JSON renderer output).
+        // The detector is substring-based and case-insensitive, so a
+        // payload containing any of these markers gets tagged with the
+        // `tailscale_metadata` class even when the volatile-field strip
+        // pass has not yet been applied. Pairs with the
+        // `tailscale_metadata` entry in `privacy.redaction_classes` and
+        // with the field registrations in `src/obs/volatile_fields.rs`.
+        ("selfnodekey", "tailscale_metadata"),
+        ("selftailscaleip", "tailscale_metadata"),
+        ("selfmagicdnsname", "tailscale_metadata"),
+        ("tailnetid", "tailscale_metadata"),
+        ("tailnetdisplayname", "tailscale_metadata"),
+        ("selfadvertisedtags", "tailscale_metadata"),
+        ("binaryversionraw", "tailscale_metadata"),
+        ("binaryabsolutepath", "tailscale_metadata"),
     ] {
         if lower.contains(marker) && !classes.iter().any(|known| known == class) {
             classes.push(class.to_string());
@@ -2491,6 +2507,76 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), String>;
+
+    // SRR6.46.1 / bd-36bbk.1.1 — tailscale_metadata redaction class detection.
+    // The detector is purely substring-based + case-insensitive; these tests
+    // lock the field-name vocabulary the redactor will trip on so future
+    // schema renames don't silently drop the class label.
+
+    #[test]
+    fn detected_redaction_classes_tags_tailscale_metadata_on_self_node_key() {
+        let payload = r#"{"selfNodeKey":"nodekey:abcdef","other":"x"}"#;
+        assert!(detected_redaction_classes(payload).contains(&"tailscale_metadata".to_string()));
+    }
+
+    #[test]
+    fn detected_redaction_classes_tags_tailscale_metadata_on_tailnet_id() {
+        let payload = r#"{"tailnetId":"tn_example","other":"x"}"#;
+        assert!(detected_redaction_classes(payload).contains(&"tailscale_metadata".to_string()));
+    }
+
+    #[test]
+    fn detected_redaction_classes_tags_tailscale_metadata_on_self_tailscale_ip() {
+        let payload = r#"{"selfTailscaleIp":"100.64.0.5"}"#;
+        assert!(detected_redaction_classes(payload).contains(&"tailscale_metadata".to_string()));
+    }
+
+    #[test]
+    fn detected_redaction_classes_tags_tailscale_metadata_on_self_magic_dns_name() {
+        let payload = r#"{"selfMagicDnsName":"alpha.tailnet"}"#;
+        assert!(detected_redaction_classes(payload).contains(&"tailscale_metadata".to_string()));
+    }
+
+    #[test]
+    fn detected_redaction_classes_tags_tailscale_metadata_on_binary_absolute_path() {
+        let payload = r#"{"binaryAbsolutePath":"/opt/homebrew/bin/tailscale"}"#;
+        assert!(detected_redaction_classes(payload).contains(&"tailscale_metadata".to_string()));
+    }
+
+    #[test]
+    fn detected_redaction_classes_does_not_double_count_tailscale_metadata() {
+        let payload = r#"{"selfNodeKey":"x","tailnetId":"y","selfTailscaleIp":"100.64.0.1"}"#;
+        let classes = detected_redaction_classes(payload);
+        let count = classes.iter().filter(|c| **c == "tailscale_metadata").count();
+        assert_eq!(count, 1, "tailscale_metadata should appear exactly once; got {classes:?}");
+    }
+
+    #[test]
+    fn detected_redaction_classes_does_not_tag_tailscale_metadata_when_absent() {
+        let payload = r#"{"workspace":"foo","level":"procedural"}"#;
+        assert!(!detected_redaction_classes(payload).contains(&"tailscale_metadata".to_string()));
+    }
+
+    #[test]
+    fn detected_redaction_classes_returns_sorted_with_tailscale_metadata() {
+        let payload = r#"{"selfNodeKey":"x","api_key":"secret","password":"hunter2"}"#;
+        let classes = detected_redaction_classes(payload);
+        // sort order must be stable; tailscale_metadata sits after the
+        // existing classes alphabetically.
+        let mut expected: Vec<String> = vec![
+            "api_key".to_string(),
+            "password".to_string(),
+            "secret".to_string(),
+            "tailscale_metadata".to_string(),
+            "token".to_string(),
+        ];
+        expected.retain(|c| classes.contains(c));
+        assert_eq!(
+            classes.iter().filter(|c| expected.contains(c)).collect::<Vec<_>>(),
+            expected.iter().collect::<Vec<_>>(),
+            "expected sorted intersect to match the natural order; got {classes:?}"
+        );
+    }
 
     fn ensure<T: std::fmt::Debug + PartialEq>(actual: T, expected: T, ctx: &str) -> TestResult {
         if actual == expected {

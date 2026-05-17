@@ -44,9 +44,22 @@ Notes on the matrix:
 - **`<class>`** in the redaction marker is the secret-detector class
   (e.g. `api_key`, `stripe_secret`, `aws_secret_access_key`, `jwt`,
   `password`, `oauth_token`, `private_key`, `ssh_key`,
-  `service_account_json`). Detector classes are emitted by the
-  `src/policy/mod.rs::redact_secret_like_content` pipeline through
-  `SecretRedactionMatch::pattern_id` and `SecretRedactionReport::redacted_reasons`.
+  `service_account_json`, `tailscale_metadata`). Detector classes are
+  emitted by the `src/policy/mod.rs::redact_secret_like_content` pipeline
+  through `SecretRedactionMatch::pattern_id` and
+  `SecretRedactionReport::redacted_reasons`, plus the field-name detector
+  `src/core/recorder.rs::detected_redaction_classes` for structured
+  identity material (e.g. tailscale `selfNodeKey`, `selfTailscaleIp`,
+  `tailnetId`, `selfMagicDnsName`, `selfAdvertisedTags`,
+  `binaryAbsolutePath`, `binaryVersionRaw`).
+- **`tailscale_metadata`** (SRR6.46.1 / `bd-36bbk.1.1`) tags any payload
+  carrying tailscale identity fields registered in
+  `src/obs/volatile_fields.rs::VOLATILE_FIELD_NAMES`. The volatile-field
+  strip pass scrubs those fields from canonical-hash inputs; the
+  `tailscale_metadata` class label propagates through
+  `ee.redaction.event.v1` records and the recorder payload-class
+  surface so support bundles and pack-ledger summaries record which
+  classes contributed to a redacted payload.
 - **"hash only"** for audit details means the `audit.details` JSON
   field is replaced with `{"hash": "blake3:<16-hex>"}` covering the
   canonical-JSON serialization of the original details.

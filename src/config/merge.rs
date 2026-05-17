@@ -954,6 +954,19 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
                 "password".to_string(),
                 "private_key".to_string(),
                 "ssh_key".to_string(),
+                // SRR6.46.1 / bd-36bbk.1.1: tailscale identity material
+                // (selfNodeKey, selfTailscaleIp, selfMagicDnsName, tailnetId,
+                // tailnetDisplayName, selfAdvertisedTags, binaryVersionRaw,
+                // binaryAbsolutePath) is sensitive in shared support bundles.
+                // The strip pass for these fields lives in
+                // src/obs/volatile_fields.rs (registered there as VOLATILE_FIELD_NAMES);
+                // adding the class here tags any payload that contained
+                // them with the well-known `tailscale_metadata` class name
+                // so `ee support bundle --redaction standard|paranoid`
+                // surfaces the redaction provenance in
+                // ee.redaction.event.v1 records and the recorder
+                // payload-class label.
+                "tailscale_metadata".to_string(),
             ]),
         },
         trust: TrustConfig {
