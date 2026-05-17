@@ -644,18 +644,6 @@ pub struct DriftDegradation {
     pub repair: String,
 }
 
-impl DriftDegradation {
-    #[must_use]
-    fn data_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "code": self.code,
-            "message": self.message,
-            "severity": self.severity,
-            "repair": self.repair,
-        })
-    }
-}
-
 /// Analyze drift between frozen evaluation snapshots.
 ///
 /// Returns a degraded report if snapshots are unavailable.
@@ -1448,18 +1436,6 @@ pub struct ClusteringDegradation {
     pub message: String,
     pub severity: String,
     pub repair: String,
-}
-
-impl ClusteringDegradation {
-    #[must_use]
-    fn data_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "code": self.code,
-            "message": self.message,
-            "severity": self.severity,
-            "repair": self.repair,
-        })
-    }
 }
 
 /// Analyze clustering over consolidation candidates.

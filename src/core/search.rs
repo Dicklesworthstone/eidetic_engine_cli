@@ -782,16 +782,6 @@ impl SearchDegradation {
             repair: Some("ee doctor --json".to_string()),
         }
     }
-
-    #[must_use]
-    fn data_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "code": self.code,
-            "severity": self.severity,
-            "message": self.message,
-            "repair": self.repair,
-        })
-    }
 }
 
 impl ScoreFactor {
