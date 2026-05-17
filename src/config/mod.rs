@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::models::RedactionLevel;
@@ -170,8 +171,32 @@ pub(crate) fn read_workspace_config_contents(
     if !metadata.file_type().is_file() {
         return Ok(None);
     }
-    std::fs::read_to_string(config_path).map(Some)
+    read_config_file_no_follow(&config_path).map(Some)
 }
+
+fn read_config_file_no_follow(path: &Path) -> std::io::Result<String> {
+    let mut file = open_workspace_config_file_for_read(path)?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    Ok(content)
+}
+
+fn open_workspace_config_file_for_read(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    configure_workspace_config_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_workspace_config_open_no_follow(options: &mut std::fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_workspace_config_open_no_follow(_options: &mut std::fs::OpenOptions) {}
 
 fn first_existing_config_symlink_component(path: &Path) -> std::io::Result<Option<PathBuf>> {
     let mut current = PathBuf::new();
@@ -321,6 +346,69 @@ export = "strict"
             ),
             &RedactionLevel::Standard,
             "symlinked redaction default falls back to built-in",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_config_final_read_open_rejects_swapped_symlink_file() -> TestResult {
+        let workspace = unique_temp_path("redaction-config-final-open");
+        let outside = unique_temp_path("redaction-config-final-open-outside");
+        let config_path = workspace.join(".ee").join("config.toml");
+        let preserved_config = workspace.join(".ee").join("config.toml.preserved");
+        let outside_config = outside.join("config.toml");
+        let config_body = "[policy.output_redaction]\nenabled = true\n";
+        fs::create_dir_all(workspace.join(".ee"))
+            .map_err(|error| format!("create workspace config dir: {error}"))?;
+        fs::create_dir_all(&outside)
+            .map_err(|error| format!("create outside config dir: {error}"))?;
+        fs::write(&config_path, config_body)
+            .map_err(|error| format!("write workspace config: {error}"))?;
+        ensure_equal(
+            &first_existing_config_symlink_component(&config_path)
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            &true,
+            "workspace config has no symlink components before swap",
+        )?;
+        ensure_equal(
+            &fs::symlink_metadata(&config_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_file(),
+            &true,
+            "workspace config is regular before swap",
+        )?;
+
+        fs::rename(&config_path, &preserved_config)
+            .map_err(|error| format!("preserve workspace config: {error}"))?;
+        fs::write(
+            &outside_config,
+            "[policy.output_redaction]\nenabled = false\n",
+        )
+        .map_err(|error| format!("write outside config: {error}"))?;
+        std::os::unix::fs::symlink(&outside_config, &config_path)
+            .map_err(|error| format!("create swapped config symlink: {error}"))?;
+
+        open_workspace_config_file_for_read(&config_path)
+            .expect_err("final workspace config open should reject symlink after validation");
+        ensure_equal(
+            &fs::read_to_string(&outside_config).map_err(|error| error.to_string())?,
+            &"[policy.output_redaction]\nenabled = false\n".to_owned(),
+            "outside config remains unchanged",
+        )?;
+        ensure_equal(
+            &fs::symlink_metadata(&config_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            &true,
+            "rejected workspace config symlink remains for inspection",
+        )?;
+        ensure_equal(
+            &fs::read_to_string(&preserved_config).map_err(|error| error.to_string())?,
+            &config_body.to_owned(),
+            "preserved validated config remains available",
         )
     }
 
