@@ -1401,9 +1401,18 @@ fn write_index_metadata(
     })?;
     drop(file);
 
-    ensure_index_path_has_no_symlinks(&meta_path, "publish index metadata")?;
-    ensure_index_metadata_path_is_regular_or_missing(&meta_path, "publish index metadata")?;
-    std::fs::rename(&temp_path, &meta_path).map_err(|e| {
+    publish_index_metadata_temp_file(&meta_path, &temp_path)
+}
+
+fn publish_index_metadata_temp_file(
+    meta_path: &Path,
+    temp_path: &Path,
+) -> Result<(), IndexRebuildError> {
+    ensure_index_path_has_no_symlinks(meta_path, "publish index metadata")?;
+    ensure_index_metadata_path_is_regular_or_missing(meta_path, "publish index metadata")?;
+    ensure_index_path_has_no_symlinks(temp_path, "publish temporary index metadata")?;
+    ensure_index_metadata_temp_path_is_regular(temp_path, "publish temporary index metadata")?;
+    std::fs::rename(temp_path, meta_path).map_err(|e| {
         IndexRebuildError::Index(format!(
             "Failed to publish index metadata from {} to {}: {e}",
             temp_path.display(),
@@ -1585,6 +1594,29 @@ fn ensure_index_metadata_temp_path_is_missing(
             path.display()
         ))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(IndexRebuildError::Index(format!(
+            "Failed to inspect temporary index metadata path {} before {action}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn ensure_index_metadata_temp_path_is_regular(
+    path: &Path,
+    action: &str,
+) -> Result<(), IndexRebuildError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(IndexRebuildError::Index(format!(
+            "Refusing to {action} because temporary index metadata path is not a regular file: {}",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(IndexRebuildError::Index(format!(
+                "Refusing to {action} because temporary index metadata is missing: {}",
+                path.display()
+            )))
+        }
         Err(error) => Err(IndexRebuildError::Index(format!(
             "Failed to inspect temporary index metadata path {} before {action}: {error}",
             path.display()
@@ -4026,6 +4058,54 @@ mod tests {
         ensure(
             !metadata_path.exists(),
             "metadata must not be published when temporary metadata exists",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn index_metadata_publish_rechecks_temp_symlink_before_rename() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("metadata-publish-temp-symlink");
+        let index_dir = root.join("index");
+        std::fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
+        let metadata_path = index_dir.join(INDEX_METADATA_FILE);
+        let temp_path = metadata_path.with_extension("json.tmp");
+        let preserved_temp = index_dir.join("meta-preserved.json.tmp");
+        let outside = root.join("outside-meta.json");
+
+        std::fs::write(&temp_path, r#"{"generation":7}"#).map_err(|error| error.to_string())?;
+        std::fs::rename(&temp_path, &preserved_temp).map_err(|error| error.to_string())?;
+        std::fs::write(&outside, "outside").map_err(|error| error.to_string())?;
+        symlink(&outside, &temp_path).map_err(|error| error.to_string())?;
+
+        let error = publish_index_metadata_temp_file(&metadata_path, &temp_path)
+            .map(|()| "unexpected metadata publish success".to_owned())
+            .expect_err("swapped temporary metadata symlink should reject before rename");
+
+        ensure(
+            error.to_string().contains("symlinked index path component"),
+            format!("unexpected temporary metadata publish error: {error}"),
+        )?;
+        ensure(
+            !metadata_path.exists(),
+            "metadata must not be published through swapped temporary symlink",
+        )?;
+        ensure(
+            std::fs::read_to_string(&outside).map_err(|error| error.to_string())? == "outside",
+            "publish must not mutate outside symlink target",
+        )?;
+        ensure(
+            std::fs::symlink_metadata(&temp_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "rejected temporary symlink should remain for inspection",
+        )?;
+        ensure(
+            std::fs::read_to_string(&preserved_temp).map_err(|error| error.to_string())?
+                == r#"{"generation":7}"#,
+            "original temporary metadata should remain preserved after simulated swap",
         )
     }
 
