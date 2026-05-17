@@ -507,7 +507,7 @@ is byte-identical to v0.2.x. This invariant is gated by
 | Env var | Default | Owner bead | Purpose |
 |---|---|---|---|
 | `EE_MESH_ENABLED` | `0` | bd-36bbk umbrella | Master kill-switch; `0` disables every mesh code path |
-| `EE_MESH_MODE` | `auto` | bd-36bbk umbrella | `auto` (default) or `manual` — `manual` disables auto-enrollment commands |
+| `EE_MESH_MODE` | `off` | bd-36bbk umbrella | Default mesh command mode; accepted values are `off`, `cache`, `revisable`, and `blocking` |
 | `EE_TAILSCALE_BINARY_OVERRIDE` | unset | bd-36bbk.1.1 | Test-only: pin the `tailscale` binary path (production code rejects relative paths) |
 | `EE_TAILSCALE_PROBE_SOCKET_OVERRIDE` | unset | bd-36bbk.1.1 | Test-only: pin the tailscaled socket path |
 | `EE_TAILSCALE_PROBE_TIMEOUT_MS` | `1500` | bd-36bbk.1.1 | Hard budget for the local probe subprocess/socket call |
@@ -524,7 +524,7 @@ interval, daily cap, etc.). Every new var is registered in
 |---|---|---|
 | `ee.tailscale.local.v1` | bd-36bbk.1.1 | Local `tailscaled` probe report block on `ee status` |
 | `ee.mesh.auto_enrollment_summary.v1` | bd-36bbk.1.5 | Forensic audit-row payload before any peer-group write |
-| `ee.mesh.auto_enrollment_outcome.v1` | bd-36bbk.1.5 | Back-fill outcome row referencing the prior summary |
+| `ee.mesh.discovery_policy.v1` | bd-36bbk.1.7 | Service-tag, allowlist, denylist, and discovery consent policy |
 | `ee.mesh.peer_group_binding.v1` | bd-2jb3s (SRR6.30) | Workspace-scoped peer-group authorization record |
 | `ee.mesh.peer_policy.v1` | bd-29ulx (SRR6.5) | Per-peer trust, lane policy, and redaction grant |
 | `ee.mesh.policy_decision.v1` | bd-29ulx | Per-call policy evaluation outcome |
@@ -536,6 +536,10 @@ Each schema has a JSON Schema file at `docs/schemas/<name>.json` and is
 covered by the J6 drift gate (`tests/contracts/swarm_schema_lifecycle.rs`
 or the equivalent for non-swarm schemas). Adding a new schema without
 the corresponding fixture and drift entry will fail CI.
+
+The ADR also names the future audit back-fill payload
+`ee.mesh.auto_enrollment_outcome.v1`; document it in this table only after
+the JSON Schema file lands under `docs/schemas/`.
 
 ### Audit event types added
 

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.hello.error.v1.json",
+  "title": "ee.mesh.hello.error.v1",
+  "description": "Hello-handshake decline response. PRIVACY INVARIANT: this payload MUST NOT carry responder-side metadata (`responderEeVersion`, `responderWorkspaceIds`, `responderCapabilities`, `responderAdvertisedTags`) — a 'no' from the responder must not leak who we are. The only fields are the schema marker, the echoed requestId, the decline code, an optional human-readable detail, and a discoveryConsent=false marker for caller-side branching symmetry.",
+  "type": "object",
+  "required": [
+    "schema",
+    "requestId",
+    "discoveryConsent",
+    "code"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.hello.error.v1"
+    },
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "Echoed from the request."
+    },
+    "discoveryConsent": {
+      "type": "boolean",
+      "const": false,
+      "description": "Always false in an error response."
+    },
+    "code": {
+      "type": "string",
+      "enum": [
+        "unsupported_protocol_version",
+        "discovery_consent_denied",
+        "responder_busy",
+        "responder_mesh_disabled",
+        "responder_shields_up",
+        "responder_unauthenticated_tailscale"
+      ],
+      "description": "Stable decline-reason vocabulary. The caller maps each code to its own skip-reason classification in SRR6.46.2 (`incompatible_protocol`, `no_discovery_consent`, `probe_timeout` for `responder_busy`, etc.)."
+    },
+    "detail": {
+      "type": ["string", "null"],
+      "maxLength": 256,
+      "description": "Optional human-readable detail. MUST NOT contain responder identity material (node key, IP, tailnet id) — those would leak metadata the privacy invariant is designed to suppress. Suitable for short responder-side hints like 'rate limit window 60s' or 'minimum protocol version 1.0'."
+    }
+  }
+}

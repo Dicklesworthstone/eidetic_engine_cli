@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.hello.v1.json",
+  "title": "ee.mesh.hello.v1",
+  "description": "Tiny bounded handshake request that SRR6.46.2 autodiscovery sends to candidate peers. Pure-read; the responder writes no DB rows. Payload ≤ 4096 bytes (frame budget enforced by the SRR6.9 transport).",
+  "type": "object",
+  "required": [
+    "schema",
+    "requestId",
+    "requesterNodeKey",
+    "requesterEeVersion",
+    "requesterEeProtocolVersion",
+    "requesterWorkspaceIds",
+    "requesterCapabilities"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.hello.v1"
+    },
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "Caller-side correlation token. The responder echoes this in `requestId` of `ee.mesh.hello.response.v1` so the caller can match concurrent in-flight probes."
+    },
+    "requesterNodeKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Stable tailscale node identifier of the requesting host. Redactable under the `tailscale_metadata` class."
+    },
+    "requesterEeVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "description": "ee crate version (e.g. `0.2.0`). Informational; not used for protocol gating."
+    },
+    "requesterEeProtocolVersion": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "Semver of the mesh wire protocol the requester speaks. Major-version skew is incompatible; minor-version skew is compatible. SRR6.27 owns the upgrade compatibility contract."
+    },
+    "requesterWorkspaceIds": {
+      "type": "array",
+      "minItems": 0,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "description": "Workspace-ids the caller cares about for filtering. SRR6.46.2 uses these to drop peers whose `responderWorkspaceIds` does not intersect the caller's."
+    },
+    "requesterCapabilities": {
+      "type": "array",
+      "minItems": 0,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "description": "Stable capability tokens the caller advertises (e.g. `discovery`, `revision_notice`, `sync_once`). Forward-compat: unknown tokens are ignored by the responder."
+    },
+    "requesterAdvertisedTags": {
+      "type": "array",
+      "minItems": 0,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "description": "Optional: tailscale ACL tags the requester advertises (e.g. `tag:ee-mesh`). Lets the responder enforce SRR6.46.7 `service_tag` policy without a separate tailnet round-trip."
+    }
+  }
+}
