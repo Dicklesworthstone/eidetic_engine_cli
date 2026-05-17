@@ -106,6 +106,8 @@ pub struct SwarmBriefReport {
     pub sources: Vec<SwarmBriefSourceSnapshot>,
     pub dirty_files: Vec<SwarmBriefDirtyFile>,
     pub recent_commits: Vec<SwarmBriefCommit>,
+    #[serde(skip_serializing_if = "WorkspaceGitOperationState::is_clean")]
+    pub git_operation_state: WorkspaceGitOperationState,
     pub beads: SwarmBriefBeadsSummary,
     pub bv: Option<SwarmBriefBvSummary>,
     pub file_reservations: Vec<SwarmBriefFileReservation>,
@@ -131,6 +133,7 @@ impl SwarmBriefReport {
             sources: Vec::new(),
             dirty_files: Vec::new(),
             recent_commits: Vec::new(),
+            git_operation_state: WorkspaceGitOperationState::default(),
             beads: SwarmBriefBeadsSummary::default(),
             bv: None,
             file_reservations: Vec::new(),
@@ -152,6 +155,10 @@ impl SwarmBriefReport {
             .dedup_by(|left, right| left.source == right.source);
         self.dirty_files.sort();
         self.dirty_files.dedup();
+        self.git_operation_state.operations.sort();
+        self.git_operation_state.operations.dedup();
+        self.git_operation_state.autostash_markers.sort();
+        self.git_operation_state.autostash_markers.dedup();
         self.recent_commits.sort_by(|left, right| {
             right
                 .authored_at_epoch_seconds
@@ -901,6 +908,7 @@ pub enum SwarmBriefContribution {
     Git {
         dirty_files: Vec<SwarmBriefDirtyFile>,
         recent_commits: Vec<SwarmBriefCommit>,
+        operation_state: WorkspaceGitOperationState,
     },
     Beads(SwarmBriefBeadsSummary),
     Bv(SwarmBriefBvSummary),
@@ -960,6 +968,7 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for GitSourceAdapter<'_
 
         let mut degraded = Vec::new();
         let dirty_files = parse_git_status_short(&status_output.stdout);
+        let operation_state = collect_workspace_git_operation_state(&options.workspace);
         let log_args = [
             "log",
             "-n",
@@ -983,7 +992,10 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for GitSourceAdapter<'_
             }
         };
 
-        let item_count = dirty_files.len() + recent_commits.len();
+        let item_count = dirty_files.len()
+            + recent_commits.len()
+            + operation_state.operations.len()
+            + operation_state.autostash_markers.len();
         SwarmBriefSourceOutput {
             snapshot: SwarmBriefSourceSnapshot::ready(
                 SwarmBriefSourceKind::Git,
@@ -994,6 +1006,7 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for GitSourceAdapter<'_
             contribution: SwarmBriefContribution::Git {
                 dirty_files,
                 recent_commits,
+                operation_state,
             },
         }
     }
@@ -1801,9 +1814,11 @@ fn apply_source_output(report: &mut SwarmBriefReport, output: SwarmBriefSourceOu
         SwarmBriefContribution::Git {
             dirty_files,
             recent_commits,
+            operation_state,
         } => {
             report.dirty_files.extend(dirty_files);
             report.recent_commits.extend(recent_commits);
+            report.git_operation_state = operation_state;
         }
         SwarmBriefContribution::Beads(summary) => {
             report.beads.ready.extend(summary.ready);
@@ -1947,6 +1962,9 @@ pub fn summarize_swarm_brief_report(report: &SwarmBriefReport) -> Value {
             "sourceCount": report.sources.len(),
             "dirtyFileCount": report.dirty_files.len(),
             "recentCommitCount": report.recent_commits.len(),
+            "gitOperationInProgress": report.git_operation_state.in_progress,
+            "gitOperationMarkerCount": report.git_operation_state.operations.len(),
+            "gitAutostashMarkerCount": report.git_operation_state.autostash_markers.len(),
             "readyWorkCount": report.beads.ready.len(),
             "blockedWorkCount": report.beads.blocked.len(),
             "inProgressWorkCount": report.beads.in_progress.len(),
@@ -2567,6 +2585,7 @@ fn recommend_swarm_brief_actions(report: &SwarmBriefReport) -> Vec<SwarmBriefRec
     let mut recommendations = Vec::new();
     recommendations.extend(degraded_capability_recommendations(report));
     recommendations.extend(resource_pressure_recommendations(report));
+    recommendations.extend(git_operation_state_recommendations(report));
     recommendations.extend(surface_conflict_recommendations(report));
 
     if matches!(
@@ -2589,6 +2608,54 @@ fn recommend_swarm_brief_actions(report: &SwarmBriefReport) -> Vec<SwarmBriefRec
     recommendations.sort();
     recommendations.dedup_by(|left, right| left.id == right.id);
     recommendations
+}
+
+fn git_operation_state_recommendations(report: &SwarmBriefReport) -> Vec<SwarmBriefRecommendation> {
+    if report.git_operation_state.is_clean() {
+        return Vec::new();
+    }
+
+    let mut reason_codes = BTreeSet::from(["git_operation_in_progress".to_string()]);
+    let mut evidence = BTreeSet::new();
+    for marker in &report.git_operation_state.operations {
+        reason_codes.insert(format!("git_operation:{}", marker.operation));
+        evidence.insert(format!(
+            "git_operation_marker:{}:{}:{}",
+            marker.operation, marker.marker_path, marker.marker_type
+        ));
+    }
+    for marker in &report.git_operation_state.autostash_markers {
+        reason_codes.insert("git_autostash_marker_present".to_string());
+        evidence.insert(format!(
+            "git_autostash_marker:{}:{}",
+            marker.marker_path, marker.marker_type
+        ));
+    }
+
+    vec![SwarmBriefRecommendation {
+        id: "rec.git.operation_in_progress".to_string(),
+        kind: "git_operation_state".to_string(),
+        confidence: "high".to_string(),
+        severity: if report.git_operation_state.autostash_markers.is_empty() {
+            "high".to_string()
+        } else {
+            "critical".to_string()
+        },
+        reason_codes: reason_codes.into_iter().collect(),
+        evidence: evidence.into_iter().collect(),
+        suggested_commands: vec![
+            "git status".to_string(),
+            "Ask the human/operator for explicit Git operation recovery direction.".to_string(),
+        ],
+        must_not_do: vec![
+            "Do not run git rebase --continue, --abort, or --quit without explicit operator direction."
+                .to_string(),
+            "Do not apply, pop, drop, or create a stash while an operation/autostash marker is present."
+                .to_string(),
+            "Do not stage or commit over unresolved Git operation metadata without coordination."
+                .to_string(),
+        ],
+    }]
 }
 
 fn degraded_capability_recommendations(report: &SwarmBriefReport) -> Vec<SwarmBriefRecommendation> {
@@ -5295,6 +5362,44 @@ mod tests {
             rec.must_not_do
                 .contains(&"Do not treat missing agent_mail data as empty evidence.".to_string())
         );
+    }
+
+    #[test]
+    fn advisor_blocks_commit_actions_during_git_operation_state() {
+        let mut report = report_with_ready_sources();
+        report.git_operation_state = WorkspaceGitOperationState {
+            in_progress: true,
+            operations: vec![WorkspaceGitOperationMarker {
+                operation: "rebase",
+                marker_path: "rebase-merge",
+                marker_type: "directory".to_string(),
+            }],
+            autostash_markers: vec![WorkspaceGitOperationMarker {
+                operation: "autostash",
+                marker_path: "rebase-merge/autostash",
+                marker_type: "file".to_string(),
+            }],
+        };
+
+        apply_swarm_brief_advice(&mut report);
+
+        let rec = recommendation(&report, "rec.git.operation_in_progress");
+        assert_eq!(rec.kind, "git_operation_state");
+        assert_eq!(rec.severity, "critical");
+        assert!(
+            rec.reason_codes
+                .contains(&"git_operation:rebase".to_string())
+        );
+        assert!(
+            rec.reason_codes
+                .contains(&"git_autostash_marker_present".to_string())
+        );
+        assert!(
+            rec.must_not_do
+                .iter()
+                .any(|item| item.contains("Do not stage or commit"))
+        );
+        assert!(rec.suggested_commands.contains(&"git status".to_string()));
     }
 
     #[test]
