@@ -622,7 +622,9 @@ fn verify_loaded_regression_fixture_replays(dir: &Path) -> Result<Vec<String>, S
 }
 
 fn regression_fixture_file_name(input_hash: &str) -> Result<String, String> {
-    let input_hash_hex = input_hash.trim_start_matches("blake3:");
+    let input_hash_hex = input_hash
+        .strip_prefix("blake3:")
+        .ok_or_else(|| format!("input_hash {input_hash:?} must start with blake3:"))?;
     if input_hash_hex.len() < 16 {
         return Err(format!(
             "input_hash {input_hash:?} is too short for regression fixture file name"
@@ -1298,6 +1300,23 @@ fn determinism_regression_fixture_loader_rejects_short_input_hash() -> Result<()
 
     assert!(error.contains("too short"));
     assert!(error.contains("blake3:short"));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_loader_rejects_missing_input_hash_scheme() -> Result<(), String> {
+    let mut fixture = regression_fixture_for_mismatch(6, b"scheme", b"expected", b"observed")
+        .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    fixture.input_hash = fixture.input_hash.trim_start_matches("blake3:").to_string();
+
+    let error = parse_regression_fixture_entries(vec![(
+        "0000000000000000.json".to_string(),
+        serialize_regression_fixture(&fixture)?,
+    )])
+    .expect_err("input_hash without blake3 scheme should be rejected before filename comparison");
+
+    assert!(error.contains("must start with blake3:"));
+    assert!(error.contains(&fixture.input_hash));
     Ok(())
 }
 
