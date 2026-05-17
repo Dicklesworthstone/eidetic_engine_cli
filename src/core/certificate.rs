@@ -1844,9 +1844,17 @@ fn write_key_file_no_symlinks(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()?;
     drop(file);
 
+    publish_key_temp_file(&temp_path, path)?;
+    reject_key_symlink_chain(path)?;
+    ensure_key_final_path_writable(path)
+}
+
+fn publish_key_temp_file(temp_path: &Path, path: &Path) -> io::Result<()> {
     reject_key_symlink_chain(path)?;
     ensure_key_final_path_writable(path)?;
-    fs::rename(&temp_path, path)?;
+    reject_key_symlink_chain(temp_path)?;
+    ensure_key_created_temp_path_is_regular(temp_path)?;
+    fs::rename(temp_path, path)?;
     reject_key_symlink_chain(path)?;
     ensure_key_final_path_writable(path)
 }
@@ -1877,6 +1885,20 @@ fn ensure_key_temp_path_absent(path: &Path) -> io::Result<()> {
             ),
         )),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn ensure_key_created_temp_path_is_regular(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "certificate key temp path is not a file: {}",
+                path.display()
+            ),
+        )),
         Err(error) => Err(error),
     }
 }
@@ -3026,6 +3048,84 @@ mod tests {
             Ok(_) => Err("final key path must not be published".to_owned()),
             Err(error) => Err(format!("final key metadata failed: {error}")),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn certificate_key_publish_rechecks_final_symlink_before_rename() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let key_path = dir.path().join("keys").join("workspace.ed25519");
+        let temp_path = key_temp_path(&key_path).map_err(|error| error.to_string())?;
+        fs::create_dir_all(key_path.parent().expect("key parent"))
+            .map_err(|error| error.to_string())?;
+        fs::write(&temp_path, b"new key bytes").map_err(|error| error.to_string())?;
+        let outside_path = dir.path().join("outside-key.ed25519");
+        fs::write(&outside_path, b"outside key").map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_path, &key_path).map_err(|error| error.to_string())?;
+
+        let error = publish_key_temp_file(&temp_path, &key_path)
+            .expect_err("symlinked final key path should reject before publish");
+
+        ensure_equal(&error.kind(), &io::ErrorKind::InvalidInput, "error kind")?;
+        ensure(
+            error.to_string().contains("symlink"),
+            "error should mention final key symlink",
+        )?;
+        ensure_equal(
+            &fs::read(&outside_path).map_err(|error| error.to_string())?,
+            &b"outside key".to_vec(),
+            "outside key content",
+        )?;
+        ensure(
+            temp_path.is_file(),
+            "temp key file should remain after final path rejection",
+        )?;
+        ensure(
+            fs::symlink_metadata(&key_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "final key symlink should remain untouched",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn certificate_key_publish_rechecks_temp_symlink_before_rename() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let key_path = dir.path().join("keys").join("workspace.ed25519");
+        let temp_path = key_temp_path(&key_path).map_err(|error| error.to_string())?;
+        fs::create_dir_all(key_path.parent().expect("key parent"))
+            .map_err(|error| error.to_string())?;
+        let outside_path = dir.path().join("outside-key.ed25519");
+        fs::write(&outside_path, b"outside key").map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_path, &temp_path).map_err(|error| error.to_string())?;
+
+        let error = publish_key_temp_file(&temp_path, &key_path)
+            .expect_err("symlinked temp key path should reject before publish");
+
+        ensure_equal(&error.kind(), &io::ErrorKind::InvalidInput, "error kind")?;
+        ensure(
+            error.to_string().contains("symlink"),
+            "error should mention temp key symlink",
+        )?;
+        ensure_equal(
+            &fs::read(&outside_path).map_err(|error| error.to_string())?,
+            &b"outside key".to_vec(),
+            "outside key content",
+        )?;
+        match fs::symlink_metadata(&key_path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Ok(_) => return Err("final key path must not be published".to_owned()),
+            Err(error) => return Err(format!("final key metadata failed: {error}")),
+        }
+        ensure(
+            fs::symlink_metadata(&temp_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "temp key symlink should remain untouched",
+        )
     }
 
     #[test]
