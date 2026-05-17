@@ -499,9 +499,11 @@ pub fn mesh_display_provenance(
     if input.decision.workspace_scope_decision != MeshImportDecisionKind::Allow {
         return None;
     }
+    let trust_lane = redaction_safe_label(input.trust_lane)?;
+    let redaction_posture = redaction_safe_label(input.redaction_posture)?;
 
     Some(MeshDisplayProvenance {
-        cached_material_id: input.cached_material_id.to_owned(),
+        cached_material_id: mesh_material_ref(input.cached_material_id),
         origin_workspace_alias: mesh_namespace_alias(
             &input.decision.origin_workspace_id,
             input.origin_workspace_label,
@@ -515,8 +517,8 @@ pub fn mesh_display_provenance(
             input.import_decision_id,
             input.ledger_cursor,
         ),
-        trust_lane: input.trust_lane.to_owned(),
-        redaction_posture: input.redaction_posture.to_owned(),
+        trust_lane: trust_lane.as_str().to_owned(),
+        redaction_posture: redaction_posture.as_str().to_owned(),
     })
 }
 
@@ -564,11 +566,14 @@ pub fn mesh_query_visibility(metadata: Option<&JsonValue>) -> MeshQueryVisibilit
     else {
         return MeshQueryVisibility::Blocked;
     };
-    let Some(trust_lane) = metadata_mesh_string(metadata, &["trustLane", "trust_lane"]) else {
+    let Some(trust_lane) =
+        metadata_mesh_string(metadata, &["trustLane", "trust_lane"]).and_then(redaction_safe_label)
+    else {
         return MeshQueryVisibility::Blocked;
     };
     let Some(redaction_posture) =
         metadata_mesh_string(metadata, &["redactionPosture", "redaction_posture"])
+            .and_then(redaction_safe_label)
     else {
         return MeshQueryVisibility::Blocked;
     };
@@ -610,8 +615,8 @@ pub fn mesh_query_visibility(metadata: Option<&JsonValue>) -> MeshQueryVisibilit
             ],
         ),
         ledger_cursor: metadata_mesh_string(metadata, &["ledgerCursor", "ledger_cursor"]),
-        trust_lane,
-        redaction_posture,
+        trust_lane: trust_lane.as_str(),
+        redaction_posture: redaction_posture.as_str(),
     };
 
     mesh_display_provenance(&input)
@@ -1379,6 +1384,11 @@ fn mesh_import_decision_ref(
     redaction_safe_label(reference).unwrap_or_else(|| stable_mesh_alias("mesh_dec", reference))
 }
 
+fn mesh_material_ref(cached_material_id: &str) -> String {
+    redaction_safe_label(cached_material_id)
+        .unwrap_or_else(|| stable_mesh_alias("mesh_mat", cached_material_id))
+}
+
 fn redaction_safe_label(label: &str) -> Option<String> {
     let label = label.trim();
     if label.is_empty()
@@ -1386,6 +1396,7 @@ fn redaction_safe_label(label: &str) -> Option<String> {
         || label.contains('\\')
         || label.contains(':')
         || label.contains('~')
+        || label.chars().any(char::is_control)
         || label_has_secret_marker(label)
     {
         None
@@ -2558,6 +2569,35 @@ max_bytes = 0
     }
 
     #[test]
+    fn mesh_display_provenance_blocks_invalid_trust_or_redaction_fields() {
+        let decision = decide_mesh_import(&mesh_input(MeshLane::Metadata), &[mesh_binding()]);
+
+        let mut invalid_trust = mesh_display_input(&decision, Some("remote-beta"));
+        invalid_trust.trust_lane = "peerAgent\nprivate-note";
+        assert_eq!(mesh_display_provenance(&invalid_trust), None);
+
+        let mut invalid_redaction = mesh_display_input(&decision, Some("remote-beta"));
+        invalid_redaction.redaction_posture = "share\tprivate-note";
+        assert_eq!(mesh_display_provenance(&invalid_redaction), None);
+    }
+
+    #[test]
+    fn mesh_display_provenance_aliases_unsafe_cached_material_id() {
+        let decision = decide_mesh_import(&mesh_input(MeshLane::Metadata), &[mesh_binding()]);
+        let mut input = mesh_display_input(&decision, Some("remote-beta"));
+        input.cached_material_id = "/Users/alice/private/mesh-body.json";
+
+        let provenance = mesh_display_provenance(&input)
+            .expect("allowed mesh material should expose redacted provenance");
+
+        assert_eq!(
+            provenance.cached_material_id,
+            stable_mesh_alias("mesh_mat", "/Users/alice/private/mesh-body.json")
+        );
+        assert!(!provenance.cached_material_id.contains("/Users/alice"));
+    }
+
+    #[test]
     fn mesh_display_provenance_redacts_path_like_origin_workspace_label() {
         let decision = decide_mesh_import(&mesh_input(MeshLane::Metadata), &[mesh_binding()]);
         let provenance = mesh_display_provenance(&mesh_display_input(
@@ -2609,6 +2649,23 @@ max_bytes = 0
         );
         assert!(!provenance.producer_peer.contains("token"));
         assert!(!provenance.producer_peer.contains("sk_live"));
+    }
+
+    #[test]
+    fn mesh_display_provenance_redacts_control_character_peer_label() {
+        let decision = decide_mesh_import(&mesh_input(MeshLane::Metadata), &[mesh_binding()]);
+        let mut input = mesh_display_input(&decision, Some("remote-beta"));
+        input.producer_peer_label = Some("trusted-peer\noperator-note");
+
+        let provenance = mesh_display_provenance(&input)
+            .expect("allowed mesh material should expose redacted provenance");
+
+        assert_eq!(
+            provenance.producer_peer,
+            stable_mesh_alias("mesh_peer", "peer_builder_one")
+        );
+        assert!(!provenance.producer_peer.contains('\n'));
+        assert!(!provenance.producer_peer.contains("operator-note"));
     }
 
     #[test]
@@ -2686,6 +2743,23 @@ max_bytes = 0
     }
 
     #[test]
+    fn mesh_display_provenance_aliases_control_character_import_decision_ref() {
+        let decision = decide_mesh_import(&mesh_input(MeshLane::Metadata), &[mesh_binding()]);
+        let mut input = mesh_display_input(&decision, Some("remote-beta"));
+        input.import_decision_id = Some("mesh_decision_123\tdebug");
+
+        let provenance = mesh_display_provenance(&input)
+            .expect("allowed mesh material should expose redacted provenance");
+
+        assert_eq!(
+            provenance.import_decision_ref,
+            stable_mesh_alias("mesh_dec", "mesh_decision_123\tdebug")
+        );
+        assert!(!provenance.import_decision_ref.contains('\t'));
+        assert!(!provenance.import_decision_ref.contains("debug"));
+    }
+
+    #[test]
     fn mesh_display_provenance_aliases_path_like_ledger_cursor() {
         let decision = decide_mesh_import(&mesh_input(MeshLane::Metadata), &[mesh_binding()]);
         let mut input = mesh_display_input(&decision, Some("remote-beta"));
@@ -2711,6 +2785,17 @@ max_bytes = 0
         assert_eq!(policy_ref, stable_mesh_alias("mesh_pol", policy_id));
         assert!(!policy_ref.contains("password"));
         assert!(!policy_ref.contains("token"));
+    }
+
+    #[test]
+    fn mesh_policy_ref_aliases_control_character_policy_id() {
+        let policy_id = "peer_policy_alpha\nprivate-note";
+
+        let policy_ref = mesh_policy_ref(Some(policy_id));
+
+        assert_eq!(policy_ref, stable_mesh_alias("mesh_pol", policy_id));
+        assert!(!policy_ref.contains('\n'));
+        assert!(!policy_ref.contains("private-note"));
     }
 
     #[test]
@@ -2768,6 +2853,8 @@ max_bytes = 0
         assert_eq!(provenance.origin_workspace_alias, "remote-beta");
         assert_eq!(provenance.producer_peer, "builder-one");
         assert_eq!(provenance.import_decision_ref, "mesh_dec_456");
+        assert_eq!(provenance.trust_lane, "mesh_metadata");
+        assert_eq!(provenance.redaction_posture, "standard");
     }
 
     #[test]
@@ -2897,6 +2984,28 @@ max_bytes = 0
                 "action": "deny"
             }
         });
+        let invalid_trust_lane = json!({
+            "mesh": {
+                "workspaceScopeDecision": "allow",
+                "cachedMaterialId": "mesh_mat_123",
+                "originWorkspaceId": "wsp_remote_beta",
+                "producerPeerId": "peer_builder_one",
+                "materialLane": "metadata",
+                "trustLane": "peerAgent\nsecret-note",
+                "redactionPosture": "share"
+            }
+        });
+        let invalid_redaction_posture = json!({
+            "mesh": {
+                "workspaceScopeDecision": "allow",
+                "cachedMaterialId": "mesh_mat_123",
+                "originWorkspaceId": "wsp_remote_beta",
+                "producerPeerId": "peer_builder_one",
+                "materialLane": "metadata",
+                "trustLane": "peerAgent",
+                "redactionPosture": "share\nsecret-note"
+            }
+        });
 
         assert_eq!(
             mesh_query_visibility(Some(&denied)),
@@ -2936,6 +3045,14 @@ max_bytes = 0
         );
         assert_eq!(
             mesh_query_visibility(Some(&standalone_policy_failure)),
+            MeshQueryVisibility::Blocked
+        );
+        assert_eq!(
+            mesh_query_visibility(Some(&invalid_trust_lane)),
+            MeshQueryVisibility::Blocked
+        );
+        assert_eq!(
+            mesh_query_visibility(Some(&invalid_redaction_posture)),
             MeshQueryVisibility::Blocked
         );
         assert_eq!(
