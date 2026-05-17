@@ -1627,6 +1627,45 @@ fn determinism_preflight_event_replays_loaded_fixtures_and_flags_stale() -> Resu
 }
 
 #[test]
+fn determinism_preflight_event_rejects_replay_hash_drift_before_sampling() -> Result<(), String> {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let specs = vec![(8, 900, 700, 1), (13, 500, 950, 3), (5, 650, 875, 2)];
+    let budget = TokenBudget::new(64).map_err(|error| format!("{error:?}"))?;
+    let options = PackAssemblyOptions {
+        include_coverage_fill: true,
+        output_redaction_enabled: true,
+        redaction_level: RedactionLevel::Strict,
+    };
+    let input = regression_input_for_pack_case(
+        "drifted preflight replay".to_string(),
+        budget,
+        ContextPackProfile::Balanced,
+        options,
+        42,
+        &specs,
+    )?;
+    let input_bytes = serde_json::to_vec(&input).map_err(|error| error.to_string())?;
+    let expected = replay_pack_case_input_bytes(&input)?;
+    let mut fixture = regression_fixture_for_mismatch(
+        42,
+        &input_bytes,
+        &expected,
+        b"synthetic nondeterministic output",
+    )
+    .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    fixture.expected_hash = hash_bytes(b"stale expected bytes");
+
+    persist_regression_fixture(tempdir.path(), &fixture)?;
+    let error =
+        regression_fixture_preflight_event(tempdir.path(), "2026-05-16T00:00:00Z", 90, 0.25, 60.0)
+            .expect_err("preflight should reject replay drift before emitting an event");
+
+    assert!(error.contains("expected_hash"));
+    assert!(error.contains(&fixture.input_hash));
+    Ok(())
+}
+
+#[test]
 fn determinism_regression_fixtures_replay_before_sampling() -> Result<(), String> {
     verify_loaded_regression_fixture_replays(Path::new(REGRESSION_FIXTURE_DIR)).map(|_| ())
 }
