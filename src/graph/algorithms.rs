@@ -435,7 +435,7 @@ where
     run_with_result_cache_with_params_hash(spec, &params_hash, compute)
 }
 
-fn run_with_result_cache_with_params_hash<R, Compute>(
+pub(crate) fn run_with_result_cache_with_params_hash<R, Compute>(
     spec: &AlgorithmResultCacheSpec<'_>,
     params_hash: &str,
     compute: Compute,

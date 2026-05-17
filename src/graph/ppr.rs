@@ -11,6 +11,7 @@ use crate::db::DbConnection;
 use crate::graph::algorithms::{
     AlgorithmResultCacheRun, AlgorithmResultCacheSpec, DEFAULT_FOREGROUND_BUDGET,
     current_or_testing_cx, run_with_budget, run_with_result_cache,
+    run_with_result_cache_with_params_hash,
 };
 use crate::graph::ppr_prefetch_cache::{
     PprPrefetchCache, PprPrefetchCacheKey, PprPrefetchCacheResultHit,
@@ -198,8 +199,17 @@ where
     F: FnOnce() -> GraphResult<DiGraph>,
 {
     let cx = current_or_testing_cx();
-    let prefetch_key = ppr_prefetch_cache_key(spec)?;
-    run_with_result_cache(spec, || {
+    let params_hash =
+        graph_algorithm_params_hash(spec.algorithm, spec.snapshot_content_hash, spec.params)?;
+    let prefetch_key = ppr_prefetch_cache_key(spec, &params_hash);
+    if let Some(hit) = load_ppr_prefetch_result(&prefetch_key) {
+        return Ok(AlgorithmResultCacheRun {
+            result: hit.result,
+            params_hash,
+            cache_hit: true,
+        });
+    }
+    run_with_result_cache_with_params_hash(spec, &params_hash, || {
         if let Some(hit) = load_ppr_prefetch_result(&prefetch_key) {
             return Ok(hit.result);
         }
@@ -210,13 +220,14 @@ where
     })
 }
 
-fn ppr_prefetch_cache_key(spec: &AlgorithmResultCacheSpec<'_>) -> GraphResult<PprPrefetchCacheKey> {
-    let seed_set_hash =
-        graph_algorithm_params_hash(spec.algorithm, spec.snapshot_content_hash, spec.params)?;
-    Ok(PprPrefetchCacheKey::new(
-        seed_set_hash,
+fn ppr_prefetch_cache_key(
+    spec: &AlgorithmResultCacheSpec<'_>,
+    params_hash: &str,
+) -> PprPrefetchCacheKey {
+    PprPrefetchCacheKey::new(
+        params_hash.to_owned(),
         ppr_prefetch_snapshot_generation(spec.snapshot_content_hash),
-    ))
+    )
 }
 
 fn ppr_prefetch_snapshot_generation(snapshot_content_hash: &str) -> u64 {
