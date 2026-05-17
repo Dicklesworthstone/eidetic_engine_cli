@@ -687,12 +687,13 @@ fn read_manifest(path: &Path) -> Result<ArtifactRelocationManifest, DomainError>
             repair: Some("Pass a regular ee.artifact.relocation.v1 manifest file.".to_owned()),
         });
     }
-    let text = fs::read_to_string(path).map_err(|error| DomainError::Storage {
-        message: format!("failed to read manifest {}: {error}", path.display()),
-        repair: Some(
-            "Pass a relocation manifest created by `ee artifact relocate --apply`.".to_owned(),
-        ),
-    })?;
+    let text =
+        read_relocation_manifest_file_no_follow(path).map_err(|error| DomainError::Storage {
+            message: format!("failed to read manifest {}: {error}", path.display()),
+            repair: Some(
+                "Pass a relocation manifest created by `ee artifact relocate --apply`.".to_owned(),
+            ),
+        })?;
     let manifest: ArtifactRelocationManifest =
         serde_json::from_str(&text).map_err(|error| DomainError::Usage {
             message: format!(
@@ -712,6 +713,30 @@ fn read_manifest(path: &Path) -> Result<ArtifactRelocationManifest, DomainError>
     }
     Ok(manifest)
 }
+
+fn read_relocation_manifest_file_no_follow(path: &Path) -> io::Result<String> {
+    let mut file = open_relocation_manifest_file_for_read(path)?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+fn open_relocation_manifest_file_for_read(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_relocation_manifest_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_relocation_manifest_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_relocation_manifest_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 fn manifest_entry_path(
     entry: &ArtifactRelocationEntry,
@@ -1684,6 +1709,34 @@ mod tests {
         } else {
             Err(format!("expected policy denial, got {result:?}"))
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relocation_manifest_final_read_open_rejects_symlinked_path() -> TestResult {
+        let root = temp_path("manifest-final-read-symlink");
+        let real_manifest = root.join("real-relocation.json");
+        fs::create_dir_all(parent_dir(&real_manifest)?).map_err(|error| error.to_string())?;
+        let manifest_text = format!(
+            r#"{{"schema":"{}","entries":[]}}"#,
+            ARTIFACT_RELOCATION_SCHEMA_V1
+        );
+        fs::write(&real_manifest, &manifest_text).map_err(|error| error.to_string())?;
+        let manifest_link = root.join("relocation.json");
+        std::os::unix::fs::symlink(&real_manifest, &manifest_link)
+            .map_err(|error| error.to_string())?;
+
+        let error = open_relocation_manifest_file_for_read(&manifest_link)
+            .expect_err("final manifest read open must reject symlinks");
+
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Err("final symlink read should fail because the path is a symlink".to_owned());
+        }
+        let real_content = fs::read_to_string(&real_manifest).map_err(|error| error.to_string())?;
+        if real_content != manifest_text {
+            return Err("manifest read helper unexpectedly mutated the symlink target".to_owned());
+        }
+        Ok(())
     }
 
     #[test]

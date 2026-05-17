@@ -10,7 +10,7 @@
 //! - **close**: Mark a preflight run as completed
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -751,12 +751,14 @@ fn read_preflight_run_store(store_path: &Path) -> Result<PreflightRunStoreDocume
         }
     }
 
-    let text = fs::read_to_string(store_path).map_err(|error| DomainError::Storage {
-        message: format!(
-            "Failed to read preflight run store `{}`: {error}",
-            store_path.display()
-        ),
-        repair: Some("Check workspace .ee permissions.".to_owned()),
+    let text = read_preflight_run_store_file_no_follow(store_path).map_err(|error| {
+        DomainError::Storage {
+            message: format!(
+                "Failed to read preflight run store `{}`: {error}",
+                store_path.display()
+            ),
+            repair: Some("Check workspace .ee permissions.".to_owned()),
+        }
     })?;
 
     let document: PreflightRunStoreDocument =
@@ -783,6 +785,30 @@ fn read_preflight_run_store(store_path: &Path) -> Result<PreflightRunStoreDocume
         })
     }
 }
+
+fn read_preflight_run_store_file_no_follow(store_path: &Path) -> Result<String, std::io::Error> {
+    let mut file = open_preflight_run_store_file_for_read(store_path)?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+fn open_preflight_run_store_file_for_read(store_path: &Path) -> Result<fs::File, std::io::Error> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_preflight_run_store_open_no_follow(&mut options);
+    options.open(store_path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_preflight_run_store_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_preflight_run_store_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 fn write_preflight_run_store(
     store_path: &Path,
@@ -1753,6 +1779,36 @@ mod tests {
             error.message().contains("symlinked path component"),
             true,
             "symlinked store error message",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_run_store_final_read_open_rejects_swapped_symlink_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = temp_workspace()?;
+        let ee_dir = workspace.path().join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let outside_store = workspace.path().join("outside-preflight-runs.json");
+        let outside_text =
+            format!("{{\"schema\":\"{PREFLIGHT_RUN_STORE_SCHEMA_V1}\",\"runs\":[]}}\n");
+        std::fs::write(&outside_store, &outside_text).map_err(|error| error.to_string())?;
+        let store_path = preflight_run_store_path(workspace.path());
+        symlink(&outside_store, &store_path).map_err(|error| error.to_string())?;
+
+        let error = open_preflight_run_store_file_for_read(&store_path)
+            .expect_err("final preflight run-store read open must reject symlinks");
+
+        ensure(
+            error.kind() != std::io::ErrorKind::NotFound,
+            true,
+            "final symlink read should fail because the path is a symlink",
+        )?;
+        ensure(
+            std::fs::read_to_string(&outside_store).map_err(|error| error.to_string())?,
+            outside_text,
+            "preflight run-store read helper must not follow the symlink target",
         )
     }
 

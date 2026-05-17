@@ -7,7 +7,7 @@ use std::env;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -1741,8 +1741,32 @@ fn read_profile_config_if_regular(
             ),
         ));
     }
-    fs::read_to_string(path).map(Some)
+    read_profile_config_file_no_follow(path).map(Some)
 }
+
+fn read_profile_config_file_no_follow(path: &Path) -> Result<String, io::Error> {
+    let mut file = open_profile_config_file_for_read(path)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(contents)
+}
+
+fn open_profile_config_file_for_read(path: &Path) -> Result<fs::File, io::Error> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_profile_config_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_profile_config_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_profile_config_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 fn ensure_profile_config_write_path_is_regular_or_missing(path: &Path) -> Result<(), io::Error> {
     match fs::symlink_metadata(path) {
@@ -2823,6 +2847,42 @@ mod tests {
             selected_profile_from_config(temp.path()),
             None,
             "runtime profile must not read symlinked config",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_config_final_read_open_rejects_swapped_symlink_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_dir = temp.path().join(".ee");
+        fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        let original_config = config_dir.join("config.toml.validated");
+        let original_text = "[profile]\nselected = \"portable\"\n";
+        fs::write(&original_config, original_text).map_err(|error| error.to_string())?;
+        let outside_config = temp.path().join("outside-config.toml");
+        let outside_text = "[profile]\nselected = \"swarm\"\n";
+        fs::write(&outside_config, outside_text).map_err(|error| error.to_string())?;
+        let config_path = config_dir.join("config.toml");
+        symlink(&outside_config, &config_path).map_err(|error| error.to_string())?;
+
+        let error = open_profile_config_file_for_read(&config_path)
+            .expect_err("final profile config read open must reject symlinks");
+
+        ensure_true(
+            error.kind() != io::ErrorKind::NotFound,
+            "final symlink read should fail because the path is a symlink",
+        )?;
+        ensure(
+            fs::read_to_string(&outside_config).map_err(|error| error.to_string())?,
+            outside_text.to_owned(),
+            "profile config read helper must not follow the symlink target",
+        )?;
+        ensure(
+            fs::read_to_string(&original_config).map_err(|error| error.to_string())?,
+            original_text.to_owned(),
+            "validated profile config copy must remain untouched",
         )
     }
 
