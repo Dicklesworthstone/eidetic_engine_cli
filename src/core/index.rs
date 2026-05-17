@@ -1275,12 +1275,12 @@ fn recover_interrupted_publish(
 ) -> Result<IndexPublishRecoveryAction, IndexRebuildError> {
     ensure_index_path_has_no_symlinks(index_dir, "recover interrupted index publish")?;
 
-    if index_dir.exists() {
+    if path_exists_no_follow(index_dir) {
         return Ok(IndexPublishRecoveryAction::ActivePresent);
     }
 
     let retained_dir = retained_index_dir(index_dir)?;
-    if retained_dir.exists() {
+    if path_exists_no_follow(&retained_dir) {
         rename_index_dir(
             &retained_dir,
             index_dir,
@@ -1330,14 +1330,14 @@ fn publish_staged_index(index_dir: &Path, staging_dir: &Path) -> Result<(), Inde
     ensure_index_path_has_no_symlinks(staging_dir, "publish staged index generation")?;
     ensure_index_path_has_no_symlinks(index_dir, "publish staged index generation")?;
 
-    if !staging_dir.exists() {
+    if !path_exists_no_follow(staging_dir) {
         return Err(IndexRebuildError::Index(format!(
             "Index staging directory does not exist: {}",
             staging_dir.display()
         )));
     }
 
-    let retained_dir = if index_dir.exists() {
+    let retained_dir = if path_exists_no_follow(index_dir) {
         let retained = allocate_retained_index_dir(index_dir)?;
         rename_index_dir(index_dir, &retained, "retain previous index generation")?;
         Some(retained)
@@ -1348,7 +1348,7 @@ fn publish_staged_index(index_dir: &Path, staging_dir: &Path) -> Result<(), Inde
     if let Err(error) = rename_index_dir(staging_dir, index_dir, "publish staged index generation")
     {
         if let Some(retained) = retained_dir
-            && !index_dir.exists()
+            && !path_exists_no_follow(index_dir)
         {
             let _ = rename_index_dir(&retained, index_dir, "restore previous index generation");
         }
@@ -1393,7 +1393,7 @@ fn write_index_metadata(
 
 fn find_complete_staging_dir(index_dir: &Path) -> Result<Option<PathBuf>, IndexRebuildError> {
     let parent = index_parent(index_dir);
-    if !parent.exists() {
+    if !path_exists_no_follow(parent) {
         return Ok(None);
     }
 
@@ -1436,7 +1436,7 @@ fn allocate_retained_index_dir(index_dir: &Path) -> Result<PathBuf, IndexRebuild
         } else {
             parent.join(format!("{base}{INDEX_RETAINED_SUFFIX}.{sequence:03}"))
         };
-        if !candidate.exists() {
+        if !path_exists_no_follow(&candidate) {
             return Ok(candidate);
         }
     }
@@ -1524,6 +1524,10 @@ fn path_is_regular_file_no_follow(path: &Path) -> bool {
     std::fs::symlink_metadata(path)
         .map(|metadata| metadata.file_type().is_file())
         .unwrap_or(false)
+}
+
+fn path_exists_no_follow(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
 }
 
 fn ensure_index_metadata_path_is_regular_or_missing(
@@ -3730,6 +3734,49 @@ mod tests {
         ensure(
             staging_dir.is_dir(),
             "rejected publish should leave staging directory intact",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_staged_index_skips_dangling_retained_generation_symlink() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("publish-dangling-retained");
+        let index_dir = root.join("index");
+        let staging_dir = root.join(".index.publish-test");
+        let retained_link = root.join("index.previous");
+        write_marker(&index_dir, "generation.txt", "old")?;
+        write_marker(&staging_dir, "generation.txt", "new")?;
+        write_index_metadata(&staging_dir, 2, 1).map_err(|e| e.to_string())?;
+        symlink(root.join("missing-retained-target"), &retained_link)
+            .map_err(|error| error.to_string())?;
+
+        publish_staged_index(&index_dir, &staging_dir).map_err(|error| error.to_string())?;
+
+        let retained_dir = root.join("index.previous.001");
+        ensure(
+            index_dir.is_dir(),
+            "active index should exist after publish",
+        )?;
+        ensure(
+            retained_dir.is_dir(),
+            "dangling retained symlink should force allocation of a later retained path",
+        )?;
+        ensure(
+            std::fs::symlink_metadata(&retained_link)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "dangling retained symlink should remain untouched",
+        )?;
+        ensure(
+            read_marker(&index_dir, "generation.txt")? == "new",
+            "active index should contain staged generation",
+        )?;
+        ensure(
+            read_marker(&retained_dir, "generation.txt")? == "old",
+            "retained index should contain previous generation",
         )
     }
 
