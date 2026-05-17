@@ -817,7 +817,18 @@ fn write_preflight_run_store(
     ensure_no_symlink_components(&temp_path, "write")?;
     ensure_preflight_run_store_temp_path_for_write(&temp_path)?;
     write_preflight_run_store_temp_file(&temp_path, &format!("{text}\n"))?;
-    fs::rename(&temp_path, store_path).map_err(|error| DomainError::Storage {
+    publish_preflight_run_store_temp_file(&temp_path, store_path)
+}
+
+fn publish_preflight_run_store_temp_file(
+    temp_path: &Path,
+    store_path: &Path,
+) -> Result<(), DomainError> {
+    ensure_no_symlink_components(temp_path, "publish")?;
+    ensure_preflight_run_store_temp_path_is_regular(temp_path)?;
+    ensure_no_symlink_components(store_path, "publish")?;
+    ensure_preflight_run_store_final_path_for_write(store_path)?;
+    fs::rename(temp_path, store_path).map_err(|error| DomainError::Storage {
         message: format!(
             "Failed to publish preflight run store `{}` from temp file `{}`: {error}",
             store_path.display(),
@@ -825,6 +836,26 @@ fn write_preflight_run_store(
         ),
         repair: Some("Check workspace .ee permissions.".to_owned()),
     })
+}
+
+fn ensure_preflight_run_store_temp_path_is_regular(temp_path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(temp_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to publish preflight run store temp file `{}` because it is not a regular file.",
+                temp_path.display()
+            ),
+            repair: Some("Replace .ee/preflight_runs.json.tmp with a regular file.".to_owned()),
+        }),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to stat preflight run store temp file `{}` before publish: {error}",
+                temp_path.display()
+            ),
+            repair: Some("Check workspace .ee permissions.".to_owned()),
+        }),
+    }
 }
 
 fn ensure_preflight_run_store_final_path_for_write(store_path: &Path) -> Result<(), DomainError> {
@@ -1793,6 +1824,42 @@ mod tests {
             store_path.exists(),
             false,
             "final preflight store must not be published when temp exists",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_preflight_run_store_rechecks_final_symlink_before_publish() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = temp_workspace()?;
+        let store_path = preflight_run_store_path(workspace.path());
+        let temp_path = store_path.with_extension("json.tmp");
+        std::fs::create_dir_all(temp_path.parent().expect("preflight temp parent"))
+            .map_err(|error| error.to_string())?;
+        write_preflight_run_store_temp_file(&temp_path, "{\"schema\":\"sentinel\"}\n")
+            .map_err(|error| error.message())?;
+
+        let outside_store = workspace.path().join("outside-preflight-runs.json");
+        std::fs::write(&outside_store, "outside sentinel").map_err(|error| error.to_string())?;
+        symlink(&outside_store, &store_path).map_err(|error| error.to_string())?;
+
+        let result = publish_preflight_run_store_temp_file(&temp_path, &store_path);
+        let error = result.expect_err("final symlink must be rejected before publish");
+        ensure(
+            error.message().contains("symlinked path component"),
+            true,
+            "final symlink publish error message",
+        )?;
+        ensure(
+            std::fs::read_to_string(&outside_store).map_err(|error| error.to_string())?,
+            "outside sentinel".to_owned(),
+            "outside symlink target remains unchanged",
+        )?;
+        ensure(
+            std::fs::read_to_string(&temp_path).map_err(|error| error.to_string())?,
+            "{\"schema\":\"sentinel\"}\n".to_owned(),
+            "temp store remains available after rejected publish",
         )
     }
 
