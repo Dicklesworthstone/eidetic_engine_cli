@@ -33,7 +33,8 @@
 //! in those beads.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 use serde::{Deserialize, Serialize};
 
@@ -344,9 +345,12 @@ impl std::error::Error for LoadListError {}
 /// the `BTreeSet` contract. Unknown top-level keys are silently ignored
 /// for forward-compat; only `node_keys = [...]` is required.
 pub fn load_node_key_list(path: &Path) -> Result<BTreeSet<String>, LoadListError> {
-    let body = match std::fs::read_to_string(path) {
+    if !node_key_list_path_is_regular(path)? {
+        return Ok(BTreeSet::new());
+    }
+    let body = match fs::read_to_string(path) {
         Ok(body) => body,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
         Err(error) => return Err(LoadListError::Read(error)),
     };
     let document = body
@@ -376,6 +380,57 @@ pub fn load_node_key_list(path: &Path) -> Result<BTreeSet<String>, LoadListError
         }
     }
     Ok(out)
+}
+
+fn node_key_list_path_is_regular(path: &Path) -> Result<bool, LoadListError> {
+    if let Some(symlink_path) = node_key_list_symlink_component(path)? {
+        return Err(node_key_list_invalid_path_error(format!(
+            "refusing to read discovery list '{}' because it traverses symbolic link '{}'",
+            path.display(),
+            symlink_path.display(),
+        )));
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(node_key_list_invalid_path_error(format!(
+            "refusing to read discovery list '{}' because it is not a regular file",
+            path.display(),
+        ))),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(LoadListError::Read(error)),
+    }
+}
+
+fn node_key_list_symlink_component(path: &Path) -> Result<Option<PathBuf>, LoadListError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(LoadListError::Read(error)),
+        }
+    }
+    Ok(None)
+}
+
+fn node_key_list_invalid_path_error(message: String) -> LoadListError {
+    LoadListError::Read(io::Error::new(io::ErrorKind::InvalidInput, message))
 }
 
 /// Convenience: load all three workspace list files (`.ee/discovery_allowlist.toml`,
@@ -741,6 +796,41 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert!(result.contains("nodekey:alpha"));
         assert!(result.contains("nodekey:bravo"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_node_key_list_rejects_symlinked_list_file() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let real_path = tempdir.path().join("real.toml");
+        std::fs::write(&real_path, "node_keys = [\"nodekey:outside\"]\n").expect("write");
+        let linked_path = tempdir.path().join("linked.toml");
+        symlink(&real_path, &linked_path).expect("symlink");
+
+        let result = load_node_key_list(&linked_path);
+
+        let Err(LoadListError::Read(error)) = result else {
+            panic!("expected symlinked list path to fail closed, got {result:?}");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("symbolic link"));
+    }
+
+    #[test]
+    fn load_node_key_list_rejects_non_regular_list_path() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let directory_path = tempdir.path().join("list.toml");
+        std::fs::create_dir(&directory_path).expect("mkdir");
+
+        let result = load_node_key_list(&directory_path);
+
+        let Err(LoadListError::Read(error)) = result else {
+            panic!("expected non-regular list path to fail closed, got {result:?}");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("not a regular file"));
     }
 
     #[test]
