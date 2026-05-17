@@ -8,7 +8,9 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::core::hygiene_classifier::ClassificationRow;
-use crate::models::degradation::WORKSPACE_HYGIENE_AGENT_MAIL_UNAVAILABLE_CODE;
+use crate::models::degradation::{
+    WORKSPACE_HYGIENE_AGENT_MAIL_TIMEOUT_CODE, WORKSPACE_HYGIENE_AGENT_MAIL_UNAVAILABLE_CODE,
+};
 
 pub const HYGIENE_COORDINATION_OVERLAY_SCHEMA_V1: &str = "ee.hygiene_coordination_overlay.v1";
 
@@ -18,11 +20,13 @@ pub mod reason {
     pub const EXPIRED_RESERVATION_IGNORED: &str = "expired_reservation_ignored";
     pub const SELF_RESERVATION_IGNORED: &str = "self_reservation_ignored";
     pub const AGENT_MAIL_UNAVAILABLE: &str = "agent_mail_unavailable";
+    pub const AGENT_MAIL_TIMEOUT: &str = "agent_mail_timeout";
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentMailCoordinationInput {
     Unavailable,
+    TimedOut,
     Available {
         reservations: Vec<AgentMailReservation>,
         active_agents: Vec<ActiveAgent>,
@@ -59,6 +63,7 @@ pub struct HygieneCoordinationOverlay {
     pub schema: &'static str,
     pub agent_mail_available: bool,
     pub active_agent_count: usize,
+    pub active_agents: Vec<ActiveAgent>,
     pub reservation_count: usize,
     pub blocked_by_coordination: Vec<CoordinationBlockedPath>,
     pub observed_shared_reservations: Vec<ReservationObservation>,
@@ -111,11 +116,23 @@ pub fn overlay_coordination_state(
             schema: HYGIENE_COORDINATION_OVERLAY_SCHEMA_V1,
             agent_mail_available: false,
             active_agent_count: 0,
+            active_agents: Vec::new(),
             reservation_count: 0,
             blocked_by_coordination: Vec::new(),
             observed_shared_reservations: Vec::new(),
             ignored_reservations: Vec::new(),
             degraded_codes: vec![WORKSPACE_HYGIENE_AGENT_MAIL_UNAVAILABLE_CODE],
+        },
+        AgentMailCoordinationInput::TimedOut => HygieneCoordinationOverlay {
+            schema: HYGIENE_COORDINATION_OVERLAY_SCHEMA_V1,
+            agent_mail_available: false,
+            active_agent_count: 0,
+            active_agents: Vec::new(),
+            reservation_count: 0,
+            blocked_by_coordination: Vec::new(),
+            observed_shared_reservations: Vec::new(),
+            ignored_reservations: Vec::new(),
+            degraded_codes: vec![WORKSPACE_HYGIENE_AGENT_MAIL_TIMEOUT_CODE],
         },
         AgentMailCoordinationInput::Available {
             reservations,
@@ -167,11 +184,18 @@ pub fn overlay_coordination_state(
             });
             observed_shared_reservations.sort_by(compare_observations);
             ignored_reservations.sort_by(compare_observations);
+            let mut active_agents = active_agents.clone();
+            active_agents.sort_by(|left, right| {
+                left.name
+                    .cmp(&right.name)
+                    .then_with(|| left.last_active_at.cmp(&right.last_active_at))
+            });
 
             HygieneCoordinationOverlay {
                 schema: HYGIENE_COORDINATION_OVERLAY_SCHEMA_V1,
                 agent_mail_available: true,
                 active_agent_count: active_agents.len(),
+                active_agents,
                 reservation_count: reservations.len(),
                 blocked_by_coordination,
                 observed_shared_reservations,
@@ -332,21 +356,53 @@ mod tests {
     }
 
     #[test]
-    fn available_empty_reservations_reports_no_blocks() {
+    fn timed_out_agent_mail_degrades_without_guessing_reservations() {
+        let overlay = overlay_coordination_state(
+            &[row("src/core/search.rs")],
+            &AgentMailCoordinationInput::TimedOut,
+            now(),
+            Some("GoldenCompass"),
+        );
+        assert!(!overlay.agent_mail_available);
+        assert_eq!(overlay.active_agent_count, 0);
+        assert!(overlay.active_agents.is_empty());
+        assert_eq!(
+            overlay.degraded_codes,
+            vec![WORKSPACE_HYGIENE_AGENT_MAIL_TIMEOUT_CODE]
+        );
+        assert!(overlay.blocked_by_coordination.is_empty());
+    }
+
+    #[test]
+    fn available_empty_reservations_reports_sorted_active_agents_and_no_blocks() {
         let overlay = overlay_coordination_state(
             &[row("src/core/search.rs")],
             &AgentMailCoordinationInput::Available {
                 reservations: Vec::new(),
-                active_agents: vec![ActiveAgent {
-                    name: "GoldenCompass".to_owned(),
-                    last_active_at: None,
-                }],
+                active_agents: vec![
+                    ActiveAgent {
+                        name: "ZincRiver".to_owned(),
+                        last_active_at: Some("2026-05-17T05:12:00Z".to_owned()),
+                    },
+                    ActiveAgent {
+                        name: "GoldenCompass".to_owned(),
+                        last_active_at: None,
+                    },
+                ],
             },
             now(),
             Some("GoldenCompass"),
         );
         assert!(overlay.agent_mail_available);
-        assert_eq!(overlay.active_agent_count, 1);
+        assert_eq!(overlay.active_agent_count, 2);
+        assert_eq!(
+            overlay
+                .active_agents
+                .iter()
+                .map(|agent| agent.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["GoldenCompass", "ZincRiver"]
+        );
         assert_eq!(overlay.reservation_count, 0);
         assert!(overlay.degraded_codes.is_empty());
         assert!(overlay.blocked_by_coordination.is_empty());
