@@ -623,7 +623,18 @@ fn redact_artifact_search_absolute_path_like_segments(input: &str) -> String {
                 if next.is_whitespace()
                     || matches!(
                         next,
-                        '"' | '\'' | '`' | '<' | '>' | ')' | ']' | '}' | ',' | ';' | '|'
+                        '"' | '\''
+                            | '`'
+                            | '<'
+                            | '>'
+                            | ')'
+                            | ']'
+                            | '}'
+                            | ','
+                            | ';'
+                            | '|'
+                            | '?'
+                            | '#'
                     )
                 {
                     break;

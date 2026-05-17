@@ -1376,7 +1376,18 @@ fn redact_search_absolute_path_like_segments(
                 if next.is_whitespace()
                     || matches!(
                         next,
-                        '"' | '\'' | '`' | '<' | '>' | ')' | ']' | '}' | ',' | ';' | '|'
+                        '"' | '\''
+                            | '`'
+                            | '<'
+                            | '>'
+                            | ')'
+                            | ']'
+                            | '}'
+                            | ','
+                            | ';'
+                            | '|'
+                            | '?'
+                            | '#'
                     )
                 {
                     break;

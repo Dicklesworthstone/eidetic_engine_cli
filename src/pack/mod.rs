@@ -1101,11 +1101,11 @@ impl From<&PackProvenance> for RenderedPackProvenance {
         let scheme = provenance.uri.scheme();
         let (label, locator) = rendered_provenance_label(&provenance.uri);
         Self {
-            uri: provenance.uri.to_string(),
+            uri: redact_pack_provenance_text(&provenance.uri.to_string()),
             scheme,
-            label,
-            locator,
-            note: provenance.note.clone(),
+            label: redact_pack_provenance_text(&label),
+            locator: locator.map(|value| redact_pack_provenance_text(&value)),
+            note: redact_pack_provenance_text(&provenance.note),
         }
     }
 }
@@ -1116,8 +1116,8 @@ pub fn pack_item_provenance_json(provenance: &[PackProvenance]) -> String {
         .iter()
         .map(|source| {
             serde_json::json!({
-                "uri": source.uri.to_string(),
-                "note": source.note.as_str(),
+                "uri": redact_pack_provenance_text(&source.uri.to_string()),
+                "note": redact_pack_provenance_text(&source.note),
             })
         })
         .collect::<Vec<_>>();
@@ -1126,6 +1126,73 @@ pub fn pack_item_provenance_json(provenance: &[PackProvenance]) -> String {
         "entries": entries,
     })
     .to_string()
+}
+
+fn redact_pack_provenance_text(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    redact_pack_absolute_path_like_segments(&secret_redacted)
+}
+
+fn redact_pack_absolute_path_like_segments(input: &str) -> String {
+    const REDACTED_PATH: &str = "[REDACTED_PATH]";
+    const PATH_PREFIXES: &[&str] = &[
+        "/home/",
+        "/Users/",
+        "/data/",
+        "/workspace/",
+        "/Volumes/",
+        "C:\\",
+        "D:\\",
+    ];
+
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0usize;
+    while cursor < input.len() {
+        let remaining = &input[cursor..];
+        if let Some(prefix) = PATH_PREFIXES
+            .iter()
+            .find(|prefix| remaining.starts_with(**prefix))
+        {
+            output.push_str(REDACTED_PATH);
+            cursor += prefix.len();
+            while cursor < input.len() {
+                let next = input[cursor..]
+                    .chars()
+                    .next()
+                    .expect("cursor stays on a character boundary");
+                if next.is_whitespace()
+                    || matches!(
+                        next,
+                        '"' | '\''
+                            | '`'
+                            | '<'
+                            | '>'
+                            | ')'
+                            | ']'
+                            | '}'
+                            | ','
+                            | ';'
+                            | '|'
+                            | '?'
+                            | '#'
+                    )
+                {
+                    break;
+                }
+                cursor += next.len_utf8();
+            }
+            continue;
+        }
+
+        let next = remaining
+            .chars()
+            .next()
+            .expect("cursor stays on a character boundary");
+        output.push(next);
+        cursor += next.len_utf8();
+    }
+
+    output
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -6915,6 +6982,39 @@ mod tests {
     }
 
     #[test]
+    fn pack_provenance_rendering_redacts_sensitive_sources() -> TestResult {
+        let uri = ProvenanceUri::from_str(
+            "file:///Users/alice/private/logs/build.log?api_key=redaction-fixture#L42",
+        )
+        .map_err(|error| format!("test provenance URI rejected: {error:?}"))?;
+        let source = PackProvenance::new(uri, "source api_key=redaction-fixture")
+            .map_err(|error| format!("test provenance note rejected: {error:?}"))?;
+
+        let rendered = source.rendered();
+        let combined = format!(
+            "{}\n{}\n{:?}\n{}",
+            rendered.uri, rendered.label, rendered.locator, rendered.note
+        );
+
+        ensure(
+            combined.contains("[REDACTED_PATH]"),
+            "rendered provenance should retain a path placeholder",
+        )?;
+        ensure(
+            combined.contains("[REDACTED:api_key]"),
+            "rendered provenance should retain a secret placeholder",
+        )?;
+        ensure(
+            !combined.contains("/Users/alice/private/logs/build.log"),
+            "rendered provenance must not leak absolute paths",
+        )?;
+        ensure(
+            !combined.contains("redaction-fixture"),
+            "rendered provenance must not leak secret-like values",
+        )
+    }
+
+    #[test]
     fn pack_item_provenance_json_preserves_full_sources() -> TestResult {
         let json = pack_item_provenance_json(&[
             provenance("file://src/lib.rs#L42")?,
@@ -6942,6 +7042,39 @@ mod tests {
             &value["entries"][1]["uri"],
             &serde_json::json!("cass-session://session-a#L20-22"),
             "second provenance uri",
+        )
+    }
+
+    #[test]
+    fn pack_item_provenance_json_redacts_sensitive_sources() -> TestResult {
+        let uri = ProvenanceUri::from_str(
+            "file:///Users/alice/private/logs/build.log?api_key=redaction-fixture#L42",
+        )
+        .map_err(|error| format!("test provenance URI rejected: {error:?}"))?;
+        let source = PackProvenance::new(uri, "source api_key=redaction-fixture")
+            .map_err(|error| format!("test provenance note rejected: {error:?}"))?;
+        let json = pack_item_provenance_json(&[source]);
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        let rendered = value.to_string();
+
+        ensure_equal(
+            &value["entries"][0]["uri"],
+            &serde_json::json!("file://[REDACTED_PATH]?api_key=[REDACTED:api_key]#L42"),
+            "redacted provenance uri",
+        )?;
+        ensure_equal(
+            &value["entries"][0]["note"],
+            &serde_json::json!("source api_key=[REDACTED:api_key]"),
+            "redacted provenance note",
+        )?;
+        ensure(
+            !rendered.contains("/Users/alice/private/logs/build.log"),
+            "persisted provenance JSON must not leak absolute paths",
+        )?;
+        ensure(
+            !rendered.contains("redaction-fixture"),
+            "persisted provenance JSON must not leak secret-like values",
         )
     }
 
