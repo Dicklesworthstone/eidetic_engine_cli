@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -2573,7 +2573,7 @@ fn read_side_path_no_symlinks(path: &Path) -> Result<Vec<u8>, DomainError> {
         }
     }
 
-    fs::read(path).map_err(|error| DomainError::Import {
+    read_playbook_source_file_no_follow(path).map_err(|error| DomainError::Import {
         message: format!(
             "failed to read playbook source '{}': {error}",
             path.display()
@@ -2581,6 +2581,30 @@ fn read_side_path_no_symlinks(path: &Path) -> Result<Vec<u8>, DomainError> {
         repair: Some("choose a readable playbook JSON file".to_owned()),
     })
 }
+
+fn read_playbook_source_file_no_follow(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut file = open_playbook_source_file_for_read(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn open_playbook_source_file_for_read(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_playbook_source_read_options(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_playbook_source_read_options(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_playbook_source_read_options(_options: &mut OpenOptions) {}
 
 fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, DomainError> {
     let mut current = PathBuf::new();
@@ -4699,6 +4723,38 @@ mod tests {
         ensure(
             err.message().contains("symbolic link"),
             "error should mention symbolic link",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn playbook_import_final_read_open_rejects_symlinked_source() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside = tempdir.path().join("outside-playbook.json");
+        let source_path = tempdir.path().join("playbook.json");
+        fs::write(
+            &outside,
+            b"{\"schema\":\"ee.playbook.portable.v1\",\"ruleCount\":0,\"rules\":[]}",
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(&outside, &source_path).map_err(|error| error.to_string())?;
+
+        open_playbook_source_file_for_read(&source_path)
+            .expect_err("playbook final read should reject symlinked source");
+
+        ensure(
+            fs::symlink_metadata(&source_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "rejected playbook source symlink should remain available for inspection",
+        )?;
+        ensure(
+            fs::read_to_string(&outside).map_err(|error| error.to_string())?
+                == "{\"schema\":\"ee.playbook.portable.v1\",\"ruleCount\":0,\"rules\":[]}",
+            "outside playbook source should remain unchanged",
         )
     }
 
