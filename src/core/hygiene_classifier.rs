@@ -10,7 +10,7 @@
 //! The classifier itself is **pure**:
 //!
 //! - No `std::fs::*` writes, opens, or reads.
-//! - No `std::process::Command` shell-outs.
+//! - No process-command shell-outs.
 //! - No git mutations, no stash, no reset, no checkout, no rm.
 //! - No allocation of background tasks; no I/O of any kind.
 //!
