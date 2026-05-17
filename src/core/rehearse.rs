@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -1246,7 +1246,14 @@ where
         message: format!("Failed to serialize rehearsal artifact: {error}"),
         repair: Some("ee rehearse run --json".to_string()),
     })?;
-    fs::write(path, bytes).map_err(|error| storage_error("write rehearsal artifact", error))
+    let temp_path = path.with_extension("json.tmp");
+    ensure_no_rehearsal_artifact_symlink_components(
+        &temp_path,
+        "write rehearsal artifact temp file",
+    )?;
+    ensure_rehearsal_artifact_temp_path_missing(&temp_path)?;
+    write_rehearsal_artifact_temp_file(&temp_path, &bytes)?;
+    fs::rename(&temp_path, path).map_err(|error| storage_error("publish rehearsal artifact", error))
 }
 
 fn changed_paths(before: &FilesystemSnapshot, after: &FilesystemSnapshot) -> Vec<String> {
@@ -1379,6 +1386,34 @@ fn ensure_rehearsal_artifact_regular_or_missing(
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(storage_error(operation, error)),
     }
+}
+
+fn ensure_rehearsal_artifact_temp_path_missing(path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write rehearsal artifact temp file `{}` because it already exists.",
+                path.display()
+            ),
+            repair: Some(
+                "Remove the stale rehearsal artifact temp file before retrying.".to_owned(),
+            ),
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(storage_error("inspect rehearsal artifact temp file", error)),
+    }
+}
+
+fn write_rehearsal_artifact_temp_file(path: &Path, bytes: &[u8]) -> Result<(), DomainError> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| storage_error("create rehearsal artifact temp file", error))?;
+    file.write_all(bytes)
+        .map_err(|error| storage_error("write rehearsal artifact temp file", error))?;
+    file.sync_all()
+        .map_err(|error| storage_error("sync rehearsal artifact temp file", error))
 }
 
 fn path_is_regular_file_no_symlinks(
@@ -1872,6 +1907,41 @@ mod tests {
         assert!(
             !out.join(MANIFEST_FILE).exists(),
             "rehearsal must fail before writing later artifacts"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn run_rejects_existing_rehearsal_artifact_temp_file_without_truncating() -> TestResult {
+        let workspace = kept_temp_dir("ee-rehearse-run-temp-artifact-workspace")?;
+        let out = kept_temp_dir("ee-rehearse-run-temp-artifact-out")?;
+        fs::write(workspace.join("state.txt"), "source").map_err(|error| error.to_string())?;
+        let temp_path = out.join(SOURCE_SNAPSHOT_FILE).with_extension("json.tmp");
+        fs::write(&temp_path, "stale rehearsal temp").map_err(|error| error.to_string())?;
+
+        let options = RehearseRunOptions {
+            workspace,
+            output_dir: Some(out.clone()),
+            ..Default::default()
+        };
+        let error = match run_rehearsal(&options) {
+            Ok(report) => {
+                return Err(format!(
+                    "existing rehearsal artifact temp file was accepted: {report:?}"
+                ));
+            }
+            Err(error) => error,
+        };
+
+        assert!(error.message().contains("already exists"));
+        assert_eq!(
+            fs::read_to_string(&temp_path).map_err(|error| error.to_string())?,
+            "stale rehearsal temp",
+            "existing rehearsal artifact temp content remains unchanged"
+        );
+        assert!(
+            !out.join(SOURCE_SNAPSHOT_FILE).exists(),
+            "rehearsal must not publish the final artifact when temp exists"
         );
         Ok(())
     }
