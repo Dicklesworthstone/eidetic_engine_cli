@@ -511,11 +511,10 @@ pub fn mesh_display_provenance(
             input.producer_peer_label,
         ),
         material_lane: input.decision.material_lane,
-        import_decision_ref: input
-            .import_decision_id
-            .or(input.ledger_cursor)
-            .unwrap_or("unrecorded")
-            .to_owned(),
+        import_decision_ref: mesh_import_decision_ref(
+            input.import_decision_id,
+            input.ledger_cursor,
+        ),
         trust_lane: input.trust_lane.to_owned(),
         redaction_posture: input.redaction_posture.to_owned(),
     })
@@ -1368,6 +1367,16 @@ fn mesh_peer_display(producer_peer_id: &str, label: Option<&str>) -> String {
     label
         .and_then(redaction_safe_label)
         .unwrap_or_else(|| stable_mesh_alias("mesh_peer", producer_peer_id))
+}
+
+fn mesh_import_decision_ref(
+    import_decision_id: Option<&str>,
+    ledger_cursor: Option<&str>,
+) -> String {
+    let Some(reference) = import_decision_id.or(ledger_cursor) else {
+        return "unrecorded".to_owned();
+    };
+    redaction_safe_label(reference).unwrap_or_else(|| stable_mesh_alias("mesh_dec", reference))
 }
 
 fn redaction_safe_label(label: &str) -> Option<String> {
@@ -2581,6 +2590,42 @@ max_bytes = 0
             .expect("allowed mesh material should expose redacted provenance");
 
         assert_eq!(provenance.import_decision_ref, "mesh_ledger_789");
+    }
+
+    #[test]
+    fn mesh_display_provenance_aliases_path_like_import_decision_ref() {
+        let decision = decide_mesh_import(&mesh_input(MeshLane::Metadata), &[mesh_binding()]);
+        let mut input = mesh_display_input(&decision, Some("remote-beta"));
+        input.import_decision_id = Some("/Users/alice/private/mesh_decision.json");
+
+        let provenance = mesh_display_provenance(&input)
+            .expect("allowed mesh material should expose redacted provenance");
+
+        assert_eq!(
+            provenance.import_decision_ref,
+            stable_mesh_alias("mesh_dec", "/Users/alice/private/mesh_decision.json")
+        );
+        assert_ne!(
+            provenance.import_decision_ref,
+            "/Users/alice/private/mesh_decision.json"
+        );
+    }
+
+    #[test]
+    fn mesh_display_provenance_aliases_path_like_ledger_cursor() {
+        let decision = decide_mesh_import(&mesh_input(MeshLane::Metadata), &[mesh_binding()]);
+        let mut input = mesh_display_input(&decision, Some("remote-beta"));
+        input.import_decision_id = None;
+        input.ledger_cursor = Some("agent-mail://BlueLake/private/mesh-ledger");
+
+        let provenance = mesh_display_provenance(&input)
+            .expect("allowed mesh material should expose redacted provenance");
+
+        assert_eq!(
+            provenance.import_decision_ref,
+            stable_mesh_alias("mesh_dec", "agent-mail://BlueLake/private/mesh-ledger")
+        );
+        assert!(!provenance.import_decision_ref.contains("agent-mail"));
     }
 
     #[test]
