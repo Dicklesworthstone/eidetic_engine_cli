@@ -904,7 +904,7 @@ fn parse_import_source_events(
         code: RecorderImportErrorCode::InvalidInputJson,
         message: format!("Recorder import input is not valid JSON: {error}"),
         repair: "Provide CASS `view --json` output with a top-level lines array.".to_string(),
-        details: Box::new(json!({"sourceId": options.source_id})),
+        details: Box::new(json!({"sourceId": redact_recorder_source_ref(&options.source_id)})),
     })?;
 
     match options.source_type {
@@ -946,7 +946,7 @@ fn parse_cass_view_events(
                 code: RecorderImportErrorCode::InvalidSourceShape,
                 message: "Recorder import CASS line is missing numeric line.".to_string(),
                 repair: "Ensure each CASS view line has a numeric line field.".to_string(),
-                details: Box::new(json!({"sourceId": source_id})),
+                details: Box::new(json!({"sourceId": redact_recorder_source_ref(source_id)})),
             })?;
         let content = line
             .get("content")
@@ -2964,6 +2964,88 @@ mod tests {
             rendered.contains("redaction-fixture"),
             false,
             "source id secret value redacted",
+        )
+    }
+
+    #[test]
+    fn recorder_import_errors_redact_public_source_id_details() -> TestResult {
+        let source_id = "file:///Users/alice/private/cass.jsonl?api_key=redaction-fixture";
+        let invalid_json_options = RecorderImportOptions {
+            source_type: ImportSourceType::Cass,
+            source_id: source_id.to_string(),
+            input_json: Some("{not-json".to_string()),
+            input_path: None,
+            agent_id: None,
+            session_id: None,
+            workspace_id: None,
+            max_events: DEFAULT_RECORDER_IMPORT_LIMIT,
+            redact: false,
+            max_payload_bytes: DEFAULT_MAX_RECORDER_PAYLOAD_BYTES,
+            dry_run: true,
+        };
+
+        let invalid_json_error = parse_import_source_events(&invalid_json_options)
+            .expect_err("invalid recorder import JSON should fail");
+        let invalid_json_details = invalid_json_error.details.to_string();
+
+        ensure(
+            invalid_json_details.contains("[REDACTED_PATH]"),
+            true,
+            "invalid JSON source path placeholder present",
+        )?;
+        ensure(
+            invalid_json_details.contains("[REDACTED:"),
+            true,
+            "invalid JSON source secret placeholder present",
+        )?;
+        ensure(
+            invalid_json_details.contains("/Users/alice"),
+            false,
+            "invalid JSON source path redacted",
+        )?;
+        ensure(
+            invalid_json_details.contains("redaction-fixture"),
+            false,
+            "invalid JSON source secret value redacted",
+        )?;
+
+        let malformed_line_options = RecorderImportOptions {
+            source_type: ImportSourceType::Cass,
+            source_id: source_id.to_string(),
+            input_json: Some(json!({"lines": [{"content": "missing line"}]}).to_string()),
+            input_path: None,
+            agent_id: None,
+            session_id: None,
+            workspace_id: None,
+            max_events: DEFAULT_RECORDER_IMPORT_LIMIT,
+            redact: false,
+            max_payload_bytes: DEFAULT_MAX_RECORDER_PAYLOAD_BYTES,
+            dry_run: true,
+        };
+
+        let malformed_line_error = parse_import_source_events(&malformed_line_options)
+            .expect_err("malformed CASS line should fail");
+        let malformed_line_details = malformed_line_error.details.to_string();
+
+        ensure(
+            malformed_line_details.contains("[REDACTED_PATH]"),
+            true,
+            "malformed line source path placeholder present",
+        )?;
+        ensure(
+            malformed_line_details.contains("[REDACTED:"),
+            true,
+            "malformed line source secret placeholder present",
+        )?;
+        ensure(
+            malformed_line_details.contains("/Users/alice"),
+            false,
+            "malformed line source path redacted",
+        )?;
+        ensure(
+            malformed_line_details.contains("redaction-fixture"),
+            false,
+            "malformed line source secret value redacted",
         )
     }
 
