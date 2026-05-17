@@ -6,6 +6,7 @@
 //! memory bodies, peer paths, or secrets.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize, Serializer};
@@ -556,14 +557,8 @@ fn write_registry_document(
             repair: Some("replace the symlinked .ee/qos temp path with a real file".to_owned()),
         });
     }
-    ensure_registry_temp_path_writable(&temp_path)?;
-    fs::write(&temp_path, format!("{json}\n")).map_err(|error| DomainError::Storage {
-        message: format!(
-            "failed to write QoS active-lane registry temp file '{}': {error}",
-            temp_path.display()
-        ),
-        repair: Some("check workspace .ee/qos permissions".to_owned()),
-    })?;
+    ensure_registry_temp_path_available(&temp_path)?;
+    write_registry_temp_document(&temp_path, &json)?;
     fs::rename(&temp_path, path).map_err(|error| DomainError::Storage {
         message: format!(
             "failed to publish QoS active-lane registry '{}': {error}",
@@ -604,9 +599,15 @@ fn ensure_registry_final_path_writable(path: &Path) -> Result<(), DomainError> {
     }
 }
 
-fn ensure_registry_temp_path_writable(path: &Path) -> Result<(), DomainError> {
+fn ensure_registry_temp_path_available(path: &Path) -> Result<(), DomainError> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(metadata) if metadata.file_type().is_file() => Err(DomainError::Storage {
+            message: format!(
+                "refusing to write QoS active-lane registry temp file '{}' because it already exists",
+                path.display()
+            ),
+            repair: Some("remove stale .ee/qos/active-lanes.json.tmp and retry".to_owned()),
+        }),
         Ok(_) => Err(DomainError::Storage {
             message: format!(
                 "refusing to write QoS active-lane registry temp file '{}' because it is not a regular file",
@@ -632,6 +633,35 @@ fn ensure_registry_temp_path_writable(path: &Path) -> Result<(), DomainError> {
             repair: Some("check workspace .ee/qos permissions".to_owned()),
         }),
     }
+}
+
+fn write_registry_temp_document(path: &Path, json: &str) -> Result<(), DomainError> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "failed to create QoS active-lane registry temp file '{}': {error}",
+                path.display()
+            ),
+            repair: Some("check workspace .ee/qos permissions and retry".to_owned()),
+        })?;
+    file.write_all(format!("{json}\n").as_bytes())
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "failed to write QoS active-lane registry temp file '{}': {error}",
+                path.display()
+            ),
+            repair: Some("check workspace .ee/qos permissions".to_owned()),
+        })?;
+    file.sync_all().map_err(|error| DomainError::Storage {
+        message: format!(
+            "failed to sync QoS active-lane registry temp file '{}': {error}",
+            path.display()
+        ),
+        repair: Some("check workspace .ee/qos permissions".to_owned()),
+    })
 }
 
 fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, DomainError> {
@@ -1143,6 +1173,35 @@ mod tests {
             error.message()
         );
         assert_eq!(fs::read_to_string(&outside)?, "outside sentinel");
+        Ok(())
+    }
+
+    #[test]
+    fn registry_write_rejects_existing_regular_temp_file_without_truncating() -> TestResult {
+        let tempdir = tempfile::tempdir()?;
+        let workspace = tempdir.path().join("workspace");
+        let path = qos_registry_path(&workspace);
+        let temp_path = path.with_extension("json.tmp");
+        fs::create_dir_all(path.parent().expect("registry parent"))?;
+        fs::write(&temp_path, "stale temp sentinel")?;
+
+        let error = publish_qos_lane_record(
+            &workspace,
+            &record_input(QosLane::VerificationRch, "cargo-test", "query", 100),
+        )
+        .expect_err("existing regular temp file should reject registry write");
+
+        assert!(
+            error.message().contains("already exists"),
+            "unexpected existing temp error: {}",
+            error.message()
+        );
+        assert_eq!(fs::read_to_string(&temp_path)?, "stale temp sentinel");
+        assert!(
+            fs::symlink_metadata(&path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "final registry path must not be created when temp path already exists"
+        );
         Ok(())
     }
 
