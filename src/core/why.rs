@@ -1149,6 +1149,23 @@ where
         .collect()
 }
 
+fn aggregate_why_dominance_degraded(
+    degraded: &[crate::graph::dominance::DominanceDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_why_revision_lineage_degraded(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "graph_dominance",
+            entry.code.clone(),
+            entry.severity.clone(),
+            entry.message.clone(),
+            entry
+                .repair
+                .clone()
+                .unwrap_or_else(|| "Refresh graph dominance diagnostics.".to_owned()),
+        )
+    }))
+}
+
 fn revision_lineage_for_why(
     conn: &DbConnection,
     workspace_id: &str,
@@ -1206,6 +1223,7 @@ fn revision_lineage_for_why(
             serde_json::Value::Array(ids.into_iter().map(serde_json::Value::String).collect()),
         );
     }
+    let degraded = aggregate_why_dominance_degraded(&impact.degraded);
 
     Some(serde_json::json!({
         "sourceSchema": impact.schema,
@@ -1216,7 +1234,7 @@ fn revision_lineage_for_why(
         "dominanceFrontier": dominance_frontier,
         "ancestorsAtDepth": ancestors,
         "validationStatus": impact.impact_analysis.validation_status,
-        "degraded": impact.degraded,
+        "degraded": degraded,
     }))
 }
 
@@ -2945,6 +2963,51 @@ mod tests {
             lineage["degraded"][0]["sources"][0].as_str(),
             Some("why_revision_lineage"),
             "disabled degraded source",
+        )
+    }
+
+    #[test]
+    fn why_revision_lineage_aggregates_dominance_degradations() -> TestResult {
+        let degraded = aggregate_why_dominance_degraded(&[
+            crate::graph::dominance::DominanceDegradation {
+                code: "graph_dominance_no_revision_chain".to_owned(),
+                severity: "info".to_owned(),
+                message: "low-detail graph dominance message".to_owned(),
+                repair: None,
+            },
+            crate::graph::dominance::DominanceDegradation {
+                code: "graph_dominance_no_revision_chain".to_owned(),
+                severity: "warning".to_owned(),
+                message: "higher-severity graph dominance message".to_owned(),
+                repair: Some("ee graph refresh --workspace .".to_owned()),
+            },
+        ]);
+
+        ensure(degraded.len(), 1_usize, "aggregate duplicate code count")?;
+        ensure(
+            degraded[0]["code"].as_str(),
+            Some("graph_dominance_no_revision_chain"),
+            "aggregate code",
+        )?;
+        ensure(
+            degraded[0]["severity"].as_str(),
+            Some("warning"),
+            "aggregate severity",
+        )?;
+        ensure(
+            degraded[0]["message"].as_str(),
+            Some("higher-severity graph dominance message"),
+            "aggregate message",
+        )?;
+        ensure(
+            degraded[0]["repair"].as_str(),
+            Some("ee graph refresh --workspace ."),
+            "aggregate repair",
+        )?;
+        ensure(
+            degraded[0]["sources"][0].as_str(),
+            Some("graph_dominance"),
+            "aggregate source",
         )
     }
 
