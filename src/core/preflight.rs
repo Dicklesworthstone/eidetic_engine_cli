@@ -1863,6 +1863,58 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn write_preflight_run_store_rechecks_temp_symlink_before_publish() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = temp_workspace()?;
+        let store_path = preflight_run_store_path(workspace.path());
+        let temp_path = store_path.with_extension("json.tmp");
+        let preserved_temp = store_path.with_extension("json.tmp.preserved");
+        std::fs::create_dir_all(temp_path.parent().expect("preflight temp parent"))
+            .map_err(|error| error.to_string())?;
+        write_preflight_run_store_temp_file(&temp_path, "{\"schema\":\"sentinel\"}\n")
+            .map_err(|error| error.message())?;
+        std::fs::rename(&temp_path, &preserved_temp).map_err(|error| error.to_string())?;
+
+        let outside_store = workspace.path().join("outside-preflight-runs.json");
+        std::fs::write(&outside_store, "outside sentinel").map_err(|error| error.to_string())?;
+        symlink(&outside_store, &temp_path).map_err(|error| error.to_string())?;
+
+        let result = publish_preflight_run_store_temp_file(&temp_path, &store_path);
+        let error = result.expect_err("temp symlink must be rejected before publish");
+        ensure(
+            error.message().contains("symlinked path component")
+                || error.message().contains("not a regular file"),
+            true,
+            "temp symlink publish error message",
+        )?;
+        ensure(
+            store_path.exists(),
+            false,
+            "final preflight store must not be published through swapped temp symlink",
+        )?;
+        ensure(
+            std::fs::read_to_string(&outside_store).map_err(|error| error.to_string())?,
+            "outside sentinel".to_owned(),
+            "outside symlink target remains unchanged",
+        )?;
+        ensure(
+            std::fs::symlink_metadata(&temp_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            true,
+            "rejected temp symlink remains for inspection",
+        )?;
+        ensure(
+            std::fs::read_to_string(&preserved_temp).map_err(|error| error.to_string())?,
+            "{\"schema\":\"sentinel\"}\n".to_owned(),
+            "preserved temp store remains available after simulated swap",
+        )
+    }
+
     #[test]
     fn run_reports_matching_stale_persisted_preflight_evidence() -> TestResult {
         let workspace = temp_workspace()?;
