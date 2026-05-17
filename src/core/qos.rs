@@ -573,6 +573,7 @@ fn publish_registry_temp_document(path: &Path, temp_path: &Path) -> Result<(), D
         });
     }
     ensure_registry_final_path_writable(path)?;
+    ensure_created_registry_temp_path_publishable(temp_path)?;
     fs::rename(temp_path, path).map_err(|error| DomainError::Storage {
         message: format!(
             "failed to publish QoS active-lane registry '{}': {error}",
@@ -580,6 +581,35 @@ fn publish_registry_temp_document(path: &Path, temp_path: &Path) -> Result<(), D
         ),
         repair: Some("check workspace .ee/qos permissions and retry".to_owned()),
     })
+}
+
+fn ensure_created_registry_temp_path_publishable(path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(DomainError::Storage {
+            message: format!(
+                "refusing to publish QoS active-lane registry temp file '{}' because it became a symlink",
+                path.display()
+            ),
+            repair: Some("replace the symlinked .ee/qos temp path with a real file".to_owned()),
+        }),
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "refusing to publish QoS active-lane registry temp file '{}' because it is not a regular file",
+                path.display()
+            ),
+            repair: Some(
+                "replace .ee/qos/active-lanes.json.tmp with a regular file or remove it".to_owned(),
+            ),
+        }),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "failed to inspect QoS active-lane registry temp file '{}' before publish: {error}",
+                path.display()
+            ),
+            repair: Some("check workspace .ee/qos permissions".to_owned()),
+        }),
+    }
 }
 
 fn ensure_registry_final_path_writable(path: &Path) -> Result<(), DomainError> {
@@ -1340,6 +1370,45 @@ mod tests {
             fs::symlink_metadata(&temp_path)?.file_type().is_file(),
             "temp registry file should remain available after publish rejection"
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_publish_rechecks_temp_symlink_before_rename() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir()?;
+        let workspace = tempdir.path().join("workspace");
+        let path = qos_registry_path(&workspace);
+        let temp_path = path.with_extension("json.tmp");
+        let temp_backup = tempdir.path().join("active-lanes-temp-backup.json");
+        let outside = tempdir.path().join("outside-active-lanes.json");
+        fs::create_dir_all(path.parent().expect("registry parent"))?;
+        write_registry_temp_document(&temp_path, "{}")?;
+        fs::rename(&temp_path, &temp_backup)?;
+        fs::write(&outside, "outside sentinel")?;
+        symlink(&outside, &temp_path)?;
+
+        let error = publish_registry_temp_document(&path, &temp_path)
+            .expect_err("temp symlink should reject immediately before registry publish");
+
+        assert!(
+            error.message().contains("became a symlink"),
+            "unexpected temp symlink error: {}",
+            error.message()
+        );
+        assert_eq!(fs::read_to_string(&outside)?, "outside sentinel");
+        assert!(
+            fs::symlink_metadata(&temp_path)?.file_type().is_symlink(),
+            "swapped temp symlink should remain available after publish rejection"
+        );
+        assert!(
+            fs::symlink_metadata(&path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "final registry path must not be published from a swapped temp symlink"
+        );
+        assert_eq!(fs::read_to_string(&temp_backup)?, "{}\n");
         Ok(())
     }
 
