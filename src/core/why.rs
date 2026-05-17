@@ -1383,7 +1383,8 @@ fn unsupported_result_target_storage(
                     provenance_uri: session
                         .source_path
                         .clone()
-                        .or_else(|| Some(format!("cass://session/{}", session.cass_session_id))),
+                        .or_else(|| Some(format!("cass://session/{}", session.cass_session_id)))
+                        .map(redact_why_search_result_provenance_uri),
                     workflow_id: None,
                     created_at: session.imported_at,
                     valid_from: session.started_at,
@@ -1404,7 +1405,7 @@ fn unsupported_result_target_storage(
                         .provenance_uri
                         .or(artifact.original_path)
                         .or(artifact.external_ref)
-                        .map(redact_why_artifact_provenance_uri),
+                        .map(redact_why_search_result_provenance_uri),
                     workflow_id: None,
                     created_at: artifact.created_at,
                     valid_from: None,
@@ -1421,14 +1422,28 @@ fn unsupported_result_target_storage(
     }
 }
 
-fn redact_why_artifact_provenance_uri(value: String) -> String {
+fn redact_why_search_result_provenance_uri(value: String) -> String {
     let secret_redacted = crate::policy::redact_secret_like_content(&value).content;
     redact_why_absolute_path_like_segments(&secret_redacted)
 }
 
 fn redact_why_absolute_path_like_segments(input: &str) -> String {
     const REDACTED_PATH: &str = "[REDACTED_PATH]";
-    const PATH_PREFIXES: &[&str] = &["/home/", "/Users/", "/data/", "C:\\", "D:\\"];
+    const PATH_PREFIXES: &[&str] = &[
+        "/home/",
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+        "C:\\",
+        "D:\\",
+    ];
 
     let mut output = String::with_capacity(input.len());
     let mut cursor = 0usize;
@@ -2147,7 +2162,7 @@ fn fetch_rationale_traces(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{CreateArtifactInput, CreateWorkspaceInput};
+    use crate::db::{CreateArtifactInput, CreateSessionInput, CreateWorkspaceInput};
     use crate::models::{
         RationaleTraceKind, RationaleTracePosture, RationaleTraceVisibility, RedactionStatus,
     };
@@ -2831,6 +2846,128 @@ mod tests {
             },
         )
         .map_err(|error| error.to_string())
+    }
+
+    fn insert_why_session(
+        conn: &DbConnection,
+        session_id: &str,
+        cass_session_id: &str,
+        source_path: Option<&str>,
+    ) -> TestResult {
+        conn.insert_session(
+            session_id,
+            &CreateSessionInput {
+                workspace_id: "wsp_00000000000000000000000001".to_owned(),
+                cass_session_id: cass_session_id.to_owned(),
+                source_path: source_path.map(ToOwned::to_owned),
+                agent_name: Some("test-agent".to_owned()),
+                model: Some("test-model".to_owned()),
+                started_at: Some("2026-05-17T00:00:00Z".to_owned()),
+                ended_at: Some("2026-05-17T00:01:00Z".to_owned()),
+                message_count: 2,
+                token_count: Some(100),
+                content_hash:
+                    "blake3:1111111111111111111111111111111111111111111111111111111111111111"
+                        .to_owned(),
+                metadata_json: Some(r#"{"fixture":"why-session"}"#.to_owned()),
+            },
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn why_session_result_storage_redacts_path_and_secret_source_path() -> TestResult {
+        let conn = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        conn.migrate().map_err(|error| error.to_string())?;
+        conn.insert_workspace(
+            "wsp_00000000000000000000000001",
+            &CreateWorkspaceInput {
+                path: "/tmp/why-session-redaction".to_owned(),
+                name: Some("why-session-redaction".to_owned()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        insert_why_session(
+            &conn,
+            "sess_00000000000000000000000001",
+            "cass-session-a",
+            Some(concat!(
+                "file:///Volumes/USBNVME16TB/private/cass/session.jsonl?",
+                "api",
+                "_key=redaction-fixture"
+            )),
+        )?;
+
+        let report = WhyReport::unsupported_result_target(
+            "sess_00000000000000000000000001".to_owned(),
+            WhyResultDocumentSource::Session,
+            &conn,
+        );
+        let provenance = report
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.provenance_uri.as_deref())
+            .ok_or_else(|| "session provenance present".to_owned())?;
+
+        ensure(
+            provenance.contains("/Volumes/USBNVME16TB"),
+            false,
+            "raw session source path redacted",
+        )?;
+        ensure(
+            provenance.contains("[REDACTED_PATH]"),
+            true,
+            "path placeholder present",
+        )?;
+        ensure(
+            provenance.contains("redaction-fixture"),
+            false,
+            "secret value redacted",
+        )?;
+        ensure(
+            provenance.contains("[REDACTED:"),
+            true,
+            "secret placeholder present",
+        )
+    }
+
+    #[test]
+    fn why_session_result_storage_preserves_safe_cass_fallback() -> TestResult {
+        let conn = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        conn.migrate().map_err(|error| error.to_string())?;
+        conn.insert_workspace(
+            "wsp_00000000000000000000000001",
+            &CreateWorkspaceInput {
+                path: "/tmp/why-session-fallback".to_owned(),
+                name: Some("why-session-fallback".to_owned()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        insert_why_session(
+            &conn,
+            "sess_00000000000000000000000002",
+            "cass-session-b",
+            None,
+        )?;
+
+        let report = WhyReport::unsupported_result_target(
+            "sess_00000000000000000000000002".to_owned(),
+            WhyResultDocumentSource::Session,
+            &conn,
+        );
+        let provenance = report
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.provenance_uri.as_deref())
+            .ok_or_else(|| "session fallback provenance present".to_owned())?;
+
+        ensure(
+            provenance.to_owned(),
+            "cass://session/cass-session-b".to_owned(),
+            "safe cass fallback preserved",
+        )
     }
 
     #[test]
