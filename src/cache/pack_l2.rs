@@ -213,14 +213,7 @@ impl PackL2Cache {
         ensure_no_symlink_components(&temp_path, "inspect_temp")?;
 
         write_synced_file(&temp_path, &bytes)?;
-        fs::rename(&temp_path, &path).map_err(|source| {
-            let _ = fs::remove_file(&temp_path);
-            PackL2CacheError::Io {
-                path: path.clone(),
-                operation: "rename",
-                source,
-            }
-        })?;
+        publish_cache_entry_temp_file(&temp_path, &path)?;
         sync_directory(&self.root)?;
         let eviction = self.evict_best_effort_at(stored_at_epoch_seconds)?;
 
@@ -670,6 +663,39 @@ fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), PackL2CacheError> 
     Ok(())
 }
 
+fn publish_cache_entry_temp_file(temp_path: &Path, path: &Path) -> Result<(), PackL2CacheError> {
+    ensure_no_symlink_components(path, "inspect_entry")?;
+    ensure_no_symlink_components(temp_path, "inspect_temp")?;
+    ensure_cache_temp_path_is_regular(temp_path)?;
+    fs::rename(temp_path, path).map_err(|source| {
+        let _ = fs::remove_file(temp_path);
+        PackL2CacheError::Io {
+            path: path.to_path_buf(),
+            operation: "rename",
+            source,
+        }
+    })
+}
+
+fn ensure_cache_temp_path_is_regular(path: &Path) -> Result<(), PackL2CacheError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(PackL2CacheError::Io {
+            path: path.to_path_buf(),
+            operation: "inspect_temp",
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "pack L2 cache temp path is not a regular file",
+            ),
+        }),
+        Err(source) => Err(PackL2CacheError::Io {
+            path: path.to_path_buf(),
+            operation: "inspect_temp",
+            source,
+        }),
+    }
+}
+
 fn sync_directory(path: &Path) -> Result<(), PackL2CacheError> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
@@ -1031,6 +1057,54 @@ mod tests {
             fs::read_to_string(&outside_entry).map_err(|error| error.to_string())?,
             r#"{"schema":"outside"}"#,
             "cache write must not overwrite a symlink target"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn error_or_invalid_publish_rechecks_symlinked_final_entry() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let cache = PackL2Cache::new(
+            temp.path().join("pack-l2"),
+            PackL2CacheOptions::new(4096, Duration::from_secs(60)),
+        );
+        ensure_cache_dir(cache.root()).map_err(|error| error.to_string())?;
+
+        let pack_json = json!({"hash": "publish-recheck"});
+        let bytes = raw_entry_bytes("blake3:publish-recheck", pack_json, 100)?;
+        let body_hash = body_hash_prefix(&bytes);
+        let entry_path = cache.entry_path_for_body_hash("blake3:publish-recheck", &body_hash);
+        let temp_path = cache.temp_path("blake3:publish-recheck", &body_hash, 100);
+        write_synced_file(&temp_path, &bytes).map_err(|error| error.to_string())?;
+
+        let outside_entry = temp.path().join("outside-entry.json");
+        fs::write(&outside_entry, br#"{"schema":"outside"}"#).map_err(|error| error.to_string())?;
+        symlink(&outside_entry, &entry_path).map_err(|error| error.to_string())?;
+
+        let error = publish_cache_entry_temp_file(&temp_path, &entry_path)
+            .expect_err("symlinked final entry should be rejected before publish");
+        match error {
+            PackL2CacheError::Io {
+                path,
+                operation: "inspect_entry",
+                source,
+            } => {
+                assert_eq!(path, entry_path);
+                assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
+            }
+            other => return Err(format!("unexpected publish error: {other}")),
+        }
+        assert_eq!(
+            fs::read_to_string(&outside_entry).map_err(|error| error.to_string())?,
+            r#"{"schema":"outside"}"#,
+            "cache publish must not mutate the symlink target"
+        );
+        assert!(
+            temp_path.exists(),
+            "cache temp entry should remain available after rejected publish"
         );
         Ok(())
     }
