@@ -559,7 +559,21 @@ fn write_registry_document(
     }
     ensure_registry_temp_path_available(&temp_path)?;
     write_registry_temp_document(&temp_path, &json)?;
-    fs::rename(&temp_path, path).map_err(|error| DomainError::Storage {
+    publish_registry_temp_document(path, &temp_path)
+}
+
+fn publish_registry_temp_document(path: &Path, temp_path: &Path) -> Result<(), DomainError> {
+    if let Some(symlink) = first_existing_symlink_component(path)? {
+        return Err(DomainError::Storage {
+            message: format!(
+                "refusing to publish QoS active-lane registry through symlink '{}'",
+                symlink.display()
+            ),
+            repair: Some("replace the symlinked .ee/qos path with a real directory".to_owned()),
+        });
+    }
+    ensure_registry_final_path_writable(path)?;
+    fs::rename(temp_path, path).map_err(|error| DomainError::Storage {
         message: format!(
             "failed to publish QoS active-lane registry '{}': {error}",
             path.display()
@@ -1293,6 +1307,38 @@ mod tests {
             fs::symlink_metadata(path.with_extension("json.tmp"))
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
             "temp file should not be written when final registry path is non-regular"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_publish_rechecks_final_symlink_before_rename() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir()?;
+        let workspace = tempdir.path().join("workspace");
+        let path = qos_registry_path(&workspace);
+        let temp_path = path.with_extension("json.tmp");
+        let outside = tempdir.path().join("outside-active-lanes.json");
+        fs::create_dir_all(path.parent().expect("registry parent"))?;
+        write_registry_temp_document(&temp_path, "{}")?;
+        fs::write(&outside, "outside sentinel")?;
+        symlink(&outside, &path)?;
+
+        let error = publish_registry_temp_document(&path, &temp_path)
+            .expect_err("final symlink should reject immediately before registry publish");
+
+        assert!(
+            error.message().contains("through symlink")
+                || error.message().contains("not a regular file"),
+            "unexpected final symlink error: {}",
+            error.message()
+        );
+        assert_eq!(fs::read_to_string(&outside)?, "outside sentinel");
+        assert!(
+            fs::symlink_metadata(&temp_path)?.file_type().is_file(),
+            "temp registry file should remain available after publish rejection"
         );
         Ok(())
     }
