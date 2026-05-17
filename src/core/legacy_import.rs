@@ -134,7 +134,7 @@ impl LegacyImportScanReport {
         json!({
             "schema": self.schema,
             "command": "import eidetic-legacy",
-            "sourcePath": self.source_path,
+            "sourcePath": redact_legacy_import_source_path(&self.source_path),
             "dryRun": self.dry_run,
             "status": self.status.as_str(),
             "scannedFiles": self.scanned_files,
@@ -788,6 +788,59 @@ fn path_to_wire_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+fn redact_legacy_import_source_path(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    redact_legacy_import_source_path_segments(&secret_redacted)
+}
+
+fn redact_legacy_import_source_path_segments(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, c)| *c == '/')
+        else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        let start = cursor + relative_index;
+        if !legacy_import_source_path_starts_sensitive_segment(&value[start..]) {
+            output.push_str(&value[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        output.push_str(&value[cursor..start]);
+        output.push_str("[REDACTED_PATH]");
+        cursor = value[start..]
+            .char_indices()
+            .find_map(|(index, c)| legacy_import_source_path_boundary(c).then_some(start + index))
+            .unwrap_or(value.len());
+    }
+    output
+}
+
+fn legacy_import_source_path_starts_sensitive_segment(value: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/home/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+    ];
+
+    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+}
+
+fn legacy_import_source_path_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
+}
+
 fn io_error(path: &Path, error: io::Error) -> LegacyImportScanError {
     LegacyImportScanError::Io {
         path: path.to_path_buf(),
@@ -1012,7 +1065,7 @@ impl LegacyMappingReport {
         json!({
             "schema": self.schema,
             "command": "import legacy-mapping",
-            "sourcePath": self.source_path,
+            "sourcePath": redact_legacy_import_source_path(&self.source_path),
             "statistics": {
                 "totalArtifacts": self.statistics.total_artifacts,
                 "importableMemories": self.statistics.importable_memories,
@@ -1059,7 +1112,10 @@ impl LegacyMappingReport {
         let mut out = String::with_capacity(1024);
         out.push_str("Legacy Mapping Report\n");
         out.push_str("=====================\n\n");
-        out.push_str(&format!("Source: {}\n\n", self.source_path));
+        out.push_str(&format!(
+            "Source: {}\n\n",
+            redact_legacy_import_source_path(&self.source_path)
+        ));
 
         out.push_str("Statistics:\n");
         out.push_str(&format!(
@@ -1439,6 +1495,43 @@ mod tests {
         )
     }
 
+    #[test]
+    fn scan_report_json_redacts_sensitive_source_path() -> TestResult {
+        let report = super::LegacyImportScanReport {
+            schema: IMPORT_EIDETIC_LEGACY_SCAN_SCHEMA_V1,
+            source_path: concat!(
+                "file:///Users/jemanuel/.eidetic/legacy.json?",
+                "api",
+                "_key=sk-test-12345678901234567890"
+            )
+            .to_string(),
+            dry_run: true,
+            status: LegacyImportScanStatus::Completed,
+            scanned_files: 1,
+            skipped_files: 0,
+            artifacts: vec![],
+        };
+
+        let rendered = report.data_json().to_string();
+
+        ensure(
+            rendered.contains("[REDACTED_PATH]"),
+            format!("scan JSON should redact path-like sourcePath: {rendered}"),
+        )?;
+        ensure(
+            rendered.contains("[REDACTED:"),
+            format!("scan JSON should redact secret-like sourcePath: {rendered}"),
+        )?;
+        ensure(
+            !rendered.contains("/Users/jemanuel"),
+            format!("scan JSON leaked raw sourcePath: {rendered}"),
+        )?;
+        ensure(
+            !rendered.contains("12345678901234567890"),
+            format!("scan JSON leaked sourcePath secret material: {rendered}"),
+        )
+    }
+
     // ========================================================================
     // EE-271: Mapping Report Tests
     // ========================================================================
@@ -1618,6 +1711,44 @@ mod tests {
         assert!(human.contains("Source:"));
         assert!(human.contains("Statistics:"));
         assert!(human.contains("Type Mappings:"));
+    }
+
+    #[test]
+    fn mapping_report_outputs_redact_sensitive_source_path() -> TestResult {
+        let scan = super::LegacyImportScanReport {
+            schema: IMPORT_EIDETIC_LEGACY_SCAN_SCHEMA_V1,
+            source_path: concat!(
+                "file:///Volumes/USBNVME16TB/private/legacy.db?",
+                "api",
+                "_key=sk-test-abcdefghijklmnop"
+            )
+            .to_string(),
+            dry_run: true,
+            status: LegacyImportScanStatus::NoArtifacts,
+            scanned_files: 0,
+            skipped_files: 0,
+            artifacts: vec![],
+        };
+
+        let report = LegacyMappingReport::from_scan(&scan);
+        let rendered = format!("{}{}", report.data_json(), report.human_summary());
+
+        ensure(
+            rendered.contains("[REDACTED_PATH]"),
+            format!("mapping output should redact path-like sourcePath: {rendered}"),
+        )?;
+        ensure(
+            rendered.contains("[REDACTED:"),
+            format!("mapping output should redact secret-like sourcePath: {rendered}"),
+        )?;
+        ensure(
+            !rendered.contains("/Volumes/USBNVME16TB"),
+            format!("mapping output leaked raw sourcePath: {rendered}"),
+        )?;
+        ensure(
+            !rendered.contains("abcdefghijklmnop"),
+            format!("mapping output leaked sourcePath secret material: {rendered}"),
+        )
     }
 
     // ========================================================================
