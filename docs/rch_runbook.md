@@ -49,14 +49,15 @@ Before launching RCH, decide what source tree the proof should mean:
 |---|---|---|
 | You are intentionally verifying the current shared checkout, including dirty files. | Live checkout | `scripts/rch_verify.sh --bead-id bd-XXXX -- cargo test --lib my_test -- --nocapture` |
 | You need closeout evidence that no dirty source, Beads churn, or scratch artifacts influenced the run. | Strict clean checkout | `scripts/rch_verify.sh --bead-id bd-XXXX --summary --require-clean-tree -- cargo test --lib my_test -- --nocapture` |
-| You need to prove which committed tree would be verified while other agents have dirty files. | Committed-tree manifest | `scripts/rch_verify.sh --bead-id bd-XXXX --summary --committed-tree --treeish HEAD -- cargo test --lib my_test -- --nocapture` |
+| You need to verify committed source while other agents have dirty files. | Committed-tree export | `scripts/rch_verify.sh --bead-id bd-XXXX --summary --committed-tree --treeish HEAD -- cargo test --lib my_test -- --nocapture` |
 
-Current committed-tree mode is deliberately conservative: it resolves
-`--treeish`, records the commit/tree and manifest hash, then refuses before RCH
-with `rch_verify_committed_tree_unsupported` until a safe source
-materialization or RCH sync-filter protocol exists. If it reports
+Committed-tree mode is deliberately conservative: it resolves `--treeish`,
+records the commit/tree and manifest hash, then materializes that committed tree
+into a generated source export when it can be represented safely. If it reports
+`rch_verify_committed_tree_unsupported`, the ref was unresolved or the committed
+tree could not be exported safely. If it reports
 `rch_verify_committed_tree_path_deps_unsupported`, the committed tree has path
-dependencies that cannot be represented safely by the manifest alone.
+dependencies that cannot be represented safely by the export alone.
 
 Never use source-proof modes as permission to run `git worktree`, `git stash`,
 `git reset`, `git checkout`, deletion cleanup, or local Cargo. The correct

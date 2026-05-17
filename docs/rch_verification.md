@@ -48,15 +48,16 @@ honest for the claim you need to make.
 |---|---|---:|---|---|
 | Live checkout | `scripts/rch_verify.sh -- cargo test ...` | yes | The current checkout state is the thing being verified, including any dirty paths. | `verification_attribution=live_dirty_checkout`; may still pass remotely. |
 | Strict clean checkout | `scripts/rch_verify.sh --require-clean-tree -- cargo test ...` | only if clean | You need proof that no tracked, Beads, scratch, or unsafe untracked paths influenced the run. | Clean: `strict_clean_tree`; dirty: `source_state_refused` before RCH. |
-| Committed tree manifest | `scripts/rch_verify.sh --committed-tree --treeish HEAD -- cargo test ...` | no, currently refuses | You need a deterministic manifest for a committed source tree while the shared checkout is dirty. | `committed_tree_unsupported` until safe source materialization exists. |
+| Committed tree export | `scripts/rch_verify.sh --committed-tree --treeish HEAD -- cargo test ...` | yes for safe trees | You need to verify committed source while the shared checkout is dirty. | Safe no-path-dependency trees run from a generated export with `verification_attribution=committed_tree`; unsupported refs/path dependencies refuse before RCH. |
 
 Strict clean mode is the closeout mode for "this exact checkout is clean and
-remote-verified." Committed-tree mode is currently a source-proof mode, not a
-remote execution mode: it resolves the requested treeish, records `git_tree`,
-`resolved_commit`, `source_manifest_hash`, `source_manifest_file_count`, and
-`source_manifest_byte_count`, then refuses before RCH with
-`rch_verify_committed_tree_unsupported`. If `Cargo.toml` contains path
-dependencies, the proof also carries
+remote-verified." Committed-tree mode resolves the requested treeish, records
+`git_tree`, `resolved_commit`, `source_manifest_hash`,
+`source_manifest_file_count`, and `source_manifest_byte_count`, then
+materializes that committed tree into a generated source export when the tree is
+safe to represent without path dependencies. If the ref is unresolved or
+`Cargo.toml` contains path dependencies, the proof refuses before RCH with
+`rch_verify_committed_tree_unsupported` and, for path dependencies,
 `rch_verify_committed_tree_path_deps_unsupported`; do not reinterpret that as a
 successful verification of the live checkout.
 
@@ -71,8 +72,8 @@ scripts/rch_verify.sh --bead-id bd-XXXX --summary -- \
 scripts/rch_verify.sh --bead-id bd-XXXX --summary --require-clean-tree -- \
   cargo test --test rch_verify_contract strict_clean_tree -- --nocapture
 
-# Committed-tree source proof. Computes a manifest, then refuses until the
-# source materialization protocol exists.
+# Committed-tree proof. Safe no-path-dependency trees run from a generated
+# source export; path-dependency trees refuse before RCH with an unsupported code.
 scripts/rch_verify.sh --bead-id bd-XXXX --summary --committed-tree --treeish HEAD -- \
   cargo test --test rch_verify_contract committed_tree_ -- --nocapture
 ```
