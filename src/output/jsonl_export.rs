@@ -48,6 +48,22 @@ pub const REDACTED_PATH_PLACEHOLDER: &str = "[REDACTED_PATH]";
 /// Placeholder for redacted identifiers.
 pub const REDACTED_ID_PLACEHOLDER: &str = "[REDACTED_ID]";
 
+const SENSITIVE_PATH_PREFIXES: &[&str] = &[
+    "/home/",
+    "/Users/",
+    "/Volumes/",
+    "/private/",
+    "/var/",
+    "/tmp/",
+    "/data/",
+    "/dp/",
+    "/workspace/",
+    "/repo/",
+    "/etc/",
+    "C:\\",
+    "D:\\",
+];
+
 /// Check if content contains patterns that suggest secrets.
 #[must_use]
 pub fn contains_secret_pattern(content: &str) -> bool {
@@ -89,7 +105,7 @@ pub fn redact_content(content: &str, level: RedactionLevel) -> String {
 /// Redact file paths in content.
 fn redact_paths_in_content(content: &str) -> String {
     let mut result = content.to_owned();
-    for prefix in ["/home/", "/Users/", "/data/", "C:\\", "D:\\"] {
+    for prefix in SENSITIVE_PATH_PREFIXES {
         if result.contains(prefix) {
             let lines: Vec<&str> = result.lines().collect();
             let redacted_lines: Vec<String> = lines
@@ -108,7 +124,7 @@ fn redact_paths_in_content(content: &str) -> String {
                                         .chars()
                                         .next()
                                         .expect("cursor stays on a character boundary");
-                                    if next.is_whitespace() || next == '"' || next == '\'' {
+                                    if path_redaction_boundary(next) {
                                         break;
                                     }
                                     cursor += next.len_utf8();
@@ -134,6 +150,16 @@ fn redact_paths_in_content(content: &str) -> String {
     result
 }
 
+fn starts_with_sensitive_path_prefix(value: &str) -> bool {
+    SENSITIVE_PATH_PREFIXES
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
+}
+
+fn path_redaction_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
+}
+
 /// Redact a path string.
 #[must_use]
 pub fn redact_path(path: &str, level: RedactionLevel) -> String {
@@ -143,15 +169,12 @@ pub fn redact_path(path: &str, level: RedactionLevel) -> String {
         | RedactionLevel::Strict
         | RedactionLevel::Paranoid
         | RedactionLevel::Full => {
-            if path.starts_with("/home/")
-                || path.starts_with("/Users/")
-                || path.starts_with("/data/")
-                || path.starts_with("C:\\")
-                || path.starts_with("D:\\")
-            {
+            if contains_secret_pattern(path) {
+                REDACTED_PLACEHOLDER.to_owned()
+            } else if starts_with_sensitive_path_prefix(path) {
                 REDACTED_PATH_PLACEHOLDER.to_owned()
             } else {
-                path.to_owned()
+                redact_paths_in_content(path)
             }
         }
     }
@@ -906,6 +929,22 @@ mod tests {
             "standard redacts home paths",
         )?;
         ensure(
+            redact_path(
+                "/Volumes/USBNVME16TB/private/model.bin",
+                RedactionLevel::Standard,
+            ),
+            REDACTED_PATH_PLACEHOLDER.to_owned(),
+            "standard redacts mounted-volume paths",
+        )?;
+        ensure(
+            redact_path(
+                "file:///Users/alice/private/model.bin?download=1",
+                RedactionLevel::Standard,
+            ),
+            format!("file://{REDACTED_PATH_PLACEHOLDER}?download=1"),
+            "standard redacts URI-wrapped home paths without losing query text",
+        )?;
+        ensure(
             redact_path("/usr/local/bin", RedactionLevel::Standard),
             "/usr/local/bin".to_owned(),
             "standard preserves system paths",
@@ -985,6 +1024,27 @@ mod tests {
     }
 
     #[test]
+    fn redact_memory_record_standard_redacts_uri_wrapped_provenance_path() {
+        let record = ExportMemoryRecord::builder()
+            .memory_id("mem-uri-path")
+            .workspace_id("ws-uri-path")
+            .level("procedural")
+            .kind("rule")
+            .content("normal content")
+            .provenance_uri("file:///Users/alice/private/memory.md?download=1")
+            .created_at("2026-04-30T12:00:00Z")
+            .build()
+            .expect("memory has required fields");
+
+        let redacted = redact_memory_record(record, RedactionLevel::Standard);
+        let provenance = redacted.provenance_uri.expect("provenance stays present");
+
+        assert!(provenance.contains(REDACTED_PATH_PLACEHOLDER));
+        assert!(provenance.contains("?download=1"));
+        assert!(!provenance.contains("/Users/alice/private"));
+    }
+
+    #[test]
     fn jsonl_exporter_writes_header() {
         let mut output = Vec::new();
         let mut exporter = JsonlExporter::new(&mut output, RedactionLevel::None, ExportScope::All);
@@ -1042,6 +1102,7 @@ mod tests {
             .artifact_type("log")
             .canonical_path("/data/projects/example/logs/build.log")
             .external_ref(format!("/Users/example/private/{secret_fixture}.log"))
+            .provenance_uri("file:///Volumes/USBNVME16TB/private/support.json")
             .content_hash("blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
             .media_type("text/plain")
             .size_bytes(42)
@@ -1067,6 +1128,7 @@ mod tests {
         assert!(written.contains(REDACTED_PATH_PLACEHOLDER));
         assert!(!written.contains(&secret_fixture));
         assert!(!written.contains("/Users/example/private"));
+        assert!(!written.contains("/Volumes/USBNVME16TB/private"));
         ensure(artifact_count, 1, "artifact count")
     }
 
