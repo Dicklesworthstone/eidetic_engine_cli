@@ -153,6 +153,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "rule_provenance_ego"
+path = "fuzz_targets/rule_provenance_ego.rs"
+test = false
+doc = false
+bench = false
+
 [patch.crates-io]
 asupersync = { path = "/data/projects/asupersync" }
 fsqlite = { path = "/data/projects/frankensqlite/crates/fsqlite" }
