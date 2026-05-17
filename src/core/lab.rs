@@ -10,8 +10,8 @@
 //! - **counterfactual**: Emit pack-diff hypotheses that require external validation
 
 use std::{
-    fs::{self, OpenOptions},
-    io::{ErrorKind, Write},
+    fs::{self, File, OpenOptions},
+    io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -811,7 +811,7 @@ fn read_frozen_episode(
             ),
         ));
     }
-    let text = match fs::read_to_string(path) {
+    let text = match read_lab_file_to_string_no_follow(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(lab_storage_error("read frozen episode artifact", error)),
@@ -827,6 +827,30 @@ fn read_frozen_episode(
     }
     Ok(Some(artifact))
 }
+
+fn read_lab_file_to_string_no_follow(path: &Path) -> std::io::Result<String> {
+    let mut file = open_lab_file_for_read_no_follow(path)?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+fn open_lab_file_for_read_no_follow(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_lab_file_read_options(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_lab_file_read_options(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_lab_file_read_options(_options: &mut OpenOptions) {}
 
 fn frozen_episode_path(workspace: &Path, episode_id: &str) -> PathBuf {
     workspace
@@ -1508,6 +1532,39 @@ mod tests {
             error.message().contains("symlinked path component"),
             true,
             "symlinked artifact error message",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lab_file_final_read_open_rejects_symlinked_artifact() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_artifact = tempdir.path().join("outside-episode.json");
+        fs::write(&outside_artifact, "{\"schema\":\"outside\"}\n")
+            .map_err(|error| error.to_string())?;
+        let linked_artifact = tempdir.path().join("episode.json");
+        symlink(&outside_artifact, &linked_artifact).map_err(|error| error.to_string())?;
+
+        let error = open_lab_file_for_read_no_follow(&linked_artifact)
+            .expect_err("final frozen episode read open must reject symlinks");
+
+        ensure(
+            error.kind() != ErrorKind::NotFound,
+            "final symlink read should fail because the path is a symlink",
+        )?;
+        ensure_equal(
+            fs::read_to_string(&outside_artifact).map_err(|error| error.to_string())?,
+            "{\"schema\":\"outside\"}\n",
+            "outside artifact content",
+        )?;
+        ensure(
+            fs::symlink_metadata(&linked_artifact)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "final artifact symlink remains untouched",
         )
     }
 
