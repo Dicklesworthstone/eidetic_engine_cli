@@ -1923,7 +1923,10 @@ fn summarize_coordination_fallback_record(record: &Value) -> Option<Value> {
         "status": evidence.get("status").and_then(Value::as_str),
         "source": {
             "kind": evidence.pointer("/source/kind").and_then(Value::as_str),
-            "sourceId": evidence.pointer("/source/sourceId").and_then(Value::as_str),
+            "sourceId": evidence
+                .pointer("/source/sourceId")
+                .and_then(Value::as_str)
+                .map(redact_support_diagnostic_text),
         },
         "reasonCode": evidence.get("reasonCode").and_then(Value::as_str),
         "contentHash": content_hash,
@@ -2729,7 +2732,10 @@ mod tests {
             "evidenceId": "coord_fallback_test_01",
             "capturedAt": "2026-05-16T21:06:00Z",
             "status": "unavailable",
-            "source": {"kind": "agent_mail", "sourceId": "mcp-agent-mail"},
+            "source": {
+                "kind": "agent_mail",
+                "sourceId": "file:///Users/alice/private/agent-mail.jsonl?api_key=redaction-fixture"
+            },
             "reasonCode": "agent_mail_transport_unavailable",
             "summary": {
                 "text": raw_summary,
@@ -2802,6 +2808,18 @@ mod tests {
         assert!(
             !summary_text.contains(raw_summary),
             "summary must not include raw fallback summary text"
+        );
+        assert!(
+            summary_text.contains("[REDACTED:path]"),
+            "summary should redact path-like source IDs"
+        );
+        assert!(
+            summary_text.contains("[REDACTED:"),
+            "summary should redact secret-like source IDs"
+        );
+        assert!(
+            !summary_text.contains("/Users/alice") && !summary_text.contains("redaction-fixture"),
+            "summary leaked sensitive source ID: {summary_text}"
         );
         Ok(())
     }
