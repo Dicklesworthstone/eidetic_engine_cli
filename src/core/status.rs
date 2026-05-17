@@ -68,6 +68,8 @@ const GRAPH_COMPUTE_ALGORITHMS: &[&str] = &[
     "feature_enrichment",
     "neighborhood",
 ];
+const PACK_BUDGET_BUCKET_SCHEMA_V1: &str = "ee.status.pack_budget_buckets.v1";
+const PACK_BUDGET_BUCKET_WINDOW_HOURS: u32 = 24;
 
 /// Memory subsystem health status.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1155,6 +1157,7 @@ pub struct StatusReport {
     pub capabilities: CapabilityReport,
     pub runtime: RuntimeReport,
     pub read_pool: ReadPoolStatusReport,
+    pub pack_budget_buckets: PackBudgetBucketReport,
     pub qos_posture: super::qos::QosLaneSummary,
     pub memory_health: MemoryHealthReport,
     pub curation_health: CurationHealthReport,
@@ -1167,6 +1170,38 @@ pub struct StatusReport {
     pub tailscale_local: Option<TailscaleLocalReport>,
     pub agent_inventory: AgentInventoryReport,
     pub degradations: Vec<DegradationReport>,
+}
+
+/// Last-24h context-pack token-budget bucket counts for tuning adaptive packs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PackBudgetBucketReport {
+    pub schema: &'static str,
+    pub window_hours: u32,
+    pub total_invocations: u32,
+    pub adaptive_invocations: u32,
+    pub non_adaptive_invocations: u32,
+    pub below_one_k: u32,
+    pub one_to_two_k: u32,
+    pub two_to_four_k: u32,
+    pub four_to_eight_k: u32,
+    pub eight_k_plus: u32,
+}
+
+impl Default for PackBudgetBucketReport {
+    fn default() -> Self {
+        Self {
+            schema: PACK_BUDGET_BUCKET_SCHEMA_V1,
+            window_hours: PACK_BUDGET_BUCKET_WINDOW_HOURS,
+            total_invocations: 0,
+            adaptive_invocations: 0,
+            non_adaptive_invocations: 0,
+            below_one_k: 0,
+            one_to_two_k: 0,
+            two_to_four_k: 0,
+            four_to_eight_k: 0,
+            eight_k_plus: 0,
+        }
+    }
 }
 
 impl StatusReport {
@@ -1195,6 +1230,7 @@ impl StatusReport {
             CapabilityReport::gather_with_workspace(options.workspace_path.as_deref());
         let runtime = RuntimeReport::gather();
         let read_pool = ReadPoolStatusReport::gather();
+        let pack_budget_buckets = gather_pack_budget_buckets(options.workspace_path.as_deref());
         let qos_posture = gather_qos_posture(options.workspace_path.as_deref());
         let (memory_health, memory_health_degradations) =
             gather_memory_health(options.workspace_path.as_deref());
@@ -1267,6 +1303,7 @@ impl StatusReport {
             capabilities,
             runtime,
             read_pool,
+            pack_budget_buckets,
             qos_posture,
             memory_health,
             curation_health,
@@ -1303,6 +1340,82 @@ fn gather_mesh_storage_status_from_connection(
         report.add(&status);
     }
     Some(report)
+}
+
+fn gather_pack_budget_buckets(workspace_path: Option<&Path>) -> PackBudgetBucketReport {
+    let Some(workspace_path) = workspace_path else {
+        return PackBudgetBucketReport::default();
+    };
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return PackBudgetBucketReport::default();
+    }
+    let canonical_workspace = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    let workspace_id = stable_workspace_id(&canonical_workspace);
+    let Ok(connection) = DbConnection::open_file(&database_path) else {
+        return PackBudgetBucketReport::default();
+    };
+    let Ok(entries) = connection.list_audit_entries(Some(&workspace_id), None) else {
+        return PackBudgetBucketReport::default();
+    };
+    pack_budget_buckets_from_audit_entries(&entries, Utc::now())
+}
+
+fn pack_budget_buckets_from_audit_entries(
+    entries: &[StoredAuditEntry],
+    now: DateTime<Utc>,
+) -> PackBudgetBucketReport {
+    let window_start = now - ChronoDuration::hours(i64::from(PACK_BUDGET_BUCKET_WINDOW_HOURS));
+    let mut report = PackBudgetBucketReport::default();
+    for entry in entries {
+        if entry.action != audit_actions::PACK_ASSEMBLED {
+            continue;
+        }
+        let Ok(timestamp) = DateTime::parse_from_rfc3339(&entry.timestamp) else {
+            continue;
+        };
+        if timestamp.with_timezone(&Utc) < window_start {
+            continue;
+        }
+        let Some((budget, adaptive)) = entry
+            .details
+            .as_deref()
+            .and_then(pack_budget_from_audit_details)
+        else {
+            continue;
+        };
+        report.total_invocations = report.total_invocations.saturating_add(1);
+        if adaptive {
+            report.adaptive_invocations = report.adaptive_invocations.saturating_add(1);
+        } else {
+            report.non_adaptive_invocations = report.non_adaptive_invocations.saturating_add(1);
+        }
+        match budget {
+            0..=999 => report.below_one_k = report.below_one_k.saturating_add(1),
+            1_000..=1_999 => report.one_to_two_k = report.one_to_two_k.saturating_add(1),
+            2_000..=3_999 => report.two_to_four_k = report.two_to_four_k.saturating_add(1),
+            4_000..=7_999 => report.four_to_eight_k = report.four_to_eight_k.saturating_add(1),
+            _ => report.eight_k_plus = report.eight_k_plus.saturating_add(1),
+        }
+    }
+    report
+}
+
+fn pack_budget_from_audit_details(details: &str) -> Option<(u32, bool)> {
+    let value = serde_json::from_str::<serde_json::Value>(details).ok()?;
+    let budget = value
+        .get("budget")
+        .or_else(|| value.get("maxTokens"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())?;
+    let adaptive = value
+        .get("adaptiveBudget")
+        .and_then(|adaptive| adaptive.get("adaptive"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    Some((budget, adaptive))
 }
 
 fn gather_qos_posture(workspace_path: Option<&Path>) -> super::qos::QosLaneSummary {
@@ -3578,6 +3691,78 @@ mod tests {
         DateTime::parse_from_rfc3339(s)
             .map(|dt| dt.with_timezone(&Utc))
             .map_err(|e| format!("invalid timestamp '{s}': {e}"))
+    }
+
+    fn audit_entry(action: &str, timestamp: &str, details: Option<String>) -> StoredAuditEntry {
+        StoredAuditEntry {
+            id: format!("audit_{action}_{timestamp}"),
+            workspace_id: Some("wsp_test".to_string()),
+            timestamp: timestamp.to_string(),
+            actor: None,
+            action: action.to_string(),
+            target_type: Some("pack".to_string()),
+            target_id: Some("pack_test".to_string()),
+            details,
+            surface: "pack".to_string(),
+            mutation_kind: action.to_string(),
+            before_hash: None,
+            after_hash: None,
+            prev_row_hash: None,
+            this_row_hash: None,
+        }
+    }
+
+    #[test]
+    fn pack_budget_buckets_count_recent_pack_assembled_rows() -> TestResult {
+        let now = parse_ts("2026-05-17T07:00:00Z")?;
+        let entries = vec![
+            audit_entry(
+                audit_actions::PACK_ASSEMBLED,
+                "2026-05-17T06:59:00Z",
+                Some(r#"{"budget":999}"#.to_string()),
+            ),
+            audit_entry(
+                audit_actions::PACK_ASSEMBLED,
+                "2026-05-17T06:58:00Z",
+                Some(r#"{"budget":1500,"adaptiveBudget":{"adaptive":true}}"#.to_string()),
+            ),
+            audit_entry(
+                audit_actions::PACK_ASSEMBLED,
+                "2026-05-17T06:57:00Z",
+                Some(r#"{"budget":3000}"#.to_string()),
+            ),
+            audit_entry(
+                audit_actions::PACK_ASSEMBLED,
+                "2026-05-17T06:56:00Z",
+                Some(r#"{"budget":4000,"adaptiveBudget":{"adaptive":true}}"#.to_string()),
+            ),
+            audit_entry(
+                audit_actions::PACK_ASSEMBLED,
+                "2026-05-17T06:55:00Z",
+                Some(r#"{"budget":12000}"#.to_string()),
+            ),
+            audit_entry(
+                audit_actions::PACK_ASSEMBLED,
+                "2026-05-16T06:55:00Z",
+                Some(r#"{"budget":12000,"adaptiveBudget":{"adaptive":true}}"#.to_string()),
+            ),
+            audit_entry(
+                "memory.create",
+                "2026-05-17T06:54:00Z",
+                Some(r#"{"budget":1500}"#.to_string()),
+            ),
+        ];
+
+        let report = pack_budget_buckets_from_audit_entries(&entries, now);
+
+        ensure(report.total_invocations, 5, "total recent pack rows")?;
+        ensure(report.adaptive_invocations, 2, "adaptive rows")?;
+        ensure(report.non_adaptive_invocations, 3, "non-adaptive rows")?;
+        ensure(report.below_one_k, 1, "below 1k")?;
+        ensure(report.one_to_two_k, 1, "1-2k")?;
+        ensure(report.two_to_four_k, 1, "2-4k")?;
+        ensure(report.four_to_eight_k, 1, "4-8k")?;
+        ensure(report.eight_k_plus, 1, "8k+")
     }
 
     #[test]

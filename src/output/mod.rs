@@ -1524,6 +1524,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "posture",
                 "capabilities",
                 "runtime",
+                "packBudgetBuckets",
                 "memoryHealth",
                 "curationHealth",
                 "feedbackHealth",
@@ -3203,6 +3204,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
             r.field_str("asyncBoundary", report.runtime.async_boundary);
         });
         render_read_pool_status_json(d, &report.read_pool);
+        render_pack_budget_buckets_json(d, &report.pack_budget_buckets);
         render_qos_status_json(d, &report.qos_posture, false);
         render_memory_health_json(d, &report.memory_health);
         render_curation_health_json(d, &report.curation_health);
@@ -3481,6 +3483,26 @@ fn render_read_pool_status_json(
             wait.field_raw("samples", &report.acquire_wait.samples.to_string());
             wait.field_raw("p50_ns", &report.acquire_wait.p50_ns.to_string());
             wait.field_raw("p99_ns", &report.acquire_wait.p99_ns.to_string());
+        });
+    });
+}
+
+fn render_pack_budget_buckets_json(
+    parent: &mut JsonBuilder,
+    report: &crate::core::status::PackBudgetBucketReport,
+) {
+    parent.field_object("packBudgetBuckets", |budget| {
+        budget.field_str("schema", report.schema);
+        budget.field_u32("windowHours", report.window_hours);
+        budget.field_u32("totalInvocations", report.total_invocations);
+        budget.field_u32("adaptiveInvocations", report.adaptive_invocations);
+        budget.field_u32("nonAdaptiveInvocations", report.non_adaptive_invocations);
+        budget.field_object("buckets", |buckets| {
+            buckets.field_u32("below1k", report.below_one_k);
+            buckets.field_u32("oneTo2k", report.one_to_two_k);
+            buckets.field_u32("twoTo4k", report.two_to_four_k);
+            buckets.field_u32("fourTo8k", report.four_to_eight_k);
+            buckets.field_u32("eightKPlus", report.eight_k_plus);
         });
     });
 }
@@ -3916,6 +3938,7 @@ pub fn render_status_json_with_meta(
             r.field_str("asyncBoundary", report.runtime.async_boundary);
         });
         render_read_pool_status_json(d, &report.read_pool);
+        render_pack_budget_buckets_json(d, &report.pack_budget_buckets);
         render_memory_health_json(d, &report.memory_health);
         render_graph_compute_json(d, &report.graph_compute);
         render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
@@ -9314,6 +9337,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
                 r.field_str("asyncBoundary", report.runtime.async_boundary);
             });
             render_read_pool_status_json(d, &report.read_pool);
+            render_pack_budget_buckets_json(d, &report.pack_budget_buckets);
             render_memory_health_json(d, &report.memory_health);
             render_curation_health_json(d, &report.curation_health);
             render_feedback_health_json(d, &report.feedback_health);
@@ -15949,6 +15973,7 @@ mod tests {
         ensure_contains(&json, "\"capabilities\":", "has capabilities")?;
         ensure_contains(&json, "\"mesh\":\"pending\"", "mesh capability default")?;
         ensure_contains(&json, "\"runtime\":", "has runtime")?;
+        ensure_contains(&json, "\"packBudgetBuckets\":", "has pack budget buckets")?;
         ensure_contains(&json, "\"singleFlight\":", "has singleFlight")?;
         ensure_contains(
             &json,
