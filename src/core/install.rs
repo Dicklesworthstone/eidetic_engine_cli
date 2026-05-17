@@ -1193,9 +1193,14 @@ fn publish_extracted_binary(extracted_binary: &Path, install_path: &Path) -> Res
     })?;
     drop(temp_file);
 
+    publish_install_temp_binary(&temp_path, install_path)
+}
+
+fn publish_install_temp_binary(temp_path: &Path, install_path: &Path) -> Result<(), String> {
     ensure_install_target_path_is_regular_or_missing(install_path)?;
-    fs::rename(&temp_path, install_path).map_err(|error| {
-        let _ = fs::remove_file(&temp_path);
+    ensure_install_created_temp_path_is_regular(temp_path)?;
+    fs::rename(temp_path, install_path).map_err(|error| {
+        let _ = fs::remove_file(temp_path);
         format!(
             "failed to publish temporary install binary '{}' to '{}': {error}",
             temp_path.display(),
@@ -1228,6 +1233,37 @@ fn ensure_install_temp_path_absent(path: &Path) -> Result<(), String> {
             path.display()
         )),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "failed to inspect install temp path '{}': {error}",
+            path.display()
+        )),
+    }
+}
+
+fn ensure_install_created_temp_path_is_regular(path: &Path) -> Result<(), String> {
+    match install_path_has_symlink_component(path) {
+        Ok(Some(component)) => {
+            return Err(format!(
+                "install temp path '{}' traverses symbolic link '{}'",
+                path.display(),
+                component.display()
+            ));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect install temp path '{}': {error}",
+                path.display()
+            ));
+        }
+    }
+
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(format!(
+            "install temp path '{}' is not a regular file",
+            path.display()
+        )),
         Err(error) => Err(format!(
             "failed to inspect install temp path '{}': {error}",
             path.display()
@@ -2352,6 +2388,83 @@ mod tests {
         ensure(
             !install_path.exists(),
             "final install path must not be published when temp exists",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_install_temp_rechecks_final_symlink_before_rename() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let install_path = tempdir.path().join("bin").join("ee");
+        let temp_path = install_temp_path(&install_path)?;
+        fs::create_dir_all(install_path.parent().expect("install parent"))
+            .map_err(|error| error.to_string())?;
+        fs::write(&temp_path, b"new binary").map_err(|error| error.to_string())?;
+        let outside_binary = tempdir.path().join("outside-ee");
+        fs::write(&outside_binary, b"outside binary").map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_binary, &install_path)
+            .map_err(|error| error.to_string())?;
+
+        let error = publish_install_temp_binary(&temp_path, &install_path)
+            .expect_err("symlinked final install path should reject before publish");
+
+        ensure(
+            error.contains("symbolic link"),
+            "final symlink error should mention symbolic link",
+        )?;
+        ensure_equal(
+            fs::read(&outside_binary).map_err(|error| error.to_string())?,
+            b"outside binary".to_vec(),
+            "outside binary content",
+        )?;
+        ensure(
+            temp_path.is_file(),
+            "temp install binary should remain after final path rejection",
+        )?;
+        ensure(
+            fs::symlink_metadata(&install_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "final install symlink should remain untouched",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_install_temp_rechecks_temp_symlink_before_rename() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let install_path = tempdir.path().join("bin").join("ee");
+        let temp_path = install_temp_path(&install_path)?;
+        fs::create_dir_all(install_path.parent().expect("install parent"))
+            .map_err(|error| error.to_string())?;
+        let outside_binary = tempdir.path().join("outside-ee");
+        fs::write(&outside_binary, b"outside binary").map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_binary, &temp_path)
+            .map_err(|error| error.to_string())?;
+
+        let error = publish_install_temp_binary(&temp_path, &install_path)
+            .expect_err("symlinked temp install path should reject before publish");
+
+        ensure(
+            error.contains("symbolic link"),
+            "temp symlink error should mention symbolic link",
+        )?;
+        ensure(
+            !install_path.exists(),
+            "final install path must not be published from a temp symlink",
+        )?;
+        ensure_equal(
+            fs::read(&outside_binary).map_err(|error| error.to_string())?,
+            b"outside binary".to_vec(),
+            "outside binary content",
+        )?;
+        ensure(
+            fs::symlink_metadata(&temp_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "temp install symlink should remain untouched",
         )
     }
 
