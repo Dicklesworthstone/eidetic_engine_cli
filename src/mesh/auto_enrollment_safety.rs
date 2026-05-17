@@ -215,9 +215,15 @@ pub struct AutoEnrollmentSummary {
     pub intended_lane_policy: IntendedLanePolicyJson,
     #[serde(rename = "triggerReason")]
     pub trigger_reason: String,
-    #[serde(rename = "previousPeerGroupId", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "previousPeerGroupId",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub previous_peer_group_id: Option<String>,
-    #[serde(rename = "previousPeerSetHash", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "previousPeerSetHash",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub previous_peer_set_hash: Option<String>,
     #[serde(rename = "intendedPeerSetHash")]
     pub intended_peer_set_hash: String,
@@ -274,8 +280,12 @@ pub enum SafetySnapshotError {
 impl std::fmt::Display for SafetySnapshotError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Serialize(error) => write!(f, "failed to serialize auto-enrollment summary: {error}"),
-            Self::AuditWrite(error) => write!(f, "failed to write auto-enrollment audit row: {error}"),
+            Self::Serialize(error) => {
+                write!(f, "failed to serialize auto-enrollment summary: {error}")
+            }
+            Self::AuditWrite(error) => {
+                write!(f, "failed to write auto-enrollment audit row: {error}")
+            }
         }
     }
 }
@@ -342,8 +352,7 @@ pub fn emit_safety_snapshot_audit(
     actor: Option<&str>,
     target_id: Option<&str>,
 ) -> Result<String, SafetySnapshotError> {
-    let details_json =
-        serde_json::to_string(summary).map_err(SafetySnapshotError::Serialize)?;
+    let details_json = serde_json::to_string(summary).map_err(SafetySnapshotError::Serialize)?;
     let audit_id = generate_audit_id();
     let input = CreateAuditInput {
         workspace_id: Some(summary.workspace_id.clone()),
@@ -574,7 +583,11 @@ mod tests {
         );
         // The reversal command must contain the literal substitution so an
         // operator can copy-paste it without further processing.
-        assert!(summary.reversal_command.contains("/data/projects/eidetic_engine_cli"));
+        assert!(
+            summary
+                .reversal_command
+                .contains("/data/projects/eidetic_engine_cli")
+        );
     }
 
     #[test]
@@ -622,7 +635,10 @@ mod tests {
         });
         let summary_b = compute_summary(&modified_input);
         assert_ne!(summary_a.summary_hash, summary_b.summary_hash);
-        assert_ne!(summary_a.intended_peer_set_hash, summary_b.intended_peer_set_hash);
+        assert_ne!(
+            summary_a.intended_peer_set_hash,
+            summary_b.intended_peer_set_hash
+        );
     }
 
     #[test]
@@ -653,7 +669,10 @@ mod tests {
 
         let summary_a = compute_summary(&input_a);
         let summary_b = compute_summary(&input_b);
-        assert_eq!(summary_a.intended_peer_set_hash, summary_b.intended_peer_set_hash);
+        assert_eq!(
+            summary_a.intended_peer_set_hash,
+            summary_b.intended_peer_set_hash
+        );
         assert_eq!(summary_a.summary_hash, summary_b.summary_hash);
     }
 
@@ -697,7 +716,8 @@ mod tests {
     fn safety_snapshot_records_previous_peer_group_id_when_replacing_existing_materialization() {
         let mut input = fixture_input();
         input.previous_peer_group_id = Some("pg_existing_aaaaaa");
-        input.previous_peer_set_hash = Some("blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd");
+        input.previous_peer_set_hash =
+            Some("blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd");
         let summary = compute_summary(&input);
         assert_eq!(
             summary.previous_peer_group_id.as_deref(),
