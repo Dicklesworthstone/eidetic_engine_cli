@@ -190,6 +190,7 @@ use crate::core::swarm_brief::{
     SystemSwarmBriefCommandRunner, all_swarm_brief_sources, collect_swarm_brief,
     default_swarm_brief_sources,
 };
+use crate::core::swarm_next_action::{SwarmNextActionSnapshot, collect_swarm_next_action_snapshot};
 use crate::core::task_frame::{
     TaskEvidenceLink, TaskFrameCloseOptions, TaskFrameCreateOptions, TaskFrameReport,
     TaskFrameShowOptions, TaskFrameStatus, TaskFrameUpdateOptions, TaskSubgoalAddOptions,
@@ -8027,12 +8028,46 @@ pub struct SupportInspectArgs {
 pub enum SwarmCommand {
     /// Emit a read-only coordination brief for agent swarms.
     Brief(SwarmBriefArgs),
+    /// Emit a read-only next-action input snapshot for work allocation.
+    NextAction(SwarmNextActionArgs),
 }
 
 /// Arguments for `ee swarm brief`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct SwarmBriefArgs {
     /// Comma-separated sources to collect: default, all, none, git, beads, bv, agent-mail, rch, host-profile, agent-inventory.
+    #[arg(long, value_name = "LIST", default_value = "default")]
+    pub sources: String,
+
+    /// Include the optional RCH status probe. Equivalent to adding rch to --sources.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_rch: bool,
+
+    /// Redacted Agent Mail snapshot JSON to include. No live Agent Mail mutation is performed.
+    #[arg(long, value_name = "PATH")]
+    pub agent_mail_snapshot: Option<PathBuf>,
+
+    /// Comma-separated agent connector slugs to inspect when agent-inventory is enabled.
+    #[arg(long, value_name = "SLUGS")]
+    pub agent_inventory_only: Option<String>,
+
+    /// Number of recent git commits to include when the git source is enabled.
+    #[arg(long, value_name = "N", default_value_t = 8)]
+    pub max_recent_commits: usize,
+
+    /// Per-source command timeout budget in milliseconds.
+    #[arg(long, value_name = "MS", default_value_t = 1_500)]
+    pub command_timeout_ms: u64,
+
+    /// Fail with exit code 6 when any selected source is unavailable, not configured, or skipped.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub require_sources: bool,
+}
+
+/// Arguments for `ee swarm next-action`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct SwarmNextActionArgs {
+    /// Comma-separated sources to collect: default, all, none, git, beads, bv, agent-mail, rch, host-profile, agent-inventory. For next-action, default includes rch.
     #[arg(long, value_name = "LIST", default_value = "default")]
     pub sources: String,
 
@@ -9500,6 +9535,9 @@ where
         }
         Some(Command::Swarm(SwarmCommand::Brief(ref args))) => {
             handle_swarm_brief(&cli, args, stdout, stderr)
+        }
+        Some(Command::Swarm(SwarmCommand::NextAction(ref args))) => {
+            handle_swarm_next_action(&cli, args, stdout, stderr)
         }
         Some(Command::Workspace(ref cmd)) => handle_workspace_command(&cli, cmd, stdout, stderr),
         Some(Command::Tripwire(TripwireCommand::List(ref args))) => {
@@ -37121,10 +37159,13 @@ where
     W: Write,
     E: Write,
 {
-    let enabled_sources = match parse_swarm_brief_sources(&args.sources, args.include_rch) {
+    let mut enabled_sources = match parse_swarm_brief_sources(&args.sources, args.include_rch) {
         Ok(sources) => sources,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
+    if args.sources.trim().eq_ignore_ascii_case("default") {
+        enabled_sources.insert(SwarmBriefSourceKind::Rch);
+    }
     let mut options = SwarmBriefCollectOptions::for_workspace(cli.resolve_workspace());
     options.max_recent_commits = args.max_recent_commits;
     options.include_rch = enabled_sources.contains(&SwarmBriefSourceKind::Rch);
@@ -37173,6 +37214,75 @@ where
                 cli.fields_level().to_field_profile()
             };
             match render_swarm_brief_json(&report, profile) {
+                Ok(json) => write_stdout(stdout, &(json + "\n")),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            }
+        }
+    }
+}
+
+fn handle_swarm_next_action<W, E>(
+    cli: &Cli,
+    args: &SwarmNextActionArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let enabled_sources = match parse_swarm_brief_sources(&args.sources, args.include_rch) {
+        Ok(sources) => sources,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let mut options = SwarmBriefCollectOptions::for_workspace(cli.resolve_workspace());
+    options.max_recent_commits = args.max_recent_commits;
+    options.include_rch = enabled_sources.contains(&SwarmBriefSourceKind::Rch);
+    options.enabled_sources = enabled_sources;
+    options.agent_mail_snapshot_path = args.agent_mail_snapshot.clone();
+    options.agent_inventory_only_connectors = args
+        .agent_inventory_only
+        .as_deref()
+        .map(parse_comma_separated_values);
+    options.command_timeout_ms = args.command_timeout_ms;
+
+    let runner = SystemSwarmBriefCommandRunner;
+    let snapshot = collect_swarm_next_action_snapshot(&options, &runner);
+    let unavailable_sources = swarm_next_action_unavailable_sources(&snapshot);
+    if args.require_sources && !unavailable_sources.is_empty() {
+        let error = DomainError::UnsatisfiedDegradedMode {
+            message: format!(
+                "Required swarm next-action sources are unavailable: {}.",
+                unavailable_sources.join(", ")
+            ),
+            repair: Some(
+                "Run without --require-sources, adjust --sources, or provide --agent-mail-snapshot."
+                    .to_string(),
+            ),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_swarm_next_action_markdown(&snapshot))
+        }
+        output::Renderer::Toon => {
+            match render_swarm_next_action_json(&snapshot, cli.fields_level().to_field_profile()) {
+                Ok(json) => write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n")),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            }
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let profile = if matches!(cli.renderer(), output::Renderer::Compact) {
+                output::FieldProfile::Summary
+            } else {
+                cli.fields_level().to_field_profile()
+            };
+            match render_swarm_next_action_json(&snapshot, profile) {
                 Ok(json) => write_stdout(stdout, &(json + "\n")),
                 Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
             }
@@ -37260,6 +37370,91 @@ fn swarm_brief_unavailable_sources(report: &SwarmBriefReport) -> Vec<String> {
         })
         .map(|source| format!("{}:{}", source.source.as_str(), source.status.as_str()))
         .collect()
+}
+
+fn swarm_next_action_unavailable_sources(snapshot: &SwarmNextActionSnapshot) -> Vec<String> {
+    snapshot
+        .degraded
+        .iter()
+        .map(|degradation| format!("{}:{}", degradation.source, degradation.code))
+        .collect()
+}
+
+fn render_swarm_next_action_json(
+    snapshot: &SwarmNextActionSnapshot,
+    profile: output::FieldProfile,
+) -> Result<String, DomainError> {
+    let data = match profile {
+        output::FieldProfile::Minimal => serde_json::json!({
+            "schema": snapshot.schema,
+            "workspace": &snapshot.workspace,
+            "redactionStatus": snapshot.redaction_status,
+            "candidateCount": snapshot.candidates.len(),
+            "dirtyPathCount": snapshot.checkout.dirty_path_count,
+            "degradedCount": snapshot.degraded.len(),
+        }),
+        output::FieldProfile::Summary => serde_json::json!({
+            "schema": snapshot.schema,
+            "workspace": &snapshot.workspace,
+            "redactionStatus": snapshot.redaction_status,
+            "inputs": &snapshot.inputs,
+            "coordination": &snapshot.coordination,
+            "checkout": {
+                "dirtyPathCount": snapshot.checkout.dirty_path_count,
+            },
+            "verification": &snapshot.verification,
+            "environment": &snapshot.environment,
+            "topCandidates": snapshot.candidates.iter().take(8).collect::<Vec<_>>(),
+            "degraded": &snapshot.degraded,
+        }),
+        output::FieldProfile::Standard | output::FieldProfile::Full => {
+            serde_json::to_value(snapshot).map_err(|error| DomainError::Storage {
+                message: format!("Failed to serialize swarm next-action snapshot: {error}."),
+                repair: Some(
+                    "Fix the swarm next-action serializer before emitting JSON.".to_string(),
+                ),
+            })?
+        }
+    };
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": data,
+        "degraded": &snapshot.degraded,
+    });
+    serde_json::to_string_pretty(&response).map_err(|error| DomainError::Storage {
+        message: format!("Failed to serialize swarm next-action response: {error}."),
+        repair: Some("Fix the swarm next-action response serializer.".to_string()),
+    })
+}
+
+fn render_swarm_next_action_markdown(snapshot: &SwarmNextActionSnapshot) -> String {
+    let mut output = String::new();
+    output.push_str("# Swarm Next Action\n\n");
+    output.push_str(&format!("Workspace: `{}`\n\n", snapshot.workspace));
+    output.push_str(&format!(
+        "- Candidates: {}\n- Dirty paths: {}\n- Reservations: {}\n- RCH slots available: {}\n\n",
+        snapshot.candidates.len(),
+        snapshot.checkout.dirty_path_count,
+        snapshot.coordination.active_reservation_count,
+        snapshot
+            .verification
+            .slots_available
+            .map(|slots| slots.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    ));
+    if snapshot.candidates.is_empty() {
+        output.push_str("No candidates were available from the selected sources.\n");
+    } else {
+        output.push_str("## Top Candidates\n\n");
+        for candidate in snapshot.candidates.iter().take(8) {
+            output.push_str(&format!(
+                "- `{}` {} [{}]\n",
+                candidate.id, candidate.title, candidate.source
+            ));
+        }
+    }
+    output
 }
 
 fn render_swarm_brief_json(
@@ -38339,6 +38534,7 @@ impl NormalizedInvocation {
                 },
                 Command::Swarm(swarm) => match swarm {
                     SwarmCommand::Brief(_) => "swarm brief".to_string(),
+                    SwarmCommand::NextAction(_) => "swarm next-action".to_string(),
                 },
                 Command::TaskFrame(task_frame) => match task_frame {
                     TaskFrameCommand::Create(_) => "task-frame create".to_string(),
