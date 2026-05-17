@@ -571,6 +571,173 @@ printf '[RCH] remote trj (0.1s)\n'
 }
 
 #[test]
+fn committed_tree_manifest_ignores_dirty_checkout_and_refuses_before_rch() -> TestResult {
+    let workspace = seed_git_workspace("rch-committed-tree-dirty")?;
+    fs::write(workspace.join("tracked.txt"), "dirty live checkout\n")
+        .map_err(|error| format!("dirty tracked fixture: {error}"))?;
+    fs::write(workspace.join("credential-note.txt"), "redacted fixture\n")
+        .map_err(|error| format!("write untracked secret-risk fixture: {error}"))?;
+    let before_status = git_status_porcelain_v2(&workspace)?;
+    let invocation_log = unique_tmp_path("rch-committed-tree-invocations");
+    let fake_rch = write_fake_rch(
+        "fake-rch-committed-tree-should-not-run.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+printf '[RCH] remote trj (0.1s)\n'
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+
+    let args = [
+        "--committed-tree",
+        "--treeish",
+        "HEAD",
+        "--rch-bin",
+        fake_rch_arg,
+        "--",
+        "cargo",
+        "test",
+        "--lib",
+        "committed_tree_smoke",
+    ];
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &args,
+        &[("FAKE_RCH_INVOCATIONS", invocation_log_arg)],
+        &workspace,
+    )?;
+    assert_git_status_unchanged(&workspace, &before_status, "committed-tree preflight")?;
+    if status.success() {
+        return Err(format!(
+            "committed-tree mode should refuse before unsafe source materialization\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    if invocation_log.exists() {
+        let invocations = fs::read_to_string(&invocation_log)
+            .map_err(|error| format!("read committed-tree invocation log: {error}"))?;
+        if !invocations.is_empty() {
+            return Err(format!(
+                "committed-tree unsupported mode should not invoke fake RCH: {invocations:?}"
+            ));
+        }
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse committed-tree report: {error}"))?;
+    if report["status"] != "committed_tree_unsupported"
+        || report["verification_attribution"] != "committed_tree"
+        || report["requested_treeish"] != "HEAD"
+        || report["resolved_commit"].as_str().map(str::len) != Some(40)
+        || report["git_tree"].as_str().map(str::len) != Some(40)
+    {
+        return Err(format!("unexpected committed-tree report: {report}"));
+    }
+    if report["dirty_summary"]["total"] != 0
+        || report["dirty_paths_sample"] != serde_json::json!([])
+    {
+        return Err(format!(
+            "committed-tree source proof should exclude live dirty paths: {report}"
+        ));
+    }
+    if report["source_manifest_file_count"] != 2 || report["source_manifest_byte_count"] == 0 {
+        return Err(format!("unexpected committed manifest counts: {report}"));
+    }
+    for expected in ["dirty_tracked", "untracked", "ignored"] {
+        if !report["source_manifest_excluded_path_classes"]
+            .as_array()
+            .ok_or_else(|| "missing excluded path classes".to_owned())?
+            .iter()
+            .any(|class| class == expected)
+        {
+            return Err(format!("missing excluded class {expected}: {report}"));
+        }
+    }
+    if !source_degraded_contains(&report, "rch_verify_committed_tree_unsupported")?
+        || !degraded_contains(&report, "rch_verify_committed_tree_unsupported")?
+    {
+        return Err(format!("missing committed-tree unsupported code: {report}"));
+    }
+    let first_manifest_hash = report["source_manifest_hash"]
+        .as_str()
+        .ok_or_else(|| "missing source manifest hash".to_owned())?
+        .to_owned();
+
+    fs::write(workspace.join("tracked.txt"), "different dirty content\n")
+        .map_err(|error| format!("rewrite dirty tracked fixture: {error}"))?;
+    fs::write(workspace.join("new-token-file.txt"), "redacted fixture\n")
+        .map_err(|error| format!("write second untracked fixture: {error}"))?;
+    let (second_status, second_stdout, _second_stderr) = run_script_with_env_in_dir(
+        &args,
+        &[("FAKE_RCH_INVOCATIONS", invocation_log_arg)],
+        &workspace,
+    )?;
+    if second_status.success() {
+        return Err("second committed-tree unsupported run should still refuse".to_owned());
+    }
+    let second_report: Value = serde_json::from_str(&second_stdout)
+        .map_err(|error| format!("parse second committed-tree report: {error}"))?;
+    if second_report["source_manifest_hash"] != first_manifest_hash {
+        return Err(format!(
+            "committed-tree manifest changed when only dirty live checkout changed:\nfirst={report}\nsecond={second_report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn committed_tree_reports_path_dependency_unsupported() -> TestResult {
+    let workspace = seed_git_workspace("rch-committed-tree-path-dep")?;
+    fs::write(
+        workspace.join("Cargo.toml"),
+        "[package]\nname = \"rch_path_dep_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nfixture_dep = { path = \"../fixture_dep\" }\n",
+    )
+    .map_err(|error| format!("write path-dep Cargo.toml: {error}"))?;
+    git(&workspace, &["add", "Cargo.toml"])?;
+    git(&workspace, &["commit", "-m", "add path dependency"])?;
+
+    let (status, stdout, _stderr) = run_script_with_env_in_dir(
+        &[
+            "--committed-tree",
+            "--treeish",
+            "HEAD",
+            "--dry-run",
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "committed_tree_path_dep",
+        ],
+        &[],
+        &workspace,
+    )?;
+    if status.success() {
+        return Err("committed-tree path dependency mode should be unsupported".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse path-dependency committed-tree report: {error}"))?;
+    for expected in [
+        "rch_verify_committed_tree_unsupported",
+        "rch_verify_committed_tree_path_deps_unsupported",
+    ] {
+        if !source_degraded_contains(&report, expected)? || !degraded_contains(&report, expected)? {
+            return Err(format!(
+                "missing {expected} in committed-tree report: {report}"
+            ));
+        }
+    }
+    if degraded_contains(&report, "rch_verify_dry_run")? {
+        return Err(format!(
+            "committed-tree source refusal should happen before dry-run proof: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn first_remote_invocation_passes_requested_workers() -> TestResult {
     let fake_rch = write_fake_rch(
         "fake-rch-workers.sh",

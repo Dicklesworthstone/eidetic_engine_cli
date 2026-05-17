@@ -21,6 +21,8 @@ Options:
   --project-root <path>     Local project root (default: cwd)
   --env <NAME=VALUE>        Pass an explicit environment override to the remote verifier command
   --require-clean-tree      Refuse before RCH when the git checkout is dirty
+  --committed-tree          Resolve --treeish as the source proof and refuse until safe materialization exists
+  --treeish <ref>           Committed-tree ref to prove (default: HEAD)
   --json                    Accepted for symmetry; output is always JSON
   -h, --help                Show this help
 
@@ -41,6 +43,8 @@ INCLUDE_SUMMARY=0
 NO_WRITE=0
 ENV_OVERRIDES=()
 REQUIRE_CLEAN_TREE=0
+COMMITTED_TREE=0
+TREEISH="HEAD"
 DEFAULT_RCH_BIN="/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch"
 if [ -z "${RCH_BIN:-}" ] && [ -x "$DEFAULT_RCH_BIN" ]; then
     RCH_BIN="$DEFAULT_RCH_BIN"
@@ -85,6 +89,8 @@ while [ "$#" -gt 0 ]; do
         --project-root) PROJECT_ROOT="${2:?--project-root requires a value}"; shift 2 ;;
         --env) ENV_OVERRIDES+=("$(validate_env_override "${2:?--env requires NAME=VALUE}")"); shift 2 ;;
         --require-clean-tree) REQUIRE_CLEAN_TREE=1; shift ;;
+        --committed-tree) COMMITTED_TREE=1; shift ;;
+        --treeish) TREEISH="${2:?--treeish requires a value}"; shift 2 ;;
         --json) shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;
@@ -598,6 +604,7 @@ summary = {
     "ignored": 0,
     "unknown": 0,
 }
+
 sample = []
 for line in sorted(status_lines):
     path = path_from_porcelain_v2(line)
@@ -631,6 +638,140 @@ print(json.dumps({
     "dirty_summary": summary,
     "dirty_paths_sample": sample,
     "source_state_degraded_codes": source_codes,
+}, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+compute_committed_tree_state_json() {
+    PROJECT_ROOT_PATH="$PROJECT_ROOT" \
+    REQUESTED_TREEISH="$TREEISH" \
+    python3 - <<'PY'
+import hashlib
+import json
+import os
+import subprocess
+
+project_root = os.environ["PROJECT_ROOT_PATH"]
+treeish = os.environ.get("REQUESTED_TREEISH") or "HEAD"
+
+def git(args):
+    try:
+        return subprocess.run(
+            ["git", "-C", project_root, *args],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+    except Exception as error:
+        return subprocess.CompletedProcess(args, 1, "", str(error))
+
+def empty_state(codes):
+    return {
+        "verification_attribution": "committed_tree",
+        "git_head": None,
+        "git_tree": None,
+        "dirty_status_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "dirty_summary": {
+            "total": 0,
+            "tracked": 0,
+            "untracked": 0,
+            "beads": 0,
+            "scratch": 0,
+            "secret_risk": 0,
+            "ignored": 0,
+            "unknown": 0,
+        },
+        "dirty_paths_sample": [],
+        "source_state_degraded_codes": codes,
+        "requested_treeish": treeish,
+        "resolved_commit": None,
+        "source_manifest_hash": None,
+        "source_manifest_file_count": 0,
+        "source_manifest_byte_count": 0,
+        "source_manifest_excluded_path_classes": ["dirty_tracked", "untracked", "ignored"],
+    }
+
+commit_result = git(["rev-parse", "--verify", "--quiet", f"{treeish}^{{commit}}"])
+if commit_result.returncode != 0:
+    print(json.dumps(empty_state([
+        "rch_verify_committed_tree_ref_unresolved",
+        "rch_verify_committed_tree_unsupported",
+    ]), sort_keys=True, separators=(",", ":")))
+    raise SystemExit(0)
+
+commit = commit_result.stdout.strip()
+tree_result = git(["rev-parse", "--verify", "--quiet", f"{commit}^{{tree}}"])
+if tree_result.returncode != 0:
+    print(json.dumps(empty_state([
+        "rch_verify_committed_tree_ref_unresolved",
+        "rch_verify_committed_tree_unsupported",
+    ]), sort_keys=True, separators=(",", ":")))
+    raise SystemExit(0)
+tree = tree_result.stdout.strip()
+
+ls_tree = subprocess.run(
+    ["git", "-C", project_root, "ls-tree", "-r", "-l", "-z", "--full-tree", commit],
+    check=False,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.DEVNULL,
+    timeout=10,
+)
+
+entries = []
+byte_count = 0
+if ls_tree.returncode == 0:
+    for raw in ls_tree.stdout.split(b"\0"):
+        if not raw:
+            continue
+        meta, _, raw_path = raw.partition(b"\t")
+        parts = meta.decode("utf-8", "replace").split()
+        if len(parts) < 4:
+            continue
+        mode, kind, object_id, size_text = parts[:4]
+        path = raw_path.decode("utf-8", "replace")
+        try:
+            size = int(size_text)
+        except ValueError:
+            size = 0
+        byte_count += max(size, 0)
+        entries.append((path, mode, kind, object_id, size))
+
+manifest = "\n".join(
+    f"{path}\0{mode}\0{kind}\0{object_id}\0{size}"
+    for path, mode, kind, object_id, size in sorted(entries)
+)
+manifest_hash = "sha256:" + hashlib.sha256(manifest.encode("utf-8")).hexdigest()
+
+codes = ["rch_verify_committed_tree_unsupported"]
+show_cargo = git(["show", f"{commit}:Cargo.toml"])
+if show_cargo.returncode == 0 and "path" in show_cargo.stdout and "path =" in show_cargo.stdout:
+    codes.append("rch_verify_committed_tree_path_deps_unsupported")
+
+print(json.dumps({
+    "verification_attribution": "committed_tree",
+    "git_head": commit,
+    "git_tree": tree,
+    "dirty_status_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "dirty_summary": {
+        "total": 0,
+        "tracked": 0,
+        "untracked": 0,
+        "beads": 0,
+        "scratch": 0,
+        "secret_risk": 0,
+        "ignored": 0,
+        "unknown": 0,
+    },
+    "dirty_paths_sample": [],
+    "source_state_degraded_codes": codes,
+    "requested_treeish": treeish,
+    "resolved_commit": commit,
+    "source_manifest_hash": manifest_hash,
+    "source_manifest_file_count": len(entries),
+    "source_manifest_byte_count": byte_count,
+    "source_manifest_excluded_path_classes": ["dirty_tracked", "untracked", "ignored"],
 }, sort_keys=True, separators=(",", ":")))
 PY
 }
@@ -774,6 +915,12 @@ for key in (
     "dirty_summary",
     "dirty_paths_sample",
     "source_state_degraded_codes",
+    "requested_treeish",
+    "resolved_commit",
+    "source_manifest_hash",
+    "source_manifest_file_count",
+    "source_manifest_byte_count",
+    "source_manifest_excluded_path_classes",
 ):
     proof[key] = source_state.get(key)
 bead_id = os.environ.get("BEAD_ID", "")
@@ -822,6 +969,8 @@ elif exit_code == 0 and proof.get("worker_id"):
     status = "remote_pass"
 elif exit_code == 0:
     status = "pass_without_remote_marker"
+elif "rch_verify_committed_tree_unsupported" in degraded:
+    status = "committed_tree_unsupported"
 elif (
     "rch_verify_dirty_tree_refused" in degraded
 ):
@@ -884,6 +1033,10 @@ else:
 source_degraded = proof.get("source_state_degraded_codes") or []
 if source_degraded:
     summary_lines.append("- source_state_degraded_codes: `" + "`, `".join(source_degraded) + "`")
+if proof.get("requested_treeish"):
+    summary_lines.append(f"- requested_treeish: `{proof.get('requested_treeish')}`")
+if proof.get("source_manifest_hash"):
+    summary_lines.append(f"- source_manifest_hash: `{proof.get('source_manifest_hash')}`")
 summary = "\n".join(summary_lines)
 
 if include_summary:
@@ -958,7 +1111,17 @@ if [ "$COMMAND_KIND" = "rejected" ]; then
     exit 2
 fi
 
-SOURCE_STATE_JSON="$(compute_source_state_json)"
+if [ "$COMMITTED_TREE" -eq 1 ] && [ "$REQUIRE_CLEAN_TREE" -eq 1 ]; then
+    RCH_INVOCATION=()
+    emit_json false null 0 "" "choose either --committed-tree or --require-clean-tree, not both" "rch_verify_refused_conflicting_source_modes"
+    exit 2
+fi
+
+if [ "$COMMITTED_TREE" -eq 1 ]; then
+    SOURCE_STATE_JSON="$(compute_committed_tree_state_json)"
+else
+    SOURCE_STATE_JSON="$(compute_source_state_json)"
+fi
 SOURCE_STATE_DEGRADED_CODES="$(
     SOURCE_STATE_JSON="$SOURCE_STATE_JSON" python3 - <<'PY'
 import json
@@ -972,6 +1135,12 @@ if [ "$REQUIRE_CLEAN_TREE" -eq 1 ] && [ -n "$SOURCE_STATE_DEGRADED_CODES" ]; the
     RCH_INVOCATION=()
     mapfile -t source_degraded_array <<<"$SOURCE_STATE_DEGRADED_CODES"
     emit_json true 1 0 "strict clean-tree preflight refused dirty checkout" "" "${source_degraded_array[@]}"
+    exit 1
+fi
+if [ "$COMMITTED_TREE" -eq 1 ]; then
+    RCH_INVOCATION=()
+    mapfile -t source_degraded_array <<<"$SOURCE_STATE_DEGRADED_CODES"
+    emit_json true 1 0 "committed-tree preflight computed source manifest but cannot safely materialize it for RCH yet" "" "${source_degraded_array[@]}"
     exit 1
 fi
 
