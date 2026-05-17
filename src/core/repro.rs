@@ -7,7 +7,7 @@
 use std::{
     collections::BTreeMap,
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -779,14 +779,35 @@ fn read_pack_file_no_symlinks(pack_path: &Path, relative_path: &str) -> Result<V
             MAX_PACK_ARTIFACT_BYTES
         ));
     }
-    fs::read(&target_path).map_err(|error| {
+    let mut file = open_pack_file_for_read_no_symlinks(&target_path)?;
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    file.read_to_end(&mut bytes).map_err(|error| {
         format!(
             "pack_artifact_unavailable: {}: {}",
             target_path.display(),
             error
         )
-    })
+    })?;
+    Ok(bytes)
 }
+
+fn open_pack_file_for_read_no_symlinks(path: &Path) -> Result<fs::File, String> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_pack_file_read_options(&mut options);
+    options
+        .open(path)
+        .map_err(|error| format!("pack_artifact_unavailable: {}: {}", path.display(), error))
+}
+
+#[cfg(unix)]
+fn configure_pack_file_read_options(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(unix))]
+fn configure_pack_file_read_options(_options: &mut fs::OpenOptions) {}
 
 fn write_pack_file_no_symlinks(
     pack_path: &Path,
@@ -1290,6 +1311,35 @@ mod tests {
 
         assert_eq!(error.code(), "storage");
         assert!(error.message().contains("symlink"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_pack_file_for_read_rejects_symlinked_final_path() -> TestResult {
+        let workspace = temp_root("ee_repro_read_final_symlink_")?;
+        let pack_member = workspace.join("env.json");
+        let outside_member = workspace.join("outside-env.json");
+        fs::write(&outside_member, "{}\n").map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_member, &pack_member)
+            .map_err(|error| error.to_string())?;
+
+        let error = open_pack_file_for_read_no_symlinks(&pack_member)
+            .expect_err("final symlink read must be rejected");
+
+        if !error.contains("pack_artifact_unavailable") {
+            return Err(format!("unexpected final symlink read error: {error}"));
+        }
+        let outside_after =
+            fs::read_to_string(&outside_member).map_err(|error| error.to_string())?;
+        assert_eq!(outside_after, "{}\n");
+        assert!(
+            fs::symlink_metadata(&pack_member)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "rejected final symlink should remain for inspection"
+        );
         Ok(())
     }
 
