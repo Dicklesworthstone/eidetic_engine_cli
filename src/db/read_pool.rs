@@ -140,6 +140,7 @@ struct PoolState {
 
 struct ActivePinRecord {
     slot_id: Option<u64>,
+    metadata: SnapshotPinMetadata,
     acquired_at: Instant,
     max_pin_duration: Duration,
     poisoned: Arc<AtomicBool>,
@@ -174,6 +175,12 @@ pub struct ExpiredSnapshotPin {
     pub age: Duration,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SnapshotPinMetadata {
+    pub workflow_id: Option<String>,
+    pub request_id: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SnapshotDrainReport {
     pub drained: bool,
@@ -186,6 +193,8 @@ pub struct SnapshotDrainReport {
 pub struct ActiveSnapshotPin {
     pub pin_id: u64,
     pub slot_id: Option<u64>,
+    pub workflow_id: Option<String>,
+    pub request_id: Option<String>,
     pub pin_age_ms: u128,
     pub max_pin_duration_ms: u128,
     pub poisoned: bool,
@@ -295,7 +304,22 @@ impl ReadConnectionPool {
         self.acquire_snapshot(true)
     }
 
+    pub fn pin_snapshot_with_metadata(
+        &self,
+        metadata: SnapshotPinMetadata,
+    ) -> Result<SnapshotPin<'_>> {
+        self.acquire_snapshot_with_metadata(true, metadata)
+    }
+
     pub fn acquire_snapshot(&self, pin_snapshot: bool) -> Result<SnapshotPin<'_>> {
+        self.acquire_snapshot_with_metadata(pin_snapshot, SnapshotPinMetadata::default())
+    }
+
+    fn acquire_snapshot_with_metadata(
+        &self,
+        pin_snapshot: bool,
+        metadata: SnapshotPinMetadata,
+    ) -> Result<SnapshotPin<'_>> {
         let connection = self.acquire()?;
         if pin_snapshot {
             if let Err(error) = connection.begin_read_snapshot() {
@@ -308,6 +332,7 @@ impl ReadConnectionPool {
         let (pin_id, poisoned) = if pin_snapshot {
             let (pin_id, poisoned) = self.register_pin(
                 connection.slot_id(),
+                metadata,
                 acquired_at,
                 self.config.max_pin_duration(),
             );
@@ -462,6 +487,7 @@ impl ReadConnectionPool {
     fn register_pin(
         &self,
         slot_id: Option<u64>,
+        metadata: SnapshotPinMetadata,
         acquired_at: Instant,
         max_pin_duration: Duration,
     ) -> (u64, Arc<AtomicBool>) {
@@ -473,6 +499,7 @@ impl ReadConnectionPool {
             pin_id,
             ActivePinRecord {
                 slot_id,
+                metadata,
                 acquired_at,
                 max_pin_duration,
                 poisoned: Arc::clone(&poisoned),
@@ -748,6 +775,8 @@ fn active_snapshot_pin_from_record(
     ActiveSnapshotPin {
         pin_id,
         slot_id: record.slot_id,
+        workflow_id: record.metadata.workflow_id.clone(),
+        request_id: record.metadata.request_id.clone(),
         pin_age_ms: age.as_millis(),
         max_pin_duration_ms: record.max_pin_duration.as_millis(),
         poisoned,
@@ -1353,6 +1382,28 @@ mod tests {
 
         drop(first);
         drop(second);
+        assert!(pool.active_snapshot_pins().is_empty());
+    }
+
+    #[test]
+    fn active_snapshot_pins_preserve_workflow_and_request_metadata() {
+        let (_tempdir, _database_path, pool) = file_pool(1);
+        let pin = must(
+            pool.pin_snapshot_with_metadata(SnapshotPinMetadata {
+                workflow_id: Some("workflow-read-pool".to_owned()),
+                request_id: Some("request-42".to_owned()),
+            }),
+            "metadata snapshot pin opens",
+        );
+
+        let active = pool.active_snapshot_pins();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].workflow_id.as_deref(), Some("workflow-read-pool"));
+        assert_eq!(active[0].request_id.as_deref(), Some("request-42"));
+        assert_eq!(active[0].release_state, SnapshotPinReleaseState::Active);
+        assert!(!active[0].poisoned);
+
+        drop(pin);
         assert!(pool.active_snapshot_pins().is_empty());
     }
 
