@@ -644,6 +644,7 @@ fn scan_artifact(path: &Path, scan_root: &Path) -> Result<LegacyArtifact, Legacy
 }
 
 fn hash_and_preview(path: &Path) -> Result<(u64, String, String), LegacyImportScanError> {
+    ensure_legacy_scan_file_is_regular(path)?;
     let mut file = File::open(path).map_err(|error| io_error(path, error))?;
     let mut hasher = blake3::Hasher::new();
     let mut buffer = [0_u8; READ_BUFFER_BYTES];
@@ -669,6 +670,29 @@ fn hash_and_preview(path: &Path) -> Result<(u64, String, String), LegacyImportSc
     let content_hash = format!("blake3:{}", hasher.finalize().to_hex());
     let preview = String::from_utf8_lossy(&preview_bytes).into_owned();
     Ok((size_bytes, content_hash, preview))
+}
+
+fn ensure_legacy_scan_file_is_regular(path: &Path) -> Result<(), LegacyImportScanError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| io_error(path, error))?;
+    if metadata.file_type().is_symlink() {
+        return Err(LegacyImportScanError::Io {
+            path: path.to_path_buf(),
+            message: format!(
+                "refusing to scan legacy Eidetic artifact through symlinked file path `{}`",
+                path.display()
+            ),
+        });
+    }
+    if !metadata.is_file() {
+        return Err(LegacyImportScanError::Io {
+            path: path.to_path_buf(),
+            message: format!(
+                "legacy Eidetic artifact is not a regular file: {}",
+                path.display()
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn format_from_path(path: &Path) -> LegacyArtifactFormat {
@@ -1457,6 +1481,43 @@ mod tests {
         assert!(
             file_error.to_string().contains("symlinked path component"),
             "unexpected error: {file_error}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hash_preview_rejects_symlinked_artifact_path() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_file = tempdir.path().join("memories.jsonl.real");
+        fs::write(&real_file, r#"{"memory":"source"}"#).map_err(|error| error.to_string())?;
+        let linked_file = tempdir.path().join("memories.jsonl");
+        symlink(&real_file, &linked_file).map_err(|error| error.to_string())?;
+
+        let error = super::hash_and_preview(&linked_file)
+            .expect_err("symlinked artifact path should be rejected before File::open");
+
+        assert!(
+            error.to_string().contains("symlinked file path"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hash_preview_rejects_non_regular_artifact_path() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let directory_path = tempdir.path().join("memories.jsonl");
+        fs::create_dir_all(&directory_path).map_err(|error| error.to_string())?;
+
+        let error = super::hash_and_preview(&directory_path)
+            .expect_err("directory artifact path should be rejected before File::open");
+
+        assert!(
+            error.to_string().contains("not a regular file"),
+            "unexpected error: {error}"
         );
         Ok(())
     }
