@@ -2455,6 +2455,18 @@ fn write_side_path_no_overwrite(path: &Path, bytes: &[u8]) -> Result<(), DomainE
             repair: Some("choose a writable --out path".to_owned()),
         })?;
     }
+    if let Some(symlink_path) = first_existing_symlink_component(path)? {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "playbook export path '{}' traverses symbolic link '{}'",
+                path.display(),
+                symlink_path.display()
+            ),
+            repair: Some("choose a real, non-symlink --out path".to_owned()),
+        });
+    }
+    ensure_playbook_export_final_path_is_creatable(path)?;
+
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -2491,6 +2503,35 @@ fn write_side_path_no_overwrite(path: &Path, bytes: &[u8]) -> Result<(), DomainE
         ),
         repair: Some("inspect disk health and retry".to_owned()),
     })
+}
+
+fn ensure_playbook_export_final_path_is_creatable(path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Err(DomainError::Storage {
+            message: format!(
+                "failed to create playbook export '{}': file already exists",
+                path.display()
+            ),
+            repair: Some(
+                "choose a new --out path; ee never overwrites existing playbook exports".to_owned(),
+            ),
+        }),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "refusing to create playbook export '{}' because it is not a regular file",
+                path.display()
+            ),
+            repair: Some("choose a new regular --out file path".to_owned()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "failed to inspect playbook export path '{}' before create: {error}",
+                path.display()
+            ),
+            repair: Some("choose a writable --out path".to_owned()),
+        }),
+    }
 }
 
 fn read_side_path_no_symlinks(path: &Path) -> Result<Vec<u8>, DomainError> {
@@ -4448,6 +4489,31 @@ mod tests {
         ensure(
             !real_parent.join("playbook.json").exists(),
             "playbook export must not write through symlinked parent",
+        )
+    }
+
+    #[test]
+    fn playbook_export_rejects_non_regular_output_path_before_create() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let output_path = tempdir.path().join("playbook.json");
+        fs::create_dir(&output_path).map_err(|error| error.to_string())?;
+
+        let err = match write_side_path_no_overwrite(&output_path, b"{}") {
+            Ok(()) => return Err("non-regular output path should reject".to_owned()),
+            Err(err) => err,
+        };
+
+        ensure(
+            matches!(err, DomainError::Storage { .. }),
+            "expected storage error",
+        )?;
+        ensure(
+            err.message().contains("not a regular file"),
+            "error should mention regular file",
+        )?;
+        ensure(
+            output_path.is_dir(),
+            "playbook export must leave non-regular output path untouched",
         )
     }
 
