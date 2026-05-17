@@ -5525,7 +5525,7 @@ fn render_memory_fields(b: &mut JsonBuilder, details: &MemoryDetails) {
     b.field_raw("utility", &format!("{:.4}", mem.utility));
     b.field_raw("importance", &format!("{:.4}", mem.importance));
     if let Some(ref uri) = mem.provenance_uri {
-        b.field_str("provenance_uri", uri);
+        b.field_str("provenance_uri", &redact_memory_output_provenance_uri(uri));
     }
     b.field_str("trust_class", &mem.trust_class);
     if let Some(ref sub) = mem.trust_subclass {
@@ -5580,7 +5580,10 @@ pub fn render_memory_show_human(report: &MemoryShowReport) -> String {
     }
     output.push('\n');
     if let Some(ref uri) = mem.provenance_uri {
-        output.push_str(&format!("  Provenance: {}\n", uri));
+        output.push_str(&format!(
+            "  Provenance: {}\n",
+            redact_memory_output_provenance_uri(uri)
+        ));
     }
     output.push_str(&format!("  Created: {}\n", mem.created_at));
     output.push_str(&format!("  Updated: {}\n", mem.updated_at));
@@ -5640,7 +5643,7 @@ pub fn render_memory_list_json(report: &MemoryListReport) -> String {
             obj.field_bool("content_truncated", m.content_truncated);
             obj.field_raw("confidence", &format!("{:.4}", m.confidence));
             if let Some(ref uri) = m.provenance_uri {
-                obj.field_str("provenance_uri", uri);
+                obj.field_str("provenance_uri", &redact_memory_output_provenance_uri(uri));
             }
             obj.field_bool("is_tombstoned", m.is_tombstoned);
             field_optional_str(obj, "valid_from", m.valid_from.as_deref());
@@ -5655,6 +5658,100 @@ pub fn render_memory_list_json(report: &MemoryListReport) -> String {
         }
     });
     b.finish()
+}
+
+fn redact_memory_output_provenance_uri(value: &str) -> String {
+    let redacted_paths = redact_memory_output_path_like_segments(value);
+    redact_memory_output_secret_like_segments(&redacted_paths)
+}
+
+fn redact_memory_output_path_like_segments(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, c)| *c == '/')
+        else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        let start = cursor + relative_index;
+        if !memory_output_path_starts_sensitive_segment(&value[start..]) {
+            output.push_str(&value[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        output.push_str(&value[cursor..start]);
+        output.push_str("[REDACTED_PATH]");
+        cursor = value[start..]
+            .char_indices()
+            .find_map(|(index, c)| memory_output_path_boundary(c).then_some(start + index))
+            .unwrap_or(value.len());
+    }
+    output
+}
+
+fn memory_output_path_starts_sensitive_segment(value: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/home/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+    ];
+
+    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+}
+
+fn memory_output_path_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
+}
+
+fn redact_memory_output_secret_like_segments(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let lower = value[cursor..].to_ascii_lowercase();
+        let Some((relative_start, key_len)) = memory_output_next_secret_key(&lower) else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        let value_start = cursor + relative_start + key_len;
+        output.push_str(&value[cursor..value_start]);
+        output.push_str("[REDACTED:secret]");
+        cursor = value[value_start..]
+            .char_indices()
+            .find_map(|(index, c)| memory_output_secret_boundary(c).then_some(value_start + index))
+            .unwrap_or(value.len());
+    }
+    output
+}
+
+fn memory_output_next_secret_key(value: &str) -> Option<(usize, usize)> {
+    const KEYS: &[&str] = &[
+        "api_key=",
+        "apikey=",
+        "access_token=",
+        "auth_token=",
+        "token=",
+        "secret=",
+        "password=",
+        "passwd=",
+    ];
+
+    KEYS.iter()
+        .filter_map(|key| value.find(key).map(|index| (index, key.len())))
+        .min_by_key(|(index, _)| *index)
+}
+
+fn memory_output_secret_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '&' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
 }
 
 /// Render a memory list report as human-readable text.
@@ -12749,7 +12846,10 @@ mod tests {
         ExperimentBudget, ExperimentDecisionImpact, ExperimentProposal, ExperimentSafetyPlan,
         LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1, LearnClusterReport, LearnExperimentProposalReport,
     };
-    use crate::core::memory::{MemoryHistoryEntry, MemoryHistoryReport};
+    use crate::core::memory::{
+        MemoryDetails, MemoryHistoryEntry, MemoryHistoryReport, MemoryListFilter, MemoryListReport,
+        MemoryShowReport, MemorySummary,
+    };
     use crate::core::preflight::{
         PreflightDegradation, PreflightRunView, RunReport as PreflightRunReport,
         ShowReport as PreflightShowReport,
@@ -12760,6 +12860,7 @@ mod tests {
         BUILD_TIMESTAMP_POLICY, BuildFeature, BuildInfo, BuildProvenanceDegradation,
         SupportedSchema, VERSION_PROVENANCE_SCHEMA_V1, VersionReport,
     };
+    use crate::db::StoredMemory;
     use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
     use crate::models::{
         DomainError, ERROR_SCHEMA_V2, MemoryId, ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass,
@@ -13016,6 +13117,105 @@ mod tests {
         ensure(
             haystack.contains(needle),
             format!("{context}: expected output to contain {needle:?}, got {haystack:?}"),
+        )
+    }
+
+    fn output_test_memory(provenance_uri: Option<String>) -> StoredMemory {
+        StoredMemory {
+            id: "mem_output_redaction".to_owned(),
+            workspace_id: "wsp_output_redaction".to_owned(),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            content: "Keep memory provenance output redacted.".to_owned(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.8,
+            importance: 0.7,
+            provenance_uri,
+            trust_class: "human_explicit".to_owned(),
+            trust_subclass: None,
+            provenance_chain_hash: None,
+            provenance_chain_hash_version: "1".to_owned(),
+            provenance_verification_status: "unverified".to_owned(),
+            provenance_verified_at: None,
+            provenance_verification_note: None,
+            created_at: "2026-05-17T00:00:00Z".to_owned(),
+            updated_at: "2026-05-17T00:00:00Z".to_owned(),
+            tombstoned_at: None,
+            valid_from: None,
+            valid_to: None,
+        }
+    }
+
+    #[test]
+    fn memory_show_output_redacts_sensitive_provenance_uri() -> TestResult {
+        let report = MemoryShowReport::found(MemoryDetails {
+            memory: output_test_memory(Some(
+                "file:///Users/alice/private/logs/build.log?api_key=redaction-fixture".to_owned(),
+            )),
+            tags: Vec::new(),
+        });
+
+        let json = render_memory_show_json(&report);
+        ensure_contains(&json, "[REDACTED_PATH]", "memory show path redaction")?;
+        ensure_contains(&json, "[REDACTED:secret]", "memory show secret redaction")?;
+        ensure(
+            !json.contains("/Users/alice"),
+            format!("memory show JSON leaked absolute path: {json}"),
+        )?;
+        ensure(
+            !json.contains("redaction-fixture"),
+            format!("memory show JSON leaked secret-like value: {json}"),
+        )?;
+
+        let human = render_memory_show_human(&report);
+        ensure_contains(
+            &human,
+            "[REDACTED_PATH]",
+            "memory show human path redaction",
+        )?;
+        ensure(
+            !human.contains("/Users/alice") && !human.contains("redaction-fixture"),
+            format!("memory show human leaked sensitive provenance: {human}"),
+        )
+    }
+
+    #[test]
+    fn memory_list_json_redacts_sensitive_provenance_uri() -> TestResult {
+        let report = MemoryListReport::success(
+            vec![MemorySummary {
+                id: "mem_output_redaction".to_owned(),
+                level: "procedural".to_owned(),
+                kind: "rule".to_owned(),
+                content: "Keep memory provenance output redacted.".to_owned(),
+                content_truncated: false,
+                confidence: 0.9,
+                provenance_uri: Some(
+                    "file:///Volumes/USBNVME16TB/private/index.json#token=redaction-fixture"
+                        .to_owned(),
+                ),
+                is_tombstoned: false,
+                valid_from: None,
+                valid_to: None,
+                validity_status: "current".to_owned(),
+                validity_window_kind: "unbounded".to_owned(),
+                created_at: "2026-05-17T00:00:00Z".to_owned(),
+            }],
+            1,
+            false,
+            MemoryListFilter::default(),
+        );
+
+        let json = render_memory_list_json(&report);
+        ensure_contains(&json, "[REDACTED_PATH]", "memory list path redaction")?;
+        ensure_contains(&json, "[REDACTED:secret]", "memory list secret redaction")?;
+        ensure(
+            !json.contains("/Volumes/USBNVME16TB"),
+            format!("memory list JSON leaked absolute path: {json}"),
+        )?;
+        ensure(
+            !json.contains("redaction-fixture"),
+            format!("memory list JSON leaked secret-like value: {json}"),
         )
     }
 
