@@ -24,7 +24,7 @@ use std::io::{BufRead, BufReader, Write};
 use serde_json::{Value, json};
 
 use crate::core::agent_docs::AgentDocsTopic;
-use crate::models::{ContextProfileName, ProcessExitCode};
+use crate::models::{ContextProfileName, ProcessExitCode, RedactionLevel};
 pub use crate::output::MCP_PROTOCOL_VERSION;
 use crate::output::public_schemas;
 
@@ -1472,6 +1472,10 @@ fn run_cli_tool(args: Vec<OsString>) -> (ProcessExitCode, String, String) {
     )
 }
 
+fn redact_mcp_public_diagnostics(value: &str) -> String {
+    crate::output::jsonl_export::redact_content(value, RedactionLevel::Standard)
+}
+
 fn resource_read_result(
     id: Value,
     uri: &str,
@@ -1479,7 +1483,12 @@ fn resource_read_result(
     stdout: String,
     stderr: String,
 ) -> Value {
-    let text = if stdout.is_empty() { &stderr } else { &stdout };
+    let redacted_stderr = redact_mcp_public_diagnostics(&stderr);
+    let text = if stdout.is_empty() {
+        redacted_stderr.as_str()
+    } else {
+        stdout.as_str()
+    };
     json_rpc_result(
         id,
         json!({
@@ -1490,7 +1499,7 @@ fn resource_read_result(
             }],
             "isError": exit != ProcessExitCode::Success,
             "exitCode": exit as u8,
-            "stderr": stderr
+            "stderr": redacted_stderr
         }),
     )
 }
@@ -1512,7 +1521,12 @@ fn handle_resources_read(id: Value, params: Option<&Value>) -> Value {
 }
 
 fn cli_tool_result(id: Value, exit: ProcessExitCode, stdout: String, stderr: String) -> Value {
-    let text = if stdout.is_empty() { &stderr } else { &stdout };
+    let redacted_stderr = redact_mcp_public_diagnostics(&stderr);
+    let text = if stdout.is_empty() {
+        redacted_stderr.as_str()
+    } else {
+        stdout.as_str()
+    };
     json_rpc_result(
         id,
         json!({
@@ -1522,7 +1536,7 @@ fn cli_tool_result(id: Value, exit: ProcessExitCode, stdout: String, stderr: Str
             }],
             "isError": exit != ProcessExitCode::Success,
             "exitCode": exit as u8,
-            "stderr": stderr
+            "stderr": redacted_stderr
         }),
     )
 }
@@ -2204,6 +2218,39 @@ mod tests {
     }
 
     #[test]
+    fn resource_result_redacts_stderr_when_used_as_text() -> Result<(), String> {
+        let raw_stderr =
+            "error: failed to read /Users/alice/private/repo/logs/build.log\nNext: inspect it";
+        let response = resource_read_result(
+            json!(1),
+            "ee://workspace/status",
+            ProcessExitCode::Storage,
+            String::new(),
+            raw_stderr.to_owned(),
+        );
+        let Some(result) = response.get("result") else {
+            return Err("resource response missing result".to_string());
+        };
+        let Some(stderr) = result.get("stderr").and_then(Value::as_str) else {
+            return Err("resource response missing stderr".to_string());
+        };
+        let Some(text) = result
+            .get("contents")
+            .and_then(Value::as_array)
+            .and_then(|contents| contents.first())
+            .and_then(|content| content.get("text"))
+            .and_then(Value::as_str)
+        else {
+            return Err("resource response missing text".to_string());
+        };
+
+        assert_eq!(stderr, text);
+        assert!(!stderr.contains("/Users/alice/private/repo"));
+        assert!(stderr.contains("[REDACTED_PATH]"));
+        Ok(())
+    }
+
+    #[test]
     fn handle_tools_list_returns_tool_definitions() -> Result<(), String> {
         let response = handle_tools_list(json!(1));
         let Some(result) = response.get("result") else {
@@ -2388,6 +2435,29 @@ mod tests {
                 .and_then(Value::as_str),
             Some("checked")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn tool_result_redacts_stderr_even_when_stdout_is_json() -> Result<(), String> {
+        let stdout = "{\"schema\":\"ee.response.v1\",\"success\":true}".to_string();
+        let raw_stderr = "warning: ignored /Users/alice/private/repo/.ee/config.toml".to_string();
+        let response = cli_tool_result(
+            json!(1),
+            ProcessExitCode::Success,
+            stdout.clone(),
+            raw_stderr,
+        );
+        let Some(result) = response.get("result") else {
+            return Err("tool response missing result".to_string());
+        };
+
+        assert_eq!(first_tool_text(&response)?, stdout);
+        let Some(stderr) = result.get("stderr").and_then(Value::as_str) else {
+            return Err("tool response missing stderr".to_string());
+        };
+        assert!(!stderr.contains("/Users/alice/private/repo"));
+        assert!(stderr.contains("[REDACTED_PATH]"));
         Ok(())
     }
 
