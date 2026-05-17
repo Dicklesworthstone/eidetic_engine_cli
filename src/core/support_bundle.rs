@@ -946,8 +946,9 @@ fn agent_profile_evidence_json(workspace: &Path) -> String {
 
 fn collect_agent_profile_evidence(workspace: &Path) -> Value {
     let database_path = workspace.join(".ee").join("ee.db");
+    let database_present = support_bundle_database_path_is_regular(&database_path);
     let mut database = json!({
-        "present": database_path.is_file(),
+        "present": database_present,
         "readable": false,
         "workspaceRowPresent": false,
         "schemaVersion": null,
@@ -955,7 +956,7 @@ fn collect_agent_profile_evidence(workspace: &Path) -> Value {
         "summarizedAgentCount": 0,
     });
 
-    if !database_path.is_file() {
+    if !database_present {
         return agent_profile_evidence_value("database_missing", database, Vec::new());
     }
 
@@ -1268,8 +1269,9 @@ fn collect_cache_hotset_snapshot(
     cache_state: &CacheDirectoryState,
 ) -> CacheHotsetSnapshot {
     let database_path = workspace.join(".ee").join("ee.db");
+    let database_present = support_bundle_database_path_is_regular(&database_path);
     let mut snapshot = CacheHotsetSnapshot {
-        database_present: database_path.is_file(),
+        database_present,
         ..CacheHotsetSnapshot::default()
     };
     if !snapshot.database_present {
@@ -1613,8 +1615,9 @@ fn qos_lane_summary_json(workspace: &Path) -> String {
 
 fn collect_pack_replay_summary(workspace: &Path) -> Value {
     let database_path = workspace.join(".ee").join("ee.db");
+    let database_present = support_bundle_database_path_is_regular(&database_path);
     let mut database = json!({
-        "present": database_path.is_file(),
+        "present": database_present,
         "readable": false,
         "workspaceRowPresent": false,
         "schemaVersion": null,
@@ -1626,7 +1629,7 @@ fn collect_pack_replay_summary(workspace: &Path) -> Value {
         "ledgerHashMismatchCount": 0,
     });
 
-    if !database_path.is_file() {
+    if !database_present {
         return pack_replay_summary_value("database_missing", database, Vec::new());
     }
 
@@ -2400,7 +2403,7 @@ fn support_cache_key(payload: &str) -> String {
 
 fn collect_audit_entries(workspace: &Path, limit: u32) -> String {
     let database_path = workspace.join(".ee").join("ee.db");
-    if !database_path.is_file() {
+    if !support_bundle_database_path_is_regular(&database_path) {
         return "[]".to_string();
     }
 
@@ -2432,6 +2435,15 @@ fn collect_audit_entries(workspace: &Path, limit: u32) -> String {
         lines.push(entry_json.to_string());
     }
     lines.join("\n")
+}
+
+fn support_bundle_database_path_is_regular(database_path: &Path) -> bool {
+    if reject_existing_symlink_component(database_path, "support bundle database").is_err() {
+        return false;
+    }
+    fs::symlink_metadata(database_path)
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false)
 }
 
 fn planned_files() -> Vec<String> {
@@ -2626,6 +2638,68 @@ mod tests {
         };
         let result = create_bundle(&options);
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn support_bundle_database_helper_rejects_symlinked_database_path() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_path("symlink-db-path");
+        let workspace = root.join("workspace");
+        let metadata_dir = workspace.join(".ee");
+        fs::create_dir_all(&metadata_dir)
+            .map_err(|error| format!("failed to create metadata dir: {error}"))?;
+        let outside_db = root.join("outside.db");
+        fs::write(&outside_db, b"not a support-bundle database")
+            .map_err(|error| format!("failed to write outside db: {error}"))?;
+        let database_path = metadata_dir.join("ee.db");
+        symlink(&outside_db, &database_path)
+            .map_err(|error| format!("failed to symlink database: {error}"))?;
+
+        assert!(
+            !support_bundle_database_path_is_regular(&database_path),
+            "support bundle evidence must not follow a symlinked ee.db"
+        );
+        let summary = collect_pack_replay_summary(&workspace);
+        assert_eq!(
+            summary.pointer("/status"),
+            Some(&json!("database_missing")),
+            "symlinked database should be reported as unavailable to support-bundle evidence"
+        );
+        assert_eq!(
+            summary.pointer("/database/present"),
+            Some(&json!(false)),
+            "symlinked database should not be reported as present"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn support_bundle_database_helper_rejects_symlinked_metadata_parent() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_path("symlink-db-parent");
+        let workspace = root.join("workspace");
+        let real_metadata = root.join("real-ee");
+        fs::create_dir_all(&real_metadata)
+            .map_err(|error| format!("failed to create real metadata dir: {error}"))?;
+        fs::create_dir_all(&workspace)
+            .map_err(|error| format!("failed to create workspace: {error}"))?;
+        symlink(&real_metadata, workspace.join(".ee"))
+            .map_err(|error| format!("failed to symlink metadata dir: {error}"))?;
+        let database_path = workspace.join(".ee").join("ee.db");
+
+        assert!(
+            !support_bundle_database_path_is_regular(&database_path),
+            "support bundle evidence must not traverse a symlinked .ee parent"
+        );
+        assert!(
+            !real_metadata.join("ee.db").exists(),
+            "support bundle database probe must not create or touch the symlink target"
+        );
+        Ok(())
     }
 
     #[test]
