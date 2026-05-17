@@ -556,6 +556,39 @@ fn preflight_hook_temp_target(temp_path: &Path) -> Result<(), DomainError> {
     }
 }
 
+fn preflight_created_hook_temp_target(temp_path: &Path) -> Result<(), DomainError> {
+    match std::fs::symlink_metadata(temp_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(DomainError::PolicyDenied {
+            message: format!(
+                "Refusing to install temporary hook '{}': path became a symlink before rename",
+                temp_path.display()
+            ),
+            repair: Some(
+                "Remove the symlink and re-run hook installation from a trusted hook directory."
+                    .to_owned(),
+            ),
+        }),
+        Ok(metadata) if !metadata.file_type().is_file() => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to install temporary hook '{}': path is not a regular file",
+                temp_path.display()
+            ),
+            repair: Some(
+                "Remove the stale temporary hook entry after confirming no install is running."
+                    .to_owned(),
+            ),
+        }),
+        Ok(_) => Ok(()),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect temporary hook before rename '{}': {error}",
+                temp_path.display()
+            ),
+            repair: Some("Check hook path permissions and re-run hook installation.".to_owned()),
+        }),
+    }
+}
+
 fn preflight_hook_writes(hook_dir: &Path, writes: &[PlannedHookWrite]) -> Result<(), DomainError> {
     ensure_hook_dir_is_not_symlink(hook_dir)?;
     std::fs::create_dir_all(hook_dir).map_err(|error| DomainError::Storage {
@@ -614,7 +647,33 @@ fn write_hook_file(hook_dir: &Path, target_path: &Path, content: &str) -> Result
                 ),
                 repair: Some("Check hook path permissions.".to_owned()),
             })?;
-        file.sync_data().map_err(|error| DomainError::Storage {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = file.metadata().map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to read temporary hook metadata '{}': {error}",
+                    temp_path.display()
+                ),
+                repair: Some(
+                    "Check hook file permissions and re-run hook installation.".to_owned(),
+                ),
+            })?;
+            let mut perms = metadata.permissions();
+            perms.set_mode(0o755);
+            file.set_permissions(perms)
+                .map_err(|error| DomainError::Storage {
+                    message: format!(
+                        "Failed to mark temporary hook executable '{}': {error}",
+                        temp_path.display()
+                    ),
+                    repair: Some(
+                        "Check hook file permissions and re-run hook installation.".to_owned(),
+                    ),
+                })?;
+        }
+
+        file.sync_all().map_err(|error| DomainError::Storage {
             message: format!(
                 "Failed to sync temporary hook '{}': {error}",
                 temp_path.display()
@@ -623,26 +682,7 @@ fn write_hook_file(hook_dir: &Path, target_path: &Path, content: &str) -> Result
         })?;
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let metadata = std::fs::metadata(&temp_path).map_err(|error| DomainError::Storage {
-            message: format!(
-                "Failed to read temporary hook metadata '{}': {error}",
-                temp_path.display()
-            ),
-            repair: Some("Check hook file permissions and re-run hook installation.".to_owned()),
-        })?;
-        let mut perms = metadata.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&temp_path, perms).map_err(|error| DomainError::Storage {
-            message: format!(
-                "Failed to mark temporary hook executable '{}': {error}",
-                temp_path.display()
-            ),
-            repair: Some("Check hook file permissions and re-run hook installation.".to_owned()),
-        })?;
-    }
+    preflight_created_hook_temp_target(&temp_path)?;
 
     std::fs::rename(&temp_path, target_path).map_err(|error| DomainError::Storage {
         message: format!(
@@ -1838,6 +1878,61 @@ mod tests {
         assert!(
             temp_hook_path.is_dir(),
             "directory temp path should remain untouched"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn created_hook_temp_recheck_rejects_symlink_before_rename() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let target = temp.path().join("sensitive-file");
+        fs::write(&target, "original content").map_err(|e| e.to_string())?;
+        let temp_hook_path = temp.path().join("pre-task.tmp");
+        symlink(&target, &temp_hook_path).map_err(|e| e.to_string())?;
+
+        let error = match preflight_created_hook_temp_target(&temp_hook_path) {
+            Ok(()) => return Err("created temp hook recheck should reject symlinks".to_owned()),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "policy_denied");
+        assert!(
+            error.message().contains("became a symlink"),
+            "unexpected error: {}",
+            error.message()
+        );
+        let target_content = fs::read_to_string(&target).map_err(|e| e.to_string())?;
+        assert_eq!(
+            target_content, "original content",
+            "temp recheck must not follow a swapped symlink"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn created_hook_temp_recheck_rejects_non_regular_before_rename() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let temp_hook_path = temp.path().join("pre-task.tmp");
+        fs::create_dir(&temp_hook_path).map_err(|e| e.to_string())?;
+
+        let error = match preflight_created_hook_temp_target(&temp_hook_path) {
+            Ok(()) => return Err("created temp hook recheck should reject directories".to_owned()),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.message().contains("not a regular file"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert!(
+            temp_hook_path.is_dir(),
+            "temp recheck must not alter a non-regular temp entry"
         );
 
         Ok(())
