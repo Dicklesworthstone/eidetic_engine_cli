@@ -823,6 +823,54 @@ mod tests {
     }
 
     #[test]
+    fn personalized_pagerank_uses_stored_edge_weight_ratios() -> TestResult {
+        let mut graph = DiGraph::strict();
+        let seed = memory_id(25);
+        let strong = memory_id(26);
+        let weak = memory_id(27);
+        graph
+            .add_edge_with_attrs(
+                seed.to_string(),
+                strong.to_string(),
+                edge_attrs("supports", 1.0, 1.0),
+            )
+            .map_err(|error| error.to_string())?;
+        graph
+            .add_edge_with_attrs(
+                seed.to_string(),
+                weak.to_string(),
+                edge_attrs("supports", 0.1, 1.0),
+            )
+            .map_err(|error| error.to_string())?;
+        let seeds = HashMap::from([(seed, 1.0)]);
+
+        let result = graph_result(compute_personalized_pagerank_with_policy(
+            &graph,
+            &seeds,
+            PersonalizedPageRankPolicy {
+                tolerance: 1.0e-8,
+                ..PersonalizedPageRankPolicy::default()
+            },
+        ))?;
+        let strong_score = result.get(&strong).copied().unwrap_or(0.0);
+        let weak_score = result.get(&weak).copied().unwrap_or(0.0);
+
+        assert!(
+            strong_score > 0.0,
+            "strong edge target should receive positive PPR mass: {result:?}"
+        );
+        assert!(
+            weak_score > 0.0,
+            "weak edge target should receive positive PPR mass: {result:?}"
+        );
+        assert!(
+            strong_score > weak_score * 9.0,
+            "stored edge weight 1.0 should propagate roughly 10x more mass than 0.1: {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn personalized_pagerank_is_deterministic_across_runs() -> TestResult {
         let mut graph = DiGraph::strict();
         let a = memory_id(31);
