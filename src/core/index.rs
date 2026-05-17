@@ -1376,6 +1376,7 @@ fn write_index_metadata(
 
     let meta_path = index_dir.join(INDEX_METADATA_FILE);
     ensure_index_path_has_no_symlinks(&meta_path, "write index metadata")?;
+    ensure_index_metadata_path_is_regular_or_missing(&meta_path, "write index metadata")?;
     let mut file = std::fs::File::create(&meta_path).map_err(|e| {
         IndexRebuildError::Index(format!("Failed to open index metadata for writing: {e}"))
     })?;
@@ -1523,6 +1524,24 @@ fn path_is_regular_file_no_follow(path: &Path) -> bool {
     std::fs::symlink_metadata(path)
         .map(|metadata| metadata.file_type().is_file())
         .unwrap_or(false)
+}
+
+fn ensure_index_metadata_path_is_regular_or_missing(
+    path: &Path,
+    action: &str,
+) -> Result<(), IndexRebuildError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(IndexRebuildError::Index(format!(
+            "Refusing to {action} because index metadata path is not a regular file: {}",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(IndexRebuildError::Index(format!(
+            "Failed to inspect index metadata path {} before {action}: {error}",
+            path.display()
+        ))),
+    }
 }
 
 fn monotonicish_stamp() -> u128 {
@@ -3867,6 +3886,27 @@ mod tests {
         ensure(
             check_error.is_none(),
             format!("metadata should not report check error: {check_error:?}"),
+        )
+    }
+
+    #[test]
+    fn write_index_metadata_rejects_non_regular_metadata_path() -> TestResult {
+        let root = unique_test_dir("metadata-write-directory");
+        let index_dir = root.join("index");
+        let metadata_dir = index_dir.join(INDEX_METADATA_FILE);
+        std::fs::create_dir_all(&metadata_dir).map_err(|error| error.to_string())?;
+
+        let error = write_index_metadata(&index_dir, 42, 7)
+            .map(|()| "unexpected metadata write success".to_owned())
+            .expect_err("metadata directory should reject before File::create");
+
+        ensure(
+            error.to_string().contains("not a regular file"),
+            format!("unexpected metadata write error: {error}"),
+        )?;
+        ensure(
+            metadata_dir.is_dir(),
+            "metadata directory must be left untouched",
         )
     }
 
