@@ -1999,6 +1999,54 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn publish_hook_temp_rechecks_symlinked_temp_before_rename() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_dir = temp.path().join("hooks");
+        fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
+        let temp_hook_path = hook_dir.join("pre-task.tmp");
+        let sensitive_path = temp.path().join("sensitive-temp-target");
+        fs::write(&sensitive_path, "original content").map_err(|e| e.to_string())?;
+        let target_path = hook_dir.join("pre-task");
+        symlink(&sensitive_path, &temp_hook_path).map_err(|e| e.to_string())?;
+
+        let error = match publish_hook_temp_file(&hook_dir, &temp_hook_path, &target_path) {
+            Ok(()) => {
+                return Err(
+                    "publish should reject symlinked temporary hook before rename".to_owned(),
+                );
+            }
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "policy_denied");
+        assert!(
+            error.message().contains("became a symlink before rename"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert_eq!(
+            fs::read_to_string(&sensitive_path).map_err(|e| e.to_string())?,
+            "original content",
+            "temp recheck must not follow or modify symlink target"
+        );
+        assert!(
+            fs::symlink_metadata(&temp_hook_path)
+                .map_err(|e| e.to_string())?
+                .file_type()
+                .is_symlink(),
+            "symlinked temp hook must remain untouched"
+        );
+        assert!(
+            !target_path.exists(),
+            "final hook target must not be published from a symlinked temp hook"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn symlink_hook_directory_is_rejected_before_writing() -> TestResult {
         use std::os::unix::fs::symlink;
 
