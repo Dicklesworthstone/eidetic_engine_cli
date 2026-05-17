@@ -2590,7 +2590,14 @@ fn structural_decay_config_contents(path: &Path) -> Result<Option<String>, Domai
 
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
         Err(error) => {
             return Err(DomainError::Configuration {
                 message: format!(
@@ -2631,7 +2638,14 @@ fn first_existing_structural_decay_config_symlink_component(
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
             Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
             Err(error) => {
                 return Err(DomainError::Configuration {
                     message: format!(
@@ -6451,6 +6465,20 @@ mod tests {
         };
 
         assert!(error.message().contains("is not a regular file"));
+        Ok(())
+    }
+
+    #[test]
+    fn structural_decay_feature_treats_non_directory_metadata_path_as_absent() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        fs::write(workspace_path.join(".ee"), "not a metadata directory\n")
+            .map_err(|error| error.to_string())?;
+
+        let enabled = super::structural_decay_feature_enabled(workspace_path)
+            .map_err(|error| error.to_string())?;
+
+        assert!(!enabled);
         Ok(())
     }
 
