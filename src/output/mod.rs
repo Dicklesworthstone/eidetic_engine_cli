@@ -5005,7 +5005,8 @@ pub fn render_quarantine_json(report: &QuarantineReport) -> String {
 }
 
 fn build_quarantine_entry(obj: &mut JsonBuilder, entry: &QuarantineEntry) {
-    obj.field_str("sourceId", &entry.source_id);
+    let source_id = redact_quarantine_source_uri(&entry.source_id);
+    obj.field_str("sourceId", &source_id);
     obj.field_str("advisory", entry.advisory.as_str());
     obj.field_raw("effectiveTrust", &format!("{:.4}", entry.effective_trust));
     obj.field_raw("decayFactor", &format!("{:.4}", entry.decay_factor));
@@ -5061,9 +5062,10 @@ pub fn render_quarantine_human(report: &QuarantineReport) -> String {
     if !report.blocked_sources.is_empty() {
         output.push_str("Blocked Sources:\n");
         for entry in &report.blocked_sources {
+            let source_id = redact_quarantine_source_uri(&entry.source_id);
             output.push_str(&format!(
                 "  ✗ {} (trust {:.2})\n    {}\n",
-                entry.source_id, entry.effective_trust, entry.message
+                source_id, entry.effective_trust, entry.message
             ));
         }
         output.push('\n');
@@ -5072,9 +5074,10 @@ pub fn render_quarantine_human(report: &QuarantineReport) -> String {
     if !report.quarantined_sources.is_empty() {
         output.push_str("Quarantined Sources:\n");
         for entry in &report.quarantined_sources {
+            let source_id = redact_quarantine_source_uri(&entry.source_id);
             output.push_str(&format!(
                 "  ⚠ {} (trust {:.2}, decay {:.2})\n    {}\n",
-                entry.source_id, entry.effective_trust, entry.decay_factor, entry.message
+                source_id, entry.effective_trust, entry.decay_factor, entry.message
             ));
         }
         output.push('\n');
@@ -5083,9 +5086,10 @@ pub fn render_quarantine_human(report: &QuarantineReport) -> String {
     if !report.at_risk_sources.is_empty() {
         output.push_str("At-Risk Sources:\n");
         for entry in &report.at_risk_sources {
+            let source_id = redact_quarantine_source_uri(&entry.source_id);
             output.push_str(&format!(
                 "  ◐ {} (trust {:.2})\n    {}\n",
-                entry.source_id, entry.effective_trust, entry.message
+                source_id, entry.effective_trust, entry.message
             ));
         }
         output.push('\n');
@@ -5104,12 +5108,13 @@ pub fn render_quarantine_toon(report: &QuarantineReport) -> String {
 /// Render a single quarantine entry as JSON (ee.response.v1 envelope).
 #[must_use]
 pub fn render_quarantine_entry_json(entry: &crate::db::StoredTrustQuarantine) -> String {
+    let source_uri = redact_quarantine_source_uri(&entry.source_uri);
     let mut b = JsonBuilder::with_capacity(512);
     b.field_str("schema", RESPONSE_SCHEMA_V1);
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "diag quarantine show");
-        d.field_str("sourceUri", &entry.source_uri);
+        d.field_str("sourceUri", &source_uri);
         d.field_str("status", &entry.status);
         d.field_str("firstEventAt", &entry.first_event_at);
         d.field_str("lastEventAt", &entry.last_event_at);
@@ -5127,8 +5132,9 @@ pub fn render_quarantine_entry_json(entry: &crate::db::StoredTrustQuarantine) ->
 /// Render a single quarantine entry as human-readable text.
 #[must_use]
 pub fn render_quarantine_entry_human(entry: &crate::db::StoredTrustQuarantine) -> String {
+    let source_uri = redact_quarantine_source_uri(&entry.source_uri);
     let mut output = "ee diag quarantine show\n\n".to_string();
-    output.push_str(&format!("Source: {}\n", entry.source_uri));
+    output.push_str(&format!("Source: {source_uri}\n"));
     output.push_str(&format!("Status: {}\n", entry.status));
     output.push_str(&format!("Harmful events: {}\n", entry.harmful_event_count));
     output.push_str(&format!("First event: {}\n", entry.first_event_at));
@@ -5147,6 +5153,10 @@ pub fn render_quarantine_entry_human(entry: &crate::db::StoredTrustQuarantine) -
 #[must_use]
 pub fn render_quarantine_entry_toon(entry: &crate::db::StoredTrustQuarantine) -> String {
     render_toon_from_json(&render_quarantine_entry_json(entry))
+}
+
+fn redact_quarantine_source_uri(value: &str) -> String {
+    redact_memory_output_provenance_uri(value)
 }
 
 // ============================================================================
@@ -9532,7 +9542,8 @@ pub fn render_quarantine_json_filtered(report: &QuarantineReport, profile: Field
 
         if profile.include_arrays() {
             let build_entry = |obj: &mut JsonBuilder, entry: &QuarantineEntry| {
-                obj.field_str("sourceId", &entry.source_id);
+                let source_id = redact_quarantine_source_uri(&entry.source_id);
+                obj.field_str("sourceId", &source_id);
                 obj.field_str("advisory", entry.advisory.as_str());
                 obj.field_raw("effectiveTrust", &format!("{:.4}", entry.effective_trust));
                 if profile.include_verbose_details() {
@@ -12826,9 +12837,12 @@ mod tests {
         render_learn_cluster_json, render_learn_experiment_proposal_human,
         render_learn_experiment_proposal_json, render_learn_experiment_proposal_toon,
         render_memory_history_json, render_memory_history_toon, render_preflight_run_json,
-        render_preflight_show_json, render_schema_export_json, render_shadow_run_human,
-        render_shadow_run_json, render_shadow_run_toon, render_status_json,
-        render_status_json_filtered, render_status_toon, render_version_json, status_response_json,
+        render_preflight_show_json, render_quarantine_entry_human, render_quarantine_entry_json,
+        render_quarantine_entry_toon, render_quarantine_human, render_quarantine_json,
+        render_quarantine_json_filtered, render_quarantine_toon, render_schema_export_json,
+        render_shadow_run_human, render_shadow_run_json, render_shadow_run_toon,
+        render_status_json, render_status_json_filtered, render_status_toon, render_version_json,
+        status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::doctor::{
@@ -12854,13 +12868,17 @@ mod tests {
         PreflightDegradation, PreflightRunView, RunReport as PreflightRunReport,
         ShowReport as PreflightShowReport,
     };
+    use crate::core::quarantine::{
+        AdvisoryLevel, QuarantineEntry, QuarantineReport, QuarantineStorageStatus,
+        QuarantineSummary,
+    };
     use crate::core::status::{DegradationReport, MeshStorageStatusReport, StatusReport};
     use crate::core::tailscale_probe::{TailscaleLocalReport, TailscaleProbeMethod};
     use crate::core::{
         BUILD_TIMESTAMP_POLICY, BuildFeature, BuildInfo, BuildProvenanceDegradation,
         SupportedSchema, VERSION_PROVENANCE_SCHEMA_V1, VersionReport,
     };
-    use crate::db::StoredMemory;
+    use crate::db::{StoredMemory, StoredTrustQuarantine};
     use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
     use crate::models::{
         DomainError, ERROR_SCHEMA_V2, MemoryId, ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass,
@@ -13145,6 +13163,123 @@ mod tests {
             valid_from: None,
             valid_to: None,
         }
+    }
+
+    fn output_test_quarantine(source_uri: String) -> StoredTrustQuarantine {
+        StoredTrustQuarantine {
+            workspace_id: "wsp_output_redaction".to_owned(),
+            source_uri,
+            first_event_at: "2026-05-17T00:00:00Z".to_owned(),
+            last_event_at: "2026-05-17T00:01:00Z".to_owned(),
+            harmful_event_count: 3,
+            quarantined_until: Some("2026-05-18T00:00:00Z".to_owned()),
+            reason: "redaction regression fixture".to_owned(),
+            status: "active".to_owned(),
+            created_at: "2026-05-17T00:00:00Z".to_owned(),
+            updated_at: "2026-05-17T00:01:00Z".to_owned(),
+        }
+    }
+
+    fn output_test_quarantine_report(source_id: String) -> QuarantineReport {
+        let entry = QuarantineEntry {
+            source_id,
+            advisory: AdvisoryLevel::Block,
+            effective_trust: 0.1,
+            decay_factor: 0.2,
+            negative_rate: 1.0,
+            negative_count: 3,
+            total_imports: 3,
+            message: "source is blocked".to_owned(),
+            permits_import: false,
+            requires_validation: true,
+        };
+        QuarantineReport {
+            version: "test",
+            quarantined_sources: Vec::new(),
+            at_risk_sources: Vec::new(),
+            blocked_sources: vec![entry],
+            summary: QuarantineSummary {
+                quarantined_count: 0,
+                at_risk_count: 0,
+                blocked_count: 1,
+                total_sources: 1,
+                healthy_count: 0,
+            },
+            storage_status: QuarantineStorageStatus::Ready,
+            workspace_path: None,
+            database_path: None,
+            degraded: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn quarantine_entry_output_redacts_sensitive_source_uri() -> TestResult {
+        let entry = output_test_quarantine(
+            "file:///Users/alice/private/quarantine.json?api_key=redaction-fixture".to_owned(),
+        );
+
+        let json = render_quarantine_entry_json(&entry);
+        ensure_contains(
+            &json,
+            "[REDACTED_PATH]",
+            "quarantine entry JSON path redaction",
+        )?;
+        ensure_contains(
+            &json,
+            "[REDACTED:secret]",
+            "quarantine entry JSON secret redaction",
+        )?;
+        ensure(
+            !json.contains("/Users/alice") && !json.contains("redaction-fixture"),
+            format!("quarantine entry JSON leaked sensitive source URI: {json}"),
+        )?;
+
+        let human = render_quarantine_entry_human(&entry);
+        ensure_contains(
+            &human,
+            "[REDACTED_PATH]",
+            "quarantine entry human path redaction",
+        )?;
+        ensure(
+            !human.contains("/Users/alice") && !human.contains("redaction-fixture"),
+            format!("quarantine entry human leaked sensitive source URI: {human}"),
+        )?;
+
+        let toon = render_quarantine_entry_toon(&entry);
+        ensure(
+            !toon.contains("/Users/alice") && !toon.contains("redaction-fixture"),
+            format!("quarantine entry TOON leaked sensitive source URI: {toon}"),
+        )
+    }
+
+    #[test]
+    fn quarantine_report_output_redacts_sensitive_source_id() -> TestResult {
+        let report = output_test_quarantine_report(
+            "file:///Volumes/USBNVME16TB/private/quarantine.json#token=redaction-fixture"
+                .to_owned(),
+        );
+
+        for (surface, rendered) in [
+            ("json", render_quarantine_json(&report)),
+            ("human", render_quarantine_human(&report)),
+            ("toon", render_quarantine_toon(&report)),
+            (
+                "filtered",
+                render_quarantine_json_filtered(&report, FieldProfile::Full),
+            ),
+        ] {
+            ensure_contains(
+                &rendered,
+                "[REDACTED_PATH]",
+                format!("quarantine report {surface} path redaction").as_str(),
+            )?;
+            ensure(
+                !rendered.contains("/Volumes/USBNVME16TB")
+                    && !rendered.contains("redaction-fixture"),
+                format!("quarantine report {surface} leaked sensitive source id: {rendered}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
