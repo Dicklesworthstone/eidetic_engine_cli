@@ -6,6 +6,7 @@ use std::time::Duration;
 use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
 };
+use crate::core::graph_telemetry::{SnapshotRefreshEvent, emit_snapshot_refresh};
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
     DbOperation,
@@ -2593,6 +2594,7 @@ fn refresh_typed_graph_snapshot_with_owner(
         )?);
     }
 
+    emit_graph_snapshot_refresh_telemetry_if_persisted(&report);
     Ok(report)
 }
 
@@ -2607,6 +2609,7 @@ fn refresh_graph_snapshot_locked(
     with_graph_snapshot_transaction(conn, "graph snapshot refresh transaction", || {
         refresh_graph_snapshot_in_transaction(conn, workspace_id, options, &write_owner)
     })
+    .inspect(emit_graph_snapshot_refresh_telemetry_if_persisted)
 }
 
 fn refresh_graph_snapshot_in_transaction(
@@ -2633,6 +2636,20 @@ fn refresh_graph_snapshot_in_transaction(
     emit_centrality_refresh_witnesses(conn, workspace_id, &snapshot, &report.centrality)?;
     report.snapshot = Some(snapshot);
     Ok(report)
+}
+
+fn emit_graph_snapshot_refresh_telemetry_if_persisted(report: &GraphRefreshJobReport) {
+    let Some(snapshot) = report.snapshot.as_ref() else {
+        return;
+    };
+    emit_snapshot_refresh(SnapshotRefreshEvent {
+        graph_type: snapshot.graph_type.as_str(),
+        snapshot_version: u64::from(snapshot.snapshot_version),
+        build_ms: float_millis_to_u64_saturating(report.centrality.total_ms),
+        node_count: report.centrality.node_count,
+        edge_count: report.centrality.edge_count,
+        lock_wait_ms: 0,
+    });
 }
 
 fn emit_centrality_refresh_witnesses(
@@ -5138,7 +5155,17 @@ mod tests {
     use proptest::prelude::*;
     use proptest::test_runner::Config as ProptestConfig;
     use std::error::Error as _;
+    #[cfg(feature = "graph")]
+    use std::sync::Mutex;
     use std::sync::{Arc, Barrier};
+    #[cfg(feature = "graph")]
+    use tracing::subscriber::with_default;
+    #[cfg(feature = "graph")]
+    use tracing_subscriber::Layer;
+    #[cfg(feature = "graph")]
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    #[cfg(feature = "graph")]
+    use tracing_subscriber::registry::Registry;
 
     use super::{
         CgseValue, GraphCapabilityName, GraphError, GraphSurface, REQUIRED_GRAPH_ENGINE,
@@ -5235,6 +5262,85 @@ mod tests {
         (32, 34),
         (33, 34),
     ];
+
+    #[cfg(feature = "graph")]
+    #[derive(Clone)]
+    struct CapturedGraphEvent {
+        target: String,
+        fields: std::collections::BTreeMap<String, String>,
+    }
+
+    #[cfg(feature = "graph")]
+    #[derive(Default, Clone)]
+    struct GraphEventCaptureLayer {
+        events: Arc<Mutex<Vec<CapturedGraphEvent>>>,
+    }
+
+    #[cfg(feature = "graph")]
+    impl<S> Layer<S> for GraphEventCaptureLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            let mut captured = CapturedGraphEvent {
+                target: event.metadata().target().to_owned(),
+                fields: std::collections::BTreeMap::new(),
+            };
+            let mut visitor = GraphEventCaptureVisitor {
+                fields: &mut captured.fields,
+            };
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("graph telemetry capture lock")
+                .push(captured);
+        }
+    }
+
+    #[cfg(feature = "graph")]
+    struct GraphEventCaptureVisitor<'a> {
+        fields: &'a mut std::collections::BTreeMap<String, String>,
+    }
+
+    #[cfg(feature = "graph")]
+    impl tracing::field::Visit for GraphEventCaptureVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_owned(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_owned());
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_string());
+        }
+
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_string());
+        }
+
+        fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_string());
+        }
+    }
+
+    #[cfg(feature = "graph")]
+    fn capture_graph_events<T>(thunk: impl FnOnce() -> T) -> (T, Vec<CapturedGraphEvent>) {
+        let layer = GraphEventCaptureLayer::default();
+        let events = layer.events.clone();
+        let subscriber = Registry::default()
+            .with(layer)
+            .with(tracing_subscriber::filter::LevelFilter::TRACE);
+        let result = with_default(subscriber, thunk);
+        let captured = events.lock().expect("graph telemetry capture lock").clone();
+        (result, captured)
+    }
 
     fn numbered_memory_id(number: usize) -> String {
         format!("mem_{number:026}")
@@ -7229,8 +7335,7 @@ mod tests {
         ];
         let hits = super::hits::HitsScores::default();
 
-        let scores =
-            super::merge_centrality_scores(&pagerank_scores, &betweenness_scores, &hits);
+        let scores = super::merge_centrality_scores(&pagerank_scores, &betweenness_scores, &hits);
         let scores_by_id: std::collections::BTreeMap<&str, &super::MemoryCentralityScore> = scores
             .iter()
             .map(|score| (score.memory_id.as_str(), score))
@@ -7279,8 +7384,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_centrality_from_links_emits_hits_scores_and_top_hubs_authorities() -> TestResult
-    {
+    fn refresh_centrality_from_links_emits_hits_scores_and_top_hubs_authorities() -> TestResult {
         let links = vec![
             stored_memory_link("link_aaaaaaaaaaaaaaaaaaaaaaaaaaaa01", MEMORY_A, MEMORY_B),
             stored_memory_link("link_aaaaaaaaaaaaaaaaaaaaaaaaaaaa02", MEMORY_A, MEMORY_C),
@@ -7300,7 +7404,11 @@ mod tests {
             return Err("top_authorities should be populated for a non-empty graph".to_owned());
         }
         // Every score carries the new hub/authority columns.
-        if report.scores.iter().any(|s| s.hub.is_nan() || s.authority.is_nan()) {
+        if report
+            .scores
+            .iter()
+            .any(|s| s.hub.is_nan() || s.authority.is_nan())
+        {
             return Err("hub/authority must be finite".to_owned());
         }
         // top_hubs is descending by hub.
@@ -7364,8 +7472,7 @@ mod tests {
         authorities.insert(MEMORY_C.to_owned(), 0.2);
         let hits = super::hits::HitsScores { hubs, authorities };
 
-        let scores =
-            super::merge_centrality_scores(&pagerank_scores, &betweenness_scores, &hits);
+        let scores = super::merge_centrality_scores(&pagerank_scores, &betweenness_scores, &hits);
         let scores_by_id: std::collections::BTreeMap<&str, &super::MemoryCentralityScore> = scores
             .iter()
             .map(|score| (score.memory_id.as_str(), score))
@@ -8678,6 +8785,80 @@ mod tests {
             },
         ))?;
         assert_eq!(export.status, super::GraphExportStatus::Exported);
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn refresh_graph_snapshot_emits_snapshot_refresh_telemetry() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000131",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000132",
+            MEMORY_B,
+            MEMORY_C,
+            true,
+            0.9,
+            0.9,
+        )?;
+
+        let (refresh, events) = capture_graph_events(|| {
+            graph_result(super::refresh_graph_snapshot(
+                &connection,
+                WORKSPACE_ID,
+                &super::CentralityRefreshOptions::default(),
+            ))
+        });
+        let report = refresh?;
+        let snapshot = report
+            .snapshot
+            .as_ref()
+            .ok_or_else(|| "refresh should persist a snapshot".to_owned())?;
+
+        let event = events
+            .iter()
+            .find(|event| event.target == crate::core::graph_telemetry::SNAPSHOT_REFRESH_EVENT)
+            .ok_or_else(|| "snapshot refresh telemetry should be emitted".to_owned())?;
+        assert_eq!(
+            event.fields.get("graph_type").map(String::as_str),
+            Some(GraphSnapshotType::MemoryLinks.as_str())
+        );
+        let snapshot_version = snapshot.snapshot_version.to_string();
+        assert_eq!(
+            event.fields.get("snapshot_version").map(String::as_str),
+            Some(snapshot_version.as_str())
+        );
+        assert_eq!(
+            event.fields.get("node_count").map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(
+            event.fields.get("edge_count").map(String::as_str),
+            Some("2")
+        );
+        assert!(
+            event
+                .fields
+                .get("build_ms")
+                .and_then(|value| value.parse::<u64>().ok())
+                .is_some(),
+            "snapshot refresh telemetry should include numeric build_ms: {:?}",
+            event.fields
+        );
+        assert_eq!(
+            event.fields.get("lock_wait_ms").map(String::as_str),
+            Some("0")
+        );
 
         connection.close().map_err(|error| error.to_string())
     }
