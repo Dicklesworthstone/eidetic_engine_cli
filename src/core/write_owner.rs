@@ -153,6 +153,7 @@ fn write_recovery_state(workspace_path: &Path, state: &str) -> std::io::Result<(
         fs::create_dir_all(parent)?;
     }
     ensure_recovery_state_path_has_no_symlink_components(&path)?;
+    ensure_recovery_state_final_path_is_regular_or_missing(&path)?;
     let payload = format!(
         "{{\"schema\":\"{WRITE_SPOOL_RECOVERY_STATE_SCHEMA_V1}\",\"state\":\"{state}\"}}\n"
     );
@@ -181,6 +182,21 @@ fn write_recovery_state(workspace_path: &Path, state: &str) -> std::io::Result<(
     }
 
     Ok(())
+}
+
+fn ensure_recovery_state_final_path_is_regular_or_missing(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "write-spool recovery state path is not a file: {}",
+                path.display()
+            ),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn ensure_recovery_state_path_has_no_symlink_components(path: &Path) -> io::Result<()> {
@@ -2461,6 +2477,38 @@ mod tests {
         assert!(
             !workspace_write_replay_required(temp.path()),
             "status must not trust a non-regular recovery marker path"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn write_spool_recovery_state_rejects_non_regular_marker_before_temp_write()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let marker_path = write_spool_recovery_state_path(temp.path());
+        fs::create_dir_all(&marker_path).map_err(|error| error.to_string())?;
+        let mut temp_path = marker_path.clone();
+        temp_path.set_extension("tmp");
+
+        let error = mark_write_replay_required(temp.path())
+            .expect_err("non-regular recovery marker path should be rejected");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("not a file"),
+            "error should explain the non-file marker path"
+        );
+        assert!(
+            fs::symlink_metadata(&marker_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_dir(),
+            "recovery marker path must remain a directory"
+        );
+        assert!(
+            !temp_path.exists(),
+            "temp recovery marker must not be written after final path preflight fails"
         );
 
         Ok(())
