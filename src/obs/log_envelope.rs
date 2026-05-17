@@ -186,6 +186,28 @@ fn ensure_append_path_has_no_symlink_components(path: &Path) -> io::Result<()> {
             ),
         ));
     }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing to append audit event to '{}': path is not a regular file",
+                    path.display()
+                ),
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "failed to inspect audit append path '{}': {error}",
+                    path.display()
+                ),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -339,6 +361,38 @@ mod tests {
                 .map_err(|error| error.to_string())?
                 .is_empty(),
             "audit append must not write through symlinked file"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn audit_event_append_rejects_non_regular_final_path() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let audit_path = tempdir.path().join("audit.jsonl");
+        std::fs::create_dir(&audit_path).map_err(|error| error.to_string())?;
+
+        let event = AuditEvent::new(
+            "2026-05-06T00:00:00.123456789Z",
+            "agent:SwiftCat",
+            "remember",
+            "memory:mem_01",
+            AuditOutcome::Success,
+        );
+        let error = match event.append_to_path(&audit_path) {
+            Ok(()) => return Err("append should reject non-regular audit path".to_owned()),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            error.to_string().contains("path is not a regular file"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            std::fs::read_dir(&audit_path)
+                .map_err(|error| error.to_string())?
+                .next()
+                .is_none(),
+            "non-regular audit target must not be modified"
         );
         Ok(())
     }
