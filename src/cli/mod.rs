@@ -18822,6 +18822,12 @@ where
         }
     };
 
+    if !args.in_place
+        && let Err(error) = ensure_diag_database_output_path_is_safe(&output_database_path)
+    {
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
     if !args.in_place && output_database_path.exists() {
         let domain_error = DomainError::Usage {
             message: format!(
@@ -27303,6 +27309,60 @@ where
     });
 
     write_stdout(stdout, &(response.to_string() + "\n"))
+}
+
+fn ensure_diag_database_output_path_is_safe(path: &Path) -> Result<(), DomainError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::RootDir => current.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => current.push(component.as_os_str()),
+            Component::Normal(segment) => {
+                current.push(segment);
+                match fs::symlink_metadata(&current) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        return Err(DomainError::Storage {
+                            message: format!(
+                                "Refusing to write diagnostic database through symlinked output path component {}.",
+                                current.display()
+                            ),
+                            repair: Some(
+                                "Choose a --output-database path made of real directories and a regular database file.".to_string(),
+                            ),
+                        });
+                    }
+                    Ok(metadata) if current == path && !metadata.is_file() => {
+                        return Err(DomainError::Storage {
+                            message: format!(
+                                "Refusing to write diagnostic database to non-regular output path {}.",
+                                path.display()
+                            ),
+                            repair: Some(
+                                "Choose a fresh --output-database path or remove the non-file path manually.".to_string(),
+                            ),
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                    Err(error) => {
+                        return Err(DomainError::Storage {
+                            message: format!(
+                                "Failed to inspect diagnostic database output path {}: {error}",
+                                current.display()
+                            ),
+                            repair: Some(
+                                "Check permissions for the --output-database path and retry."
+                                    .to_string(),
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn handle_pack_diff<W, E>(
@@ -44492,6 +44552,70 @@ mod tests {
             ensure_contains(&stdout, &format!("\"skew\":\"{skew}\""), "skew")?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn diag_database_output_path_rejects_non_regular_final_path() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let output_database = tempdir.path().join("skew.db");
+        fs::create_dir(&output_database).map_err(|error| error.to_string())?;
+
+        let error = match ensure_diag_database_output_path_is_safe(&output_database) {
+            Ok(()) => return Err("directory output path should be rejected".to_string()),
+            Err(error) => error,
+        };
+
+        ensure_contains(
+            &error.to_string(),
+            "non-regular output path",
+            "non-regular output error",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diag_database_output_path_rejects_symlinked_parent_component() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_parent = tempdir.path().join("real-parent");
+        let linked_parent = tempdir.path().join("linked-parent");
+        fs::create_dir(&real_parent).map_err(|error| error.to_string())?;
+        symlink(&real_parent, &linked_parent).map_err(|error| error.to_string())?;
+        let output_database = linked_parent.join("skew.db");
+
+        let error = match ensure_diag_database_output_path_is_safe(&output_database) {
+            Ok(()) => return Err("symlinked parent output path should be rejected".to_string()),
+            Err(error) => error,
+        };
+
+        ensure_contains(
+            &error.to_string(),
+            "symlinked output path component",
+            "symlinked parent output error",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diag_database_output_path_rejects_symlinked_final_path() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let output_database = tempdir.path().join("skew.db");
+        let outside_target = tempdir.path().join("outside.db");
+        symlink(&outside_target, &output_database).map_err(|error| error.to_string())?;
+
+        let error = match ensure_diag_database_output_path_is_safe(&output_database) {
+            Ok(()) => return Err("symlinked final output path should be rejected".to_string()),
+            Err(error) => error,
+        };
+
+        ensure_contains(
+            &error.to_string(),
+            "symlinked output path component",
+            "symlinked final output error",
+        )
     }
 
     #[test]
