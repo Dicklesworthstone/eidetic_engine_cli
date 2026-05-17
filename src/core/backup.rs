@@ -846,14 +846,7 @@ pub fn list_backups(options: &BackupListOptions) -> Result<BackupListReport, Dom
     let mut degraded = Vec::new();
     let mut backups = Vec::new();
 
-    if backup_root.exists() {
-        if !backup_root.is_dir() {
-            return Err(DomainError::Storage {
-                message: format!("backup root '{}' is not a directory", backup_root.display()),
-                repair: Some("choose a directory with --output-dir".to_owned()),
-            });
-        }
-
+    if backup_list_root_exists(&backup_root)? {
         let mut backup_paths = fs::read_dir(&backup_root)
             .map_err(|error| DomainError::Storage {
                 message: format!(
@@ -873,17 +866,12 @@ pub fn list_backups(options: &BackupListOptions) -> Result<BackupListReport, Dom
             })?;
         backup_paths.sort();
 
-        for backup_path in backup_paths.into_iter().filter(|path| path.is_dir()) {
+        for path in backup_paths {
+            let Some(backup_path) = backup_list_child_dir(path, &mut degraded)? else {
+                continue;
+            };
             let manifest_path = backup_path.join(MANIFEST_FILE);
-            if !manifest_path.is_file() {
-                degraded.push(BackupDegradation::warning(
-                    "backup_manifest_missing",
-                    format!(
-                        "backup directory '{}' has no manifest.json",
-                        backup_path.display()
-                    ),
-                    "run ee backup inspect on the directory or remove it manually after review",
-                ));
+            if !backup_list_manifest_is_file(&backup_path, &manifest_path, &mut degraded)? {
                 continue;
             }
 
@@ -920,6 +908,173 @@ pub fn list_backups(options: &BackupListOptions) -> Result<BackupListReport, Dom
         backups,
         degraded,
     })
+}
+
+fn backup_list_root_exists(path: &Path) -> Result<bool, DomainError> {
+    if let Some(symlink_path) = backup_list_symlink_component(path)? {
+        return Err(DomainError::Storage {
+            message: format!(
+                "backup root '{}' traverses symbolic link '{}'",
+                path.display(),
+                symlink_path.display()
+            ),
+            repair: Some("choose a real, non-symlink directory with --output-dir".to_owned()),
+        });
+    }
+
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "failed to inspect backup root '{}': {error}",
+                    path.display()
+                ),
+                repair: Some("choose a readable --output-dir".to_owned()),
+            });
+        }
+    };
+    if !metadata.file_type().is_dir() {
+        return Err(DomainError::Storage {
+            message: format!("backup root '{}' is not a directory", path.display()),
+            repair: Some("choose a directory with --output-dir".to_owned()),
+        });
+    }
+    Ok(true)
+}
+
+fn backup_list_child_dir(
+    path: PathBuf,
+    degraded: &mut Vec<BackupDegradation>,
+) -> Result<Option<PathBuf>, DomainError> {
+    if let Some(symlink_path) = backup_list_symlink_component(&path)? {
+        degraded.push(BackupDegradation::warning(
+            "backup_manifest_unreadable",
+            format!(
+                "backup directory '{}' was skipped because it traverses symbolic link '{}'",
+                path.display(),
+                symlink_path.display()
+            ),
+            "replace symlinked backup entries with self-contained backup directories",
+        ));
+        return Ok(None);
+    }
+
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            degraded.push(BackupDegradation::warning(
+                "backup_manifest_unreadable",
+                format!(
+                    "backup directory '{}' could not be inspected: {error}",
+                    path.display()
+                ),
+                "run ee backup inspect on the directory for a focused diagnostic",
+            ));
+            return Ok(None);
+        }
+    };
+
+    Ok(metadata.file_type().is_dir().then_some(path))
+}
+
+fn backup_list_manifest_is_file(
+    backup_path: &Path,
+    manifest_path: &Path,
+    degraded: &mut Vec<BackupDegradation>,
+) -> Result<bool, DomainError> {
+    if backup_relative_path_has_symlink_component(backup_path, Path::new(MANIFEST_FILE))? {
+        degraded.push(BackupDegradation::warning(
+            "backup_manifest_unreadable",
+            format!(
+                "backup manifest path '{}' traverses a symbolic link",
+                manifest_path.display()
+            ),
+            "run ee backup inspect on the directory for a focused diagnostic",
+        ));
+        return Ok(false);
+    }
+
+    match fs::symlink_metadata(manifest_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => {
+            degraded.push(BackupDegradation::warning(
+                "backup_manifest_unreadable",
+                format!(
+                    "backup manifest path '{}' is not a regular file",
+                    manifest_path.display()
+                ),
+                "run ee backup inspect on the directory for a focused diagnostic",
+            ));
+            Ok(false)
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            degraded.push(BackupDegradation::warning(
+                "backup_manifest_missing",
+                format!(
+                    "backup directory '{}' has no manifest.json",
+                    backup_path.display()
+                ),
+                "run ee backup inspect on the directory or remove it manually after review",
+            ));
+            Ok(false)
+        }
+        Err(error) => {
+            degraded.push(BackupDegradation::warning(
+                "backup_manifest_unreadable",
+                format!(
+                    "backup manifest path '{}' could not be inspected: {error}",
+                    manifest_path.display()
+                ),
+                "run ee backup inspect on the directory for a focused diagnostic",
+            ));
+            Ok(false)
+        }
+    }
+}
+
+fn backup_list_symlink_component(path: &Path) -> Result<Option<PathBuf>, DomainError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "failed to inspect backup list path component '{}': {error}",
+                        current.display()
+                    ),
+                    repair: Some(
+                        "inspect filesystem permissions or choose another --output-dir".to_owned(),
+                    ),
+                });
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Inspect one backup manifest without checking artifact hashes.
@@ -4047,6 +4202,83 @@ mod tests {
             "listed backup id",
         )?;
         ensure_equal(entry.issue_count, 0, "listed issue count")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_backups_rejects_symlinked_backup_root() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let real_root = tempdir.path().join("real-backups");
+        fs::create_dir_all(&real_root).map_err(|error| error.to_string())?;
+        let linked_root = workspace.join("linked-backups");
+        symlink(&real_root, &linked_root).map_err(|error| error.to_string())?;
+
+        let result = list_backups(&BackupListOptions {
+            workspace_path: workspace,
+            output_dir: Some(linked_root),
+        });
+
+        match result {
+            Err(DomainError::Storage { message, repair }) => {
+                ensure(
+                    message.contains("symbolic link"),
+                    "symlinked backup root should be rejected explicitly",
+                )?;
+                ensure_equal(
+                    repair.as_deref(),
+                    Some("choose a real, non-symlink directory with --output-dir"),
+                    "symlinked backup root repair",
+                )
+            }
+            other => Err(format!("expected storage error, got {other:?}")),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_backups_skips_symlinked_backup_entry_before_inspect() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        let backup_root = workspace.join("backups");
+        fs::create_dir_all(&backup_root).map_err(|error| error.to_string())?;
+        let real_backup = tempdir.path().join("real-backup");
+        fs::create_dir_all(&real_backup).map_err(|error| error.to_string())?;
+        fs::write(
+            real_backup.join(MANIFEST_FILE),
+            serde_json::to_vec(&json!({
+                "schema": BACKUP_MANIFEST_SCHEMA_V1,
+                "backupId": "backup-test",
+                "artifacts": [],
+            }))
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(&real_backup, backup_root.join("linked-backup"))
+            .map_err(|error| error.to_string())?;
+
+        let listed = list_backups(&BackupListOptions {
+            workspace_path: workspace,
+            output_dir: Some(backup_root),
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            listed.backups.is_empty(),
+            "symlinked backup entry must not be inspected as a backup",
+        )?;
+        ensure(
+            listed.degraded.iter().any(|degradation| {
+                degradation.code == "backup_manifest_unreadable"
+                    && degradation.message.contains("symbolic link")
+            }),
+            "symlinked backup entry should be reported with existing unreadable code",
+        )
     }
 
     #[test]
