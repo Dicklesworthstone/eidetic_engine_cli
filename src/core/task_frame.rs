@@ -4,8 +4,8 @@
 //! links, and evidence IDs for agent continuity. They never execute shell
 //! commands, route tools, or mutate workspace source files.
 
-use std::fs;
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -551,7 +551,7 @@ fn read_store(store_path: &Path) -> Result<TaskFrameStoreDocument, DomainError> 
             repair: Some("Replace .ee/task_frames.json with a regular JSON file.".to_owned()),
         });
     }
-    let text = fs::read_to_string(store_path).map_err(|error| DomainError::Storage {
+    let text = read_store_file(store_path).map_err(|error| DomainError::Storage {
         message: format!(
             "Failed to read task-frame store `{}`: {error}",
             store_path.display()
@@ -566,6 +566,30 @@ fn read_store(store_path: &Path) -> Result<TaskFrameStoreDocument, DomainError> 
         repair: Some("Inspect .ee/task_frames.json for malformed JSON.".to_owned()),
     })
 }
+
+fn read_store_file(store_path: &Path) -> std::io::Result<String> {
+    let mut file = open_store_file_for_read(store_path)?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+fn open_store_file_for_read(store_path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_task_frame_open_no_follow(&mut options);
+    options.open(store_path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_task_frame_open_no_follow(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_task_frame_open_no_follow(_options: &mut OpenOptions) {}
 
 fn write_store(store_path: &Path, store: &TaskFrameStoreDocument) -> Result<(), DomainError> {
     ensure_no_symlink_components(store_path, "write")?;
@@ -674,7 +698,7 @@ fn ensure_created_write_store_temp_path(temp_path: &Path) -> Result<(), DomainEr
 }
 
 fn write_store_temp_file(temp_path: &Path, text: &str) -> Result<(), DomainError> {
-    let mut file = fs::OpenOptions::new()
+    let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(temp_path)
@@ -1286,6 +1310,39 @@ mod tests {
                 "{{\"schema\":\"{}\",\"frames\":[]}}\n",
                 TASK_FRAME_STORE_SCHEMA_V1
             )
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn task_frame_store_final_read_open_rejects_symlinked_store_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = temp_workspace("final-read-symlink")?;
+        let ee_dir = workspace.join(".ee");
+        fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let outside_store = workspace.join("outside-task-frames.json");
+        let outside_text = format!(
+            "{{\"schema\":\"{}\",\"frames\":[]}}\n",
+            TASK_FRAME_STORE_SCHEMA_V1
+        );
+        fs::write(&outside_store, outside_text.as_bytes()).map_err(|error| error.to_string())?;
+        let linked_store = task_frame_store_path(&workspace);
+        symlink(&outside_store, &linked_store).map_err(|error| error.to_string())?;
+
+        let error = open_store_file_for_read(&linked_store)
+            .expect_err("final task-frame store read open must reject symlinks");
+
+        assert_ne!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "final symlink read should fail because the path is a symlink"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_store).map_err(|error| error.to_string())?,
+            outside_text,
+            "task-frame store read helper must not follow the symlink target"
         );
         Ok(())
     }
