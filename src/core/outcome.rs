@@ -2696,10 +2696,7 @@ mod tests {
 
         let rendered = [
             outcome_audit_details("fb_00000000000000000000000003", &event_input),
-            feedback_quarantine_audit_details(
-                "fq_00000000000000000000000003",
-                &quarantine_input,
-            ),
+            feedback_quarantine_audit_details("fq_00000000000000000000000003", &quarantine_input),
             feedback_quarantine_review_audit_details(&quarantine_row, "released", None),
         ]
         .join("\n");
