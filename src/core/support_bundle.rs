@@ -2509,17 +2509,23 @@ fn write_file_with_hash(path: &Path, content: &str) -> Result<u64, DomainError> 
     })?;
     drop(file);
 
+    publish_support_bundle_temp_file(&temp_path, path)?;
+
+    Ok(content.len() as u64)
+}
+
+fn publish_support_bundle_temp_file(temp_path: &Path, path: &Path) -> Result<(), DomainError> {
+    reject_existing_symlink_component(path, "support bundle file")?;
     ensure_support_bundle_file_final_path_regular_or_missing(path)?;
-    fs::rename(&temp_path, path).map_err(|e| DomainError::Storage {
+    ensure_support_bundle_created_temp_path_regular(temp_path)?;
+    fs::rename(temp_path, path).map_err(|e| DomainError::Storage {
         message: format!(
             "Failed to publish temporary support bundle file {} to {}: {e}",
             temp_path.display(),
             path.display()
         ),
         repair: None,
-    })?;
-
-    Ok(content.len() as u64)
+    })
 }
 
 fn support_bundle_temp_path(path: &Path) -> Result<PathBuf, DomainError> {
@@ -2554,6 +2560,26 @@ fn ensure_support_bundle_file_temp_path_absent(path: &Path) -> Result<(), Domain
         Err(error) => Err(DomainError::Storage {
             message: format!(
                 "Failed to inspect support bundle temp file {} before create: {error}",
+                path.display()
+            ),
+            repair: Some("Check support bundle temp path permissions.".to_owned()),
+        }),
+    }
+}
+
+fn ensure_support_bundle_created_temp_path_regular(path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to publish support bundle temp file {} because it is not a regular file.",
+                path.display()
+            ),
+            repair: Some("Remove the stale support bundle temp path and retry.".to_owned()),
+        }),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect support bundle temp file {} before publish: {error}",
                 path.display()
             ),
             repair: Some("Check support bundle temp path permissions.".to_owned()),
@@ -3116,6 +3142,56 @@ mod tests {
         assert!(
             !file_path.exists(),
             "final support bundle file must not be published when temp exists"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_support_bundle_temp_rechecks_final_symlink_before_rename() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_path("publish-final-symlink");
+        let file_path = root.join("bundle").join("evidence.json");
+        let temp_path = support_bundle_temp_path(&file_path).map_err(|error| error.message())?;
+        fs::create_dir_all(
+            file_path
+                .parent()
+                .ok_or_else(|| "file path missing parent".to_owned())?,
+        )
+        .map_err(|error| format!("failed to create bundle dir: {error}"))?;
+        fs::write(&temp_path, "{}")
+            .map_err(|error| format!("failed to write support bundle temp file: {error}"))?;
+        let outside_file = root.join("outside-evidence.json");
+        fs::write(&outside_file, "outside content")
+            .map_err(|error| format!("failed to write outside file: {error}"))?;
+        symlink(&outside_file, &file_path)
+            .map_err(|error| format!("failed to symlink final path: {error}"))?;
+
+        let error = publish_support_bundle_temp_file(&temp_path, &file_path)
+            .expect_err("symlinked final support bundle path should be rejected before publish");
+
+        assert!(
+            error.message().contains("symlinked path component"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_file)
+                .map_err(|error| format!("failed to read outside file: {error}"))?,
+            "outside content",
+            "support bundle publish must not overwrite a symlink target"
+        );
+        assert!(
+            temp_path.is_file(),
+            "temporary support bundle file should remain available for inspection"
+        );
+        assert!(
+            fs::symlink_metadata(&file_path)
+                .map_err(|error| format!("failed to inspect final path: {error}"))?
+                .file_type()
+                .is_symlink(),
+            "final symlink should remain untouched"
         );
         Ok(())
     }
