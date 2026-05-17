@@ -25105,18 +25105,76 @@ fn db_inspect_row_json(row: &sqlmodel_core::Row) -> DbInspectRow {
     let mut values = BTreeMap::new();
     let mut source_uri = None;
     for (column, value) in row.iter() {
+        let redacted_source_uri = (column == "source_uri")
+            .then(|| value.as_str().map(db_inspect_redact_source_uri))
+            .flatten();
         let inspected = if db_inspect_column_is_sensitive(column) {
             serde_json::Value::String("<redacted>".to_string())
+        } else if let Some(redacted) = redacted_source_uri.clone() {
+            serde_json::Value::String(redacted)
         } else {
             db_sql_value_json(value)
         };
-        if column == "source_uri" {
-            source_uri = value.as_str().map(str::to_owned);
+        if redacted_source_uri.is_some() {
+            source_uri = redacted_source_uri;
         }
         values.insert(column.to_string(), inspected);
     }
 
     DbInspectRow { source_uri, values }
+}
+
+fn db_inspect_redact_source_uri(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    db_inspect_redact_source_path_segments(&secret_redacted)
+}
+
+fn db_inspect_redact_source_path_segments(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, c)| *c == '/')
+        else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        let start = cursor + relative_index;
+        if !db_inspect_source_path_starts_sensitive_segment(&value[start..]) {
+            output.push_str(&value[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        output.push_str(&value[cursor..start]);
+        output.push_str("[REDACTED_PATH]");
+        cursor = value[start..]
+            .char_indices()
+            .find_map(|(index, c)| db_inspect_source_path_boundary(c).then_some(start + index))
+            .unwrap_or(value.len());
+    }
+    output
+}
+
+fn db_inspect_source_path_starts_sensitive_segment(value: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/home/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+    ];
+
+    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+}
+
+fn db_inspect_source_path_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
 }
 
 fn db_inspect_column_is_sensitive(column: &str) -> bool {
