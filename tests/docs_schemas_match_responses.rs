@@ -515,6 +515,26 @@ fn canonical_response_fixtures_match_docs_schemas() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn swarm_next_action_golden_snapshots_match_schema() -> TestResult {
+    let schema = schema_doc(SWARM_NEXT_ACTION_SCHEMA_V1)?;
+    for fixture_name in [
+        "clean",
+        "dirty",
+        "degraded_beads",
+        "degraded_mail",
+        "saturated_rch",
+    ] {
+        let response = read_json(&fixture_path(&format!(
+            "golden/swarm_next_action/{fixture_name}.json.golden"
+        )))?;
+        ensure_json_str(&response, "/data/schema", SWARM_NEXT_ACTION_SCHEMA_V1)?;
+        validate_json_schema(&response, &schema, &schema, "$")
+            .map_err(|error| format!("swarm next-action {fixture_name}: {error}"))?;
+    }
+    Ok(())
+}
+
 fn domain_error_sample() -> Result<Value, String> {
     serde_json::from_str(&error_response_json(&DomainError::Storage {
         message: "Database file corrupted.".to_string(),

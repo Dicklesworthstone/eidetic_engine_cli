@@ -1,0 +1,60 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "schema": "ee.swarm_next_action.v1",
+    "workspace": "/repo",
+    "redactionStatus": "counts_ids_statuses_paths_redacted_no_mail_body_no_file_content",
+    "inputs": {
+      "sourceCount": 6,
+      "readyBeadCount": 2,
+      "inProgressBeadCount": 1,
+      "blockedBeadCount": 1,
+      "bvTopPickCount": 1
+    },
+    "candidates": [
+      {
+        "id": "bd-dirty",
+        "title": "Dirty checkout aware slice",
+        "source": "bv_top_pick",
+        "scoreMilli": 875,
+        "status": "open",
+        "priority": 1,
+        "assignee": null,
+        "blockedBy": ["bd-parent"],
+        "actionHint": "Work on bd-parent first"
+      }
+    ],
+    "coordination": {
+      "activeReservationCount": 2,
+      "reservationHolders": ["BlueLake", "GoldenCompass"],
+      "unreadInboxCount": 1,
+      "ackRequiredCount": 0
+    },
+    "checkout": {
+      "dirtyPathCount": 3,
+      "dirtyPaths": [
+        ".beads/issues.jsonl",
+        "src/core/rule.rs",
+        "tests/fixtures/golden/swarm_next_action/dirty.json.golden"
+      ]
+    },
+    "verification": {
+      "rchSourceEnabled": true,
+      "remoteOnlyRequired": true,
+      "remoteOnlySafe": true,
+      "healthyWorkerCount": 1,
+      "activeRemoteBuildCount": 1,
+      "queuedRemoteBuildCount": 0,
+      "slotsAvailable": 3
+    },
+    "environment": {
+      "cargoTargetExternalized": true,
+      "tmpdirExternalized": true,
+      "externalAgentSpacePresent": true,
+      "diskPressureHintCount": 1
+    },
+    "degraded": []
+  },
+  "degraded": []
+}

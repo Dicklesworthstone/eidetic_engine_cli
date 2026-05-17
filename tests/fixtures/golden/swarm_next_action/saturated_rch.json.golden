@@ -1,0 +1,72 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "schema": "ee.swarm_next_action.v1",
+    "workspace": "/repo",
+    "redactionStatus": "counts_ids_statuses_paths_redacted_no_mail_body_no_file_content",
+    "inputs": {
+      "sourceCount": 6,
+      "readyBeadCount": 1,
+      "inProgressBeadCount": 1,
+      "blockedBeadCount": 0,
+      "bvTopPickCount": 1
+    },
+    "candidates": [
+      {
+        "id": "bd-rch",
+        "title": "Source-only slice while RCH is saturated",
+        "source": "bv_top_pick",
+        "scoreMilli": 700,
+        "status": "open",
+        "priority": 2,
+        "assignee": null,
+        "blockedBy": [],
+        "actionHint": "Pick source-only work until remote slots clear"
+      }
+    ],
+    "coordination": {
+      "activeReservationCount": 1,
+      "reservationHolders": ["GoldenCompass"],
+      "unreadInboxCount": 0,
+      "ackRequiredCount": 0
+    },
+    "checkout": {
+      "dirtyPathCount": 0,
+      "dirtyPaths": []
+    },
+    "verification": {
+      "rchSourceEnabled": true,
+      "remoteOnlyRequired": true,
+      "remoteOnlySafe": false,
+      "healthyWorkerCount": 1,
+      "activeRemoteBuildCount": 4,
+      "queuedRemoteBuildCount": 0,
+      "slotsAvailable": 0
+    },
+    "environment": {
+      "cargoTargetExternalized": true,
+      "tmpdirExternalized": true,
+      "externalAgentSpacePresent": true,
+      "diskPressureHintCount": 0
+    },
+    "degraded": [
+      {
+        "code": "rch_saturated",
+        "source": "rch",
+        "severity": "warning",
+        "message": "Remote workers are healthy but no slots are currently available.",
+        "repair": "Wait for a slot or choose source-only work."
+      }
+    ]
+  },
+  "degraded": [
+    {
+      "code": "rch_saturated",
+      "source": "rch",
+      "severity": "warning",
+      "message": "Remote workers are healthy but no slots are currently available.",
+      "repair": "Wait for a slot or choose source-only work."
+    }
+  ]
+}

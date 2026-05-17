@@ -1,0 +1,60 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "schema": "ee.swarm_next_action.v1",
+    "workspace": "/repo",
+    "redactionStatus": "counts_ids_statuses_paths_redacted_no_mail_body_no_file_content",
+    "inputs": {
+      "sourceCount": 4,
+      "readyBeadCount": 0,
+      "inProgressBeadCount": 0,
+      "blockedBeadCount": 0,
+      "bvTopPickCount": 0
+    },
+    "candidates": [],
+    "coordination": {
+      "activeReservationCount": 0,
+      "reservationHolders": [],
+      "unreadInboxCount": 0,
+      "ackRequiredCount": 0
+    },
+    "checkout": {
+      "dirtyPathCount": 0,
+      "dirtyPaths": []
+    },
+    "verification": {
+      "rchSourceEnabled": false,
+      "remoteOnlyRequired": false,
+      "remoteOnlySafe": null,
+      "healthyWorkerCount": null,
+      "activeRemoteBuildCount": null,
+      "queuedRemoteBuildCount": null,
+      "slotsAvailable": null
+    },
+    "environment": {
+      "cargoTargetExternalized": true,
+      "tmpdirExternalized": false,
+      "externalAgentSpacePresent": true,
+      "diskPressureHintCount": 0
+    },
+    "degraded": [
+      {
+        "code": "beads_unavailable",
+        "source": "beads",
+        "severity": "warning",
+        "message": "Beads ready/in-progress/blocked state was unavailable.",
+        "repair": "Run br ready --json and retry after repairing the tracker."
+      }
+    ]
+  },
+  "degraded": [
+    {
+      "code": "beads_unavailable",
+      "source": "beads",
+      "severity": "warning",
+      "message": "Beads ready/in-progress/blocked state was unavailable.",
+      "repair": "Run br ready --json and retry after repairing the tracker."
+    }
+  ]
+}

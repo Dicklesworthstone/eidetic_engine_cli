@@ -1,0 +1,56 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "schema": "ee.swarm_next_action.v1",
+    "workspace": "/repo",
+    "redactionStatus": "counts_ids_statuses_paths_redacted_no_mail_body_no_file_content",
+    "inputs": {
+      "sourceCount": 5,
+      "readyBeadCount": 1,
+      "inProgressBeadCount": 0,
+      "blockedBeadCount": 0,
+      "bvTopPickCount": 0
+    },
+    "candidates": [
+      {
+        "id": "bd-clean",
+        "title": "Clean ready slice",
+        "source": "beads_ready",
+        "scoreMilli": null,
+        "status": "open",
+        "priority": 2,
+        "assignee": null,
+        "blockedBy": [],
+        "actionHint": "reserve_files_and_start_smallest_useful_slice"
+      }
+    ],
+    "coordination": {
+      "activeReservationCount": 0,
+      "reservationHolders": [],
+      "unreadInboxCount": 0,
+      "ackRequiredCount": 0
+    },
+    "checkout": {
+      "dirtyPathCount": 0,
+      "dirtyPaths": []
+    },
+    "verification": {
+      "rchSourceEnabled": false,
+      "remoteOnlyRequired": false,
+      "remoteOnlySafe": null,
+      "healthyWorkerCount": null,
+      "activeRemoteBuildCount": null,
+      "queuedRemoteBuildCount": null,
+      "slotsAvailable": null
+    },
+    "environment": {
+      "cargoTargetExternalized": true,
+      "tmpdirExternalized": true,
+      "externalAgentSpacePresent": true,
+      "diskPressureHintCount": 0
+    },
+    "degraded": []
+  },
+  "degraded": []
+}
