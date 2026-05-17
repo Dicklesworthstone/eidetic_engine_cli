@@ -303,8 +303,8 @@ mod tests {
     use super::*;
     use crate::core::swarm_brief::{
         RchCodexHookCapability, RchLocalCapabilityReport, RchQueueHealth, RchWorkerProbeSummary,
-        SwarmBriefBead, SwarmBriefBvPick, SwarmBriefBvSummary, SwarmBriefFileReservation,
-        SwarmBriefInboxSummary,
+        SwarmBriefBead, SwarmBriefBvPick, SwarmBriefBvSummary, SwarmBriefDegradation,
+        SwarmBriefFileReservation, SwarmBriefInboxSummary, SwarmBriefSourceKind,
     };
 
     #[test]
@@ -409,6 +409,55 @@ mod tests {
         assert_eq!(snapshot.verification.slots_available, Some(0));
     }
 
+    #[test]
+    fn next_action_snapshot_sorts_and_deduplicates_degradations() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.degraded = vec![
+            degradation(
+                SwarmBriefSourceKind::Bv,
+                "bv_unavailable",
+                "BV robot triage was unavailable.",
+                Some("Run bv --robot-triage after repairing bv.".to_owned()),
+            ),
+            degradation(
+                SwarmBriefSourceKind::AgentMail,
+                "agent_mail_unavailable",
+                "Agent Mail state was unavailable.",
+                None,
+            ),
+            degradation(
+                SwarmBriefSourceKind::Bv,
+                "bv_unavailable",
+                "BV robot triage was unavailable.",
+                Some("Run bv --robot-triage after repairing bv.".to_owned()),
+            ),
+        ];
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+
+        assert_eq!(
+            snapshot
+                .degraded
+                .iter()
+                .map(|degradation| (
+                    degradation.code.as_str(),
+                    degradation.source.as_str(),
+                    degradation.severity,
+                    degradation.repair.as_deref(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("agent_mail_unavailable", "agent_mail", "warning", None),
+                (
+                    "bv_unavailable",
+                    "bv",
+                    "warning",
+                    Some("Run bv --robot-triage after repairing bv."),
+                ),
+            ]
+        );
+    }
+
     fn bead(id: &str, title: &str, priority: i64) -> SwarmBriefBead {
         SwarmBriefBead {
             id: id.to_owned(),
@@ -417,6 +466,21 @@ mod tests {
             priority: Some(priority),
             assignee: None,
             source_bucket: "ready".to_owned(),
+        }
+    }
+
+    fn degradation(
+        source: SwarmBriefSourceKind,
+        code: &str,
+        message: &str,
+        repair: Option<String>,
+    ) -> SwarmBriefDegradation {
+        SwarmBriefDegradation {
+            code: code.to_owned(),
+            source,
+            severity: "warning",
+            message: message.to_owned(),
+            repair,
         }
     }
 }
