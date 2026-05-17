@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "discovery_policy_no_ee_mesh_tag",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.7",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "mesh discovery-policy"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "respondMode is set to service_tag but the local tailscale daemon does not advertise tag:ee-mesh. Peers will see decline responses on every hello attempt; the local host is effectively undiscoverable by other ee instances on the tailnet.",
+    "setup_commands": [
+      "EE_MESH_ENABLED=1 ee status --workspace . --json   # check that selfAdvertisedTags does NOT include tag:ee-mesh",
+      "ee mesh discovery-policy set --respond-mode=service_tag"
+    ],
+    "invocation": "ee mesh discovery-policy --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "discovery_policy_no_ee_mesh_tag",
+    "severity": "info",
+    "message_contains": [
+      "respondMode is service_tag",
+      "tag:ee-mesh",
+      "decline responses"
+    ],
+    "repair_contains": "tailscale up --advertise-tags=tag:ee-mesh"
+  }
+}

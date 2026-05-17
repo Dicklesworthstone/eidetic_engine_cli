@@ -12,3 +12,4 @@
 //! descriptions (SRR6.46.* under bd-36bbk).
 
 pub mod auto_enrollment_safety;
+pub mod discovery_policy;

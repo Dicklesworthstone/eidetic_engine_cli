@@ -413,6 +413,12 @@ memory bodies in `sources[]`.
 | `tailscale_probe_unavailable` | info | bd-36bbk.1.1 |
 | `tailscale_shields_up` | warning | bd-36bbk.1.1 |
 
+#### Mesh discovery policy (2)
+| Code | Severity | Bead |
+|------|----------|------|
+| `discovery_policy_no_ee_mesh_tag` | info | bd-36bbk.1.7 |
+| `discovery_policy_empty_allowlist` | info | bd-36bbk.1.7 |
+
 #### Causal lab (13)
 | Code | Severity | Bead |
 |------|----------|------|

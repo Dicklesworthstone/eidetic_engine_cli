@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "discovery_policy_empty_allowlist",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.7",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "mesh discovery-policy"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "discoveryMode is set to allowlist but .ee/discovery_allowlist.toml is absent or has node_keys = []. SRR6.46.2 autodiscovery will probe zero peers; auto-enrollment will return auto_enrollment_no_eligible_peers on every run.",
+    "setup_commands": [
+      "ee mesh discovery-policy set --discovery-mode=allowlist",
+      "rm -f .ee/discovery_allowlist.toml   # or leave node_keys = [] in the file"
+    ],
+    "invocation": "ee mesh discovery-policy --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "discovery_policy_empty_allowlist",
+    "severity": "info",
+    "message_contains": [
+      "discoveryMode is allowlist",
+      "allowlist is empty",
+      "no peers will be probed"
+    ],
+    "repair_contains": "ee mesh discovery-policy allow <node-key>"
+  }
+}

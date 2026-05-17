@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.discovery_policy.v1.json",
+  "title": "ee.mesh.discovery_policy.v1",
+  "description": "Per-peer discovery policy posture emitted by `ee mesh discovery-policy --json` (SRR6.46.7). Read-only view of the modes, allowlist, denylist, and effective per-peer decisions that govern who SRR6.46.2 probes and who the SRR6.46.12 hello responder admits.",
+  "type": "object",
+  "required": [
+    "schema",
+    "discoveryMode",
+    "respondMode",
+    "allowlistedNodeKeys",
+    "deniedNodeKeys",
+    "selfAdvertisedTags"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.discovery_policy.v1"
+    },
+    "discoveryMode": { "$ref": "#/$defs/mode" },
+    "respondMode": { "$ref": "#/$defs/mode" },
+    "allowlistedNodeKeys": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/nodeKey" },
+      "description": "Workspace-scoped allowlist read from `.ee/discovery_allowlist.toml`. Empty when the file is absent. Sorted lexicographically for deterministic output."
+    },
+    "deniedNodeKeys": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/nodeKey" },
+      "description": "Workspace-scoped denylist read from `.ee/discovery_denylist.toml`. Empty when the file is absent. Sorted lexicographically. Denylist takes priority over both auto_admit and allowlist matches."
+    },
+    "selfAdvertisedTags": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Tags this host advertises via `tailscale up --advertise-tags=...`, sourced from the SRR6.46.1 probe. The presence (or absence) of `tag:ee-mesh` determines whether `respondMode=service_tag` admits discovery requests."
+    },
+    "effectiveDecisionPreview": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/peerDecision" },
+      "description": "Optional preview returned when `--explain` is set. One entry per known tailnet peer with the policy decision evaluated against the current modes + lists."
+    },
+    "degraded": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/degradation" }
+    }
+  },
+  "$defs": {
+    "mode": {
+      "type": "string",
+      "enum": ["service_tag", "auto_admit", "allowlist"]
+    },
+    "nodeKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Stable tailscale node identifier (e.g. `nodekey:<base64>`). Redactable under the `tailscale_metadata` class."
+    },
+    "peerDecision": {
+      "type": "object",
+      "required": ["nodeKey", "decision", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "nodeKey": { "$ref": "#/$defs/nodeKey" },
+        "advertisedTags": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Tags the peer advertises (from the SRR6.46.1 probe's peer list)."
+        },
+        "decision": {
+          "type": "string",
+          "enum": ["probe", "skip"],
+          "description": "Caller-side decision for whether SRR6.46.2 would issue a hello to this peer."
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "auto_admit",
+            "service_tag_match",
+            "allowlisted",
+            "skip_no_tag",
+            "skip_not_allowlisted",
+            "skip_denylisted",
+            "skip_self"
+          ]
+        }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message", "repair"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": ["discovery_policy_no_ee_mesh_tag", "discovery_policy_empty_allowlist"]
+        },
+        "severity": { "type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"] },
+        "message": { "type": "string", "minLength": 1 },
+        "repair": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
