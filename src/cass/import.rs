@@ -124,12 +124,13 @@ impl CassImportReport {
     /// Render the stable JSON data payload for the response envelope.
     #[must_use]
     pub fn data_json(&self) -> JsonValue {
+        let source_id = redact_import_report_source_ref(&self.source_id);
         json!({
             "schema": self.schema,
             "command": "import cass",
             "workspacePath": self.workspace_path,
             "databasePath": self.database_path,
-            "sourceId": self.source_id,
+            "sourceId": source_id,
             "ledgerId": self.ledger_id,
             "dryRun": self.dry_run,
             "since": self.since,
@@ -141,8 +142,9 @@ impl CassImportReport {
             "indexRequiredAction": self.index_required_action,
             "status": self.status,
             "sessions": self.sessions.iter().map(|session| {
+                let source_path = redact_import_report_source_ref(&session.source_path);
                 json!({
-                    "sourcePath": session.source_path,
+                    "sourcePath": source_path,
                     "sessionId": session.session_id,
                     "indexJobId": session.index_job_id,
                     "status": session.status.as_str(),
@@ -172,6 +174,63 @@ impl CassImportReport {
             discovered = self.sessions_discovered,
         )
     }
+}
+
+fn redact_import_report_source_ref(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    redact_import_report_path_like_segments(&secret_redacted)
+}
+
+fn redact_import_report_path_like_segments(value: &str) -> String {
+    const REDACTED_PATH: &str = "[REDACTED_PATH]";
+    const PREFIXES: &[&str] = &[
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/home/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+    ];
+
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, ch)| *ch == '/')
+        else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        let start = cursor + relative_index;
+        if !PREFIXES
+            .iter()
+            .any(|prefix| value[start..].starts_with(prefix))
+        {
+            output.push_str(&value[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        output.push_str(&value[cursor..start]);
+        output.push_str(REDACTED_PATH);
+        cursor = value[start..]
+            .char_indices()
+            .find_map(|(index, ch)| import_report_source_path_boundary(ch).then_some(start + index))
+            .unwrap_or(value.len());
+    }
+    output
+}
+
+fn import_report_source_path_boundary(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';' | '&'
+        )
 }
 
 /// Error produced by CASS import.
@@ -1983,7 +2042,7 @@ mod tests {
             schema: IMPORT_CASS_SCHEMA_V1,
             workspace_path: "/tmp/work".to_string(),
             database_path: Some("/tmp/work/.ee/ee.db".to_string()),
-            source_id: "cass://x".to_string(),
+            source_id: "cass://safe-source".to_string(),
             ledger_id: Some("imp_abc".to_string()),
             dry_run: false,
             since: Some("2026-04-01T00:00:00Z".to_string()),
@@ -1997,7 +2056,7 @@ mod tests {
             ),
             status: "completed".to_string(),
             sessions: vec![ImportedCassSession {
-                source_path: "/tmp/a.jsonl".to_string(),
+                source_path: "cass-session://safe-session".to_string(),
                 session_id: Some("sess_abc".to_string()),
                 index_job_id: Some("sidx_abc".to_string()),
                 status: ImportSessionStatus::Imported,
@@ -2016,6 +2075,12 @@ mod tests {
             "since cutoff",
         )?;
         ensure_equal(&json["indexJobsQueued"], &json!(1), "index jobs")?;
+        ensure_equal(&json["sourceId"], &json!("cass://safe-source"), "source id")?;
+        ensure_equal(
+            &json["sessions"][0]["sourcePath"],
+            &json!("cass-session://safe-session"),
+            "safe source path",
+        )?;
         ensure_equal(
             &json["indexRequiredAction"],
             &json!("ee index rebuild --workspace /tmp/work --database /tmp/work/.ee/ee.db"),
@@ -2026,6 +2091,61 @@ mod tests {
             &json["sessions"][0]["indexJobId"],
             &json!("sidx_abc"),
             "session index job",
+        )
+    }
+
+    #[test]
+    fn report_json_redacts_sensitive_source_refs() -> TestResult {
+        let report = CassImportReport {
+            schema: IMPORT_CASS_SCHEMA_V1,
+            workspace_path: "/Users/alice/project".to_string(),
+            database_path: Some("/Users/alice/project/.ee/ee.db".to_string()),
+            source_id: "cass://sessions?workspace=/Users/alice/private&api_key=sk_live_1234567890abcdef".to_string(),
+            ledger_id: Some("imp_abc".to_string()),
+            dry_run: false,
+            since: None,
+            sessions_discovered: 1,
+            sessions_imported: 1,
+            sessions_skipped: 0,
+            spans_imported: 2,
+            index_jobs_queued: 1,
+            index_required_action: None,
+            status: "completed".to_string(),
+            sessions: vec![ImportedCassSession {
+                source_path: "file:///Users/alice/.codex/sessions/session.jsonl?token=ghp_1234567890abcdef1234567890abcdef1234".to_string(),
+                session_id: Some("sess_abc".to_string()),
+                index_job_id: None,
+                status: ImportSessionStatus::Imported,
+                spans_imported: 2,
+                message_count: Some(3),
+                missing_metadata: Vec::new(),
+            }],
+        };
+
+        let json = report.data_json();
+        let source_id = json["sourceId"]
+            .as_str()
+            .ok_or_else(|| "expected sourceId string".to_string())?;
+        let source_path = json["sessions"][0]["sourcePath"]
+            .as_str()
+            .ok_or_else(|| "expected session sourcePath string".to_string())?;
+        let rendered_source_refs = format!("{source_id}\n{source_path}");
+
+        ensure(
+            rendered_source_refs.contains("[REDACTED_PATH]"),
+            "sensitive paths should be redacted",
+        )?;
+        ensure(
+            !rendered_source_refs.contains("/Users/alice"),
+            "raw user path must not appear in public source refs",
+        )?;
+        ensure(
+            !rendered_source_refs.contains("sk_live_1234567890abcdef"),
+            "source id secret must not appear in public import report JSON",
+        )?;
+        ensure(
+            !rendered_source_refs.contains("ghp_1234567890abcdef1234567890abcdef1234"),
+            "session path token must not appear in public import report JSON",
         )
     }
 
