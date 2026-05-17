@@ -238,6 +238,9 @@ pub fn redact_artifact_record(
         if let Some(path) = record.canonical_path.as_ref() {
             record.canonical_path = Some(redact_path(path, level));
         }
+        if let Some(reference) = record.external_ref.as_ref() {
+            record.external_ref = Some(redact_content(reference, level));
+        }
         if let Some(uri) = record.provenance_uri.as_ref() {
             record.provenance_uri = Some(redact_path(uri, level));
         }
@@ -1006,6 +1009,7 @@ mod tests {
             .source_kind("file")
             .artifact_type("log")
             .canonical_path("/data/projects/example/logs/build.log")
+            .external_ref(format!("/Users/example/private/{secret_fixture}.log"))
             .content_hash("blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
             .media_type("text/plain")
             .size_bytes(42)
@@ -1030,6 +1034,7 @@ mod tests {
         assert!(written.contains(REDACTED_PLACEHOLDER));
         assert!(written.contains(REDACTED_PATH_PLACEHOLDER));
         assert!(!written.contains(&secret_fixture));
+        assert!(!written.contains("/Users/example/private"));
         ensure(artifact_count, 1, "artifact count")
     }
 
