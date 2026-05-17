@@ -96,14 +96,14 @@ where
     }
 
     for position in (0..ULID_PAYLOAD_LEN).rev() {
-        let mut buckets: [Vec<T>; RADIX] = std::array::from_fn(|_| Vec::new());
+        let mut buckets: [Vec<(T, usize)>; RADIX] = std::array::from_fn(|_| Vec::new());
         for (item, offset) in items.drain(..).zip(payload_offsets.drain(..)) {
             let digit = digit_value(key(&item).as_bytes()[offset + position]);
-            buckets[usize::from(digit)].push(item);
+            buckets[usize::from(digit)].push((item, offset));
         }
         for bucket in buckets {
-            for item in bucket {
-                payload_offsets.push(payload_offset(key(&item)));
+            for (item, offset) in bucket {
+                payload_offsets.push(offset);
                 items.push(item);
             }
         }
@@ -159,10 +159,6 @@ fn validate_payload_key(index: usize, key: &str) -> Result<usize, RadixUlidSortE
         }
     }
     Ok(offset)
-}
-
-fn payload_offset(key: &str) -> usize {
-    payload_offset_opt(key).expect("payload offset was validated before sorting")
 }
 
 fn payload_offset_opt(key: &str) -> Option<usize> {
