@@ -21,6 +21,7 @@ pub use security_profile::{
 pub use trust_decay::{DecayConfig, SourceTrustState, TrustAdvisory, TrustDecayCalculator};
 
 use crate::models::TrustClass;
+use serde::Serialize;
 
 pub const SUBSYSTEM: &str = "policy";
 
@@ -415,7 +416,7 @@ pub struct WorkspaceSecretRiskReport {
     pub evidence: Vec<WorkspaceSecretRiskEvidence>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct WorkspaceSecretRiskEvidence {
     pub risk_class: &'static str,
     pub pattern_id: &'static str,

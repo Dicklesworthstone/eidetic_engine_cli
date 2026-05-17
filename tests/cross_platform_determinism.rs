@@ -6,7 +6,7 @@
 
 #![cfg(feature = "graph")]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use ee::graph::hits::compute_hits;
@@ -140,6 +140,7 @@ struct Divergence {
     target_triple: String,
     algorithm: String,
     seed: String,
+    observed_hash: String,
     reason: String,
 }
 
@@ -179,15 +180,63 @@ fn all_supported_targets_have_hash_rows_for_each_algorithm_seed() -> TestResult 
 }
 
 #[test]
-fn divergence_manifest_is_explicit_and_empty_until_drift_is_approved() -> TestResult {
+fn divergence_manifest_entries_are_explicit_and_reviewed() -> TestResult {
     let manifest = divergence_manifest()?;
-    ensure(
-        manifest.divergences.is_empty(),
-        format!(
-            "cross-platform graph divergences require explicit review; found: {:?}",
-            manifest.divergences
-        ),
-    )
+    let mut seen = BTreeSet::new();
+    for entry in &manifest.divergences {
+        ensure(
+            TARGET_TRIPLES.contains(&entry.target_triple.as_str()),
+            format!(
+                "divergence target_triple is not supported: {}",
+                entry.target_triple
+            ),
+        )?;
+        let Some(expected) = EXPECTED_HASHES.iter().find(|expected| {
+            expected.target_triple == entry.target_triple
+                && expected.algorithm == entry.algorithm
+                && expected.seed == entry.seed
+        }) else {
+            return Err(format!(
+                "divergence has no pinned baseline row: target={} algorithm={} seed={}",
+                entry.target_triple, entry.algorithm, entry.seed
+            ));
+        };
+        ensure(
+            entry.observed_hash.starts_with("blake3:"),
+            format!(
+                "divergence observed_hash must be a blake3 hash for target={} algorithm={} seed={}",
+                entry.target_triple, entry.algorithm, entry.seed
+            ),
+        )?;
+        ensure(
+            entry.observed_hash != expected.output_hash,
+            format!(
+                "divergence observed_hash matches the pinned baseline and should be removed: target={} algorithm={} seed={}",
+                entry.target_triple, entry.algorithm, entry.seed
+            ),
+        )?;
+        ensure(
+            !entry.reason.trim().is_empty(),
+            format!(
+                "divergence reason must be non-empty for target={} algorithm={} seed={}",
+                entry.target_triple, entry.algorithm, entry.seed
+            ),
+        )?;
+        let key = (
+            entry.target_triple.as_str(),
+            entry.algorithm.as_str(),
+            entry.seed.as_str(),
+            entry.observed_hash.as_str(),
+        );
+        ensure(
+            seen.insert(key),
+            format!(
+                "duplicate divergence entry for target={} algorithm={} seed={} observed={}",
+                entry.target_triple, entry.algorithm, entry.seed, entry.observed_hash
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]
@@ -223,6 +272,7 @@ fn current_target_matches_pinned_graph_algorithm_hashes() -> TestResult {
                 entry.target_triple == target
                     && entry.algorithm == observed.algorithm
                     && entry.seed == observed.seed
+                    && entry.observed_hash == observed.output_hash
                     && !entry.reason.trim().is_empty()
             });
             ensure(
@@ -440,18 +490,49 @@ fn current_target_triple() -> &'static str {
 
 fn divergence_manifest() -> Result<DivergenceManifest, String> {
     let manifest = include_str!("cross_platform_determinism/divergences.toml");
-    for line in manifest.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed == "divergences = []" {
-            continue;
-        }
-        return Err(format!(
-            "unsupported cross-platform divergence manifest entry: {trimmed}"
-        ));
+    let document = manifest
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| format!("parse divergence manifest: {error}"))?;
+    let Some(divergences) = document.get("divergences") else {
+        return Err("divergence manifest must declare `divergences`".to_owned());
+    };
+    if divergences
+        .as_array()
+        .is_some_and(toml_edit::Array::is_empty)
+    {
+        return Ok(DivergenceManifest {
+            divergences: Vec::new(),
+        });
+    }
+    let Some(tables) = divergences.as_array_of_tables() else {
+        return Err("divergences must be `[]` or an array of [[divergences]] tables".to_owned());
+    };
+    let mut parsed = Vec::with_capacity(tables.len());
+    for (index, table) in tables.iter().enumerate() {
+        let label = format!("divergences[{index}]");
+        parsed.push(Divergence {
+            target_triple: required_manifest_str(table, "target_triple", &label)?,
+            algorithm: required_manifest_str(table, "algorithm", &label)?,
+            seed: required_manifest_str(table, "seed", &label)?,
+            observed_hash: required_manifest_str(table, "observed_hash", &label)?,
+            reason: required_manifest_str(table, "reason", &label)?,
+        });
     }
     Ok(DivergenceManifest {
-        divergences: Vec::new(),
+        divergences: parsed,
     })
+}
+
+fn required_manifest_str(
+    table: &toml_edit::Table,
+    key: &str,
+    label: &str,
+) -> Result<String, String> {
+    table
+        .get(key)
+        .and_then(toml_edit::Item::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{label}: missing string field `{key}`"))
 }
 
 fn graph_result<T>(result: GraphResult<T>) -> Result<T, String> {
