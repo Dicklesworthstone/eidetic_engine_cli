@@ -3321,6 +3321,37 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), DomainError> {
     })
 }
 
+fn copy_new_file(source: &Path, destination: &Path) -> Result<(), DomainError> {
+    ensure_backup_write_path_has_no_symlink_components(source, "backup source artifact")?;
+    ensure_backup_write_path_has_no_symlink_components(destination, "backup restore artifact")?;
+    let mut source_file = File::open(source).map_err(|error| DomainError::Storage {
+        message: format!("failed to open '{}': {error}", source.display()),
+        repair: Some("verify the backup artifact and retry restore".to_owned()),
+    })?;
+    let mut destination_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|error| DomainError::Storage {
+            message: format!("failed to create '{}': {error}", destination.display()),
+            repair: Some("retry restore with a fresh side path".to_owned()),
+        })?;
+    io::copy(&mut source_file, &mut destination_file).map_err(|error| DomainError::Storage {
+        message: format!(
+            "failed to copy '{}' to '{}': {error}",
+            source.display(),
+            destination.display()
+        ),
+        repair: Some("inspect disk health and retry restore".to_owned()),
+    })?;
+    destination_file
+        .sync_all()
+        .map_err(|error| DomainError::Storage {
+            message: format!("failed to sync '{}': {error}", destination.display()),
+            repair: Some("inspect disk health and retry restore".to_owned()),
+        })
+}
+
 fn write_new_relative_file(
     root: &Path,
     relative_path: &str,

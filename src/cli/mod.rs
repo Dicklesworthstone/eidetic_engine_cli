@@ -34135,10 +34135,10 @@ fn execute_demo_command(ctx: DemoCommandContext<'_>) -> Result<DemoCommandExecut
                 timed_out = true;
                 #[cfg(unix)]
                 {
-                    if let Some(pid) = child_group {
-                        let _ =
-                            rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-                    }
+                    let _ = rustix::process::kill_process_group(
+                        child_group,
+                        rustix::process::Signal::KILL,
+                    );
                 }
                 let _ = child.kill();
                 break child.wait().map_err(|error| DomainError::Storage {
