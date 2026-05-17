@@ -2165,6 +2165,22 @@ pub fn render_context_response_json_with_options(
                             / response.data.pack.budget.max_tokens() as f32,
                     ),
                 );
+                if let Some(adaptive_budget) = &response.data.adaptive_budget {
+                    budget.field_str("schema", adaptive_budget.schema);
+                    budget.field_bool("adaptive", adaptive_budget.adaptive);
+                    budget.field_u32("baseTokens", adaptive_budget.base_tokens);
+                    budget.field_u32("computedTokens", adaptive_budget.computed_tokens);
+                    budget.field_raw(
+                        "multiplier",
+                        &serde_json::to_string(&adaptive_budget.multiplier)
+                            .unwrap_or_else(|_| "null".to_string()),
+                    );
+                    budget.field_raw(
+                        "classifierContributions",
+                        &serde_json::to_string(&adaptive_budget.classifier_contributions)
+                            .unwrap_or_else(|_| "null".to_string()),
+                    );
+                }
             });
             if let Some(slo) = &response.data.slo {
                 pack.field_object("slo", |slo_obj| {
@@ -12897,6 +12913,7 @@ mod tests {
         ContextRequest, ContextResponse, PackAssemblySlo, PackAssemblySloActuals, PackCandidate,
         PackCandidateInput, PackProvenance, PackResourceProfile, PackScoreBreakdown, PackSection,
         PackTrustSignal, TokenBudget, assemble_draft,
+        budget_classifier::{AdaptiveBudgetInput, classify_adaptive_budget},
     };
 
     type TestResult = Result<(), String>;
@@ -14596,6 +14613,28 @@ mod tests {
             &json,
             "\"selection\":{\"scoreBreakdown\":{\"textScore\":0.200000,\"pprScore\":0.800000,\"combinedScore\":0.440000}}",
             "PPR score breakdown",
+        )
+    }
+
+    #[test]
+    fn context_response_json_renders_adaptive_budget_decision() -> TestResult {
+        let mut response = context_response_fixture()?;
+        response.data.adaptive_budget = Some(classify_adaptive_budget(
+            AdaptiveBudgetInput::new("audit release context", &[0.7, 0.3], 1.0)
+                .with_max_tokens(100),
+        ));
+
+        let json = render_context_response_json(&response);
+
+        ensure_contains(
+            &json,
+            "\"budget\":{\"maxTokens\":100,\"usedTokens\":10,\"utilization\":0.100000,\"schema\":\"ee.context.budget.v1\",\"adaptive\":true",
+            "adaptive budget decision",
+        )?;
+        ensure_contains(
+            &json,
+            "\"classifierContributions\"",
+            "adaptive budget contributions",
         )
     }
 

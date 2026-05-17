@@ -2407,6 +2407,7 @@ impl ContextResponse {
                 conflicts: Vec::new(),
                 coordination: None,
                 pack_dna: None,
+                adaptive_budget: None,
                 degraded,
             },
         })
@@ -2425,6 +2426,7 @@ pub struct ContextResponseData {
     pub conflicts: Vec<ConflictEntry>,
     pub coordination: Option<PackCoordinationSnapshot>,
     pub pack_dna: Option<serde_json::Value>,
+    pub adaptive_budget: Option<budget_classifier::AdaptiveBudgetDecision>,
     pub degraded: Vec<ContextResponseDegradation>,
 }
 
