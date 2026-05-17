@@ -1278,6 +1278,10 @@ fn gather_tailscale_local_report() -> Option<TailscaleLocalReport> {
     let mut socket_config = TailscaleSocketProbeConfig::mesh_enabled();
     socket_config.timeout_ms = timeout_ms;
     socket_config.platform_hint = current_tailscale_platform();
+    apply_tailscale_socket_override(
+        &mut socket_config,
+        read_env_var(EnvVar::TailscaleProbeSocketOverride),
+    );
 
     let mut socket_runner = SystemTailscaleSocketProbeRunner;
     let mut cli_runner = SystemTailscaleCliProbeRunner;
@@ -1287,6 +1291,20 @@ fn gather_tailscale_local_report() -> Option<TailscaleLocalReport> {
         &mut socket_runner,
         &mut cli_runner,
     ))
+}
+
+fn apply_tailscale_socket_override(
+    config: &mut TailscaleSocketProbeConfig,
+    override_path: Option<String>,
+) {
+    let Some(override_path) = override_path
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+
+    config.socket_candidates = vec![PathBuf::from(override_path)];
 }
 
 fn mesh_enabled_for_tailscale_probe() -> bool {
@@ -3507,6 +3525,36 @@ mod tests {
         DateTime::parse_from_rfc3339(s)
             .map(|dt| dt.with_timezone(&Utc))
             .map_err(|e| format!("invalid timestamp '{s}': {e}"))
+    }
+
+    #[test]
+    fn tailscale_socket_override_replaces_default_candidates() -> TestResult {
+        let mut config = TailscaleSocketProbeConfig::mesh_enabled();
+
+        apply_tailscale_socket_override(
+            &mut config,
+            Some(" /tmp/ee-fake-tailscaled.sock ".to_owned()),
+        );
+
+        ensure(
+            config.socket_candidates,
+            vec![PathBuf::from("/tmp/ee-fake-tailscaled.sock")],
+            "socket override should replace default socket candidates",
+        )
+    }
+
+    #[test]
+    fn tailscale_socket_override_ignores_blank_values() -> TestResult {
+        let mut config = TailscaleSocketProbeConfig::mesh_enabled();
+        let default_candidates = config.socket_candidates.clone();
+
+        apply_tailscale_socket_override(&mut config, Some("   ".to_owned()));
+
+        ensure(
+            config.socket_candidates,
+            default_candidates,
+            "blank socket override should leave default candidates unchanged",
+        )
     }
 
     fn stored_memory_fixture(
