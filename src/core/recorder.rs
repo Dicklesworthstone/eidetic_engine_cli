@@ -471,6 +471,59 @@ fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
+fn redact_recorder_source_ref(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    redact_recorder_source_path_segments(&secret_redacted)
+}
+
+fn redact_recorder_source_path_segments(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, c)| *c == '/')
+        else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        let start = cursor + relative_index;
+        if !recorder_source_path_starts_sensitive_segment(&value[start..]) {
+            output.push_str(&value[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        output.push_str(&value[cursor..start]);
+        output.push_str("[REDACTED_PATH]");
+        cursor = value[start..]
+            .char_indices()
+            .find_map(|(index, c)| recorder_source_path_boundary(c).then_some(start + index))
+            .unwrap_or(value.len());
+    }
+    output
+}
+
+fn recorder_source_path_starts_sensitive_segment(value: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/home/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+    ];
+
+    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+}
+
+fn recorder_source_path_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
+}
+
 // ============================================================================
 // Import Recording Plan
 // ============================================================================
@@ -554,14 +607,19 @@ impl RecorderImportPlanReport {
     /// Render as stable JSON data payload.
     #[must_use]
     pub fn data_json(&self) -> JsonValue {
+        let source_id = redact_recorder_source_ref(&self.source_id);
+        let input_path = self
+            .input_path
+            .as_deref()
+            .map(redact_recorder_source_ref);
         json!({
             "schema": self.schema,
             "command": "recorder import",
             "dryRun": self.dry_run,
             "source": {
                 "type": self.source_type.as_str(),
-                "sourceId": self.source_id,
-                "inputPath": self.input_path,
+                "sourceId": source_id,
+                "inputPath": input_path,
                 "connector": self.connector,
             },
             "run": {
@@ -626,7 +684,8 @@ impl RecorderImportPlanReport {
         output.push_str("==============================\n\n");
         output.push_str(&format!(
             "Source:   {} {}\n",
-            self.source_type, self.source_id
+            self.source_type,
+            redact_recorder_source_ref(&self.source_id)
         ));
         output.push_str(&format!("Run ID:   {}\n", self.run_id));
         output.push_str(&format!("Agent:    {}\n", self.agent_id));
@@ -1972,11 +2031,12 @@ pub struct RecorderImportResult {
 impl RecorderImportResult {
     #[must_use]
     pub fn data_json(&self) -> JsonValue {
+        let source_id = redact_recorder_source_ref(&self.source_id);
         json!({
             "schema": self.schema,
             "command": "recorder import",
             "sourceType": self.source_type.as_str(),
-            "sourceId": self.source_id,
+            "sourceId": source_id,
             "runId": self.run_id,
             "agentId": self.agent_id,
             "workspaceId": self.workspace_id,
