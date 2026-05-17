@@ -693,9 +693,16 @@ mod tests {
         let result = graph_result(compute_personalized_pagerank(&graph, &seeds))?;
 
         assert_eq!(result.len(), 3);
-        assert!(result.get(&a).copied().unwrap_or(0.0) > 0.0);
-        assert!(result.get(&b).copied().unwrap_or(0.0) > 0.0);
-        assert!(result.get(&c).copied().unwrap_or(0.0) > 0.0);
+        let a_score = result.get(&a).copied().unwrap_or(0.0);
+        let b_score = result.get(&b).copied().unwrap_or(0.0);
+        let c_score = result.get(&c).copied().unwrap_or(0.0);
+        assert!(a_score > 0.0);
+        assert!(b_score > 0.0);
+        assert!(c_score > 0.0);
+        assert!(
+            a_score > b_score && b_score > c_score,
+            "single seed path should decay outward from A to B to C: {result:?}"
+        );
         Ok(())
     }
 
