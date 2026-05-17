@@ -1386,11 +1386,35 @@ fn redaction_safe_label(label: &str) -> Option<String> {
         || label.contains('\\')
         || label.contains(':')
         || label.contains('~')
+        || label_has_secret_marker(label)
     {
         None
     } else {
         Some(label.to_owned())
     }
+}
+
+fn label_has_secret_marker(label: &str) -> bool {
+    let normalized = label.to_ascii_lowercase();
+    [
+        "api_key",
+        "apikey",
+        "secret",
+        "token",
+        "password",
+        "passwd",
+        "credential",
+        "private_key",
+        "ssh_key",
+        "bearer",
+        "sk_live",
+        "sk_test",
+        "ghp_",
+        "xoxb-",
+        "xoxp-",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
 }
 
 fn stable_mesh_alias(prefix: &str, value: &str) -> String {
@@ -2571,6 +2595,23 @@ max_bytes = 0
     }
 
     #[test]
+    fn mesh_display_provenance_redacts_secret_like_producer_peer_label() {
+        let decision = decide_mesh_import(&mesh_input(MeshLane::Metadata), &[mesh_binding()]);
+        let mut input = mesh_display_input(&decision, Some("remote-beta"));
+        input.producer_peer_label = Some("agent-token-sk_live_abc123");
+
+        let provenance = mesh_display_provenance(&input)
+            .expect("allowed mesh material should expose redacted provenance");
+
+        assert_eq!(
+            provenance.producer_peer,
+            stable_mesh_alias("mesh_peer", "peer_builder_one")
+        );
+        assert!(!provenance.producer_peer.contains("token"));
+        assert!(!provenance.producer_peer.contains("sk_live"));
+    }
+
+    #[test]
     fn mesh_display_provenance_aliases_raw_producer_peer_id_without_safe_label() {
         let input_decision = MeshImportDecisionInput {
             producer_peer_id: "nodekey:0123456789abcdef0123456789abcdef",
@@ -2628,6 +2669,23 @@ max_bytes = 0
     }
 
     #[test]
+    fn mesh_display_provenance_aliases_secret_like_import_decision_ref() {
+        let decision = decide_mesh_import(&mesh_input(MeshLane::Metadata), &[mesh_binding()]);
+        let mut input = mesh_display_input(&decision, Some("remote-beta"));
+        input.import_decision_id = Some("mesh_decision_api_key_sk_test_abc123");
+
+        let provenance = mesh_display_provenance(&input)
+            .expect("allowed mesh material should expose redacted provenance");
+
+        assert_eq!(
+            provenance.import_decision_ref,
+            stable_mesh_alias("mesh_dec", "mesh_decision_api_key_sk_test_abc123")
+        );
+        assert!(!provenance.import_decision_ref.contains("api_key"));
+        assert!(!provenance.import_decision_ref.contains("sk_test"));
+    }
+
+    #[test]
     fn mesh_display_provenance_aliases_path_like_ledger_cursor() {
         let decision = decide_mesh_import(&mesh_input(MeshLane::Metadata), &[mesh_binding()]);
         let mut input = mesh_display_input(&decision, Some("remote-beta"));
@@ -2642,6 +2700,17 @@ max_bytes = 0
             stable_mesh_alias("mesh_dec", "agent-mail://BlueLake/private/mesh-ledger")
         );
         assert!(!provenance.import_decision_ref.contains("agent-mail"));
+    }
+
+    #[test]
+    fn mesh_policy_ref_aliases_secret_like_policy_id() {
+        let policy_id = "peer_policy_password_token_abc123";
+
+        let policy_ref = mesh_policy_ref(Some(policy_id));
+
+        assert_eq!(policy_ref, stable_mesh_alias("mesh_pol", policy_id));
+        assert!(!policy_ref.contains("password"));
+        assert!(!policy_ref.contains("token"));
     }
 
     #[test]
