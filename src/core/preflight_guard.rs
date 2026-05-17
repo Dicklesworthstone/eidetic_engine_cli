@@ -11,6 +11,7 @@
 //! the deterministic glob matcher shipped by `core::tripwire`.
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -160,7 +161,7 @@ impl PreflightGuardRegistry {
         let rules_path = workspace.join(PREFLIGHT_RULES_RELATIVE_PATH);
         validate_preflight_rules_path(&rules_path)?;
         let source_label = rules_path.to_string_lossy().into_owned();
-        let body = match fs::read_to_string(&rules_path) {
+        let body = match read_preflight_rules_file_no_follow(&rules_path) {
             Ok(body) => body,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(registry),
             Err(error) => {
@@ -219,6 +220,30 @@ impl PreflightGuardRegistry {
             .collect()
     }
 }
+
+fn read_preflight_rules_file_no_follow(path: &Path) -> std::io::Result<String> {
+    let mut file = open_preflight_rules_file_for_read(path)?;
+    let mut body = String::new();
+    file.read_to_string(&mut body)?;
+    Ok(body)
+}
+
+fn open_preflight_rules_file_for_read(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_preflight_rules_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_preflight_rules_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_preflight_rules_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 fn validate_preflight_rules_path(path: &Path) -> Result<(), DomainError> {
     if let Some(symlink_path) =
@@ -1402,6 +1427,70 @@ message = "Reject curl|sh installers per workspace policy."
 
         assert_eq!(report.exit_code, 0);
         assert!(report.matches.is_empty());
+        Ok(())
+    }
+
+    #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+    #[test]
+    fn preflight_rules_final_read_open_rejects_symlinked_file() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ee_dir = tempdir.path().join(".ee");
+        std::fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        let rules_path = ee_dir.join("preflight_rules.toml");
+        let original_path = ee_dir.join("preflight_rules.toml.original");
+        let outside_path = tempdir.path().join("outside_rules.toml");
+        std::fs::write(
+            &rules_path,
+            r#"
+[[rules]]
+id = "safe"
+pattern = "*safe*"
+action = "warn"
+message = "safe fixture"
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+        std::fs::write(
+            &outside_path,
+            r#"
+[[rules]]
+id = "outside"
+pattern = "*rm -rf*"
+action = "halt"
+message = "outside fixture"
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+
+        validate_preflight_rules_path(&rules_path).map_err(|error| error.to_string())?;
+        std::fs::rename(&rules_path, &original_path).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_path, &rules_path)
+            .map_err(|error| error.to_string())?;
+
+        let error = read_preflight_rules_file_no_follow(&rules_path)
+            .expect_err("final-path symlink should be rejected by O_NOFOLLOW");
+        assert_ne!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "final symlink read should fail because the path is a symlink"
+        );
+        assert!(
+            std::fs::symlink_metadata(&rules_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "rejected preflight rules symlink should remain available for inspection"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outside_path).map_err(|error| error.to_string())?,
+            r#"
+[[rules]]
+id = "outside"
+pattern = "*rm -rf*"
+action = "halt"
+message = "outside fixture"
+"#
+        );
         Ok(())
     }
 
