@@ -477,8 +477,31 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
 
     let bundle_dir = manifest_path.parent().unwrap_or(&options.bundle_path);
 
-    let manifest: Option<BundleManifest> = if manifest_path.is_file() {
-        let content = fs::read_to_string(&manifest_path).ok();
+    let manifest_present = match fs::symlink_metadata(&manifest_path) {
+        Ok(metadata) if metadata.file_type().is_file() => true,
+        Ok(_) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Support bundle manifest is not a regular file: {}.",
+                    manifest_path.display()
+                ),
+                repair: Some("Regenerate the support bundle.".to_owned()),
+            });
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Failed to inspect support bundle manifest {}: {error}",
+                    manifest_path.display()
+                ),
+                repair: Some("Check support bundle manifest permissions.".to_owned()),
+            });
+        }
+    };
+
+    let manifest: Option<BundleManifest> = if manifest_present {
+        let content = read_regular_file_no_symlinks(&manifest_path).ok();
         content.and_then(|c| serde_json::from_str(&c).ok())
     } else {
         None
@@ -2941,6 +2964,34 @@ mod tests {
             error.message().contains("symlinked path component"),
             "unexpected error: {}",
             error.message()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inspect_bundle_rejects_non_regular_manifest_path() -> TestResult {
+        let root = unique_test_path("inspect-non-regular-manifest");
+        let bundle_dir = root.join("bundle");
+        let manifest_path = bundle_dir.join(MANIFEST_FILE);
+        fs::create_dir_all(&manifest_path)
+            .map_err(|error| format!("failed to create non-regular manifest: {error}"))?;
+
+        let result = inspect_bundle(&InspectOptions {
+            bundle_path: bundle_dir,
+            verify_hashes: true,
+        });
+        let error = result.expect_err("non-regular manifest should be rejected");
+        assert!(
+            error.message().contains("not a regular file"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert!(
+            fs::symlink_metadata(&manifest_path)
+                .map_err(|error| format!("failed to inspect manifest path: {error}"))?
+                .file_type()
+                .is_dir(),
+            "inspection must not alter the non-regular manifest path"
         );
         Ok(())
     }
