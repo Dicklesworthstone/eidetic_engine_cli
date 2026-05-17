@@ -441,14 +441,15 @@ impl ReadConnectionPool {
         let mut poisoned = Vec::new();
 
         for (pin_id, record) in &state.active_pins {
-            record.poisoned.store(true, Ordering::Release);
-            poisoned.push(ExpiredSnapshotPin {
-                pin_id: *pin_id,
-                slot_id: record.slot_id,
-                age: now
-                    .checked_duration_since(record.acquired_at)
-                    .unwrap_or(Duration::ZERO),
-            });
+            if !record.poisoned.swap(true, Ordering::AcqRel) {
+                poisoned.push(ExpiredSnapshotPin {
+                    pin_id: *pin_id,
+                    slot_id: record.slot_id,
+                    age: now
+                        .checked_duration_since(record.acquired_at)
+                        .unwrap_or(Duration::ZERO),
+                });
+            }
         }
 
         poisoned
@@ -1499,6 +1500,25 @@ mod tests {
 
         drop(pin);
         assert_eq!(pool.stats().active_pins, 0);
+    }
+
+    #[test]
+    fn force_poison_reports_each_active_pin_once_until_released() {
+        let (_tempdir, _database_path, pool) = file_pool(1);
+        let pin = must(pool.pin_snapshot(), "snapshot pin opens");
+
+        let first = pool.force_poison_active_pins();
+        let second = pool.force_poison_active_pins();
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].slot_id, pin.slot_id());
+        assert!(second.is_empty());
+        assert!(pin.is_poisoned());
+        assert_eq!(pool.stats().expired_pins, 1);
+
+        drop(pin);
+        assert_eq!(pool.stats().active_pins, 0);
+        assert_eq!(pool.stats().expired_pins, 0);
     }
 
     #[test]
