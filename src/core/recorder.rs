@@ -2547,8 +2547,14 @@ mod tests {
     fn detected_redaction_classes_does_not_double_count_tailscale_metadata() {
         let payload = r#"{"selfNodeKey":"x","tailnetId":"y","selfTailscaleIp":"100.64.0.1"}"#;
         let classes = detected_redaction_classes(payload);
-        let count = classes.iter().filter(|c| **c == "tailscale_metadata").count();
-        assert_eq!(count, 1, "tailscale_metadata should appear exactly once; got {classes:?}");
+        let count = classes
+            .iter()
+            .filter(|c| **c == "tailscale_metadata")
+            .count();
+        assert_eq!(
+            count, 1,
+            "tailscale_metadata should appear exactly once; got {classes:?}"
+        );
     }
 
     #[test]
@@ -2572,7 +2578,10 @@ mod tests {
         ];
         expected.retain(|c| classes.contains(c));
         assert_eq!(
-            classes.iter().filter(|c| expected.contains(c)).collect::<Vec<_>>(),
+            classes
+                .iter()
+                .filter(|c| expected.contains(c))
+                .collect::<Vec<_>>(),
             expected.iter().collect::<Vec<_>>(),
             "expected sorted intersect to match the natural order; got {classes:?}"
         );
