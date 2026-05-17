@@ -258,6 +258,12 @@ pub fn set_config(
                 source,
             }
         })?;
+        ensure_config_write_path_is_regular_or_missing(&path).map_err(|source| {
+            ConfigSurfaceError::Write {
+                path: path.clone(),
+                source,
+            }
+        })?;
         fs::write(&path, planned_toml.as_bytes()).map_err(|source| ConfigSurfaceError::Write {
             path: path.clone(),
             source,
@@ -406,6 +412,21 @@ fn read_optional_config_contents(path: &Path) -> Result<Option<String>, ConfigSu
             path: path.to_path_buf(),
             source,
         })
+}
+
+fn ensure_config_write_path_is_regular_or_missing(path: &Path) -> Result<(), io::Error> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to write config `{}` because it is not a regular file",
+                path.display()
+            ),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn ensure_no_config_symlink_components(
@@ -899,5 +920,25 @@ mod tests {
         } else {
             Err(format!("unexpected non-regular config error: {error}"))
         }
+    }
+
+    #[test]
+    fn config_write_preflight_rejects_non_regular_final_path() -> TestResult {
+        let temp = workspace()?;
+        let config_path = temp.path().join(".ee").join("config.toml");
+        fs::create_dir_all(&config_path).map_err(|error| error.to_string())?;
+
+        let error = ensure_config_write_path_is_regular_or_missing(&config_path)
+            .expect_err("write preflight should reject a directory config path");
+        let message = error.to_string();
+        if !message.contains("not a regular file") {
+            return Err(format!("unexpected non-regular config error: {message}"));
+        }
+        if !config_path.is_dir() {
+            return Err(
+                "write preflight should leave non-regular config path untouched".to_owned(),
+            );
+        }
+        Ok(())
     }
 }
