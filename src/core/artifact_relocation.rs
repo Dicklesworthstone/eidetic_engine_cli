@@ -4,7 +4,7 @@
 //! It never removes originals and never overwrites an existing destination.
 
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -286,16 +286,7 @@ fn restore_relocation(
         }
         reject_existing_symlink_component(&destination)?;
         reject_existing_symlink_component(&original)?;
-        fs::copy(&destination, &original).map_err(|error| DomainError::Storage {
-            message: format!(
-                "failed to restore {} from {}: {error}",
-                original.display(),
-                destination.display()
-            ),
-            repair: Some(
-                "Verify the relocation manifest and destination artifact still exist.".to_owned(),
-            ),
-        })?;
+        copy_relocation_file_no_overwrite(&destination, &original, "restore relocated artifact")?;
         restored = true;
     }
 
@@ -421,16 +412,100 @@ fn apply_manifest_copy(manifest: &ArtifactRelocationManifest) -> Result<(), Doma
         }
         reject_existing_symlink_component(&original)?;
         reject_existing_symlink_component(&destination)?;
-        fs::copy(&original, &destination).map_err(|error| DomainError::Storage {
+        copy_relocation_file_no_overwrite(&original, &destination, "copy relocated artifact")?;
+    }
+    Ok(())
+}
+
+fn copy_relocation_file_no_overwrite(
+    source: &Path,
+    destination: &Path,
+    action: &str,
+) -> Result<(), DomainError> {
+    reject_existing_symlink_component(source)?;
+    reject_existing_symlink_component(destination)?;
+    match fs::symlink_metadata(source) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "refusing to {action} from non-regular source: {}",
+                    source.display()
+                ),
+                repair: Some("Relocate only regular artifact files.".to_owned()),
+            });
+        }
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "failed to inspect relocation source {}: {error}",
+                    source.display()
+                ),
+                repair: Some("Verify the relocation manifest and source artifact.".to_owned()),
+            });
+        }
+    }
+
+    let mut source_file = fs::File::open(source).map_err(|error| DomainError::Storage {
+        message: format!(
+            "failed to open relocation source {}: {error}",
+            source.display()
+        ),
+        repair: Some("Verify the relocation manifest and source artifact.".to_owned()),
+    })?;
+    let mut destination_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|error| {
+            let (message, repair) = if error.kind() == io::ErrorKind::AlreadyExists {
+                (
+                    format!(
+                        "refusing to {action} over existing destination: {}",
+                        destination.display()
+                    ),
+                    "Move the conflicting file aside manually before retrying.".to_owned(),
+                )
+            } else {
+                (
+                    format!(
+                        "failed to create relocation destination {}: {error}",
+                        destination.display()
+                    ),
+                    "Check destination free space and permissions.".to_owned(),
+                )
+            };
+            DomainError::Storage {
+                message,
+                repair: Some(repair),
+            }
+        })?;
+    io::copy(&mut source_file, &mut destination_file).map_err(|error| DomainError::Storage {
+        message: format!(
+            "failed to {action} from {} to {}: {error}",
+            source.display(),
+            destination.display()
+        ),
+        repair: Some("Check destination free space and permissions.".to_owned()),
+    })?;
+    destination_file
+        .flush()
+        .map_err(|error| DomainError::Storage {
             message: format!(
-                "failed to copy {} to {}: {error}",
-                original.display(),
+                "failed to flush relocation destination {}: {error}",
                 destination.display()
             ),
             repair: Some("Check destination free space and permissions.".to_owned()),
         })?;
-    }
-    Ok(())
+    destination_file
+        .sync_all()
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "failed to sync relocation destination {}: {error}",
+                destination.display()
+            ),
+            repair: Some("Check destination free space and permissions.".to_owned()),
+        })
 }
 
 fn write_manifest_no_overwrite(
@@ -1351,6 +1426,45 @@ mod tests {
             directory.is_dir(),
             "hash refusal should leave directory artifact untouched".to_owned(),
         )
+    }
+
+    #[test]
+    fn relocation_copy_rejects_existing_destination_without_truncating() -> TestResult {
+        let source = temp_path("copy-existing-source").join("source.o");
+        let destination = temp_path("copy-existing-destination").join("destination.o");
+        fs::create_dir_all(parent_dir(&source)?).map_err(|error| error.to_string())?;
+        fs::create_dir_all(parent_dir(&destination)?).map_err(|error| error.to_string())?;
+        fs::write(&source, "source bytes\n").map_err(|error| error.to_string())?;
+        fs::write(&destination, "keep me\n").map_err(|error| error.to_string())?;
+
+        let result =
+            copy_relocation_file_no_overwrite(&source, &destination, "test relocation copy");
+
+        match result {
+            Err(DomainError::Storage { message, repair }) => {
+                if !message.contains("existing destination") {
+                    return Err(format!("unexpected existing destination error: {message}"));
+                }
+                if repair.as_deref()
+                    != Some("Move the conflicting file aside manually before retrying.")
+                {
+                    return Err(format!(
+                        "unexpected existing destination repair: {repair:?}"
+                    ));
+                }
+            }
+            other => {
+                return Err(format!(
+                    "expected existing destination storage error, got {other:?}"
+                ));
+            }
+        }
+        let destination_content =
+            fs::read_to_string(&destination).map_err(|error| error.to_string())?;
+        if destination_content != "keep me\n" {
+            return Err("existing relocation destination was unexpectedly truncated".to_owned());
+        }
+        Ok(())
     }
 
     #[test]
