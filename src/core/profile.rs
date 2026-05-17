@@ -7,7 +7,7 @@ use std::env;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -1549,11 +1549,28 @@ pub fn apply_profile_config(
             source,
         }
     })?;
-    fs::write(&path, report.planned_toml.as_bytes()).map_err(|source| {
+    let temp_path = path.with_extension("toml.tmp");
+    ensure_no_profile_config_symlink_components(&temp_path, "write temp").map_err(|source| {
         ProfileConfigError::Write {
-            path: path.clone(),
+            path: temp_path.clone(),
             source,
         }
+    })?;
+    ensure_profile_config_temp_path_is_missing(&temp_path).map_err(|source| {
+        ProfileConfigError::Write {
+            path: temp_path.clone(),
+            source,
+        }
+    })?;
+    write_profile_config_temp_file(&temp_path, report.planned_toml.as_bytes()).map_err(
+        |source| ProfileConfigError::Write {
+            path: temp_path.clone(),
+            source,
+        },
+    )?;
+    fs::rename(&temp_path, &path).map_err(|source| ProfileConfigError::Write {
+        path: path.clone(),
+        source,
     })?;
 
     report.applied = true;
@@ -1716,6 +1733,29 @@ fn ensure_profile_config_write_path_is_regular_or_missing(path: &Path) -> Result
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn ensure_profile_config_temp_path_is_missing(path: &Path) -> Result<(), io::Error> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "refusing to write profile config temp file `{}` because it already exists",
+                path.display()
+            ),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn write_profile_config_temp_file(path: &Path, bytes: &[u8]) -> Result<(), io::Error> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 fn ensure_no_profile_config_symlink_components(
@@ -2824,6 +2864,34 @@ mod tests {
         ensure_true(
             config_path.is_dir(),
             "write preflight leaves non-regular config path untouched",
+        )
+    }
+
+    #[test]
+    fn profile_config_apply_rejects_existing_temp_file_without_truncating() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_path = temp.path().join(".ee").join("config.toml");
+        let temp_path = config_path.with_extension("toml.tmp");
+        fs::create_dir_all(temp_path.parent().expect("profile config temp parent"))
+            .map_err(|error| error.to_string())?;
+        fs::write(&temp_path, "stale profile temp").map_err(|error| error.to_string())?;
+
+        let options = config_options(temp.path(), OperatingProfile::Swarm, false);
+        let error =
+            apply_profile_config(&options).expect_err("existing temp file should reject apply");
+
+        ensure_true(
+            error.to_string().contains("already exists"),
+            "existing temp error message",
+        )?;
+        ensure(
+            fs::read_to_string(&temp_path).map_err(|error| error.to_string())?,
+            "stale profile temp".to_owned(),
+            "existing temp content remains unchanged",
+        )?;
+        ensure_true(
+            !config_path.exists(),
+            "profile config apply must not publish final config when temp exists",
         )
     }
 
