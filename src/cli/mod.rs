@@ -44178,6 +44178,35 @@ mod tests {
     }
 
     #[test]
+    fn db_inspect_redacts_lifted_source_uri_values() -> TestResult {
+        let redacted = db_inspect_redact_source_uri(
+            "file:///Users/alice/private/db.sqlite?api_key=redaction-fixture",
+        );
+
+        ensure(
+            redacted.contains("[REDACTED_PATH]"),
+            "db inspect source URI should redact path-like segment",
+        )?;
+        ensure(
+            redacted.contains("[REDACTED:"),
+            "db inspect source URI should redact secret-like value",
+        )?;
+        ensure(
+            !redacted.contains("/Users/alice") && !redacted.contains("redaction-fixture"),
+            format!("db inspect source URI leaked sensitive value: {redacted}"),
+        )
+    }
+
+    #[test]
+    fn db_inspect_preserves_safe_source_uri_values() -> TestResult {
+        ensure_equal(
+            &db_inspect_redact_source_uri("cass://session/public#L1"),
+            &"cass://session/public#L1".to_string(),
+            "safe source URI preserved",
+        )
+    }
+
+    #[test]
     fn diag_integrity_command_parses() -> TestResult {
         let parsed = Cli::try_parse_from([
             "ee",
