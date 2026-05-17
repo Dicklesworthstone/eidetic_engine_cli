@@ -32,6 +32,18 @@ if printf '%s' "$CURATE_JSON" | jq . >/dev/null 2>&1; then
     assert_jq_nonempty "$CURATE_JSON" '.data.structuralAdjustments[0].rationale // empty' "g5_curate_decay_adjustment_rationale"
     assert_jq_nonempty "$CURATE_JSON" '.data.structuralAdjustments[0].adjustedDecay // empty' "g5_curate_decay_adjusted_decay"
     SNAPSHOT_VERSION=$(printf '%s' "$CURATE_JSON" | jq -r '.. | objects | .snapshotVersion? // .snapshot_version? // empty' 2>/dev/null | head -n 1)
+
+    CURATE_NO_STRUCTURAL_JSON=$(ee_workspace curate disposition --json --no-structural-decay 2>/dev/null || true)
+    if printf '%s' "$CURATE_NO_STRUCTURAL_JSON" | jq . >/dev/null 2>&1; then
+        assert_jq "$CURATE_NO_STRUCTURAL_JSON" '.schema // empty' "ee.response.v1" "g5_curate_decay_opt_out_envelope_schema"
+        assert_jq "$CURATE_NO_STRUCTURAL_JSON" '.success // false' "true" "g5_curate_decay_opt_out_success"
+        assert_jq "$CURATE_NO_STRUCTURAL_JSON" '.data.command // empty' "curate disposition" "g5_curate_decay_opt_out_command"
+        assert_jq "$CURATE_NO_STRUCTURAL_JSON" '.data.structuralAdjustments | type' "array" "g5_curate_decay_opt_out_structural_adjustments_array"
+        STRUCTURAL_OPT_OUT_COUNT=$(printf '%s' "$CURATE_NO_STRUCTURAL_JSON" | jq '(.data.structuralAdjustments // []) | length' 2>/dev/null || echo 0)
+        e2e_log_assert_num "$STRUCTURAL_OPT_OUT_COUNT" -eq 0 "g5_curate_decay_opt_out_structural_adjustments_absent"
+    else
+        e2e_log_assert_eq "parseable-json" "invalid-json" "g5_curate_decay_opt_out_parseable_json" || true
+    fi
 else
     todo_assert "g5_curate_decay_surface_available" "bd-mvld.4" "ee curate disposition structural decay output is not fully available yet."
     SNAPSHOT_VERSION="unavailable"

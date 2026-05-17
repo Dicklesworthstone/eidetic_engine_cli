@@ -52,4 +52,10 @@ fn g5_curate_decay_script_passes_with_cargo_built_binary() {
         log_path.display(),
         log
     );
+    assert!(
+        log.contains("g5_curate_decay_opt_out_structural_adjustments_absent"),
+        "structured log should include the --no-structural-decay opt-out assertion; log path: {}\nlog:\n{}",
+        log_path.display(),
+        log
+    );
 }
