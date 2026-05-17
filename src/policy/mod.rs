@@ -405,7 +405,8 @@ pub struct SecretRedactionMatch {
 pub const WORKSPACE_SECRET_RISK_SCHEMA_V1: &str = "ee.workspace.secret_risk.v1";
 pub const WORKSPACE_SECRET_RISK_DEFAULT_MAX_SCAN_BYTES: usize = 64 * 1024;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceSecretRiskReport {
     pub schema: &'static str,
     pub path: String,
@@ -417,6 +418,7 @@ pub struct WorkspaceSecretRiskReport {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceSecretRiskEvidence {
     pub risk_class: &'static str,
     pub pattern_id: &'static str,

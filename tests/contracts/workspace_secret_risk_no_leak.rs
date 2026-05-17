@@ -99,6 +99,8 @@ fn report_support_summary(report: &WorkspaceSecretRiskReport) -> String {
 fn normalized_renderings(report: &WorkspaceSecretRiskReport) -> Result<String, String> {
     let mut rendered_json = report_json(report).to_string();
     let mut rendered_human = report_human(report);
+    let mut raw_policy_report = serde_json::to_string(report)
+        .map_err(|error| format!("serialize raw policy report: {error}"))?;
     let mut support_summary = report_support_summary(report);
 
     for hash_prefix in report
@@ -108,6 +110,7 @@ fn normalized_renderings(report: &WorkspaceSecretRiskReport) -> Result<String, S
     {
         rendered_json = rendered_json.replace(hash_prefix, "<hash-prefix-12>");
         rendered_human = rendered_human.replace(hash_prefix, "<hash-prefix-12>");
+        raw_policy_report = raw_policy_report.replace(hash_prefix, "<hash-prefix-12>");
         support_summary = support_summary.replace(hash_prefix, "<hash-prefix-12>");
     }
 
@@ -115,6 +118,8 @@ fn normalized_renderings(report: &WorkspaceSecretRiskReport) -> Result<String, S
         "human": rendered_human,
         "json": serde_json::from_str::<Value>(&rendered_json)
             .map_err(|error| format!("normalize rendered JSON: {error}"))?,
+        "policyReportJson": serde_json::from_str::<Value>(&raw_policy_report)
+            .map_err(|error| format!("normalize raw policy report JSON: {error}"))?,
         "supportSummary": support_summary,
     }))
     .map(|mut rendered| {
@@ -193,12 +198,15 @@ fn workspace_secret_risk_renderings_do_not_leak_raw_fixture_secret() -> TestResu
 
     let rendered_json = report_json(&report).to_string();
     let rendered_human = report_human(&report);
+    let raw_policy_report =
+        serde_json::to_string(&report).map_err(|error| format!("serialize report: {error}"))?;
     let support_summary = report_support_summary(&report);
     let debug_report = format!("{report:?}");
 
     for (surface, rendered) in [
         ("json", rendered_json.as_str()),
         ("human", rendered_human.as_str()),
+        ("policy_report_json", raw_policy_report.as_str()),
         ("support_summary", support_summary.as_str()),
         ("debug", debug_report.as_str()),
     ] {
