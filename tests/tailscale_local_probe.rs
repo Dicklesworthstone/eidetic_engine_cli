@@ -445,6 +445,38 @@ fn local_probe_reports_socket_daemon_unreachable_without_cli_fallback() -> TestR
 }
 
 #[test]
+fn socket_probe_records_timeout_when_prefs_request_times_out() -> TestResult {
+    let mut socket_runner = FakeSocketRunner::with_existing("/var/run/tailscaled.socket");
+    socket_runner.status = Some(TailscaleCliCommandOutput::success(healthy_status(), 4));
+    socket_runner.prefs = Some(TailscaleCliCommandOutput::timeout(1_501));
+    let mut cli_runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
+
+    let report = probe_tailscale_local_with_runners(
+        &socket_probe_config("/var/run/tailscaled.socket"),
+        &cli_probe_config("/opt/homebrew/bin/tailscale"),
+        &mut socket_runner,
+        &mut cli_runner,
+    );
+
+    assert_eq!(report.probe_method, TailscaleProbeMethod::Socket);
+    assert!(report.daemon_reachable);
+    assert!(report.authenticated);
+    assert_eq!(report.shields_up, None);
+    assert!(
+        report
+            .degradations
+            .iter()
+            .any(|entry| entry.code == TAILSCALE_PROBE_TIMEOUT_CODE)
+    );
+    assert_eq!(
+        socket_runner.calls,
+        vec!["/localapi/v0/status", "/localapi/v0/prefs"]
+    );
+    assert!(cli_runner.calls.is_empty());
+    Ok(())
+}
+
+#[test]
 fn cli_probe_rejects_relative_override_without_running_it() -> TestResult {
     let mut runner = FakeCliRunner::with_existing("tailscale");
     let mut config = cli_probe_config("/opt/homebrew/bin/tailscale");
@@ -490,6 +522,39 @@ fn cli_probe_reports_timeout_when_status_command_times_out() -> TestResult {
     assert_eq!(
         runner.calls,
         vec!["--version", "status --json --self=true --peers=true"]
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_probe_records_timeout_when_prefs_command_times_out() -> TestResult {
+    let mut runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
+    runner.version = Some(TailscaleCliCommandOutput::success(good_version_output(), 3));
+    runner.status = Some(TailscaleCliCommandOutput::success(healthy_status(), 4));
+    runner.prefs = Some(TailscaleCliCommandOutput::timeout(1_501));
+
+    let report = probe_tailscale_cli_with_runner(
+        &cli_probe_config("/opt/homebrew/bin/tailscale"),
+        &mut runner,
+    );
+
+    assert!(report.installed);
+    assert!(report.daemon_reachable);
+    assert!(report.authenticated);
+    assert_eq!(report.shields_up, None);
+    assert!(
+        report
+            .degradations
+            .iter()
+            .any(|entry| entry.code == TAILSCALE_PROBE_TIMEOUT_CODE)
+    );
+    assert_eq!(
+        runner.calls,
+        vec![
+            "--version",
+            "status --json --self=true --peers=true",
+            "debug localapi /localapi/v0/prefs"
+        ]
     );
     Ok(())
 }
