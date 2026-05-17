@@ -17,6 +17,8 @@ use crate::models::{
 };
 use crate::runtime::determinism::{Deterministic, Seed};
 
+pub mod budget_classifier;
+
 pub const SUBSYSTEM: &str = "pack";
 pub const CONTEXT_COMMAND: &str = "context";
 pub const DEFAULT_CONTEXT_MAX_TOKENS: u32 = 4_000;
