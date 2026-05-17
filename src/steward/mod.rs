@@ -5771,6 +5771,43 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn maintenance_job_lock_rejects_symlinked_workspace_before_directory_create() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_workspace = tempdir.path().join("real-workspace");
+        fs::create_dir(&real_workspace).map_err(|error| error.to_string())?;
+        let linked_workspace = tempdir.path().join("linked-workspace");
+        symlink(&real_workspace, &linked_workspace).map_err(|error| error.to_string())?;
+
+        let error = match try_acquire_maintenance_job_lock(&linked_workspace, "test-holder") {
+            Ok(lock) => {
+                return Err(format!(
+                    "symlinked workspace lock should fail before creating .ee, got {lock:?}"
+                ));
+            }
+            Err(error) => error,
+        };
+
+        ensure(
+            error.code(),
+            "maintenance_job_lock_open_failed",
+            "symlinked workspace error code",
+        )?;
+        ensure(
+            error.message().contains("path traverses symbolic link"),
+            true,
+            "symlinked workspace error message",
+        )?;
+        ensure(
+            real_workspace.join(".ee").exists(),
+            false,
+            "lock acquisition must not create .ee through a symlinked workspace path",
+        )
+    }
+
     #[test]
     fn maintenance_job_lock_rejects_non_regular_final_path() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
