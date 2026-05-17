@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs as unix_fs;
+use std::os::unix::fs::{self as unix_fs, PermissionsExt};
 use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
@@ -285,6 +285,82 @@ fn workspace_git_snapshot_provider_is_read_only_for_clean_repo() -> TestResult {
         "clean repository should not report dirty snapshot entries: {:#?}",
         snapshot.entries
     );
+
+    Ok(())
+}
+
+#[test]
+fn workspace_git_snapshot_provider_is_read_only_for_executable_bit_change() -> TestResult {
+    let temp = tempfile::Builder::new()
+        .prefix("ee-workspace-git-mode-readonly-")
+        .tempdir()
+        .map_err(|error| format!("tempdir: {error}"))?;
+    let workspace = temp.path();
+
+    run_git(workspace, &["init", "-q", "-b", "main"])?;
+    run_git(
+        workspace,
+        &["config", "user.email", "ee-test@example.invalid"],
+    )?;
+    run_git(workspace, &["config", "user.name", "ee test"])?;
+
+    let script_path = workspace.join("script.sh");
+    write_file(&script_path, "#!/bin/sh\necho hi\n")?;
+    run_git(workspace, &["add", "script.sh"])?;
+    run_git(workspace, &["commit", "-q", "-m", "seed"])?;
+
+    let mut permissions = fs::metadata(&script_path)
+        .map_err(|error| format!("metadata {}: {error}", script_path.display()))?
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script_path, permissions)
+        .map_err(|error| format!("chmod {}: {error}", script_path.display()))?;
+    run_git(workspace, &["update-index", "--chmod=+x", "script.sh"])?;
+
+    let before_status = status_digest(workspace)?;
+    assert!(
+        before_status.lines().any(|line| line.starts_with("1 M. ")),
+        "expected staged executable-bit change before snapshot, got:\n{before_status}"
+    );
+    let before_files = file_state_digest(workspace)?;
+
+    let options = WorkspaceGitSnapshotOptions::for_workspace(workspace);
+    let started = Instant::now();
+    let snapshot = collect_workspace_git_snapshot(&options, &SystemSwarmBriefCommandRunner)
+        .map_err(|error| format!("collect workspace git snapshot: {error:?}"))?;
+    let elapsed_ms = started.elapsed().as_millis();
+
+    let after_status = status_digest(workspace)?;
+    let after_files = file_state_digest(workspace)?;
+    let log = read_only_e2e_log(
+        "executable_bit_change",
+        workspace,
+        elapsed_ms,
+        &before_status,
+        &after_status,
+        &before_files,
+        &after_files,
+    );
+    assert_read_only_e2e_log(&log, "executable_bit_change")?;
+    assert_eq!(
+        after_status, before_status,
+        "provider must not change staged mode-only git status"
+    );
+    assert_eq!(
+        after_files, before_files,
+        "provider must not change files for staged mode-only state"
+    );
+
+    let script = entry_by_path(&snapshot.entries, "script.sh")?;
+    assert_eq!(script.entry_kind, "ordinary");
+    assert_eq!(script.staged, "M");
+    assert_eq!(script.unstaged, ".");
+    assert!(script.metadata.as_ref().is_some_and(|metadata| {
+        metadata.exists
+            && metadata.file_type == "file"
+            && metadata.size_bytes == Some("#!/bin/sh\necho hi\n".len() as u64)
+            && !metadata.large_file
+    }));
 
     Ok(())
 }
