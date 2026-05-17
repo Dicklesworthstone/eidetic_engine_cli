@@ -256,6 +256,66 @@ fn context_item_contents(report: &JsonValue, context: &str) -> Result<Vec<String
         .collect()
 }
 
+fn enable_ppr_context_feature(workspace_path: &Path) -> TestResult {
+    let metadata_dir = workspace_path.join(".ee");
+    fs::create_dir_all(&metadata_dir)
+        .map_err(|error| format!("create PPR fixture config dir: {error}"))?;
+    fs::write(
+        metadata_dir.join("config.toml"),
+        "[graph.feature.ppr]\nenabled = true\n",
+    )
+    .map_err(|error| format!("write PPR fixture config: {error}"))
+}
+
+fn seed_context_ppr_cache_score(
+    database_path: &Path,
+    workspace_id: &str,
+    snapshot_id: &str,
+    memory_id: &str,
+    score: f64,
+    context: &str,
+) -> TestResult {
+    let connection = DbConnection::open_file(database_path)
+        .map_err(|error| format!("{context}: open db for PPR cache fixture: {error}"))?;
+    let rows = connection
+        .list_graph_algorithm_results(workspace_id, snapshot_id, Some("personalized_pagerank"))
+        .map_err(|error| format!("{context}: list PPR cache rows: {error}"))?;
+    ensure_equal(
+        &rows.len(),
+        &1,
+        &format!("{context}: discovered exactly one live PPR cache params hash"),
+    )?;
+    connection
+        .upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
+            workspace_id: workspace_id.to_owned(),
+            snapshot_id: snapshot_id.to_owned(),
+            algorithm: "personalized_pagerank".to_owned(),
+            params_hash: rows[0].params_hash.clone(),
+            result_json: serde_json::json!({
+                "scores": [
+                    {
+                        "node": memory_id,
+                        "score": score,
+                    }
+                ],
+                "converged": true,
+                "witness": {
+                    "algorithm": "personalized_pagerank_cache_fixture",
+                    "complexity_claim": "cache fixture",
+                    "nodes_touched": 1,
+                    "edges_scanned": 0,
+                    "queue_peak": 0,
+                }
+            })
+            .to_string(),
+            ttl_seconds: 3600,
+        })
+        .map_err(|error| format!("{context}: seed PPR cache fixture: {error}"))?;
+    connection
+        .close()
+        .map_err(|error| format!("{context}: close PPR cache fixture db: {error}"))
+}
+
 fn ensure_context_uses_ppr_cache_score(
     report: &JsonValue,
     memory_id: &str,
@@ -455,6 +515,7 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         &Some("created"),
         "init status",
     )?;
+    enable_ppr_context_feature(&workspace)?;
 
     // 2. Seed with diverse memories: distinct levels, kinds, tag sets, scores.
     let seeds: &[(&str, &str, &str, &str, &str)] = &[
@@ -572,44 +633,6 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         .first()
         .ok_or_else(|| "missing memory id for ppr cache fixture".to_owned())?;
     let ppr_cache_score = 0.875_f64;
-    let ppr_params = serde_json::json!({
-        "alpha": ee::graph::ppr::DEFAULT_PERSONALIZED_PAGERANK_ALPHA,
-        "maxIterations": ee::graph::ppr::DEFAULT_PERSONALIZED_PAGERANK_MAX_ITERATIONS,
-        "seedCount": 1,
-        "tolerance": ee::graph::ppr::DEFAULT_PERSONALIZED_PAGERANK_TOLERANCE,
-    });
-    let ppr_params_hash = ee::graph::graph_algorithm_params_hash(
-        "personalized_pagerank",
-        "blake3:e2e-backup-graph-cache",
-        &ppr_params,
-    )
-    .map_err(|error| format!("graph algorithm params hash: {error}"))?;
-    src_conn
-        .upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
-            workspace_id: src_workspace_id.clone(),
-            snapshot_id: graph_snapshot_id.to_owned(),
-            algorithm: "personalized_pagerank".to_owned(),
-            params_hash: ppr_params_hash,
-            result_json: serde_json::json!({
-                "scores": [
-                    {
-                        "node": ppr_cache_memory_id,
-                        "score": ppr_cache_score,
-                    }
-                ],
-                "converged": true,
-                "witness": {
-                    "algorithm": "personalized_pagerank_cache_fixture",
-                    "complexity_claim": "cache fixture",
-                    "nodes_touched": 1,
-                    "edges_scanned": 0,
-                    "queue_peak": 0,
-                }
-            })
-            .to_string(),
-            ttl_seconds: 3600,
-        })
-        .map_err(|error| format!("insert graph result cache: {error}"))?;
     // Backup restore transits through records.jsonl and currently restores
     // native memories with the JSONL import provenance marker. Align the source
     // fixture before taking the context snapshot so the byte-identity assertion
@@ -644,6 +667,32 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
     src_pairs.sort_by(|a, b| a.0.content.cmp(&b.0.content));
     drop(src_conn);
     let src_db_arg = src_db.to_string_lossy().into_owned();
+    // Let the current context pipeline derive the seed-aware PPR params hash;
+    // Frankensearch scores are part of the seed weights and should not be
+    // guessed by this backup fixture.
+    let (_probe_context, _probe_context_stdout) = run_ee_raw(&[
+        "--workspace",
+        &workspace_arg,
+        "--json",
+        "context",
+        CONTEXT_QUERY,
+        "--database",
+        &src_db_arg,
+        "--index-dir",
+        &source_context_index_arg,
+        "--candidate-pool",
+        "1",
+        "--ppr-weight",
+        "1.0",
+    ])?;
+    seed_context_ppr_cache_score(
+        &src_db,
+        &src_workspace_id,
+        graph_snapshot_id,
+        ppr_cache_memory_id,
+        ppr_cache_score,
+        "source context PPR probe",
+    )?;
     let (source_context, _source_context_stdout) = run_ee_raw(&[
         "--workspace",
         &workspace_arg,
@@ -869,6 +918,7 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         "restored graph result cache count",
     )?;
     drop(restored_conn);
+    enable_ppr_context_feature(&side_path)?;
     let (restored_context, _restored_context_stdout) = run_ee_raw(&[
         "--workspace",
         &side_path_arg,
