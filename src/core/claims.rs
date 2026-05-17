@@ -4,7 +4,8 @@
 //! executable claims defined in claims.yaml.
 
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -421,7 +422,7 @@ fn manifest_path_for_claim(artifacts_root: &Path, claim_id: &ClaimId) -> PathBuf
 fn read_claims_file(path: &Path) -> Result<Vec<ParsedClaim>, ClaimParseError> {
     ensure_no_claim_metadata_symlink_components(path, "read claims file")?;
     ensure_claim_metadata_regular_file(path, "claims file")?;
-    let input = fs::read_to_string(path).map_err(|error| {
+    let input = read_claim_file_to_string_no_follow(path).map_err(|error| {
         ClaimParseError::new(format!("failed to read {}: {error}", path.display()))
     })?;
     parse_claims_file_yaml(&input)
@@ -678,7 +679,7 @@ fn parse_demo_ids(ids: &[String], claim_index: usize) -> Result<Vec<DemoId>, Cla
 fn read_claim_manifest(path: &Path) -> Result<ParsedManifest, ClaimParseError> {
     ensure_no_claim_metadata_symlink_components(path, "read claim manifest")?;
     ensure_claim_metadata_regular_file(path, "claim manifest")?;
-    let input = fs::read_to_string(path).map_err(|error| {
+    let input = read_claim_file_to_string_no_follow(path).map_err(|error| {
         ClaimParseError::new(format!("failed to read {}: {error}", path.display()))
     })?;
     parse_claim_manifest_json(&input)
@@ -891,9 +892,40 @@ fn read_claim_artifact_bytes(
     let artifact_path =
         resolve_claim_artifact_path_no_symlinks(claim_artifacts_dir, relative_path)?;
     ensure_claim_artifact_regular_file(&artifact_path)?;
-    fs::read(&artifact_path)
+    read_claim_file_bytes_no_follow(&artifact_path)
         .map_err(|error| format!("artifact_not_found: {}: {}", artifact_path.display(), error))
 }
+
+fn read_claim_file_to_string_no_follow(path: &Path) -> io::Result<String> {
+    let mut file = open_claim_file_for_read_no_follow(path)?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+fn read_claim_file_bytes_no_follow(path: &Path) -> io::Result<Vec<u8>> {
+    let mut file = open_claim_file_for_read_no_follow(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn open_claim_file_for_read_no_follow(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_claim_file_read_options(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_claim_file_read_options(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_claim_file_read_options(_options: &mut OpenOptions) {}
 
 fn path_exists_no_follow(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
@@ -1108,7 +1140,7 @@ fn verify_file_hash_evidence(
         .ok_or_else(|| format!("missing_expected_hash: {}", evidence.target))?;
     let path = resolve_claim_artifact_path_no_symlinks(workspace_path, &evidence.target)?;
     ensure_claim_artifact_regular_file(&path)?;
-    let bytes = fs::read(&path)
+    let bytes = read_claim_file_bytes_no_follow(&path)
         .map_err(|error| format!("artifact_not_found: {}: {error}", path.display()))?;
     let actual_hash = blake3::hash(&bytes).to_hex().to_string();
     if actual_hash == expected_hash {
@@ -1216,7 +1248,7 @@ fn read_first_existing_claim_store(
             Err(_) => continue,
         };
         if path.exists() {
-            return fs::read_to_string(&path)
+            return read_claim_file_to_string_no_follow(&path)
                 .map_err(|error| format!("{missing_code}: {}: {error}", path.display()));
         }
     }
@@ -1788,6 +1820,39 @@ claims:
             Ok(())
         } else {
             Err(format!("unexpected symlink error: {error}"))
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claim_file_final_read_open_rejects_symlinked_path() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_claims = temp.path().join("outside-claims.yaml");
+        std::fs::write(&outside_claims, VALID_CLAIMS_YAML).map_err(|error| error.to_string())?;
+        let linked_claims = temp.path().join("claims.yaml");
+        symlink(&outside_claims, &linked_claims).map_err(|error| error.to_string())?;
+
+        let error = open_claim_file_for_read_no_follow(&linked_claims)
+            .expect_err("final claims file read open must reject symlinks");
+
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Err("final symlink read should fail because the path is a symlink".to_owned());
+        }
+        ensure_equal(
+            &std::fs::read_to_string(&outside_claims).map_err(|error| error.to_string())?,
+            &VALID_CLAIMS_YAML.to_owned(),
+            "outside claims content",
+        )?;
+        if std::fs::symlink_metadata(&linked_claims)
+            .map_err(|error| error.to_string())?
+            .file_type()
+            .is_symlink()
+        {
+            Ok(())
+        } else {
+            Err("final claims symlink should remain untouched".to_owned())
         }
     }
 
