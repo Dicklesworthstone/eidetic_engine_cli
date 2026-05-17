@@ -2111,7 +2111,7 @@ fn fetch_history(conn: &DbConnection, memory_id: &str) -> WhyEvidenceFetch<Memor
             timestamp: entry.timestamp,
             actor: entry.actor,
             action: entry.action,
-            details: entry.details,
+            details: entry.details.map(redact_why_history_details),
         })
         .collect();
 
@@ -2120,6 +2120,36 @@ fn fetch_history(conn: &DbConnection, memory_id: &str) -> WhyEvidenceFetch<Memor
         total_count,
         truncated,
     }])
+}
+
+fn redact_why_history_details(details: String) -> String {
+    match serde_json::from_str::<serde_json::Value>(&details) {
+        Ok(mut value) => {
+            redact_why_history_json_value(&mut value);
+            serde_json::to_string(&value)
+                .unwrap_or_else(|_| redact_why_search_result_provenance_uri(details))
+        }
+        Err(_) => redact_why_search_result_provenance_uri(details),
+    }
+}
+
+fn redact_why_history_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => {
+            *text = redact_why_search_result_provenance_uri(std::mem::take(text));
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_why_history_json_value(item);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for item in fields.values_mut() {
+                redact_why_history_json_value(item);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
 }
 
 fn fetch_verification_evidence(
@@ -2529,6 +2559,126 @@ mod tests {
             provenance.contains("[REDACTED:"),
             true,
             "stored provenance secret placeholder",
+        )
+    }
+
+    #[test]
+    fn explain_memory_redacts_history_details_without_mutating_audit_row() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or("database path should have parent")?,
+        )
+        .map_err(|error| error.to_string())?;
+        let conn = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        conn.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_whyhist0000000000000001";
+        let memory_id = "mem_whyhist0000000000000001";
+        conn.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: temp.path().display().to_string(),
+                name: Some("why-history-redaction".to_string()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        conn.insert_memory(
+            memory_id,
+            &crate::db::CreateMemoryInput {
+                workspace_id: workspace_id.to_string(),
+                level: "procedural".to_string(),
+                kind: "rule".to_string(),
+                content: "History details are redacted at the why surface.".to_string(),
+                workflow_id: None,
+                confidence: 0.8,
+                utility: 0.7,
+                importance: 0.6,
+                provenance_uri: None,
+                trust_class: "human_explicit".to_string(),
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let raw_details = serde_json::json!({
+            "schema": "ee.audit.memory_create.v1",
+            "provenanceUri": concat!(
+                "file:///Users/alice/private/repo/notes.md?",
+                "api",
+                "_key=redaction-fixture"
+            ),
+            "nested": {
+                "reason": "reviewed /Volumes/USBNVME16TB/private/session.jsonl"
+            },
+            "safe": "cass://session/public#L1"
+        })
+        .to_string();
+        conn.insert_audit(
+            "audit_whyhist000000000000000001",
+            &crate::db::CreateAuditInput {
+                workspace_id: Some(workspace_id.to_string()),
+                actor: Some("test-agent".to_string()),
+                action: crate::db::audit_actions::MEMORY_CREATE.to_string(),
+                target_type: Some("memory".to_string()),
+                target_id: Some(memory_id.to_string()),
+                details: Some(raw_details.clone()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report = explain_memory(&WhyOptions {
+            database_path: &database_path,
+            memory_id,
+            confidence_threshold: WhyOptions::DEFAULT_CONFIDENCE_THRESHOLD,
+        });
+        let details = report
+            .history
+            .as_ref()
+            .and_then(|history| history.entries.first())
+            .and_then(|entry| entry.details.as_deref())
+            .ok_or_else(|| "why history details present".to_string())?;
+
+        ensure(
+            details.contains("/Users/alice") || details.contains("/Volumes/USBNVME16TB"),
+            false,
+            "why history details path redacted",
+        )?;
+        ensure(
+            details.contains("redaction-fixture"),
+            false,
+            "why history details secret value redacted",
+        )?;
+        ensure(
+            details.contains("[REDACTED_PATH]"),
+            true,
+            "why history details path placeholder",
+        )?;
+        ensure(
+            details.contains("[REDACTED:"),
+            true,
+            "why history details secret placeholder",
+        )?;
+        ensure(
+            details.contains("cass://session/public#L1"),
+            true,
+            "safe cass source remains visible",
+        )?;
+
+        let raw_audit_details = conn
+            .list_audit_by_target("memory", memory_id, None)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|entry| entry.action == crate::db::audit_actions::MEMORY_CREATE)
+            .and_then(|entry| entry.details)
+            .ok_or_else(|| "raw memory-create audit details present".to_string())?;
+        ensure(
+            raw_audit_details,
+            raw_details,
+            "raw audit details preserved",
         )
     }
 
