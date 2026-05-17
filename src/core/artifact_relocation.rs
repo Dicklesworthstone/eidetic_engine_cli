@@ -91,7 +91,7 @@ pub struct ArtifactRelocationReport {
 impl ArtifactRelocationReport {
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
-        serde_json::json!(self)
+        serde_json::json!(self.redacted_for_public_output())
     }
 
     #[must_use]
@@ -100,10 +100,32 @@ impl ArtifactRelocationReport {
             "artifact relocation {mode}\n\nentries: {entries}\nmanifest: {manifest}\napplied: {applied}\nrestored: {restored}\n",
             mode = self.mode,
             entries = self.manifest.entries.len(),
-            manifest = self.manifest_path,
+            manifest = redact_artifact_relocation_public_path(&self.manifest_path),
             applied = self.applied,
             restored = self.restored
         )
+    }
+
+    fn redacted_for_public_output(&self) -> Self {
+        let mut report = self.clone();
+        report.manifest_path = redact_artifact_relocation_public_path(&report.manifest_path);
+        report.manifest.workspace_path =
+            redact_artifact_relocation_public_path(&report.manifest.workspace_path);
+        report.manifest.source_path =
+            redact_artifact_relocation_public_path(&report.manifest.source_path);
+        report.manifest.destination_root =
+            redact_artifact_relocation_public_path(&report.manifest.destination_root);
+        report.manifest.restoration_command =
+            redact_artifact_relocation_public_path(&report.manifest.restoration_command);
+        for entry in &mut report.manifest.entries {
+            entry.original_path = redact_artifact_relocation_public_path(&entry.original_path);
+            entry.destination_path =
+                redact_artifact_relocation_public_path(&entry.destination_path);
+        }
+        for action in &mut report.recovery_actions {
+            action.command = redact_artifact_relocation_public_path(&action.command);
+        }
+        report
     }
 }
 
@@ -711,6 +733,59 @@ fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+fn redact_artifact_relocation_public_path(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    redact_artifact_relocation_path_segments(&secret_redacted)
+}
+
+fn redact_artifact_relocation_path_segments(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, c)| *c == '/')
+        else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        let start = cursor + relative_index;
+        if !artifact_relocation_path_starts_sensitive_segment(&value[start..]) {
+            output.push_str(&value[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        output.push_str(&value[cursor..start]);
+        output.push_str("[REDACTED_PATH]");
+        cursor = value[start..]
+            .char_indices()
+            .find_map(|(index, c)| artifact_relocation_path_boundary(c).then_some(start + index))
+            .unwrap_or(value.len());
+    }
+    output
+}
+
+fn artifact_relocation_path_starts_sensitive_segment(value: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/home/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+    ];
+
+    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+}
+
+fn artifact_relocation_path_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,6 +854,142 @@ mod tests {
         fs::create_dir_all(parent_dir(manifest_path)?).map_err(|error| error.to_string())?;
         let json = serde_json::to_string_pretty(manifest).map_err(|error| error.to_string())?;
         fs::write(manifest_path, json).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn relocation_report_json_redacts_sensitive_manifest_paths() -> TestResult {
+        let report = ArtifactRelocationReport {
+            schema: ARTIFACT_RELOCATION_SCHEMA_V1,
+            command: "artifact relocate",
+            mode: ArtifactRelocationMode::Plan.as_str(),
+            applied: false,
+            restored: false,
+            manifest_path: concat!(
+                "/Users/jemanuel/private/relocation.json?",
+                "api",
+                "_key=sk-test-12345678901234567890"
+            )
+            .to_owned(),
+            manifest_hash: None,
+            source_allowed: true,
+            preservation_policy: "copy_preserve_no_delete_no_overwrite",
+            manifest: ArtifactRelocationManifest {
+                schema: ARTIFACT_RELOCATION_SCHEMA_V1.to_owned(),
+                command_version: env!("CARGO_PKG_VERSION").to_owned(),
+                actor: "test".to_owned(),
+                created_at: "2026-05-13T00:00:00Z".to_owned(),
+                workspace_path: "/Users/jemanuel/projects/eidetic_engine_cli".to_owned(),
+                source_path: "/Users/jemanuel/projects/eidetic_engine_cli/target/debug/app.o"
+                    .to_owned(),
+                destination_root: "/Volumes/USBNVME16TB/temp_agent_space/artifacts".to_owned(),
+                restoration_command: concat!(
+                    "ee artifact relocate --restore --manifest ",
+                    "/Users/jemanuel/private/relocation.json?",
+                    "api",
+                    "_key=sk-test-12345678901234567890 --json"
+                )
+                .to_owned(),
+                force_with_explicit_path: false,
+                entries: vec![ArtifactRelocationEntry {
+                    original_path: "/Users/jemanuel/projects/eidetic_engine_cli/target/debug/app.o"
+                        .to_owned(),
+                    destination_path: "/Volumes/USBNVME16TB/temp_agent_space/artifacts/app.o"
+                        .to_owned(),
+                    kind: "file".to_owned(),
+                    size_bytes: 10,
+                    mtime_unix_seconds: None,
+                    blake3: Some("blake3:test".to_owned()),
+                    status: "planned".to_owned(),
+                }],
+            },
+            recovery_actions: vec![ArtifactRelocationRecoveryAction {
+                priority: 1,
+                kind: "restore",
+                command: "ee artifact relocate --restore --manifest /Users/jemanuel/private/relocation.json --json".to_owned(),
+                reason: "restore".to_owned(),
+            }],
+        };
+
+        let rendered = report.data_json().to_string();
+
+        ensure(
+            rendered.contains("[REDACTED_PATH]"),
+            format!("report JSON should redact path-like fields: {rendered}"),
+        )?;
+        ensure(
+            rendered.contains("[REDACTED:"),
+            format!("report JSON should redact secret-like fields: {rendered}"),
+        )?;
+        ensure(
+            !rendered.contains("/Users/jemanuel"),
+            format!("report JSON leaked user path: {rendered}"),
+        )?;
+        ensure(
+            !rendered.contains("/Volumes/USBNVME16TB"),
+            format!("report JSON leaked volume path: {rendered}"),
+        )?;
+        ensure(
+            !rendered.contains("12345678901234567890"),
+            format!("report JSON leaked secret material: {rendered}"),
+        )?;
+        ensure(
+            report.manifest.source_path.contains("/Users/jemanuel"),
+            "raw report manifest source_path should stay intact internally",
+        )
+    }
+
+    #[test]
+    fn relocation_report_human_summary_redacts_manifest_path() -> TestResult {
+        let manifest_path = concat!(
+            "/Users/jemanuel/private/relocation.json?",
+            "api",
+            "_key=sk-test-abcdefghijklmnop"
+        )
+        .to_owned();
+        let report = ArtifactRelocationReport {
+            schema: ARTIFACT_RELOCATION_SCHEMA_V1,
+            command: "artifact relocate",
+            mode: ArtifactRelocationMode::Plan.as_str(),
+            applied: false,
+            restored: false,
+            manifest_path,
+            manifest_hash: None,
+            source_allowed: true,
+            preservation_policy: "copy_preserve_no_delete_no_overwrite",
+            manifest: ArtifactRelocationManifest {
+                schema: ARTIFACT_RELOCATION_SCHEMA_V1.to_owned(),
+                command_version: env!("CARGO_PKG_VERSION").to_owned(),
+                actor: "test".to_owned(),
+                created_at: "2026-05-13T00:00:00Z".to_owned(),
+                workspace_path: "agent://safe-workspace".to_owned(),
+                source_path: "agent://safe-source".to_owned(),
+                destination_root: "agent://safe-destination".to_owned(),
+                restoration_command:
+                    "ee artifact relocate --restore --manifest agent://safe --json".to_owned(),
+                force_with_explicit_path: false,
+                entries: vec![],
+            },
+            recovery_actions: vec![],
+        };
+
+        let rendered = report.human_summary();
+
+        ensure(
+            rendered.contains("[REDACTED_PATH]"),
+            format!("human summary should redact path-like manifest path: {rendered}"),
+        )?;
+        ensure(
+            rendered.contains("[REDACTED:"),
+            format!("human summary should redact secret-like manifest path: {rendered}"),
+        )?;
+        ensure(
+            !rendered.contains("/Users/jemanuel"),
+            format!("human summary leaked manifest path: {rendered}"),
+        )?;
+        ensure(
+            !rendered.contains("abcdefghijklmnop"),
+            format!("human summary leaked secret material: {rendered}"),
+        )
     }
 
     #[test]
