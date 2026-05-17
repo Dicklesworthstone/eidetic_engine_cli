@@ -516,7 +516,13 @@ fn ensure_relocation_manifest_temp_path_regular_or_missing(
     temp_path: &Path,
 ) -> Result<(), DomainError> {
     match fs::symlink_metadata(temp_path) {
-        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(metadata) if metadata.file_type().is_file() => Err(DomainError::Storage {
+            message: format!(
+                "temporary relocation manifest path already exists: {}",
+                temp_path.display()
+            ),
+            repair: Some("Remove the stale temporary manifest path and retry.".to_owned()),
+        }),
         Ok(_) => Err(DomainError::Storage {
             message: format!(
                 "temporary relocation manifest path is not a regular file: {}",
@@ -1217,6 +1223,58 @@ mod tests {
         }
         if expected_copy.exists() {
             return Err("copy happened before symlinked manifest parent was rejected".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn relocation_apply_rejects_existing_temp_manifest_without_truncating() -> TestResult {
+        let workspace = temp_path("existing-temp-manifest-workspace");
+        let source = workspace.join("target/debug/sample.o");
+        fs::create_dir_all(parent_dir(&source)?).map_err(|error| error.to_string())?;
+        fs::write(&source, "artifact bytes\n").map_err(|error| error.to_string())?;
+        let destination = temp_path("existing-temp-manifest-destination");
+        let manifest = temp_path("existing-temp-manifest").join("relocation.json");
+        let parent = parent_dir(&manifest)?;
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let mut temp_manifest = manifest.clone();
+        temp_manifest.set_extension("tmp");
+        fs::write(&temp_manifest, "keep me").map_err(|error| error.to_string())?;
+
+        let result = relocate_artifacts(&ArtifactRelocationOptions {
+            workspace_path: &workspace,
+            source_path: Some(&source),
+            destination_root: Some(&destination),
+            manifest_path: &manifest,
+            actor: Some("test"),
+            mode: ArtifactRelocationMode::Apply,
+            force_with_explicit_path: false,
+        });
+
+        match result {
+            Err(DomainError::Storage { message, repair }) => {
+                if !message.contains("temporary relocation manifest path")
+                    || !message.contains("already exists")
+                {
+                    return Err(format!("unexpected storage error message: {message}"));
+                }
+                if repair.as_deref() != Some("Remove the stale temporary manifest path and retry.")
+                {
+                    return Err(format!("unexpected repair hint: {repair:?}"));
+                }
+            }
+            other => {
+                return Err(format!(
+                    "expected temp manifest storage error, got {other:?}"
+                ));
+            }
+        }
+        if manifest.exists() {
+            return Err("final manifest was written after temp path collision".to_owned());
+        }
+        let temp_content = fs::read_to_string(&temp_manifest).map_err(|error| error.to_string())?;
+        if temp_content != "keep me" {
+            return Err("existing temp manifest was unexpectedly truncated".to_owned());
         }
         Ok(())
     }
