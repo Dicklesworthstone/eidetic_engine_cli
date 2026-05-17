@@ -95,6 +95,13 @@ pub const WRITE_SPOOL_BACKPRESSURE_CODE: &str = "write_spool_backpressure";
 /// User-facing alias for queue-depth write spool backpressure (L1).
 pub const WRITE_QUEUE_FULL_CODE: &str = "write_queue_full";
 
+/// SRR3 fake-runner degraded code for writes cancelled before commit.
+pub const WRITE_HOT_PATH_CANCELLED_BEFORE_COMMIT_CODE: &str =
+    "write_hot_path_cancelled_before_commit";
+
+/// SRR3 fake-runner degraded code for modeled fsync failures.
+pub const WRITE_HOT_PATH_FSYNC_FAILURE_CODE: &str = "write_hot_path_fsync_failure";
+
 /// Return the workspace-relative recovery state path.
 #[must_use]
 pub fn write_spool_recovery_state_path(workspace_path: &Path) -> PathBuf {
@@ -1898,6 +1905,203 @@ mod tests {
         )
     }
 
+    const SRR3_DUPLICATE_SEQUENCE_FAILURE: &str = "duplicate_producer_sequence";
+    const SRR3_AUDIT_CHAIN_DISCONTINUITY_FAILURE: &str = "audit_chain_discontinuity";
+    const SRR3_DURABLE_ROWS_MISMATCH_FAILURE: &str = "durable_rows_mismatch";
+
+    fn srr3_cancellation_point_as_str(point: Srr3CancellationPoint) -> &'static str {
+        match point {
+            Srr3CancellationPoint::None => "none",
+            Srr3CancellationPoint::BeforeEnqueue => "before_enqueue",
+            Srr3CancellationPoint::AfterEnqueueBeforeCommit => "after_enqueue_before_commit",
+            Srr3CancellationPoint::DuringBatchAssembly => "during_batch_assembly",
+            Srr3CancellationPoint::AfterCommit => "after_commit",
+        }
+    }
+
+    fn srr3_schedule_hash(schedule: &Srr3PropertySchedule) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(
+            &u64::try_from(schedule.max_batch_size)
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        for write in &schedule.writes {
+            hasher.update(&[write.producer_id]);
+            hasher.update(write.kind.as_str().as_bytes());
+            hasher.update(
+                &u64::try_from(write.payload_bytes)
+                    .unwrap_or(u64::MAX)
+                    .to_be_bytes(),
+            );
+            hasher.update(srr3_cancellation_point_as_str(write.cancellation_point).as_bytes());
+        }
+        for batch_id in &schedule.fsync_failure_batches {
+            hasher.update(&batch_id.to_be_bytes());
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
+    fn srr3_audit_chain_digest(result: &Srr3ModeledResult) -> String {
+        let mut hasher = blake3::Hasher::new();
+        for chain_hash in &result.audit_chain_hashes {
+            hasher.update(chain_hash.as_bytes());
+            hasher.update(b"\0");
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
+    fn srr3_accepted_count(schedule: &Srr3PropertySchedule) -> usize {
+        schedule
+            .writes
+            .iter()
+            .filter(|write| write.cancellation_point != Srr3CancellationPoint::BeforeEnqueue)
+            .count()
+    }
+
+    fn srr3_rejected_count(schedule: &Srr3PropertySchedule, result: &Srr3ModeledResult) -> usize {
+        schedule
+            .writes
+            .len()
+            .saturating_sub(result.durable_rows.len())
+    }
+
+    fn srr3_cancelled_before_commit_sequences(
+        schedule: &Srr3PropertySchedule,
+    ) -> BTreeSet<(u8, u16)> {
+        let mut producer_sequences = BTreeMap::<u8, u16>::new();
+        let mut cancelled = BTreeSet::new();
+        for write in &schedule.writes {
+            let sequence = producer_sequences.entry(write.producer_id).or_default();
+            let producer_sequence = *sequence;
+            *sequence = sequence.saturating_add(1);
+            if matches!(
+                write.cancellation_point,
+                Srr3CancellationPoint::AfterEnqueueBeforeCommit
+                    | Srr3CancellationPoint::DuringBatchAssembly
+            ) {
+                cancelled.insert((write.producer_id, producer_sequence));
+            }
+        }
+        cancelled
+    }
+
+    fn srr3_first_failure(
+        schedule: &Srr3PropertySchedule,
+        expected: &Srr3ModeledResult,
+        observed: &Srr3ModeledResult,
+    ) -> Option<&'static str> {
+        let mut durable_sequences = BTreeSet::new();
+        for row in &observed.durable_rows {
+            if !durable_sequences.insert((row.producer_id, row.producer_sequence)) {
+                return Some(SRR3_DUPLICATE_SEQUENCE_FAILURE);
+            }
+        }
+
+        let cancelled = srr3_cancelled_before_commit_sequences(schedule);
+        if observed
+            .durable_rows
+            .iter()
+            .any(|row| cancelled.contains(&(row.producer_id, row.producer_sequence)))
+        {
+            return Some(WRITE_HOT_PATH_CANCELLED_BEFORE_COMMIT_CODE);
+        }
+
+        if !schedule.fsync_failure_batches.is_empty()
+            && observed.published_snapshots != expected.published_snapshots
+        {
+            return Some(WRITE_HOT_PATH_FSYNC_FAILURE_CODE);
+        }
+
+        if observed.audit_chain_hashes != expected.audit_chain_hashes {
+            return Some(SRR3_AUDIT_CHAIN_DISCONTINUITY_FAILURE);
+        }
+
+        if observed.durable_rows != expected.durable_rows {
+            if !schedule.fsync_failure_batches.is_empty() {
+                return Some(WRITE_HOT_PATH_FSYNC_FAILURE_CODE);
+            }
+            return Some(SRR3_DURABLE_ROWS_MISMATCH_FAILURE);
+        }
+
+        None
+    }
+
+    fn srr3_fake_runner_event_line(
+        schedule: &Srr3PropertySchedule,
+        observed: &Srr3ModeledResult,
+    ) -> String {
+        let expected = interpret_srr3_reference(schedule);
+        let first_failure = srr3_first_failure(schedule, &expected, observed).unwrap_or("none");
+        let event = serde_json::json!({
+            "schema": "ee.test_event.v1",
+            "ts": "1970-01-01T00:00:00Z",
+            "test_id": format!("srr3_fake_runner:blake3:{}", srr3_schedule_hash(schedule)),
+            "kind": "note",
+            "fields": {
+                "scheduleHash": format!("blake3:{}", srr3_schedule_hash(schedule)),
+                "acceptedCount": srr3_accepted_count(schedule),
+                "rejectedCount": srr3_rejected_count(schedule, observed),
+                "batchCount": observed.audit_chain_hashes.len(),
+                "firstFailure": first_failure,
+                "auditChainDigest": format!("blake3:{}", srr3_audit_chain_digest(observed)),
+            }
+        });
+        serde_json::to_string(&event).expect("SRR3 fake-runner event should serialize")
+    }
+
+    fn srr3_fake_runner_first_failure(event_line: &str) -> Result<String, String> {
+        let value: serde_json::Value =
+            serde_json::from_str(event_line).map_err(|error| error.to_string())?;
+        value
+            .pointer("/fields/firstFailure")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| "missing firstFailure field".to_string())
+    }
+
+    fn srr3_fake_runner_cancellation_schedule() -> Srr3PropertySchedule {
+        Srr3PropertySchedule {
+            max_batch_size: 4,
+            writes: vec![
+                Srr3ScheduledWrite {
+                    producer_id: 0,
+                    kind: WriteSpoolIntentKind::Remember,
+                    payload_bytes: 64,
+                    cancellation_point: Srr3CancellationPoint::AfterEnqueueBeforeCommit,
+                },
+                Srr3ScheduledWrite {
+                    producer_id: 0,
+                    kind: WriteSpoolIntentKind::Remember,
+                    payload_bytes: 64,
+                    cancellation_point: Srr3CancellationPoint::None,
+                },
+            ],
+            fsync_failure_batches: BTreeSet::new(),
+        }
+    }
+
+    fn srr3_fake_runner_fsync_schedule() -> Srr3PropertySchedule {
+        Srr3PropertySchedule {
+            max_batch_size: 1,
+            writes: vec![
+                Srr3ScheduledWrite {
+                    producer_id: 0,
+                    kind: WriteSpoolIntentKind::Remember,
+                    payload_bytes: 64,
+                    cancellation_point: Srr3CancellationPoint::None,
+                },
+                Srr3ScheduledWrite {
+                    producer_id: 1,
+                    kind: WriteSpoolIntentKind::Remember,
+                    payload_bytes: 64,
+                    cancellation_point: Srr3CancellationPoint::None,
+                },
+            ],
+            fsync_failure_batches: BTreeSet::from([2]),
+        }
+    }
+
     fn next_snapshot_generation(current: u64, batch_committed: bool) -> u64 {
         if batch_committed {
             current.saturating_add(1)
@@ -2590,6 +2794,117 @@ mod tests {
         }
 
         assert_eq!(observed, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn srr3_fake_runner_emits_sanitized_test_event_line() -> Result<(), String> {
+        let schedule = srr3_fake_runner_fsync_schedule();
+        let observed = interpret_srr3_write_spool(&schedule);
+        let event_line = srr3_fake_runner_event_line(&schedule, &observed);
+        let event: serde_json::Value =
+            serde_json::from_str(&event_line).map_err(|error| error.to_string())?;
+
+        assert_eq!(event["schema"], "ee.test_event.v1");
+        assert_eq!(event["kind"], "note");
+        assert_eq!(event["fields"]["firstFailure"], "none");
+        assert_eq!(event["fields"]["acceptedCount"], serde_json::json!(2));
+        assert_eq!(event["fields"]["rejectedCount"], serde_json::json!(1));
+        assert_eq!(event["fields"]["batchCount"], serde_json::json!(2));
+        assert!(
+            event["fields"]["scheduleHash"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("blake3:"))
+        );
+        assert!(
+            event["fields"]["auditChainDigest"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("blake3:"))
+        );
+        assert!(
+            !event_line.contains("workspace") && !event_line.contains("p00"),
+            "fake-runner event must expose sanitized hashes/counts, not raw write subjects"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn srr3_fake_runner_rejects_duplicate_sequence_regression() -> Result<(), String> {
+        let schedule = srr3_fake_runner_fsync_schedule();
+        let mut observed = interpret_srr3_write_spool(&schedule);
+        let duplicate = observed
+            .durable_rows
+            .first()
+            .cloned()
+            .ok_or_else(|| "expected at least one durable row".to_string())?;
+        observed.durable_rows.push(duplicate);
+
+        let event_line = srr3_fake_runner_event_line(&schedule, &observed);
+        assert_eq!(
+            srr3_fake_runner_first_failure(&event_line)?,
+            SRR3_DUPLICATE_SEQUENCE_FAILURE
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn srr3_fake_runner_rejects_missing_cancellation_event() -> Result<(), String> {
+        let schedule = srr3_fake_runner_cancellation_schedule();
+        let mut observed = interpret_srr3_write_spool(&schedule);
+        observed.durable_rows.push(Srr3DurableRow {
+            request_id: 1,
+            producer_id: 0,
+            producer_sequence: 0,
+            batch_id: 1,
+            kind: WriteSpoolIntentKind::Remember,
+            payload_bytes: 64,
+        });
+
+        let event_line = srr3_fake_runner_event_line(&schedule, &observed);
+        assert_eq!(
+            srr3_fake_runner_first_failure(&event_line)?,
+            WRITE_HOT_PATH_CANCELLED_BEFORE_COMMIT_CODE
+        );
+        assert!(
+            event_line.contains("scheduleHash"),
+            "cancellation diagnostic must carry sanitized schedule evidence"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn srr3_fake_runner_rejects_partial_fsync_publication() -> Result<(), String> {
+        let schedule = srr3_fake_runner_fsync_schedule();
+        let mut observed = interpret_srr3_write_spool(&schedule);
+        observed.published_snapshots.push(2);
+
+        let event_line = srr3_fake_runner_event_line(&schedule, &observed);
+        assert_eq!(
+            srr3_fake_runner_first_failure(&event_line)?,
+            WRITE_HOT_PATH_FSYNC_FAILURE_CODE
+        );
+        assert!(
+            event_line.contains("auditChainDigest"),
+            "fsync diagnostic must carry sanitized audit-chain evidence"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn srr3_fake_runner_rejects_audit_chain_discontinuity() -> Result<(), String> {
+        let schedule = srr3_fake_runner_fsync_schedule();
+        let mut observed = interpret_srr3_write_spool(&schedule);
+        let first_hash = observed
+            .audit_chain_hashes
+            .first_mut()
+            .ok_or_else(|| "expected at least one audit hash".to_string())?;
+        *first_hash = "tampered".to_string();
+
+        let event_line = srr3_fake_runner_event_line(&schedule, &observed);
+        assert_eq!(
+            srr3_fake_runner_first_failure(&event_line)?,
+            SRR3_AUDIT_CHAIN_DISCONTINUITY_FAILURE
+        );
+        Ok(())
     }
 
     proptest! {

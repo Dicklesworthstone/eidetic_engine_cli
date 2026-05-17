@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "write_hot_path_cancelled_before_commit",
+  "introduced_by": {
+    "bead": "bd-2lsxf.2.4",
+    "epic_letter": "SRR3"
+  },
+  "surfaces": [
+    "write hot path fake runner"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The SRR3 fake runner executes a deterministic schedule where a write is accepted by the spool and cancelled before its batch commits.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "cargo test --lib srr3_fake_runner_rejects_missing_cancellation_event -- --nocapture"
+  },
+  "expected_emission": {
+    "code": "write_hot_path_cancelled_before_commit",
+    "severity": "medium",
+    "message_contains": [
+      "cancelled before commit",
+      "schedule hash"
+    ],
+    "repair_contains": "inspect the SRR3 fake-runner event log"
+  }
+}

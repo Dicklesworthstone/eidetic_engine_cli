@@ -224,6 +224,8 @@ in the same commit, keeping the catalog complete by construction.
 | `write_owner_busy` | write owner | medium | bd-17c65.10.6 (J6) |
 | `write_spool_backpressure` | write spool | medium | bd-17c65.10.6 (J6) |
 | `write_queue_full` | write spool | low | bd-17c65.12.2 (L1) |
+| `write_hot_path_cancelled_before_commit` | write hot path fake runner | medium | bd-2lsxf.2.4 (SRR3) |
+| `write_hot_path_fsync_failure` | write hot path fake runner | high | bd-2lsxf.2.4 (SRR3) |
 | `situation_decisioning_unavailable` | situation classify | warning | bd-17c65.10.6 (J6) |
 | `clustering_insufficient_data` | learn cluster, curate candidates | warning | bd-17c65.10.6 (J6) |
 | `clustering_threshold_too_strict` | learn cluster, curate candidates | warning | bd-17c65.10.6 (J6) |

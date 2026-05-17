@@ -380,7 +380,7 @@ memory bodies in `sources[]`.
 | `serialization_failed` | medium | bd-17c65.10.6 (J6) |
 | `trust_promotion_evidence_rejected` | medium | bd-17c65.7.4 (G4) |
 
-#### Concurrency + write owner (5)
+#### Concurrency + write owner (7)
 | Code | Severity | Bead |
 |------|----------|------|
 | `advisory_lock_timeout` | medium | bd-3usjw.57 |
@@ -388,6 +388,8 @@ memory bodies in `sources[]`.
 | `write_owner_busy` | warning | bd-17c65.12.2 (L1) |
 | `write_spool_backpressure` | warning | bd-17c65.12.2 (L1) |
 | `write_queue_full` | low | bd-17c65.12.2 (L1) |
+| `write_hot_path_cancelled_before_commit` | medium | bd-2lsxf.2.4 (SRR3) |
+| `write_hot_path_fsync_failure` | high | bd-2lsxf.2.4 (SRR3) |
 
 #### Other (7)
 | Code | Severity | Bead |
