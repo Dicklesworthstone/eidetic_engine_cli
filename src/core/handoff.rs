@@ -1500,6 +1500,7 @@ fn write_private_secret(path: &Path, secret: &[u8; 32]) -> Result<(), DomainErro
     use std::os::unix::fs::OpenOptionsExt;
 
     reject_existing_symlink_component(path, "handoff HMAC key")?;
+    ensure_handoff_write_path_is_regular_or_missing(path, "handoff HMAC key")?;
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
@@ -1520,17 +1521,20 @@ fn write_private_secret(path: &Path, secret: &[u8; 32]) -> Result<(), DomainErro
         repair: Some(format!("Check disk health for {}", path.display())),
     })?;
     reject_existing_symlink_component(path, "handoff HMAC key")?;
+    ensure_handoff_write_path_is_regular_file(path, "handoff HMAC key")?;
     set_private_file_mode(path)
 }
 
 #[cfg(not(unix))]
 fn write_private_secret(path: &Path, secret: &[u8; 32]) -> Result<(), DomainError> {
     reject_existing_symlink_component(path, "handoff HMAC key")?;
+    ensure_handoff_write_path_is_regular_or_missing(path, "handoff HMAC key")?;
     fs::write(path, secret).map_err(|error| DomainError::Storage {
         message: format!("Failed to write handoff HMAC key: {error}"),
         repair: Some(format!("Check permissions for {}", path.display())),
     })?;
     reject_existing_symlink_component(path, "handoff HMAC key")?;
+    ensure_handoff_write_path_is_regular_file(path, "handoff HMAC key")?;
     set_private_file_mode(path)
 }
 
@@ -2143,6 +2147,53 @@ fn handoff_read_path_is_regular_file(path: &Path, label: &str) -> Result<bool, D
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(DomainError::Storage {
             message: format!("Failed to inspect {label} path {}: {error}", path.display()),
+            repair: Some(format!("Check permissions for {}", path.display())),
+        }),
+    }
+}
+
+fn ensure_handoff_write_path_is_regular_or_missing(
+    path: &Path,
+    label: &str,
+) -> Result<(), DomainError> {
+    reject_existing_symlink_component(path, label)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write {label} to non-regular path: {}",
+                path.display()
+            ),
+            repair: Some(
+                "Use a regular file path for handoff capsules and key material.".to_owned(),
+            ),
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DomainError::Storage {
+            message: format!("Failed to inspect {label} path {}: {error}", path.display()),
+            repair: Some(format!("Check permissions for {}", path.display())),
+        }),
+    }
+}
+
+fn ensure_handoff_write_path_is_regular_file(path: &Path, label: &str) -> Result<(), DomainError> {
+    reject_existing_symlink_component(path, label)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to finish writing {label} to non-regular path: {}",
+                path.display()
+            ),
+            repair: Some(
+                "Use a regular file path for handoff capsules and key material.".to_owned(),
+            ),
+        }),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect {label} path {} after write: {error}",
+                path.display()
+            ),
             repair: Some(format!("Check permissions for {}", path.display())),
         }),
     }
@@ -4889,6 +4940,28 @@ memories_revised = 3
             & 0o777;
         ensure_equal(&workspace_mode, &0o600, "workspace hmac key mode")?;
         ensure_equal(&salt_mode, &0o600, "machine salt mode")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_hmac_key_write_rejects_non_regular_final_path_before_open() -> TestResult {
+        let dir = repo_tempdir()?;
+        let key_path = dir.path().join("handoff_hmac_key");
+        fs::create_dir(&key_path).map_err(|error| error.to_string())?;
+
+        let error = write_private_secret(&key_path, &[7_u8; 32])
+            .expect_err("non-regular key path should be rejected before write");
+        ensure(
+            error.message().contains("non-regular path"),
+            format!("unexpected error: {}", error.message()),
+        )?;
+        ensure(
+            fs::symlink_metadata(&key_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_dir(),
+            "directory key path should remain untouched",
+        )
     }
 
     #[test]
