@@ -5,8 +5,8 @@
 //! readers can make cooperative throttling decisions without raw queries,
 //! memory bodies, peer paths, or secrets.
 
-use std::fs;
-use std::io::Write;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize, Serializer};
@@ -475,7 +475,7 @@ fn read_registry_document(path: &Path) -> Result<Option<QosActiveLaneRegistry>, 
         });
     }
 
-    match fs::read_to_string(path) {
+    match read_registry_file_no_follow(path) {
         Ok(raw) => {
             let mut registry: QosActiveLaneRegistry =
                 serde_json::from_str(&raw).map_err(|error| DomainError::Storage {
@@ -507,6 +507,30 @@ fn read_registry_document(path: &Path) -> Result<Option<QosActiveLaneRegistry>, 
         }),
     }
 }
+
+fn read_registry_file_no_follow(path: &Path) -> std::io::Result<String> {
+    let mut file = open_registry_file_for_read(path)?;
+    let mut raw = String::new();
+    file.read_to_string(&mut raw)?;
+    Ok(raw)
+}
+
+fn open_registry_file_for_read(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_registry_read_options(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_registry_read_options(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_registry_read_options(_options: &mut OpenOptions) {}
 
 fn write_registry_document(
     path: &Path,
@@ -1141,6 +1165,28 @@ mod tests {
         assert_eq!(summary.degraded.len(), 1);
         assert_eq!(summary.degraded[0].code, QOS_REGISTRY_UNAVAILABLE_CODE);
         assert!(summary.degraded[0].message.contains("symlink"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_final_read_open_rejects_symlinked_registry_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir()?;
+        let outside = tempdir.path().join("outside-active-lanes.json");
+        let path = tempdir.path().join("active-lanes.json");
+        fs::write(&outside, "{\"schema\":\"outside\"}")?;
+        symlink(&outside, &path)?;
+
+        open_registry_file_for_read(&path)
+            .expect_err("registry final read should reject symlinked file");
+
+        assert!(
+            fs::symlink_metadata(&path)?.file_type().is_symlink(),
+            "rejected registry symlink should remain available for inspection"
+        );
+        assert_eq!(fs::read_to_string(&outside)?, "{\"schema\":\"outside\"}");
         Ok(())
     }
 
