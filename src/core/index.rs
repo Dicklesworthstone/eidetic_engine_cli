@@ -1502,6 +1502,8 @@ fn index_base_name(index_dir: &Path) -> Result<String, IndexRebuildError> {
 fn rename_index_dir(from: &Path, to: &Path, action: &str) -> Result<(), IndexRebuildError> {
     ensure_index_path_has_no_symlinks(from, action)?;
     ensure_index_path_has_no_symlinks(to, action)?;
+    ensure_index_publish_source_is_directory(from, action)?;
+    ensure_index_publish_target_is_directory_or_missing(to, action)?;
     std::fs::rename(from, to).map_err(|e| {
         IndexRebuildError::Index(format!(
             "Failed to {action} from {} to {}: {e}",
@@ -1509,6 +1511,41 @@ fn rename_index_dir(from: &Path, to: &Path, action: &str) -> Result<(), IndexReb
             to.display()
         ))
     })
+}
+
+fn ensure_index_publish_source_is_directory(
+    path: &Path,
+    action: &str,
+) -> Result<(), IndexRebuildError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
+        Ok(_) => Err(IndexRebuildError::Index(format!(
+            "Refusing to {action} because index generation source is not a directory: {}",
+            path.display()
+        ))),
+        Err(error) => Err(IndexRebuildError::Index(format!(
+            "Failed to inspect index generation source before {action} at {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn ensure_index_publish_target_is_directory_or_missing(
+    path: &Path,
+    action: &str,
+) -> Result<(), IndexRebuildError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
+        Ok(_) => Err(IndexRebuildError::Index(format!(
+            "Refusing to {action} because index generation target is not a directory: {}",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(IndexRebuildError::Index(format!(
+            "Failed to inspect index generation target before {action} at {}: {error}",
+            path.display()
+        ))),
+    }
 }
 
 fn ensure_index_path_has_no_symlinks(path: &Path, action: &str) -> Result<(), IndexRebuildError> {
@@ -3749,6 +3786,34 @@ mod tests {
         ensure(
             read_marker(&retained_dir, "generation.txt")? == "old",
             "retained index should contain previous generation",
+        )
+    }
+
+    #[test]
+    fn publish_staged_index_rejects_non_directory_staging_generation() -> TestResult {
+        let root = unique_test_dir("publish-file-staging");
+        let index_dir = root.join("index");
+        let staging_dir = root.join(".index.publish-test");
+        write_marker(&index_dir, "generation.txt", "old")?;
+        std::fs::write(&staging_dir, "not a directory").map_err(|error| error.to_string())?;
+
+        let error = match publish_staged_index(&index_dir, &staging_dir) {
+            Ok(()) => return Err("unexpected publish success".to_owned()),
+            Err(error) => error,
+        };
+
+        ensure(
+            error.to_string().contains("source is not a directory"),
+            format!("unexpected error: {error}"),
+        )?;
+        ensure(index_dir.is_dir(), "active index should be restored")?;
+        ensure(
+            read_marker(&index_dir, "generation.txt")? == "old",
+            "failed publish should restore previous generation",
+        )?;
+        ensure(
+            staging_dir.is_file(),
+            "rejected non-directory staging path should remain for inspection",
         )
     }
 
