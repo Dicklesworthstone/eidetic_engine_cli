@@ -141,6 +141,19 @@ jobs:
         report = json.loads(output)
         golden = json.loads((FIXTURES / "fnx_all_missing_golden.json").read_text(encoding="utf-8"))
         self.assertEqual(report, golden)
+        self.assertEqual(
+            report["aggregate"],
+            {
+                "all_required_crates_ready": False,
+                "blocked_count": 7,
+                "crate_count": 7,
+                "group_count": 1,
+                "missing_count": 7,
+                "network_unavailable_count": 0,
+                "ready_count": 0,
+                "wrong_version_count": 0,
+            },
+        )
         group = report["groups"][0]
         self.assertIn("fnx-generators", group["workflow"]["missing_from_publish_order"])
         generator = next(crate for crate in group["crates"] if crate["crate_name"] == "fnx-generators")
@@ -229,6 +242,44 @@ jobs:
 
         self.assertIn("Aggregate: `2/5` crates ready; `3` blocked", output)
         self.assertIn("`1` missing, `1` wrong-version, `1` network-unavailable", output)
+
+    def test_json_aggregate_counts_multiple_groups(self) -> None:
+        groups = [
+            {
+                "summary": {
+                    "crate_count": 3,
+                    "ready_count": 1,
+                    "blocked_count": 2,
+                    "missing_count": 1,
+                    "wrong_version_count": 1,
+                    "network_unavailable_count": 0,
+                }
+            },
+            {
+                "summary": {
+                    "crate_count": 2,
+                    "ready_count": 1,
+                    "blocked_count": 1,
+                    "missing_count": 0,
+                    "wrong_version_count": 0,
+                    "network_unavailable_count": 1,
+                }
+            },
+        ]
+
+        self.assertEqual(
+            self.mod.aggregate_summary(groups),
+            {
+                "all_required_crates_ready": False,
+                "blocked_count": 3,
+                "crate_count": 5,
+                "group_count": 2,
+                "missing_count": 1,
+                "network_unavailable_count": 1,
+                "ready_count": 2,
+                "wrong_version_count": 1,
+            },
+        )
 
 
 if __name__ == "__main__":

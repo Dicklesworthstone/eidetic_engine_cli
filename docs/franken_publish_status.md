@@ -24,6 +24,24 @@ aggregate line, for example:
 Aggregate: `1/9` crates ready; `8` blocked (`7` missing, `1` wrong-version, `0` network-unavailable).
 ```
 
+The JSON output carries the same counts in a top-level `aggregate` object so
+agents and audit scripts do not need to parse Markdown:
+
+```json
+{
+  "aggregate": {
+    "all_required_crates_ready": false,
+    "blocked_count": 8,
+    "crate_count": 9,
+    "group_count": 2,
+    "missing_count": 7,
+    "network_unavailable_count": 0,
+    "ready_count": 1,
+    "wrong_version_count": 1
+  }
+}
+```
+
 Fixture mode for CI-safe parser checks:
 
 ```bash

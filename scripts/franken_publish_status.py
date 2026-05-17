@@ -407,8 +407,7 @@ def evaluate_group(
     }
 
 
-def render_markdown(report: dict[str, Any]) -> str:
-    groups = report["groups"]
+def aggregate_summary(groups: list[dict[str, Any]]) -> dict[str, Any]:
     total_crates = sum(group["summary"]["crate_count"] for group in groups)
     ready_crates = sum(group["summary"]["ready_count"] for group in groups)
     blocked_crates = sum(group["summary"]["blocked_count"] for group in groups)
@@ -417,13 +416,29 @@ def render_markdown(report: dict[str, Any]) -> str:
     network_unavailable_crates = sum(
         group["summary"]["network_unavailable_count"] for group in groups
     )
+    return {
+        "group_count": len(groups),
+        "crate_count": total_crates,
+        "ready_count": ready_crates,
+        "blocked_count": blocked_crates,
+        "missing_count": missing_crates,
+        "wrong_version_count": wrong_version_crates,
+        "network_unavailable_count": network_unavailable_crates,
+        "all_required_crates_ready": blocked_crates == 0,
+    }
+
+
+def render_markdown(report: dict[str, Any]) -> str:
+    groups = report["groups"]
+    aggregate = report.get("aggregate") or aggregate_summary(groups)
     lines = [
         f"Franken publish status `{report['schema']}` generated `{report['generated_at']}`.",
         (
-            f"Aggregate: `{ready_crates}/{total_crates}` crates ready; "
-            f"`{blocked_crates}` blocked "
-            f"(`{missing_crates}` missing, `{wrong_version_crates}` wrong-version, "
-            f"`{network_unavailable_crates}` network-unavailable)."
+            f"Aggregate: `{aggregate['ready_count']}/{aggregate['crate_count']}` crates ready; "
+            f"`{aggregate['blocked_count']}` blocked "
+            f"(`{aggregate['missing_count']}` missing, "
+            f"`{aggregate['wrong_version_count']}` wrong-version, "
+            f"`{aggregate['network_unavailable_count']}` network-unavailable)."
         ),
         "",
     ]
@@ -474,6 +489,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "schema": SCHEMA,
         "generated_at": args.generated_at or utc_now(),
         "mode": "fixture" if args.fixtures_dir else "live",
+        "aggregate": aggregate_summary(groups),
         "groups": groups,
     }
 
