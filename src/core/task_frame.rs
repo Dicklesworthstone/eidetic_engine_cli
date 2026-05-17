@@ -594,6 +594,8 @@ fn write_store(store_path: &Path, store: &TaskFrameStoreDocument) -> Result<(), 
 fn publish_store_temp_file(store_path: &Path, temp_path: &Path) -> Result<(), DomainError> {
     ensure_no_symlink_components(store_path, "write")?;
     ensure_write_store_final_path(store_path)?;
+    ensure_no_symlink_components(temp_path, "write")?;
+    ensure_created_write_store_temp_path(temp_path)?;
     fs::rename(temp_path, store_path).map_err(|error| DomainError::Storage {
         message: format!(
             "Failed to publish task-frame store `{}`: {error}",
@@ -644,6 +646,26 @@ fn ensure_write_store_temp_path(temp_path: &Path) -> Result<(), DomainError> {
         Err(error) => Err(DomainError::Storage {
             message: format!(
                 "Failed to inspect task-frame temp store `{}` before write: {error}",
+                temp_path.display()
+            ),
+            repair: Some("Check workspace .ee permissions.".to_owned()),
+        }),
+    }
+}
+
+fn ensure_created_write_store_temp_path(temp_path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(temp_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to publish task-frame temp store `{}` because it is not a regular file.",
+                temp_path.display()
+            ),
+            repair: Some("Replace .ee/task_frames.json.tmp with a regular file.".to_owned()),
+        }),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect task-frame temp store `{}` before publish: {error}",
                 temp_path.display()
             ),
             repair: Some("Check workspace .ee permissions.".to_owned()),
@@ -1165,6 +1187,61 @@ mod tests {
                 .file_type()
                 .is_file(),
             "temp task-frame store should remain after publish rejection"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_frame_store_rechecks_temp_symlink_before_rename() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = temp_workspace("publish-temp-symlink")?;
+        let store_path = task_frame_store_path(&workspace);
+        let temp_path = store_path.with_extension("json.tmp");
+        let temp_backup = store_path.with_extension("json.tmp.backup");
+        let outside_store = workspace.join("outside-temp-task-frames.json");
+        let parent = temp_path
+            .parent()
+            .ok_or_else(|| "missing temp parent".to_owned())?;
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        write_store_temp_file(
+            &temp_path,
+            &format!(
+                "{{\"schema\":\"{}\",\"frames\":[]}}\n",
+                TASK_FRAME_STORE_SCHEMA_V1
+            ),
+        )
+        .map_err(|error| error.message())?;
+        fs::rename(&temp_path, &temp_backup).map_err(|error| error.to_string())?;
+        fs::write(&outside_store, b"outside sentinel").map_err(|error| error.to_string())?;
+        symlink(&outside_store, &temp_path).map_err(|error| error.to_string())?;
+
+        let error = publish_store_temp_file(&store_path, &temp_path)
+            .expect_err("temp symlink should reject task-frame store publish");
+
+        assert_eq!(error.code(), "storage");
+        assert!(
+            error.message().contains("symlinked path component")
+                || error.message().contains("not a regular file"),
+            "unexpected temp symlink error: {}",
+            error.message()
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_store).map_err(|error| error.to_string())?,
+            "outside sentinel",
+            "outside task-frame temp target must remain unchanged"
+        );
+        assert!(
+            fs::symlink_metadata(&temp_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "swapped temp symlink should remain after publish rejection"
+        );
+        assert!(
+            !store_path.exists(),
+            "final task-frame store must not publish from symlinked temp path"
         );
         Ok(())
     }
