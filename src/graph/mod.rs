@@ -6,7 +6,10 @@ use std::time::Duration;
 use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
 };
-use crate::core::graph_telemetry::{SnapshotRefreshEvent, emit_snapshot_refresh};
+use crate::core::graph_telemetry::{
+    CacheEvictEvent, CacheEvictReason, SnapshotRefreshEvent, emit_cache_evict,
+    emit_snapshot_refresh,
+};
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
     DbOperation,
@@ -2919,6 +2922,16 @@ fn persist_graph_snapshot_in_transaction(
     )
     .map_err(|error| GraphError::storage("persist graph snapshot", error))?;
 
+    let evicted_algorithm_results = conn
+        .evict_stale_graph_algorithm_results(workspace_id, input.graph_type)
+        .map_err(|error| GraphError::storage("evict stale graph algorithm results", error))?;
+    if evicted_algorithm_results > 0 {
+        emit_cache_evict(CacheEvictEvent {
+            reason: CacheEvictReason::SnapshotArchived,
+            count: u32::try_from(evicted_algorithm_results).unwrap_or(u32::MAX),
+        });
+    }
+
     Ok(GraphRefreshSnapshot {
         id: snapshot_id,
         graph_type: input.graph_type,
@@ -5147,10 +5160,10 @@ fn compare_neighborhood_edges(
 #[cfg(test)]
 mod tests {
     use crate::db::{
-        CreateCausalEvidenceInput, CreateGraphSnapshotInput, CreateMemoryInput,
-        CreateMemoryLinkInput, CreateProceduralRuleInput, CreateWorkspaceInput, DbConnection,
-        DbError, DbOperation, GraphSnapshotStatus, GraphSnapshotType, MemoryLinkRelation,
-        MemoryLinkSource, StoredGraphSnapshot,
+        CreateCausalEvidenceInput, CreateGraphAlgorithmResultInput, CreateGraphSnapshotInput,
+        CreateMemoryInput, CreateMemoryLinkInput, CreateProceduralRuleInput, CreateWorkspaceInput,
+        DbConnection, DbError, DbOperation, GraphSnapshotStatus, GraphSnapshotType,
+        MemoryLinkRelation, MemoryLinkSource, StoredGraphSnapshot,
     };
     use proptest::prelude::*;
     use proptest::test_runner::Config as ProptestConfig;
@@ -9286,6 +9299,65 @@ mod tests {
         );
         assert_eq!(snapshots[0].status, GraphSnapshotStatus::Valid);
         assert_eq!(snapshots[1].status, GraphSnapshotStatus::Archived);
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn persist_graph_snapshot_evicts_archived_algorithm_results_and_emits_telemetry() -> TestResult
+    {
+        let connection = open_snapshot_db()?;
+        let old_snapshot_id = "gsnap_0000000000000000000000131";
+        insert_graph_snapshot(&connection, old_snapshot_id, r#"{"nodes":[],"edges":[]}"#)?;
+        connection
+            .upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                snapshot_id: old_snapshot_id.to_owned(),
+                algorithm: "pagerank".to_owned(),
+                params_hash: "blake3:snapshot-archived-cache-result".to_owned(),
+                result_json: r#"{"scores":[["mem_a",0.42]]}"#.to_owned(),
+                ttl_seconds: 300,
+            })
+            .map_err(|error| error.to_string())?;
+
+        let (snapshot, events) = capture_graph_events(|| {
+            graph_result(super::persist_graph_snapshot(
+                &connection,
+                WORKSPACE_ID,
+                super::GraphSnapshotPersistenceInput {
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 2,
+                    edge_count: 1,
+                    metrics_json: serde_json::json!({
+                        "nodes": [{"id": "mem_a"}, {"id": "mem_b"}],
+                        "edges": [{"source": "mem_a", "target": "mem_b"}],
+                    })
+                    .to_string(),
+                    content_hash: "blake3:snapshot-archived-cache-evict".to_owned(),
+                    source_generation: 1,
+                },
+            ))
+        });
+        let snapshot = snapshot?;
+        assert_eq!(snapshot.snapshot_version, 2);
+        assert!(
+            connection
+                .list_graph_algorithm_results(WORKSPACE_ID, old_snapshot_id, None)
+                .map_err(|error| error.to_string())?
+                .is_empty(),
+            "archived snapshot cache rows should be evicted"
+        );
+
+        let event = events
+            .iter()
+            .find(|event| event.target == crate::core::graph_telemetry::CACHE_EVICT_EVENT)
+            .ok_or_else(|| "cache eviction telemetry should be emitted".to_owned())?;
+        assert_eq!(
+            event.fields.get("reason").map(String::as_str),
+            Some("snapshot_archived")
+        );
+        assert_eq!(event.fields.get("count").map(String::as_str), Some("1"));
 
         connection.close().map_err(|error| error.to_string())
     }
