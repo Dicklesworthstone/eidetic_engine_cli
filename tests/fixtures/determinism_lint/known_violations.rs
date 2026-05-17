@@ -25,6 +25,12 @@ fn ambient_uuid_v4(_: &ee::runtime::determinism::Deterministic<Seed>) {
 }
 
 #[determinism::required]
+fn ambient_uuid_v7_now(_: &ee::runtime::determinism::Deterministic<Seed>) {
+    let _ = Uuid::now_v7();
+    let _ = uuid::Uuid::now_v7();
+}
+
+#[determinism::required]
 fn ambient_time(_: &ee::runtime::determinism::Deterministic<Seed>) {
     let _ = Instant::now();
 }
@@ -69,6 +75,7 @@ fn benign_block_comment_and_raw_string_mentions() {
     /*
      * rand::thread_rng();
      * Uuid::new_v4();
+     * Uuid::now_v7();
      * std::fs::read_dir(".");
      */
     let _ = r#"std::env::var("EE_SEED") Instant::now() SystemTime::now()"#;
