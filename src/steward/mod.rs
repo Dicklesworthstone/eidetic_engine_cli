@@ -297,19 +297,13 @@ pub fn try_acquire_maintenance_job_lock(
         release_maintenance_job_process_gate(&process_gate_path);
         return Err(error);
     }
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|error| {
-            release_maintenance_job_process_gate(&process_gate_path);
-            MaintenanceJobLockError::OpenFailed {
-                path: lock_path.clone(),
-                message: format!("Failed to open maintenance job lock: {error}"),
-            }
-        })?;
+    let file = open_maintenance_job_lock_file(&lock_path).map_err(|error| {
+        release_maintenance_job_process_gate(&process_gate_path);
+        MaintenanceJobLockError::OpenFailed {
+            path: lock_path.clone(),
+            message: format!("Failed to open maintenance job lock: {error}"),
+        }
+    })?;
 
     #[cfg(unix)]
     if let Err(error) = flock(&file, FlockOperation::NonBlockingLockExclusive) {
@@ -334,6 +328,23 @@ pub fn try_acquire_maintenance_job_lock(
         process_gate_path,
     })
 }
+
+fn open_maintenance_job_lock_file(lock_path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    configure_maintenance_job_lock_options(&mut options);
+    options.open(lock_path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_maintenance_job_lock_options(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_maintenance_job_lock_options(_options: &mut OpenOptions) {}
 
 fn ensure_maintenance_job_lock_path_is_not_symlink(
     lock_path: &Path,
@@ -5768,6 +5779,40 @@ mod tests {
             fs::read_to_string(&outside_lock).map_err(|error| error.to_string())?,
             String::new(),
             "lock must not write through symlinked target",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maintenance_job_lock_final_open_rejects_symlinked_lock_path() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let lock_path = tempdir.path().join("maintenance-job.lock");
+        let outside_lock = tempdir.path().join("outside-maintenance-job.lock");
+        fs::write(&outside_lock, "outside sentinel").map_err(|error| error.to_string())?;
+        symlink(&outside_lock, &lock_path).map_err(|error| error.to_string())?;
+
+        let error = open_maintenance_job_lock_file(&lock_path)
+            .expect_err("final lock open must reject symlinked path");
+
+        ensure(
+            error.kind() != std::io::ErrorKind::NotFound,
+            true,
+            "final symlink open should fail because the path is a symlink",
+        )?;
+        ensure(
+            fs::read_to_string(&outside_lock).map_err(|error| error.to_string())?,
+            "outside sentinel".to_owned(),
+            "outside lock target remains unchanged",
+        )?;
+        ensure(
+            fs::symlink_metadata(&lock_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            true,
+            "rejected maintenance lock symlink remains for inspection",
         )
     }
 
