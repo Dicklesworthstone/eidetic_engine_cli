@@ -431,7 +431,20 @@ fn workspace_git_snapshot_provider_uses_repo_root_from_nested_workspace() -> Tes
         "provider must not change files when invoked from a subdirectory"
     );
 
-    assert_eq!(snapshot.repository_root, workspace.display().to_string());
+    let raw_repository_root = workspace.display().to_string();
+    assert_ne!(
+        snapshot.repository_root, raw_repository_root,
+        "public workspace snapshot output must not expose raw absolute repository roots"
+    );
+    assert!(
+        snapshot.repository_root.starts_with("[REDACTED_PATH:"),
+        "repository root should use the redacted path marker, got {}",
+        snapshot.repository_root
+    );
+    assert!(
+        !snapshot.repository_root.contains(&raw_repository_root),
+        "redacted repository root must not contain the raw temp path"
+    );
     let entry_paths = snapshot
         .entries
         .iter()
