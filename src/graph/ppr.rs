@@ -202,13 +202,6 @@ where
     let params_hash =
         graph_algorithm_params_hash(spec.algorithm, spec.snapshot_content_hash, spec.params)?;
     let prefetch_key = ppr_prefetch_cache_key(spec, &params_hash);
-    if let Some(hit) = load_ppr_prefetch_result(&prefetch_key) {
-        return Ok(AlgorithmResultCacheRun {
-            result: hit.result,
-            params_hash,
-            cache_hit: true,
-        });
-    }
     run_with_result_cache_with_params_hash(spec, &params_hash, || {
         if let Some(hit) = load_ppr_prefetch_result(&prefetch_key) {
             return Ok(hit.result);
@@ -1692,6 +1685,12 @@ mod tests {
         assert!(!second.cache_hit);
         assert_eq!(build_count.get(), 1);
         assert_pagerank_results_equivalent(&first.result, &second.result);
+
+        let rows = connection
+            .list_graph_algorithm_results(WORKSPACE_ID, snapshot_b, Some("personalized_pagerank"))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].params_hash, second.params_hash);
 
         connection.close().map_err(|error| error.to_string())
     }
