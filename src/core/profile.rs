@@ -1568,9 +1568,11 @@ pub fn apply_profile_config(
             source,
         },
     )?;
-    fs::rename(&temp_path, &path).map_err(|source| ProfileConfigError::Write {
-        path: path.clone(),
-        source,
+    publish_profile_config_temp_file(&temp_path, &path).map_err(|source| {
+        ProfileConfigError::Write {
+            path: path.clone(),
+            source,
+        }
     })?;
 
     report.applied = true;
@@ -1581,6 +1583,28 @@ pub fn apply_profile_config(
         }
     }
     Ok(report)
+}
+
+fn publish_profile_config_temp_file(temp_path: &Path, path: &Path) -> Result<(), io::Error> {
+    ensure_no_profile_config_symlink_components(temp_path, "publish temp")?;
+    ensure_profile_config_temp_path_is_regular(temp_path)?;
+    ensure_no_profile_config_symlink_components(path, "publish")?;
+    ensure_profile_config_write_path_is_regular_or_missing(path)?;
+    fs::rename(temp_path, path)
+}
+
+fn ensure_profile_config_temp_path_is_regular(path: &Path) -> Result<(), io::Error> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to publish profile config temp file `{}` because it is not a regular file",
+                path.display()
+            ),
+        )),
+        Err(error) => Err(error),
+    }
 }
 
 fn build_profile_config_report(
@@ -2892,6 +2916,41 @@ mod tests {
         ensure_true(
             !config_path.exists(),
             "profile config apply must not publish final config when temp exists",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_config_publish_rechecks_final_symlink_before_rename() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_path = temp.path().join(".ee").join("config.toml");
+        let temp_path = config_path.with_extension("toml.tmp");
+        fs::create_dir_all(temp_path.parent().expect("profile config temp parent"))
+            .map_err(|error| error.to_string())?;
+        write_profile_config_temp_file(&temp_path, b"[profile]\nselected = \"swarm\"\n")
+            .map_err(|error| error.to_string())?;
+
+        let outside_config = temp.path().join("outside-config.toml");
+        fs::write(&outside_config, "outside sentinel").map_err(|error| error.to_string())?;
+        symlink(&outside_config, &config_path).map_err(|error| error.to_string())?;
+
+        let error = publish_profile_config_temp_file(&temp_path, &config_path)
+            .expect_err("final symlink must be rejected before profile config publish");
+        ensure_true(
+            error.to_string().contains("symlinked path component"),
+            "final symlink publish error message",
+        )?;
+        ensure(
+            fs::read_to_string(&outside_config).map_err(|error| error.to_string())?,
+            "outside sentinel".to_owned(),
+            "outside symlink target remains unchanged",
+        )?;
+        ensure(
+            fs::read_to_string(&temp_path).map_err(|error| error.to_string())?,
+            "[profile]\nselected = \"swarm\"\n".to_owned(),
+            "temp config remains available after rejected publish",
         )
     }
 
