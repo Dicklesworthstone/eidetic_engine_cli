@@ -307,21 +307,12 @@ pub fn decide_respond(input: &RespondDecisionInput<'_>) -> (DiscoveryConsent, Di
     }
 }
 
-/// On-disk TOML shape for the workspace allowlist / denylist files.
-///
-/// Tolerates absent files (empty set) and tolerates unknown fields
-/// (forward-compat) — only the `node_keys` array is required.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct NodeKeyListFile {
-    #[serde(default)]
-    pub node_keys: Vec<String>,
-}
-
 /// Error variants for [`load_node_key_list`].
 #[derive(Debug)]
 pub enum LoadListError {
     Read(std::io::Error),
-    Parse(toml::de::Error),
+    Parse(toml_edit::TomlError),
+    InvalidShape(String),
 }
 
 impl std::fmt::Display for LoadListError {
@@ -329,6 +320,9 @@ impl std::fmt::Display for LoadListError {
         match self {
             Self::Read(error) => write!(f, "failed to read discovery list file: {error}"),
             Self::Parse(error) => write!(f, "failed to parse discovery list TOML: {error}"),
+            Self::InvalidShape(detail) => {
+                write!(f, "invalid discovery list shape: {detail}")
+            }
         }
     }
 }
@@ -339,22 +333,49 @@ impl std::error::Error for LoadListError {}
 /// expected state for fresh workspaces; `service_tag` and `auto_admit`
 /// modes work without any list file present).
 ///
-/// Trims whitespace from each entry and skips empty lines; lowercases
-/// nothing (node-keys are case-sensitive). Duplicates are deduplicated
-/// via the `BTreeSet` contract.
+/// Expected file shape:
+///
+/// ```toml
+/// node_keys = ["nodekey:alpha", "nodekey:bravo"]
+/// ```
+///
+/// Trims whitespace from each entry and skips empty entries; preserves
+/// case (node-keys are case-sensitive). Duplicates are deduplicated via
+/// the `BTreeSet` contract. Unknown top-level keys are silently ignored
+/// for forward-compat; only `node_keys = [...]` is required.
 pub fn load_node_key_list(path: &Path) -> Result<BTreeSet<String>, LoadListError> {
     let body = match std::fs::read_to_string(path) {
         Ok(body) => body,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
         Err(error) => return Err(LoadListError::Read(error)),
     };
-    let parsed: NodeKeyListFile = toml::from_str(&body).map_err(LoadListError::Parse)?;
-    Ok(parsed
-        .node_keys
-        .into_iter()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .collect())
+    let document = body
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(LoadListError::Parse)?;
+    let Some(node_keys_item) = document.get("node_keys") else {
+        // Missing field treated as empty list — symmetric with the
+        // absent-file case. Lets a fresh workspace ship a file with
+        // only a header comment and no entries yet.
+        return Ok(BTreeSet::new());
+    };
+    let Some(array) = node_keys_item.as_array() else {
+        return Err(LoadListError::InvalidShape(
+            "expected `node_keys` to be a TOML array of strings".to_owned(),
+        ));
+    };
+    let mut out = BTreeSet::new();
+    for (index, value) in array.iter().enumerate() {
+        let Some(s) = value.as_str() else {
+            return Err(LoadListError::InvalidShape(format!(
+                "expected `node_keys[{index}]` to be a string, got `{value:?}`",
+            )));
+        };
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            out.insert(trimmed.to_owned());
+        }
+    }
+    Ok(out)
 }
 
 /// Convenience: load all three workspace list files (`.ee/discovery_allowlist.toml`,
