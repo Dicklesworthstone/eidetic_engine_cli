@@ -266,12 +266,14 @@ impl MemoryDocumentBuilder {
     /// document metadata for filtering and scoring.
     #[must_use]
     pub fn build(self, memory: &crate::db::StoredMemory) -> CanonicalSearchDocument {
+        let (content, content_truncated) = content_preview_with_flag(&memory.content);
         let mut doc =
             CanonicalSearchDocument::new(&memory.id, &memory.content, DocumentSource::Memory)
                 .with_level(&memory.level)
                 .with_kind(&memory.kind)
                 .with_created_at(&memory.created_at)
-                .with_metadata_entry("contentPreview", content_preview(&memory.content))
+                .with_metadata_entry("content", content)
+                .with_metadata_entry("content_truncated", content_truncated.to_string())
                 .with_metadata_entry(
                     "validity_window_kind",
                     memory_validity_window_kind(
@@ -315,17 +317,17 @@ fn memory_validity_window_kind(valid_from: Option<&str>, valid_to: Option<&str>)
     }
 }
 
-fn content_preview(content: &str) -> String {
+fn content_preview_with_flag(content: &str) -> (String, bool) {
     const MAX_CHARS: usize = 240;
     let mut preview = String::new();
     for (index, ch) in content.chars().enumerate() {
         if index == MAX_CHARS {
             preview.push_str("...");
-            break;
+            return (preview, true);
         }
         preview.push(ch);
     }
-    preview
+    (preview, false)
 }
 
 /// Convert a stored memory directly to a canonical search document.
@@ -2550,14 +2552,19 @@ mod tests {
             Some(&"2026-04-29T12:00:00Z".to_owned())
         );
         assert_eq!(
-            indexable.metadata.get("contentPreview"),
+            indexable.metadata.get("content"),
             Some(&"Always run cargo fmt before commit.".to_owned())
         );
+        assert_eq!(
+            indexable.metadata.get("content_truncated"),
+            Some(&"false".to_owned())
+        );
+        assert!(!indexable.metadata.contains_key("contentPreview"));
         assert!(!indexable.metadata.contains_key("workspace"));
     }
 
     #[test]
-    fn memory_document_builder_bounds_content_preview() {
+    fn memory_document_builder_bounds_content_and_marks_truncation() {
         let mut memory = make_test_memory();
         memory.content = "a".repeat(300);
 
@@ -2566,15 +2573,19 @@ mod tests {
         assert_eq!(
             indexable
                 .metadata
-                .get("contentPreview")
+                .get("content")
                 .map(std::string::String::len),
             Some(243)
         );
         assert!(
             indexable
                 .metadata
-                .get("contentPreview")
-                .is_some_and(|preview| preview.ends_with("..."))
+                .get("content")
+                .is_some_and(|content| content.ends_with("..."))
+        );
+        assert_eq!(
+            indexable.metadata.get("content_truncated"),
+            Some(&"true".to_owned())
         );
     }
 

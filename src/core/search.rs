@@ -1439,46 +1439,93 @@ fn public_search_metadata(
         return (metadata.clone(), Vec::new());
     };
     let mut redacted_patterns = BTreeSet::new();
-    let mut public_fields: serde_json::Map<String, serde_json::Value> = object
-        .iter()
-        .filter(|(key, _)| !search_metadata_key_is_internal(key))
-        .map(|(key, value)| {
-            let value = if search_metadata_content_key_needs_redaction(key) {
-                redact_search_metadata_content_value(
-                    value,
-                    &mut redacted_patterns,
-                    output_redaction_enabled,
-                )
-            } else if search_metadata_provenance_key_needs_redaction(key) {
-                redact_search_metadata_provenance_value(
-                    value,
-                    &mut redacted_patterns,
-                    output_redaction_enabled,
-                )
-            } else {
-                value.clone()
-            };
-            (key.clone(), value)
-        })
-        .collect();
+    let mut public_fields: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
 
-    if !public_fields.contains_key("content")
-        && let Some(value) = object.get(SEARCH_ANALYSIS_CONTENT_KEY)
-    {
-        public_fields.insert(
-            "content".to_string(),
+    for (key, value) in object {
+        if search_metadata_key_is_internal(key) {
+            continue;
+        }
+        if matches!(key.as_str(), "contentPreview" | "content_preview") {
+            continue;
+        }
+        if matches!(key.as_str(), "contentTruncated") {
+            public_fields.insert(
+                "content_truncated".to_string(),
+                search_metadata_truncated_value(value),
+            );
+            continue;
+        }
+
+        let value = if search_metadata_content_key_needs_redaction(key) {
             redact_search_metadata_content_value(
                 value,
                 &mut redacted_patterns,
                 output_redaction_enabled,
-            ),
-        );
+            )
+        } else if search_metadata_provenance_key_needs_redaction(key) {
+            redact_search_metadata_provenance_value(
+                value,
+                &mut redacted_patterns,
+                output_redaction_enabled,
+            )
+        } else if key == "content_truncated" {
+            search_metadata_truncated_value(value)
+        } else {
+            value.clone()
+        };
+        public_fields.insert(key.clone(), value);
+    }
+
+    if !public_fields.contains_key("content") {
+        let content_value = object
+            .get(SEARCH_ANALYSIS_CONTENT_KEY)
+            .or_else(|| object.get("contentPreview"))
+            .or_else(|| object.get("content_preview"));
+        if let Some(value) = content_value {
+            public_fields.insert(
+                "content".to_string(),
+                redact_search_metadata_content_value(
+                    value,
+                    &mut redacted_patterns,
+                    output_redaction_enabled,
+                ),
+            );
+        }
+    }
+
+    if !public_fields.contains_key("content_truncated") {
+        if let Some(value) = object
+            .get("content_truncated")
+            .or_else(|| object.get("contentTruncated"))
+        {
+            public_fields.insert(
+                "content_truncated".to_string(),
+                search_metadata_truncated_value(value),
+            );
+        } else if let Some(content) = public_fields
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+        {
+            public_fields.insert(
+                "content_truncated".to_string(),
+                serde_json::json!(content.ends_with("...")),
+            );
+        }
     }
 
     (
         serde_json::Value::Object(public_fields),
         redacted_patterns.into_iter().collect(),
     )
+}
+
+fn search_metadata_truncated_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Bool(_) => value.clone(),
+        serde_json::Value::String(s) => serde_json::json!(matches!(s.as_str(), "true" | "1")),
+        serde_json::Value::Number(n) => serde_json::json!(n.as_u64().is_some_and(|v| v != 0)),
+        _ => serde_json::Value::Bool(false),
+    }
 }
 
 fn search_metadata_key_is_internal(key: &str) -> bool {
@@ -5118,9 +5165,10 @@ mod tests {
             json["results"][0]["metadata"]["content"].as_str(),
             Some("Rotate api_key=[REDACTED:api_key] before release.")
         );
+        assert_eq!(json["results"][0]["metadata"].get("contentPreview"), None);
         assert_eq!(
-            json["results"][0]["metadata"]["contentPreview"].as_str(),
-            Some("Preview api_key=[REDACTED:api_key]")
+            json["results"][0]["metadata"]["content_truncated"].as_bool(),
+            Some(false)
         );
         assert_eq!(
             json["results"][0]["redactions"][0]["reason"].as_str(),
@@ -5170,8 +5218,13 @@ mod tests {
         assert!(rendered.contains(raw_value));
         assert_eq!(json["results"][0].get("contentRedacted"), None);
         assert_eq!(
-            json["results"][0]["metadata"]["contentPreview"].as_str(),
+            json["results"][0]["metadata"]["content"].as_str(),
             Some(expected_preview.as_str())
+        );
+        assert_eq!(json["results"][0]["metadata"].get("contentPreview"), None);
+        assert_eq!(
+            json["results"][0]["metadata"]["content_truncated"].as_bool(),
+            Some(false)
         );
         assert_eq!(
             json["degraded"][0]["code"].as_str(),

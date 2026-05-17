@@ -43,7 +43,10 @@
 
 use ee::core::learn::{LEARN_UNCERTAINTY_SCHEMA_V1, LearnUncertaintyReport, UncertaintyItem};
 use ee::core::memory::{MemoryListFilter, MemoryListReport, MemorySummary};
+use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
 use ee::core::rule::{RuleEvidence, RuleLifecycle, RuleListFilter, RuleListReport, RuleSummary};
+use ee::core::search::{ScoreSource, SearchHit, SearchReport, SearchSourceMode, SearchStatus};
+use ee::models::{MemoryScope, MemoryScopeStats};
 use ee::output::{
     render_introspect_json, render_learn_uncertainty_json, render_memory_list_json,
     render_rule_list_json,
@@ -484,6 +487,46 @@ fn learn_uncertainty_surface_has_no_field_name_drift() -> TestResult {
         generated_at: "2026-05-10T00:00:00Z".to_owned(),
     };
     assert_no_drift("learn uncertainty", &render_learn_uncertainty_json(&report))
+}
+
+#[test]
+fn search_surface_normalizes_legacy_content_preview_metadata() -> TestResult {
+    let report = SearchReport {
+        status: SearchStatus::Success,
+        query: "format before release".to_owned(),
+        requested_limit: 1,
+        results: vec![SearchHit {
+            doc_id: "mem_01search".to_owned(),
+            score: 0.91,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(0.91),
+            rerank_score: None,
+            metadata: Some(serde_json::json!({
+                "contentPreview": "Run cargo fmt --check before release.",
+                "created_at": "2026-05-10T00:00:00Z",
+            })),
+            explanation: None,
+        }],
+        elapsed_ms: 1.0,
+        errors: Vec::new(),
+        degraded: Vec::new(),
+        runtime_profile: RuntimeProfileReport::for_profile(
+            OperatingProfile::Workstation,
+            "test_fixture",
+        ),
+        relevance_floor_applied: None,
+        candidates_below_floor: 0,
+        source_mode_requested: SearchSourceMode::Hybrid,
+        source_mode_applied: SearchSourceMode::Hybrid,
+        source_mode_fallback: false,
+        strict_source_mode: false,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+        scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+    };
+    assert_no_drift("search", &report.data_json().to_string())
 }
 
 #[test]
