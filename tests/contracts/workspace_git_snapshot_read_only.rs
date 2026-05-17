@@ -404,6 +404,7 @@ fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
     write_file(&workspace.join("both.txt"), "base\n")?;
     write_file(&workspace.join("rename_old.txt"), "rename me\n")?;
     write_file(&workspace.join("delete_me.txt"), "delete me\n")?;
+    write_file(&workspace.join("staged_delete.txt"), "stage delete me\n")?;
     write_file(
         &workspace.join("binary.bin"),
         [0_u8, 159, 146, 150, 0, 1, 2],
@@ -417,6 +418,7 @@ fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
             "both.txt",
             "rename_old.txt",
             "delete_me.txt",
+            "staged_delete.txt",
             "binary.bin",
         ],
     )?;
@@ -435,6 +437,7 @@ fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
     run_git(workspace, &["mv", "rename_old.txt", "rename_new.txt"])?;
     fs::remove_file(workspace.join("delete_me.txt"))
         .map_err(|error| format!("remove delete_me.txt in temp repo: {error}"))?;
+    run_git(workspace, &["rm", "-q", "staged_delete.txt"])?;
     write_file(&workspace.join("untracked.txt"), "untracked\n")?;
     write_file(&workspace.join("ignored.tmp"), "ignored\n")?;
     write_file(&workspace.join("large.dat"), vec![b'x'; 128])?;
@@ -492,6 +495,7 @@ fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
     assert!(entries_by_path.contains_key("staged.txt"));
     assert!(entries_by_path.contains_key("rename_new.txt"));
     assert!(entries_by_path.contains_key("delete_me.txt"));
+    assert!(entries_by_path.contains_key("staged_delete.txt"));
     assert!(entries_by_path.contains_key("binary.bin"));
     assert!(entries_by_path.contains_key("untracked.txt"));
     assert!(entries_by_path.contains_key("large.dat"));
@@ -524,6 +528,17 @@ fn workspace_git_snapshot_provider_is_read_only_for_dirty_repo() -> TestResult {
     assert_eq!(deleted.unstaged, "D");
     assert!(
         deleted
+            .metadata
+            .as_ref()
+            .is_some_and(|metadata| !metadata.exists && metadata.file_type == "missing")
+    );
+
+    let staged_deleted = entry_by_path(&snapshot.entries, "staged_delete.txt")?;
+    assert_eq!(staged_deleted.entry_kind, "ordinary");
+    assert_eq!(staged_deleted.staged, "D");
+    assert_eq!(staged_deleted.unstaged, ".");
+    assert!(
+        staged_deleted
             .metadata
             .as_ref()
             .is_some_and(|metadata| !metadata.exists && metadata.file_type == "missing")
