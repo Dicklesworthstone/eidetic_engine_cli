@@ -858,6 +858,83 @@ fn committed_tree_reports_path_dependency_unsupported() -> TestResult {
 }
 
 #[test]
+fn committed_tree_unresolved_ref_refuses_before_rch() -> TestResult {
+    let workspace = seed_git_workspace("rch-committed-tree-missing-ref")?;
+    let before_status = git_status_porcelain_v2(&workspace)?;
+    let invocation_log = unique_tmp_path("rch-committed-tree-missing-ref-invocations");
+    let fake_rch = write_fake_rch(
+        "fake-rch-committed-tree-missing-ref-should-not-run.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+printf '[RCH] remote trj (0.1s)\n'
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--committed-tree",
+            "--treeish",
+            "refs/heads/does-not-exist",
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "committed_tree_missing_ref_smoke",
+        ],
+        &[("FAKE_RCH_INVOCATIONS", invocation_log_arg)],
+        &workspace,
+    )?;
+    assert_git_status_unchanged(&workspace, &before_status, "committed-tree unresolved ref")?;
+    if status.success() {
+        return Err(format!(
+            "unresolved committed-tree ref should refuse before RCH\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    if invocation_log.exists() {
+        let invocations = fs::read_to_string(&invocation_log)
+            .map_err(|error| format!("read unresolved-ref invocation log: {error}"))?;
+        if !invocations.is_empty() {
+            return Err(format!(
+                "unresolved committed-tree ref should not invoke fake RCH: {invocations:?}"
+            ));
+        }
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse unresolved committed-tree report: {error}"))?;
+    if report["status"] != "committed_tree_unsupported"
+        || report["verification_attribution"] != "committed_tree"
+        || report["requested_treeish"] != "refs/heads/does-not-exist"
+        || !report["resolved_commit"].is_null()
+        || !report["git_tree"].is_null()
+        || report["source_manifest_file_count"] != 0
+    {
+        return Err(format!(
+            "unexpected unresolved committed-tree report: {report}"
+        ));
+    }
+    for expected in [
+        "rch_verify_committed_tree_ref_unresolved",
+        "rch_verify_committed_tree_unsupported",
+    ] {
+        if !source_degraded_contains(&report, expected)? || !degraded_contains(&report, expected)? {
+            return Err(format!(
+                "missing {expected} in unresolved committed-tree report: {report}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn first_remote_invocation_passes_requested_workers() -> TestResult {
     let fake_rch = write_fake_rch(
         "fake-rch-workers.sh",

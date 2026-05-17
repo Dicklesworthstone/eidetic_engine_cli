@@ -67,6 +67,13 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "use DeterministicClock/seeded ID helpers instead of Uuid::new_v4",
             });
         }
+        if line.contains("Uuid::now_v7(") || line.contains("uuid::Uuid::now_v7(") {
+            findings.push(Finding {
+                line: line_no,
+                code: "ambient_uuid_v7_now",
+                message: "use DeterministicClock/seeded ID helpers instead of Uuid::now_v7",
+            });
+        }
         if line.contains("Instant::now(") {
             findings.push(Finding {
                 line: line_no,
