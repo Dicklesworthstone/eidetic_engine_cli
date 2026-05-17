@@ -2206,11 +2206,65 @@ fn write_regular_file_no_symlinks(
 ) -> Result<(), DomainError> {
     reject_existing_symlink_component(path, label)?;
     ensure_handoff_write_path_is_regular_or_missing(path, label)?;
-    fs::write(path, content).map_err(|error| DomainError::Storage {
-        message: format!("Failed to write {label}: {error}"),
+    let temp_path = handoff_temp_publish_path(path);
+    reject_existing_symlink_component(&temp_path, label)?;
+    ensure_handoff_temp_path_is_missing(&temp_path, label)?;
+    write_handoff_temp_file(&temp_path, content, label)?;
+    fs::rename(&temp_path, path).map_err(|error| DomainError::Storage {
+        message: format!("Failed to publish {label}: {error}"),
         repair: Some(format!("Check write permissions for {}", path.display())),
     })?;
-    reject_existing_symlink_component(path, label)
+    reject_existing_symlink_component(path, label)?;
+    ensure_handoff_write_path_is_regular_file(path, label)
+}
+
+fn handoff_temp_publish_path(path: &Path) -> PathBuf {
+    let mut temp = path.as_os_str().to_os_string();
+    temp.push(".tmp");
+    PathBuf::from(temp)
+}
+
+fn ensure_handoff_temp_path_is_missing(path: &Path, label: &str) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write {label} temp file because it already exists: {}",
+                path.display()
+            ),
+            repair: Some(format!(
+                "Remove stale temp file {} and retry.",
+                path.display()
+            )),
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect {label} temp file {} before write: {error}",
+                path.display()
+            ),
+            repair: Some(format!("Check permissions for {}", path.display())),
+        }),
+    }
+}
+
+fn write_handoff_temp_file(path: &Path, content: &str, label: &str) -> Result<(), DomainError> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to create {label} temp file: {error}"),
+            repair: Some(format!("Check write permissions for {}", path.display())),
+        })?;
+    file.write_all(content.as_bytes())
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to write {label} temp file: {error}"),
+            repair: Some(format!("Check write permissions for {}", path.display())),
+        })?;
+    file.sync_all().map_err(|error| DomainError::Storage {
+        message: format!("Failed to sync {label} temp file: {error}"),
+        repair: Some(format!("Check disk health for {}", path.display())),
+    })
 }
 
 fn add_task_frame_to_resume(report: &mut ResumeReport, task_frame: serde_json::Value) {
@@ -4983,6 +5037,30 @@ memories_revised = 3
                 .file_type()
                 .is_dir(),
             "directory capsule path should remain untouched",
+        )
+    }
+
+    #[test]
+    fn handoff_capsule_write_rejects_existing_temp_file_without_truncating() -> TestResult {
+        let dir = repo_tempdir()?;
+        let capsule_path = dir.path().join("capsule.json");
+        let temp_path = handoff_temp_publish_path(&capsule_path);
+        fs::write(&temp_path, "stale temp sentinel").map_err(|error| error.to_string())?;
+
+        let error = write_regular_file_no_symlinks(&capsule_path, "{}", "handoff capsule")
+            .expect_err("existing temp file should reject before write");
+        ensure(
+            error.message().contains("temp file"),
+            format!("unexpected error: {}", error.message()),
+        )?;
+        ensure_equal(
+            &fs::read_to_string(&temp_path).map_err(|error| error.to_string())?,
+            &"stale temp sentinel".to_owned(),
+            "stale temp content",
+        )?;
+        ensure(
+            !capsule_path.exists(),
+            "final capsule should not be published after temp rejection",
         )
     }
 

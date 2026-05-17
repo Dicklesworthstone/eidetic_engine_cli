@@ -38,7 +38,7 @@
 //! A forged signature produced from public inputs alone MUST fail verification.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
 use ring::rand::SystemRandom;
@@ -1830,10 +1830,25 @@ fn write_key_file_no_symlinks(path: &Path, bytes: &[u8]) -> io::Result<()> {
         fs::create_dir_all(parent)?;
         reject_key_symlink_chain(parent)?;
     }
+    let temp_path = key_temp_path(path)?;
     reject_key_symlink_chain(path)?;
     ensure_key_final_path_writable(path)?;
-    fs::write(path, bytes)?;
-    reject_key_symlink_chain(path)
+    reject_key_symlink_chain(&temp_path)?;
+    ensure_key_temp_path_absent(&temp_path)?;
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+
+    reject_key_symlink_chain(path)?;
+    ensure_key_final_path_writable(path)?;
+    fs::rename(&temp_path, path)?;
+    reject_key_symlink_chain(path)?;
+    ensure_key_final_path_writable(path)
 }
 
 fn ensure_key_final_path_writable(path: &Path) -> io::Result<()> {
@@ -1846,6 +1861,36 @@ fn ensure_key_final_path_writable(path: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn ensure_key_temp_path_absent(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("certificate key temp symlink refused: {}", path.display()),
+        )),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "certificate key temp path already exists: {}",
+                path.display()
+            ),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn key_temp_path(path: &Path) -> io::Result<PathBuf> {
+    let Some(file_name) = path.file_name() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "certificate key path has no file name",
+        ));
+    };
+    let mut temp_name = file_name.to_os_string();
+    temp_name.push(".tmp");
+    Ok(path.with_file_name(temp_name))
 }
 
 fn reject_key_symlink_chain(path: &Path) -> io::Result<()> {
@@ -2956,6 +3001,31 @@ mod tests {
                 .is_dir(),
             "non-regular key path must remain a directory",
         )
+    }
+
+    #[test]
+    fn certificate_key_write_rejects_existing_temp_without_truncating() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let key_path = dir.path().join("keys").join("workspace.ed25519");
+        let temp_path = key_temp_path(&key_path).map_err(|error| error.to_string())?;
+        fs::create_dir_all(key_path.parent().expect("key parent"))
+            .map_err(|error| error.to_string())?;
+        fs::write(&temp_path, b"stale key temp").map_err(|error| error.to_string())?;
+
+        let error = write_key_file_no_symlinks(&key_path, b"new key bytes")
+            .expect_err("existing key temp path should reject key write");
+
+        ensure_equal(&error.kind(), &io::ErrorKind::AlreadyExists, "error kind")?;
+        ensure_equal(
+            &fs::read(&temp_path).map_err(|error| error.to_string())?,
+            &b"stale key temp".to_vec(),
+            "stale temp content",
+        )?;
+        match fs::symlink_metadata(&key_path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Ok(_) => Err("final key path must not be published".to_owned()),
+            Err(error) => Err(format!("final key metadata failed: {error}")),
+        }
     }
 
     #[test]

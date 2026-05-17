@@ -682,9 +682,19 @@ fn write_hook_file(hook_dir: &Path, target_path: &Path, content: &str) -> Result
         })?;
     }
 
-    preflight_created_hook_temp_target(&temp_path)?;
+    publish_hook_temp_file(hook_dir, &temp_path, target_path)
+}
 
-    std::fs::rename(&temp_path, target_path).map_err(|error| DomainError::Storage {
+fn publish_hook_temp_file(
+    hook_dir: &Path,
+    temp_path: &Path,
+    target_path: &Path,
+) -> Result<(), DomainError> {
+    ensure_hook_dir_is_not_symlink(hook_dir)?;
+    preflight_created_hook_temp_target(temp_path)?;
+    preflight_hook_target(target_path)?;
+
+    std::fs::rename(temp_path, target_path).map_err(|error| DomainError::Storage {
         message: format!(
             "Failed to rename temporary hook to '{}': {error}",
             target_path.display()
@@ -1935,6 +1945,55 @@ mod tests {
             "temp recheck must not alter a non-regular temp entry"
         );
 
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_hook_temp_rechecks_symlinked_final_target_before_rename() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_dir = temp.path().join("hooks");
+        fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
+        let temp_hook_path = hook_dir.join("pre-task.tmp");
+        fs::write(&temp_hook_path, "#!/bin/sh\nexit 0\n").map_err(|e| e.to_string())?;
+        let sensitive_path = temp.path().join("sensitive-file");
+        fs::write(&sensitive_path, "original content").map_err(|e| e.to_string())?;
+        let target_path = hook_dir.join("pre-task");
+        symlink(&sensitive_path, &target_path).map_err(|e| e.to_string())?;
+
+        let error = match publish_hook_temp_file(&hook_dir, &temp_hook_path, &target_path) {
+            Ok(()) => {
+                return Err(
+                    "publish should reject symlinked final hook target before rename".to_owned(),
+                );
+            }
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "policy_denied");
+        assert!(
+            error.message().contains("path is a symlink"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert_eq!(
+            fs::read_to_string(&sensitive_path).map_err(|e| e.to_string())?,
+            "original content",
+            "final target recheck must not overwrite symlink target"
+        );
+        assert!(
+            fs::symlink_metadata(&target_path)
+                .map_err(|e| e.to_string())?
+                .file_type()
+                .is_symlink(),
+            "symlinked final target must remain untouched"
+        );
+        assert!(
+            temp_hook_path.is_file(),
+            "temporary hook should remain for inspection after final target rejection"
+        );
         Ok(())
     }
 

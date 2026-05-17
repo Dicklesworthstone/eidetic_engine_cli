@@ -1147,11 +1147,101 @@ fn extract_binary_from_archive(
 
     let extracted_binary = find_binary_in_dir(temp_path, binary_name)?;
 
-    // Move binary to install path
-    fs::copy(&extracted_binary, install_path)
-        .map_err(|e| format!("failed to copy binary to '{}': {e}", install_path.display()))?;
+    publish_extracted_binary(&extracted_binary, install_path)?;
 
     Ok(())
+}
+
+fn publish_extracted_binary(extracted_binary: &Path, install_path: &Path) -> Result<(), String> {
+    if !is_regular_file_no_symlink(extracted_binary)? {
+        return Err(format!(
+            "extracted binary '{}' is not a regular file",
+            extracted_binary.display()
+        ));
+    }
+    ensure_install_target_path_is_regular_or_missing(install_path)?;
+    let temp_path = install_temp_path(install_path)?;
+    ensure_install_temp_path_absent(&temp_path)?;
+
+    let mut source_file = fs::File::open(extracted_binary).map_err(|error| {
+        format!(
+            "failed to open extracted binary '{}': {error}",
+            extracted_binary.display()
+        )
+    })?;
+    let mut temp_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .map_err(|error| {
+            format!(
+                "failed to create temporary install binary '{}': {error}",
+                temp_path.display()
+            )
+        })?;
+    io::copy(&mut source_file, &mut temp_file).map_err(|error| {
+        format!(
+            "failed to copy extracted binary to temporary install path '{}': {error}",
+            temp_path.display()
+        )
+    })?;
+    temp_file.sync_all().map_err(|error| {
+        format!(
+            "failed to sync temporary install binary '{}': {error}",
+            temp_path.display()
+        )
+    })?;
+    drop(temp_file);
+
+    ensure_install_target_path_is_regular_or_missing(install_path)?;
+    fs::rename(&temp_path, install_path).map_err(|error| {
+        let _ = fs::remove_file(&temp_path);
+        format!(
+            "failed to publish temporary install binary '{}' to '{}': {error}",
+            temp_path.display(),
+            install_path.display()
+        )
+    })
+}
+
+fn ensure_install_temp_path_absent(path: &Path) -> Result<(), String> {
+    match install_path_has_symlink_component(path) {
+        Ok(Some(component)) => {
+            return Err(format!(
+                "install temp path '{}' traverses symbolic link '{}'",
+                path.display(),
+                component.display()
+            ));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect install temp path '{}': {error}",
+                path.display()
+            ));
+        }
+    }
+
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(format!(
+            "install temp path '{}' already exists",
+            path.display()
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "failed to inspect install temp path '{}': {error}",
+            path.display()
+        )),
+    }
+}
+
+fn install_temp_path(install_path: &Path) -> Result<PathBuf, String> {
+    let Some(file_name) = install_path.file_name() else {
+        return Err("install path has no file name".to_owned());
+    };
+    let mut temp_name = file_name.to_os_string();
+    temp_name.push(".tmp");
+    Ok(install_path.with_file_name(temp_name))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2233,6 +2323,35 @@ mod tests {
             outside.as_slice(),
             b"outside binary".as_slice(),
             "symlink target must remain untouched",
+        )
+    }
+
+    #[test]
+    fn publish_extracted_binary_rejects_existing_temp_without_truncating() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let extracted_binary = tempdir.path().join("extracted-ee");
+        let install_path = tempdir.path().join("bin").join("ee");
+        let temp_path = install_temp_path(&install_path)?;
+        fs::create_dir_all(install_path.parent().expect("install parent"))
+            .map_err(|error| error.to_string())?;
+        fs::write(&extracted_binary, b"new binary").map_err(|error| error.to_string())?;
+        fs::write(&temp_path, b"stale temp binary").map_err(|error| error.to_string())?;
+
+        let error = publish_extracted_binary(&extracted_binary, &install_path)
+            .expect_err("existing install temp should reject publish");
+
+        ensure(
+            error.contains("already exists"),
+            "existing temp error should mention already exists",
+        )?;
+        ensure_equal(
+            fs::read(&temp_path).map_err(|error| error.to_string())?,
+            b"stale temp binary".to_vec(),
+            "stale temp content",
+        )?;
+        ensure(
+            !install_path.exists(),
+            "final install path must not be published when temp exists",
         )
     }
 
