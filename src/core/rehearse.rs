@@ -1241,6 +1241,7 @@ where
         )?;
     }
     ensure_no_rehearsal_artifact_symlink_components(path, "write rehearsal artifact")?;
+    ensure_rehearsal_artifact_regular_or_missing(path, "write rehearsal artifact")?;
     let bytes = serde_json::to_vec_pretty(value).map_err(|error| DomainError::Storage {
         message: format!("Failed to serialize rehearsal artifact: {error}"),
         repair: Some("ee rehearse run --json".to_string()),
@@ -1355,6 +1356,28 @@ fn storage_error(context: &str, error: io::Error) -> DomainError {
     DomainError::Storage {
         message: format!("Failed to {context}: {error}"),
         repair: Some("ee rehearse run --json".to_string()),
+    }
+}
+
+fn ensure_rehearsal_artifact_regular_or_missing(
+    path: &Path,
+    operation: &'static str,
+) -> Result<(), DomainError> {
+    ensure_no_rehearsal_artifact_symlink_components(path, operation)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to {operation} `{}` because the existing path is not a regular file.",
+                path.display()
+            ),
+            repair: Some(
+                "Replace the path with a regular rehearsal artifact file before retrying."
+                    .to_owned(),
+            ),
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(storage_error(operation, error)),
     }
 }
 
@@ -1820,6 +1843,40 @@ mod tests {
             fs::read_to_string(&outside_snapshot).map_err(|error| error.to_string())?,
             "outside",
             "rehearsal artifact write must not follow a symlinked file"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn run_rejects_non_regular_output_artifact_file() -> TestResult {
+        let workspace = kept_temp_dir("ee-rehearse-run-nonregular-artifact-workspace")?;
+        let out = kept_temp_dir("ee-rehearse-run-nonregular-artifact-out")?;
+        fs::write(workspace.join("state.txt"), "source").map_err(|error| error.to_string())?;
+        let artifact_path = out.join(SOURCE_SNAPSHOT_FILE);
+        fs::create_dir_all(&artifact_path).map_err(|error| error.to_string())?;
+
+        let options = RehearseRunOptions {
+            workspace,
+            output_dir: Some(out.clone()),
+            ..Default::default()
+        };
+        let error = match run_rehearsal(&options) {
+            Ok(report) => {
+                return Err(format!(
+                    "non-regular rehearsal artifact file was accepted: {report:?}"
+                ));
+            }
+            Err(error) => error,
+        };
+
+        assert!(error.message().contains("not a regular file"));
+        assert!(
+            artifact_path.is_dir(),
+            "rehearsal artifact preflight must leave the directory path untouched"
+        );
+        assert!(
+            !out.join(MANIFEST_FILE).exists(),
+            "rehearsal must fail before writing later artifacts"
         );
         Ok(())
     }
