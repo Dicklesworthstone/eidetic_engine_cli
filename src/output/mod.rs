@@ -5157,6 +5157,7 @@ pub fn render_quarantine_toon(report: &QuarantineReport) -> String {
 #[must_use]
 pub fn render_quarantine_entry_json(entry: &crate::db::StoredTrustQuarantine) -> String {
     let source_uri = redact_quarantine_source_uri(&entry.source_uri);
+    let reason = redact_quarantine_source_uri(&entry.reason);
     let mut b = JsonBuilder::with_capacity(512);
     b.field_str("schema", RESPONSE_SCHEMA_V1);
     b.field_bool("success", true);
@@ -5170,7 +5171,7 @@ pub fn render_quarantine_entry_json(entry: &crate::db::StoredTrustQuarantine) ->
         if let Some(quarantined_until) = &entry.quarantined_until {
             d.field_str("quarantinedUntil", quarantined_until);
         }
-        d.field_str("reason", &entry.reason);
+        d.field_str("reason", &reason);
         d.field_str("createdAt", &entry.created_at);
         d.field_str("updatedAt", &entry.updated_at);
     });
@@ -5181,6 +5182,7 @@ pub fn render_quarantine_entry_json(entry: &crate::db::StoredTrustQuarantine) ->
 #[must_use]
 pub fn render_quarantine_entry_human(entry: &crate::db::StoredTrustQuarantine) -> String {
     let source_uri = redact_quarantine_source_uri(&entry.source_uri);
+    let reason = redact_quarantine_source_uri(&entry.reason);
     let mut output = "ee diag quarantine show\n\n".to_string();
     output.push_str(&format!("Source: {source_uri}\n"));
     output.push_str(&format!("Status: {}\n", entry.status));
@@ -5190,7 +5192,7 @@ pub fn render_quarantine_entry_human(entry: &crate::db::StoredTrustQuarantine) -
     if let Some(quarantined_until) = &entry.quarantined_until {
         output.push_str(&format!("Quarantined until: {quarantined_until}\n"));
     }
-    output.push_str(&format!("Reason: {}\n", entry.reason));
+    output.push_str(&format!("Reason: {reason}\n"));
     output.push_str(&format!("\nRecord created: {}\n", entry.created_at));
     output.push_str(&format!("Record updated: {}\n", entry.updated_at));
     output.push_str("\nNext:\n  ee diag quarantine list --json\n");
@@ -13268,9 +13270,12 @@ mod tests {
 
     #[test]
     fn quarantine_entry_output_redacts_sensitive_source_uri() -> TestResult {
-        let entry = output_test_quarantine(
+        let mut entry = output_test_quarantine(
             "file:///Users/alice/private/quarantine.json?api_key=redaction-fixture".to_owned(),
         );
+        entry.reason =
+            "harmful burst from /Users/alice/private/quarantine.log?token=redaction-fixture"
+                .to_owned();
 
         let json = render_quarantine_entry_json(&entry);
         ensure_contains(
@@ -13287,6 +13292,10 @@ mod tests {
             !json.contains("/Users/alice") && !json.contains("redaction-fixture"),
             format!("quarantine entry JSON leaked sensitive source URI: {json}"),
         )?;
+        ensure(
+            !json.contains("quarantine.log"),
+            format!("quarantine entry JSON leaked sensitive reason path: {json}"),
+        )?;
 
         let human = render_quarantine_entry_human(&entry);
         ensure_contains(
@@ -13298,11 +13307,19 @@ mod tests {
             !human.contains("/Users/alice") && !human.contains("redaction-fixture"),
             format!("quarantine entry human leaked sensitive source URI: {human}"),
         )?;
+        ensure(
+            !human.contains("quarantine.log"),
+            format!("quarantine entry human leaked sensitive reason path: {human}"),
+        )?;
 
         let toon = render_quarantine_entry_toon(&entry);
         ensure(
             !toon.contains("/Users/alice") && !toon.contains("redaction-fixture"),
             format!("quarantine entry TOON leaked sensitive source URI: {toon}"),
+        )?;
+        ensure(
+            !toon.contains("quarantine.log"),
+            format!("quarantine entry TOON leaked sensitive reason path: {toon}"),
         )
     }
 
