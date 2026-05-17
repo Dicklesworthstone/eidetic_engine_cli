@@ -860,6 +860,8 @@ fn write_focus_state(path: &Path, state: &FocusState) -> Result<(), DomainError>
 fn publish_focus_state_temp_file(path: &Path, temp_path: &Path) -> Result<(), DomainError> {
     ensure_no_symlink_components(path, "write")?;
     ensure_focus_state_final_path_for_write(path)?;
+    ensure_no_symlink_components(temp_path, "write")?;
+    ensure_focus_state_temp_path_for_publish(temp_path)?;
     fs::rename(temp_path, path).map_err(|error| DomainError::Storage {
         message: format!("Failed to publish focus state {}: {error}", path.display()),
         repair: Some("Check workspace .ee/focus permissions.".to_owned()),
@@ -907,6 +909,33 @@ fn ensure_focus_state_temp_path_for_write(path: &Path) -> Result<(), DomainError
         Err(error) => Err(DomainError::Storage {
             message: format!(
                 "Failed to stat focus state temp file {} before write: {error}",
+                path.display()
+            ),
+            repair: Some("Check workspace .ee/focus permissions.".to_owned()),
+        }),
+    }
+}
+
+fn ensure_focus_state_temp_path_for_publish(path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to publish focus state temp file {} because it is not a regular file.",
+                path.display()
+            ),
+            repair: Some("Replace .ee/focus/state.json.tmp with a regular file.".to_owned()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to publish focus state temp file {} because it is missing.",
+                path.display()
+            ),
+            repair: Some("Retry the focus command so the temp file is recreated.".to_owned()),
+        }),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to stat focus state temp file {} before publish: {error}",
                 path.display()
             ),
             repair: Some("Check workspace .ee/focus permissions.".to_owned()),
@@ -1711,6 +1740,61 @@ mod tests {
                 .is_file(),
             true,
             "temp focus state remains available after publish rejection",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_focus_state_rechecks_temp_symlink_before_rename() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let state_path = focus_state_path(dir.path());
+        let temp_path = state_path.with_extension("json.tmp");
+        let preserved_temp = state_path.with_extension("json.tmp.preserved");
+        let outside_state = dir.path().join("outside-focus-state.json");
+        let state = focus_state(&[memory_id(50)], 2).map_err(|error| error.message())?;
+        let mut body =
+            serde_json::to_string_pretty(&state.data_json()).map_err(|error| error.to_string())?;
+        body.push('\n');
+        std::fs::create_dir_all(temp_path.parent().expect("focus temp parent"))
+            .map_err(|error| error.to_string())?;
+        write_focus_state_temp_file(&temp_path, &body).map_err(|error| error.message())?;
+        std::fs::rename(&temp_path, &preserved_temp).map_err(|error| error.to_string())?;
+        std::fs::write(&outside_state, "outside sentinel").map_err(|error| error.to_string())?;
+        symlink(&outside_state, &temp_path).map_err(|error| error.to_string())?;
+
+        let error = publish_focus_state_temp_file(&state_path, &temp_path)
+            .expect_err("temp symlink should reject focus state publish");
+
+        ensure(
+            error.message().contains("symlinked path component")
+                || error.message().contains("not a regular file"),
+            true,
+            "temp symlink publish error",
+        )?;
+        ensure(
+            state_path.exists(),
+            false,
+            "focus state must not be published through swapped temp symlink",
+        )?;
+        ensure(
+            std::fs::read_to_string(&outside_state).map_err(|error| error.to_string())?,
+            "outside sentinel".to_owned(),
+            "outside focus state remains unchanged",
+        )?;
+        ensure(
+            std::fs::symlink_metadata(&temp_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            true,
+            "rejected temp focus state symlink remains for inspection",
+        )?;
+        ensure(
+            std::fs::read_to_string(&preserved_temp).map_err(|error| error.to_string())?,
+            body,
+            "preserved temp focus state remains available after simulated swap",
         )
     }
 
