@@ -630,6 +630,8 @@ impl WorkspaceGitSnapshotOptions {
 pub struct WorkspaceGitSnapshot {
     pub repository_root: String,
     pub entries: Vec<WorkspaceGitStatusEntry>,
+    #[serde(skip_serializing_if = "WorkspaceGitOperationState::is_clean")]
+    pub operation_state: WorkspaceGitOperationState,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
@@ -666,6 +668,29 @@ pub struct WorkspaceGitPathMetadata {
     pub large_file: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skip_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceGitOperationState {
+    pub in_progress: bool,
+    pub operations: Vec<WorkspaceGitOperationMarker>,
+    pub autostash_markers: Vec<WorkspaceGitOperationMarker>,
+}
+
+impl WorkspaceGitOperationState {
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        !self.in_progress && self.operations.is_empty() && self.autostash_markers.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceGitOperationMarker {
+    pub operation: &'static str,
+    pub marker_path: &'static str,
+    pub marker_type: String,
 }
 
 /// Error returned by a read-only command runner.
@@ -747,6 +772,7 @@ pub fn collect_workspace_git_snapshot(
     Ok(WorkspaceGitSnapshot {
         repository_root: redact_path_label(&repository_root_path),
         entries,
+        operation_state: collect_workspace_git_operation_state(&repository_root_path),
     })
 }
 
@@ -3391,6 +3417,65 @@ fn workspace_git_path_metadata(
 }
 
 #[must_use]
+pub fn collect_workspace_git_operation_state(repository_root: &Path) -> WorkspaceGitOperationState {
+    let git_dir = repository_root.join(".git");
+    let mut operations = [
+        ("rebase", "rebase-merge"),
+        ("rebase", "rebase-apply"),
+        ("merge", "MERGE_HEAD"),
+        ("cherry_pick", "CHERRY_PICK_HEAD"),
+        ("revert", "REVERT_HEAD"),
+        ("bisect", "BISECT_LOG"),
+    ]
+    .into_iter()
+    .filter_map(|(operation, marker_path)| git_operation_marker(&git_dir, operation, marker_path))
+    .collect::<Vec<_>>();
+    operations.sort();
+    operations.dedup();
+
+    let mut autostash_markers = [
+        ("autostash", "rebase-merge/autostash"),
+        ("autostash", "rebase-apply/autostash"),
+        ("autostash", "MERGE_AUTOSTASH"),
+    ]
+    .into_iter()
+    .filter_map(|(operation, marker_path)| git_operation_marker(&git_dir, operation, marker_path))
+    .collect::<Vec<_>>();
+    autostash_markers.sort();
+    autostash_markers.dedup();
+
+    WorkspaceGitOperationState {
+        in_progress: !operations.is_empty(),
+        operations,
+        autostash_markers,
+    }
+}
+
+fn git_operation_marker(
+    git_dir: &Path,
+    operation: &'static str,
+    marker_path: &'static str,
+) -> Option<WorkspaceGitOperationMarker> {
+    let metadata = fs::symlink_metadata(git_dir.join(marker_path)).ok()?;
+    let file_type = metadata.file_type();
+    let marker_type = if file_type.is_symlink() {
+        "symlink"
+    } else if metadata.is_dir() {
+        "directory"
+    } else if metadata.is_file() {
+        "file"
+    } else {
+        "other"
+    };
+
+    Some(WorkspaceGitOperationMarker {
+        operation,
+        marker_path,
+        marker_type: marker_type.to_string(),
+    })
+}
+
+#[must_use]
 pub fn parse_git_log(input: &str) -> Vec<SwarmBriefCommit> {
     let mut commits = input
         .lines()
@@ -5540,6 +5625,94 @@ mod tests {
                 "git rev-parse --show-toplevel".to_string(),
                 "git status --porcelain=v2 --branch --untracked-files=all".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn workspace_git_snapshot_reports_operation_state_from_metadata_only() {
+        let temp = tempfile::Builder::new()
+            .prefix("ee-workspace-git-operation-state-")
+            .tempdir()
+            .expect("create temp repo root");
+        let workspace = temp.path();
+        std::fs::create_dir_all(workspace.join(".git/rebase-merge"))
+            .expect("create synthetic rebase metadata");
+        std::fs::write(
+            workspace.join(".git/rebase-merge/autostash"),
+            "fake-secret-oid\n",
+        )
+        .expect("write synthetic autostash marker");
+        std::fs::write(workspace.join(".git/CHERRY_PICK_HEAD"), "fake-secret-oid\n")
+            .expect("write synthetic cherry-pick marker");
+        let autostash_before = std::fs::read(workspace.join(".git/rebase-merge/autostash"))
+            .expect("read synthetic autostash marker before snapshot");
+        let cherry_pick_before = std::fs::read(workspace.join(".git/CHERRY_PICK_HEAD"))
+            .expect("read synthetic cherry-pick marker before snapshot");
+
+        let workspace_label = workspace.display().to_string();
+        let runner = FakeRunner::default()
+            .with_output("git", &["rev-parse", "--show-toplevel"], &workspace_label)
+            .with_output(
+                "git",
+                &[
+                    "status",
+                    "--porcelain=v2",
+                    "--branch",
+                    "--untracked-files=all",
+                ],
+                "",
+            );
+        let snapshot = collect_workspace_git_snapshot(
+            &WorkspaceGitSnapshotOptions::for_workspace(workspace),
+            &runner,
+        )
+        .expect("workspace git snapshot should collect synthetic operation state");
+
+        assert_eq!(
+            std::fs::read(workspace.join(".git/rebase-merge/autostash"))
+                .expect("read synthetic autostash marker after snapshot"),
+            autostash_before
+        );
+        assert_eq!(
+            std::fs::read(workspace.join(".git/CHERRY_PICK_HEAD"))
+                .expect("read synthetic cherry-pick marker after snapshot"),
+            cherry_pick_before
+        );
+        assert!(snapshot.operation_state.in_progress);
+        assert_eq!(
+            snapshot
+                .operation_state
+                .operations
+                .iter()
+                .map(|marker| (
+                    marker.operation,
+                    marker.marker_path,
+                    marker.marker_type.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("cherry_pick", "CHERRY_PICK_HEAD", "file"),
+                ("rebase", "rebase-merge", "directory"),
+            ]
+        );
+        assert_eq!(
+            snapshot
+                .operation_state
+                .autostash_markers
+                .iter()
+                .map(|marker| (
+                    marker.operation,
+                    marker.marker_path,
+                    marker.marker_type.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![("autostash", "rebase-merge/autostash", "file")]
+        );
+        let serialized =
+            serde_json::to_value(&snapshot.operation_state).expect("operation state serializes");
+        assert!(
+            !serialized.to_string().contains("fake-secret-oid"),
+            "operation state must not expose marker file contents"
         );
     }
 

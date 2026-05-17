@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use ee::core::swarm_brief::{
     SwarmBriefCommandError, SystemSwarmBriefCommandRunner, WorkspaceGitSnapshotOptions,
-    WorkspaceGitStatusEntry, collect_workspace_git_snapshot,
+    WorkspaceGitStatusEntry, collect_workspace_git_operation_state, collect_workspace_git_snapshot,
     parse_workspace_git_status_porcelain_v2,
 };
 use serde_json::{Value, json};
@@ -228,6 +228,102 @@ fn workspace_git_porcelain_v2_parser_preserves_copied_paths() -> TestResult {
     assert_eq!(copied.original_path.as_deref(), Some("src/source.rs"));
     assert_eq!(copied.staged, "C");
     assert_eq!(copied.unstaged, ".");
+
+    Ok(())
+}
+
+#[test]
+fn workspace_git_operation_state_reports_in_progress_markers_without_contents() -> TestResult {
+    let temp = tempfile::Builder::new()
+        .prefix("ee-workspace-git-operation-state-")
+        .tempdir()
+        .map_err(|error| format!("tempdir: {error}"))?;
+    let workspace = temp.path();
+
+    fs::create_dir_all(workspace.join(".git/rebase-merge"))
+        .map_err(|error| format!("create rebase-merge metadata: {error}"))?;
+    write_file(
+        &workspace.join(".git/rebase-merge/autostash"),
+        "0123456789abcdef0123456789abcdef01234567\n",
+    )?;
+    write_file(
+        &workspace.join(".git/MERGE_HEAD"),
+        "fedcba9876543210fedcba9876543210fedcba98\n",
+    )?;
+    write_file(&workspace.join(".git/BISECT_LOG"), "git bisect start\n")?;
+    let autostash_before = fs::read(workspace.join(".git/rebase-merge/autostash"))
+        .map_err(|error| format!("read autostash marker before: {error}"))?;
+    let merge_before = fs::read(workspace.join(".git/MERGE_HEAD"))
+        .map_err(|error| format!("read merge marker before: {error}"))?;
+    let bisect_before = fs::read(workspace.join(".git/BISECT_LOG"))
+        .map_err(|error| format!("read bisect marker before: {error}"))?;
+
+    let before_files = file_state_digest(workspace)?;
+    let operation_state = collect_workspace_git_operation_state(workspace);
+    let after_files = file_state_digest(workspace)?;
+
+    assert_eq!(
+        after_files, before_files,
+        "operation-state collection must not mutate repository files"
+    );
+    assert_eq!(
+        fs::read(workspace.join(".git/rebase-merge/autostash"))
+            .map_err(|error| format!("read autostash marker after: {error}"))?,
+        autostash_before,
+        "operation-state collection must not mutate autostash marker contents"
+    );
+    assert_eq!(
+        fs::read(workspace.join(".git/MERGE_HEAD"))
+            .map_err(|error| format!("read merge marker after: {error}"))?,
+        merge_before,
+        "operation-state collection must not mutate merge marker contents"
+    );
+    assert_eq!(
+        fs::read(workspace.join(".git/BISECT_LOG"))
+            .map_err(|error| format!("read bisect marker after: {error}"))?,
+        bisect_before,
+        "operation-state collection must not mutate bisect marker contents"
+    );
+    assert!(operation_state.in_progress);
+    assert_eq!(
+        operation_state
+            .operations
+            .iter()
+            .map(|marker| {
+                (
+                    marker.operation,
+                    marker.marker_path,
+                    marker.marker_type.as_str(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            ("bisect", "BISECT_LOG", "file"),
+            ("merge", "MERGE_HEAD", "file"),
+            ("rebase", "rebase-merge", "directory"),
+        ]
+    );
+    assert_eq!(
+        operation_state
+            .autostash_markers
+            .iter()
+            .map(|marker| {
+                (
+                    marker.operation,
+                    marker.marker_path,
+                    marker.marker_type.as_str(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![("autostash", "rebase-merge/autostash", "file")]
+    );
+    let serialized = serde_json::to_string(&operation_state)
+        .map_err(|error| format!("serialize operation state: {error}"))?;
+    assert!(
+        !serialized.contains("0123456789abcdef0123456789abcdef01234567")
+            && !serialized.contains("fedcba9876543210fedcba9876543210fedcba98"),
+        "operation-state report must not expose marker contents: {serialized}"
+    );
 
     Ok(())
 }

@@ -971,7 +971,9 @@ fn source_test_docs_classification(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::swarm_brief::{WorkspaceGitPathMetadata, WorkspaceGitStatusEntry};
+    use crate::core::swarm_brief::{
+        WorkspaceGitOperationState, WorkspaceGitPathMetadata, WorkspaceGitStatusEntry,
+    };
 
     fn entry(
         path: &str,
@@ -1006,6 +1008,7 @@ mod tests {
         WorkspaceGitSnapshot {
             repository_root: "/tmp/test-repo".to_owned(),
             entries,
+            operation_state: WorkspaceGitOperationState::default(),
         }
     }
 

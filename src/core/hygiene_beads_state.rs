@@ -414,7 +414,7 @@ fn looks_like_json_object(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::swarm_brief::WorkspaceGitStatusEntry;
+    use crate::core::swarm_brief::{WorkspaceGitOperationState, WorkspaceGitStatusEntry};
 
     fn entry(
         path: &str,
@@ -437,6 +437,7 @@ mod tests {
         WorkspaceGitSnapshot {
             repository_root: "/tmp/beads-repo".to_owned(),
             entries,
+            operation_state: WorkspaceGitOperationState::default(),
         }
     }
 
