@@ -420,9 +420,17 @@ printf '[RCH] remote css (0.1s)\n'
     if report["dirty_summary"]["tracked"] != 1 || report["dirty_summary"]["total"] != 1 {
         return Err(format!("tracked dirty counts were not precise: {report}"));
     }
+    if report["dirty_summary"]["tracked_staged"] != 0
+        || report["dirty_summary"]["tracked_unstaged"] != 1
+    {
+        return Err(format!(
+            "unstaged tracked dirty counts were not precise: {report}"
+        ));
+    }
     for expected in [
         "rch_verify_dirty_tree_refused",
         "rch_verify_dirty_tracked_paths",
+        "rch_verify_dirty_unstaged_paths",
     ] {
         if !degraded_contains(&report, expected)? || !source_degraded_contains(&report, expected)? {
             return Err(format!("missing {expected} in dirty refusal: {report}"));
@@ -480,8 +488,18 @@ fn strict_clean_tree_refuses_staged_dirty_source_before_rch() -> TestResult {
     if report["dirty_summary"]["tracked"] != 1 || report["dirty_summary"]["total"] != 1 {
         return Err(format!("staged dirty counts were not precise: {report}"));
     }
+    if report["dirty_summary"]["tracked_staged"] != 1
+        || report["dirty_summary"]["tracked_unstaged"] != 0
+    {
+        return Err(format!(
+            "staged tracked dirty counts were not precise: {report}"
+        ));
+    }
     if !source_degraded_contains(&report, "rch_verify_dirty_tracked_paths")? {
         return Err(format!("missing staged tracked degradation: {report}"));
+    }
+    if !source_degraded_contains(&report, "rch_verify_dirty_staged_paths")? {
+        return Err(format!("missing staged-state degradation: {report}"));
     }
     if degraded_contains(&report, "rch_verify_dry_run")? {
         return Err(format!(

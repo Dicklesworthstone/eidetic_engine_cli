@@ -588,6 +588,14 @@ def status_kind(line, path):
         return "ignored"
     return "tracked"
 
+def tracked_state(line):
+    if not (line.startswith("1 ") or line.startswith("2 ") or line.startswith("u ")):
+        return False, False
+    xy = line[2:4]
+    if len(xy) != 2:
+        return False, False
+    return xy[0] != ".", xy[1] != "."
+
 head = git_stdout(["rev-parse", "HEAD"])
 tree = git_stdout(["rev-parse", "HEAD^{tree}"]) if head else None
 status = git(["status", "--porcelain=v2", "--untracked-files=all", "--ignored=no"])
@@ -600,6 +608,8 @@ dirty_hash = "sha256:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 summary = {
     "total": 0,
     "tracked": 0,
+    "tracked_staged": 0,
+    "tracked_unstaged": 0,
     "untracked": 0,
     "beads": 0,
     "scratch": 0,
@@ -618,14 +628,27 @@ for line in sorted(status_lines):
         kind = "unknown"
     summary["total"] += 1
     summary[kind] += 1
+    staged, unstaged = tracked_state(line)
+    if kind == "tracked" and staged:
+        summary["tracked_staged"] += 1
+    if kind == "tracked" and unstaged:
+        summary["tracked_unstaged"] += 1
     if len(sample) < 12:
-        sample.append({"path": path, "kind": kind})
+        item = {"path": path, "kind": kind}
+        if kind == "tracked":
+            item["staged"] = staged
+            item["unstaged"] = unstaged
+        sample.append(item)
 
 source_codes = []
 if require_clean and summary["total"]:
     source_codes.append("rch_verify_dirty_tree_refused")
     if summary["tracked"]:
         source_codes.append("rch_verify_dirty_tracked_paths")
+    if summary["tracked_staged"]:
+        source_codes.append("rch_verify_dirty_staged_paths")
+    if summary["tracked_unstaged"]:
+        source_codes.append("rch_verify_dirty_unstaged_paths")
     if summary["beads"]:
         source_codes.append("rch_verify_dirty_beads_metadata")
     if summary["scratch"]:
