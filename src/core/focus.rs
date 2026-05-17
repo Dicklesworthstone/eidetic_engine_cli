@@ -829,6 +829,7 @@ fn write_focus_state(path: &Path, state: &FocusState) -> Result<(), DomainError>
         })?;
     }
     ensure_no_symlink_components(path, "write")?;
+    ensure_focus_state_final_path_for_write(path)?;
     let mut body =
         serde_json::to_string_pretty(&state.data_json()).map_err(|error| DomainError::Storage {
             message: format!("Failed to serialize focus state: {error}"),
@@ -852,6 +853,27 @@ fn write_focus_state(path: &Path, state: &FocusState) -> Result<(), DomainError>
     }
 
     Ok(())
+}
+
+fn ensure_focus_state_final_path_for_write(path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write focus state {} because it is not a regular file.",
+                path.display()
+            ),
+            repair: Some("Replace .ee/focus/state.json with a regular JSON file.".to_owned()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to stat focus state {} before write: {error}",
+                path.display()
+            ),
+            repair: Some("Check workspace .ee/focus permissions.".to_owned()),
+        }),
+    }
 }
 
 fn ensure_no_symlink_components(path: &Path, operation: &'static str) -> Result<(), DomainError> {
@@ -1529,6 +1551,27 @@ mod tests {
             error.message().contains("not a regular file"),
             true,
             "active state directory error message",
+        )
+    }
+
+    #[test]
+    fn write_focus_state_rejects_non_regular_final_path() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let state_path = focus_state_path(dir.path());
+        std::fs::create_dir_all(&state_path).map_err(|error| error.to_string())?;
+        let state = focus_state(&[memory_id(47)], 2).map_err(|error| error.message())?;
+
+        let result = write_focus_state(&state_path, &state);
+        let error = result.expect_err("directory focus state should be rejected on write");
+        ensure(
+            error.message().contains("not a regular file"),
+            true,
+            "non-regular write error message",
+        )?;
+        ensure(
+            state_path.is_dir(),
+            true,
+            "non-regular focus state remains a directory",
         )
     }
 
