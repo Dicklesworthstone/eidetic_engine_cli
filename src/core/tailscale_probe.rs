@@ -897,7 +897,7 @@ fn elapsed_ms_since(start: Instant) -> u64 {
 
 #[cfg(unix)]
 fn socket_candidate_exists(path: &Path) -> bool {
-    fs::metadata(path)
+    fs::symlink_metadata(path)
         .map(|metadata| metadata.file_type().is_socket())
         .unwrap_or(false)
 }
@@ -1208,6 +1208,35 @@ mod tests {
     fn relative_binary_path_is_rejected() {
         let err = validate_binary_path(Path::new("tailscale")).expect_err("relative path rejected");
         assert_eq!(err.code, TAILSCALE_BINARY_INAUTHENTIC_CODE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_candidate_rejects_symlink_to_socket() -> TestResult {
+        if std::env::var("TMPDIR")
+            .unwrap_or_default()
+            .contains("USBNVME")
+        {
+            return Ok(());
+        }
+        use std::os::unix::{fs::symlink, net::UnixListener};
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let socket_path = temp.path().join("tailscaled.sock");
+        let _listener = UnixListener::bind(&socket_path).map_err(|error| error.to_string())?;
+        let socket_link = temp.path().join("linked.sock");
+        symlink(&socket_path, &socket_link).map_err(|error| error.to_string())?;
+
+        assert!(
+            socket_candidate_exists(&socket_path),
+            "real Unix socket should be a candidate"
+        );
+        assert!(
+            !socket_candidate_exists(&socket_link),
+            "symlinked socket candidate should not be followed"
+        );
+
+        Ok(())
     }
 
     #[test]
