@@ -1013,6 +1013,43 @@ mod tests {
     }
 
     #[test]
+    fn personalized_pagerank_is_seed_insertion_order_stable() -> TestResult {
+        let mut graph = DiGraph::strict();
+        let a = memory_id(37);
+        let b = memory_id(38);
+        let c = memory_id(39);
+        let d = memory_id(40);
+        for (source, target, relation, weight, confidence) in [
+            (a, c, "supports", 1.0, 0.9),
+            (b, c, "derived_from", 0.8, 0.7),
+            (c, d, "related", 0.6, 0.5),
+            (d, a, "co_tag", 0.4, 0.3),
+        ] {
+            graph
+                .add_edge_with_attrs(
+                    source.to_string(),
+                    target.to_string(),
+                    edge_attrs(relation, weight, confidence),
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let mut forward = HashMap::new();
+        forward.insert(a, 2.0);
+        forward.insert(b, 1.0);
+        forward.insert(c, 0.5);
+        let mut reverse = HashMap::new();
+        reverse.insert(c, 0.5);
+        reverse.insert(b, 1.0);
+        reverse.insert(a, 2.0);
+
+        let first = graph_result(compute_personalized_pagerank(&graph, &forward))?;
+        let second = graph_result(compute_personalized_pagerank(&graph, &reverse))?;
+
+        assert_eq!(first, second);
+        Ok(())
+    }
+
+    #[test]
     fn personalized_pagerank_uses_local_acl_frontier() -> TestResult {
         let mut graph = DiGraph::strict();
         let ids = (100..200).map(memory_id).collect::<Vec<_>>();
