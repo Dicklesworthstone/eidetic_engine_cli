@@ -976,6 +976,63 @@ fn source_relevance_key(source_kind: &str, source_id: &str) -> String {
     format!("{}:{}", source_kind.trim(), source_id.trim())
 }
 
+fn redact_tripwire_public_source_ref(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    redact_tripwire_public_path_like_segments(&secret_redacted)
+}
+
+fn redact_tripwire_public_path_like_segments(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, c)| *c == '/')
+        else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        let start = cursor + relative_index;
+        if !tripwire_public_path_starts_sensitive_segment(&value[start..]) {
+            output.push_str(&value[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        output.push_str(&value[cursor..start]);
+        output.push_str("[REDACTED_PATH]");
+        cursor = value[start..]
+            .char_indices()
+            .find_map(|(index, c)| tripwire_public_path_boundary(c).then_some(start + index))
+            .unwrap_or(value.len());
+    }
+    output
+}
+
+fn tripwire_public_path_starts_sensitive_segment(value: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/home/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+    ];
+
+    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+}
+
+fn tripwire_public_path_boundary(value: char) -> bool {
+    value.is_ascii_whitespace()
+        || matches!(
+            value,
+            '"' | '\'' | '`' | ')' | '(' | ']' | '[' | '}' | '{' | ',' | ';'
+        )
+}
+
 /// A parsed `event:<key.path>=<glob-pattern>` condition specification.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EventMatchSpec {
@@ -1231,6 +1288,11 @@ impl HarmFeedbackPromotionProposal {
     /// Render the proposal as a stable JSON document for `ee curate candidates`.
     #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
+        let source_id = self
+            .input
+            .source_id
+            .as_deref()
+            .map(redact_tripwire_public_source_ref);
         serde_json::json!({
             "schema": TRIPWIRE_HARM_PROMOTION_SCHEMA_V1,
             "candidateId": self.candidate_id,
@@ -1241,7 +1303,7 @@ impl HarmFeedbackPromotionProposal {
             "condition": self.condition,
             "reason": self.input.reason,
             "sourceType": self.input.source_type,
-            "sourceId": self.input.source_id,
+            "sourceId": source_id,
             "confidence": self.input.confidence,
         })
     }
@@ -2001,6 +2063,71 @@ mod tests {
         );
         assert_eq!(json["memoryId"].as_str(), Some("mem_xyz"));
         assert_eq!(json["harmCount"].as_i64(), Some(3));
+    }
+
+    #[test]
+    fn harm_feedback_promotion_json_redacts_public_source_id() -> TestResult {
+        let sensitive_source_id =
+            "file:///Users/alice/private/tripwire.json?api_key=redaction-fixture";
+        let proposal = HarmFeedbackPromotionProposal {
+            candidate_id: "curate_redaction_fixture".to_owned(),
+            input: CreateCurationCandidateInput {
+                workspace_id: "ws_test".to_owned(),
+                candidate_type: "rule".to_owned(),
+                target_memory_id: "mem_redaction".to_owned(),
+                proposed_content: Some("redacted proposal".to_owned()),
+                proposed_confidence: Some(0.7),
+                proposed_trust_class: Some("agent_derived".to_owned()),
+                source_type: "feedback".to_owned(),
+                source_id: Some(sensitive_source_id.to_owned()),
+                reason: "source path should stay private".to_owned(),
+                confidence: 0.7,
+                status: None,
+                created_at: None,
+                ttl_expires_at: None,
+            },
+            condition: "source:memory:mem_redaction remains relevant".to_owned(),
+            memory_id: "mem_redaction".to_owned(),
+            harm_count: 3,
+            threshold: 3,
+        };
+
+        let json = proposal.to_json().to_string();
+
+        ensure(json.contains("[REDACTED_PATH]"), "path placeholder present")?;
+        ensure(json.contains("[REDACTED:"), "secret placeholder present")?;
+        ensure(
+            !json.contains("/Users/alice"),
+            format!("source path leaked in proposal JSON: {json}"),
+        )?;
+        ensure(
+            !json.contains("redaction-fixture"),
+            format!("source secret leaked in proposal JSON: {json}"),
+        )
+    }
+
+    #[test]
+    fn harm_feedback_promotion_json_preserves_safe_source_id() -> TestResult {
+        let outcome = propose_tripwire_from_harmful_feedback(&HarmFeedbackPromotionOptions {
+            workspace_id: "ws_test".to_owned(),
+            memory_id: "mem_safe".to_owned(),
+            harm_count: 3,
+            threshold: 3,
+            memory_summary: None,
+            window_seconds: 86_400,
+            suggested_condition: None,
+        });
+        let HarmFeedbackPromotionOutcome::Promoted(proposal) = outcome else {
+            return Err("expected Promoted variant".to_owned());
+        };
+
+        let json = proposal.to_json();
+
+        ensure(
+            json["sourceId"].as_str(),
+            Some("harm_feedback:mem_safe"),
+            "safe source id preserved",
+        )
     }
 
     #[test]
