@@ -238,12 +238,13 @@ pub fn redact_artifact_record(
         if let Some(path) = record.canonical_path.as_ref() {
             record.canonical_path = Some(redact_path(path, level));
         }
-        if let Some(reference) = record.external_ref.as_ref() {
-            record.external_ref = Some(redact_content(reference, level));
-        }
         if let Some(uri) = record.provenance_uri.as_ref() {
             record.provenance_uri = Some(redact_path(uri, level));
         }
+    }
+
+    if let Some(reference) = record.external_ref.as_ref() {
+        record.external_ref = Some(redact_content(reference, level));
     }
 
     if level.redacts_identifiers() {
@@ -1036,6 +1037,43 @@ mod tests {
         assert!(!written.contains(&secret_fixture));
         assert!(!written.contains("/Users/example/private"));
         ensure(artifact_count, 1, "artifact count")
+    }
+
+    #[test]
+    fn jsonl_exporter_minimal_redacts_secret_artifact_external_ref() -> TestResult {
+        let mut output = Vec::new();
+        let external_ref = "https://example.invalid/artifacts?api_key=redaction-fixture";
+
+        let artifact = ExportArtifactRecord::builder()
+            .artifact_id("art_minimal_external_ref")
+            .workspace_id("wsp_minimal_external_ref")
+            .source_kind("file")
+            .artifact_type("log")
+            .external_ref(external_ref)
+            .content_hash("blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .media_type("text/plain")
+            .size_bytes(42)
+            .redaction_status("checked")
+            .created_at("2026-04-30T12:00:00Z")
+            .updated_at("2026-04-30T12:00:00Z")
+            .build()
+            .map_err(|error| format!("build artifact: {error}"))?;
+
+        let artifact_count = {
+            let mut exporter =
+                JsonlExporter::new(&mut output, RedactionLevel::Minimal, ExportScope::All);
+            exporter
+                .write_artifact(artifact)
+                .map_err(|error| format!("write artifact: {error}"))?;
+            exporter.artifact_count
+        };
+
+        let written = String::from_utf8(output).map_err(|error| format!("valid utf8: {error}"))?;
+        ensure(artifact_count, 1, "artifact count")?;
+        assert!(written.contains(REDACTED_PLACEHOLDER));
+        assert!(!written.contains("redaction-fixture"));
+        assert!(!written.contains(external_ref));
+        Ok(())
     }
 
     #[test]
