@@ -147,6 +147,7 @@ impl McpPrompt {
 enum McpTool {
     Health,
     Status,
+    Doctor,
     Capabilities,
     Search,
     Context,
@@ -161,6 +162,7 @@ impl McpTool {
         match name {
             "ee_health" => Some(Self::Health),
             "ee_status" => Some(Self::Status),
+            "ee_doctor" => Some(Self::Doctor),
             "ee_capabilities" => Some(Self::Capabilities),
             "ee_search" => Some(Self::Search),
             "ee_context" => Some(Self::Context),
@@ -536,6 +538,25 @@ fn handle_tools_list(id: Value) -> Value {
                 {
                     "name": "ee_status",
                     "description": "Run ee status --json and return workspace readiness",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "workspace": {
+                                "type": "string",
+                                "description": "Workspace path (defaults to current directory)"
+                            }
+                        }
+                    },
+                    "annotations": {
+                        "readOnlyHint": true,
+                        "destructiveHint": false,
+                        "idempotentHint": true,
+                        "openWorldHint": false
+                    }
+                },
+                {
+                    "name": "ee_doctor",
+                    "description": "Run ee doctor --json and return health checks with repair actions",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -1056,6 +1077,7 @@ fn build_cli_args_for_tool(tool: McpTool, arguments: &Value) -> Result<Vec<OsStr
     match tool {
         McpTool::Health => push_arg(&mut args, "health"),
         McpTool::Status => push_arg(&mut args, "status"),
+        McpTool::Doctor => push_arg(&mut args, "doctor"),
         McpTool::Capabilities => push_arg(&mut args, "capabilities"),
         McpTool::Search => {
             push_arg(&mut args, "search");
@@ -2201,6 +2223,7 @@ mod tests {
         assert!(tool_names.contains(&"ee_context"));
         assert!(tool_names.contains(&"ee_status"));
         assert!(tool_names.contains(&"ee_health"));
+        assert!(tool_names.contains(&"ee_doctor"));
         assert!(tool_names.contains(&"ee_capabilities"));
         assert!(tool_names.contains(&"ee_memory_show"));
         assert!(tool_names.contains(&"ee_why"));
@@ -2216,6 +2239,7 @@ mod tests {
         for name in [
             "ee_health",
             "ee_status",
+            "ee_doctor",
             "ee_capabilities",
             "ee_search",
             "ee_context",

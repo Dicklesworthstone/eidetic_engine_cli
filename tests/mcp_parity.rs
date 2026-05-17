@@ -25,6 +25,7 @@ type TestResult = Result<(), String>;
 const PARITY_TESTED_TOOLS: &[&str] = &[
     "ee_health",
     "ee_status",
+    "ee_doctor",
     "ee_capabilities",
     "ee_search",
     "ee_context",
@@ -291,6 +292,31 @@ fn mcp_parity_status_command() -> TestResult {
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "status")
+}
+
+/// Parity test: `ee doctor --json` vs `ee_doctor` MCP tool
+#[test]
+fn mcp_parity_doctor_command() -> TestResult {
+    let dir = scenario_dir("doctor")?;
+    init_workspace(&dir)?;
+
+    let (cli_exit, cli_stdout, _cli_stderr) = run_cli(vec![
+        OsString::from("ee"),
+        OsString::from("doctor"),
+        OsString::from("--workspace"),
+        OsString::from(&dir),
+        OsString::from("--json"),
+    ]);
+    ensure(
+        cli_exit == ee::models::ProcessExitCode::Success,
+        "CLI doctor failed",
+    )?;
+
+    let mcp_response =
+        run_mcp_tool_call("ee_doctor", json!({ "workspace": dir.to_string_lossy() }))?;
+    let mcp_text = extract_mcp_tool_text(&mcp_response)?;
+
+    assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "doctor")
 }
 
 /// Parity test: `ee health --json` vs `ee_health` MCP tool
@@ -597,6 +623,7 @@ fn mcp_manifest_covers_walking_skeleton_commands() -> TestResult {
     let walking_skeleton_commands = [
         "ee_status",
         "ee_health",
+        "ee_doctor",
         "ee_capabilities",
         "ee_search",
         "ee_remember",
