@@ -251,6 +251,8 @@ pub fn redact_artifact_record(
     if level.redacts_content() {
         record.snippet = None;
         record.metadata = None;
+    } else if let Some(metadata) = record.metadata.as_mut() {
+        redact_link_metadata(metadata, level);
     }
 
     record
@@ -1029,6 +1031,66 @@ mod tests {
         assert!(written.contains(REDACTED_PATH_PLACEHOLDER));
         assert!(!written.contains(&secret_fixture));
         ensure(artifact_count, 1, "artifact count")
+    }
+
+    #[test]
+    fn jsonl_exporter_standard_redacts_mesh_artifact_metadata_identifiers() -> TestResult {
+        let mut output = Vec::new();
+        let origin_workspace = "/Users/example/private/artifact-workspace";
+        let producer_peer = "nodekey:fedcba9876543210fedcba9876543210";
+        let import_decision = "mesh_artifact_decision_fedcba9876543210";
+        let policy_ref = "mesh_artifact_policy_fedcba9876543210";
+
+        let artifact = ExportArtifactRecord::builder()
+            .artifact_id("art_mesh_artifact_redaction")
+            .workspace_id("wsp_mesh_artifact_redaction")
+            .source_kind("mesh")
+            .artifact_type("support")
+            .canonical_path("/data/projects/example/private/support.json")
+            .content_hash("blake3:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210")
+            .media_type("application/json")
+            .size_bytes(128)
+            .redaction_status("checked")
+            .metadata(serde_json::json!({
+                "mesh": {
+                    "workspaceScopeDecision": "allow",
+                    "originWorkspaceAlias": origin_workspace,
+                    "producerPeer": producer_peer,
+                    "importDecisionId": import_decision,
+                    "policyDecision": {
+                        "schema": "ee.mesh.policy_decision.v1",
+                        "direction": "inbound",
+                        "action": "allow",
+                        "policyRef": policy_ref,
+                        "bodyFetchAllowed": false
+                    }
+                },
+                "source": "agent"
+            }))
+            .created_at("2026-04-30T12:00:00Z")
+            .updated_at("2026-04-30T12:00:00Z")
+            .build()
+            .map_err(|error| format!("build artifact: {error}"))?;
+
+        let artifact_count = {
+            let mut exporter =
+                JsonlExporter::new(&mut output, RedactionLevel::Standard, ExportScope::All);
+            exporter
+                .write_artifact(artifact)
+                .map_err(|error| format!("write artifact: {error}"))?;
+            exporter.artifact_count
+        };
+
+        let written = String::from_utf8(output).map_err(|error| format!("valid utf8: {error}"))?;
+        ensure(artifact_count, 1, "artifact count")?;
+        assert!(written.contains(REDACTED_PATH_PLACEHOLDER));
+        assert!(!written.contains(origin_workspace));
+        assert!(!written.contains(producer_peer));
+        assert!(!written.contains(import_decision));
+        assert!(!written.contains(policy_ref));
+        assert!(written.contains(r#""source":"agent""#));
+        assert!(written.contains(r#""workspaceScopeDecision":"allow""#));
+        Ok(())
     }
 
     #[test]
