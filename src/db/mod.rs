@@ -416,7 +416,7 @@ struct SymlinkComponentInspectionError {
 
 fn first_existing_symlink_component(
     path: &Path,
-) -> Result<Option<PathBuf>, SymlinkComponentInspectionError> {
+) -> std::result::Result<Option<PathBuf>, SymlinkComponentInspectionError> {
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());

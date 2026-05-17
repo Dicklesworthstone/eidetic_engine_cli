@@ -1264,14 +1264,14 @@ mod tests {
         let pack = workspace.join("pack");
         fs::create_dir_all(pack.join("env.json")).map_err(|error| error.to_string())?;
 
-        let error = capture_repro_pack(&CaptureOptions {
-            output_dir: pack.clone(),
-            pack_name: None,
-            description: "non-regular member guard".to_owned(),
-            command: vec!["ee".to_owned(), "status".to_owned()],
+        let error = capture_pack(&CaptureOptions {
+            source: workspace.clone(),
+            output_dir: workspace.clone(),
+            name: Some("pack".to_owned()),
+            version: "1.0.0".to_owned(),
+            description: Some("non-regular member guard".to_owned()),
             include_env: true,
-            include_db_snapshot: false,
-            source_files: Vec::new(),
+            ..Default::default()
         })
         .expect_err("existing directory member should reject repro pack write");
 
