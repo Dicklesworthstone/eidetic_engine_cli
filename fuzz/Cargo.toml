@@ -160,6 +160,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "graph_telemetry"
+path = "fuzz_targets/graph_telemetry.rs"
+test = false
+doc = false
+bench = false
+
 [patch.crates-io]
 asupersync = { path = "/data/projects/asupersync" }
 fsqlite = { path = "/data/projects/frankensqlite/crates/fsqlite" }
