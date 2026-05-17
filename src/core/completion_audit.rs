@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -317,7 +317,12 @@ fn push_static_workspace_evidence(
     expectation: &EvidenceExpectation,
 ) {
     match expectation.kind.as_str() {
-        "file_read" if workspace.join(&expectation.target).is_file() => {
+        "file_read"
+            if static_workspace_file_exists_without_symlinks(
+                workspace,
+                Path::new(&expectation.target),
+            ) =>
+        {
             records.push(evidence_record(
                 "file_read",
                 &expectation.target,
@@ -327,7 +332,12 @@ fn push_static_workspace_evidence(
                 "file exists, but this does not prove the agent read and applied it",
             ));
         }
-        "beads" if workspace.join(".beads").join("issues.jsonl").is_file() => {
+        "beads"
+            if static_workspace_file_exists_without_symlinks(
+                workspace,
+                Path::new(".beads").join("issues.jsonl").as_path(),
+            ) =>
+        {
             records.push(evidence_record(
                 "beads",
                 ".beads/issues.jsonl",
@@ -337,7 +347,9 @@ fn push_static_workspace_evidence(
                 "Beads store exists, but this does not prove status/comment evidence was updated",
             ));
         }
-        "code_inspection" if workspace.join("src").is_dir() => {
+        "code_inspection"
+            if static_workspace_directory_exists_without_symlinks(workspace, Path::new("src")) =>
+        {
             records.push(evidence_record(
                 "code_inspection",
                 "repository",
@@ -347,7 +359,12 @@ fn push_static_workspace_evidence(
                 "source tree exists, but this does not prove a targeted architecture audit happened",
             ));
         }
-        "rch" if workspace.join("scripts").join("rch_verify.sh").is_file() => {
+        "rch"
+            if static_workspace_file_exists_without_symlinks(
+                workspace,
+                Path::new("scripts").join("rch_verify.sh").as_path(),
+            ) =>
+        {
             records.push(evidence_record(
                 "rch",
                 "remote build metadata",
@@ -357,7 +374,12 @@ fn push_static_workspace_evidence(
                 "RCH helper exists, but this does not prove a remote verifier passed",
             ));
         }
-        "file_or_path" if workspace.join(&expectation.target).exists() => {
+        "file_or_path"
+            if static_workspace_path_exists_without_symlinks(
+                workspace,
+                Path::new(&expectation.target),
+            ) =>
+        {
             records.push(evidence_record(
                 "file_or_path",
                 &expectation.target,
@@ -379,6 +401,60 @@ fn push_static_workspace_evidence(
         }
         _ => {}
     }
+}
+
+fn static_workspace_file_exists_without_symlinks(workspace: &Path, relative: &Path) -> bool {
+    static_workspace_path_file_type_without_symlinks(workspace, relative)
+        .is_some_and(|file_type| file_type.is_file())
+}
+
+fn static_workspace_directory_exists_without_symlinks(workspace: &Path, relative: &Path) -> bool {
+    static_workspace_path_file_type_without_symlinks(workspace, relative)
+        .is_some_and(|file_type| file_type.is_dir())
+}
+
+fn static_workspace_path_exists_without_symlinks(workspace: &Path, relative: &Path) -> bool {
+    static_workspace_path_file_type_without_symlinks(workspace, relative).is_some()
+}
+
+fn static_workspace_path_file_type_without_symlinks(
+    workspace: &Path,
+    relative: &Path,
+) -> Option<std::fs::FileType> {
+    let path = workspace.join(relative);
+    if first_existing_static_evidence_symlink_component(&path)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return None;
+    }
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|metadata| metadata.file_type())
+}
+
+fn first_existing_static_evidence_symlink_component(
+    path: &Path,
+) -> std::io::Result<Option<PathBuf>> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
 }
 
 fn agent_mail_archive_present() -> bool {
@@ -2163,6 +2239,46 @@ mod tests {
                 .iter()
                 .any(|item| item.support == RequirementSupport::Direct)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn static_workspace_evidence_ignores_symlinked_file_read_proxy() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let outside = tempdir.path().join("outside-readme.md");
+        std::fs::write(&outside, "outside").expect("outside");
+        symlink(&outside, tempdir.path().join("README.md")).expect("symlink readme");
+
+        let mut records = Vec::new();
+        push_static_workspace_evidence(
+            &mut records,
+            tempdir.path(),
+            &evidence("file_read", "README.md", "direct"),
+        );
+
+        assert!(
+            records.is_empty(),
+            "symlinked workspace file must not count as static read evidence: {records:?}"
+        );
+    }
+
+    #[test]
+    fn static_workspace_evidence_records_regular_file_read_proxy() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tempdir.path().join("README.md"), "readme").expect("readme");
+
+        let mut records = Vec::new();
+        push_static_workspace_evidence(
+            &mut records,
+            tempdir.path(),
+            &evidence("file_read", "README.md", "direct"),
+        );
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, "file_read");
+        assert_eq!(records[0].status, EvidenceRecordStatus::StaticOnly);
     }
 
     #[test]
