@@ -12,3 +12,8 @@ ee context "prepare release" --workspace . --max-tokens 1000 --json \
 ```
 
 The contract check lives at `scripts/e2e_overhaul/agent_consumer.sh`.
+
+For shared-checkout commit readiness, see
+[`docs/agent-ux/workspace-hygiene.md`](agent-ux/workspace-hygiene.md). The
+workspace hygiene surface is read-only and explains dirty-path buckets,
+reason codes, and scratch-artifact examples for agent commits.
