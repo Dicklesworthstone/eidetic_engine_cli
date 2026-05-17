@@ -26,6 +26,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use regex_lite::Regex;
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
@@ -39,6 +40,14 @@ fn fixtures_dir() -> PathBuf {
 
 fn src_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
+}
+
+fn degradation_source_file() -> PathBuf {
+    src_dir().join("models").join("degradation.rs")
+}
+
+fn docs_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs")
 }
 
 fn allowed_severities() -> BTreeSet<&'static str> {
@@ -208,6 +217,74 @@ fn validate_fixture(path: &Path) -> TestResult {
     Ok(())
 }
 
+fn collect_workspace_hygiene_codes() -> Result<Vec<String>, String> {
+    let path = degradation_source_file();
+    let source =
+        fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let regex =
+        Regex::new(r#"pub const WORKSPACE_HYGIENE_[A-Z0-9_]+_CODE:\s*&str\s*=\s*"([^"]+)""#)
+            .map_err(|error| format!("compile workspace-hygiene code regex: {error}"))?;
+    let mut codes: Vec<String> = regex
+        .captures_iter(&source)
+        .filter_map(|captures| captures.get(1).map(|match_| match_.as_str().to_owned()))
+        .collect();
+    codes.sort();
+    codes.dedup();
+    Ok(codes)
+}
+
+fn read_fixture(path: &Path) -> Result<Value, String> {
+    let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("parse {}: {error}", path.display()))
+}
+
+fn array_contains_string(value: &Value, pointer: &str, expected: &str) -> bool {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.iter().any(|item| item.as_str() == Some(expected)))
+}
+
+fn string_array_is_non_empty(value: &Value, pointer: &str) -> bool {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty() && items.iter().all(Value::is_string))
+}
+
+fn repair_strings_are_pinned(expected: &Value) -> bool {
+    expected
+        .get("repair_string")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.is_empty())
+        || expected
+            .get("repair_strings")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty() && items.iter().all(Value::is_string))
+}
+
+fn fixture_only_rationale(code: &str) -> Option<&'static str> {
+    match code {
+        // These are shared git degraded codes. Their catalog fixtures are
+        // currently public-triggered by `ee swarm brief` and list
+        // `workspace hygiene` as a surface until the workspace-hygiene
+        // command emits the same shared code through its own CLI path.
+        "git_unavailable" | "git_not_repository" => Some("shared git degraded fixture"),
+        _ => None,
+    }
+}
+
+fn taxonomy_has_code_with_severity(taxonomy: &str, code: &str, severity: &str) -> bool {
+    taxonomy.lines().any(|line| {
+        line.contains(&format!("| `{code}` |")) && line.contains(&format!("| {severity} |"))
+    })
+}
+
+fn generated_docs_has_fixture_link(docs: &str, code: &str) -> bool {
+    docs.contains(&format!("## `{code}`"))
+        && docs.contains(&format!("tests/fixtures/failure_modes/{code}.json"))
+}
+
 #[test]
 fn failure_mode_fixtures_validate_catalog() -> TestResult {
     let dir = fixtures_dir();
@@ -227,8 +304,13 @@ fn failure_mode_fixtures_validate_catalog() -> TestResult {
             errors.push(error);
             continue;
         }
-        let bytes = fs::read(path).unwrap();
-        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        let value = match read_fixture(path) {
+            Ok(value) => value,
+            Err(error) => {
+                errors.push(error);
+                continue;
+            }
+        };
         if let Some(code) = value.pointer("/code").and_then(Value::as_str) {
             if !codes.insert(code.to_owned()) {
                 errors.push(format!(
@@ -264,4 +346,131 @@ fn failure_mode_catalog_has_schema_and_readme() -> TestResult {
         format!("{}: README.md must exist", readme.display()),
     )?;
     Ok(())
+}
+
+#[test]
+fn workspace_hygiene_degraded_codes_have_fixture_taxonomy_and_trigger_contract() -> TestResult {
+    let codes = collect_workspace_hygiene_codes()?;
+    ensure(
+        !codes.is_empty(),
+        format!(
+            "{}: expected at least one WORKSPACE_HYGIENE_*_CODE constant",
+            degradation_source_file().display()
+        ),
+    )?;
+
+    let taxonomy_path = docs_dir().join("degraded_code_taxonomy.md");
+    let generated_docs_path = docs_dir().join("degraded_codes.md");
+    let taxonomy = fs::read_to_string(&taxonomy_path)
+        .map_err(|error| format!("read {}: {error}", taxonomy_path.display()))?;
+    let generated_docs = fs::read_to_string(&generated_docs_path)
+        .map_err(|error| format!("read {}: {error}", generated_docs_path.display()))?;
+
+    let mut errors = Vec::new();
+    for code in codes {
+        let fixture_path = fixtures_dir().join(format!("{code}.json"));
+        if !fixture_path.exists() {
+            errors.push(format!(
+                "{}: missing workspace-hygiene degraded-code fixture for `{code}`",
+                fixture_path.display()
+            ));
+            continue;
+        }
+
+        let fixture = match read_fixture(&fixture_path) {
+            Ok(fixture) => fixture,
+            Err(error) => {
+                errors.push(error);
+                continue;
+            }
+        };
+        let ctx = fixture_path.display().to_string();
+
+        let fixture_code = fixture.pointer("/code").and_then(Value::as_str);
+        if fixture_code != Some(code.as_str()) {
+            errors.push(format!(
+                "{ctx}: fixture code {:?} must match workspace-hygiene constant `{code}`",
+                fixture_code
+            ));
+        }
+        if !array_contains_string(&fixture, "/surfaces", "workspace hygiene") {
+            errors.push(format!(
+                "{ctx}: surfaces[] must include `workspace hygiene` for `{code}`"
+            ));
+        }
+
+        let severity = fixture
+            .pointer("/severity")
+            .and_then(Value::as_str)
+            .unwrap_or("<missing>");
+        let expected = fixture
+            .pointer("/expected_emission")
+            .unwrap_or(&Value::Null);
+        let expected_severity = expected
+            .get("severity")
+            .and_then(Value::as_str)
+            .unwrap_or("<missing>");
+        if expected_severity != severity {
+            errors.push(format!(
+                "{ctx}: expected_emission.severity `{expected_severity}` must match fixture severity `{severity}`"
+            ));
+        }
+        if !string_array_is_non_empty(expected, "/message_contains") {
+            errors.push(format!(
+                "{ctx}: expected_emission.message_contains must pin at least one substring"
+            ));
+        }
+        if fixture.pointer("/repair_present").and_then(Value::as_bool) != Some(true) {
+            errors.push(format!(
+                "{ctx}: repair_present must be true for workspace-hygiene degraded code `{code}`"
+            ));
+        }
+        if expected
+            .get("repair_contains")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            errors.push(format!(
+                "{ctx}: expected_emission.repair_contains must pin the repair topic"
+            ));
+        }
+        if !repair_strings_are_pinned(expected) {
+            errors.push(format!(
+                "{ctx}: expected_emission must pin repair_string or repair_strings"
+            ));
+        }
+
+        let invocation = fixture
+            .pointer("/trigger/invocation")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !invocation.contains("ee workspace hygiene") && fixture_only_rationale(&code).is_none() {
+            errors.push(format!(
+                "{ctx}: trigger.invocation must use `ee workspace hygiene` or the test must document a fixture-only rationale for `{code}`"
+            ));
+        }
+
+        if !taxonomy_has_code_with_severity(&taxonomy, &code, severity) {
+            errors.push(format!(
+                "{}: missing taxonomy row for `{code}` with severity `{severity}`",
+                taxonomy_path.display()
+            ));
+        }
+        if !generated_docs_has_fixture_link(&generated_docs, &code) {
+            errors.push(format!(
+                "{}: generated degraded-code docs must include heading and fixture link for `{code}`",
+                generated_docs_path.display()
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} workspace-hygiene degraded catalog error(s):\n  - {}",
+            errors.len(),
+            errors.join("\n  - "),
+        ))
+    }
 }
