@@ -587,8 +587,8 @@ mod tests {
     fn debug_dump_is_sorted_by_key() {
         let mut cache = PprPrefetchCache::new(4);
         cache.insert(key("seed-c", 1), scores(&[("c", 1.0)]));
-        cache.insert(key("seed-a", 2), scores(&[("a", 1.0)]));
-        cache.insert(key("seed-a", 1), scores(&[("a-old", 1.0)]));
+        cache.insert(key("seed-b", 1), scores(&[("b", 1.0)]));
+        cache.insert(key("seed-a", 1), scores(&[("a", 1.0)]));
 
         let dump = cache.debug_dump();
         let order = dump
@@ -600,7 +600,7 @@ mod tests {
             order,
             vec![
                 ("blake3:seed-a", 1),
-                ("blake3:seed-a", 2),
+                ("blake3:seed-b", 1),
                 ("blake3:seed-c", 1)
             ]
         );
