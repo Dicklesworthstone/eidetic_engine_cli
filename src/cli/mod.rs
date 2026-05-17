@@ -38890,8 +38890,9 @@ mod tests {
         PackCommand, PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, RuleCommand,
         SERVE_UNAVAILABLE_CODE, ShadowMode, SituationCommand, StatusArgs, SupportCommand,
         SwarmBriefArgs, SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand, VerifyCommand,
-        WorkflowCommand, decay_settings_from_config, load_maintenance_decay_settings,
-        load_witness_retention_policy, run, write_index_rebuild_error,
+        WorkflowCommand, db_inspect_redact_source_uri, decay_settings_from_config,
+        load_maintenance_decay_settings, load_witness_retention_policy, run,
+        write_index_rebuild_error,
     };
     use crate::config::MeshCommandMode;
     use crate::core::index::IndexRebuildError;
