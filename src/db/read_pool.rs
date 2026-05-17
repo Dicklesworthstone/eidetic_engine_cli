@@ -182,6 +182,23 @@ pub struct SnapshotDrainReport {
     pub force_poisoned: Vec<ExpiredSnapshotPin>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActiveSnapshotPin {
+    pub pin_id: u64,
+    pub slot_id: Option<u64>,
+    pub pin_age_ms: u128,
+    pub max_pin_duration_ms: u128,
+    pub poisoned: bool,
+    pub release_state: SnapshotPinReleaseState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SnapshotPinReleaseState {
+    Active,
+    Expired,
+    Poisoned,
+}
+
 impl ReadConnectionPool {
     #[must_use]
     pub fn new(database: DatabaseConfig, config: PoolConfig) -> Self {
@@ -326,6 +343,17 @@ impl ReadConnectionPool {
             acquire_wait: acquire_wait_stats(&state.acquire_wait_ns),
             size_was_zero: self.config.size_was_zero(),
         }
+    }
+
+    #[must_use]
+    pub fn active_snapshot_pins(&self) -> Vec<ActiveSnapshotPin> {
+        let now = Instant::now();
+        let state = self.lock_state();
+        state
+            .active_pins
+            .iter()
+            .map(|(pin_id, record)| active_snapshot_pin_from_record(*pin_id, record, now))
+            .collect()
     }
 
     fn release(&self, slot_id: u64, connection: DbConnection) {
@@ -698,6 +726,33 @@ fn expired_pin_count(active_pins: &BTreeMap<u64, ActivePinRecord>) -> usize {
                     >= record.max_pin_duration
         })
         .count()
+}
+
+fn active_snapshot_pin_from_record(
+    pin_id: u64,
+    record: &ActivePinRecord,
+    now: Instant,
+) -> ActiveSnapshotPin {
+    let age = now
+        .checked_duration_since(record.acquired_at)
+        .unwrap_or(Duration::ZERO);
+    let poisoned = record.poisoned.load(Ordering::Acquire);
+    let release_state = if poisoned {
+        SnapshotPinReleaseState::Poisoned
+    } else if age >= record.max_pin_duration {
+        SnapshotPinReleaseState::Expired
+    } else {
+        SnapshotPinReleaseState::Active
+    };
+
+    ActiveSnapshotPin {
+        pin_id,
+        slot_id: record.slot_id,
+        pin_age_ms: age.as_millis(),
+        max_pin_duration_ms: record.max_pin_duration.as_millis(),
+        poisoned,
+        release_state,
+    }
 }
 
 fn drop_idle_connections(connections: Vec<DbConnection>) {
@@ -1262,6 +1317,43 @@ mod tests {
         drop(pin);
         assert_eq!(pool.stats().active_pins, 0);
         assert_eq!(pool.stats().expired_pins, 0);
+    }
+
+    #[test]
+    fn active_snapshot_pins_report_ordered_lifecycle_metadata() {
+        let tempdir = must(tempfile::tempdir(), "tempdir creates");
+        let database_path = tempdir.path().join("read-pool-active-pins.db");
+        seed_snapshot_database(&database_path);
+        let pool = ReadConnectionPool::new(
+            DatabaseConfig::file(database_path),
+            PoolConfig::new(2, Duration::from_secs(30)).with_max_pin_duration(Duration::ZERO),
+        );
+        let first = must(pool.pin_snapshot(), "first snapshot pin opens");
+        let second = must(pool.pin_snapshot(), "second snapshot pin opens");
+
+        let active = pool.active_snapshot_pins();
+        assert_eq!(active.len(), 2);
+        assert!(active[0].pin_id < active[1].pin_id);
+        assert_eq!(active[0].slot_id, first.slot_id());
+        assert_eq!(active[1].slot_id, second.slot_id());
+        assert_eq!(active[0].max_pin_duration_ms, 0);
+        assert_eq!(active[1].max_pin_duration_ms, 0);
+        assert_eq!(active[0].release_state, SnapshotPinReleaseState::Expired);
+        assert_eq!(active[1].release_state, SnapshotPinReleaseState::Expired);
+        assert!(!active[0].poisoned);
+        assert!(!active[1].poisoned);
+
+        let expired = pool.expire_stale_pins();
+        assert_eq!(expired.len(), 2);
+        let poisoned = pool.active_snapshot_pins();
+        assert_eq!(poisoned[0].release_state, SnapshotPinReleaseState::Poisoned);
+        assert_eq!(poisoned[1].release_state, SnapshotPinReleaseState::Poisoned);
+        assert!(poisoned[0].poisoned);
+        assert!(poisoned[1].poisoned);
+
+        drop(first);
+        drop(second);
+        assert!(pool.active_snapshot_pins().is_empty());
     }
 
     #[test]
