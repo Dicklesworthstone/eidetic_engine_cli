@@ -6193,6 +6193,97 @@ mod tests {
     }
 
     #[test]
+    fn context_ppr_cache_separates_same_count_seed_sets() -> Result<(), String> {
+        use crate::db::{CreateMemoryLinkInput, MemoryLinkRelation, MemoryLinkSource};
+
+        let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
+        enable_context_ppr_feature(&fixture.workspace_path)?;
+        fixture
+            .connection
+            .insert_memory_link(
+                "link_00000000000000000000000912",
+                &CreateMemoryLinkInput {
+                    src_memory_id: fixture.orphan.to_string(),
+                    dst_memory_id: fixture.seed.to_string(),
+                    relation: MemoryLinkRelation::Supports,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    directed: true,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: MemoryLinkSource::Agent,
+                    created_by: Some("context-ppr-cache-test".to_string()),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let mut first_candidates = vec![
+            ppr_candidate(fixture.seed, 0.10)?,
+            ppr_candidate(fixture.neighbor, 0.10)?,
+            ppr_candidate(fixture.orphan, 0.10)?,
+        ];
+        let first_report = ppr_search_report(vec![ppr_hit(fixture.seed, 0.90, Some(0.95))]);
+        let mut first_degraded = Vec::new();
+
+        let first_metrics = super::apply_personalized_pagerank_rerank(
+            &fixture.connection,
+            &fixture.workspace_path,
+            &first_report,
+            &mut first_candidates,
+            1.0,
+            &mut first_degraded,
+        );
+
+        assert_eq!(first_metrics.reranked_candidates, 3);
+        assert!(
+            first_degraded.is_empty(),
+            "first PPR pass should not degrade: {first_degraded:?}"
+        );
+        let first_orphan_score = first_candidates
+            .iter()
+            .find(|candidate| candidate.memory_id == fixture.orphan)
+            .map(|candidate| candidate.relevance.into_inner())
+            .ok_or_else(|| "first pass should retain orphan candidate".to_string())?;
+        assert_eq!(
+            first_orphan_score, 0.0,
+            "orphan should not inherit rank from a seed-only cache entry"
+        );
+
+        let mut second_candidates = vec![
+            ppr_candidate(fixture.seed, 0.10)?,
+            ppr_candidate(fixture.neighbor, 0.10)?,
+            ppr_candidate(fixture.orphan, 0.10)?,
+        ];
+        let second_report = ppr_search_report(vec![ppr_hit(fixture.orphan, 0.90, Some(0.95))]);
+        let mut second_degraded = Vec::new();
+
+        let second_metrics = super::apply_personalized_pagerank_rerank(
+            &fixture.connection,
+            &fixture.workspace_path,
+            &second_report,
+            &mut second_candidates,
+            1.0,
+            &mut second_degraded,
+        );
+
+        assert_eq!(second_metrics.reranked_candidates, 3);
+        assert!(
+            second_degraded.is_empty(),
+            "second PPR pass should not degrade: {second_degraded:?}"
+        );
+        let second_orphan_score = second_candidates
+            .iter()
+            .find(|candidate| candidate.memory_id == fixture.orphan)
+            .map(|candidate| candidate.relevance.into_inner())
+            .ok_or_else(|| "second pass should retain orphan candidate".to_string())?;
+        assert!(
+            second_orphan_score > first_orphan_score,
+            "same-count seed sets must not reuse the first PPR cache result"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn context_ppr_feature_disabled_preserves_text_scores() -> Result<(), String> {
         let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
         let mut candidates = vec![
