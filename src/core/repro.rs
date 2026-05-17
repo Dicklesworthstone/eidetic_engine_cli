@@ -785,6 +785,7 @@ fn write_pack_file_no_symlinks(
     content: &[u8],
 ) -> Result<(), String> {
     let target_path = resolve_pack_file_path_for_write_no_symlinks(pack_path, relative_path)?;
+    ensure_pack_write_target_is_regular_or_missing(&target_path)?;
     fs::write(&target_path, content).map_err(|error| {
         format!(
             "pack_artifact_write_failed: {}: {}",
@@ -792,6 +793,22 @@ fn write_pack_file_no_symlinks(
             error
         )
     })
+}
+
+fn ensure_pack_write_target_is_regular_or_missing(target_path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(target_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(format!(
+            "pack_artifact_write_failed: {}: not a regular file",
+            target_path.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "pack_artifact_write_failed: {}: {}",
+            target_path.display(),
+            error
+        )),
+    }
 }
 
 fn pack_file_metadata_no_symlinks(
@@ -1238,6 +1255,35 @@ mod tests {
 
         assert_eq!(error.code(), "storage");
         assert!(error.message().contains("symlink"));
+        Ok(())
+    }
+
+    #[test]
+    fn capture_pack_rejects_non_regular_member_before_write() -> TestResult {
+        let workspace = temp_root("ee_repro_capture_non_regular_member_")?;
+        let pack = workspace.join("pack");
+        fs::create_dir_all(pack.join("env.json")).map_err(|error| error.to_string())?;
+
+        let error = capture_repro_pack(&CaptureOptions {
+            output_dir: pack.clone(),
+            pack_name: None,
+            description: "non-regular member guard".to_owned(),
+            command: vec!["ee".to_owned(), "status".to_owned()],
+            include_env: true,
+            include_db_snapshot: false,
+            source_files: Vec::new(),
+        })
+        .expect_err("existing directory member should reject repro pack write");
+
+        assert!(
+            error.message().contains("not a regular file"),
+            "expected non-regular write failure, got: {}",
+            error.message()
+        );
+        assert!(
+            pack.join("env.json").is_dir(),
+            "non-regular repro pack member should remain a directory"
+        );
         Ok(())
     }
 }
