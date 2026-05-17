@@ -890,6 +890,39 @@ fn verify_artifact_file(
         }
     }
 
+    match fs::symlink_metadata(&artifact_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            findings.push(ReleaseVerificationFinding::error(
+                ReleaseVerificationCode::UnsafeArtifactPath,
+                Some(artifact.artifact_id.clone()),
+                format!(
+                    "artifact file '{}' is not a regular file",
+                    artifact.file_name
+                ),
+                "Use a regular archive file contained directly under the artifact root.",
+            ));
+            return;
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) => {}
+        Err(error) => {
+            findings.push(ReleaseVerificationFinding::error(
+                ReleaseVerificationCode::MissingArtifact,
+                Some(artifact.artifact_id.clone()),
+                format!(
+                    "artifact file '{}' could not be inspected: {error}",
+                    artifact.file_name
+                ),
+                "Check artifact permissions and rerun verification.",
+            ));
+            return;
+        }
+    }
+
     let mut file = match File::open(&artifact_path) {
         Ok(file) => file,
         Err(_) => {
@@ -1148,6 +1181,35 @@ mod tests {
         ensure(
             !codes.contains(&ReleaseVerificationCode::ChecksumMismatch),
             "symlink target bytes must not be accepted as artifact evidence",
+        )
+    }
+
+    #[test]
+    fn verification_rejects_non_regular_artifact_file() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let artifact_root = tempdir.path().join("artifacts");
+        fs::create_dir_all(&artifact_root).map_err(|error| error.to_string())?;
+        let artifact =
+            ReleaseArtifact::from_bytes("0.1.0", "commit-a", "x86_64-unknown-linux-gnu", b"binary");
+        fs::create_dir(artifact_root.join(&artifact.file_name))
+            .map_err(|error| error.to_string())?;
+        let manifest = ReleaseManifest::new("0.1.0", "commit-a", vec![artifact]);
+
+        let report = manifest.verify(Some(&artifact_root));
+        let codes = finding_codes(&report);
+
+        ensure_equal(
+            report.status,
+            ReleaseVerificationStatus::Failed,
+            "non-regular artifact status",
+        )?;
+        ensure(
+            codes.contains(&ReleaseVerificationCode::UnsafeArtifactPath),
+            "non-regular artifact should be rejected before open",
+        )?;
+        ensure(
+            !codes.contains(&ReleaseVerificationCode::MissingArtifact),
+            "non-regular artifact should not be flattened into missing artifact",
         )
     }
 
