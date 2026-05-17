@@ -232,6 +232,8 @@ fn restore_relocation(
     for entry in &manifest.entries {
         let original = manifest_entry_path(entry, "originalPath", &entry.original_path)?;
         let destination = manifest_entry_path(entry, "destinationPath", &entry.destination_path)?;
+        reject_existing_symlink_component(&original)?;
+        reject_existing_symlink_component(&destination)?;
         if original.exists() {
             if let Some(expected) = entry.blake3.as_deref() {
                 let actual = hash_file(&original)?;
@@ -368,6 +370,8 @@ fn apply_manifest_copy(manifest: &ArtifactRelocationManifest) -> Result<(), Doma
     for entry in &manifest.entries {
         let original = manifest_entry_path(entry, "originalPath", &entry.original_path)?;
         let destination = manifest_entry_path(entry, "destinationPath", &entry.destination_path)?;
+        reject_existing_symlink_component(&original)?;
+        reject_existing_symlink_component(&destination)?;
         if destination.exists() {
             if let Some(expected) = entry.blake3.as_deref() {
                 let actual = hash_file(&destination)?;
@@ -814,6 +818,48 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn relocation_apply_rejects_existing_symlinked_destination_file_before_hash() -> TestResult {
+        let workspace = temp_path("symlink-final-destination-workspace");
+        let source = workspace.join("target/debug/sample.o");
+        fs::create_dir_all(parent_dir(&source)?).map_err(|error| error.to_string())?;
+        fs::write(&source, "artifact bytes\n").map_err(|error| error.to_string())?;
+        let destination = temp_path("symlink-final-destination");
+        let expected_copy = destination
+            .join(RELOCATION_DIR)
+            .join("target/debug/sample.o");
+        fs::create_dir_all(parent_dir(&expected_copy)?).map_err(|error| error.to_string())?;
+        let outside_target = temp_path("symlink-final-destination-target").join("sample.o");
+        fs::create_dir_all(parent_dir(&outside_target)?).map_err(|error| error.to_string())?;
+        fs::write(&outside_target, "artifact bytes\n").map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_target, &expected_copy)
+            .map_err(|error| error.to_string())?;
+        let manifest = temp_path("symlink-final-destination-manifest").join("relocation.json");
+
+        let result = relocate_artifacts(&ArtifactRelocationOptions {
+            workspace_path: &workspace,
+            source_path: Some(&source),
+            destination_root: Some(&destination),
+            manifest_path: &manifest,
+            actor: Some("test"),
+            mode: ArtifactRelocationMode::Apply,
+            force_with_explicit_path: false,
+        });
+
+        if !matches!(result, Err(DomainError::PolicyDenied { .. })) {
+            return Err(format!("expected policy denial, got {result:?}"));
+        }
+        let outside = fs::read_to_string(&outside_target).map_err(|error| error.to_string())?;
+        if outside != "artifact bytes\n" {
+            return Err("apply mutated symlink target before rejecting".to_owned());
+        }
+        if manifest.exists() {
+            return Err("manifest was written after symlinked destination rejection".to_owned());
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn relocation_apply_rejects_symlinked_destination_root() -> TestResult {
         let workspace = temp_path("symlink-destination-workspace");
         let source = workspace.join("target/debug/sample.o");
@@ -1014,6 +1060,49 @@ mod tests {
                 "expected regular-file storage error, got {other:?}"
             )),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relocation_restore_rejects_existing_symlinked_original_file_before_hash() -> TestResult {
+        let workspace = temp_path("restore-symlink-final-original-workspace");
+        let original = workspace.join("target/debug/restored.o");
+        fs::create_dir_all(parent_dir(&original)?).map_err(|error| error.to_string())?;
+        let outside_original =
+            temp_path("restore-symlink-final-original-target").join("restored.o");
+        fs::create_dir_all(parent_dir(&outside_original)?).map_err(|error| error.to_string())?;
+        fs::write(&outside_original, "restore bytes\n").map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_original, &original)
+            .map_err(|error| error.to_string())?;
+        let destination = temp_path("restore-symlink-final-original-destination")
+            .join(RELOCATION_DIR)
+            .join("target/debug/restored.o");
+        fs::create_dir_all(parent_dir(&destination)?).map_err(|error| error.to_string())?;
+        fs::write(&destination, "restore bytes\n").map_err(|error| error.to_string())?;
+        let manifest_path =
+            temp_path("restore-symlink-final-original-manifest").join("relocation.json");
+        let manifest =
+            relocation_manifest_for(&workspace, &original, &destination, &manifest_path)?;
+        write_relocation_manifest(&manifest_path, &manifest)?;
+
+        let result = relocate_artifacts(&ArtifactRelocationOptions {
+            workspace_path: &workspace,
+            source_path: None,
+            destination_root: None,
+            manifest_path: &manifest_path,
+            actor: Some("test"),
+            mode: ArtifactRelocationMode::Restore,
+            force_with_explicit_path: false,
+        });
+
+        if !matches!(result, Err(DomainError::PolicyDenied { .. })) {
+            return Err(format!("expected policy denial, got {result:?}"));
+        }
+        let outside = fs::read_to_string(&outside_original).map_err(|error| error.to_string())?;
+        if outside != "restore bytes\n" {
+            return Err("restore mutated symlink target before rejecting".to_owned());
+        }
+        Ok(())
     }
 
     #[cfg(unix)]

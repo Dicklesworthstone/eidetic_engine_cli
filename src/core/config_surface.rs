@@ -718,7 +718,10 @@ fn set_toml_value(document: &mut DocumentMut, path: &[&str], value: TomlScalar) 
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigSurfaceOptions, get_config, graph_config_keys, set_config, show_config};
+    use super::{
+        ConfigSurfaceOptions, ensure_config_write_path_is_regular_or_missing, get_config,
+        graph_config_keys, set_config, show_config,
+    };
     use std::fs;
 
     type TestResult = Result<(), String>;
