@@ -638,6 +638,7 @@ fn serialize_regression_fixture(fixture: &DeterminismRegressionFixture) -> Resul
 }
 
 fn reject_symlinked_regression_fixture_dir(dir: &Path, operation: &str) -> Result<(), String> {
+    reject_symlinked_regression_fixture_path_components(dir, operation)?;
     let metadata = fs::symlink_metadata(dir)
         .map_err(|error| format!("metadata {}: {error}", dir.display()))?;
     if metadata.file_type().is_symlink() {
@@ -653,6 +654,7 @@ fn reject_existing_symlinked_regression_fixture_path(
     path: &Path,
     operation: &str,
 ) -> Result<(), String> {
+    reject_symlinked_regression_fixture_path_components(path, operation)?;
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
             "{operation} {}: regression fixture path is a symlink",
@@ -664,10 +666,38 @@ fn reject_existing_symlinked_regression_fixture_path(
     }
 }
 
+fn reject_symlinked_regression_fixture_path_components(
+    path: &Path,
+    operation: &str,
+) -> Result<(), String> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "{operation} {}: regression fixture path traverses symlinked component {}",
+                    path.display(),
+                    current.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
+            {
+                break;
+            }
+            Err(error) => return Err(format!("metadata {}: {error}", current.display())),
+        }
+    }
+    Ok(())
+}
+
 fn persist_regression_fixture(
     dir: &Path,
     fixture: &DeterminismRegressionFixture,
 ) -> Result<PathBuf, String> {
+    reject_symlinked_regression_fixture_path_components(dir, "write")?;
     fs::create_dir_all(dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
     reject_symlinked_regression_fixture_dir(dir, "write")?;
     let path = dir.join(regression_fixture_file_name(&fixture.input_hash)?);
@@ -678,6 +708,7 @@ fn persist_regression_fixture(
 }
 
 fn load_regression_fixtures(dir: &Path) -> Result<Vec<DeterminismRegressionFixture>, String> {
+    reject_symlinked_regression_fixture_path_components(dir, "read")?;
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -1363,6 +1394,31 @@ fn determinism_regression_fixture_loader_rejects_symlinked_fixture_dir() -> Resu
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn determinism_regression_fixture_loader_rejects_symlinked_parent_component() -> Result<(), String>
+{
+    use std::os::unix::fs::symlink;
+
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let real_parent = tempdir.path().join("real-parent");
+    fs::create_dir(&real_parent).map_err(|error| error.to_string())?;
+    let linked_parent = tempdir.path().join("linked-parent");
+    symlink(&real_parent, &linked_parent).map_err(|error| error.to_string())?;
+    let fixture_dir = linked_parent.join("proptest-regressions");
+
+    let error = load_regression_fixtures(&fixture_dir)
+        .expect_err("symlinked fixture parent components should not be followed");
+
+    assert!(error.contains("symlinked component"));
+    assert!(error.contains(&linked_parent.display().to_string()));
+    assert!(
+        !real_parent.join("proptest-regressions").exists(),
+        "loader should not create or traverse the real parent"
+    );
+    Ok(())
+}
+
 #[test]
 fn determinism_regression_fixture_loader_tolerates_missing_dir() -> Result<(), String> {
     let missing = Path::new("tests/fixtures/proptest_regressions");
@@ -1419,6 +1475,34 @@ fn determinism_regression_fixture_persist_rejects_symlinked_fixture_dir() -> Res
 
     assert!(error.contains("regression fixture directory is a symlink"));
     assert!(error.contains(&symlink_dir.display().to_string()));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn determinism_regression_fixture_persist_rejects_symlinked_parent_component() -> Result<(), String>
+{
+    use std::os::unix::fs::symlink;
+
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let real_parent = tempdir.path().join("real-parent");
+    fs::create_dir(&real_parent).map_err(|error| error.to_string())?;
+    let linked_parent = tempdir.path().join("linked-parent");
+    symlink(&real_parent, &linked_parent).map_err(|error| error.to_string())?;
+    let fixture_dir = linked_parent.join("proptest-regressions");
+    let fixture =
+        regression_fixture_for_mismatch(126, b"symlinked-parent", b"expected", b"observed")
+            .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+
+    let error = persist_regression_fixture(&fixture_dir, &fixture)
+        .expect_err("persist should reject symlinked fixture parent components");
+
+    assert!(error.contains("symlinked component"));
+    assert!(error.contains(&linked_parent.display().to_string()));
+    assert!(
+        !real_parent.join("proptest-regressions").exists(),
+        "persist must not create fixture directories through a symlinked parent"
+    );
     Ok(())
 }
 
