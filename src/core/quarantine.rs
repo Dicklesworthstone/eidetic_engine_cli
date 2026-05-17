@@ -5,6 +5,8 @@
 //! `ee diag quarantine --json` to surface trust decay information to agents.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::db::{
@@ -178,19 +180,39 @@ impl QuarantineReport {
             }
         };
         let database_path = workspace_path.join(".ee").join("ee.db");
-        if !database_path.is_file() {
-            return Self::gather_with_storage(
-                Vec::new(),
-                QuarantineStorageStatus::Missing,
-                Some(workspace_path.display().to_string()),
-                Some(database_path.display().to_string()),
-                vec![QuarantineDegradation {
-                    code: "quarantine_database_missing",
-                    severity: "medium",
-                    message: format!("No ee database was found at {}.", database_path.display()),
-                    repair: "ee init --workspace .",
-                }],
-            );
+        match quarantine_database_path_state(&database_path) {
+            Ok(QuarantineDatabasePathState::Ready) => {}
+            Ok(QuarantineDatabasePathState::Missing) => {
+                return Self::gather_with_storage(
+                    Vec::new(),
+                    QuarantineStorageStatus::Missing,
+                    Some(workspace_path.display().to_string()),
+                    Some(database_path.display().to_string()),
+                    vec![QuarantineDegradation {
+                        code: "quarantine_database_missing",
+                        severity: "medium",
+                        message: format!(
+                            "No ee database was found at {}.",
+                            database_path.display()
+                        ),
+                        repair: "ee init --workspace .",
+                    }],
+                );
+            }
+            Err(error) => {
+                return Self::gather_with_storage(
+                    Vec::new(),
+                    QuarantineStorageStatus::Unavailable,
+                    Some(workspace_path.display().to_string()),
+                    Some(database_path.display().to_string()),
+                    vec![QuarantineDegradation {
+                        code: "quarantine_database_unreadable",
+                        severity: "medium",
+                        message: format!("Failed to inspect quarantine database: {error}."),
+                        repair: "ee doctor --json",
+                    }],
+                );
+            }
         }
 
         let workspace_id = super::curate::stable_workspace_id(&workspace_path);
@@ -406,6 +428,66 @@ fn canonical_workspace_path(path: &Path) -> Result<PathBuf, String> {
             absolute.display()
         )
     })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuarantineDatabasePathState {
+    Ready,
+    Missing,
+}
+
+fn quarantine_database_path_state(path: &Path) -> io::Result<QuarantineDatabasePathState> {
+    if let Some(symlink_path) = first_existing_quarantine_symlink_component(path)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "quarantine database path {} traverses symlinked component {}",
+                path.display(),
+                symlink_path.display()
+            ),
+        ));
+    }
+
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(QuarantineDatabasePathState::Ready),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "quarantine database path is not a regular file: {}",
+                path.display()
+            ),
+        )),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(QuarantineDatabasePathState::Missing)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn first_existing_quarantine_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
 }
 
 fn apply_feedback_event(
@@ -665,6 +747,91 @@ mod tests {
             report.blocked_sources[0].source_id.as_str(),
             "cass://bad-source",
             "blocked source id",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gather_for_workspace_rejects_database_under_symlinked_metadata_dir() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let outside_metadata = dir.path().join("outside-ee");
+        fs::create_dir_all(&outside_metadata).map_err(|error| error.to_string())?;
+        fs::write(outside_metadata.join("ee.db"), b"outside db")
+            .map_err(|error| error.to_string())?;
+        symlink(&outside_metadata, workspace.join(".ee")).map_err(|error| error.to_string())?;
+
+        let report = QuarantineReport::gather_for_workspace(&workspace);
+
+        ensure(
+            report.storage_status,
+            QuarantineStorageStatus::Unavailable,
+            "storage status",
+        )?;
+        ensure(
+            report
+                .degraded
+                .iter()
+                .any(|degraded| degraded.message.contains("symlinked component")),
+            true,
+            "symlink degradation message",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gather_for_workspace_rejects_symlinked_database_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().join("workspace");
+        let metadata = workspace.join(".ee");
+        fs::create_dir_all(&metadata).map_err(|error| error.to_string())?;
+        let outside_database = dir.path().join("outside-ee.db");
+        fs::write(&outside_database, b"outside db").map_err(|error| error.to_string())?;
+        symlink(&outside_database, metadata.join("ee.db")).map_err(|error| error.to_string())?;
+
+        let report = QuarantineReport::gather_for_workspace(&workspace);
+
+        ensure(
+            report.storage_status,
+            QuarantineStorageStatus::Unavailable,
+            "storage status",
+        )?;
+        ensure(
+            report
+                .degraded
+                .iter()
+                .any(|degraded| degraded.message.contains("symlinked component")),
+            true,
+            "symlink degradation message",
+        )
+    }
+
+    #[test]
+    fn gather_for_workspace_rejects_non_regular_database_path() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().join("workspace");
+        let database_path = workspace.join(".ee").join("ee.db");
+        fs::create_dir_all(&database_path).map_err(|error| error.to_string())?;
+
+        let report = QuarantineReport::gather_for_workspace(&workspace);
+
+        ensure(
+            report.storage_status,
+            QuarantineStorageStatus::Unavailable,
+            "storage status",
+        )?;
+        ensure(
+            report
+                .degraded
+                .iter()
+                .any(|degraded| degraded.message.contains("not a regular file")),
+            true,
+            "non-regular degradation message",
         )
     }
 

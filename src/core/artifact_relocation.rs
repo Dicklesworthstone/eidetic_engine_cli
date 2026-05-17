@@ -789,6 +789,8 @@ fn artifact_relocation_path_boundary(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::ensure;
+    use std::fs;
 
     type TestResult = Result<(), String>;
 

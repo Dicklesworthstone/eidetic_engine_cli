@@ -4,7 +4,6 @@
 //! knowledge gaps and prioritizing learning opportunities.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -3117,6 +3116,7 @@ mod tests {
     use crate::db::{
         CreateFeedbackEventInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection,
     };
+    use std::fs;
 
     type TestResult = Result<(), String>;
 

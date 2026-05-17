@@ -403,7 +403,7 @@ impl SwarmBriefDegradation {
     }
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SwarmBriefDirtyFile {
     pub path: String,
@@ -845,9 +845,9 @@ impl SwarmBriefCommandRunner for SystemSwarmBriefCommandRunner {
         let stderr_bytes = stderr_thread.join().unwrap_or_default();
 
         let stdout = String::from_utf8(stdout_bytes)
-            .unwrap_or_else(|_| String::from_utf8_lossy(b"Invalid UTF-8 stdout").into_owned());
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
         let stderr = String::from_utf8(stderr_bytes)
-            .unwrap_or_else(|_| String::from_utf8_lossy(b"Invalid UTF-8 stderr").into_owned());
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
 
         if status.success() {
             Ok(SwarmBriefCommandOutput { stdout, stderr })

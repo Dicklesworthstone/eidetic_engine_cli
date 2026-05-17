@@ -1801,6 +1801,48 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn directory_hook_temp_target_is_rejected_before_writing() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_dir = temp.path().join("hooks");
+        fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
+
+        let temp_hook_path = hook_dir.join("pre-task.tmp");
+        fs::create_dir_all(&temp_hook_path).map_err(|e| e.to_string())?;
+
+        let options = HookInstallOptions {
+            hook_dir: hook_dir.clone(),
+            hooks: vec![HookType::PreTask],
+            dry_run: false,
+            preserve_existing: false,
+            force: false,
+        };
+
+        let error = match install_hooks_for_test(&options) {
+            Ok(_) => return Err("install should reject directory hook temp path".to_owned()),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "storage_error");
+        assert!(
+            error
+                .message()
+                .contains("temporary hook path already exists"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert!(
+            !hook_dir.join("pre-task").exists(),
+            "final hook target must not be written when temp path preflight fails"
+        );
+        assert!(
+            temp_hook_path.is_dir(),
+            "directory temp path should remain untouched"
+        );
+
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlink_hook_directory_is_rejected_before_writing() -> TestResult {

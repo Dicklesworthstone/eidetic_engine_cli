@@ -787,7 +787,10 @@ fn input_bytes_exceed_budget(
 }
 
 fn snapshot_size(path: &Path) -> u64 {
-    std::fs::metadata(path).map_or(0, |metadata| metadata.len())
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata.len(),
+        _ => 0,
+    }
 }
 
 fn metric_budget_exhausted(metric_count: usize, metric_budget: Option<usize>) -> bool {
@@ -2349,6 +2352,38 @@ mod tests {
             true,
             "symlinked parent error message",
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_size_ignores_symlinked_snapshot_path() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_snapshot = temp.path().join("real.json");
+        let linked_snapshot = temp.path().join("linked.json");
+        write_eval_snapshot(&real_snapshot, "real_snapshot", 0.8)?;
+        symlink(&real_snapshot, &linked_snapshot).map_err(|error| error.to_string())?;
+
+        ensure(
+            snapshot_size(&real_snapshot) > 0,
+            true,
+            "real snapshot size",
+        )?;
+        ensure(
+            snapshot_size(&linked_snapshot),
+            0,
+            "symlinked snapshot size",
+        )
+    }
+
+    #[test]
+    fn snapshot_size_ignores_non_regular_snapshot_path() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let snapshot_dir = temp.path().join("snapshot.json");
+        std::fs::create_dir(&snapshot_dir).map_err(|error| error.to_string())?;
+
+        ensure(snapshot_size(&snapshot_dir), 0, "non-regular snapshot size")
     }
 
     #[test]
