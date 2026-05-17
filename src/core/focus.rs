@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
@@ -836,8 +837,12 @@ fn write_focus_state(path: &Path, state: &FocusState) -> Result<(), DomainError>
             repair: Some("Report the focus serialization failure.".to_owned()),
         })?;
     body.push('\n');
-    fs::write(path, &body).map_err(|error| DomainError::Storage {
-        message: format!("Failed to write focus state {}: {error}", path.display()),
+    let temp_path = path.with_extension("json.tmp");
+    ensure_no_symlink_components(&temp_path, "write")?;
+    ensure_focus_state_temp_path_for_write(&temp_path)?;
+    write_focus_state_temp_file(&temp_path, &body)?;
+    fs::rename(&temp_path, path).map_err(|error| DomainError::Storage {
+        message: format!("Failed to publish focus state {}: {error}", path.display()),
         repair: Some("Check workspace .ee/focus permissions.".to_owned()),
     })?;
 
@@ -874,6 +879,62 @@ fn ensure_focus_state_final_path_for_write(path: &Path) -> Result<(), DomainErro
             repair: Some("Check workspace .ee/focus permissions.".to_owned()),
         }),
     }
+}
+
+fn ensure_focus_state_temp_path_for_write(path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write focus state temp file {} because it already exists.",
+                path.display()
+            ),
+            repair: Some("Remove stale .ee/focus/state.json.tmp and retry.".to_owned()),
+        }),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write focus state temp file {} because it is not a regular file.",
+                path.display()
+            ),
+            repair: Some("Replace .ee/focus/state.json.tmp with a regular file.".to_owned()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to stat focus state temp file {} before write: {error}",
+                path.display()
+            ),
+            repair: Some("Check workspace .ee/focus permissions.".to_owned()),
+        }),
+    }
+}
+
+fn write_focus_state_temp_file(path: &Path, body: &str) -> Result<(), DomainError> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to create focus state temp file {}: {error}",
+                path.display()
+            ),
+            repair: Some("Check workspace .ee/focus permissions.".to_owned()),
+        })?;
+    file.write_all(body.as_bytes())
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to write focus state temp file {}: {error}",
+                path.display()
+            ),
+            repair: Some("Check workspace .ee/focus permissions.".to_owned()),
+        })?;
+    file.sync_all().map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to sync focus state temp file {}: {error}",
+            path.display()
+        ),
+        repair: Some("Check workspace .ee/focus permissions.".to_owned()),
+    })
 }
 
 fn ensure_no_symlink_components(path: &Path, operation: &'static str) -> Result<(), DomainError> {
@@ -1572,6 +1633,35 @@ mod tests {
             state_path.is_dir(),
             true,
             "non-regular focus state remains a directory",
+        )
+    }
+
+    #[test]
+    fn write_focus_state_rejects_existing_regular_temp_file_without_truncating() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let state_path = focus_state_path(dir.path());
+        let temp_path = state_path.with_extension("json.tmp");
+        let state = focus_state(&[memory_id(48)], 2).map_err(|error| error.message())?;
+        std::fs::create_dir_all(temp_path.parent().expect("focus temp parent"))
+            .map_err(|error| error.to_string())?;
+        std::fs::write(&temp_path, "stale focus temp").map_err(|error| error.to_string())?;
+
+        let result = write_focus_state(&state_path, &state);
+        let error = result.expect_err("existing regular temp state should reject focus write");
+        ensure(
+            error.message().contains("already exists"),
+            true,
+            "existing temp error message",
+        )?;
+        ensure(
+            std::fs::read_to_string(&temp_path).map_err(|error| error.to_string())?,
+            "stale focus temp".to_owned(),
+            "existing temp content remains unchanged",
+        )?;
+        ensure(
+            state_path.exists(),
+            false,
+            "final focus state must not be published when temp exists",
         )
     }
 
