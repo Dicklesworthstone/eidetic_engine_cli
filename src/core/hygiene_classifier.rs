@@ -74,6 +74,7 @@ pub mod reason {
     pub const GEN_BUILD_ARTIFACT: &str = "generated_build_artifact";
     pub const SCRATCH_ROOT_HELPER: &str = "scratch_root_helper";
     pub const SCRATCH_ROOT_REPORT: &str = "scratch_root_report";
+    pub const SCRATCH_ROOT_TOOL_OUTPUT: &str = "scratch_root_tool_output";
     pub const SCRATCH_ROOT_TMP: &str = "scratch_root_tmp";
     pub const SCRATCH_LINE_LENGTH_PROBE: &str = "scratch_line_length_probe";
     pub const LOCAL_APPLE_DOUBLE: &str = "local_apple_double";
@@ -601,12 +602,19 @@ fn scratch_classification(path: &str) -> Option<(Vec<&'static str>, f32)> {
         }
         if path.starts_with("ubs-report")
             || path.starts_with("ubs_report")
+            || path.starts_with("ubs.")
+            || path.starts_with("ubs_")
             || path.starts_with("drift-report")
             || path.starts_with("drift_report")
+            || path.starts_with(".plan-drift-report")
+            || path.starts_with(".plan_drift_report")
             || path.ends_with("-report.txt")
             || path.ends_with("_report.txt")
         {
             return Some((vec![reason::SCRATCH_ROOT_REPORT], CONFIDENCE_HIGH));
+        }
+        if path == "critical.json" || path == "functions.txt" {
+            return Some((vec![reason::SCRATCH_ROOT_TOOL_OUTPUT], CONFIDENCE_HIGH));
         }
         if path.starts_with("tmp.")
             || path == "tmp"
@@ -619,6 +627,9 @@ fn scratch_classification(path: &str) -> Option<(Vec<&'static str>, f32)> {
             return Some((vec![reason::SCRATCH_ROOT_TMP], CONFIDENCE_MEDIUM_HIGH));
         }
         if path.starts_with("line-length-probe") || path.starts_with("line_length_probe") {
+            return Some((vec![reason::SCRATCH_LINE_LENGTH_PROBE], CONFIDENCE_HIGH));
+        }
+        if path.starts_with("test_ln_") || path.starts_with("test_multibyte") {
             return Some((vec![reason::SCRATCH_LINE_LENGTH_PROBE], CONFIDENCE_HIGH));
         }
     }
@@ -831,11 +842,21 @@ mod tests {
         let snap = snapshot(vec![
             untracked("--help"),
             untracked("ubs-report-2026-05-16.txt"),
+            untracked("ubs.json"),
+            untracked("ubs_findings.jsonl"),
+            untracked("ubs_full.txt"),
             untracked("drift-report.txt"),
+            untracked(".plan-drift-report.json"),
+            untracked("critical.json"),
+            untracked("functions.txt"),
             untracked("line-length-probe-output.txt"),
+            untracked("test_ln_1p"),
+            untracked("test_ln_1p.rs"),
+            untracked("test_multibyte"),
+            untracked("test_multibyte.rs"),
         ]);
         let rows = classify_workspace(&snap, &no_secret_evidence());
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), 14);
         for row in &rows {
             assert_eq!(row.kind, Kind::Scratch, "{} should be scratch", row.path);
             assert_eq!(
@@ -853,6 +874,29 @@ mod tests {
             .unwrap();
         assert!(
             probe_row
+                .reasons
+                .contains(&reason::SCRATCH_LINE_LENGTH_PROBE)
+        );
+        let ubs_json_row = rows.iter().find(|r| r.path == "ubs.json").unwrap();
+        assert!(ubs_json_row.reasons.contains(&reason::SCRATCH_ROOT_REPORT));
+        let plan_drift_row = rows
+            .iter()
+            .find(|r| r.path == ".plan-drift-report.json")
+            .unwrap();
+        assert!(
+            plan_drift_row
+                .reasons
+                .contains(&reason::SCRATCH_ROOT_REPORT)
+        );
+        let tool_output_row = rows.iter().find(|r| r.path == "functions.txt").unwrap();
+        assert!(
+            tool_output_row
+                .reasons
+                .contains(&reason::SCRATCH_ROOT_TOOL_OUTPUT)
+        );
+        let multibyte_row = rows.iter().find(|r| r.path == "test_multibyte.rs").unwrap();
+        assert!(
+            multibyte_row
                 .reasons
                 .contains(&reason::SCRATCH_LINE_LENGTH_PROBE)
         );
