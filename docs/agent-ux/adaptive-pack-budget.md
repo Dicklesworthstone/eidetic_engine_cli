@@ -2,24 +2,30 @@
 
 Adaptive pack budgets let `ee context` choose a smaller or larger token budget
 from deterministic task signals instead of using one fixed default for every
-query. The feature is opt-in when it is wired to the public context surface; an
-explicit `--max-tokens` value remains authoritative.
+query. The feature is opt-in, and an explicit `--max-tokens` value remains
+authoritative.
 
 The budget decision block uses schema `ee.context.budget.v1`.
 
 ## Configuration
 
-Once context wiring lands, opt in with:
+Opt in with:
 
 ```toml
 [pack]
 adaptive_budget = true
 ```
 
-The built-in default is `false`, so existing `ee context` calls keep using
-`[pack].default_max_tokens` until an operator opts in. The key is the rollout
-gate for adaptive selection; the configured maximum token bound still caps
-every computed budget.
+The built-in default is `false`, so existing calls keep using the configured
+or default token bound until an operator opts in. The key is the rollout gate
+for adaptive selection; the configured maximum token bound still caps every
+computed budget.
+
+Current implementation note: core context assembly applies adaptive budgets
+only when the caller passes no explicit/request token budget
+(`ContextPackOptions.max_tokens = None`). The `ee context` CLI still needs a
+follow-up change to distinguish an omitted `--max-tokens` flag from its
+current default value before the opt-in affects that direct command path.
 
 ## What To Read
 
@@ -103,7 +109,8 @@ computedTokens = clamp(ceil(baseTokens * multiplier), baseTokens, maxTokens)
 
 ## Rollout Expectations
 
-The first implementation slice only provides the pure classifier and this
-contract. Public context wiring still needs the config key, explain-output
-attachment, golden fixtures, e2e logging, and RCH-only benchmark evidence before
-operators should rely on adaptive budgets in normal workflows.
+The current implementation provides the pure classifier, config key, response
+budget block, and a core assembly hook for implicit-budget callers. Public CLI
+default-vs-explicit handling, graph fanout input, status bucket reporting,
+golden fixtures, e2e logging, and RCH-only benchmark evidence still need to
+land before operators should rely on adaptive budgets in normal workflows.
