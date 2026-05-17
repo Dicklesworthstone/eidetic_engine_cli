@@ -1253,7 +1253,7 @@ where
     )?;
     ensure_rehearsal_artifact_temp_path_missing(&temp_path)?;
     write_rehearsal_artifact_temp_file(&temp_path, &bytes)?;
-    fs::rename(&temp_path, path).map_err(|error| storage_error("publish rehearsal artifact", error))
+    publish_rehearsal_artifact_temp_file(path, &temp_path)
 }
 
 fn changed_paths(before: &FilesystemSnapshot, after: &FilesystemSnapshot) -> Vec<String> {
@@ -1414,6 +1414,30 @@ fn write_rehearsal_artifact_temp_file(path: &Path, bytes: &[u8]) -> Result<(), D
         .map_err(|error| storage_error("write rehearsal artifact temp file", error))?;
     file.sync_all()
         .map_err(|error| storage_error("sync rehearsal artifact temp file", error))
+}
+
+fn publish_rehearsal_artifact_temp_file(path: &Path, temp_path: &Path) -> Result<(), DomainError> {
+    ensure_rehearsal_artifact_regular_or_missing(path, "publish rehearsal artifact")?;
+    ensure_no_rehearsal_artifact_symlink_components(
+        temp_path,
+        "publish rehearsal artifact temp file",
+    )?;
+    match fs::symlink_metadata(temp_path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Refusing to publish rehearsal artifact temp file `{}` because it is not a regular file.",
+                    temp_path.display()
+                ),
+                repair: Some(
+                    "Remove the invalid rehearsal artifact temp file before retrying.".to_owned(),
+                ),
+            });
+        }
+        Err(error) => return Err(storage_error("inspect rehearsal artifact temp file", error)),
+    }
+    fs::rename(temp_path, path).map_err(|error| storage_error("publish rehearsal artifact", error))
 }
 
 fn path_is_regular_file_no_symlinks(
@@ -1942,6 +1966,72 @@ mod tests {
         assert!(
             !out.join(SOURCE_SNAPSHOT_FILE).exists(),
             "rehearsal must not publish the final artifact when temp exists"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_rehearsal_artifact_rechecks_final_symlink_before_rename() -> TestResult {
+        let out = kept_temp_dir("ee-rehearse-publish-final-symlink-out")?;
+        let outside = kept_temp_dir("ee-rehearse-publish-final-symlink-target")?;
+        let artifact_path = out.join(SOURCE_SNAPSHOT_FILE);
+        let temp_path = artifact_path.with_extension("json.tmp");
+        let outside_snapshot = outside.join(SOURCE_SNAPSHOT_FILE);
+        fs::write(&outside_snapshot, "outside sentinel").map_err(|error| error.to_string())?;
+        write_rehearsal_artifact_temp_file(&temp_path, br#"{"schema":"test"}"#)
+            .map_err(|error| error.message().to_owned())?;
+        std::os::unix::fs::symlink(&outside_snapshot, &artifact_path)
+            .map_err(|error| error.to_string())?;
+
+        let error = publish_rehearsal_artifact_temp_file(&artifact_path, &temp_path)
+            .expect_err("final symlink introduced before publish should be rejected");
+
+        assert!(
+            error.message().contains("not a regular file")
+                || error.message().contains("symlinked path component"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_snapshot).map_err(|error| error.to_string())?,
+            "outside sentinel",
+            "publish must not overwrite the final symlink target"
+        );
+        assert!(
+            temp_path.is_file(),
+            "failed publish should preserve the temp artifact for inspection"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_rehearsal_artifact_rechecks_temp_symlink_before_rename() -> TestResult {
+        let out = kept_temp_dir("ee-rehearse-publish-temp-symlink-out")?;
+        let outside = kept_temp_dir("ee-rehearse-publish-temp-symlink-target")?;
+        let artifact_path = out.join(SOURCE_SNAPSHOT_FILE);
+        let temp_path = artifact_path.with_extension("json.tmp");
+        let outside_temp = outside.join("outside-temp.json");
+        fs::write(&outside_temp, "outside temp sentinel").map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_temp, &temp_path).map_err(|error| error.to_string())?;
+
+        let error = publish_rehearsal_artifact_temp_file(&artifact_path, &temp_path)
+            .expect_err("temp symlink introduced before publish should be rejected");
+
+        assert!(
+            error.message().contains("symlinked path component"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_temp).map_err(|error| error.to_string())?,
+            "outside temp sentinel",
+            "publish must not follow or modify the temp symlink target"
+        );
+        assert!(
+            !artifact_path.exists(),
+            "final artifact must not be published from a temp symlink"
         );
         Ok(())
     }
