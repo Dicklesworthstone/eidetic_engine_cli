@@ -421,9 +421,7 @@ pub fn load_daemon_job_rows(workspace_path: &Path) -> Result<Vec<DaemonJobRow>, 
     if !daemon_job_table_path_is_regular_file(&table_path, "read")? {
         return Ok(Vec::new());
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .open(&table_path)
+    let file = open_daemon_job_table_for_read(&table_path)
         .map_err(|error| format!("Failed to open daemon job table: {error}"))?;
     let reader = BufReader::new(file);
     let mut rows = Vec::new();
@@ -461,10 +459,7 @@ fn append_daemon_job_rows(table_path: &Path, rows: &[DaemonJobRow]) -> Result<()
             table_path.display()
         ));
     }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(table_path)
+    let mut file = open_daemon_job_table_for_append(table_path)
         .map_err(|error| format!("Failed to open daemon job table for append: {error}"))?;
 
     let mut buffer = Vec::new();
@@ -480,6 +475,30 @@ fn append_daemon_job_rows(table_path: &Path, rows: &[DaemonJobRow]) -> Result<()
     file.sync_all()
         .map_err(|error| format!("Failed to sync daemon job table: {error}"))
 }
+
+fn open_daemon_job_table_for_read(table_path: &Path) -> std::io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_daemon_job_table_open_options(&mut options);
+    options.open(table_path)
+}
+
+fn open_daemon_job_table_for_append(table_path: &Path) -> std::io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    configure_daemon_job_table_open_options(&mut options);
+    options.open(table_path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_daemon_job_table_open_options(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_daemon_job_table_open_options(_options: &mut OpenOptions) {}
 
 fn ensure_daemon_job_table_path_is_not_symlink(table_path: &Path) -> Result<(), String> {
     if let Some(symlink_path) = first_existing_symlink_component(table_path)? {
@@ -833,6 +852,36 @@ mod tests {
         )?;
         ensure(
             fs::read_to_string(&target).map_err(|error| error.to_string())?,
+            String::new(),
+            "symlink target must not receive daemon rows",
+        )
+    }
+
+    #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+    #[test]
+    fn daemon_job_table_open_helpers_reject_symlinked_final_path() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let table_path = daemon_job_table_path(temp.path());
+        let parent = table_path
+            .parent()
+            .ok_or_else(|| format!("missing parent for {}", table_path.display()))?;
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let outside_table = temp.path().join("outside-daemon-jobs.jsonl");
+        fs::write(&outside_table, "").map_err(|error| error.to_string())?;
+        symlink(&outside_table, &table_path).map_err(|error| error.to_string())?;
+
+        match open_daemon_job_table_for_read(&table_path) {
+            Ok(_) => return Err("read open should reject symlinked daemon job table".to_owned()),
+            Err(_) => {}
+        }
+        match open_daemon_job_table_for_append(&table_path) {
+            Ok(_) => return Err("append open should reject symlinked daemon job table".to_owned()),
+            Err(_) => {}
+        }
+        ensure(
+            fs::read_to_string(&outside_table).map_err(|error| error.to_string())?,
             String::new(),
             "symlink target must not receive daemon rows",
         )
