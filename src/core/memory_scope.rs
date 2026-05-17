@@ -1367,7 +1367,7 @@ fn mesh_namespace_alias(origin_workspace_id: &str, label: Option<&str>) -> Strin
 fn mesh_peer_display(producer_peer_id: &str, label: Option<&str>) -> String {
     label
         .and_then(redaction_safe_label)
-        .unwrap_or_else(|| producer_peer_id.to_owned())
+        .unwrap_or_else(|| stable_mesh_alias("mesh_peer", producer_peer_id))
 }
 
 fn redaction_safe_label(label: &str) -> Option<String> {
@@ -2537,8 +2537,38 @@ max_bytes = 0
         let provenance = mesh_display_provenance(&input)
             .expect("allowed mesh material should expose redacted provenance");
 
-        assert_eq!(provenance.producer_peer, "peer_builder_one");
+        assert_eq!(
+            provenance.producer_peer,
+            stable_mesh_alias("mesh_peer", "peer_builder_one")
+        );
+        assert_ne!(provenance.producer_peer, "peer_builder_one");
         assert_ne!(provenance.producer_peer, "/Users/alice/private/peer-agent");
+    }
+
+    #[test]
+    fn mesh_display_provenance_aliases_raw_producer_peer_id_without_safe_label() {
+        let input_decision = MeshImportDecisionInput {
+            producer_peer_id: "nodekey:0123456789abcdef0123456789abcdef",
+            ..mesh_input(MeshLane::Metadata)
+        };
+        let decision = mesh_decision(
+            &input_decision,
+            Some("pg_alpha_mesh".to_owned()),
+            MeshImportDecisionKind::Allow,
+            "lane_allowed",
+        );
+        let mut input = mesh_display_input(&decision, Some("remote-beta"));
+        input.producer_peer_label = None;
+
+        let provenance = mesh_display_provenance(&input)
+            .expect("allowed mesh material should expose redacted provenance");
+
+        assert_eq!(
+            provenance.producer_peer,
+            stable_mesh_alias("mesh_peer", input_decision.producer_peer_id)
+        );
+        assert_ne!(provenance.producer_peer, input_decision.producer_peer_id);
+        assert!(!provenance.producer_peer.contains("nodekey"));
     }
 
     #[test]
