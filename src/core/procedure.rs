@@ -506,7 +506,15 @@ pub fn export_procedure_from_records(
     let export_id = format!("exp_{}", generate_id());
 
     let snapshot = procedure_export_snapshot(&options.procedure_id, &exported_at, records)?;
-    let content = render_export_content(&snapshot, format, &export_id, &exported_at)?;
+    let (public_snapshot, redacted_evidence_refs) = public_procedure_export_snapshot(&snapshot);
+    let redaction_status = procedure_export_redaction_status(redacted_evidence_refs);
+    let content = render_export_content(
+        &public_snapshot,
+        format,
+        &export_id,
+        &exported_at,
+        redaction_status,
+    )?;
     let content_hash = format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex());
     let warnings = export_warnings(format);
     let output_path = options
@@ -531,7 +539,7 @@ pub fn export_procedure_from_records(
         content_length,
         content_hash,
         includes_evidence: snapshot.includes_evidence(),
-        redaction_status: "not_required".to_owned(),
+        redaction_status: redaction_status.to_owned(),
         install_mode: install_mode(format),
         warnings,
         exported_at,
@@ -579,6 +587,7 @@ fn render_export_content(
     format: ProcedureExportFormat,
     export_id: &str,
     exported_at: &str,
+    redaction_status: &str,
 ) -> Result<String, DomainError> {
     Ok(match format {
         ProcedureExportFormat::Json => render_procedure_export_manifest(
@@ -586,16 +595,25 @@ fn render_export_content(
             export_id,
             exported_at,
             ProcedureExportFormat::Json,
+            redaction_status,
         )?,
-        ProcedureExportFormat::Markdown => render_procedure_markdown(snapshot, exported_at),
-        ProcedureExportFormat::Playbook => render_procedure_playbook(snapshot, exported_at),
+        ProcedureExportFormat::Markdown => {
+            render_procedure_markdown(snapshot, exported_at, redaction_status)
+        }
+        ProcedureExportFormat::Playbook => {
+            render_procedure_playbook(snapshot, exported_at, redaction_status)
+        }
         ProcedureExportFormat::SkillCapsule => {
-            render_skill_capsule(snapshot, export_id, exported_at)
+            render_skill_capsule(snapshot, export_id, exported_at, redaction_status)
         }
     })
 }
 
-fn render_procedure_markdown(snapshot: &ProcedureExportSnapshot, exported_at: &str) -> String {
+fn render_procedure_markdown(
+    snapshot: &ProcedureExportSnapshot,
+    exported_at: &str,
+    redaction_status: &str,
+) -> String {
     let procedure = &snapshot.procedure;
     let mut out = String::with_capacity(1024);
     out.push_str(&format!(
@@ -619,7 +637,10 @@ fn render_procedure_markdown(snapshot: &ProcedureExportSnapshot, exported_at: &s
         "- Generated: {}\n",
         markdown::inline_code(exported_at)
     ));
-    out.push_str("- Redaction: `not_required`\n\n");
+    out.push_str(&format!(
+        "- Redaction: {}\n\n",
+        markdown::inline_code(redaction_status)
+    ));
 
     out.push_str("## Steps\n\n");
     for step in &snapshot.steps {
@@ -645,7 +666,11 @@ fn render_procedure_markdown(snapshot: &ProcedureExportSnapshot, exported_at: &s
     out
 }
 
-fn render_procedure_playbook(snapshot: &ProcedureExportSnapshot, exported_at: &str) -> String {
+fn render_procedure_playbook(
+    snapshot: &ProcedureExportSnapshot,
+    exported_at: &str,
+    redaction_status: &str,
+) -> String {
     let procedure = &snapshot.procedure;
     let mut out = String::with_capacity(1024);
     out.push_str("schema: \"ee.procedure.playbook.v1\"\n");
@@ -657,7 +682,10 @@ fn render_procedure_playbook(snapshot: &ProcedureExportSnapshot, exported_at: &s
     out.push_str(&format!("summary: {}\n", yaml_string(&procedure.summary)));
     out.push_str(&format!("status: {}\n", yaml_string(&procedure.status)));
     out.push_str(&format!("generated_at: {}\n", yaml_string(exported_at)));
-    out.push_str("redaction_status: \"not_required\"\n");
+    out.push_str(&format!(
+        "redaction_status: {}\n",
+        yaml_string(redaction_status)
+    ));
     out.push_str("steps:\n");
     for step in &snapshot.steps {
         out.push_str(&format!("  - sequence: {}\n", step.sequence));
@@ -682,6 +710,7 @@ fn render_skill_capsule(
     snapshot: &ProcedureExportSnapshot,
     export_id: &str,
     exported_at: &str,
+    redaction_status: &str,
 ) -> String {
     let procedure = &snapshot.procedure;
     let capsule_id = format!("capsule_{}", generate_id());
@@ -721,6 +750,10 @@ fn render_skill_capsule(
     body.push_str(
         "- Review the procedure and evidence before copying it into a skill directory.\n",
     );
+    body.push_str(&format!(
+        "- Redaction: {}\n",
+        markdown::inline_code(redaction_status)
+    ));
     body.push_str(&format!("- Generated: `{exported_at}`\n\n"));
     body.push_str("## Procedure Steps\n\n");
     for step in &snapshot.steps {
@@ -747,6 +780,7 @@ fn render_procedure_export_manifest(
     export_id: &str,
     exported_at: &str,
     format: ProcedureExportFormat,
+    redaction_status: &str,
 ) -> Result<String, DomainError> {
     let value = json!({
         "schema": "ee.procedure.export_artifact.v1",
@@ -755,7 +789,7 @@ fn render_procedure_export_manifest(
         "format": format.as_str(),
         "generatedAt": exported_at,
         "includesEvidence": snapshot.includes_evidence(),
-        "redactionStatus": "not_required",
+        "redactionStatus": redaction_status,
         "procedure": snapshot.procedure,
         "steps": snapshot.steps,
     });
@@ -763,6 +797,90 @@ fn render_procedure_export_manifest(
         message: format!("failed to render procedure export manifest: {error}"),
         repair: Some("retry the export or choose --export-format markdown".to_owned()),
     })
+}
+
+fn procedure_export_redaction_status(redacted: bool) -> &'static str {
+    if redacted { "standard" } else { "not_required" }
+}
+
+fn public_procedure_export_snapshot(
+    snapshot: &ProcedureExportSnapshot,
+) -> (ProcedureExportSnapshot, bool) {
+    let mut public = snapshot.clone();
+    let mut redacted = false;
+    public.procedure.source_run_ids =
+        redact_procedure_public_source_refs(&public.procedure.source_run_ids, &mut redacted);
+    public.procedure.evidence_ids =
+        redact_procedure_public_source_refs(&public.procedure.evidence_ids, &mut redacted);
+    (public, redacted)
+}
+
+fn redact_procedure_public_source_refs(values: &[String], redacted: &mut bool) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| {
+            let replacement = redact_procedure_public_source_ref(value);
+            if replacement != *value {
+                *redacted = true;
+            }
+            replacement
+        })
+        .collect()
+}
+
+fn redact_procedure_public_source_ref(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    redact_procedure_public_path_like_segments(&secret_redacted)
+}
+
+fn redact_procedure_public_path_like_segments(value: &str) -> String {
+    const REDACTED_PATH: &str = "[REDACTED_PATH]";
+    const PREFIXES: &[&str] = &[
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/home/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+    ];
+
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, ch)| *ch == '/')
+        else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        let start = cursor + relative_index;
+        if !PREFIXES
+            .iter()
+            .any(|prefix| value[start..].starts_with(prefix))
+        {
+            output.push_str(&value[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        output.push_str(&value[cursor..start]);
+        output.push_str(REDACTED_PATH);
+        cursor = value[start..]
+            .char_indices()
+            .find_map(|(index, ch)| {
+                procedure_public_source_path_boundary(ch).then_some(start + index)
+            })
+            .unwrap_or(value.len());
+    }
+    output
+}
+
+fn procedure_public_source_path_boundary(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
 }
 
 fn push_markdown_provenance(out: &mut String, procedure: &ProcedureDetail) {
@@ -3729,6 +3847,44 @@ mod tests {
         assert!(report.content.contains("## Steps"));
         assert!(report.content.contains("## Provenance"));
         assert!(report.content_hash.starts_with("blake3:"));
+        assert_eq!(report.redaction_status, "not_required");
+        Ok(())
+    }
+
+    #[test]
+    fn export_public_artifacts_redact_sensitive_evidence_refs() -> TestResult {
+        let mut record = procedure_record("candidate");
+        let source_ref =
+            "/Users/alice/private/cass/session.jsonl?api_key=sk-FAKEabc123def456ghi789";
+        let evidence_ref =
+            "evidence:///Volumes/Secret/procedure/proof.json?token=ghp_FAKEabc123def456ghi7890";
+        record.procedure.source_run_ids = vec![source_ref.to_owned()];
+        record.procedure.evidence_ids = vec![evidence_ref.to_owned()];
+
+        for format in ["markdown", "playbook", "json", "skill-capsule"] {
+            let report = export_procedure_from_records(
+                &ProcedureExportOptions {
+                    procedure_id: "proc_test".to_owned(),
+                    format: format.to_owned(),
+                    ..Default::default()
+                },
+                &[record.clone()],
+            )
+            .map_err(|e| e.message())?;
+
+            assert_eq!(report.redaction_status, "standard", "{format}");
+            assert!(report.content.contains("[REDACTED_PATH]"), "{format}");
+            assert!(report.content.contains("[REDACTED:"), "{format}");
+            assert!(!report.content.contains(source_ref), "{format}");
+            assert!(!report.content.contains(evidence_ref), "{format}");
+            assert!(!report.content.contains("/Users/alice"), "{format}");
+            assert!(!report.content.contains("/Volumes/Secret"), "{format}");
+            assert!(!report.content.contains("sk-FAKE"), "{format}");
+            assert!(!report.content.contains("ghp_FAKE"), "{format}");
+        }
+
+        assert_eq!(record.procedure.source_run_ids, vec![source_ref.to_owned()]);
+        assert_eq!(record.procedure.evidence_ids, vec![evidence_ref.to_owned()]);
         Ok(())
     }
 
