@@ -2065,7 +2065,7 @@ fn lexical_memory_fallback_hits(
             quality_score: None,
             lexical_score: Some(score),
             rerank_score: None,
-            metadata: Some(memory_fallback_metadata(&memory, reference_time)),
+            metadata: Some(public_memory_fallback_metadata(&memory, reference_time)),
             explanation: None,
         })
         .collect()
@@ -2343,6 +2343,73 @@ fn memory_fallback_metadata(
         "validity_status": validity_status_for_memory(memory, reference_time),
         "validity_window_kind": validity_window_kind(memory.valid_from.as_deref(), memory.valid_to.as_deref()),
     })
+}
+
+fn public_memory_fallback_metadata(
+    memory: &StoredMemory,
+    reference_time: DateTime<Utc>,
+) -> serde_json::Value {
+    let mut metadata = memory_fallback_metadata(memory, reference_time);
+    if let Some(provenance_uri) = memory.provenance_uri.as_deref() {
+        metadata["provenanceUri"] =
+            serde_json::Value::String(redact_context_public_source_ref(provenance_uri));
+    }
+    metadata
+}
+
+fn redact_context_public_source_ref(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    redact_context_public_path_like_segments(&secret_redacted)
+}
+
+fn redact_context_public_path_like_segments(value: &str) -> String {
+    const REDACTED_PATH: &str = "[REDACTED_PATH]";
+    const PREFIXES: &[&str] = &[
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/home/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+    ];
+
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, ch)| *ch == '/')
+        else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        let start = cursor + relative_index;
+        if !PREFIXES
+            .iter()
+            .any(|prefix| value[start..].starts_with(prefix))
+        {
+            output.push_str(&value[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        output.push_str(&value[cursor..start]);
+        output.push_str(REDACTED_PATH);
+        cursor = value[start..]
+            .char_indices()
+            .find_map(|(index, ch)| {
+                context_public_source_path_boundary(ch).then_some(start + index)
+            })
+            .unwrap_or(value.len());
+    }
+    output
+}
+
+fn context_public_source_path_boundary(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
 }
 
 const fn plural_suffix(count: usize) -> &'static str {
@@ -8203,6 +8270,90 @@ mod tests {
             provenance_urls,
             vec!["https://example.com/original-generation"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn lexical_fallback_metadata_redacts_sensitive_provenance_uri() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = super::stable_context_workspace_id(&workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("fallback metadata redaction".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(46)).to_string();
+        connection
+            .insert_memory(
+                &memory_id,
+                &CreateMemoryInput {
+                    workspace_id,
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Fallback provenance redaction protects local paths.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.95,
+                    utility: 0.80,
+                    importance: 0.70,
+                    provenance_uri: Some(
+                        "file:///Users/alice/private/repo/notes.md?api_key=sk-FAKEabc123def456ghi789"
+                            .to_owned(),
+                    ),
+                    trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                    trust_subclass: Some("test".to_owned()),
+                    tags: vec!["release".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut degraded = Vec::new();
+        let hits = super::lexical_memory_fallback_hits(
+            &connection,
+            &workspace,
+            "fallback provenance redaction",
+            10,
+            false,
+            None,
+            false,
+            false,
+            false,
+            &mut degraded,
+        );
+        let hit = hits
+            .iter()
+            .find(|hit| hit.doc_id == memory_id)
+            .ok_or_else(|| format!("expected fallback hit for {memory_id}, got {hits:?}"))?;
+        let provenance_uri = hit
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("provenanceUri"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "fallback metadata missing provenanceUri".to_owned())?;
+
+        assert!(
+            provenance_uri.contains("[REDACTED_PATH]"),
+            "fallback provenance should redact local paths: {provenance_uri}"
+        );
+        assert!(
+            provenance_uri.contains("[REDACTED:"),
+            "fallback provenance should redact secret-like query values: {provenance_uri}"
+        );
+        assert!(!provenance_uri.contains("/Users/alice/private/repo"));
+        assert!(!provenance_uri.contains("sk-FAKEabc123def456ghi789"));
         Ok(())
     }
 
