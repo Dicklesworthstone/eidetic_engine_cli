@@ -133,3 +133,36 @@ repo-relative and should stay narrow.
 
 Local configuration must never mark secret-risk files safe. Secret-risk evidence,
 active reservations, and Beads ownership always override local stage preferences.
+
+## Coordination Overlay
+
+The Agent Mail overlay is a pure second pass over already-collected facts. Core
+classification code consumes a caller-provided reservation snapshot; it does not
+query Agent Mail, read message bodies, send mail, release reservations, or mutate
+files. The caller owns timeout budgets and data collection.
+
+The overlay distinguishes three Agent Mail states:
+
+| State | Meaning |
+| --- | --- |
+| `available` | Reservations and active-agent summaries were collected within budget. |
+| `unavailable` | Agent Mail could not be reached; report `workspace_hygiene_agent_mail_unavailable`. |
+| `timed_out` | Agent Mail did not answer within the hygiene budget; report `workspace_hygiene_agent_mail_timeout`. |
+
+When Agent Mail is available, active agents are surfaced as redaction-safe
+summaries: agent name plus optional last-active timestamp. Message subjects,
+message bodies, attachment paths, and mailbox contents are not part of the
+workspace-hygiene contract.
+
+Reservation precedence:
+
+| Reservation fact | Overlay behavior |
+| --- | --- |
+| Active exclusive reservation held by another agent overlaps a dirty path | Add that path to `blockedByCoordination[]` with reason `active_exclusive_reservation`. |
+| Active non-exclusive reservation overlaps a dirty path | Record it as an observed shared reservation; do not block staging by itself. |
+| Expired reservation overlaps a dirty path | Record it as ignored with reason `expired_reservation_ignored`. |
+| Reservation held by the current agent overlaps a dirty path | Record it as ignored with reason `self_reservation_ignored`. |
+
+The overlay is advisory but stronger than ordinary stage grouping: staging
+recommendations must not suggest a path as commit-ready while an active
+exclusive reservation held by another agent overlaps it.
