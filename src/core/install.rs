@@ -975,6 +975,16 @@ pub fn execute_install_plan(
         }
     }
 
+    if let Err(error) = ensure_install_target_path_is_regular_or_missing(install_path) {
+        return InstallExecutionResult {
+            success: false,
+            artifact_verified: true,
+            binary_installed: false,
+            backup_path: None,
+            error_message: Some(error),
+        };
+    }
+
     // Back up existing binary
     let backup_path = if install_path.exists() {
         let backup = match select_install_backup_path(install_path) {
@@ -1397,6 +1407,38 @@ fn install_artifact_path_has_symlink_component(root: &Path, relative: &Path) -> 
         }
     }
     Ok(false)
+}
+
+fn ensure_install_target_path_is_regular_or_missing(path: &Path) -> Result<(), String> {
+    match install_path_has_symlink_component(path) {
+        Ok(Some(component)) => {
+            return Err(format!(
+                "install target '{}' traverses symbolic link '{}'",
+                path.display(),
+                component.display()
+            ));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect install target '{}': {error}",
+                path.display()
+            ));
+        }
+    }
+
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(format!(
+            "install target '{}' is not a regular file",
+            path.display()
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "failed to inspect install target '{}': {error}",
+            path.display()
+        )),
+    }
 }
 
 fn install_path_has_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
@@ -2083,6 +2125,99 @@ mod tests {
                 .as_ref()
                 .is_some_and(|message| message.contains("symbolic link")),
             "execute error should report symlink artifact",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_install_plan_rejects_symlinked_install_target_before_backup() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let artifact_root = tempdir.path().join("artifacts");
+        fs::create_dir_all(&artifact_root).map_err(|error| error.to_string())?;
+        let artifact_name = "ee-x86_64-unknown-linux-gnu.tar.xz";
+        let artifact_bytes = b"not a real archive";
+        fs::write(artifact_root.join(artifact_name), artifact_bytes)
+            .map_err(|error| error.to_string())?;
+        let outside_binary = tempdir.path().join("outside-ee");
+        fs::write(&outside_binary, b"outside binary").map_err(|error| error.to_string())?;
+        let install_path = tempdir.path().join("bin").join("ee");
+        fs::create_dir_all(install_path.parent().unwrap()).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_binary, &install_path)
+            .map_err(|error| error.to_string())?;
+        let artifact = InstallArtifactSelection {
+            artifact_id: "ee-9.9.9-x86_64-unknown-linux-gnu".to_owned(),
+            release_version: "9.9.9".to_owned(),
+            file_name: artifact_name.to_owned(),
+            target_triple: "x86_64-unknown-linux-gnu".to_owned(),
+            archive_format: "tar_xz".to_owned(),
+            checksum_algorithm: "blake3".to_owned(),
+            checksum: blake3::hash(artifact_bytes).to_hex().to_string(),
+            signature: "missing".to_owned(),
+        };
+        let report = executable_plan_for_artifact(artifact, &install_path);
+
+        let result = execute_install_plan(&report, &artifact_root);
+
+        ensure(!result.success, "symlink install target should fail")?;
+        ensure(
+            result.artifact_verified,
+            "artifact should verify before target guard",
+        )?;
+        ensure(
+            result
+                .error_message
+                .as_ref()
+                .is_some_and(|message| message.contains("symbolic link")),
+            "execute error should report symlink target",
+        )?;
+        let outside = fs::read(&outside_binary).map_err(|error| error.to_string())?;
+        ensure_equal(
+            outside.as_slice(),
+            b"outside binary".as_slice(),
+            "symlink target must remain untouched",
+        )
+    }
+
+    #[test]
+    fn execute_install_plan_rejects_non_regular_install_target_before_backup() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let artifact_root = tempdir.path().join("artifacts");
+        fs::create_dir_all(&artifact_root).map_err(|error| error.to_string())?;
+        let artifact_name = "ee-x86_64-unknown-linux-gnu.tar.xz";
+        let artifact_bytes = b"not a real archive";
+        fs::write(artifact_root.join(artifact_name), artifact_bytes)
+            .map_err(|error| error.to_string())?;
+        let install_path = tempdir.path().join("bin").join("ee");
+        fs::create_dir_all(&install_path).map_err(|error| error.to_string())?;
+        let artifact = InstallArtifactSelection {
+            artifact_id: "ee-9.9.9-x86_64-unknown-linux-gnu".to_owned(),
+            release_version: "9.9.9".to_owned(),
+            file_name: artifact_name.to_owned(),
+            target_triple: "x86_64-unknown-linux-gnu".to_owned(),
+            archive_format: "tar_xz".to_owned(),
+            checksum_algorithm: "blake3".to_owned(),
+            checksum: blake3::hash(artifact_bytes).to_hex().to_string(),
+            signature: "missing".to_owned(),
+        };
+        let report = executable_plan_for_artifact(artifact, &install_path);
+
+        let result = execute_install_plan(&report, &artifact_root);
+
+        ensure(!result.success, "non-regular install target should fail")?;
+        ensure(
+            result.artifact_verified,
+            "artifact should verify before target guard",
+        )?;
+        ensure(
+            result
+                .error_message
+                .as_ref()
+                .is_some_and(|message| message.contains("not a regular file")),
+            "execute error should report non-regular target",
+        )?;
+        ensure(
+            install_path.is_dir(),
+            "non-regular install target must remain untouched",
         )
     }
 
