@@ -926,11 +926,39 @@ mod tests {
     }
 
     #[test]
-    fn personalized_pagerank_is_deterministic_across_runs() -> TestResult {
+    fn personalized_pagerank_returns_zero_scores_for_empty_or_unmatched_seeds() -> TestResult {
         let mut graph = DiGraph::strict();
         let a = memory_id(31);
         let b = memory_id(32);
-        let c = memory_id(33);
+        let missing = memory_id(33);
+        graph
+            .add_edge_with_attrs(
+                a.to_string(),
+                b.to_string(),
+                edge_attrs("supports", 1.0, 1.0),
+            )
+            .map_err(|error| error.to_string())?;
+
+        let empty = graph_result(compute_personalized_pagerank(&graph, &HashMap::new()))?;
+        let unmatched = graph_result(compute_personalized_pagerank(
+            &graph,
+            &HashMap::from([(missing, 1.0)]),
+        ))?;
+
+        for result in [&empty, &unmatched] {
+            assert_eq!(result.len(), 2);
+            assert!((result.get(&a).copied().unwrap_or(1.0)).abs() < 1.0e-12);
+            assert!((result.get(&b).copied().unwrap_or(1.0)).abs() < 1.0e-12);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn personalized_pagerank_is_deterministic_across_runs() -> TestResult {
+        let mut graph = DiGraph::strict();
+        let a = memory_id(34);
+        let b = memory_id(35);
+        let c = memory_id(36);
         graph
             .add_edge_with_attrs(
                 a.to_string(),
