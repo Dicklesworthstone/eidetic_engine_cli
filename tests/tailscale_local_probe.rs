@@ -148,7 +148,23 @@ fn healthy_status() -> &'static [u8] {
         "Platform": "linux",
         "Tags": ["tag:ee-mesh"]
       },
-      "Peer": {}
+      "Peer": {
+        "nodekey:zulu": {
+          "ID": "nodekey:zulu",
+          "DNSName": "zulu.tailnet.test.",
+          "HostName": "zulu",
+          "Online": false,
+          "Tags": [],
+          "TailscaleIPs": ["100.64.0.30"]
+        },
+        "nodekey:alpha": {
+          "DNSName": "alpha.tailnet.test.",
+          "HostName": "alpha",
+          "Online": true,
+          "Tags": ["tag:ee-mesh"],
+          "TailscaleIPs": ["100.64.0.20", "fd7a:115c:a1e0::20"]
+        }
+      }
     }"#
 }
 
@@ -176,6 +192,17 @@ fn local_probe_returns_authenticated_self_when_status_json_well_formed() -> Test
         Some("ee-local.tailnet.test.")
     );
     assert_eq!(report.self_advertised_tags, vec!["tag:ee-mesh"]);
+    assert_eq!(report.peers.len(), 2);
+    assert_eq!(report.peers[0].node_key, "nodekey:alpha");
+    assert_eq!(report.peers[0].tailscale_ips[0], "100.64.0.20");
+    assert_eq!(
+        report.peers[0].magic_dns_name.as_deref(),
+        Some("alpha.tailnet.test.")
+    );
+    assert_eq!(report.peers[0].hostname.as_deref(), Some("alpha"));
+    assert_eq!(report.peers[0].advertised_tags, vec!["tag:ee-mesh"]);
+    assert_eq!(report.peers[0].online, Some(true));
+    assert_eq!(report.peers[1].node_key, "nodekey:zulu");
     assert_eq!(report.platform, TailscalePlatform::Linux);
     assert!(report.degradations.is_empty(), "{:?}", report.degradations);
     Ok(())
@@ -686,6 +713,21 @@ fn status_json_embeds_tailscale_report_under_mesh_block() -> TestResult {
         mesh.get("selfTailscaleIp")
             .and_then(serde_json::Value::as_str),
         Some("100.64.0.10")
+    );
+    assert_eq!(
+        mesh.pointer("/peers/0/peerNodeKey")
+            .and_then(serde_json::Value::as_str),
+        Some("nodekey:alpha")
+    );
+    assert_eq!(
+        mesh.pointer("/peers/0/peerTailscaleIps/0")
+            .and_then(serde_json::Value::as_str),
+        Some("100.64.0.20")
+    );
+    assert_eq!(
+        mesh.pointer("/peers/0/peerAdvertisedTags/0")
+            .and_then(serde_json::Value::as_str),
+        Some("tag:ee-mesh")
     );
     assert_eq!(
         mesh.get("probeMethod").and_then(serde_json::Value::as_str),

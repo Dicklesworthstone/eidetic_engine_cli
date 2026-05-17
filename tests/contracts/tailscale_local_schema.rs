@@ -105,9 +105,33 @@ fn tailscale_local_schema_pins_mesh_safe_status_shape() -> TestResult {
                     && required
                         .iter()
                         .any(|field| field.as_str() == Some("degraded"))
+                    && required.iter().any(|field| field.as_str() == Some("peers"))
             }),
-        "schema must require binaryAuthentic and degraded",
+        "schema must require binaryAuthentic, peers, and degraded",
     )?;
+    ensure_str(
+        schema
+            .pointer("/properties/peers/items/$ref")
+            .and_then(Value::as_str),
+        "#/$defs/peer",
+        "peers item ref",
+    )?;
+    ensure(
+        schema
+            .pointer("/$defs/peer/additionalProperties")
+            .and_then(Value::as_bool)
+            == Some(false),
+        "peer schema must reject additional properties",
+    )?;
+    for field in ["peerNodeKey", "peerTailscaleIps", "peerAdvertisedTags"] {
+        ensure(
+            schema
+                .pointer("/$defs/peer/required")
+                .and_then(Value::as_array)
+                .is_some_and(|required| required.iter().any(|item| item.as_str() == Some(field))),
+            format!("peer schema missing required field {field}"),
+        )?;
+    }
 
     let degraded_codes = schema
         .pointer("/$defs/degradation/properties/code/enum")

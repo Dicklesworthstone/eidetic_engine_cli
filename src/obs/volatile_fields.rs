@@ -53,6 +53,11 @@ pub const VOLATILE_FIELD_NAMES: &[&str] = &[
     "tailnetId",
     "tailnetDisplayName",
     "selfAdvertisedTags",
+    "peerNodeKey",
+    "peerTailscaleIps",
+    "peerMagicDnsName",
+    "peerHostname",
+    "peerAdvertisedTags",
     "binaryVersionRaw",
     "binaryAbsolutePath",
 ];
@@ -292,6 +297,14 @@ mod tests {
                         "selfTailscaleIp": "100.64.0.10",
                         "selfMagicDnsName": "ee-local.tailnet.test.",
                         "selfAdvertisedTags": ["tag:ee-mesh"],
+                        "peers": [{
+                            "peerNodeKey": "nodekey:peeralpha",
+                            "peerTailscaleIps": ["100.64.0.20"],
+                            "peerMagicDnsName": "peer-alpha.tailnet.test.",
+                            "peerHostname": "peer-alpha",
+                            "peerAdvertisedTags": ["tag:ee-mesh"],
+                            "online": true
+                        }],
                         "binaryVersionRaw": "1.66.0\n  tailscale commit: abc",
                         "binaryAbsolutePath": "/opt/homebrew/bin/tailscale",
                         "probeMethod": "cli"
@@ -308,6 +321,11 @@ mod tests {
             "/data/mesh/tailscale/selfTailscaleIp",
             "/data/mesh/tailscale/selfMagicDnsName",
             "/data/mesh/tailscale/selfAdvertisedTags",
+            "/data/mesh/tailscale/peers/0/peerNodeKey",
+            "/data/mesh/tailscale/peers/0/peerTailscaleIps",
+            "/data/mesh/tailscale/peers/0/peerMagicDnsName",
+            "/data/mesh/tailscale/peers/0/peerHostname",
+            "/data/mesh/tailscale/peers/0/peerAdvertisedTags",
             "/data/mesh/tailscale/binaryVersionRaw",
             "/data/mesh/tailscale/binaryAbsolutePath",
         ] {
@@ -329,6 +347,11 @@ mod tests {
             "selfTailscaleIp",
             "selfMagicDnsName",
             "selfAdvertisedTags",
+            "peerNodeKey",
+            "peerTailscaleIps",
+            "peerMagicDnsName",
+            "peerHostname",
+            "peerAdvertisedTags",
             "binaryVersionRaw",
             "binaryAbsolutePath",
         ] {

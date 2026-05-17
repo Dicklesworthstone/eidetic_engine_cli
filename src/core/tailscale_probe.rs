@@ -114,6 +114,16 @@ pub struct TailscaleBinaryReport {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TailscalePeerReport {
+    pub node_key: String,
+    pub tailscale_ips: Vec<String>,
+    pub magic_dns_name: Option<String>,
+    pub hostname: Option<String>,
+    pub advertised_tags: Vec<String>,
+    pub online: Option<bool>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TailscaleLocalReport {
     pub schema: &'static str,
     pub installed: bool,
@@ -129,6 +139,7 @@ pub struct TailscaleLocalReport {
     pub self_tailscale_ip: Option<String>,
     pub self_magic_dns_name: Option<String>,
     pub self_advertised_tags: Vec<String>,
+    pub peers: Vec<TailscalePeerReport>,
     pub version: Option<String>,
     pub probe_method: TailscaleProbeMethod,
     pub probe_elapsed_ms: u64,
@@ -240,6 +251,7 @@ impl TailscaleLocalReport {
             self_tailscale_ip: None,
             self_magic_dns_name: None,
             self_advertised_tags: Vec::new(),
+            peers: Vec::new(),
             version: None,
             probe_method,
             probe_elapsed_ms,
@@ -614,6 +626,7 @@ pub fn classify_status_payload(input: TailscaleStatusProbeInput<'_>) -> Tailscal
     report.self_magic_dns_name = string_value(self_node, "DNSName");
     report.self_tailscale_ip = first_string_array_value(self_node, "TailscaleIPs");
     report.self_advertised_tags = string_array_value(self_node, "Tags");
+    report.peers = peer_reports(&status);
 
     if let Some(binary) = input.binary {
         report.binary_authentic = binary.authentic;
@@ -1025,6 +1038,35 @@ fn string_array_value(value: &Value, key: &str) -> Vec<String> {
         .collect()
 }
 
+fn peer_reports(status: &Value) -> Vec<TailscalePeerReport> {
+    let Some(peers) = status.get("Peer").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+
+    let mut reports: Vec<_> = peers
+        .iter()
+        .filter_map(|(fallback_node_key, peer)| {
+            if !peer.is_object() {
+                return None;
+            }
+            let node_key = string_value(peer, "ID").unwrap_or_else(|| fallback_node_key.to_owned());
+            if node_key.trim().is_empty() {
+                return None;
+            }
+            Some(TailscalePeerReport {
+                node_key,
+                tailscale_ips: string_array_value(peer, "TailscaleIPs"),
+                magic_dns_name: string_value(peer, "DNSName"),
+                hostname: string_value(peer, "HostName"),
+                advertised_tags: string_array_value(peer, "Tags"),
+                online: bool_value(peer, "Online"),
+            })
+        })
+        .collect();
+    reports.sort_by(|left, right| left.node_key.cmp(&right.node_key));
+    reports
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1109,6 +1151,50 @@ mod tests {
         assert_eq!(report.self_node_key.as_deref(), Some("nodekey:self"));
         assert_eq!(report.self_tailscale_ip.as_deref(), Some("100.64.0.10"));
         assert!(report.degradations.is_empty());
+    }
+
+    #[test]
+    fn peer_map_is_reported_in_deterministic_node_key_order() {
+        let report = classify(
+            r#"{
+              "BackendState": "Running",
+              "Self": {
+                "ID":"nodekey:self",
+                "Authenticated":true,
+                "TailscaleIPs":["100.64.0.10"],
+                "Platform":"linux"
+              },
+              "Peer": {
+                "nodekey:zulu": {
+                  "ID": "nodekey:zulu",
+                  "DNSName": "zulu.tailnet.test.",
+                  "HostName": "zulu",
+                  "Online": false,
+                  "Tags": [],
+                  "TailscaleIPs": ["100.64.0.30"]
+                },
+                "nodekey:alpha": {
+                  "DNSName": "alpha.tailnet.test.",
+                  "HostName": "alpha",
+                  "Online": true,
+                  "Tags": ["tag:ee-mesh"],
+                  "TailscaleIPs": ["100.64.0.20", "fd7a:115c:a1e0::20"]
+                }
+              }
+            }"#,
+        );
+
+        assert_eq!(report.peers.len(), 2);
+        assert_eq!(report.peers[0].node_key, "nodekey:alpha");
+        assert_eq!(report.peers[0].tailscale_ips[0], "100.64.0.20");
+        assert_eq!(
+            report.peers[0].magic_dns_name.as_deref(),
+            Some("alpha.tailnet.test.")
+        );
+        assert_eq!(report.peers[0].hostname.as_deref(), Some("alpha"));
+        assert_eq!(report.peers[0].advertised_tags, vec!["tag:ee-mesh"]);
+        assert_eq!(report.peers[0].online, Some(true));
+        assert_eq!(report.peers[1].node_key, "nodekey:zulu");
     }
 
     #[test]

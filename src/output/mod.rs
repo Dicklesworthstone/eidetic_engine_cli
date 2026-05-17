@@ -3574,6 +3574,20 @@ fn render_tailscale_local_status_json(parent: &mut JsonBuilder, report: &Tailsca
             tailscale.field_str("selfMagicDnsName", self_magic_dns_name);
         }
         tailscale.field_array_of_strings("selfAdvertisedTags", &report.self_advertised_tags);
+        tailscale.field_array_of_objects("peers", &report.peers, |peer_object, peer| {
+            peer_object.field_str("peerNodeKey", &peer.node_key);
+            peer_object.field_array_of_strings("peerTailscaleIps", &peer.tailscale_ips);
+            if let Some(magic_dns_name) = peer.magic_dns_name.as_deref() {
+                peer_object.field_str("peerMagicDnsName", magic_dns_name);
+            }
+            if let Some(hostname) = peer.hostname.as_deref() {
+                peer_object.field_str("peerHostname", hostname);
+            }
+            peer_object.field_array_of_strings("peerAdvertisedTags", &peer.advertised_tags);
+            if let Some(online) = peer.online {
+                peer_object.field_bool("online", online);
+            }
+        });
         if let Some(version) = report.version.as_deref() {
             tailscale.field_str("version", version);
         }

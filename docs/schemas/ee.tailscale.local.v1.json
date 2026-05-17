@@ -11,6 +11,7 @@
     "authenticated",
     "binaryAuthentic",
     "selfAdvertisedTags",
+    "peers",
     "probeMethod",
     "probeElapsedMs",
     "platform",
@@ -63,6 +64,12 @@
         "type": "string"
       }
     },
+    "peers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/peer"
+      }
+    },
     "version": {
       "type": "string",
       "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+"
@@ -95,6 +102,42 @@
     }
   },
   "$defs": {
+    "peer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "peerNodeKey",
+        "peerTailscaleIps",
+        "peerAdvertisedTags"
+      ],
+      "properties": {
+        "peerNodeKey": {
+          "type": "string",
+          "pattern": "^nodekey:[A-Za-z0-9_:-]+$"
+        },
+        "peerTailscaleIps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "peerMagicDnsName": {
+          "type": "string"
+        },
+        "peerHostname": {
+          "type": "string"
+        },
+        "peerAdvertisedTags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "online": {
+          "type": "boolean"
+        }
+      }
+    },
     "degradation": {
       "type": "object",
       "additionalProperties": false,

@@ -80,6 +80,11 @@ const TAILSCALE_METADATA_FIELDS: &[&str] = &[
     "tailnetId",
     "tailnetDisplayName",
     "selfAdvertisedTags",
+    "peerNodeKey",
+    "peerTailscaleIps",
+    "peerMagicDnsName",
+    "peerHostname",
+    "peerAdvertisedTags",
     "binaryVersionRaw",
     "binaryAbsolutePath",
 ];
@@ -2617,7 +2622,7 @@ mod tests {
 
     #[test]
     fn support_bundle_standard_redacts_tailscale_metadata_fields() -> TestResult {
-        let raw = r#"{"mesh":{"tailscale":{"selfNodeKey":"nodekey:selfalpha","selfTailscaleIp":"100.64.0.10","selfMagicDnsName":"ee-local.tailnet.test.","tailnetId":"tailnet-alpha","tailnetDisplayName":"alpha.example","selfAdvertisedTags":["tag:ee-mesh","tag:memory"],"binaryVersionRaw":"1.66.0\n  tailscale commit: abc","binaryAbsolutePath":"/opt/homebrew/bin/tailscale","probeMethod":"cli"}}}"#;
+        let raw = r#"{"mesh":{"tailscale":{"selfNodeKey":"nodekey:selfalpha","selfTailscaleIp":"100.64.0.10","selfMagicDnsName":"ee-local.tailnet.test.","tailnetId":"tailnet-alpha","tailnetDisplayName":"alpha.example","selfAdvertisedTags":["tag:ee-mesh","tag:memory"],"peers":[{"peerNodeKey":"nodekey:peeralpha","peerTailscaleIps":["100.64.0.20"],"peerMagicDnsName":"peer-alpha.tailnet.test.","peerHostname":"peer-alpha","peerAdvertisedTags":["tag:ee-mesh"],"online":true}],"binaryVersionRaw":"1.66.0\n  tailscale commit: abc","binaryAbsolutePath":"/opt/homebrew/bin/tailscale","probeMethod":"cli"}}}"#;
 
         let report = redact_support_bundle_content(raw, RedactionLevel::Standard);
 
@@ -2636,6 +2641,10 @@ mod tests {
             "tailnet-alpha",
             "alpha.example",
             "tag:ee-mesh",
+            "nodekey:peeralpha",
+            "100.64.0.20",
+            "peer-alpha.tailnet.test.",
+            "peer-alpha",
             "/opt/homebrew/bin/tailscale",
         ] {
             assert!(
