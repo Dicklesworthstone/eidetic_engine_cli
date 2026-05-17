@@ -2249,7 +2249,7 @@ pub fn import_playbook(
         workspace_id: prepared.workspace_id,
         workspace_path: prepared.workspace_path.display().to_string(),
         database_path: prepared.database_path.display().to_string(),
-        source_path: options.source_path.display().to_string(),
+        source_path: redact_rule_public_source_ref(&options.source_path.display().to_string()),
         source_hash,
         source_schema: document.schema,
         source_rule_count: document.rules.len(),
@@ -4031,6 +4031,66 @@ fn rule_read_usage_error(message: String, repair: &str) -> DomainError {
     }
 }
 
+fn redact_rule_public_source_ref(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    redact_rule_public_path_like_segments(&secret_redacted)
+}
+
+fn redact_rule_public_path_like_segments(value: &str) -> String {
+    const REDACTED_PATH: &str = "[REDACTED_PATH]";
+    const PREFIXES: &[&str] = &[
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/home/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+        "C:\\",
+        "D:\\",
+    ];
+
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0usize;
+    while cursor < value.len() {
+        let remaining = &value[cursor..];
+        if let Some(prefix) = PREFIXES
+            .iter()
+            .find(|prefix| remaining.starts_with(**prefix))
+        {
+            output.push_str(REDACTED_PATH);
+            cursor += prefix.len();
+            while cursor < value.len() {
+                let next = value[cursor..]
+                    .chars()
+                    .next()
+                    .expect("cursor stays on a character boundary");
+                if rule_public_path_boundary(next) {
+                    break;
+                }
+                cursor += next.len_utf8();
+            }
+            continue;
+        }
+
+        let next = remaining
+            .chars()
+            .next()
+            .expect("cursor stays on a character boundary");
+        output.push(next);
+        cursor += next.len_utf8();
+    }
+    output
+}
+
+fn rule_public_path_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
+}
+
 /// Validate that a rule's content is safe to persist.
 ///
 /// Bead bd-17c65.3.1 (C1): the previous implementation rejected on any
@@ -4205,6 +4265,87 @@ mod tests {
         ensure(
             degraded[0]["sources"] == serde_json::json!(["playbook_list"]),
             format!("playbook_list source should be present: {}", degraded[0]),
+        )
+    }
+
+    #[test]
+    fn playbook_import_report_redacts_sensitive_source_path() -> TestResult {
+        let raw_source =
+            "/Users/alice/private/playbooks/team.json?api_key=sk-FAKEabc123def456ghi789";
+        let report = PlaybookImportReport {
+            schema: PLAYBOOK_IMPORT_SCHEMA_V1,
+            command: "playbook import",
+            version: "test",
+            status: "dry_run".to_owned(),
+            dry_run: true,
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            workspace_path: "/Users/alice/project".to_owned(),
+            database_path: "/Users/alice/project/.ee/ee.db".to_owned(),
+            source_path: redact_rule_public_source_ref(raw_source),
+            source_hash: "hash_fixture".to_owned(),
+            source_schema: PLAYBOOK_PORTABLE_SCHEMA_V1.to_owned(),
+            source_rule_count: 0,
+            imported_count: 0,
+            duplicate_count: 0,
+            skipped_count: 0,
+            downgraded_count: 0,
+            durable_mutation: false,
+            decisions: Vec::new(),
+            degraded: Vec::new(),
+        };
+
+        let rendered = format!("{}\n{}", report.data_json(), report.human_summary());
+
+        ensure(
+            rendered.contains("[REDACTED_PATH]"),
+            format!("source path should include path placeholder: {rendered}"),
+        )?;
+        ensure(
+            rendered.contains("[REDACTED:"),
+            format!("source path should include secret placeholder: {rendered}"),
+        )?;
+        ensure(
+            !rendered.contains("/Users/alice/private"),
+            format!("source path leaked local path: {rendered}"),
+        )?;
+        ensure(
+            !rendered.contains("sk-FAKEabc123def456ghi789"),
+            format!("source path leaked secret-like query value: {rendered}"),
+        )
+    }
+
+    #[test]
+    fn playbook_import_report_preserves_safe_source_path() -> TestResult {
+        let raw_source = "playbooks/team-policy.json";
+        let report = PlaybookImportReport {
+            schema: PLAYBOOK_IMPORT_SCHEMA_V1,
+            command: "playbook import",
+            version: "test",
+            status: "dry_run".to_owned(),
+            dry_run: true,
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            workspace_path: "/tmp/project".to_owned(),
+            database_path: "/tmp/project/.ee/ee.db".to_owned(),
+            source_path: redact_rule_public_source_ref(raw_source),
+            source_hash: "hash_fixture".to_owned(),
+            source_schema: PLAYBOOK_PORTABLE_SCHEMA_V1.to_owned(),
+            source_rule_count: 0,
+            imported_count: 0,
+            duplicate_count: 0,
+            skipped_count: 0,
+            downgraded_count: 0,
+            durable_mutation: false,
+            decisions: Vec::new(),
+            degraded: Vec::new(),
+        };
+
+        ensure(
+            report.source_path == raw_source,
+            format!("safe relative source path should be preserved: {report:?}"),
+        )?;
+        ensure(
+            !report.human_summary().contains("[REDACTED_PATH]"),
+            "safe relative source path should not be path-redacted",
         )
     }
 
