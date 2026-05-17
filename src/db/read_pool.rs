@@ -574,15 +574,7 @@ impl SnapshotPin<'_> {
         }
 
         if self.is_poisoned() {
-            return Err(DbError::MalformedRow {
-                operation: DbOperation::Query,
-                message: format!(
-                    "snapshot pin {} was poisoned or expired by the read-pool lifecycle watchdog; release it and acquire a fresh snapshot",
-                    self.pin_id
-                        .map(|pin_id| pin_id.to_string())
-                        .unwrap_or_else(|| "<unpinned>".to_string())
-                ),
-            });
+            return Err(self.poisoned_error());
         }
 
         Ok(self.connection().deref())
@@ -590,6 +582,14 @@ impl SnapshotPin<'_> {
 
     pub fn commit(mut self) -> Result<()> {
         if self.snapshot_active {
+            if self.is_expired() {
+                self.poisoned.store(true, Ordering::Release);
+            }
+            if self.is_poisoned() {
+                let error = self.poisoned_error();
+                self.rollback()?;
+                return Err(error);
+            }
             self.connection().commit_read_snapshot()?;
             self.snapshot_active = false;
             self.unregister_pin();
@@ -644,6 +644,18 @@ impl SnapshotPin<'_> {
     fn note_release_failure(&self) {
         if let Some(pool) = self.pool {
             pool.note_release_failure();
+        }
+    }
+
+    fn poisoned_error(&self) -> DbError {
+        DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: format!(
+                "snapshot pin {} was poisoned or expired by the read-pool lifecycle watchdog; release it and acquire a fresh snapshot",
+                self.pin_id
+                    .map(|pin_id| pin_id.to_string())
+                    .unwrap_or_else(|| "<unpinned>".to_string())
+            ),
         }
     }
 
@@ -1515,6 +1527,34 @@ mod tests {
         assert_eq!(stats.active, 0);
         assert_eq!(stats.idle, 1);
         assert_eq!(stats.active_pins, 0);
+    }
+
+    #[test]
+    fn poisoned_snapshot_pin_commit_returns_clean_error_and_releases_connection() {
+        let (_tempdir, _database_path, pool) = file_pool(1);
+        let pin = must(pool.pin_snapshot(), "snapshot pin opens");
+        let slot_id = pin.slot_id();
+
+        let poisoned = pool.force_poison_active_pins();
+        assert_eq!(poisoned.len(), 1);
+
+        let error = match pin.commit() {
+            Ok(()) => panic!("poisoned pin should not commit as a clean release"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.operation(), Some(DbOperation::Query));
+        assert!(error.to_string().contains("snapshot pin"));
+        assert!(error.to_string().contains("poisoned"));
+
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 1);
+        assert_eq!(stats.active_pins, 0);
+        assert_eq!(stats.expired_pins, 0);
+
+        let reacquired = must(pool.acquire(), "poisoned commit releases connection");
+        assert_eq!(reacquired.slot_id(), slot_id);
     }
 
     #[test]
