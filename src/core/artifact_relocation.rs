@@ -698,6 +698,7 @@ fn reject_existing_symlink_component(path: &Path) -> Result<(), DomainError> {
 
 fn hash_file(path: &Path) -> Result<String, DomainError> {
     reject_existing_symlink_component(path)?;
+    ensure_hash_source_is_regular_file(path)?;
     let mut file = fs::File::open(path).map_err(|error| DomainError::Storage {
         message: format!("failed to open {} for hashing: {error}", path.display()),
         repair: Some("Check file permissions.".to_owned()),
@@ -717,6 +718,26 @@ fn hash_file(path: &Path) -> Result<String, DomainError> {
         hasher.update(&buffer[..read]);
     }
     Ok(format!("blake3:{}", hasher.finalize().to_hex()))
+}
+
+fn ensure_hash_source_is_regular_file(path: &Path) -> Result<(), DomainError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "failed to inspect {} before hashing: {error}",
+            path.display()
+        ),
+        repair: Some("Check file permissions.".to_owned()),
+    })?;
+    if metadata.file_type().is_file() {
+        return Ok(());
+    }
+    Err(DomainError::Storage {
+        message: format!(
+            "refusing to hash non-regular artifact path: {}",
+            path.display()
+        ),
+        repair: Some("Relocate only regular artifact files.".to_owned()),
+    })
 }
 
 fn absolutize(path: &Path) -> PathBuf {
@@ -1248,6 +1269,30 @@ mod tests {
             return Err("non-regular temp manifest path was unexpectedly replaced".to_owned());
         }
         Ok(())
+    }
+
+    #[test]
+    fn hash_file_rejects_non_regular_artifact_path_before_open() -> TestResult {
+        let directory = temp_path("hash-directory-artifact");
+        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+
+        let result = hash_file(&directory);
+
+        match result {
+            Err(DomainError::Storage { message, repair }) => {
+                if !message.contains("refusing to hash non-regular artifact path") {
+                    return Err(format!("unexpected storage error message: {message}"));
+                }
+                if repair.as_deref() != Some("Relocate only regular artifact files.") {
+                    return Err(format!("unexpected repair hint: {repair:?}"));
+                }
+            }
+            other => return Err(format!("expected non-regular hash refusal, got {other:?}")),
+        }
+        ensure(
+            directory.is_dir(),
+            "hash refusal should leave directory artifact untouched".to_owned(),
+        )
     }
 
     #[test]
