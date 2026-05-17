@@ -2784,6 +2784,31 @@ mod tests {
     }
 
     #[test]
+    fn profile_config_apply_rejects_config_directory_before_write() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_path = temp.path().join(".ee").join("config.toml");
+        fs::create_dir_all(&config_path).map_err(|error| error.to_string())?;
+
+        let options = config_options(temp.path(), OperatingProfile::Swarm, false);
+        let error = apply_profile_config(&options)
+            .expect_err("profile config apply should reject config directory before write");
+
+        ensure_true(
+            error.to_string().contains("not a regular file"),
+            "apply error reports non-regular config path",
+        )?;
+        ensure_true(
+            config_path.is_dir(),
+            "profile config apply leaves non-regular config path untouched",
+        )?;
+        ensure(
+            selected_profile_from_config(temp.path()),
+            None,
+            "runtime profile must not read config directory after failed apply",
+        )
+    }
+
+    #[test]
     fn profile_config_write_preflight_rejects_non_regular_final_path() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let config_path = temp.path().join(".ee").join("config.toml");
