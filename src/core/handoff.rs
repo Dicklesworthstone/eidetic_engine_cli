@@ -2205,6 +2205,7 @@ fn write_regular_file_no_symlinks(
     label: &str,
 ) -> Result<(), DomainError> {
     reject_existing_symlink_component(path, label)?;
+    ensure_handoff_write_path_is_regular_or_missing(path, label)?;
     fs::write(path, content).map_err(|error| DomainError::Storage {
         message: format!("Failed to write {label}: {error}"),
         repair: Some(format!("Check write permissions for {}", path.display())),
@@ -4961,6 +4962,27 @@ memories_revised = 3
                 .file_type()
                 .is_dir(),
             "directory key path should remain untouched",
+        )
+    }
+
+    #[test]
+    fn handoff_capsule_write_rejects_non_regular_final_path_before_write() -> TestResult {
+        let dir = repo_tempdir()?;
+        let capsule_path = dir.path().join("capsule.json");
+        fs::create_dir(&capsule_path).map_err(|error| error.to_string())?;
+
+        let error = write_regular_file_no_symlinks(&capsule_path, "{}", "handoff capsule")
+            .expect_err("non-regular capsule path should be rejected before write");
+        ensure(
+            error.message().contains("non-regular path"),
+            format!("unexpected error: {}", error.message()),
+        )?;
+        ensure(
+            fs::symlink_metadata(&capsule_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_dir(),
+            "directory capsule path should remain untouched",
         )
     }
 
