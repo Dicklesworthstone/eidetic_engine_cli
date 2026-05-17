@@ -280,11 +280,28 @@ pub fn log_event_to(path: &Path, level: LogLevel, event: &TestEvent) -> bool {
     if !test_log_final_path_is_regular_or_missing(path) {
         return false;
     }
-    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+    let Ok(mut file) = open_test_log_for_append(path) else {
         return false;
     };
     writeln!(file, "{serialized}").is_ok()
 }
+
+fn open_test_log_for_append(path: &Path) -> io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    configure_test_log_append_options(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_test_log_append_options(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_test_log_append_options(_options: &mut OpenOptions) {}
 
 fn test_log_final_path_is_regular_or_missing(path: &Path) -> bool {
     match fs::symlink_metadata(path) {
@@ -588,6 +605,26 @@ mod tests {
             std::fs::read_to_string(&outside_log).expect("outside content"),
             "outside\n",
             "test-event logging must not append through symlinked file"
+        );
+    }
+
+    #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+    #[test]
+    fn open_test_log_for_append_rejects_symlinked_final_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let outside_log = tmp.path().join("outside.jsonl");
+        std::fs::write(&outside_log, "outside\n").expect("outside log");
+        let linked_log = tmp.path().join("events.jsonl");
+        std::os::unix::fs::symlink(&outside_log, &linked_log).expect("symlink log");
+
+        assert!(
+            open_test_log_for_append(&linked_log).is_err(),
+            "test-event log append open should not follow final symlinks"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outside_log).expect("outside content"),
+            "outside\n",
+            "test-event log append open must not mutate the linked target"
         );
     }
 
