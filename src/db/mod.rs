@@ -301,6 +301,9 @@ fn lock_file_write_owner_gate(location: &DatabaseLocation) -> Result<FileWriteOw
 
 fn lock_database_write_file(database_path: &Path) -> Result<File> {
     let lock_path = database_path.with_extension("write.lock");
+    ensure_database_write_lock_path_has_no_symlink_components(&lock_path)?;
+    ensure_database_write_lock_path_is_regular_or_missing(&lock_path)?;
+
     let lock_file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -348,6 +351,95 @@ fn lock_database_write_file(database_path: &Path) -> Result<File> {
     }
 
     Ok(lock_file)
+}
+
+fn ensure_database_write_lock_path_has_no_symlink_components(lock_path: &Path) -> Result<()> {
+    if let Some(symlink_path) =
+        first_existing_symlink_component(lock_path).map_err(|error| DbError::InvalidPath {
+            operation: DbOperation::BeginTransaction,
+            path: lock_path.to_path_buf(),
+            message: format!(
+                "failed to inspect database write lock path component '{}': {}",
+                error.path.display(),
+                error.source
+            ),
+        })?
+    {
+        return Err(DbError::InvalidPath {
+            operation: DbOperation::BeginTransaction,
+            path: lock_path.to_path_buf(),
+            message: format!(
+                "refusing to open database write lock '{}': path traverses symbolic link '{}'",
+                lock_path.display(),
+                symlink_path.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn ensure_database_write_lock_path_is_regular_or_missing(lock_path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(lock_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DbError::InvalidPath {
+            operation: DbOperation::BeginTransaction,
+            path: lock_path.to_path_buf(),
+            message: format!(
+                "refusing to open database write lock '{}': path is not a regular file",
+                lock_path.display()
+            ),
+        }),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(DbError::InvalidPath {
+            operation: DbOperation::BeginTransaction,
+            path: lock_path.to_path_buf(),
+            message: format!(
+                "failed to inspect database write lock '{}': {error}",
+                lock_path.display()
+            ),
+        }),
+    }
+}
+
+#[derive(Debug)]
+struct SymlinkComponentInspectionError {
+    path: PathBuf,
+    source: std::io::Error,
+}
+
+fn first_existing_symlink_component(
+    path: &Path,
+) -> Result<Option<PathBuf>, SymlinkComponentInspectionError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(source) => {
+                return Err(SymlinkComponentInspectionError {
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(None)
 }
 
 impl DbConnection {
@@ -25083,6 +25175,65 @@ mod tests {
         )?;
         check.close()?;
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_write_lock_rejects_symlinked_lock_parent_before_open() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let real_parent = tempdir.path().join("real-parent");
+        let symlink_parent = tempdir.path().join("symlink-parent");
+        std::fs::create_dir(&real_parent).map_err(|error| TestFailure::new(error.to_string()))?;
+        std::os::unix::fs::symlink(&real_parent, &symlink_parent)
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+
+        let database_path = symlink_parent.join("locks.db");
+        let target_lock_path = real_parent.join("locks.write.lock");
+        let error = match super::lock_database_write_file(&database_path) {
+            Ok(_) => {
+                return Err(TestFailure::new(
+                    "write lock should reject a symlinked parent before opening",
+                ));
+            }
+            Err(error) => error,
+        };
+
+        let message = error.to_string();
+        ensure(
+            message.contains("symbolic link"),
+            format!("error should mention symbolic link rejection, got: {message}"),
+        )?;
+        ensure(
+            !target_lock_path.exists(),
+            "write lock file should not be created through symlinked parent",
+        )
+    }
+
+    #[test]
+    fn database_write_lock_rejects_non_regular_lock_file_before_open() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let database_path = tempdir.path().join("locks.db");
+        let lock_path = database_path.with_extension("write.lock");
+        std::fs::create_dir(&lock_path).map_err(|error| TestFailure::new(error.to_string()))?;
+
+        let error = match super::lock_database_write_file(&database_path) {
+            Ok(_) => {
+                return Err(TestFailure::new(
+                    "write lock should reject a non-regular lock path before opening",
+                ));
+            }
+            Err(error) => error,
+        };
+
+        let message = error.to_string();
+        ensure(
+            message.contains("not a regular file"),
+            format!("error should mention non-regular lock path, got: {message}"),
+        )?;
+        ensure(
+            lock_path.is_dir(),
+            "non-regular lock path should remain a directory",
+        )
     }
 
     fn acquire_lock_from_parallel_file_connections(
