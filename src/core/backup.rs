@@ -3274,6 +3274,7 @@ fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, Doma
 }
 
 fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), DomainError> {
+    ensure_backup_write_path_has_no_symlink_components(path, "backup artifact")?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -3299,6 +3300,7 @@ fn write_new_relative_file(
     bytes: &[u8],
 ) -> Result<PathBuf, DomainError> {
     let path = root.join(relative_path);
+    ensure_backup_write_path_has_no_symlink_components(&path, "backup relative artifact")?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
             message: format!(
@@ -3308,8 +3310,28 @@ fn write_new_relative_file(
             repair: Some("retry backup creation with a writable output directory".to_owned()),
         })?;
     }
+    ensure_backup_write_path_has_no_symlink_components(&path, "backup relative artifact")?;
     write_new_file(&path, bytes)?;
     Ok(path)
+}
+
+fn ensure_backup_write_path_has_no_symlink_components(
+    path: &Path,
+    role: &'static str,
+) -> Result<(), DomainError> {
+    if let Some(symlink_path) = first_existing_symlink_component(path)? {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "{role} '{}' traverses symbolic link '{}'; backup writes require real artifact paths",
+                path.display(),
+                symlink_path.display()
+            ),
+            repair: Some(
+                "replace symlinked backup artifact paths with real directories".to_owned(),
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn hash_file(path: &Path) -> Result<String, DomainError> {
@@ -4922,6 +4944,40 @@ mod tests {
         ensure(
             !real_root.join("restore-side-path").exists(),
             "restore must not write through a symlinked side-path parent",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_new_relative_file_rejects_symlinked_parent_before_write() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = tempdir.path().join("backup");
+        let outside = tempdir.path().join("outside");
+        fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&outside).map_err(|error| error.to_string())?;
+        symlink(&outside, root.join("derived")).map_err(|error| error.to_string())?;
+
+        let result = write_new_relative_file(&root, "derived/payload.bin", b"payload");
+
+        match result {
+            Err(DomainError::PolicyDenied { message, repair }) => {
+                ensure(
+                    message.contains("traverses symbolic link"),
+                    "symlinked relative artifact parent is rejected",
+                )?;
+                ensure_equal(
+                    repair.as_deref(),
+                    Some("replace symlinked backup artifact paths with real directories"),
+                    "symlinked relative artifact repair",
+                )?;
+            }
+            other => return Err(format!("expected policy denied error, got {other:?}")),
+        }
+        ensure(
+            !outside.join("payload.bin").exists(),
+            "backup relative artifact write must not follow symlinked parent",
         )
     }
 
