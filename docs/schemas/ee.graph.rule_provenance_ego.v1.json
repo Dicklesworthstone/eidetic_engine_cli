@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.graph.rule_provenance_ego.v1.json",
+  "title": "ee.graph.rule_provenance_ego.v1",
+  "description": "Bipartite ego subgraph for a single procedural rule. Produced by `ee::graph::bipartite_provenance::compute_rule_provenance_ego`. The bare payload returned by the helper; the planned `ee rule provenance <rule-id>` CLI surface (tracked by bd-3eymh) will wrap this inside the standard `ee.response.v2` envelope. Collections are deterministically sorted (`citedMemories` by `memoryId`, `coCitingRules` by `ruleId`, `sharedMemoryIds` by memory id) so the JSON serialization is byte-stable across runs against the same projection (J7 contract).",
+  "type": "object",
+  "required": [
+    "schema",
+    "ruleId",
+    "status",
+    "citedMemories",
+    "coCitingRules"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.graph.rule_provenance_ego.v1",
+      "description": "Schema version pin. Bumps when this document's shape changes."
+    },
+    "ruleId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Center rule the ego subgraph is rooted at. Echoed back from the caller-supplied identifier even when the rule is not present in the bipartite projection."
+    },
+    "status": {"$ref": "#/$defs/egoStatus"},
+    "citedMemories": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/citedMemory"},
+      "description": "Memories the center rule cites (the 1-hop ring on the bipartite projection). Sorted by `memoryId` ascending. Empty when `status` is not `available`."
+    },
+    "coCitingRules": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/coCitingRule"},
+      "description": "Peer rules that share at least one memory with the center rule (the 2-hop ring). Sorted by `ruleId` ascending. The center rule itself is never included. Empty when `status` is not `available`."
+    }
+  },
+  "$defs": {
+    "egoStatus": {
+      "type": "string",
+      "enum": ["available", "rule_not_found", "not_a_rule_node"],
+      "description": "Honest enumeration of why the ego subgraph might be empty. `available` means the rule node was found and traversed (even if it cited nothing). `rule_not_found` separates 'this rule has no provenance edges yet' from 'this rule isn't in the bipartite projection at all', and `not_a_rule_node` fires when the caller passed a memory id where a rule id was expected. Agents use the distinction to decide whether to retry after a steward refresh or to surface a structured error.",
+      "x-ee-wire-format": "snake_case"
+    },
+    "citedMemory": {
+      "type": "object",
+      "required": ["memoryId", "otherRuleCount"],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Memory cited by the center rule."
+        },
+        "otherRuleCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of OTHER rules in the bipartite projection that also cite this memory (excluding the center rule). `0` means the memory is anchored solely by the center."
+        }
+      }
+    },
+    "coCitingRule": {
+      "type": "object",
+      "required": ["ruleId", "sharedMemoryCount", "sharedMemoryIds"],
+      "additionalProperties": false,
+      "properties": {
+        "ruleId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Peer rule id. Always different from the center rule's id."
+        },
+        "sharedMemoryCount": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Length of `sharedMemoryIds`. A peer that shares zero memories with the center is never included in `coCitingRules`, so this is always at least 1 when the entry appears."
+        },
+        "sharedMemoryIds": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Deterministic intersection of this peer's cited memories with the center's cited memories. Sorted by memory id ascending, deduplicated."
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.graph.rule_provenance_ego.v1",
+      "ruleId": "rule_release_format_clippy",
+      "status": "available",
+      "citedMemories": [
+        {"memoryId": "mem_release_failure_q3", "otherRuleCount": 2},
+        {"memoryId": "mem_format_before_release", "otherRuleCount": 0}
+      ],
+      "coCitingRules": [
+        {
+          "ruleId": "rule_clippy_pedantic_release_gate",
+          "sharedMemoryCount": 1,
+          "sharedMemoryIds": ["mem_release_failure_q3"]
+        },
+        {
+          "ruleId": "rule_pre_release_audit",
+          "sharedMemoryCount": 1,
+          "sharedMemoryIds": ["mem_release_failure_q3"]
+        }
+      ]
+    },
+    {
+      "schema": "ee.graph.rule_provenance_ego.v1",
+      "ruleId": "rule_isolated",
+      "status": "available",
+      "citedMemories": [],
+      "coCitingRules": []
+    },
+    {
+      "schema": "ee.graph.rule_provenance_ego.v1",
+      "ruleId": "rule_typo",
+      "status": "rule_not_found",
+      "citedMemories": [],
+      "coCitingRules": []
+    },
+    {
+      "schema": "ee.graph.rule_provenance_ego.v1",
+      "ruleId": "mem_user_passed_a_memory_id",
+      "status": "not_a_rule_node",
+      "citedMemories": [],
+      "coCitingRules": []
+    }
+  ]
+}
