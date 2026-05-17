@@ -192,7 +192,49 @@ fn timing_ms(performance: &serde_json::Value, name: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StageDiagnostics {
+    total_ms: f64,
+    search_ms: f64,
+    candidate_resolution_ms: f64,
+    ppr_rerank_ms: f64,
+    pack_assembly_ms: f64,
+    pack_persistence_ms: f64,
+}
+
+impl StageDiagnostics {
+    fn from_performance(performance: &serde_json::Value) -> Self {
+        Self {
+            total_ms: timing_ms(performance, "total"),
+            search_ms: timing_ms(performance, "search"),
+            candidate_resolution_ms: timing_ms(performance, "candidateResolution"),
+            ppr_rerank_ms: timing_ms(performance, "pprRerank"),
+            pack_assembly_ms: timing_ms(performance, "packAssembly"),
+            pack_persistence_ms: timing_ms(performance, "packPersistence"),
+        }
+    }
+
+    fn tracked_ms(self) -> f64 {
+        self.search_ms
+            + self.candidate_resolution_ms
+            + self.ppr_rerank_ms
+            + self.pack_assembly_ms
+            + self.pack_persistence_ms
+    }
+}
+
+fn budget_status(value_ms: f64) -> &'static str {
+    if value_ms <= PPR_OVERHEAD_P50_BUDGET_MS {
+        "within_budget"
+    } else {
+        "over_budget"
+    }
+}
+
 fn emit_stage_diagnostics(workspace_path: &Path, db_path: &Path, index_dir: &Path) {
+    let mut base_diagnostics = None;
+    let mut ppr_diagnostics = None;
+
     for (label, ppr_weight) in [
         ("base_1000_memories", None),
         ("ppr_1000_memories", Some(0.5)),
@@ -202,16 +244,39 @@ fn emit_stage_diagnostics(workspace_path: &Path, db_path: &Path, index_dir: &Pat
             "context",
         )
         .expect("context pack stage diagnostics");
+        let diagnostics = StageDiagnostics::from_performance(&run.performance);
         println!(
             "ppr_stage_diagnostics label={label} total_ms={:.3} search_ms={:.3} candidate_resolution_ms={:.3} ppr_rerank_ms={:.3} pack_assembly_ms={:.3} pack_persistence_ms={:.3}",
-            timing_ms(&run.performance, "total"),
-            timing_ms(&run.performance, "search"),
-            timing_ms(&run.performance, "candidateResolution"),
-            timing_ms(&run.performance, "pprRerank"),
-            timing_ms(&run.performance, "packAssembly"),
-            timing_ms(&run.performance, "packPersistence"),
+            diagnostics.total_ms,
+            diagnostics.search_ms,
+            diagnostics.candidate_resolution_ms,
+            diagnostics.ppr_rerank_ms,
+            diagnostics.pack_assembly_ms,
+            diagnostics.pack_persistence_ms,
         );
+        if ppr_weight.is_some() {
+            ppr_diagnostics = Some(diagnostics);
+        } else {
+            base_diagnostics = Some(diagnostics);
+        }
         black_box(run.response.data.pack.hash);
+    }
+
+    if let (Some(base), Some(ppr)) = (base_diagnostics, ppr_diagnostics) {
+        let total_delta_ms = ppr.total_ms - base.total_ms;
+        let search_delta_ms = ppr.search_ms - base.search_ms;
+        let candidate_resolution_delta_ms =
+            ppr.candidate_resolution_ms - base.candidate_resolution_ms;
+        let ppr_rerank_delta_ms = ppr.ppr_rerank_ms - base.ppr_rerank_ms;
+        let pack_assembly_delta_ms = ppr.pack_assembly_ms - base.pack_assembly_ms;
+        let pack_persistence_delta_ms = ppr.pack_persistence_ms - base.pack_persistence_ms;
+        let tracked_delta_ms = ppr.tracked_ms() - base.tracked_ms();
+        let residual_delta_ms = total_delta_ms - tracked_delta_ms;
+        println!(
+            "ppr_overhead_attribution total_delta_ms={total_delta_ms:.3} search_delta_ms={search_delta_ms:.3} candidate_resolution_delta_ms={candidate_resolution_delta_ms:.3} ppr_rerank_delta_ms={ppr_rerank_delta_ms:.3} pack_assembly_delta_ms={pack_assembly_delta_ms:.3} pack_persistence_delta_ms={pack_persistence_delta_ms:.3} residual_delta_ms={residual_delta_ms:.3} budget_ms={PPR_OVERHEAD_P50_BUDGET_MS:.3} total_budget_status={} ppr_rerank_budget_status={}",
+            budget_status(total_delta_ms),
+            budget_status(ppr_rerank_delta_ms),
+        );
     }
 }
 
@@ -247,6 +312,13 @@ criterion_main!(benches);
 
 #[cfg(test)]
 mod tests {
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < f64::EPSILON,
+            "expected {actual} to equal {expected}"
+        );
+    }
+
     #[test]
     fn benchmark_group_name_is_canonical() {
         assert_eq!(super::BENCH_GROUP_NAME, "ee_context_with_ppr");
@@ -265,7 +337,30 @@ mod tests {
             }
         });
 
-        assert_eq!(super::timing_ms(&performance, "pprRerank"), 7.25);
-        assert_eq!(super::timing_ms(&performance, "missing"), 0.0);
+        assert_close(super::timing_ms(&performance, "pprRerank"), 7.25);
+        assert_close(super::timing_ms(&performance, "missing"), 0.0);
+    }
+
+    #[test]
+    fn stage_diagnostics_tracks_named_context_stages() {
+        let performance = serde_json::json!({
+            "data": {
+                "timings": [
+                    { "name": "total", "elapsedMs": 100.0 },
+                    { "name": "search", "elapsedMs": 80.0 },
+                    { "name": "candidateResolution", "elapsedMs": 2.0 },
+                    { "name": "pprRerank", "elapsedMs": 7.0 },
+                    { "name": "packAssembly", "elapsedMs": 3.0 },
+                    { "name": "packPersistence", "elapsedMs": 5.0 }
+                ]
+            }
+        });
+
+        let diagnostics = super::StageDiagnostics::from_performance(&performance);
+
+        assert_close(diagnostics.total_ms, 100.0);
+        assert_close(diagnostics.tracked_ms(), 97.0);
+        assert_eq!(super::budget_status(7.0), "within_budget");
+        assert_eq!(super::budget_status(31.0), "over_budget");
     }
 }

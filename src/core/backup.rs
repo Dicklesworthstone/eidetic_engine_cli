@@ -1232,14 +1232,7 @@ pub fn restore_backup_to_side_path(
     let restore_degraded = restore_manifest_degradations(&manifest_bytes);
     write_new_file(&restore_manifest_path, &manifest_bytes)?;
 
-    let records_bytes = fs::read(&source_records_path).map_err(|error| DomainError::Storage {
-        message: format!(
-            "failed to read backup records '{}': {error}",
-            source_records_path.display()
-        ),
-        repair: Some("verify the backup records artifact and retry restore".to_owned()),
-    })?;
-    write_new_file(&restore_records_path, &records_bytes)?;
+    copy_new_file(&source_records_path, &restore_records_path)?;
     let restored_derived = copy_derived_artifacts_to_restore(
         &backup_path,
         &restore_artifact_dir,
@@ -1393,6 +1386,25 @@ fn copy_derived_artifacts_to_restore(
                 repair: Some("recreate the backup in a safe filesystem path".to_owned()),
             });
         };
+        let metadata =
+            fs::symlink_metadata(&source_path).map_err(|error| DomainError::Storage {
+                message: format!(
+                    "failed to stat derived backup asset '{}': {error}",
+                    source_path.display()
+                ),
+                repair: Some("verify the backup directory and retry restore".to_owned()),
+            })?;
+        const MAX_DERIVED_ASSET_BYTES: u64 = 250 * 1024 * 1024;
+        if metadata.len() > MAX_DERIVED_ASSET_BYTES {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "derived backup asset '{}' exceeds maximum allowed size of {} bytes",
+                    source_path.display(),
+                    MAX_DERIVED_ASSET_BYTES
+                ),
+                repair: Some("inspect backup size constraints".to_owned()),
+            });
+        }
         let bytes = fs::read(&source_path).map_err(|error| DomainError::Storage {
             message: format!(
                 "failed to read derived backup asset '{}': {error}",
@@ -2570,6 +2582,21 @@ fn read_index_manifest_candidate(
         }
     };
     if !metadata.file_type().is_file() {
+        return None;
+    }
+
+    const MAX_INDEX_MANIFEST_BYTES: u64 = 1024 * 1024;
+    if metadata.len() > MAX_INDEX_MANIFEST_BYTES {
+        degraded.push(BackupDegradation::warning(
+            "index_manifest_too_large",
+            format!(
+                "index manifest '{}' is {} bytes, exceeding the {} byte limit",
+                candidate.display(),
+                metadata.len(),
+                MAX_INDEX_MANIFEST_BYTES
+            ),
+            "inspect .ee/index for unexpected large files and retry backup create --include-derived",
+        ));
         return None;
     }
 

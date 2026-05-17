@@ -1227,6 +1227,8 @@ pub fn assess_memory_evidence_freshness(
     }
 }
 
+const MAX_PROVENANCE_FILE_BYTES: u64 = 10 * 1024 * 1024;
+
 fn read_provenance_file_text(source_path: &Path) -> Result<Option<String>, String> {
     if let Some(symlink_path) = first_existing_symlink_component(source_path).map_err(|error| {
         format!(
@@ -1244,7 +1246,16 @@ fn read_provenance_file_text(source_path: &Path) -> Result<Option<String>, Strin
     }
 
     match fs::symlink_metadata(source_path) {
-        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(metadata) if metadata.file_type().is_file() => {
+            if metadata.len() > MAX_PROVENANCE_FILE_BYTES {
+                return Err(format!(
+                    "Referenced provenance file {} is too large ({} bytes). Maximum supported size is {} bytes.",
+                    source_path.display(),
+                    metadata.len(),
+                    MAX_PROVENANCE_FILE_BYTES
+                ));
+            }
+        }
         Ok(_) => {
             return Err(format!(
                 "Referenced provenance file {} is not a regular file.",

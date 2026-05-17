@@ -770,6 +770,14 @@ fn read_pack_file_no_symlinks(pack_path: &Path, relative_path: &str) -> Result<V
             target_path.display()
         ));
     }
+    const MAX_PACK_ARTIFACT_BYTES: u64 = 100 * 1024 * 1024;
+    if metadata.len() > MAX_PACK_ARTIFACT_BYTES {
+        return Err(format!(
+            "pack_artifact_too_large: {}: exceeds maximum size of {} bytes",
+            target_path.display(),
+            MAX_PACK_ARTIFACT_BYTES
+        ));
+    }
     fs::read(&target_path).map_err(|error| {
         format!(
             "pack_artifact_unavailable: {}: {}",

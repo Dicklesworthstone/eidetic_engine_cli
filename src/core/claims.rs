@@ -967,17 +967,25 @@ fn resolve_claim_artifact_path_no_symlinks(
     Ok(artifact_path)
 }
 
+const MAX_CLAIM_ARTIFACT_BYTES: u64 = 100 * 1024 * 1024;
+
 fn ensure_claim_artifact_regular_file(path: &Path) -> Result<(), String> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("artifact_not_found: {}: {}", path.display(), error))?;
-    if metadata.file_type().is_file() {
-        Ok(())
-    } else {
-        Err(format!(
+    if !metadata.file_type().is_file() {
+        return Err(format!(
             "artifact_not_regular: {} is not a regular file",
             path.display()
-        ))
+        ));
     }
+    if metadata.len() > MAX_CLAIM_ARTIFACT_BYTES {
+        return Err(format!(
+            "artifact_too_large: {} exceeds maximum size of {} bytes",
+            path.display(),
+            MAX_CLAIM_ARTIFACT_BYTES
+        ));
+    }
+    Ok(())
 }
 
 fn reject_symlink_component(path: &Path) -> Result<(), String> {
