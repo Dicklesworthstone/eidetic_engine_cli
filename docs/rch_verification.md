@@ -35,7 +35,51 @@ The wrapper sets these remote-safe defaults:
 The JSON proof schema is `ee.rch.verify.v1` and includes the command kind,
 remote-required flag, planned or actual RCH invocation, worker id when observed,
 remote project root, remote target dir, exit code, elapsed time, command hash,
-first Rust compiler error location, output tail, and degradation codes.
+first Rust compiler error location, output tail, source attribution, dirty-state
+hashes, and degradation codes.
+
+## Source Attribution Modes
+
+The wrapper has three source-attribution modes. Pick the weakest mode that is
+honest for the claim you need to make.
+
+| Mode | Command shape | Runs RCH? | Use when | Proof status to expect |
+|---|---|---:|---|---|
+| Live checkout | `scripts/rch_verify.sh -- cargo test ...` | yes | The current checkout state is the thing being verified, including any dirty paths. | `verification_attribution=live_dirty_checkout`; may still pass remotely. |
+| Strict clean checkout | `scripts/rch_verify.sh --require-clean-tree -- cargo test ...` | only if clean | You need proof that no tracked, Beads, scratch, or unsafe untracked paths influenced the run. | Clean: `strict_clean_tree`; dirty: `source_state_refused` before RCH. |
+| Committed tree manifest | `scripts/rch_verify.sh --committed-tree --treeish HEAD -- cargo test ...` | no, currently refuses | You need a deterministic manifest for a committed source tree while the shared checkout is dirty. | `committed_tree_unsupported` until safe source materialization exists. |
+
+Strict clean mode is the closeout mode for "this exact checkout is clean and
+remote-verified." Committed-tree mode is currently a source-proof mode, not a
+remote execution mode: it resolves the requested treeish, records `git_tree`,
+`resolved_commit`, `source_manifest_hash`, `source_manifest_file_count`, and
+`source_manifest_byte_count`, then refuses before RCH with
+`rch_verify_committed_tree_unsupported`. If `Cargo.toml` contains path
+dependencies, the proof also carries
+`rch_verify_committed_tree_path_deps_unsupported`; do not reinterpret that as a
+successful verification of the live checkout.
+
+Copy-paste examples:
+
+```bash
+# Default live-checkout proof. Honest if dirty source is intentionally in scope.
+scripts/rch_verify.sh --bead-id bd-XXXX --summary -- \
+  cargo test --lib focused_case_name -- --nocapture
+
+# Strict proof. Refuses before RCH if .beads, source, or scratch paths are dirty.
+scripts/rch_verify.sh --bead-id bd-XXXX --summary --require-clean-tree -- \
+  cargo test --test rch_verify_contract strict_clean_tree -- --nocapture
+
+# Committed-tree source proof. Computes a manifest, then refuses until the
+# source materialization protocol exists.
+scripts/rch_verify.sh --bead-id bd-XXXX --summary --committed-tree --treeish HEAD -- \
+  cargo test --test rch_verify_contract committed_tree_ -- --nocapture
+```
+
+These modes never authorize `git worktree`, `git stash`, `git reset`,
+`git checkout`, destructive cleanup, or local Cargo fallback. If the proof is
+blocked by dirty state, record that state and coordinate; do not "clean it up"
+by deleting files.
 
 For bead closeout evidence, pass `--ledger <path>` to append one derived
 JSONL row with schema `ee.rch.verify.ledger.v1`, and pass `--summary` to include
@@ -53,9 +97,52 @@ remote `/data/projects/...` and local `/Volumes/...` evidence.
 
 `status` is one of `dry_run`, `remote_pass`, `pass_without_remote_marker`,
 `remote_failure`, `rch_environment_failure`, `capacity_or_timeout`, or
-`refused`. Use `rch_environment_failure` for topology/local-fallback blockers
-and `capacity_or_timeout` for worker capacity, timeout, or all-workers-offline
-signals; those are not code failures.
+`refused`, `source_state_refused`, or `committed_tree_unsupported`. Use
+`rch_environment_failure` for topology/local-fallback blockers and
+`capacity_or_timeout` for worker capacity, timeout, or all-workers-offline
+signals; those are not code failures. Use `source_state_refused` for dirty
+checkout ambiguity and `committed_tree_unsupported` for an intentionally
+non-executing committed-tree proof.
+
+## Beads and Agent Mail Templates
+
+For Beads comments, paste the summary plus the fields that make attribution
+auditable:
+
+```text
+RCH proof for <bead>:
+- command_hash: <proof.command_hash>
+- status: <proof.status>
+- verification_attribution: <proof.verification_attribution>
+- git_head: <proof.git_head>
+- git_tree: <proof.git_tree>
+- dirty_status_hash: <proof.dirty_status_hash>
+- source_manifest_hash: <proof.source_manifest_hash or none>
+- worker_id: <proof.worker_id or none>
+- exit_code: <proof.exit_code>
+- degraded_codes: <proof.degraded_codes or none>
+- source_state_degraded_codes: <proof.source_state_degraded_codes or none>
+- first_error: <proof.first_error_file>:<proof.first_error_line or none>
+```
+
+Agent Mail handoff phrasing should distinguish proof quality:
+
+- `remote_pass` + `strict_clean_tree`: "Committed implementation verified from
+  a clean checkout."
+- `remote_pass` + `live_dirty_checkout`: "Remote run passed, but attribution is
+  live dirty checkout; inspect `dirty_paths_sample` before closing."
+- `source_state_refused`: "Code may be implemented, but clean proof is blocked
+  by dirty source state."
+- `committed_tree_unsupported`: "Committed source manifest was computed, but no
+  safe remote materialization exists yet; this is not a remote Cargo pass."
+
+Dirty `.beads/issues.jsonl` is metadata churn, but it still invalidates strict
+clean proof because it changes the shared checkout. If the only dirty path is a
+Beads export that you own, run `br doctor --json`, then `br sync --flush-only`,
+commit the tracker export, and rerun strict mode. If the Beads file is reserved
+or contains another agent's updates, coordinate through Agent Mail and use
+live-checkout or committed-tree manifest wording rather than claiming a clean
+proof.
 
 ## Compile-Blocker Routing
 

@@ -41,6 +41,27 @@ scripts/rch_verify.sh --bead-id bd-XXXX -- cargo test --lib my_focused_unit_test
 The wrapper emits an `ee.rch.verify.v1` JSON proof to stdout, which you paste
 into the Beads comment for closure evidence.
 
+## Choose the source proof mode first
+
+Before launching RCH, decide what source tree the proof should mean:
+
+| Situation | Mode | Command |
+|---|---|---|
+| You are intentionally verifying the current shared checkout, including dirty files. | Live checkout | `scripts/rch_verify.sh --bead-id bd-XXXX -- cargo test --lib my_test -- --nocapture` |
+| You need closeout evidence that no dirty source, Beads churn, or scratch artifacts influenced the run. | Strict clean checkout | `scripts/rch_verify.sh --bead-id bd-XXXX --summary --require-clean-tree -- cargo test --lib my_test -- --nocapture` |
+| You need to prove which committed tree would be verified while other agents have dirty files. | Committed-tree manifest | `scripts/rch_verify.sh --bead-id bd-XXXX --summary --committed-tree --treeish HEAD -- cargo test --lib my_test -- --nocapture` |
+
+Current committed-tree mode is deliberately conservative: it resolves
+`--treeish`, records the commit/tree and manifest hash, then refuses before RCH
+with `rch_verify_committed_tree_unsupported` until a safe source
+materialization or RCH sync-filter protocol exists. If it reports
+`rch_verify_committed_tree_path_deps_unsupported`, the committed tree has path
+dependencies that cannot be represented safely by the manifest alone.
+
+Never use source-proof modes as permission to run `git worktree`, `git stash`,
+`git reset`, `git checkout`, deletion cleanup, or local Cargo. The correct
+response to an ambiguous proof is coordination, not mutation.
+
 ## Why every flag matters
 
 | Env var | Why |
@@ -126,6 +147,38 @@ br close bd-XXXX --reason "$(jq -r '.close_reason_markdown' /tmp/proof.json)"
 # 4. Optional: ledger the proof for swarm-wide reuse (bd-1h8ji.3)
 scripts/rch_verify.sh --ledger .ee/derived/rch/runs.jsonl -- <cmd>
 ```
+
+Paste or summarize these proof fields in the Beads comment:
+
+```text
+RCH proof:
+- command_hash: <command_hash>
+- status: <status>
+- verification_attribution: <verification_attribution>
+- git_tree: <git_tree>
+- dirty_status_hash: <dirty_status_hash>
+- source_manifest_hash: <source_manifest_hash or none>
+- worker_id: <worker_id or none>
+- exit_code: <exit_code>
+- degraded_codes: <degraded_codes or none>
+- source_state_degraded_codes: <source_state_degraded_codes or none>
+- first_error: <first_error_file>:<first_error_line or none>
+```
+
+Use precise Agent Mail wording:
+
+- `strict_clean_tree` + `remote_pass`: closeout-quality proof.
+- `live_dirty_checkout` + `remote_pass`: useful signal, but not clean proof.
+- `source_state_refused`: implementation may be done, but clean proof is
+  blocked by dirty checkout state.
+- `committed_tree_unsupported`: committed source identity is known, but remote
+  Cargo did not run from that source set.
+
+Dirty `.beads/issues.jsonl` is safe metadata churn only when you own the tracker
+update and can commit it. It still blocks `--require-clean-tree`. If Beads is
+dirty, run `br doctor --json` and `br sync --flush-only`; if the file is reserved
+or contains another agent's work, do not claim strict proof. Coordinate and use
+the live-checkout or committed-tree wording instead.
 
 Before claiming a bead, **always**:
 
