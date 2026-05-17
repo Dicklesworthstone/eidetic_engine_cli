@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -93,7 +93,7 @@ impl PackL2Cache {
             }));
         };
         ensure_no_symlink_components(&path, "inspect_entry")?;
-        let bytes = match fs::read(&path) {
+        let bytes = match read_cache_entry_file(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(PackL2CacheLookup::Miss(PackL2CacheMiss {
@@ -570,7 +570,7 @@ fn cache_entry_stored_at(path: &Path) -> Option<u64> {
     {
         return None;
     }
-    let bytes = fs::read(path).ok()?;
+    let bytes = read_cache_entry_file(path).ok()?;
     serde_json::from_slice::<PackL2CacheEntry>(&bytes)
         .ok()
         .map(|entry| entry.stored_at_epoch_seconds)
@@ -636,11 +636,8 @@ fn first_existing_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> 
 }
 
 fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), PackL2CacheError> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|source| PackL2CacheError::Io {
+    let mut file =
+        open_cache_temp_file_for_create(path).map_err(|source| PackL2CacheError::Io {
             path: path.to_path_buf(),
             operation: "open_temp",
             source,
@@ -697,7 +694,7 @@ fn ensure_cache_temp_path_is_regular(path: &Path) -> Result<(), PackL2CacheError
 }
 
 fn sync_directory(path: &Path) -> Result<(), PackL2CacheError> {
-    File::open(path)
+    open_cache_directory_for_sync(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|source| PackL2CacheError::Io {
             path: path.to_path_buf(),
@@ -705,6 +702,44 @@ fn sync_directory(path: &Path) -> Result<(), PackL2CacheError> {
             source,
         })
 }
+
+fn read_cache_entry_file(path: &Path) -> io::Result<Vec<u8>> {
+    let mut file = open_cache_entry_file_for_read(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn open_cache_entry_file_for_read(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_pack_l2_open_no_follow(&mut options);
+    options.open(path)
+}
+
+fn open_cache_temp_file_for_create(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    configure_pack_l2_open_no_follow(&mut options);
+    options.open(path)
+}
+
+fn open_cache_directory_for_sync(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_pack_l2_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_pack_l2_open_no_follow(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_pack_l2_open_no_follow(_options: &mut OpenOptions) {}
 
 #[cfg(test)]
 mod tests {
@@ -1057,6 +1092,60 @@ mod tests {
             fs::read_to_string(&outside_entry).map_err(|error| error.to_string())?,
             r#"{"schema":"outside"}"#,
             "cache write must not overwrite a symlink target"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_entry_final_read_open_rejects_symlinked_entry_path() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_entry = temp.path().join("outside-entry.json");
+        fs::write(&outside_entry, br#"{"schema":"outside"}"#).map_err(|error| error.to_string())?;
+        let linked_entry = temp.path().join("linked-entry.json");
+        symlink(&outside_entry, &linked_entry).map_err(|error| error.to_string())?;
+
+        let error = open_cache_entry_file_for_read(&linked_entry)
+            .expect_err("final cache entry read open must reject symlinks");
+
+        assert_ne!(
+            error.kind(),
+            io::ErrorKind::NotFound,
+            "final symlink read should fail because the path is a symlink"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_entry).map_err(|error| error.to_string())?,
+            r#"{"schema":"outside"}"#,
+            "cache read helper must not follow the symlink target"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_temp_final_create_open_rejects_symlinked_temp_path() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_entry = temp.path().join("outside-temp.json");
+        fs::write(&outside_entry, br#"{"schema":"outside"}"#).map_err(|error| error.to_string())?;
+        let linked_temp = temp.path().join("entry.tmp");
+        symlink(&outside_entry, &linked_temp).map_err(|error| error.to_string())?;
+
+        let error = open_cache_temp_file_for_create(&linked_temp)
+            .expect_err("final cache temp create open must reject symlinks");
+
+        assert_ne!(
+            error.kind(),
+            io::ErrorKind::NotFound,
+            "final symlink create should fail because the path is a symlink"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_entry).map_err(|error| error.to_string())?,
+            r#"{"schema":"outside"}"#,
+            "cache temp create helper must not follow or truncate the symlink target"
         );
         Ok(())
     }
