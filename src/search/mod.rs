@@ -402,6 +402,10 @@ impl SessionDocumentBuilder {
             .source_path
             .as_deref()
             .map(redact_session_search_ref);
+        let safe_metadata_json = session
+            .metadata_json
+            .as_deref()
+            .map(redact_session_search_ref);
         let mut lines = vec![format!("CASS session: {}", session.cass_session_id)];
         push_optional_labeled_line(&mut lines, "Source path", safe_source_path.as_deref());
         push_optional_labeled_line(&mut lines, "Agent", session.agent_name.as_deref());
@@ -413,7 +417,7 @@ impl SessionDocumentBuilder {
             lines.push(format!("Tokens: {token_count}"));
         }
         push_labeled_line(&mut lines, "Content hash", &session.content_hash);
-        push_optional_labeled_line(&mut lines, "Metadata", session.metadata_json.as_deref());
+        push_optional_labeled_line(&mut lines, "Metadata", safe_metadata_json.as_deref());
 
         let created_at = session
             .started_at
@@ -453,7 +457,7 @@ impl SessionDocumentBuilder {
         if let Some(token_count) = session.token_count {
             doc = doc.with_metadata_entry("token_count", token_count.to_string());
         }
-        if let Some(metadata_json) = &session.metadata_json {
+        if let Some(metadata_json) = &safe_metadata_json {
             doc = doc.with_metadata_entry("metadata_json", metadata_json);
         }
         if !self.tags.is_empty() {
@@ -2801,6 +2805,43 @@ mod tests {
         assert_eq!(
             indexable.metadata.get("source_path"),
             Some(&"file://[REDACTED_PATH]?api_key=[REDACTED:api_key]".to_owned())
+        );
+    }
+
+    #[test]
+    fn session_document_builder_redacts_sensitive_metadata_json() {
+        let mut session = make_test_session();
+        session.metadata_json = Some(
+            r#"{"source":"cass","sourcePath":"file:///Users/alice/private/session.jsonl?api_key=redaction-fixture"}"#.to_owned(),
+        );
+
+        let doc = super::session_to_document(&session);
+        let content = doc.content().to_string();
+        let indexable = doc.into_indexable();
+        let rendered = format!("{}\n{:?}", content, indexable.metadata);
+
+        assert!(
+            rendered.contains("[REDACTED_PATH]"),
+            "redacted session metadata should retain path placeholders"
+        );
+        assert!(
+            rendered.contains("[REDACTED:api_key]"),
+            "redacted session metadata should retain secret placeholders"
+        );
+        assert!(
+            !rendered.contains("/Users/alice/private/session.jsonl"),
+            "session search document leaked metadata path: {rendered}"
+        );
+        assert!(
+            !rendered.contains("redaction-fixture"),
+            "session search document leaked secret-like metadata: {rendered}"
+        );
+        assert_eq!(
+            indexable.metadata.get("metadata_json"),
+            Some(
+                &r#"{"source":"cass","sourcePath":"file://[REDACTED_PATH]?api_key=[REDACTED:api_key]"}"#
+                    .to_owned()
+            )
         );
     }
 
