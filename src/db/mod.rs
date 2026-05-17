@@ -304,13 +304,8 @@ fn lock_database_write_file(database_path: &Path) -> Result<File> {
     ensure_database_write_lock_path_has_no_symlink_components(&lock_path)?;
     ensure_database_write_lock_path_is_regular_or_missing(&lock_path)?;
 
-    let lock_file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|error| DbError::InvalidPath {
+    let lock_file =
+        open_database_write_lock_file(&lock_path).map_err(|error| DbError::InvalidPath {
             operation: DbOperation::BeginTransaction,
             path: lock_path.clone(),
             message: format!("could not open database write lock: {error}"),
@@ -352,6 +347,23 @@ fn lock_database_write_file(database_path: &Path) -> Result<File> {
 
     Ok(lock_file)
 }
+
+fn open_database_write_lock_file(lock_path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    configure_database_write_lock_options(&mut options);
+    options.open(lock_path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_database_write_lock_options(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_database_write_lock_options(_options: &mut OpenOptions) {}
 
 fn ensure_database_write_lock_path_has_no_symlink_components(lock_path: &Path) -> Result<()> {
     if let Some(symlink_path) =
@@ -25531,6 +25543,48 @@ mod tests {
         ensure(
             lock_path.is_dir(),
             "non-regular lock path should remain a directory",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_write_lock_final_open_rejects_symlinked_lock_path() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let lock_path = tempdir.path().join("locks.write.lock");
+        let outside_lock = tempdir.path().join("outside.write.lock");
+        std::fs::write(&outside_lock, "outside sentinel")
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        std::os::unix::fs::symlink(&outside_lock, &lock_path)
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+
+        let error = match super::open_database_write_lock_file(&lock_path) {
+            Ok(_) => {
+                return Err(TestFailure::new(
+                    "write lock final open should reject a symlinked lock path",
+                ));
+            }
+            Err(error) => error,
+        };
+
+        let message = error.to_string();
+        ensure(
+            message.contains("Too many levels of symbolic links")
+                || message.contains("File exists")
+                || message.contains("symbolic link"),
+            format!("error should mention symlink/open refusal, got: {message}"),
+        )?;
+        ensure(
+            std::fs::read_to_string(&outside_lock)
+                .map_err(|error| TestFailure::new(error.to_string()))?
+                == "outside sentinel",
+            "outside lock target should not be mutated",
+        )?;
+        ensure(
+            std::fs::symlink_metadata(&lock_path)
+                .map_err(|error| TestFailure::new(error.to_string()))?
+                .file_type()
+                .is_symlink(),
+            "rejected lock symlink should remain for inspection",
         )
     }
 
