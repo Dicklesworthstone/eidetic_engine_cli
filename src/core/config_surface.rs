@@ -299,15 +299,7 @@ pub fn set_config(
                     source,
                 })?;
         }
-        fs::rename(&temp_path, &path).map_err(|source| ConfigSurfaceError::Write {
-            path: path.clone(),
-            source,
-        })?;
-        if let Some(parent) = path.parent() {
-            if let Ok(dir) = fs::File::open(parent) {
-                let _ = dir.sync_data();
-            }
-        }
+        publish_config_temp_file(&path, &temp_path)?;
     }
 
     Ok(ConfigSetReport {
@@ -488,6 +480,31 @@ fn ensure_config_temp_path_is_missing(path: &Path) -> Result<(), io::Error> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn publish_config_temp_file(path: &Path, temp_path: &Path) -> Result<(), ConfigSurfaceError> {
+    ensure_no_config_symlink_components(path, "publish").map_err(|source| {
+        ConfigSurfaceError::Write {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+    ensure_config_write_path_is_regular_or_missing(path).map_err(|source| {
+        ConfigSurfaceError::Write {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+    fs::rename(temp_path, path).map_err(|source| ConfigSurfaceError::Write {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_data();
+        }
+    }
+    Ok(())
 }
 
 fn ensure_no_config_symlink_components(
@@ -781,7 +798,7 @@ fn set_toml_value(document: &mut DocumentMut, path: &[&str], value: TomlScalar) 
 mod tests {
     use super::{
         ConfigSurfaceOptions, ensure_config_write_path_is_regular_or_missing, get_config,
-        graph_config_keys, set_config, show_config,
+        graph_config_keys, publish_config_temp_file, set_config, show_config,
     };
     use std::fs;
 
@@ -1078,6 +1095,42 @@ mod tests {
         }
         if config_dir.join("config.toml").exists() {
             return Err("config final path should not be created after temp rejection".to_owned());
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graph_set_publish_rechecks_final_symlink_before_rename() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = workspace()?;
+        let config_dir = temp.path().join(".ee");
+        let config_path = config_dir.join("config.toml");
+        let temp_path = config_dir.join("config.tmp");
+        fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        fs::write(&temp_path, "[graph.ppr]\nalpha = 0.5\n").map_err(|error| error.to_string())?;
+        let outside_config = temp.path().join("outside-config.toml");
+        fs::write(&outside_config, "outside sentinel").map_err(|error| error.to_string())?;
+        symlink(&outside_config, &config_path).map_err(|error| error.to_string())?;
+
+        let error = publish_config_temp_file(&config_path, &temp_path)
+            .expect_err("final config symlink should reject publish")
+            .to_string();
+        if !error.contains("symlinked path component") {
+            return Err(format!("unexpected final symlink publish error: {error}"));
+        }
+        let outside_after =
+            fs::read_to_string(&outside_config).map_err(|error| error.to_string())?;
+        if outside_after != "outside sentinel" {
+            return Err("config publish must not overwrite symlink target".to_owned());
+        }
+        if !fs::symlink_metadata(&temp_path)
+            .map_err(|error| error.to_string())?
+            .file_type()
+            .is_file()
+        {
+            return Err("config temp file should remain after final publish rejection".to_owned());
         }
         Ok(())
     }
