@@ -1804,8 +1804,21 @@ fn write_key_file_no_symlinks(path: &Path, bytes: &[u8]) -> io::Result<()> {
         reject_key_symlink_chain(parent)?;
     }
     reject_key_symlink_chain(path)?;
+    ensure_key_final_path_writable(path)?;
     fs::write(path, bytes)?;
     reject_key_symlink_chain(path)
+}
+
+fn ensure_key_final_path_writable(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("certificate key path is not a file: {}", path.display()),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn reject_key_symlink_chain(path: &Path) -> io::Result<()> {
@@ -2892,6 +2905,29 @@ mod tests {
         ensure(
             report.message.contains("symlink"),
             "sign error should mention symlink",
+        )
+    }
+
+    #[test]
+    fn certificate_key_write_rejects_non_regular_final_path() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let key_path = dir.path().join("keys").join("workspace.ed25519");
+        fs::create_dir_all(&key_path).map_err(|error| error.to_string())?;
+
+        let error = write_key_file_no_symlinks(&key_path, b"not a real key")
+            .expect_err("non-regular key path should reject key write");
+
+        ensure_equal(&error.kind(), &io::ErrorKind::InvalidInput, "error kind")?;
+        ensure(
+            error.to_string().contains("not a file"),
+            "error should mention non-file key path",
+        )?;
+        ensure(
+            fs::symlink_metadata(&key_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_dir(),
+            "non-regular key path must remain a directory",
         )
     }
 
