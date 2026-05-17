@@ -620,12 +620,7 @@ pub fn summarize_feedback(records: &[FeedbackRecord]) -> FeedbackSummary {
 }
 
 fn generate_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    format!("{:x}", timestamp & 0xFFFFFFFF)
+    uuid::Uuid::now_v7().to_string()
 }
 
 fn effects_for_preflight_feedback(

@@ -1457,12 +1457,7 @@ fn ensure_no_rehearsal_artifact_symlink_components(
 
 /// Generate a short random ID.
 fn generate_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    format!("{:x}", timestamp & 0xFFFFFFFF)
+    uuid::Uuid::now_v7().to_string()
 }
 
 // ============================================================================
