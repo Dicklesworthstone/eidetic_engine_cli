@@ -38,6 +38,7 @@
         "bench_iteration",
         "artifact_manifest",
         "lint_determinism",
+        "proptest_run",
         "redaction_apply"
       ]
     },
@@ -233,6 +234,26 @@
               "exemptions_with_justification",
               "ui_tests_passed",
               "ui_tests_failed"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "proptest_run"}}},
+      "then": {
+        "properties": {
+          "fields": {
+            "type": "object",
+            "required": [
+              "axes_count",
+              "cases_sampled",
+              "cases_passed",
+              "cases_failed",
+              "new_regressions",
+              "stale_regressions_flagged",
+              "elapsed_seconds",
+              "budget_seconds"
             ]
           }
         }

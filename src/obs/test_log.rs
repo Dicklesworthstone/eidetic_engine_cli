@@ -83,6 +83,10 @@ pub enum EventKind {
     ArtifactManifest,
     /// Determinism-lint gate summary emitted by the N4.4 e2e driver.
     LintDeterminism,
+    /// Determinism proptest summary emitted by the N4.5 e2e driver.
+    ProptestRun,
+    /// Redaction application summary emitted by redaction matrix drivers.
+    RedactionApply,
 }
 
 impl EventKind {
@@ -104,11 +108,13 @@ impl EventKind {
             Self::BenchIteration => "bench_iteration",
             Self::ArtifactManifest => "artifact_manifest",
             Self::LintDeterminism => "lint_determinism",
+            Self::ProptestRun => "proptest_run",
+            Self::RedactionApply => "redaction_apply",
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 15] {
+    pub const fn all() -> [Self; 17] {
         [
             Self::CommandStart,
             Self::CommandEnd,
@@ -125,6 +131,8 @@ impl EventKind {
             Self::BenchIteration,
             Self::ArtifactManifest,
             Self::LintDeterminism,
+            Self::ProptestRun,
+            Self::RedactionApply,
         ]
     }
 }
@@ -156,6 +164,8 @@ impl LogLevel {
                     | EventKind::AssertFail
                     | EventKind::GoldenCompare
                     | EventKind::LintDeterminism
+                    | EventKind::ProptestRun
+                    | EventKind::RedactionApply
             ),
             Self::Normal => !matches!(kind, EventKind::TimerLap),
             Self::Verbose => true,

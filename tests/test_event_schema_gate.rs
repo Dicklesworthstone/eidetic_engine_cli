@@ -136,6 +136,25 @@ fn validate_kind_fields(kind: &str, fields: Option<&Value>) -> TestResult {
             "ui_tests_passed",
             "ui_tests_failed",
         ],
+        "proptest_run" => &[
+            "axes_count",
+            "cases_sampled",
+            "cases_passed",
+            "cases_failed",
+            "new_regressions",
+            "stale_regressions_flagged",
+            "elapsed_seconds",
+            "budget_seconds",
+        ],
+        "redaction_apply" => &[
+            "level",
+            "surface",
+            "fields_redacted_count",
+            "patterns_matched",
+            "tokens_truncated",
+            "content_hash_original",
+            "audit_row_id",
+        ],
         _ => &[],
     };
     if required.is_empty() {
