@@ -1296,6 +1296,7 @@ fn database_path(options: &CassImportOptions) -> PathBuf {
 
 fn ensure_database_parent(path: &Path) -> Result<(), CassImportError> {
     ensure_database_path_has_no_symlink_components(path)?;
+    ensure_database_path_is_regular_or_missing(path)?;
     let Some(parent) = path.parent() else {
         return Ok(());
     };
@@ -1303,7 +1304,8 @@ fn ensure_database_parent(path: &Path) -> Result<(), CassImportError> {
         path: parent.to_path_buf(),
         message: error.to_string(),
     })?;
-    ensure_database_path_has_no_symlink_components(path)
+    ensure_database_path_has_no_symlink_components(path)?;
+    ensure_database_path_is_regular_or_missing(path)
 }
 
 fn ensure_database_path_has_no_symlink_components(path: &Path) -> Result<(), CassImportError> {
@@ -1313,6 +1315,22 @@ fn ensure_database_path_has_no_symlink_components(path: &Path) -> Result<(), Cas
             path: path.to_path_buf(),
             message: "refusing CASS import database path with symlink component".to_string(),
         }),
+        Err(error) => Err(CassImportError::Io {
+            path: path.to_path_buf(),
+            message: format!("failed to inspect CASS import database path: {error}"),
+        }),
+    }
+}
+
+fn ensure_database_path_is_regular_or_missing(path: &Path) -> Result<(), CassImportError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(CassImportError::Io {
+            path: path.to_path_buf(),
+            message: "refusing CASS import database path because it is not a regular file"
+                .to_string(),
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(CassImportError::Io {
             path: path.to_path_buf(),
             message: format!("failed to inspect CASS import database path: {error}"),
@@ -2149,6 +2167,21 @@ mod tests {
             .expect_err("symlinked database file must be rejected");
         ensure(
             error.to_string().contains("symlink component"),
+            format!("unexpected error: {error}"),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_database_parent_rejects_non_regular_database_path() -> TestResult {
+        let root = unique_test_dir("cass-import-db-directory")?;
+        let database_path = root.join("ee.db");
+        fs::create_dir_all(&database_path).map_err(|error| error.to_string())?;
+
+        let error = ensure_database_parent(&database_path)
+            .expect_err("directory database path must be rejected before open");
+        ensure(
+            error.to_string().contains("not a regular file"),
             format!("unexpected error: {error}"),
         )
     }
