@@ -1169,13 +1169,47 @@ fn database_path(options: &JsonlImportOptions) -> PathBuf {
 }
 
 fn ensure_database_parent(path: &Path) -> Result<(), JsonlImportError> {
+    ensure_import_database_path_is_safe_for_write(path)?;
     let Some(parent) = path.parent() else {
         return Ok(());
     };
     std::fs::create_dir_all(parent).map_err(|error| JsonlImportError::Io {
         path: parent.to_path_buf(),
         message: error.to_string(),
-    })
+    })?;
+    ensure_import_database_path_is_safe_for_write(path)
+}
+
+fn ensure_import_database_path_is_safe_for_write(path: &Path) -> Result<(), JsonlImportError> {
+    if let Some(symlink_path) =
+        first_existing_symlink_component(path).map_err(|error| JsonlImportError::Io {
+            path: error.path,
+            message: error.source.to_string(),
+        })?
+    {
+        return Err(JsonlImportError::Io {
+            path: path.to_path_buf(),
+            message: format!(
+                "refusing to import JSONL records into database through symlinked path component `{}`",
+                symlink_path.display()
+            ),
+        });
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(JsonlImportError::Io {
+            path: path.to_path_buf(),
+            message: format!(
+                "refusing to import JSONL records into non-regular database path `{}`",
+                path.display()
+            ),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(JsonlImportError::Io {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        }),
+    }
 }
 
 fn ensure_import_source_path_is_regular_file(path: &Path) -> Result<(), JsonlImportError> {
@@ -1660,6 +1694,75 @@ mod tests {
             Some("2026-06-01T00:00:00Z"),
             "valid_to fallback from expires_at",
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_rejects_symlinked_database_parent_before_create() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let source_path = tempdir.path().join("export.jsonl");
+        fs::write(&source_path, sample_jsonl()).map_err(|error| error.to_string())?;
+
+        let real_database_dir = tempdir.path().join("real-db");
+        fs::create_dir_all(&real_database_dir).map_err(|error| error.to_string())?;
+        let linked_database_dir = tempdir.path().join("linked-db");
+        symlink(&real_database_dir, &linked_database_dir).map_err(|error| error.to_string())?;
+        let database_path = linked_database_dir.join("ee.db");
+
+        let error = match import_jsonl_records(&JsonlImportOptions {
+            workspace_path: tempdir.path().join("workspace"),
+            database_path: Some(database_path),
+            source_path,
+            dry_run: false,
+        }) {
+            Ok(report) => {
+                return Err(format!(
+                    "import should reject symlinked DB path: {report:?}"
+                ));
+            }
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("symlinked path component"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !real_database_dir.join("ee.db").exists(),
+            "import must not create a database through a symlinked parent"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn import_rejects_non_regular_database_path_before_open() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let source_path = tempdir.path().join("export.jsonl");
+        fs::write(&source_path, sample_jsonl()).map_err(|error| error.to_string())?;
+        let database_path = tempdir.path().join("workspace").join(".ee").join("ee.db");
+        fs::create_dir_all(&database_path).map_err(|error| error.to_string())?;
+
+        let error = match import_jsonl_records(&JsonlImportOptions {
+            workspace_path: tempdir.path().join("workspace"),
+            database_path: Some(database_path),
+            source_path,
+            dry_run: false,
+        }) {
+            Ok(report) => {
+                return Err(format!(
+                    "import should reject directory DB path: {report:?}"
+                ));
+            }
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("non-regular database path"),
+            "unexpected error: {error}"
+        );
+        Ok(())
     }
 
     #[cfg(unix)]
