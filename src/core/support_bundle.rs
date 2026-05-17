@@ -2439,6 +2439,7 @@ fn generate_bundle_id() -> String {
 
 fn write_file_with_hash(path: &Path, content: &str) -> Result<u64, DomainError> {
     reject_existing_symlink_component(path, "support bundle file")?;
+    ensure_support_bundle_file_final_path_regular_or_missing(path)?;
     let mut file = File::create(path).map_err(|e| DomainError::Storage {
         message: format!("Failed to create file {}: {e}", path.display()),
         repair: None,
@@ -2449,6 +2450,32 @@ fn write_file_with_hash(path: &Path, content: &str) -> Result<u64, DomainError> 
             repair: None,
         })?;
     Ok(content.len() as u64)
+}
+
+fn ensure_support_bundle_file_final_path_regular_or_missing(
+    path: &Path,
+) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to create support bundle file {} because the final path is not a regular file.",
+                path.display()
+            ),
+            repair: Some(
+                "Remove the non-regular support bundle path or choose a fresh output directory."
+                    .to_owned(),
+            ),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect support bundle file {} before create: {error}",
+                path.display()
+            ),
+            repair: Some("Check support bundle path permissions.".to_owned()),
+        }),
+    }
 }
 
 fn reject_existing_symlink_component(path: &Path, label: &str) -> Result<(), DomainError> {
@@ -2843,6 +2870,31 @@ mod tests {
                 .next()
                 .is_none(),
             "support bundle creation must not write through the symlink target"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn write_file_with_hash_rejects_non_regular_final_path() -> TestResult {
+        let root = unique_test_path("write-non-regular-final");
+        let file_path = root.join("bundle").join("evidence.json");
+        fs::create_dir_all(&file_path)
+            .map_err(|error| format!("failed to create non-regular final path: {error}"))?;
+
+        let error = write_file_with_hash(&file_path, "{}")
+            .expect_err("non-regular final path should be rejected before File::create");
+
+        assert!(
+            error.message().contains("not a regular file"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert!(
+            fs::symlink_metadata(&file_path)
+                .map_err(|error| format!("failed to inspect final path: {error}"))?
+                .file_type()
+                .is_dir(),
+            "support bundle writer must leave non-regular final path untouched"
         );
         Ok(())
     }
