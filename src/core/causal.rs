@@ -1854,7 +1854,7 @@ impl CausalComparison {
         json!({
             "comparisonId": self.comparison_id,
             "sourceKind": self.source_kind,
-            "sourceId": self.source_id,
+            "sourceId": redact_causal_public_ref(&self.source_id),
             "baselineUplift": self.baseline_uplift,
             "candidateUplift": self.candidate_uplift,
             "upliftDelta": self.uplift_delta,
@@ -1926,7 +1926,7 @@ impl CompareReport {
                     "  {}. {}:{} -> {} (delta: {:+.3}, confidence: {})\n",
                     index + 1,
                     comparison.source_kind,
-                    comparison.source_id,
+                    redact_causal_public_ref(&comparison.source_id),
                     comparison.verdict,
                     comparison.uplift_delta,
                     comparison.confidence_state.as_str(),
@@ -1949,6 +1949,59 @@ impl CompareReport {
     pub fn is_empty(&self) -> bool {
         self.comparisons.is_empty()
     }
+}
+
+fn redact_causal_public_ref(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    redact_causal_public_path_like_segments(&secret_redacted)
+}
+
+fn redact_causal_public_path_like_segments(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, c)| *c == '/')
+        else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        let start = cursor + relative_index;
+        if !causal_public_path_starts_sensitive_segment(&value[start..]) {
+            output.push_str(&value[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        output.push_str(&value[cursor..start]);
+        output.push_str("[REDACTED_PATH]");
+        cursor = value[start..]
+            .char_indices()
+            .find_map(|(index, c)| causal_public_path_boundary(c).then_some(start + index))
+            .unwrap_or(value.len());
+    }
+    output
+}
+
+fn causal_public_path_starts_sensitive_segment(value: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/home/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+    ];
+
+    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+}
+
+fn causal_public_path_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
 }
 
 /// Compare causal uplift evidence across multiple evidence sources.
@@ -4059,6 +4112,73 @@ mod tests {
         assert_eq!(json["command"], "causal compare");
         assert!(json["comparisons"].is_array());
         assert!(json["summary"]["totalComparisons"].is_number());
+    }
+
+    #[test]
+    fn compare_report_redacts_sensitive_source_id_output() {
+        let report = CompareReport {
+            schema: CAUSAL_COMPARE_SCHEMA_V1,
+            comparisons: vec![CausalComparison {
+                comparison_id: "cmp_redaction".to_owned(),
+                source_kind: "causal_chain_pair".to_owned(),
+                source_id: "file:///Users/alice/private/chain-a.json?api_key=redaction-fixture..file:///tmp/chain-b.json".to_owned(),
+                baseline_uplift: 0.1,
+                candidate_uplift: 0.2,
+                uplift_delta: 0.1,
+                confidence_state: ConfidenceState::Medium,
+                evidence_strength: "replay_supported".to_owned(),
+                verdict: "improves".to_owned(),
+            }],
+            filters_applied: Vec::new(),
+            degradations: Vec::new(),
+            method_used: "replay".to_owned(),
+            dry_run: false,
+        };
+
+        let rendered_json = report.data_json().to_string();
+        assert!(
+            rendered_json.contains("[REDACTED_PATH]"),
+            "causal JSON should redact path-like source IDs: {rendered_json}"
+        );
+        assert!(
+            !rendered_json.contains("/Users/alice") && !rendered_json.contains("/tmp/chain-b"),
+            "causal JSON leaked sensitive source path: {rendered_json}"
+        );
+        assert!(
+            !rendered_json.contains("redaction-fixture"),
+            "causal JSON leaked secret-like source ID material: {rendered_json}"
+        );
+
+        let rendered_human = report.human_summary();
+        assert!(
+            rendered_human.contains("[REDACTED_PATH]"),
+            "causal human output should redact path-like source IDs: {rendered_human}"
+        );
+        assert!(
+            !rendered_human.contains("/Users/alice") && !rendered_human.contains("/tmp/chain-b"),
+            "causal human output leaked sensitive source path: {rendered_human}"
+        );
+        assert!(
+            !rendered_human.contains("redaction-fixture"),
+            "causal human output leaked secret-like source ID material: {rendered_human}"
+        );
+    }
+
+    #[test]
+    fn compare_report_preserves_safe_source_id_output() {
+        let comparison = CausalComparison {
+            comparison_id: "cmp_safe".to_owned(),
+            source_kind: "causal_chain_pair".to_owned(),
+            source_id: "chain_a..chain_b".to_owned(),
+            baseline_uplift: 0.1,
+            candidate_uplift: 0.2,
+            uplift_delta: 0.1,
+            confidence_state: ConfidenceState::Medium,
+            evidence_strength: "replay_supported".to_owned(),
+            verdict: "improves".to_owned(),
+        };
+
+        assert_eq!(comparison.data_json()["sourceId"], "chain_a..chain_b");
     }
 
     #[test]
