@@ -570,13 +570,7 @@ fn write_manifest_no_overwrite(
         })?;
     }
 
-    fs::rename(&temp_path, manifest_path).map_err(|error| DomainError::Storage {
-        message: format!(
-            "failed to rename temporary manifest to {}: {error}",
-            manifest_path.display()
-        ),
-        repair: Some("Check manifest path permissions.".to_owned()),
-    })?;
+    publish_relocation_manifest_temp_file(&temp_path, manifest_path)?;
 
     if let Some(parent) = manifest_path.parent() {
         if let Ok(dir) = fs::File::open(parent) {
@@ -585,6 +579,66 @@ fn write_manifest_no_overwrite(
     }
 
     Ok(())
+}
+
+fn publish_relocation_manifest_temp_file(
+    temp_path: &Path,
+    manifest_path: &Path,
+) -> Result<(), DomainError> {
+    reject_existing_symlink_component(manifest_path)?;
+    ensure_relocation_manifest_final_path_regular_or_missing(manifest_path)?;
+    reject_existing_symlink_component(temp_path)?;
+    ensure_relocation_manifest_temp_path_is_regular(temp_path)?;
+    fs::rename(temp_path, manifest_path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "failed to rename temporary manifest to {}: {error}",
+            manifest_path.display()
+        ),
+        repair: Some("Check manifest path permissions.".to_owned()),
+    })
+}
+
+fn ensure_relocation_manifest_final_path_regular_or_missing(
+    manifest_path: &Path,
+) -> Result<(), DomainError> {
+    match fs::symlink_metadata(manifest_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "relocation manifest path is not a regular file: {}",
+                manifest_path.display()
+            ),
+            repair: Some("Choose a regular relocation manifest path.".to_owned()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "failed to inspect relocation manifest {} before publish: {error}",
+                manifest_path.display()
+            ),
+            repair: Some("Check manifest path permissions.".to_owned()),
+        }),
+    }
+}
+
+fn ensure_relocation_manifest_temp_path_is_regular(temp_path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(temp_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "temporary relocation manifest path is not a regular file: {}",
+                temp_path.display()
+            ),
+            repair: Some("Remove the non-regular temporary manifest path and retry.".to_owned()),
+        }),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "failed to inspect temporary relocation manifest {} before publish: {error}",
+                temp_path.display()
+            ),
+            repair: Some("Check manifest path permissions.".to_owned()),
+        }),
+    }
 }
 
 fn ensure_relocation_manifest_temp_path_regular_or_missing(
@@ -1350,6 +1404,46 @@ mod tests {
         let temp_content = fs::read_to_string(&temp_manifest).map_err(|error| error.to_string())?;
         if temp_content != "keep me" {
             return Err("existing temp manifest was unexpectedly truncated".to_owned());
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relocation_manifest_publish_rechecks_final_symlink_before_rename() -> TestResult {
+        let root = temp_path("manifest-final-symlink-recheck");
+        let manifest = root.join("relocation.json");
+        fs::create_dir_all(parent_dir(&manifest)?).map_err(|error| error.to_string())?;
+        let mut temp_manifest = manifest.clone();
+        temp_manifest.set_extension("tmp");
+        fs::write(&temp_manifest, r#"{"schema":"sentinel"}"#).map_err(|error| error.to_string())?;
+
+        let outside_manifest = root.join("outside-relocation.json");
+        fs::write(&outside_manifest, "outside sentinel").map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_manifest, &manifest)
+            .map_err(|error| error.to_string())?;
+
+        let result = publish_relocation_manifest_temp_file(&temp_manifest, &manifest);
+        match result {
+            Err(DomainError::PolicyDenied { message, .. }) => {
+                if !message.contains("symlink component") {
+                    return Err(format!("unexpected policy error message: {message}"));
+                }
+            }
+            other => {
+                return Err(format!(
+                    "expected final symlink policy denial before publish, got {other:?}"
+                ));
+            }
+        }
+        let outside_content =
+            fs::read_to_string(&outside_manifest).map_err(|error| error.to_string())?;
+        if outside_content != "outside sentinel" {
+            return Err("outside manifest target was unexpectedly mutated".to_owned());
+        }
+        let temp_content = fs::read_to_string(&temp_manifest).map_err(|error| error.to_string())?;
+        if temp_content != r#"{"schema":"sentinel"}"# {
+            return Err("temporary manifest was unexpectedly removed or mutated".to_owned());
         }
         Ok(())
     }
