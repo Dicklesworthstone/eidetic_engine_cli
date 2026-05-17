@@ -374,8 +374,103 @@ fn redact_link_record(mut record: ExportLinkRecord, level: RedactionLevel) -> Ex
     }
     if level.redacts_content() {
         record.metadata = None;
+    } else if let Some(metadata) = record.metadata.as_mut() {
+        redact_link_metadata(metadata, level);
     }
     record
+}
+
+fn redact_link_metadata(value: &mut serde_json::Value, level: RedactionLevel) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                redact_link_metadata_field(key, child, level);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                redact_link_metadata(child, level);
+            }
+        }
+        serde_json::Value::String(text) => {
+            if level.redacts_paths() || level.redacts_secrets() {
+                *text = redact_content(text, level);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+fn redact_link_metadata_field(key: &str, value: &mut serde_json::Value, level: RedactionLevel) {
+    match value {
+        serde_json::Value::String(text) if link_metadata_identifier_key(key) => {
+            let original = text.clone();
+            if level.redacts_paths() {
+                *text = redact_content(text, level);
+            }
+            if level.redacts_identifiers() && *text == original {
+                *text = redact_identifier(text, level);
+            }
+        }
+        serde_json::Value::String(text) if link_metadata_path_key(key) => {
+            if level.redacts_paths() {
+                *text = redact_content(text, level);
+            } else if level.redacts_secrets() {
+                *text = redact_content(text, level);
+            }
+        }
+        child => redact_link_metadata(child, level),
+    }
+}
+
+fn link_metadata_identifier_key(key: &str) -> bool {
+    matches!(
+        key,
+        "bodyCacheKey"
+            | "body_cache_key"
+            | "cachedMaterialId"
+            | "cached_material_id"
+            | "importDecisionId"
+            | "import_decision_id"
+            | "importDecisionRef"
+            | "import_decision_ref"
+            | "localWorkspaceId"
+            | "local_workspace_id"
+            | "originNodeId"
+            | "origin_node_id"
+            | "originWorkspaceAlias"
+            | "origin_workspace_alias"
+            | "originWorkspaceId"
+            | "origin_workspace_id"
+            | "peerId"
+            | "peer_id"
+            | "policyId"
+            | "policy_id"
+            | "policyRef"
+            | "policy_ref"
+            | "producerPeer"
+            | "producer_peer"
+            | "producerPeerId"
+            | "producer_peer_id"
+            | "workspaceId"
+            | "workspace_id"
+    )
+}
+
+fn link_metadata_path_key(key: &str) -> bool {
+    matches!(
+        key,
+        "absolutePath"
+            | "absolute_path"
+            | "binaryAbsolutePath"
+            | "binary_absolute_path"
+            | "canonicalPath"
+            | "canonical_path"
+            | "path"
+            | "provenanceUri"
+            | "provenance_uri"
+            | "uri"
+    )
 }
 
 fn redact_tag_record(mut record: ExportTagRecord, level: RedactionLevel) -> ExportTagRecord {
@@ -685,7 +780,8 @@ pub struct ExportStats {
 mod tests {
     use super::*;
     use crate::models::{
-        EXPORT_ARTIFACT_SCHEMA_V1, EXPORT_MEMORY_SCHEMA_V1, ExportHeader, ExportMemoryRecord,
+        EXPORT_ARTIFACT_SCHEMA_V1, EXPORT_MEMORY_SCHEMA_V1, ExportHeader, ExportLinkRecord,
+        ExportMemoryRecord,
     };
 
     type TestResult = Result<(), String>;
@@ -933,6 +1029,60 @@ mod tests {
         assert!(written.contains(REDACTED_PATH_PLACEHOLDER));
         assert!(!written.contains(&secret_fixture));
         ensure(artifact_count, 1, "artifact count")
+    }
+
+    #[test]
+    fn jsonl_exporter_standard_redacts_mesh_link_metadata_identifiers() -> TestResult {
+        let mut output = Vec::new();
+        let origin_workspace = "/Users/example/private/mesh-workspace";
+        let producer_peer = "nodekey:0123456789abcdef0123456789abcdef";
+        let import_decision = "mesh_decision_0123456789abcdef";
+        let policy_ref = "mesh_policy_0123456789abcdef";
+
+        let link = ExportLinkRecord::builder()
+            .link_id("link_0123456789abcdef")
+            .source_memory_id("mem_source_0123456789abcdef")
+            .target_memory_id("mem_target_0123456789abcdef")
+            .link_type("supports")
+            .created_at("2026-04-30T12:00:00Z")
+            .metadata(serde_json::json!({
+                "mesh": {
+                    "workspaceScopeDecision": "allow",
+                    "originWorkspaceAlias": origin_workspace,
+                    "producerPeer": producer_peer,
+                    "importDecisionId": import_decision,
+                    "policyDecision": {
+                        "schema": "ee.mesh.policy_decision.v1",
+                        "direction": "inbound",
+                        "action": "allow",
+                        "policyRef": policy_ref,
+                        "bodyFetchAllowed": false
+                    }
+                },
+                "source": "agent"
+            }))
+            .build()
+            .map_err(|error| format!("build link: {error}"))?;
+
+        let link_count = {
+            let mut exporter =
+                JsonlExporter::new(&mut output, RedactionLevel::Standard, ExportScope::All);
+            exporter
+                .write_link(link)
+                .map_err(|error| format!("write link: {error}"))?;
+            exporter.link_count
+        };
+
+        let written = String::from_utf8(output).map_err(|error| format!("valid utf8: {error}"))?;
+        ensure(link_count, 1, "link count")?;
+        assert!(written.contains(REDACTED_PATH_PLACEHOLDER));
+        assert!(!written.contains(origin_workspace));
+        assert!(!written.contains(producer_peer));
+        assert!(!written.contains(import_decision));
+        assert!(!written.contains(policy_ref));
+        assert!(written.contains(r#""source":"agent""#));
+        assert!(written.contains(r#""workspaceScopeDecision":"allow""#));
+        Ok(())
     }
 
     #[test]
