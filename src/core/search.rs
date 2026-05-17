@@ -417,6 +417,16 @@ pub struct SearchDegradation {
 
 impl SearchDegradation {
     #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "code": self.code,
+            "severity": self.severity,
+            "message": self.message,
+            "repair": self.repair,
+        })
+    }
+
+    #[must_use]
     fn stale_index(db_generation: Option<u64>, index_generation: Option<u64>) -> Self {
         let generation_detail = match (db_generation, index_generation) {
             (Some(db_generation), Some(index_generation)) => format!(
