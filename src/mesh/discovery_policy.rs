@@ -411,16 +411,16 @@ fn is_valid_node_key(value: &str) -> bool {
 fn node_key_list_path_is_regular(path: &Path) -> Result<bool, LoadListError> {
     if let Some(symlink_path) = node_key_list_symlink_component(path)? {
         return Err(node_key_list_invalid_path_error(format!(
-            "refusing to read discovery list '{}' because it traverses symbolic link '{}'",
-            path.display(),
-            symlink_path.display(),
+            "refusing to read discovery list {} because it traverses symbolic link {}",
+            discovery_list_path_ref(path),
+            discovery_list_path_ref(&symlink_path),
         )));
     }
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => Ok(true),
         Ok(_) => Err(node_key_list_invalid_path_error(format!(
-            "refusing to read discovery list '{}' because it is not a regular file",
-            path.display(),
+            "refusing to read discovery list {} because it is not a regular file",
+            discovery_list_path_ref(path),
         ))),
         Err(error)
             if matches!(
@@ -457,6 +457,12 @@ fn node_key_list_symlink_component(path: &Path) -> Result<Option<PathBuf>, LoadL
 
 fn node_key_list_invalid_path_error(message: String) -> LoadListError {
     LoadListError::Read(io::Error::new(io::ErrorKind::InvalidInput, message))
+}
+
+fn discovery_list_path_ref(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    let hash = blake3::hash(path.as_bytes()).to_hex();
+    format!("discovery_list_path_{}", &hash[..10])
 }
 
 /// Convenience: load all three workspace list files (`.ee/discovery_allowlist.toml`,
@@ -848,7 +854,12 @@ mod tests {
             panic!("expected symlinked list path to fail closed, got {result:?}");
         };
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(error.to_string().contains("symbolic link"));
+        let message = error.to_string();
+        assert!(message.contains("symbolic link"));
+        assert!(message.contains("discovery_list_path_"));
+        assert!(!message.contains("linked.toml"));
+        assert!(!message.contains("real.toml"));
+        assert!(!message.contains(tempdir.path().to_string_lossy().as_ref()));
     }
 
     #[test]
@@ -863,7 +874,11 @@ mod tests {
             panic!("expected non-regular list path to fail closed, got {result:?}");
         };
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(error.to_string().contains("not a regular file"));
+        let message = error.to_string();
+        assert!(message.contains("not a regular file"));
+        assert!(message.contains("discovery_list_path_"));
+        assert!(!message.contains("list.toml"));
+        assert!(!message.contains(tempdir.path().to_string_lossy().as_ref()));
     }
 
     #[test]
