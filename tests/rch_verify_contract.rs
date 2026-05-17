@@ -202,6 +202,55 @@ fn script_is_syntax_valid_and_uses_explicit_rch_exec() -> TestResult {
 }
 
 #[test]
+fn script_body_avoids_forbidden_git_and_cleanup_operations() -> TestResult {
+    let text =
+        fs::read_to_string(script_path()).map_err(|error| format!("read wrapper: {error}"))?;
+    let forbidden = [
+        "git worktree",
+        "git stash",
+        "git reset",
+        "git checkout",
+        "git clean",
+        "rm -rf",
+        "rm -f",
+    ];
+    let mut in_policy_matcher = false;
+    let mut violations = Vec::new();
+
+    for (index, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("contains_forbidden_text()") {
+            in_policy_matcher = true;
+        }
+        if in_policy_matcher {
+            if trimmed == "}" {
+                in_policy_matcher = false;
+            }
+            continue;
+        }
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        for pattern in forbidden {
+            if trimmed.contains(pattern) {
+                violations.push(format!(
+                    "line {} contains `{pattern}`: {trimmed}",
+                    index + 1
+                ));
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        return Err(format!(
+            "rch verifier wrapper must not use forbidden Git operations or deletion cleanup:\n{}",
+            violations.join("\n")
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn dry_run_accepts_focused_cargo_test_and_builds_remote_env() -> TestResult {
     let report = run_json(&[
         "--dry-run",
