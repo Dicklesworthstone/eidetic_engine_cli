@@ -384,14 +384,16 @@ pub struct OutcomeQuarantineSummary {
 impl OutcomeQuarantineSummary {
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
+        let source_id = redacted_outcome_public_source_id(self.source_id.as_deref());
+        let reason = redact_outcome_public_source_ref(&self.reason);
         serde_json::json!({
             "id": &self.id,
             "status": &self.status,
-            "sourceId": &self.source_id,
+            "sourceId": source_id,
             "limit": self.limit,
             "windowSeconds": self.window_seconds,
             "observedCount": self.observed_count,
-            "reason": &self.reason,
+            "reason": reason,
             "rawEventHash": &self.raw_event_hash,
         })
     }
@@ -458,6 +460,33 @@ pub struct OutcomeQuarantineRecord {
     pub released_feedback_event_id: Option<String>,
 }
 
+impl OutcomeQuarantineRecord {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": &self.id,
+            "workspaceId": &self.workspace_id,
+            "sourceId": redact_outcome_public_source_ref(&self.source_id),
+            "targetType": &self.target_type,
+            "targetId": &self.target_id,
+            "signal": &self.signal,
+            "eventWeight": score_json_value(self.event_weight),
+            "eventSourceType": &self.event_source_type,
+            "proposedEventId": &self.proposed_event_id,
+            "recordedAt": &self.recorded_at,
+            "reason": redact_outcome_public_source_ref(&self.reason),
+            "eventReasonPresent": self.event_reason_present,
+            "eventEvidenceJsonPresent": self.event_evidence_json_present,
+            "eventSessionId": &self.event_session_id,
+            "rawEventHash": &self.raw_event_hash,
+            "status": &self.status,
+            "reviewedAt": &self.reviewed_at,
+            "reviewedBy": &self.reviewed_by,
+            "releasedFeedbackEventId": &self.released_feedback_event_id,
+        })
+    }
+}
+
 /// Result of listing quarantined feedback.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -476,7 +505,22 @@ pub struct OutcomeQuarantineListReport {
 impl OutcomeQuarantineListReport {
     #[must_use]
     pub fn data_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| {
+        let data = serde_json::json!({
+            "schema": self.schema,
+            "command": self.command,
+            "version": self.version,
+            "workspaceId": &self.workspace_id,
+            "workspacePath": &self.workspace_path,
+            "databasePath": &self.database_path,
+            "statusFilter": &self.status_filter,
+            "queueDepth": self.queue_depth,
+            "records": self
+                .records
+                .iter()
+                .map(OutcomeQuarantineRecord::data_json)
+                .collect::<Vec<_>>(),
+        });
+        serde_json::to_string(&data).unwrap_or_else(|_| {
             format!(
                 r#"{{"schema":"{}","command":"outcome quarantine list","status":"serialization_failed"}}"#,
                 OUTCOME_QUARANTINE_LIST_SCHEMA_V1
@@ -488,9 +532,10 @@ impl OutcomeQuarantineListReport {
     pub fn human_summary(&self) -> String {
         let mut output = format!("Feedback quarantine ({} records)\n", self.queue_depth);
         for record in &self.records {
+            let source_id = redact_outcome_public_source_ref(&record.source_id);
             output.push_str(&format!(
                 "  {} [{}] {} {} from {}\n",
-                record.id, record.status, record.target_type, record.target_id, record.source_id
+                record.id, record.status, record.target_type, record.target_id, source_id
             ));
         }
         output
@@ -604,6 +649,7 @@ impl OutcomeRecordReport {
 
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
+        let source_id = redacted_outcome_public_source_id(self.source_id.as_deref());
         serde_json::json!({
             "command": "outcome",
             "version": self.version,
@@ -621,7 +667,7 @@ impl OutcomeRecordReport {
                 "signal": &self.signal,
                 "weight": score_json_value(self.weight),
                 "sourceType": &self.source_type,
-                "sourceId": &self.source_id,
+                "sourceId": source_id,
                 "reasonPresent": self.reason_present,
                 "evidenceJsonPresent": self.evidence_json_present,
                 "sessionId": &self.session_id,
@@ -630,6 +676,62 @@ impl OutcomeRecordReport {
             "feedback": self.feedback.data_json(),
         })
     }
+}
+
+fn redacted_outcome_public_source_id(value: Option<&str>) -> Option<String> {
+    value.map(redact_outcome_public_source_ref)
+}
+
+fn redact_outcome_public_source_ref(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    redact_outcome_public_path_like_segments(&secret_redacted)
+}
+
+fn redact_outcome_public_path_like_segments(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, c)| *c == '/')
+        else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        let start = cursor + relative_index;
+        if !outcome_public_path_starts_sensitive_segment(&value[start..]) {
+            output.push_str(&value[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        output.push_str(&value[cursor..start]);
+        output.push_str("[REDACTED_PATH]");
+        cursor = value[start..]
+            .char_indices()
+            .find_map(|(index, c)| outcome_public_path_boundary(c).then_some(start + index))
+            .unwrap_or(value.len());
+    }
+    output
+}
+
+fn outcome_public_path_starts_sensitive_segment(value: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/home/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+    ];
+    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+}
+
+fn outcome_public_path_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
 }
 
 /// Record observed feedback about a memory or related target.
@@ -2095,9 +2197,12 @@ mod tests {
 
     use super::{
         CliCancelReason, CliOutcomeClass, CliOutcomeSummary, DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
-        DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR, EXIT_CANCELLED, EXIT_PANICKED, OutcomeRecordOptions,
-        OutcomeRecordStatus, default_feedback_weight, generate_feedback_event_id, outcome_class,
-        outcome_exit_code, record_outcome, record_outcome_seeded, validate_feedback_event_id,
+        DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR, EXIT_CANCELLED, EXIT_PANICKED,
+        OUTCOME_QUARANTINE_LIST_SCHEMA_V1, OutcomeFeedbackSummary, OutcomeQuarantineListReport,
+        OutcomeQuarantineRecord, OutcomeQuarantineSummary, OutcomeRecordOptions,
+        OutcomeRecordReport, OutcomeRecordStatus, default_feedback_weight,
+        generate_feedback_event_id, outcome_class, outcome_exit_code, record_outcome,
+        record_outcome_seeded, validate_feedback_event_id,
     };
     use crate::models::{DomainError, ProcessExitCode};
     use crate::runtime::determinism::Deterministic;
@@ -2425,6 +2530,172 @@ mod tests {
             &default_feedback_weight("outcome_observed", "harmful"),
             &(feedback_scoring::WEIGHT_OUTCOME_OBSERVED * feedback_scoring::HARMFUL_MULTIPLIER),
             "outcome harmful weight",
+        )
+    }
+
+    #[test]
+    fn outcome_record_report_redacts_sensitive_public_source_id() -> TestResult {
+        let source_id =
+            "file:///Users/alice/private/outcome.json?api_key=redaction-fixture".to_string();
+        let report = OutcomeRecordReport {
+            version: "test",
+            status: OutcomeRecordStatus::Quarantined,
+            dry_run: false,
+            event_id: Some("fb_00000000000000000000000001".to_string()),
+            audit_id: Some("aud_outcome_fixture".to_string()),
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: OUTCOME_TEST_WORKSPACE_ID.to_string(),
+            target_verified: true,
+            signal: "harmful".to_string(),
+            weight: 1.0,
+            source_type: "outcome_observed".to_string(),
+            source_id: Some(source_id.clone()),
+            reason_present: true,
+            evidence_json_present: false,
+            session_id: None,
+            quarantine: Some(OutcomeQuarantineSummary {
+                id: Some("fq_00000000000000000000000001".to_string()),
+                status: "pending".to_string(),
+                source_id: Some(source_id.clone()),
+                limit: 1,
+                window_seconds: 60,
+                observed_count: 2,
+                reason: format!("source {source_id} observed too many harmful events"),
+                raw_event_hash: Some("blake3:fixture".to_string()),
+            }),
+            feedback: OutcomeFeedbackSummary {
+                positive_weight: 0.0,
+                positive_count: 0,
+                negative_weight: 0.0,
+                negative_count: 0,
+                neutral_weight: 0.0,
+                neutral_count: 0,
+                decay_weight: 0.0,
+                decay_count: 0,
+                total_count: 0,
+                net_score: 0.0,
+                trust_score: 0.0,
+            },
+        };
+
+        let rendered = report.data_json().to_string();
+        ensure(
+            rendered.contains("[REDACTED_PATH]"),
+            "path-like source id is redacted",
+        )?;
+        ensure(
+            !rendered.contains("/Users/alice"),
+            "user path does not leak in report JSON",
+        )?;
+        ensure(
+            !rendered.contains("redaction-fixture"),
+            "query secret does not leak in report JSON",
+        )
+    }
+
+    #[test]
+    fn outcome_record_report_preserves_safe_public_source_id() -> TestResult {
+        let report = OutcomeRecordReport {
+            version: "test",
+            status: OutcomeRecordStatus::Recorded,
+            dry_run: false,
+            event_id: Some("fb_00000000000000000000000002".to_string()),
+            audit_id: None,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: OUTCOME_TEST_WORKSPACE_ID.to_string(),
+            target_verified: true,
+            signal: "helpful".to_string(),
+            weight: 1.0,
+            source_type: "human_explicit".to_string(),
+            source_id: Some("operator-note-42".to_string()),
+            reason_present: false,
+            evidence_json_present: false,
+            session_id: None,
+            quarantine: None,
+            feedback: OutcomeFeedbackSummary {
+                positive_weight: 1.0,
+                positive_count: 1,
+                negative_weight: 0.0,
+                negative_count: 0,
+                neutral_weight: 0.0,
+                neutral_count: 0,
+                decay_weight: 0.0,
+                decay_count: 0,
+                total_count: 1,
+                net_score: 1.0,
+                trust_score: 1.0,
+            },
+        };
+
+        let rendered = report.data_json().to_string();
+        ensure(
+            rendered.contains("operator-note-42"),
+            "safe source id remains visible",
+        )?;
+        ensure(
+            !rendered.contains("[REDACTED_PATH]"),
+            "safe source id is not path-redacted",
+        )
+    }
+
+    #[test]
+    fn outcome_quarantine_list_redacts_sensitive_public_source_id() -> TestResult {
+        let source_id = "file:///tmp/outcomes.json?api_key=redaction-fixture".to_string();
+        let report = OutcomeQuarantineListReport {
+            schema: OUTCOME_QUARANTINE_LIST_SCHEMA_V1,
+            command: "outcome quarantine list",
+            version: "test",
+            workspace_id: OUTCOME_TEST_WORKSPACE_ID.to_string(),
+            workspace_path: "fixture-workspace".to_string(),
+            database_path: "fixture-db".to_string(),
+            status_filter: Some("pending".to_string()),
+            queue_depth: 1,
+            records: vec![OutcomeQuarantineRecord {
+                id: "fq_00000000000000000000000002".to_string(),
+                workspace_id: OUTCOME_TEST_WORKSPACE_ID.to_string(),
+                source_id: source_id.clone(),
+                target_type: "memory".to_string(),
+                target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+                signal: "harmful".to_string(),
+                event_weight: 1.0,
+                event_source_type: "outcome_observed".to_string(),
+                proposed_event_id: Some("fb_00000000000000000000000003".to_string()),
+                recorded_at: "2026-05-17T00:00:00Z".to_string(),
+                reason: format!("source {source_id} exceeded the limit"),
+                event_reason_present: true,
+                event_evidence_json_present: false,
+                event_session_id: None,
+                raw_event_hash: "blake3:fixture".to_string(),
+                status: "pending".to_string(),
+                reviewed_at: None,
+                reviewed_by: None,
+                released_feedback_event_id: None,
+            }],
+        };
+
+        let rendered_json = report.data_json();
+        let rendered_human = report.human_summary();
+        ensure(
+            rendered_json.contains("[REDACTED_PATH]"),
+            "path-like source id is redacted in quarantine JSON",
+        )?;
+        ensure(
+            rendered_human.contains("[REDACTED_PATH]"),
+            "path-like source id is redacted in quarantine human output",
+        )?;
+        ensure(
+            !rendered_json.contains("/tmp/outcomes.json"),
+            "source path does not leak in quarantine JSON",
+        )?;
+        ensure(
+            !rendered_human.contains("/tmp/outcomes.json"),
+            "source path does not leak in quarantine human output",
+        )?;
+        ensure(
+            !rendered_json.contains("redaction-fixture"),
+            "query secret does not leak in quarantine JSON",
         )
     }
 
