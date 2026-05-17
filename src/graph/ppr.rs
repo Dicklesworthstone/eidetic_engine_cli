@@ -878,6 +878,54 @@ mod tests {
     }
 
     #[test]
+    fn personalized_pagerank_uses_edge_confidence_ratios() -> TestResult {
+        let mut graph = DiGraph::strict();
+        let seed = memory_id(28);
+        let confident = memory_id(29);
+        let uncertain = memory_id(30);
+        graph
+            .add_edge_with_attrs(
+                seed.to_string(),
+                confident.to_string(),
+                edge_attrs("supports", 1.0, 1.0),
+            )
+            .map_err(|error| error.to_string())?;
+        graph
+            .add_edge_with_attrs(
+                seed.to_string(),
+                uncertain.to_string(),
+                edge_attrs("supports", 1.0, 0.1),
+            )
+            .map_err(|error| error.to_string())?;
+        let seeds = HashMap::from([(seed, 1.0)]);
+
+        let result = graph_result(compute_personalized_pagerank_with_policy(
+            &graph,
+            &seeds,
+            PersonalizedPageRankPolicy {
+                tolerance: 1.0e-8,
+                ..PersonalizedPageRankPolicy::default()
+            },
+        ))?;
+        let confident_score = result.get(&confident).copied().unwrap_or(0.0);
+        let uncertain_score = result.get(&uncertain).copied().unwrap_or(0.0);
+
+        assert!(
+            confident_score > 0.0,
+            "confident edge target should receive positive PPR mass: {result:?}"
+        );
+        assert!(
+            uncertain_score > 0.0,
+            "uncertain edge target should receive positive PPR mass: {result:?}"
+        );
+        assert!(
+            confident_score > uncertain_score * 9.0,
+            "edge confidence 1.0 should propagate roughly 10x more mass than 0.1: {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn personalized_pagerank_is_deterministic_across_runs() -> TestResult {
         let mut graph = DiGraph::strict();
         let a = memory_id(31);
