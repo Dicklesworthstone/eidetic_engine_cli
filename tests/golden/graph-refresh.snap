@@ -12,7 +12,8 @@ contracts:
   - stale or missing snapshot returns degraded status with repair hint
   - min_weight and min_confidence options filter links before projection
   - link_limit caps the maximum links processed for large graphs
-  - timing breakdown includes projection_ms, pagerank_ms, betweenness_ms
+  - timing breakdown includes projection_ms, pagerank_ms, betweenness_ms, hits_ms
+  - persisted snapshot metrics include hub and authority scores per node
   - concurrent writers are serialized via advisory lock
   - lock contention returns SnapshotLockHeld error with holder info
   - JSON stdout includes workspace_id and optional snapshot metadata
@@ -27,3 +28,5 @@ evidence:
   - GraphRefreshSnapshot.content_hash
   - GraphRefreshJobReport.workspace_id
   - CentralityRefreshStatus
+  - MemoryCentralityScore.hub
+  - MemoryCentralityScore.authority

@@ -5,18 +5,18 @@ schema:
   report: ee.graph.centrality_refresh.v1
   score: ee.graph.centrality_score.v1
 contracts:
-  - centrality metrics use fnx_algorithms PageRank and betweenness centrality
+  - centrality metrics use fnx_algorithms PageRank, betweenness, and HITS centrality
   - no petgraph or hand-rolled graph algorithms in dependency tree
   - same memory links yield stable score ordering with deterministic tie-breaking
-  - scores include memoryId, pagerank, and betweenness fields
-  - top_pagerank and top_betweenness lists are sorted by respective metric descending
+  - scores include memoryId, pagerank, betweenness, hub, and authority fields
+  - top_pagerank, top_betweenness, top_hubs, and top_authorities lists are sorted by respective metric descending
   - equal centrality scores are tie-broken by memoryId for stable JSON output
   - empty graph returns EmptyGraph status with zero node/edge counts
   - disconnected components produce finite deterministic scores across repeated refreshes
   - 100+ node projections respect link_limit while keeping top score lists capped at 10
   - missing database returns clear Storage error with init repair hint
   - JSON stdout is ee.response.v1 envelope with data containing scores
-  - human output formats pagerank and betweenness to 4 decimal places
+  - human output formats pagerank, betweenness, hub, and authority to 4 decimal places
 evidence:
   - CentralityRefreshReport.status
   - CentralityRefreshReport.node_count
@@ -24,7 +24,10 @@ evidence:
   - MemoryCentralityScore.memory_id
   - MemoryCentralityScore.pagerank
   - MemoryCentralityScore.betweenness
+  - MemoryCentralityScore.hub
+  - MemoryCentralityScore.authority
   - refresh_centrality_handles_disconnected_components_deterministically
   - refresh_centrality_respects_link_limit_on_large_graph
   - fnx_algorithms::pagerank_directed
   - fnx_algorithms::betweenness_centrality_directed
+  - fnx_algorithms::hits_centrality_directed

@@ -11,10 +11,9 @@
 //! cancellation, panic capture, and budget accounting match every other
 //! graph wrapper (PageRank, betweenness, Gomory-Hu, causal explanation).
 //!
-//! Snapshot caching during `refresh_centrality` (the second half of
-//! G10.a's acceptance) is intentionally deferred to a follow-on slice so
-//! this file remains self-contained and small. The wrapper here is the
-//! computational primitive the snapshot job will call.
+//! `refresh_centrality` calls this wrapper when it builds durable graph
+//! snapshots, so snapshot metrics can carry HITS hub and authority scores
+//! alongside PageRank and betweenness.
 //!
 //! Downstream consumers (G10.b `ee context --profile grounding`,
 //! G10.c `ee insights --section hubs/authorities`) consume this same

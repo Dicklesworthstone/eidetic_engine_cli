@@ -2931,8 +2931,8 @@ fn persist_graph_snapshot_in_transaction(
 
 /// Refresh centrality metrics for all memories in the graph.
 ///
-/// This builds a fresh projection from memory_links, computes PageRank and
-/// betweenness centrality, and returns a report with all scores.
+/// This builds a fresh projection from memory_links, computes PageRank,
+/// betweenness, and HITS centrality, and returns a report with all scores.
 pub fn refresh_centrality(
     conn: &DbConnection,
     options: &CentralityRefreshOptions,
@@ -8520,9 +8520,18 @@ mod tests {
         assert_eq!(json["graph"]["nodeCount"], 2);
         assert_eq!(json["graph"]["edgeCount"], 1);
         assert!(json["timing"]["totalMs"].as_f64().is_some());
+        assert!(json["timing"]["hitsMs"].as_f64().is_some());
         assert!(json["scores"].as_array().is_some());
+        let first_score = json["scores"]
+            .as_array()
+            .and_then(|scores| scores.first())
+            .ok_or_else(|| "centrality score should be present".to_owned())?;
+        assert!(first_score["hub"].as_f64().is_some());
+        assert!(first_score["authority"].as_f64().is_some());
         assert!(json["topPagerank"].as_array().is_some());
         assert!(json["topBetweenness"].as_array().is_some());
+        assert!(json["topHubs"].as_array().is_some());
+        assert!(json["topAuthorities"].as_array().is_some());
 
         connection.close().map_err(|error| error.to_string())
     }
