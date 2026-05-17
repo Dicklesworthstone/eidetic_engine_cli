@@ -571,6 +571,111 @@ printf '[RCH] remote trj (0.1s)\n'
 }
 
 #[test]
+fn event_log_records_source_state_and_fake_rch_invocation_count() -> TestResult {
+    let workspace = seed_git_workspace("rch-event-log-fake-rch")?;
+    let before_status = git_status_porcelain_v2(&workspace)?;
+    let invocation_log = unique_tmp_path("rch-event-log-invocations");
+    let event_log = unique_tmp_path("rch-event-log").join("events.jsonl");
+    let fake_rch = write_fake_rch(
+        "fake-rch-event-log.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+printf 'remote event-log ok\n'
+printf '[RCH] remote trj (0.1s)\n'
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+    let event_log_arg = event_log
+        .to_str()
+        .ok_or_else(|| "event log path is not utf-8".to_owned())?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--bead-id",
+            "bd-9ygik.3",
+            "--require-clean-tree",
+            "--event-log",
+            event_log_arg,
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "event_log_fake_rch_smoke",
+        ],
+        &[
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            (
+                "RCH_VERIFY_STATUS_JSON",
+                r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
+            ),
+        ],
+        &workspace,
+    )?;
+    assert_git_status_unchanged(&workspace, &before_status, "event-log fake RCH")?;
+    if !status.success() {
+        return Err(format!(
+            "event-log fake RCH run failed with {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            status.code()
+        ));
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse report: {error}"))?;
+    if report["status"] != "remote_pass"
+        || report["verification_attribution"] != "strict_clean_tree"
+        || report["command_hash"].as_str().map(str::len) != Some(64)
+    {
+        return Err(format!("unexpected event-log proof report: {report}"));
+    }
+
+    let event_text =
+        fs::read_to_string(&event_log).map_err(|error| format!("read event log: {error}"))?;
+    let rows = event_text.lines().collect::<Vec<_>>();
+    if rows.len() != 1 {
+        return Err(format!("expected one event row, got {}", rows.len()));
+    }
+    let event: Value =
+        serde_json::from_str(rows[0]).map_err(|error| format!("parse event row: {error}"))?;
+    if event["schema"] != "ee.test_event.v1"
+        || event["kind"] != "command_end"
+        || event["test_id"] != "bd-9ygik.3"
+        || event["command"] != "scripts/rch_verify.sh"
+        || event["exit_code"] != 0
+    {
+        return Err(format!(
+            "event row does not match test-event basics: {event}"
+        ));
+    }
+    if event["stdout_hash"]
+        .as_str()
+        .is_none_or(|hash| !hash.starts_with("sha256:") || hash.len() != 71)
+    {
+        return Err(format!("event row missing stdout hash: {event}"));
+    }
+    let fields = &event["fields"];
+    if fields["status"] != "remote_pass"
+        || fields["bead_id"] != "bd-9ygik.3"
+        || fields["verification_attribution"] != "strict_clean_tree"
+        || fields["fake_rch_invoked"] != true
+        || fields["fake_rch_invocation_count"] != 1
+        || fields["dirty_status_hash"]
+            != "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    {
+        return Err(format!("event row missing source/fake-RCH fields: {event}"));
+    }
+    Ok(())
+}
+
+#[test]
 fn committed_tree_manifest_ignores_dirty_checkout_and_refuses_before_rch() -> TestResult {
     let workspace = seed_git_workspace("rch-committed-tree-dirty")?;
     fs::write(workspace.join("tracked.txt"), "dirty live checkout\n")

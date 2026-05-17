@@ -15,6 +15,7 @@ Options:
   --allow-raw               Allow non-Cargo commands; still runs through rch exec
   --bead-id <id>            Optional bead id for ledger rows and summaries
   --ledger <path>           Append one derived JSONL evidence row
+  --event-log <path>        Append one ee.test_event.v1 command_end event row
   --summary                 Include bead-ready Markdown summary in the JSON proof
   --no-write                Do not write --ledger; render proof/summary only
   --rch-bin <path>          RCH binary (default: $RCH_BIN or rch)
@@ -39,6 +40,7 @@ DRY_RUN=0
 ALLOW_RAW=0
 BEAD_ID=""
 LEDGER_PATH=""
+EVENT_LOG_PATH=""
 INCLUDE_SUMMARY=0
 NO_WRITE=0
 ENV_OVERRIDES=()
@@ -83,6 +85,7 @@ while [ "$#" -gt 0 ]; do
         --allow-raw) ALLOW_RAW=1; shift ;;
         --bead-id) BEAD_ID="${2:?--bead-id requires a value}"; shift 2 ;;
         --ledger) LEDGER_PATH="${2:?--ledger requires a value}"; shift 2 ;;
+        --event-log) EVENT_LOG_PATH="${2:?--event-log requires a value}"; shift 2 ;;
         --summary) INCLUDE_SUMMARY=1; shift ;;
         --no-write) NO_WRITE=1; shift ;;
         --rch-bin) RCH_BIN="${2:?--rch-bin requires a value}"; shift 2 ;;
@@ -895,6 +898,7 @@ EOF
     JSON_PAYLOAD="$json_payload" \
     BEAD_ID="$BEAD_ID" \
     LEDGER_PATH="$LEDGER_PATH" \
+    EVENT_LOG_PATH="$EVENT_LOG_PATH" \
     INCLUDE_SUMMARY="$INCLUDE_SUMMARY" \
     NO_WRITE="$NO_WRITE" \
     RUN_STARTED_AT="$RUN_STARTED_AT" \
@@ -925,6 +929,7 @@ for key in (
     proof[key] = source_state.get(key)
 bead_id = os.environ.get("BEAD_ID", "")
 ledger_path = os.environ.get("LEDGER_PATH", "")
+event_log_path = os.environ.get("EVENT_LOG_PATH", "")
 include_summary = os.environ.get("INCLUDE_SUMMARY") == "1"
 no_write = os.environ.get("NO_WRITE") == "1"
 started_at = os.environ.get("RUN_STARTED_AT") or proof.get("generated_at")
@@ -1079,7 +1084,51 @@ if ledger_path:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
 
-print(json.dumps(proof, sort_keys=True, separators=(",", ":")))
+proof_json = json.dumps(proof, sort_keys=True, separators=(",", ":"))
+
+if event_log_path:
+    fake_invocation_count = 0
+    fake_invocations_path = os.environ.get("FAKE_RCH_INVOCATIONS", "")
+    if fake_invocations_path:
+        fake_path = Path(fake_invocations_path)
+        if fake_path.exists():
+            fake_invocation_count = len(fake_path.read_text(encoding="utf-8").splitlines())
+    event = {
+        "schema": "ee.test_event.v1",
+        "ts": proof.get("generated_at"),
+        "test_id": bead_id or "rch_verify",
+        "kind": "command_end",
+        "command": "scripts/rch_verify.sh",
+        "args": proof.get("command") or [],
+        "stdout_hash": "sha256:" + hashlib.sha256(proof_json.encode("utf-8")).hexdigest(),
+        "stderr_excerpt": proof.get("stderr_tail") or "",
+        "exit_code": int(proof.get("exit_code") or 0),
+        "elapsed_ms": proof.get("elapsed_ms") or 0,
+        "fields": {
+            "bead_id": bead_id or None,
+            "status": status,
+            "command_hash": command_hash,
+            "cwd": redact(os.getcwd()),
+            "git_head": proof.get("git_head"),
+            "git_tree": proof.get("git_tree"),
+            "dirty_status_hash": proof.get("dirty_status_hash"),
+            "verification_attribution": proof.get("verification_attribution"),
+            "fake_rch_invoked": fake_invocation_count > 0,
+            "fake_rch_invocation_count": fake_invocation_count,
+            "source_manifest_hash": proof.get("source_manifest_hash"),
+            "stdout_artifact_path": None,
+            "stderr_artifact_path": None,
+            "schema_validation_status": "not_run",
+            "deterministic_rerun_hash": proof.get("source_manifest_hash") or proof.get("dirty_status_hash"),
+            "first_failure_diagnosis": status,
+        },
+    }
+    path = Path(event_log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+
+print(proof_json)
 PY
 }
 
