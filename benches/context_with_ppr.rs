@@ -13,7 +13,10 @@ use std::path::{Path, PathBuf};
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use tempfile::TempDir;
 
-use ee::core::context::{ContextPackOptions, ContextPackOutputOptions, run_context_pack};
+use ee::core::context::{
+    ContextPackOptions, ContextPackOutputOptions, run_context_pack,
+    run_context_pack_with_performance,
+};
 use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
 use ee::db::{
     CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection,
@@ -177,6 +180,41 @@ fn options(
     }
 }
 
+fn timing_ms(performance: &serde_json::Value, name: &str) -> f64 {
+    performance["data"]["timings"]
+        .as_array()
+        .and_then(|timings| {
+            timings
+                .iter()
+                .find(|timing| timing["name"].as_str() == Some(name))
+        })
+        .and_then(|timing| timing["elapsedMs"].as_f64())
+        .unwrap_or(0.0)
+}
+
+fn emit_stage_diagnostics(workspace_path: &Path, db_path: &Path, index_dir: &Path) {
+    for (label, ppr_weight) in [
+        ("base_1000_memories", None),
+        ("ppr_1000_memories", Some(0.5)),
+    ] {
+        let run = run_context_pack_with_performance(
+            &options(workspace_path, db_path, index_dir, ppr_weight),
+            "context",
+        )
+        .expect("context pack stage diagnostics");
+        println!(
+            "ppr_stage_diagnostics label={label} total_ms={:.3} search_ms={:.3} candidate_resolution_ms={:.3} ppr_rerank_ms={:.3} pack_assembly_ms={:.3} pack_persistence_ms={:.3}",
+            timing_ms(&run.performance, "total"),
+            timing_ms(&run.performance, "search"),
+            timing_ms(&run.performance, "candidateResolution"),
+            timing_ms(&run.performance, "pprRerank"),
+            timing_ms(&run.performance, "packAssembly"),
+            timing_ms(&run.performance, "packPersistence"),
+        );
+        black_box(run.response.data.pack.hash);
+    }
+}
+
 fn bench_context_with_ppr(c: &mut Criterion) {
     let mut group = c.benchmark_group(BENCH_GROUP_NAME);
     let temp_dir = TempDir::new().expect("temp dir");
@@ -201,6 +239,7 @@ fn bench_context_with_ppr(c: &mut Criterion) {
     }
 
     group.finish();
+    emit_stage_diagnostics(&workspace_path, &db_path, &index_dir);
 }
 
 criterion_group!(benches, bench_context_with_ppr);
@@ -213,5 +252,20 @@ mod tests {
         assert_eq!(super::BENCH_GROUP_NAME, "ee_context_with_ppr");
         assert_eq!(super::MEMORY_COUNT, 1_000);
         assert_eq!(super::PPR_OVERHEAD_P50_BUDGET_MS, 30.0);
+    }
+
+    #[test]
+    fn timing_ms_extracts_named_stage() {
+        let performance = serde_json::json!({
+            "data": {
+                "timings": [
+                    { "name": "search", "elapsedMs": 12.5 },
+                    { "name": "pprRerank", "elapsedMs": 7.25 }
+                ]
+            }
+        });
+
+        assert_eq!(super::timing_ms(&performance, "pprRerank"), 7.25);
+        assert_eq!(super::timing_ms(&performance, "missing"), 0.0);
     }
 }

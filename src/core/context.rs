@@ -1378,6 +1378,7 @@ fn run_context_pack_with_performance_inner(
         );
     }
 
+    let ppr_rerank_start = Instant::now();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let ppr_metrics = apply_personalized_pagerank_rerank(
         read_connection,
@@ -1387,6 +1388,7 @@ fn run_context_pack_with_performance_inner(
         effective_context_ppr_weight(options.ppr_weight),
         &mut degraded,
     );
+    trace.record_elapsed("pprRerank", ppr_rerank_start);
     candidate_metrics.graph_boosted_candidates = candidate_metrics
         .graph_boosted_candidates
         .saturating_add(ppr_metrics.reranked_candidates);
@@ -7515,10 +7517,16 @@ mod tests {
                 converted_candidates: 2,
                 ..CandidateResolutionMetrics::default()
             },
-            timings: vec![PerformanceTiming {
-                name: "packAssembly",
-                elapsed: Duration::from_millis(3),
-            }],
+            timings: vec![
+                PerformanceTiming {
+                    name: "pprRerank",
+                    elapsed: Duration::from_millis(2),
+                },
+                PerformanceTiming {
+                    name: "packAssembly",
+                    elapsed: Duration::from_millis(3),
+                },
+            ],
             ..ContextPerformanceTrace::default()
         };
         let slo = pack_assembly_slo_for_run(
@@ -7554,6 +7562,12 @@ mod tests {
         assert_eq!(json["data"]["candidates"]["convertedCandidates"], 2);
         assert_eq!(json["data"]["pack"]["pruning"]["tokenBudgetExceeded"], 2);
         assert_eq!(json["data"]["cache"]["status"], "fallback");
+        assert!(
+            json["data"]["timings"]
+                .as_array()
+                .is_some_and(|timings| timings.iter().any(|timing| timing["name"] == "pprRerank")),
+            "performance output should expose PPR rerank timing: {json:#?}"
+        );
         assert_eq!(json["data"]["redaction"]["memoryContentIncluded"], false);
         assert!(!rendered.contains("sk_live_do_not_emit"));
         assert!(!rendered.contains("SECRET_VALUE_ONE"));
