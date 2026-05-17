@@ -768,7 +768,13 @@ fn ensure_lab_write_path_is_regular_or_missing(
     operation: &str,
 ) -> Result<(), DomainError> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(metadata) if metadata.file_type().is_file() => Err(lab_storage_error_message(
+            operation,
+            format!(
+                "refusing to overwrite existing frozen episode artifact {}",
+                path.display()
+            ),
+        )),
         Ok(_) => Err(lab_storage_error_message(
             operation,
             format!(
@@ -1545,6 +1551,38 @@ mod tests {
             report.stored,
             false,
             "capture remains unstored after rejection",
+        )
+    }
+
+    #[test]
+    fn capture_rejects_existing_frozen_episode_artifact_without_truncating() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let episode_id = "episode_lab_existing_write_artifact".to_string();
+        let artifact_path = frozen_episode_path(workspace.path(), &episode_id);
+        let parent = artifact_path
+            .parent()
+            .ok_or_else(|| "artifact parent missing".to_string())?;
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        fs::write(&artifact_path, "keep me").map_err(|error| error.to_string())?;
+        let mut report = CaptureReport::new(episode_id, workspace.path().to_path_buf());
+
+        let error = maybe_store_frozen_episode(&mut report, workspace.path())
+            .expect_err("existing frozen episode artifact should be rejected before write");
+        ensure(
+            error.message().contains("overwrite existing"),
+            true,
+            "existing artifact write error message",
+        )?;
+        let preserved = fs::read_to_string(&artifact_path).map_err(|error| error.to_string())?;
+        ensure(
+            preserved == "keep me",
+            true,
+            "existing artifact content remains untouched",
+        )?;
+        ensure(
+            report.stored,
+            false,
+            "capture remains unstored after existing artifact rejection",
         )
     }
 
