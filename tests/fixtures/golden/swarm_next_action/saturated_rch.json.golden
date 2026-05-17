@@ -50,23 +50,7 @@
       "externalAgentSpacePresent": true,
       "diskPressureHintCount": 0
     },
-    "degraded": [
-      {
-        "code": "rch_saturated",
-        "source": "rch",
-        "severity": "warning",
-        "message": "Remote workers are healthy but no slots are currently available.",
-        "repair": "Wait for a slot or choose source-only work."
-      }
-    ]
+    "degraded": []
   },
-  "degraded": [
-    {
-      "code": "rch_saturated",
-      "source": "rch",
-      "severity": "warning",
-      "message": "Remote workers are healthy but no slots are currently available.",
-      "repair": "Wait for a slot or choose source-only work."
-    }
-  ]
+  "degraded": []
 }

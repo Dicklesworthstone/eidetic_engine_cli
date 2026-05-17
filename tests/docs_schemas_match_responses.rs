@@ -544,13 +544,6 @@ fn domain_error_sample() -> Result<Value, String> {
 }
 
 fn swarm_next_action_sample() -> Value {
-    let degraded = json!([{
-        "code": "rch_saturated",
-        "source": "rch",
-        "severity": "warning",
-        "message": "Remote workers are healthy but no slots are currently available.",
-        "repair": "Wait for a slot or choose source-only work."
-    }]);
     json!({
         "schema": RESPONSE_SCHEMA_V1,
         "success": true,
@@ -601,9 +594,9 @@ fn swarm_next_action_sample() -> Value {
                 "externalAgentSpacePresent": true,
                 "diskPressureHintCount": 0
             },
-            "degraded": degraded.clone()
+            "degraded": []
         },
-        "degraded": degraded
+        "degraded": []
     })
 }
 
