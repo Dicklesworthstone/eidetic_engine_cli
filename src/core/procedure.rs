@@ -1026,6 +1026,10 @@ fn write_export_file(path: &Path, content: &str) -> Result<(), DomainError> {
     })?;
     drop(file);
 
+    publish_procedure_export_temp_file(&temp_path, path)
+}
+
+fn publish_procedure_export_temp_file(temp_path: &Path, path: &Path) -> Result<(), DomainError> {
     ensure_no_procedure_path_symlink_components(path, "publish procedure export").map_err(
         |error| DomainError::Storage {
             message: format!(
@@ -1036,7 +1040,8 @@ fn write_export_file(path: &Path, content: &str) -> Result<(), DomainError> {
         },
     )?;
     ensure_procedure_export_path_is_regular_or_missing(path)?;
-    std::fs::rename(&temp_path, path).map_err(|error| DomainError::Storage {
+    ensure_procedure_export_created_temp_path_is_regular(temp_path)?;
+    std::fs::rename(temp_path, path).map_err(|error| DomainError::Storage {
         message: format!(
             "failed to publish procedure export temp file {} to {}: {error}",
             temp_path.display(),
@@ -1097,6 +1102,26 @@ fn ensure_procedure_export_temp_path_absent(path: &Path) -> Result<(), DomainErr
         Err(error) => Err(DomainError::Storage {
             message: format!(
                 "failed to inspect procedure export temp path '{}': {error}",
+                path.display()
+            ),
+            repair: Some("choose a readable parent directory for --output".to_owned()),
+        }),
+    }
+}
+
+fn ensure_procedure_export_created_temp_path_is_regular(path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::PolicyDenied {
+            message: format!(
+                "procedure export temp path '{}' is not a regular file",
+                path.display()
+            ),
+            repair: Some("remove the stale procedure export temp path and retry".to_owned()),
+        }),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "failed to inspect procedure export temp path '{}' before publish: {error}",
                 path.display()
             ),
             repair: Some("choose a readable parent directory for --output".to_owned()),
@@ -4185,6 +4210,47 @@ mod tests {
         );
         let stale_temp = fs::read_to_string(&temp_path).map_err(|error| error.to_string())?;
         assert_eq!(stale_temp, "stale export temp");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_publish_rechecks_temp_symlink_before_rename() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let output_path = temp.path().join("procedure.md");
+        let temp_path =
+            procedure_export_temp_path(&output_path).map_err(|error| error.message())?;
+        let outside_file = temp.path().join("outside-procedure.md");
+        fs::write(&outside_file, "outside content").map_err(|error| error.to_string())?;
+        symlink(&outside_file, &temp_path).map_err(|error| error.to_string())?;
+
+        let error = publish_procedure_export_temp_file(&temp_path, &output_path)
+            .expect_err("symlinked procedure export temp should be rejected before rename");
+
+        assert_eq!(error.code(), "policy_denied");
+        assert!(
+            error.message().contains("not a regular file"),
+            "unexpected temp symlink error: {}",
+            error.message()
+        );
+        assert!(
+            !output_path.exists(),
+            "export must not publish a swapped temp symlink as the final output"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_file).map_err(|error| error.to_string())?,
+            "outside content",
+            "export publish must not modify the symlink target"
+        );
+        assert!(
+            fs::symlink_metadata(&temp_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "swapped temp symlink should remain untouched"
+        );
         Ok(())
     }
 
