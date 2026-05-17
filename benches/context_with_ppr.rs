@@ -223,6 +223,60 @@ impl StageDiagnostics {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct OverheadAttribution {
+    total_delta_ms: f64,
+    search_delta_ms: f64,
+    candidate_resolution_delta_ms: f64,
+    ppr_rerank_delta_ms: f64,
+    pack_assembly_delta_ms: f64,
+    pack_persistence_delta_ms: f64,
+    residual_delta_ms: f64,
+}
+
+impl OverheadAttribution {
+    fn from_diagnostics(base: StageDiagnostics, ppr: StageDiagnostics) -> Self {
+        let total_delta_ms = ppr.total_ms - base.total_ms;
+        let search_delta_ms = ppr.search_ms - base.search_ms;
+        let candidate_resolution_delta_ms =
+            ppr.candidate_resolution_ms - base.candidate_resolution_ms;
+        let ppr_rerank_delta_ms = ppr.ppr_rerank_ms - base.ppr_rerank_ms;
+        let pack_assembly_delta_ms = ppr.pack_assembly_ms - base.pack_assembly_ms;
+        let pack_persistence_delta_ms = ppr.pack_persistence_ms - base.pack_persistence_ms;
+        let tracked_delta_ms = ppr.tracked_ms() - base.tracked_ms();
+        let residual_delta_ms = total_delta_ms - tracked_delta_ms;
+        Self {
+            total_delta_ms,
+            search_delta_ms,
+            candidate_resolution_delta_ms,
+            ppr_rerank_delta_ms,
+            pack_assembly_delta_ms,
+            pack_persistence_delta_ms,
+            residual_delta_ms,
+        }
+    }
+
+    fn to_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "ee.bench.context_with_ppr.attribution.v1",
+            "budgetMs": PPR_OVERHEAD_P50_BUDGET_MS,
+            "deltasMs": {
+                "total": self.total_delta_ms,
+                "search": self.search_delta_ms,
+                "candidateResolution": self.candidate_resolution_delta_ms,
+                "pprRerank": self.ppr_rerank_delta_ms,
+                "packAssembly": self.pack_assembly_delta_ms,
+                "packPersistence": self.pack_persistence_delta_ms,
+                "residual": self.residual_delta_ms,
+            },
+            "budgetStatus": {
+                "total": budget_status(self.total_delta_ms),
+                "pprRerank": budget_status(self.ppr_rerank_delta_ms),
+            },
+        })
+    }
+}
+
 fn budget_status(value_ms: f64) -> &'static str {
     if value_ms <= PPR_OVERHEAD_P50_BUDGET_MS {
         "within_budget"
@@ -263,19 +317,19 @@ fn emit_stage_diagnostics(workspace_path: &Path, db_path: &Path, index_dir: &Pat
     }
 
     if let (Some(base), Some(ppr)) = (base_diagnostics, ppr_diagnostics) {
-        let total_delta_ms = ppr.total_ms - base.total_ms;
-        let search_delta_ms = ppr.search_ms - base.search_ms;
-        let candidate_resolution_delta_ms =
-            ppr.candidate_resolution_ms - base.candidate_resolution_ms;
-        let ppr_rerank_delta_ms = ppr.ppr_rerank_ms - base.ppr_rerank_ms;
-        let pack_assembly_delta_ms = ppr.pack_assembly_ms - base.pack_assembly_ms;
-        let pack_persistence_delta_ms = ppr.pack_persistence_ms - base.pack_persistence_ms;
-        let tracked_delta_ms = ppr.tracked_ms() - base.tracked_ms();
-        let residual_delta_ms = total_delta_ms - tracked_delta_ms;
+        let attribution = OverheadAttribution::from_diagnostics(base, ppr);
+        println!("ppr_overhead_attribution_json {}", attribution.to_json());
         println!(
-            "ppr_overhead_attribution total_delta_ms={total_delta_ms:.3} search_delta_ms={search_delta_ms:.3} candidate_resolution_delta_ms={candidate_resolution_delta_ms:.3} ppr_rerank_delta_ms={ppr_rerank_delta_ms:.3} pack_assembly_delta_ms={pack_assembly_delta_ms:.3} pack_persistence_delta_ms={pack_persistence_delta_ms:.3} residual_delta_ms={residual_delta_ms:.3} budget_ms={PPR_OVERHEAD_P50_BUDGET_MS:.3} total_budget_status={} ppr_rerank_budget_status={}",
-            budget_status(total_delta_ms),
-            budget_status(ppr_rerank_delta_ms),
+            "ppr_overhead_attribution total_delta_ms={:.3} search_delta_ms={:.3} candidate_resolution_delta_ms={:.3} ppr_rerank_delta_ms={:.3} pack_assembly_delta_ms={:.3} pack_persistence_delta_ms={:.3} residual_delta_ms={:.3} budget_ms={PPR_OVERHEAD_P50_BUDGET_MS:.3} total_budget_status={} ppr_rerank_budget_status={}",
+            attribution.total_delta_ms,
+            attribution.search_delta_ms,
+            attribution.candidate_resolution_delta_ms,
+            attribution.ppr_rerank_delta_ms,
+            attribution.pack_assembly_delta_ms,
+            attribution.pack_persistence_delta_ms,
+            attribution.residual_delta_ms,
+            budget_status(attribution.total_delta_ms),
+            budget_status(attribution.ppr_rerank_delta_ms),
         );
     }
 }
@@ -362,5 +416,42 @@ mod tests {
         assert_close(diagnostics.tracked_ms(), 97.0);
         assert_eq!(super::budget_status(7.0), "within_budget");
         assert_eq!(super::budget_status(31.0), "over_budget");
+    }
+
+    #[test]
+    fn overhead_attribution_json_preserves_stage_deltas_and_budget_status() {
+        let base = super::StageDiagnostics {
+            total_ms: 100.0,
+            search_ms: 80.0,
+            candidate_resolution_ms: 2.0,
+            ppr_rerank_ms: 0.0,
+            pack_assembly_ms: 3.0,
+            pack_persistence_ms: 5.0,
+        };
+        let ppr = super::StageDiagnostics {
+            total_ms: 135.0,
+            search_ms: 82.0,
+            candidate_resolution_ms: 2.5,
+            ppr_rerank_ms: 7.0,
+            pack_assembly_ms: 3.25,
+            pack_persistence_ms: 6.0,
+        };
+
+        let attribution = super::OverheadAttribution::from_diagnostics(base, ppr);
+        let json = attribution.to_json();
+
+        assert_eq!(json["schema"], "ee.bench.context_with_ppr.attribution.v1");
+        assert_close(json["deltasMs"]["total"].as_f64().unwrap(), 35.0);
+        assert_close(json["deltasMs"]["search"].as_f64().unwrap(), 2.0);
+        assert_close(
+            json["deltasMs"]["candidateResolution"].as_f64().unwrap(),
+            0.5,
+        );
+        assert_close(json["deltasMs"]["pprRerank"].as_f64().unwrap(), 7.0);
+        assert_close(json["deltasMs"]["packAssembly"].as_f64().unwrap(), 0.25);
+        assert_close(json["deltasMs"]["packPersistence"].as_f64().unwrap(), 1.0);
+        assert_close(json["deltasMs"]["residual"].as_f64().unwrap(), 24.25);
+        assert_eq!(json["budgetStatus"]["total"], "over_budget");
+        assert_eq!(json["budgetStatus"]["pprRerank"], "within_budget");
     }
 }
