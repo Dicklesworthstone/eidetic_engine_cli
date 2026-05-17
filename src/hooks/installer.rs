@@ -686,6 +686,10 @@ fn install_hooks_with_binary_path(
     let mut no_change_count = 0u32;
     let mut writes = Vec::new();
 
+    if !options.dry_run {
+        ensure_hook_dir_is_not_symlink(&options.hook_dir)?;
+    }
+
     for hook_type in &options.hooks {
         let target_path = options.hook_dir.join(hook_type.filename());
         let content = generate_hook_content(*hook_type, ee_binary_path);
@@ -2021,7 +2025,7 @@ mod tests {
         };
 
         let error = generate_preflight_shell_snippet(&options).expect_err("shell required");
-        assert_eq!(error.code(), "configuration_error");
+        assert_eq!(error.code(), "configuration");
         assert!(
             error.message().contains("--shell"),
             "error must point to --shell flag, got: {}",
