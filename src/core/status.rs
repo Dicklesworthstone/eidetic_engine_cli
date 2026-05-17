@@ -3912,17 +3912,17 @@ mod tests {
                 logical_memory_id: "mem_remote_status_rule".to_owned(),
                 content_hash: format!("blake3:{}", "b".repeat(64)),
                 material_lane: "body".to_owned(),
-                redaction_class: "deny".to_owned(),
+                redaction_class: "secretDenied".to_owned(),
                 trust_lane: "peerAgent".to_owned(),
                 import_decision: "deny".to_owned(),
                 local_memory_id: None,
                 body_cache_key: None,
                 policy_failure_surface_json: Some(
-                    r#"{"schema":"ee.mesh.policy_failure_surface.v1","code":"mesh_peer_policy_denied"}"#
+                    r#"{"schema":"ee.mesh.policy_failure_surface.v1","code":"mesh_peer_policy_denied","action":"deny","reason":"peer_policy_redaction_denied","policyRef":"mesh_pol_status","materialLane":"body","redaction":"deny","trustLane":"peerAgent"}"#
                         .to_owned(),
                 ),
                 policy_decision_json: Some(
-                    r#"{"schema":"ee.mesh.policy_decision.v1","action":"deny","policyRef":"mesh_pol_status"}"#
+                    r#"{"schema":"ee.mesh.policy_decision.v1","direction":"inbound","action":"deny","reason":"peer_policy_redaction_denied","policyRef":"mesh_pol_status","materialLane":"body","redaction":"deny","trustLane":"peerAgent","importTrustClass":"agent_validated","bodyFetchAllowed":false,"localTruthSideEffectsAllowed":false,"searchOrGraphSideEffectsAllowed":false,"failure":{"schema":"ee.mesh.policy_failure_surface.v1","code":"mesh_peer_policy_denied","action":"deny","reason":"peer_policy_redaction_denied","policyRef":"mesh_pol_status","materialLane":"body","redaction":"deny","trustLane":"peerAgent"}}"#
                         .to_owned(),
                 ),
                 event_json: r#"{"schema":"ee.mesh.event.v1","eventKind":"create"}"#.to_owned(),

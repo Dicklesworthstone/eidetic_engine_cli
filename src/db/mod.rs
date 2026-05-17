@@ -7490,6 +7490,8 @@ impl DbConnection {
         &self,
         input: &InsertMeshImportLedgerEventInput,
     ) -> Result<StoredMeshImportLedgerEvent> {
+        validate_mesh_import_policy_json(input)?;
+
         if let Some(existing) = self.get_mesh_import_ledger_event(
             &input.workspace_id,
             &input.origin_node_id,
@@ -8913,6 +8915,251 @@ fn stored_agent_context_profile_for_pack_from_row(
         last_seen_at: required_text(row, 4, DbOperation::Query, "last_seen_at")?.to_string(),
         weight_cached: required_f64(row, 5, DbOperation::Query, "weight_cached")?,
     })
+}
+
+fn validate_mesh_import_policy_json(input: &InsertMeshImportLedgerEventInput) -> Result<()> {
+    if let Some(raw) = input.policy_failure_surface_json.as_deref() {
+        validate_mesh_policy_failure_surface_json(raw, "policy_failure_surface_json")?;
+    }
+    if let Some(raw) = input.policy_decision_json.as_deref() {
+        validate_mesh_policy_decision_json(raw, "policy_decision_json")?;
+    }
+    Ok(())
+}
+
+fn validate_mesh_policy_failure_surface_json(raw: &str, context: &str) -> Result<()> {
+    let value = parse_mesh_policy_object(raw, context)?;
+    ensure_json_string(
+        &value,
+        context,
+        "schema",
+        &["ee.mesh.policy_failure_surface.v1"],
+    )?;
+    let code = ensure_json_string(
+        &value,
+        context,
+        "code",
+        &[
+            "mesh_peer_policy_denied",
+            "mesh_peer_policy_quarantined",
+            "mesh_peer_policy_rejected",
+            "mesh_outbound_policy_denied",
+            "mesh_outbound_policy_quarantined",
+            "mesh_outbound_policy_rejected",
+        ],
+    )?;
+    let action = ensure_json_string(&value, context, "action", &["deny", "quarantine", "reject"])?;
+    let expected_action = match code {
+        "mesh_peer_policy_denied" | "mesh_outbound_policy_denied" => "deny",
+        "mesh_peer_policy_quarantined" | "mesh_outbound_policy_quarantined" => "quarantine",
+        "mesh_peer_policy_rejected" | "mesh_outbound_policy_rejected" => "reject",
+        _ => unreachable!("code was validated above"),
+    };
+    if action != expected_action {
+        return Err(mesh_policy_json_error(format!(
+            "{context} action {action:?} does not match code {code:?}"
+        )));
+    }
+    ensure_redaction_safe_json_string(&value, context, "reason")?;
+    ensure_redaction_safe_json_string(&value, context, "policyRef")?;
+    ensure_json_string(
+        &value,
+        context,
+        "materialLane",
+        &[
+            "metadata",
+            "body",
+            "embedding",
+            "graphLink",
+            "revisionNotice",
+            "curationSignal",
+        ],
+    )?;
+    ensure_json_string(&value, context, "redaction", &["share", "redact", "deny"])?;
+    ensure_json_optional_string(
+        &value,
+        context,
+        "trustLane",
+        &[
+            "localHuman",
+            "peerHumanViaPeer",
+            "peerAgent",
+            "peerDerived",
+            "untrusted",
+        ],
+    )
+}
+
+fn validate_mesh_policy_decision_json(raw: &str, context: &str) -> Result<()> {
+    let value = parse_mesh_policy_object(raw, context)?;
+    ensure_json_string(&value, context, "schema", &["ee.mesh.policy_decision.v1"])?;
+    let direction = ensure_json_string(&value, context, "direction", &["inbound", "outbound"])?;
+    ensure_json_string(
+        &value,
+        context,
+        "action",
+        &["allow", "deny", "quarantine", "reject"],
+    )?;
+    ensure_redaction_safe_json_string(&value, context, "reason")?;
+    ensure_redaction_safe_json_string(&value, context, "policyRef")?;
+    ensure_json_string(
+        &value,
+        context,
+        "materialLane",
+        &[
+            "metadata",
+            "body",
+            "embedding",
+            "graphLink",
+            "revisionNotice",
+            "curationSignal",
+        ],
+    )?;
+    ensure_json_string(&value, context, "redaction", &["share", "redact", "deny"])?;
+    ensure_json_optional_string(
+        &value,
+        context,
+        "trustLane",
+        &[
+            "localHuman",
+            "peerHumanViaPeer",
+            "peerAgent",
+            "peerDerived",
+            "untrusted",
+        ],
+    )?;
+
+    match direction {
+        "inbound" => {
+            ensure_json_optional_string(
+                &value,
+                context,
+                "importTrustClass",
+                &["human_explicit", "agent_assertion", "agent_validated"],
+            )?;
+            ensure_json_bool(&value, context, "bodyFetchAllowed")?;
+            ensure_json_bool(&value, context, "localTruthSideEffectsAllowed")?;
+            ensure_json_bool(&value, context, "searchOrGraphSideEffectsAllowed")?;
+            ensure_json_absent(&value, context, "payloadExportAllowed")?;
+            ensure_json_absent(&value, context, "rawPayloadExportAllowed")?;
+            ensure_json_absent(&value, context, "redactedPayloadRequired")?;
+        }
+        "outbound" => {
+            ensure_json_bool(&value, context, "payloadExportAllowed")?;
+            ensure_json_bool(&value, context, "rawPayloadExportAllowed")?;
+            ensure_json_bool(&value, context, "redactedPayloadRequired")?;
+            ensure_json_absent(&value, context, "importTrustClass")?;
+            ensure_json_absent(&value, context, "bodyFetchAllowed")?;
+            ensure_json_absent(&value, context, "localTruthSideEffectsAllowed")?;
+            ensure_json_absent(&value, context, "searchOrGraphSideEffectsAllowed")?;
+        }
+        _ => unreachable!("direction was validated above"),
+    }
+
+    match value.get("failure") {
+        None | Some(serde_json::Value::Null) => Ok(()),
+        Some(failure) => {
+            validate_mesh_policy_failure_surface_value(failure, "policy_decision_json.failure")
+        }
+    }
+}
+
+fn validate_mesh_policy_failure_surface_value(
+    value: &serde_json::Value,
+    context: &str,
+) -> Result<()> {
+    let raw = serde_json::to_string(value)
+        .map_err(|error| mesh_policy_json_error(format!("{context} serialize failed: {error}")))?;
+    validate_mesh_policy_failure_surface_json(&raw, context)
+}
+
+fn parse_mesh_policy_object(raw: &str, context: &str) -> Result<serde_json::Value> {
+    let value = serde_json::from_str::<serde_json::Value>(raw)
+        .map_err(|error| mesh_policy_json_error(format!("{context} is not valid JSON: {error}")))?;
+    if value.as_object().is_none() {
+        return Err(mesh_policy_json_error(format!(
+            "{context} must be a JSON object"
+        )));
+    }
+    Ok(value)
+}
+
+fn ensure_json_string<'a>(
+    value: &'a serde_json::Value,
+    context: &str,
+    field: &str,
+    allowed: &[&str],
+) -> Result<&'a str> {
+    let text = value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| mesh_policy_json_error(format!("{context}.{field} must be a string")))?;
+    if !allowed.contains(&text) {
+        return Err(mesh_policy_json_error(format!(
+            "{context}.{field} has unsupported value {text:?}"
+        )));
+    }
+    Ok(text)
+}
+
+fn ensure_json_optional_string(
+    value: &serde_json::Value,
+    context: &str,
+    field: &str,
+    allowed: &[&str],
+) -> Result<()> {
+    match value.get(field) {
+        Some(serde_json::Value::Null) => Ok(()),
+        Some(serde_json::Value::String(text)) if allowed.contains(&text.as_str()) => Ok(()),
+        Some(serde_json::Value::String(text)) => Err(mesh_policy_json_error(format!(
+            "{context}.{field} has unsupported value {text:?}"
+        ))),
+        _ => Err(mesh_policy_json_error(format!(
+            "{context}.{field} must be a string or null"
+        ))),
+    }
+}
+
+fn ensure_redaction_safe_json_string(
+    value: &serde_json::Value,
+    context: &str,
+    field: &str,
+) -> Result<()> {
+    let text = value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| mesh_policy_json_error(format!("{context}.{field} must be a string")))?;
+    if text.trim().is_empty() || text.contains('/') || text.contains('\\') {
+        return Err(mesh_policy_json_error(format!(
+            "{context}.{field} must be redaction-safe"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_json_bool(value: &serde_json::Value, context: &str, field: &str) -> Result<()> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_bool)
+        .map(|_| ())
+        .ok_or_else(|| mesh_policy_json_error(format!("{context}.{field} must be a boolean")))
+}
+
+fn ensure_json_absent(value: &serde_json::Value, context: &str, field: &str) -> Result<()> {
+    if value.get(field).is_some() {
+        Err(mesh_policy_json_error(format!(
+            "{context}.{field} is not valid for this direction"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn mesh_policy_json_error(message: String) -> DbError {
+    DbError::MalformedRow {
+        operation: DbOperation::Execute,
+        message,
+    }
 }
 
 fn stored_mesh_peer_from_row(row: &Row) -> Result<StoredMeshPeer> {
@@ -20009,6 +20256,57 @@ mod tests {
             &status.policy_failure_event_count,
             &0,
             "allowed decision is not a policy failure",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_import_ledger_rejects_malformed_policy_failure_surface_json() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let malformed_surface = r#"{"schema":"ee.mesh.policy_failure_surface.v1","code":"mesh_peer_policy_denied","action":"quarantine","reason":"peer_policy_redaction_denied","policyRef":"mesh_pol_7d4b19e22c","materialLane":"body","redaction":"deny","trustLane":"peerAgent"}"#;
+        let input = super::InsertMeshImportLedgerEventInput {
+            material_lane: "body".to_string(),
+            redaction_class: "secretDenied".to_string(),
+            import_decision: "deny".to_string(),
+            policy_failure_surface_json: Some(malformed_surface.to_string()),
+            ..mesh_import_event_input(4, hash('9'), hash('a'))
+        };
+
+        let error = connection
+            .insert_mesh_import_ledger_event(&input)
+            .expect_err("mismatched policy failure code/action should reject");
+        ensure(
+            error.to_string().contains("does not match code"),
+            "error should mention code/action mismatch",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_import_ledger_rejects_malformed_policy_decision_json() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let malformed_decision = r#"{"schema":"ee.mesh.policy_decision.v1","action":"deny","policyRef":"mesh_pol_7d4b19e22c"}"#;
+        let input = super::InsertMeshImportLedgerEventInput {
+            policy_decision_json: Some(malformed_decision.to_string()),
+            ..mesh_import_event_input(4, hash('9'), hash('a'))
+        };
+
+        let error = connection
+            .insert_mesh_import_ledger_event(&input)
+            .expect_err("policy decision without direction should reject");
+        ensure(
+            error.to_string().contains("policy_decision_json.direction"),
+            "error should mention missing decision direction",
         )?;
 
         connection.close()?;
