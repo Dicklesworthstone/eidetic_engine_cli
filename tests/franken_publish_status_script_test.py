@@ -167,9 +167,64 @@ jobs:
             text=True,
         )
         self.assertIn("franken_networkx", output)
+        self.assertIn("Aggregate: `0/7` crates ready; `7` blocked", output)
+        self.assertIn("`7` missing, `0` wrong-version, `0` network-unavailable", output)
         self.assertIn("crates_io_missing", output)
         self.assertNotIn("/Users/", output)
         self.assertNotIn("CARGO_REGISTRY_TOKEN=", output)
+
+    def test_markdown_aggregate_counts_multiple_groups(self) -> None:
+        report = {
+            "schema": "ee.franken_publish_status.v1",
+            "generated_at": "2026-05-16T00:00:00Z",
+            "groups": [
+                {
+                    "display_name": "first",
+                    "group": "first",
+                    "summary": {
+                        "crate_count": 3,
+                        "ready_count": 1,
+                        "blocked_count": 2,
+                        "missing_count": 1,
+                        "wrong_version_count": 1,
+                        "network_unavailable_count": 0,
+                    },
+                    "blocking_reason": "blocked",
+                    "git": {"checked": False},
+                    "workflow": {
+                        "publish_job_present": True,
+                        "tag_gate": True,
+                        "dependency_order_ok": True,
+                    },
+                    "crates": [],
+                },
+                {
+                    "display_name": "second",
+                    "group": "second",
+                    "summary": {
+                        "crate_count": 2,
+                        "ready_count": 1,
+                        "blocked_count": 1,
+                        "missing_count": 0,
+                        "wrong_version_count": 0,
+                        "network_unavailable_count": 1,
+                    },
+                    "blocking_reason": "blocked",
+                    "git": {"checked": False},
+                    "workflow": {
+                        "publish_job_present": True,
+                        "tag_gate": True,
+                        "dependency_order_ok": True,
+                    },
+                    "crates": [],
+                },
+            ],
+        }
+
+        output = self.mod.render_markdown(report)
+
+        self.assertIn("Aggregate: `2/5` crates ready; `3` blocked", output)
+        self.assertIn("`1` missing, `1` wrong-version, `1` network-unavailable", output)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,13 @@ Markdown for a tracker comment:
 scripts/franken_publish_status.py --group fnx --markdown
 ```
 
+When multiple groups are selected, the Markdown output starts with a compact
+aggregate line, for example:
+
+```text
+Aggregate: `1/9` crates ready; `8` blocked (`7` missing, `1` wrong-version, `0` network-unavailable).
+```
+
 Fixture mode for CI-safe parser checks:
 
 ```bash

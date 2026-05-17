@@ -408,8 +408,22 @@ def evaluate_group(
 
 def render_markdown(report: dict[str, Any]) -> str:
     groups = report["groups"]
+    total_crates = sum(group["summary"]["crate_count"] for group in groups)
+    ready_crates = sum(group["summary"]["ready_count"] for group in groups)
+    blocked_crates = sum(group["summary"]["blocked_count"] for group in groups)
+    missing_crates = sum(group["summary"]["missing_count"] for group in groups)
+    wrong_version_crates = sum(group["summary"]["wrong_version_count"] for group in groups)
+    network_unavailable_crates = sum(
+        group["summary"]["network_unavailable_count"] for group in groups
+    )
     lines = [
         f"Franken publish status `{report['schema']}` generated `{report['generated_at']}`.",
+        (
+            f"Aggregate: `{ready_crates}/{total_crates}` crates ready; "
+            f"`{blocked_crates}` blocked "
+            f"(`{missing_crates}` missing, `{wrong_version_crates}` wrong-version, "
+            f"`{network_unavailable_crates}` network-unavailable)."
+        ),
         "",
     ]
     for group in groups:
