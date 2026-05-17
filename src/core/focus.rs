@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
@@ -773,7 +773,7 @@ fn read_focus_state(path: &Path) -> Result<FocusState, DomainError> {
             repair: Some("Run ee focus set <memory-id> --json.".to_owned()),
         });
     };
-    let raw = fs::read_to_string(path).map_err(|error| DomainError::Storage {
+    let raw = read_focus_state_file(path).map_err(|error| DomainError::Storage {
         message: format!("Failed to read focus state {}: {error}", path.display()),
         repair: Some("Check workspace .ee/focus permissions.".to_owned()),
     })?;
@@ -786,6 +786,30 @@ fn read_focus_state(path: &Path) -> Result<FocusState, DomainError> {
         })?;
     stored_focus_state_to_domain(stored)
 }
+
+fn read_focus_state_file(path: &Path) -> std::io::Result<String> {
+    let mut file = open_focus_state_file_for_read(path)?;
+    let mut raw = String::new();
+    file.read_to_string(&mut raw)?;
+    Ok(raw)
+}
+
+fn open_focus_state_file_for_read(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_focus_state_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_focus_state_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_focus_state_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 fn focus_state_metadata_for_read(path: &Path) -> Result<Option<std::fs::Metadata>, DomainError> {
     ensure_no_symlink_components(path, "read")?;
@@ -1615,6 +1639,56 @@ mod tests {
             error.message().contains("symlinked path component"),
             true,
             "symlinked state error message",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn focus_state_final_read_open_rejects_swapped_symlinked_state_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let state_path = focus_state_path(dir.path());
+        let preserved_state = state_path.with_extension("json.preserved");
+        let outside_state = dir.path().join("outside-focus.json");
+        let state = focus_state(&[memory_id(470)], 2).map_err(|error| error.message())?;
+        let mut body =
+            serde_json::to_string_pretty(&state.data_json()).map_err(|error| error.to_string())?;
+        body.push('\n');
+        std::fs::create_dir_all(state_path.parent().expect("focus state parent"))
+            .map_err(|error| error.to_string())?;
+        std::fs::write(&state_path, &body).map_err(|error| error.to_string())?;
+        ensure(
+            focus_state_metadata_for_read(&state_path)
+                .map_err(|error| error.message())?
+                .is_some(),
+            true,
+            "regular focus state validates before final read",
+        )?;
+
+        std::fs::rename(&state_path, &preserved_state).map_err(|error| error.to_string())?;
+        std::fs::write(&outside_state, "outside sentinel").map_err(|error| error.to_string())?;
+        symlink(&outside_state, &state_path).map_err(|error| error.to_string())?;
+
+        open_focus_state_file_for_read(&state_path)
+            .expect_err("final focus state open should reject symlink after validation");
+        ensure(
+            std::fs::read_to_string(&outside_state).map_err(|error| error.to_string())?,
+            "outside sentinel".to_owned(),
+            "outside focus state remains unread and unchanged",
+        )?;
+        ensure(
+            std::fs::symlink_metadata(&state_path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            true,
+            "rejected focus state symlink remains for inspection",
+        )?;
+        ensure(
+            std::fs::read_to_string(&preserved_state).map_err(|error| error.to_string())?,
+            body,
+            "preserved validated focus state remains available after simulated swap",
         )
     }
 
