@@ -418,8 +418,7 @@ pub fn daemon_status_report(
 
 pub fn load_daemon_job_rows(workspace_path: &Path) -> Result<Vec<DaemonJobRow>, String> {
     let table_path = daemon_job_table_path(workspace_path);
-    ensure_daemon_job_table_path_is_not_symlink(&table_path)?;
-    if !table_path.exists() {
+    if !daemon_job_table_path_is_regular_file(&table_path, "read")? {
         return Ok(Vec::new());
     }
     let file = OpenOptions::new()
@@ -455,6 +454,13 @@ fn append_daemon_job_rows(table_path: &Path, rows: &[DaemonJobRow]) -> Result<()
         .ok_or_else(|| "Daemon job table path has no parent directory".to_owned())?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("Failed to create daemon job table directory: {error}"))?;
+    ensure_daemon_job_table_path_is_not_symlink(table_path)?;
+    if daemon_job_table_path_exists_as_non_regular_file(table_path)? {
+        return Err(format!(
+            "Refusing to append daemon job table '{}': path is not a regular file",
+            table_path.display()
+        ));
+    }
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -484,6 +490,50 @@ fn ensure_daemon_job_table_path_is_not_symlink(table_path: &Path) -> Result<(), 
         ));
     }
     Ok(())
+}
+
+fn daemon_job_table_path_is_regular_file(
+    table_path: &Path,
+    operation: &str,
+) -> Result<bool, String> {
+    ensure_daemon_job_table_path_is_not_symlink(table_path)?;
+    match fs::symlink_metadata(table_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(format!(
+            "Refusing to {operation} daemon job table '{}': path is not a regular file",
+            table_path.display()
+        )),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(format!(
+            "Failed to inspect daemon job table '{}': {error}",
+            table_path.display()
+        )),
+    }
+}
+
+fn daemon_job_table_path_exists_as_non_regular_file(table_path: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(table_path) {
+        Ok(metadata) => Ok(!metadata.file_type().is_file()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(format!(
+            "Failed to inspect daemon job table '{}': {error}",
+            table_path.display()
+        )),
+    }
 }
 
 fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, String> {
@@ -785,6 +835,48 @@ mod tests {
             fs::read_to_string(&target).map_err(|error| error.to_string())?,
             String::new(),
             "symlink target must not receive daemon rows",
+        )
+    }
+
+    #[test]
+    fn daemon_job_table_rejects_non_regular_table_before_read_or_write() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let table_path = daemon_job_table_path(temp.path());
+        let parent = table_path
+            .parent()
+            .ok_or_else(|| format!("missing parent for {}", table_path.display()))?;
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        fs::create_dir(&table_path).map_err(|error| error.to_string())?;
+
+        let read_error = match load_daemon_job_rows(temp.path()) {
+            Ok(rows) => {
+                return Err(format!(
+                    "non-regular daemon job table should fail, got {rows:?}"
+                ));
+            }
+            Err(error) => error,
+        };
+        ensure(
+            read_error.contains("path is not a regular file"),
+            true,
+            "non-regular table read rejection",
+        )?;
+
+        let mut options = DaemonForegroundOptions::new(temp.path().to_string_lossy().into_owned());
+        options.interval_ms = 0;
+        options.job_types = vec![JobType::HealthCheck];
+        let write_error = match record_daemon_foreground_start(temp.path(), &options) {
+            Ok(plan) => {
+                return Err(format!(
+                    "non-regular daemon job table should fail, got {plan:?}"
+                ));
+            }
+            Err(error) => error,
+        };
+        ensure(
+            write_error.contains("path is not a regular file"),
+            true,
+            "non-regular table write rejection",
         )
     }
 }
