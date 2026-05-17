@@ -36,7 +36,8 @@ The JSON proof schema is `ee.rch.verify.v1` and includes the command kind,
 remote-required flag, planned or actual RCH invocation, worker id when observed,
 remote project root, remote target dir, exit code, elapsed time, command hash,
 first Rust compiler error location, output tail, source attribution, dirty-state
-hashes, and degradation codes.
+hashes, degradation codes, and the source-state/worker-state degraded-code
+partitions described below.
 
 ## Source Attribution Modes
 
@@ -91,9 +92,10 @@ Ledger rows include `verifier_id`, optional `bead_id`, `command`,
 `command_hash`, `started_at`, `completed_at`, `elapsed_ms`, `worker_id`,
 `remote_project_root`, `remote_target_dir`, `rch_location`, `exit_code`,
 `status`, `first_error_file`, `first_error_line`, `stdout_tail`, `stderr_tail`,
-and `transcript_path`. Retained tails redact private `/Users/<name>` prefixes and
-obvious `token=...` / `secret=...` / `password=...` fragments while preserving
-remote `/data/projects/...` and local `/Volumes/...` evidence.
+`transcript_path`, `source_state_degraded_codes`, and
+`worker_state_degraded_codes`. Retained tails redact private `/Users/<name>`
+prefixes and obvious `token=...` / `secret=...` / `password=...` fragments while
+preserving remote `/data/projects/...` and local `/Volumes/...` evidence.
 
 `status` is one of `dry_run`, `remote_pass`, `pass_without_remote_marker`,
 `remote_failure`, `rch_environment_failure`, `capacity_or_timeout`, or
@@ -103,6 +105,32 @@ remote `/data/projects/...` and local `/Volumes/...` evidence.
 signals; those are not code failures. Use `source_state_refused` for dirty
 checkout ambiguity and `committed_tree_unsupported` for an intentionally
 non-executing committed-tree proof.
+
+## Degraded-Code Taxonomy
+
+`degraded_codes` remains the complete ordered list of verifier degradations.
+Consumers that need to route action should use the two narrower lists:
+
+- `source_state_degraded_codes`: source attribution blockers, such as dirty
+  tracked files, Beads metadata churn, scratch artifacts, unsafe untracked paths,
+  or committed-tree manifest limitations. These mean the source proof is weaker
+  than the closeout claim needs.
+- `worker_state_degraded_codes`: RCH worker, topology, capacity, remote-checkout,
+  or local-fallback blockers. These mean the same source may verify after the
+  worker fleet, root mapping, or queue state is fixed.
+
+The two lists are intentionally disjoint. Generic command failure codes such as
+`rch_verify_remote_command_failed` stay only in `degraded_codes`; they provide
+overall status context but are not enough by themselves to tell an agent whether
+to fix source state or wait for RCH capacity.
+
+These are script proof fields, not new `ee degraded[]` emissions. Do not add
+failure-mode catalog fixtures under `tests/fixtures/failure_modes/` only because
+a code appears in `source_state_degraded_codes` or
+`worker_state_degraded_codes`. Fixture registration is required only if the code
+is emitted through an `ee` command response envelope. For the RCH wrapper, the
+owned contract is the `ee.rch.verify.v1` proof plus
+`tests/rch_verify_contract.rs`.
 
 ## Beads and Agent Mail Templates
 
@@ -122,6 +150,7 @@ RCH proof for <bead>:
 - exit_code: <proof.exit_code>
 - degraded_codes: <proof.degraded_codes or none>
 - source_state_degraded_codes: <proof.source_state_degraded_codes or none>
+- worker_state_degraded_codes: <proof.worker_state_degraded_codes or none>
 - first_error: <proof.first_error_file>:<proof.first_error_line or none>
 ```
 
