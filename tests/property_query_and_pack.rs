@@ -758,9 +758,52 @@ fn parse_regression_fixture_entries(
                 "parse {file_name}: fixture input_hash maps to {expected_file_name}"
             ));
         }
+        validate_regression_fixture_metadata(&file_name, &fixture)?;
         fixtures.push(fixture);
     }
     Ok(fixtures)
+}
+
+fn validate_regression_fixture_metadata(
+    file_name: &str,
+    fixture: &DeterminismRegressionFixture,
+) -> Result<(), String> {
+    if fixture.observed_hash_run1 != fixture.expected_hash {
+        return Err(format!(
+            "parse {file_name}: observed_hash_run1 {} must equal expected_hash {}",
+            fixture.observed_hash_run1, fixture.expected_hash
+        ));
+    }
+    if fixture.observed_hash_run2 == fixture.expected_hash {
+        return Err(format!(
+            "parse {file_name}: observed_hash_run2 must differ from expected_hash for a persisted mismatch"
+        ));
+    }
+    if fixture.input.get("raw").is_none() {
+        let input_bytes = serde_json::to_vec(&fixture.input).map_err(|error| {
+            format!("parse {file_name}: serialize regression input for hash check: {error}")
+        })?;
+        let actual_input_hash = hash_bytes(&input_bytes);
+        if fixture.input_hash != actual_input_hash {
+            return Err(format!(
+                "parse {file_name}: input_hash {} does not match stored input hash {}",
+                fixture.input_hash, actual_input_hash
+            ));
+        }
+    }
+    if let Some(input_seed) = fixture
+        .input
+        .get("seed")
+        .and_then(serde_json::Value::as_u64)
+    {
+        if fixture.seed != input_seed {
+            return Err(format!(
+                "parse {file_name}: fixture seed {} does not match input seed {}",
+                fixture.seed, input_seed
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn stale_regression_fixture_hashes(
@@ -1348,6 +1391,98 @@ fn determinism_regression_fixture_loader_rejects_missing_input_hash_scheme() -> 
 
     assert!(error.contains("must start with blake3:"));
     assert!(error.contains(&fixture.input_hash));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_loader_rejects_structured_input_hash_drift() -> Result<(), String>
+{
+    let input = regression_input_for_pack_case(
+        "hash checked replay".to_string(),
+        TokenBudget::new(64).map_err(|error| format!("{error:?}"))?,
+        ContextPackProfile::Balanced,
+        PackAssemblyOptions::default(),
+        42,
+        &[(8, 900, 700, 1)],
+    )?;
+    let input_bytes = serde_json::to_vec(&input).map_err(|error| error.to_string())?;
+    let expected = replay_pack_case_input_bytes(&input)?;
+    let mut fixture = regression_fixture_for_mismatch(
+        42,
+        &input_bytes,
+        &expected,
+        b"synthetic nondeterministic output",
+    )
+    .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    let file_name = regression_fixture_file_name(&fixture.input_hash)?;
+    fixture.input["query"] = serde_json::json!("tampered query");
+
+    let error = parse_regression_fixture_entries(vec![(
+        file_name,
+        serialize_regression_fixture(&fixture)?,
+    )])
+    .expect_err("structured input drift should reject persisted fixtures");
+
+    assert!(error.contains("input_hash"));
+    assert!(error.contains("stored input hash"));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_loader_rejects_run_hash_drift() -> Result<(), String> {
+    let mut fixture = regression_fixture_for_mismatch(6, b"run-hash", b"expected", b"observed")
+        .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    let file_name = regression_fixture_file_name(&fixture.input_hash)?;
+    fixture.observed_hash_run1 = hash_bytes(b"different first run");
+
+    let first_run_error = parse_regression_fixture_entries(vec![(
+        file_name.clone(),
+        serialize_regression_fixture(&fixture)?,
+    )])
+    .expect_err("run1 hash must match expected hash");
+    assert!(first_run_error.contains("observed_hash_run1"));
+
+    fixture.observed_hash_run1 = fixture.expected_hash.clone();
+    fixture.observed_hash_run2 = fixture.expected_hash.clone();
+    let second_run_error = parse_regression_fixture_entries(vec![(
+        file_name,
+        serialize_regression_fixture(&fixture)?,
+    )])
+    .expect_err("run2 hash must preserve the mismatched observation");
+    assert!(second_run_error.contains("observed_hash_run2"));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_loader_rejects_seed_drift() -> Result<(), String> {
+    let input = regression_input_for_pack_case(
+        "seed checked replay".to_string(),
+        TokenBudget::new(64).map_err(|error| format!("{error:?}"))?,
+        ContextPackProfile::Balanced,
+        PackAssemblyOptions::default(),
+        42,
+        &[(8, 900, 700, 1)],
+    )?;
+    let input_bytes = serde_json::to_vec(&input).map_err(|error| error.to_string())?;
+    let expected = replay_pack_case_input_bytes(&input)?;
+    let mut fixture = regression_fixture_for_mismatch(
+        42,
+        &input_bytes,
+        &expected,
+        b"synthetic nondeterministic output",
+    )
+    .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    let file_name = regression_fixture_file_name(&fixture.input_hash)?;
+    fixture.seed = 99;
+
+    let error = parse_regression_fixture_entries(vec![(
+        file_name,
+        serialize_regression_fixture(&fixture)?,
+    )])
+    .expect_err("fixture seed should match the structured replay input seed");
+
+    assert!(error.contains("fixture seed 99"));
+    assert!(error.contains("input seed 42"));
     Ok(())
 }
 
