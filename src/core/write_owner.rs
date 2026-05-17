@@ -187,7 +187,13 @@ fn write_recovery_state(workspace_path: &Path, state: &str) -> std::io::Result<(
 
 fn ensure_recovery_state_temp_path_is_regular_or_missing(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(metadata) if metadata.file_type().is_file() => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "write-spool recovery temp path already exists: {}",
+                path.display()
+            ),
+        )),
         Ok(_) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
@@ -2525,6 +2531,39 @@ mod tests {
         assert!(
             !temp_path.exists(),
             "temp recovery marker must not be written after final path preflight fails"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn write_spool_recovery_state_rejects_existing_temp_without_truncating() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let marker_path = write_spool_recovery_state_path(temp.path());
+        let parent = marker_path
+            .parent()
+            .ok_or_else(|| "marker parent missing".to_owned())?;
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let mut temp_path = marker_path.clone();
+        temp_path.set_extension("tmp");
+        fs::write(&temp_path, "keep me").map_err(|error| error.to_string())?;
+
+        let error =
+            mark_write_replay_required(temp.path()).expect_err("existing temp should be rejected");
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(
+            error.to_string().contains("already exists"),
+            "error should explain the stale temp path"
+        );
+        assert_eq!(
+            fs::read_to_string(&temp_path).map_err(|error| error.to_string())?,
+            "keep me",
+            "recovery temp path must not be truncated"
+        );
+        assert!(
+            !marker_path.exists(),
+            "final recovery marker must not be written after temp collision"
         );
 
         Ok(())
