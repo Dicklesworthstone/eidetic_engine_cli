@@ -151,10 +151,27 @@ fn try_acquire_pack_slot(
                 message,
             };
         }
+        if let Err(message) =
+            ensure_pack_slot_path_is_regular_or_missing(&slot_path, "pack slot lock")
+        {
+            return PackSlotAcquisition::Unavailable {
+                path: slot_path,
+                message,
+            };
+        }
         if !try_acquire_pack_slot_process_gate(&slot_path) {
             continue;
         }
         if let Err(message) = ensure_pack_slot_path_is_not_symlink(&slot_path, "pack slot lock") {
+            release_pack_slot_process_gate(&slot_path);
+            return PackSlotAcquisition::Unavailable {
+                path: slot_path,
+                message,
+            };
+        }
+        if let Err(message) =
+            ensure_pack_slot_path_is_regular_or_missing(&slot_path, "pack slot lock")
+        {
             release_pack_slot_process_gate(&slot_path);
             return PackSlotAcquisition::Unavailable {
                 path: slot_path,
@@ -212,6 +229,30 @@ fn ensure_pack_slot_path_is_not_symlink(path: &Path, path_type: &str) -> Result<
         ));
     }
     Ok(())
+}
+
+fn ensure_pack_slot_path_is_regular_or_missing(path: &Path, path_type: &str) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(format!(
+            "Refusing to use {} '{}': path is not a regular file",
+            path_type,
+            path.display()
+        )),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(format!(
+            "Failed to inspect {} '{}': {error}",
+            path_type,
+            path.display()
+        )),
+    }
 }
 
 fn first_existing_pack_slot_symlink_component(path: &Path) -> Result<Option<PathBuf>, String> {
@@ -5728,6 +5769,33 @@ mod tests {
             }
             other => Err(format!(
                 "symlinked pack slot lock should be unavailable: {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn pack_slot_guard_rejects_non_regular_lock_file() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        let slots_dir = workspace.join(".ee").join("pack-slots");
+        std::fs::create_dir_all(&slots_dir).map_err(|error| error.to_string())?;
+        let slot_path = slots_dir.join(format!("{}-00.lock", PackResourceProfile::Lean.as_str()));
+        std::fs::create_dir(&slot_path).map_err(|error| error.to_string())?;
+
+        match try_acquire_pack_slot(&workspace, PackResourceProfile::Lean) {
+            PackSlotAcquisition::Unavailable { message, .. } => {
+                assert!(
+                    message.contains("not a regular file"),
+                    "expected non-regular lock rejection, got: {message}"
+                );
+                assert!(
+                    slot_path.is_dir(),
+                    "pack slot lock open must leave the non-regular path untouched"
+                );
+                Ok(())
+            }
+            other => Err(format!(
+                "non-regular pack slot lock should be unavailable: {other:?}"
             )),
         }
     }
