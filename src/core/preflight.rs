@@ -798,6 +798,7 @@ fn write_preflight_run_store(
         })?;
     }
     ensure_no_symlink_components(store_path, "write")?;
+    ensure_preflight_run_store_final_path_for_write(store_path)?;
 
     store.runs.sort_by(|left, right| {
         left.report
@@ -818,6 +819,27 @@ fn write_preflight_run_store(
         ),
         repair: Some("Check workspace .ee permissions.".to_owned()),
     })
+}
+
+fn ensure_preflight_run_store_final_path_for_write(store_path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(store_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write preflight run store `{}` because it is not a regular file.",
+                store_path.display()
+            ),
+            repair: Some("Replace the preflight run store with a regular JSON file.".to_owned()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to stat preflight run store `{}` before write: {error}",
+                store_path.display()
+            ),
+            repair: Some("Check workspace .ee permissions.".to_owned()),
+        }),
+    }
 }
 
 fn ensure_no_symlink_components(path: &Path, operation: &'static str) -> Result<(), DomainError> {
@@ -1657,6 +1679,27 @@ mod tests {
             error.message().contains("not a regular file"),
             true,
             "non-regular store error message",
+        )
+    }
+
+    #[test]
+    fn write_preflight_run_store_rejects_non_regular_final_path() -> TestResult {
+        let workspace = temp_workspace()?;
+        let store_path = preflight_run_store_path(workspace.path());
+        std::fs::create_dir_all(&store_path).map_err(|error| error.to_string())?;
+
+        let mut store = PreflightRunStoreDocument::default();
+        let result = write_preflight_run_store(&store_path, &mut store);
+        let error = result.expect_err("directory preflight run store should be rejected on write");
+        ensure(
+            error.message().contains("not a regular file"),
+            true,
+            "non-regular write error message",
+        )?;
+        ensure(
+            store_path.is_dir(),
+            true,
+            "non-regular store path remains a directory",
         )
     }
 
