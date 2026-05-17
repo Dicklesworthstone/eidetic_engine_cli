@@ -1780,9 +1780,7 @@ fn filter_selected_fields(
         serde_json::Value::Array(items) => {
             let filtered = items
                 .iter()
-                .map(|item| {
-                    filter_selected_fields(item, selected).unwrap_or(serde_json::Value::Null)
-                })
+                .filter_map(|item| filter_selected_fields(item, selected))
                 .collect::<Vec<_>>();
             (!filtered.is_empty()).then_some(serde_json::Value::Array(filtered))
         }
