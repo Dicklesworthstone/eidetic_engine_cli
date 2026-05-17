@@ -578,6 +578,7 @@ fn write_store(store_path: &Path, store: &TaskFrameStoreDocument) -> Result<(), 
         })?;
     }
     ensure_no_symlink_components(store_path, "write")?;
+    ensure_write_store_final_path(store_path)?;
     let text = serde_json::to_string_pretty(store).map_err(|error| DomainError::Storage {
         message: format!("Failed to serialize task-frame store: {error}"),
         repair: Some("Report this serialization bug.".to_owned()),
@@ -589,6 +590,27 @@ fn write_store(store_path: &Path, store: &TaskFrameStoreDocument) -> Result<(), 
         ),
         repair: Some("Check workspace .ee permissions.".to_owned()),
     })
+}
+
+fn ensure_write_store_final_path(store_path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(store_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write task-frame store `{}` because it is not a regular file.",
+                store_path.display()
+            ),
+            repair: Some("Replace .ee/task_frames.json with a regular JSON file.".to_owned()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect task-frame store `{}` before write: {error}",
+                store_path.display()
+            ),
+            repair: Some("Check workspace .ee permissions.".to_owned()),
+        }),
+    }
 }
 
 fn ensure_no_symlink_components(path: &Path, operation: &'static str) -> Result<(), DomainError> {
@@ -972,6 +994,28 @@ mod tests {
         assert!(
             !real_ee.join("task_frames.json").exists(),
             "task-frame store must not be written through symlinked .ee"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn create_frame_rejects_store_directory_before_write() -> TestResult {
+        let workspace = temp_workspace("write-store-directory")?;
+        fs::create_dir_all(task_frame_store_path(&workspace)).map_err(|error| error.to_string())?;
+
+        let error = match create_task_frame(&create_options(workspace.clone())) {
+            Ok(report) => return Err(format!("store directory should fail, got {report:?}")),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "storage");
+        assert!(
+            error.message().contains("not a regular file"),
+            "error should mention regular file"
+        );
+        assert!(
+            task_frame_store_path(&workspace).is_dir(),
+            "task-frame write must leave non-regular final path untouched"
         );
         Ok(())
     }
