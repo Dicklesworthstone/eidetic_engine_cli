@@ -2924,6 +2924,53 @@ mod tests {
     }
 
     #[test]
+    fn recorder_import_plan_redacts_public_source_refs() -> TestResult {
+        let options = RecorderImportOptions {
+            source_type: ImportSourceType::Cass,
+            source_id: "file:///Users/alice/private/cass.jsonl?api_key=redaction-fixture"
+                .to_string(),
+            input_json: None,
+            input_path: Some("/Volumes/USBNVME16TB/private/cass-view.json".to_string()),
+            agent_id: Some("codex".to_string()),
+            session_id: None,
+            workspace_id: Some("workspace-a".to_string()),
+            max_events: DEFAULT_RECORDER_IMPORT_LIMIT,
+            redact: false,
+            max_payload_bytes: DEFAULT_MAX_RECORDER_PAYLOAD_BYTES,
+            dry_run: true,
+        };
+
+        let report = plan_recorder_import(&options).map_err(|error| error.to_string())?;
+        let rendered = format!("{}\n{}", report.data_json(), report.human_summary());
+
+        ensure(
+            rendered.contains("[REDACTED_PATH]"),
+            true,
+            "path placeholder present",
+        )?;
+        ensure(
+            rendered.contains("[REDACTED:"),
+            true,
+            "secret placeholder present",
+        )?;
+        ensure(
+            rendered.contains("/Users/alice"),
+            false,
+            "source id path redacted",
+        )?;
+        ensure(
+            rendered.contains("/Volumes/USBNVME16TB"),
+            false,
+            "input path redacted",
+        )?;
+        ensure(
+            rendered.contains("redaction-fixture"),
+            false,
+            "source id secret value redacted",
+        )
+    }
+
+    #[test]
     fn recorder_import_plan_can_force_redaction_without_echoing_payload() -> TestResult {
         let input = json!({
             "lines": [
@@ -3675,6 +3722,42 @@ mod tests {
         ensure(json.get("startedAt").is_some(), true, "startedAt present")?;
         ensure(json.get("endedAt").is_some(), true, "endedAt present")?;
         ensure(json.get("warnings").is_some(), true, "warnings present")
+    }
+
+    #[test]
+    fn recorder_import_result_redacts_public_source_id() -> TestResult {
+        let result = RecorderImportResult {
+            schema: RECORDER_IMPORT_RESULT_SCHEMA_V1,
+            source_type: ImportSourceType::Cass,
+            source_id: "file:///tmp/private/cass.jsonl?token=redaction-fixture".to_string(),
+            run_id: "run_redaction".to_string(),
+            agent_id: "agent_redaction".to_string(),
+            workspace_id: None,
+            dry_run: false,
+            events_imported: 0,
+            events_rejected: 0,
+            payload_bytes: 0,
+            redacted_count: 0,
+            chain_complete: true,
+            started_at: DRY_RUN_TIMESTAMP.to_string(),
+            ended_at: DRY_RUN_TIMESTAMP.to_string(),
+            warnings: Vec::new(),
+        };
+
+        let json = result.data_json().to_string();
+
+        ensure(
+            json.contains("[REDACTED_PATH]"),
+            true,
+            "path placeholder present",
+        )?;
+        ensure(json.contains("[REDACTED:"), true, "secret placeholder present")?;
+        ensure(json.contains("/tmp/private"), false, "source path redacted")?;
+        ensure(
+            json.contains("redaction-fixture"),
+            false,
+            "source secret value redacted",
+        )
     }
 
     /// Helper: import a tiny recorder run with two events so trigger
