@@ -7,6 +7,7 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::Write,
     path::{Component, Path, PathBuf},
 };
 
@@ -794,7 +795,25 @@ fn write_pack_file_no_symlinks(
 ) -> Result<(), String> {
     let target_path = resolve_pack_file_path_for_write_no_symlinks(pack_path, relative_path)?;
     ensure_pack_write_target_is_regular_or_missing(&target_path)?;
-    fs::write(&target_path, content).map_err(|error| {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target_path)
+        .map_err(|error| {
+            format!(
+                "pack_artifact_write_failed: {}: {}",
+                target_path.display(),
+                error
+            )
+        })?;
+    file.write_all(content).map_err(|error| {
+        format!(
+            "pack_artifact_write_failed: {}: {}",
+            target_path.display(),
+            error
+        )
+    })?;
+    file.sync_all().map_err(|error| {
         format!(
             "pack_artifact_write_failed: {}: {}",
             target_path.display(),
@@ -1326,6 +1345,42 @@ mod tests {
         assert!(
             pack.join("env.json").is_dir(),
             "non-regular repro pack member should remain a directory"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn capture_pack_rejects_existing_regular_member_without_truncating() -> TestResult {
+        let workspace = temp_root("ee_repro_capture_existing_member_")?;
+        let pack = workspace.join("pack");
+        fs::create_dir_all(&pack).map_err(|error| error.to_string())?;
+        let env_path = pack.join("env.json");
+        fs::write(&env_path, b"stale env sentinel").map_err(|error| error.to_string())?;
+
+        let error = capture_pack(&CaptureOptions {
+            source: workspace.clone(),
+            output_dir: workspace.clone(),
+            name: Some("pack".to_owned()),
+            version: "1.0.0".to_owned(),
+            description: Some("existing member guard".to_owned()),
+            include_env: true,
+            ..Default::default()
+        })
+        .expect_err("existing regular member should reject repro pack write");
+
+        assert!(
+            error.message().contains("File exists") || error.message().contains("exists"),
+            "expected exclusive create failure, got: {}",
+            error.message()
+        );
+        assert_eq!(
+            fs::read_to_string(&env_path).map_err(|error| error.to_string())?,
+            "stale env sentinel",
+            "existing repro pack member must not be truncated"
+        );
+        assert!(
+            !pack.join("manifest.json").exists(),
+            "capture should stop before publishing later pack members after stale env failure"
         );
         Ok(())
     }
