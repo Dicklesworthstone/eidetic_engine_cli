@@ -1403,7 +1403,8 @@ fn unsupported_result_target_storage(
                     provenance_uri: artifact
                         .provenance_uri
                         .or(artifact.original_path)
-                        .or(artifact.external_ref),
+                        .or(artifact.external_ref)
+                        .map(redact_why_artifact_provenance_uri),
                     workflow_id: None,
                     created_at: artifact.created_at,
                     valid_from: None,
@@ -1418,6 +1419,54 @@ fn unsupported_result_target_storage(
         }
         WhyResultDocumentSource::Memory => generic_unsupported_storage(document_id, source),
     }
+}
+
+fn redact_why_artifact_provenance_uri(value: String) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(&value).content;
+    redact_why_absolute_path_like_segments(&secret_redacted)
+}
+
+fn redact_why_absolute_path_like_segments(input: &str) -> String {
+    const REDACTED_PATH: &str = "[REDACTED_PATH]";
+    const PATH_PREFIXES: &[&str] = &["/home/", "/Users/", "/data/", "C:\\", "D:\\"];
+
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0usize;
+    while cursor < input.len() {
+        let remaining = &input[cursor..];
+        if let Some(prefix) = PATH_PREFIXES
+            .iter()
+            .find(|prefix| remaining.starts_with(**prefix))
+        {
+            output.push_str(REDACTED_PATH);
+            cursor += prefix.len();
+            while cursor < input.len() {
+                let next = input[cursor..]
+                    .chars()
+                    .next()
+                    .expect("cursor stays on a character boundary");
+                if next.is_whitespace()
+                    || matches!(
+                        next,
+                        '"' | '\'' | '`' | '<' | '>' | ')' | ']' | '}' | ',' | ';' | '|'
+                    )
+                {
+                    break;
+                }
+                cursor += next.len_utf8();
+            }
+            continue;
+        }
+
+        let next = remaining
+            .chars()
+            .next()
+            .expect("cursor stays on a character boundary");
+        output.push(next);
+        cursor += next.len_utf8();
+    }
+
+    output
 }
 
 fn generic_unsupported_storage(
@@ -2098,6 +2147,7 @@ fn fetch_rationale_traces(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{CreateArtifactInput, CreateWorkspaceInput};
     use crate::models::{
         RationaleTraceKind, RationaleTracePosture, RationaleTraceVisibility, RedactionStatus,
     };
@@ -2749,6 +2799,113 @@ mod tests {
             report.links.is_empty(),
             true,
             "links should be empty by default",
+        )
+    }
+
+    fn insert_why_artifact(
+        conn: &DbConnection,
+        artifact_id: &str,
+        provenance_uri: Option<&str>,
+        original_path: Option<&str>,
+        external_ref: Option<&str>,
+    ) -> TestResult {
+        conn.upsert_artifact(
+            artifact_id,
+            &CreateArtifactInput {
+                workspace_id: "wsp_00000000000000000000000001".to_owned(),
+                source_kind: "external".to_owned(),
+                artifact_type: "log".to_owned(),
+                original_path: original_path.map(ToOwned::to_owned),
+                canonical_path: None,
+                external_ref: external_ref.map(ToOwned::to_owned),
+                content_hash:
+                    "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .to_owned(),
+                media_type: "text/plain".to_owned(),
+                size_bytes: 42,
+                redaction_status: "checked".to_owned(),
+                snippet: None,
+                snippet_hash: None,
+                provenance_uri: provenance_uri.map(ToOwned::to_owned),
+                metadata_json: Some(r#"{"title":"why artifact"}"#.to_owned()),
+            },
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn why_artifact_result_storage_redacts_path_and_secret_provenance() -> TestResult {
+        let conn = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        conn.migrate().map_err(|error| error.to_string())?;
+        conn.insert_workspace(
+            "wsp_00000000000000000000000001",
+            &CreateWorkspaceInput {
+                path: "/tmp/why-artifact-redaction".to_owned(),
+                name: Some("why-artifact-redaction".to_owned()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        insert_why_artifact(
+            &conn,
+            "art_00000000000000000000000001",
+            Some("file:///Users/alice/private/repo/build.log"),
+            None,
+            None,
+        )?;
+        insert_why_artifact(
+            &conn,
+            "art_00000000000000000000000002",
+            None,
+            None,
+            Some("https://example.invalid/logs?api_key=redaction-fixture"),
+        )?;
+
+        let path_report = WhyReport::unsupported_result_target(
+            "art_00000000000000000000000001".to_owned(),
+            WhyResultDocumentSource::Artifact,
+            &conn,
+        );
+        let path_provenance = path_report
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.provenance_uri.as_deref())
+            .ok_or_else(|| "path artifact provenance present".to_owned())?;
+        ensure(
+            path_provenance.contains("/Users/alice"),
+            false,
+            "raw path redacted",
+        )?;
+        ensure(
+            path_provenance.contains("[REDACTED_PATH]"),
+            true,
+            "path placeholder present",
+        )?;
+
+        let secret_report = WhyReport::unsupported_result_target(
+            "art_00000000000000000000000002".to_owned(),
+            WhyResultDocumentSource::Artifact,
+            &conn,
+        );
+        let secret_provenance = secret_report
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.provenance_uri.as_deref())
+            .ok_or_else(|| "secret artifact provenance present".to_owned())?;
+        ensure(
+            secret_provenance.contains("api_key"),
+            false,
+            "secret key name redacted",
+        )?;
+        ensure(
+            secret_provenance.contains("redaction-fixture"),
+            false,
+            "secret value redacted",
+        )?;
+        ensure(
+            secret_provenance.contains("[REDACTED:"),
+            true,
+            "secret placeholder present",
         )
     }
 
