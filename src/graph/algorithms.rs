@@ -448,10 +448,16 @@ where
         "{}\0{}\0{}\0{}",
         spec.workspace_id, spec.snapshot_id, spec.algorithm, params_hash
     );
+    let mut stale_persistent_eviction_emitted = false;
     let cached = compute_or_load_algorithm_result(
         &cache_key,
         || {
-            let loaded = load_cached_algorithm_result_with_memory(spec, params_hash, &cache_key)?;
+            let loaded = load_cached_algorithm_result_with_memory(
+                spec,
+                params_hash,
+                &cache_key,
+                &mut stale_persistent_eviction_emitted,
+            )?;
             if loaded.is_some() {
                 emit_cache_hit(CacheOutcomeEvent {
                     algorithm: spec.algorithm,
@@ -539,6 +545,7 @@ fn load_cached_algorithm_result_with_memory<R>(
     spec: &AlgorithmResultCacheSpec<'_>,
     params_hash: &str,
     cache_key: &str,
+    stale_persistent_eviction_emitted: &mut bool,
 ) -> GraphResult<Option<R>>
 where
     R: Clone + DeserializeOwned + Send + Sync + 'static,
@@ -547,7 +554,8 @@ where
         return Ok(Some(result));
     }
 
-    let result = load_cached_algorithm_result(spec, params_hash)?;
+    let result =
+        load_cached_algorithm_result(spec, params_hash, stale_persistent_eviction_emitted)?;
     if let Some(result) = &result {
         store_in_memory_algorithm_result(cache_key, result, spec.ttl_seconds);
     }
@@ -640,6 +648,7 @@ fn evict_expired_in_memory_algorithm_results(
 fn load_cached_algorithm_result<R>(
     spec: &AlgorithmResultCacheSpec<'_>,
     params_hash: &str,
+    stale_persistent_eviction_emitted: &mut bool,
 ) -> GraphResult<Option<R>>
 where
     R: DeserializeOwned,
@@ -657,6 +666,13 @@ where
         return Ok(None);
     };
     if !cached_algorithm_result_is_fresh(&row) {
+        if !*stale_persistent_eviction_emitted {
+            emit_cache_evict(CacheEvictEvent {
+                reason: CacheEvictReason::TtlExpired,
+                count: 1,
+            });
+            *stale_persistent_eviction_emitted = true;
+        }
         return Ok(None);
     }
 
@@ -1590,6 +1606,96 @@ mod tests {
             compute[1].fields.get("cache_hit").map(String::as_str),
             Some("true")
         );
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn expired_persistent_cache_load_emits_cache_evict_telemetry() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_8123456789abcdef0123456791";
+        let snapshot_id = "gsnap_8123456789abcdef012345680";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: "/workspace/algorithm-expired-persistent-cache".to_owned(),
+                    name: Some("algorithm-expired-persistent-cache".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_graph_snapshot(
+                snapshot_id,
+                &CreateGraphSnapshotInput {
+                    workspace_id: workspace_id.to_owned(),
+                    snapshot_version: 1,
+                    schema_version: "ee.graph.snapshot.v1".to_owned(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 2,
+                    edge_count: 1,
+                    metrics_json: r#"{"nodes":[],"edges":[]}"#.to_owned(),
+                    content_hash: "blake3:algorithm-expired-persistent-cache-snapshot".to_owned(),
+                    source_generation: 0,
+                    expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let params = serde_json::json!({"algorithm": "pagerank", "alpha": 0.30});
+        let spec = AlgorithmResultCacheSpec {
+            conn: &connection,
+            workspace_id,
+            snapshot_id,
+            snapshot_content_hash: "blake3:algorithm-expired-persistent-cache-snapshot",
+            algorithm: "pagerank",
+            params: &params,
+            ttl_seconds: 0,
+        };
+        let params_hash = graph_result(graph_algorithm_params_hash(
+            spec.algorithm,
+            spec.snapshot_content_hash,
+            spec.params,
+        ))?;
+        connection
+            .upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
+                workspace_id: workspace_id.to_owned(),
+                snapshot_id: snapshot_id.to_owned(),
+                algorithm: spec.algorithm.to_owned(),
+                params_hash: params_hash.clone(),
+                result_json: r#"{"scores":[["mem_a",0.75]]}"#.to_owned(),
+                ttl_seconds: 0,
+            })
+            .map_err(|error| error.to_string())?;
+
+        let mut first_loaded = Some(serde_json::json!({"scores":[["mem_a",0.75]]}));
+        let mut second_loaded = Some(serde_json::json!({"scores":[["mem_a",0.75]]}));
+        let events = capture_graph_events(|| {
+            let mut stale_persistent_eviction_emitted = false;
+            first_loaded = graph_result(load_cached_algorithm_result::<serde_json::Value>(
+                &spec,
+                &params_hash,
+                &mut stale_persistent_eviction_emitted,
+            ))
+            .expect("first expired persistent cache lookup should not fail");
+            second_loaded = graph_result(load_cached_algorithm_result::<serde_json::Value>(
+                &spec,
+                &params_hash,
+                &mut stale_persistent_eviction_emitted,
+            ))
+            .expect("second expired persistent cache lookup should not fail");
+        });
+
+        assert_eq!(first_loaded, None);
+        assert_eq!(second_loaded, None);
+        let evicts = events_with_target(&events, CACHE_EVICT_EVENT);
+        assert_eq!(evicts.len(), 1);
+        assert_eq!(
+            evicts[0].fields.get("reason").map(String::as_str),
+            Some("ttl_expired")
+        );
+        assert_eq!(evicts[0].fields.get("count").map(String::as_str), Some("1"));
 
         connection.close().map_err(|error| error.to_string())
     }
