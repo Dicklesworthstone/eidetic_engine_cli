@@ -103,6 +103,7 @@ impl ModelRegistryEntryView {
     }
 
     fn data_json(&self) -> serde_json::Value {
+        let source_uri = self.source_uri.as_deref().map(redact_model_source_uri);
         serde_json::json!({
             "id": self.id,
             "provider": self.provider,
@@ -112,7 +113,7 @@ impl ModelRegistryEntryView {
             "dimension": self.dimension,
             "distanceMetric": self.distance_metric,
             "version": self.version,
-            "sourceUri": self.source_uri,
+            "sourceUri": source_uri,
             "contentHash": self.content_hash,
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
@@ -339,6 +340,59 @@ fn model_degradations_data_json(
         })
     })
     .collect()
+}
+
+fn redact_model_source_uri(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    redact_model_source_path_like_segments(&secret_redacted)
+}
+
+fn redact_model_source_path_like_segments(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, c)| *c == '/')
+        else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        let start = cursor + relative_index;
+        if !model_source_path_starts_sensitive_segment(&value[start..]) {
+            output.push_str(&value[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        output.push_str(&value[cursor..start]);
+        output.push_str("[REDACTED_PATH]");
+        cursor = value[start..]
+            .char_indices()
+            .find_map(|(index, c)| model_source_path_boundary(c).then_some(start + index))
+            .unwrap_or(value.len());
+    }
+    output
+}
+
+fn model_source_path_starts_sensitive_segment(value: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/home/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+    ];
+
+    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+}
+
+fn model_source_path_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
 }
 
 fn resolve_workspace_path(path: &Path) -> Result<PathBuf, DomainError> {
@@ -679,6 +733,24 @@ mod tests {
             .map_err(|error| format!("insert registry entry: {error}"))
     }
 
+    fn model_entry_with_source(source_uri: &str) -> ModelRegistryEntryView {
+        ModelRegistryEntryView {
+            id: "mdl_output_redaction".to_owned(),
+            provider: "model2vec".to_owned(),
+            model_name: "private-model".to_owned(),
+            purpose: "embedding".to_owned(),
+            status: "available".to_owned(),
+            dimension: Some(384),
+            distance_metric: Some("cosine".to_owned()),
+            version: Some("v1".to_owned()),
+            source_uri: Some(source_uri.to_owned()),
+            content_hash: None,
+            created_at: "2026-05-17T00:00:00Z".to_owned(),
+            updated_at: "2026-05-17T00:01:00Z".to_owned(),
+            last_checked_at: None,
+        }
+    }
+
     fn make_workspace() -> Result<(tempfile::TempDir, PathBuf), String> {
         let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
         let workspace_path = temp
@@ -964,6 +1036,75 @@ mod tests {
             degraded[0]["sources"] == serde_json::json!(["model_status"]),
             "aggregate should expose the model status source label",
         )
+    }
+
+    #[test]
+    fn model_registry_entry_json_redacts_sensitive_source_uri() -> TestResult {
+        let entry = model_entry_with_source(
+            "file:///Users/alice/private/models/model.json?api_key=redaction-fixture",
+        );
+
+        let json = entry.data_json().to_string();
+
+        ensure(
+            json.contains("[REDACTED_PATH]"),
+            format!("model entry JSON should redact absolute path: {json}"),
+        )?;
+        ensure(
+            json.contains("[REDACTED:"),
+            format!("model entry JSON should redact secret-like source URI: {json}"),
+        )?;
+        ensure(
+            !json.contains("/Users/alice") && !json.contains("redaction-fixture"),
+            format!("model entry JSON leaked sensitive source URI: {json}"),
+        )
+    }
+
+    #[test]
+    fn model_status_and_list_redact_selected_entry_source_uri() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        let entry = model_entry_with_source(
+            "file:///Volumes/USBNVME16TB/private/models/model.json#token=redaction-fixture",
+        );
+        let report = ModelStatusReport {
+            schema: MODEL_STATUS_SCHEMA_V1,
+            workspace_path: workspace_path.clone(),
+            database_path: workspace_path.join(".ee").join("ee.db"),
+            active: ModelStatusActive {
+                fast_model_id: "registry:private-model".to_owned(),
+                fast_dimension: 384,
+                quality_model_id: None,
+                quality_dimension: None,
+                semantic: true,
+                deterministic: true,
+                source: "registry_observed".to_owned(),
+                selected_registry_entry: Some(entry.clone()),
+            },
+            registered_count: 1,
+            available_count: 1,
+            degradations: Vec::new(),
+        };
+        let list = ModelListReport {
+            schema: MODEL_LIST_SCHEMA_V1,
+            workspace_path: workspace_path.clone(),
+            database_path: workspace_path.join(".ee").join("ee.db"),
+            workspace_id: "wsp_output_redaction".to_owned(),
+            entries: vec![entry],
+            degradations: Vec::new(),
+        };
+
+        for (surface, value) in [("status", report.data_json()), ("list", list.data_json())] {
+            let json = value.to_string();
+            ensure(
+                json.contains("[REDACTED_PATH]"),
+                format!("model {surface} JSON should redact absolute path: {json}"),
+            )?;
+            ensure(
+                !json.contains("/Volumes/USBNVME16TB") && !json.contains("redaction-fixture"),
+                format!("model {surface} JSON leaked sensitive source URI: {json}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
