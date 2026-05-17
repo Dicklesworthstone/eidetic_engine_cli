@@ -1880,8 +1880,8 @@ pub struct ContextArgs {
     #[arg(long, short = 'p', default_value = "balanced")]
     pub profile: String,
 
-    /// Personalized PageRank blend weight for context ranking; values outside 0..1 are clamped.
-    #[arg(long = "ppr-weight", value_name = "WEIGHT")]
+    /// Personalized PageRank blend weight for context ranking, from 0.0 to 1.0.
+    #[arg(long = "ppr-weight", value_name = "WEIGHT", value_parser = parse_ppr_weight_arg)]
     pub ppr_weight: Option<f32>,
 
     /// Pack output profile: lean omits bulky optional fields, standard is default, verbose adds extra metadata.
@@ -23853,6 +23853,19 @@ fn parse_speed_mode_arg(value: &str) -> Result<crate::search::SpeedMode, String>
     value
         .parse::<crate::search::SpeedMode>()
         .map_err(|error| error.to_string())
+}
+
+fn parse_ppr_weight_arg(value: &str) -> Result<f32, String> {
+    let weight = value
+        .parse::<f32>()
+        .map_err(|error| format!("Invalid PPR weight '{value}': {error}"))?;
+    if weight.is_finite() && (0.0..=1.0).contains(&weight) {
+        Ok(weight)
+    } else {
+        Err(format!(
+            "Invalid PPR weight '{value}'. Expected a finite number from 0.0 to 1.0."
+        ))
+    }
 }
 
 fn parse_mesh_command_mode_arg(value: &str) -> Result<MeshCommandMode, String> {
@@ -46288,6 +46301,38 @@ default_half_life_days = 45
             }
             _ => Err("expected Context command".to_string()),
         }
+    }
+
+    #[test]
+    fn context_command_accepts_ppr_weight_boundaries() -> TestResult {
+        for (raw, expected) in [("0", 0.0), ("1", 1.0)] {
+            let parsed = Cli::try_parse_from(["ee", "context", "test", "--ppr-weight", raw])
+                .map_err(|e| format!("failed to parse ppr-weight {raw}: {:?}", e.kind()))?;
+            match parsed.command {
+                Some(Command::Context(ref args)) => ensure_equal(
+                    &args.ppr_weight,
+                    &Some(expected),
+                    "context ppr boundary weight",
+                )?,
+                _ => return Err("expected Context command".to_string()),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn context_command_rejects_invalid_ppr_weight() -> TestResult {
+        for raw in ["-0.01", "1.01", "NaN", "inf"] {
+            let flag = format!("--ppr-weight={raw}");
+            let error = Cli::try_parse_from(["ee", "context", "test", flag.as_str()])
+                .expect_err("invalid ppr-weight should fail clap parsing");
+            ensure_equal(
+                &error.kind(),
+                &clap::error::ErrorKind::ValueValidation,
+                "invalid ppr-weight error kind",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
