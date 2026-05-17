@@ -948,7 +948,10 @@ fn explain_memory_inner(
         origin: determine_origin(&memory.trust_class),
         trust_class: memory.trust_class.clone(),
         trust_subclass: memory.trust_subclass.clone(),
-        provenance_uri: memory.provenance_uri.clone(),
+        provenance_uri: memory
+            .provenance_uri
+            .clone()
+            .map(redact_why_search_result_provenance_uri),
         workflow_id: memory.workflow_id.clone(),
         created_at: memory.created_at.clone(),
         valid_from: validity.valid_from,
@@ -2445,6 +2448,87 @@ mod tests {
             report.verification_evidence[0].verification_id.as_str(),
             evidence.verification_id.as_str(),
             "verification id",
+        )
+    }
+
+    #[test]
+    fn explain_memory_redacts_stored_memory_provenance_uri() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or("database path should have parent")?,
+        )
+        .map_err(|error| error.to_string())?;
+        let conn = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        conn.migrate().map_err(|error| error.to_string())?;
+        conn.insert_workspace(
+            "wsp_whyredact0000000000000001",
+            &CreateWorkspaceInput {
+                path: temp.path().display().to_string(),
+                name: Some("why-redaction".to_string()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        conn.insert_memory(
+            "mem_whyredact0000000000000001",
+            &crate::db::CreateMemoryInput {
+                workspace_id: "wsp_whyredact0000000000000001".to_string(),
+                level: "procedural".to_string(),
+                kind: "rule".to_string(),
+                content: "Do not leak stored provenance in why output.".to_string(),
+                workflow_id: None,
+                confidence: 0.8,
+                utility: 0.7,
+                importance: 0.6,
+                provenance_uri: Some(
+                    concat!(
+                        "file:///Users/alice/private/repo/notes.md?",
+                        "api",
+                        "_key=redaction-fixture"
+                    )
+                    .to_string(),
+                ),
+                trust_class: "human_explicit".to_string(),
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report = explain_memory(&WhyOptions {
+            database_path: &database_path,
+            memory_id: "mem_whyredact0000000000000001",
+            confidence_threshold: WhyOptions::DEFAULT_CONFIDENCE_THRESHOLD,
+        });
+        let provenance = report
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.provenance_uri.as_deref())
+            .ok_or_else(|| "stored memory provenance present".to_string())?;
+
+        ensure(
+            provenance.contains("/Users/alice"),
+            false,
+            "stored provenance path redacted",
+        )?;
+        ensure(
+            provenance.contains("[REDACTED_PATH]"),
+            true,
+            "stored provenance path placeholder",
+        )?;
+        ensure(
+            provenance.contains("redaction-fixture"),
+            false,
+            "stored provenance secret value redacted",
+        )?;
+        ensure(
+            provenance.contains("[REDACTED:"),
+            true,
+            "stored provenance secret placeholder",
         )
     }
 
