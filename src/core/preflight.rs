@@ -10,6 +10,7 @@
 //! - **close**: Mark a preflight run as completed
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -812,10 +813,15 @@ fn write_preflight_run_store(
         repair: Some("Report the invalid preflight run payload.".to_owned()),
     })?;
 
-    fs::write(store_path, format!("{text}\n")).map_err(|error| DomainError::Storage {
+    let temp_path = store_path.with_extension("json.tmp");
+    ensure_no_symlink_components(&temp_path, "write")?;
+    ensure_preflight_run_store_temp_path_for_write(&temp_path)?;
+    write_preflight_run_store_temp_file(&temp_path, &format!("{text}\n"))?;
+    fs::rename(&temp_path, store_path).map_err(|error| DomainError::Storage {
         message: format!(
-            "Failed to write preflight run store `{}`: {error}",
-            store_path.display()
+            "Failed to publish preflight run store `{}` from temp file `{}`: {error}",
+            store_path.display(),
+            temp_path.display()
         ),
         repair: Some("Check workspace .ee permissions.".to_owned()),
     })
@@ -840,6 +846,62 @@ fn ensure_preflight_run_store_final_path_for_write(store_path: &Path) -> Result<
             repair: Some("Check workspace .ee permissions.".to_owned()),
         }),
     }
+}
+
+fn ensure_preflight_run_store_temp_path_for_write(temp_path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(temp_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write preflight run store temp file `{}` because it already exists.",
+                temp_path.display()
+            ),
+            repair: Some("Remove stale .ee/preflight_runs.json.tmp and retry.".to_owned()),
+        }),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write preflight run store temp file `{}` because it is not a regular file.",
+                temp_path.display()
+            ),
+            repair: Some("Replace .ee/preflight_runs.json.tmp with a regular file.".to_owned()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to stat preflight run store temp file `{}` before write: {error}",
+                temp_path.display()
+            ),
+            repair: Some("Check workspace .ee permissions.".to_owned()),
+        }),
+    }
+}
+
+fn write_preflight_run_store_temp_file(temp_path: &Path, text: &str) -> Result<(), DomainError> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp_path)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to create preflight run store temp file `{}`: {error}",
+                temp_path.display()
+            ),
+            repair: Some("Check workspace .ee permissions.".to_owned()),
+        })?;
+    file.write_all(text.as_bytes())
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to write preflight run store temp file `{}`: {error}",
+                temp_path.display()
+            ),
+            repair: Some("Check workspace .ee permissions.".to_owned()),
+        })?;
+    file.sync_all().map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to sync preflight run store temp file `{}`: {error}",
+            temp_path.display()
+        ),
+        repair: Some("Check workspace .ee permissions.".to_owned()),
+    })
 }
 
 fn ensure_no_symlink_components(path: &Path, operation: &'static str) -> Result<(), DomainError> {
@@ -1700,6 +1762,37 @@ mod tests {
             store_path.is_dir(),
             true,
             "non-regular store path remains a directory",
+        )
+    }
+
+    #[test]
+    fn write_preflight_run_store_rejects_existing_regular_temp_file_without_truncating()
+    -> TestResult {
+        let workspace = temp_workspace()?;
+        let store_path = preflight_run_store_path(workspace.path());
+        let temp_path = store_path.with_extension("json.tmp");
+        std::fs::create_dir_all(temp_path.parent().expect("preflight temp parent"))
+            .map_err(|error| error.to_string())?;
+        std::fs::write(&temp_path, "stale preflight temp").map_err(|error| error.to_string())?;
+
+        let mut store = PreflightRunStoreDocument::default();
+        let result = write_preflight_run_store(&store_path, &mut store);
+        let error =
+            result.expect_err("existing regular temp file should reject preflight store write");
+        ensure(
+            error.message().contains("already exists"),
+            true,
+            "existing temp error message",
+        )?;
+        ensure(
+            std::fs::read_to_string(&temp_path).map_err(|error| error.to_string())?,
+            "stale preflight temp".to_owned(),
+            "existing temp content remains unchanged",
+        )?;
+        ensure(
+            store_path.exists(),
+            false,
+            "final preflight store must not be published when temp exists",
         )
     }
 
