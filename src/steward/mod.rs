@@ -293,6 +293,10 @@ pub fn try_acquire_maintenance_job_lock(
         release_maintenance_job_process_gate(&process_gate_path);
         return Err(error);
     }
+    if let Err(error) = ensure_maintenance_job_lock_path_is_regular_or_missing(&lock_path) {
+        release_maintenance_job_process_gate(&process_gate_path);
+        return Err(error);
+    }
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -354,6 +358,36 @@ fn ensure_maintenance_job_lock_path_is_not_symlink(
         });
     }
     Ok(())
+}
+
+fn ensure_maintenance_job_lock_path_is_regular_or_missing(
+    lock_path: &Path,
+) -> Result<(), MaintenanceJobLockError> {
+    match fs::symlink_metadata(lock_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(MaintenanceJobLockError::OpenFailed {
+            path: lock_path.to_path_buf(),
+            message: format!(
+                "Refusing to open maintenance job lock '{}': path is not a regular file",
+                lock_path.display()
+            ),
+        }),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(MaintenanceJobLockError::OpenFailed {
+            path: lock_path.to_path_buf(),
+            message: format!(
+                "Failed to inspect maintenance job lock '{}': {error}",
+                lock_path.display()
+            ),
+        }),
+    }
 }
 
 #[derive(Debug)]
@@ -5734,6 +5768,36 @@ mod tests {
             fs::read_to_string(&outside_lock).map_err(|error| error.to_string())?,
             String::new(),
             "lock must not write through symlinked target",
+        )
+    }
+
+    #[test]
+    fn maintenance_job_lock_rejects_non_regular_final_path() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let lock_path = tempdir.path().join(".ee").join("maintenance-job.lock");
+        fs::create_dir_all(&lock_path).map_err(|error| error.to_string())?;
+
+        let error = match try_acquire_maintenance_job_lock(tempdir.path(), "test-holder") {
+            Ok(lock) => return Err(format!("non-regular lock target should fail, got {lock:?}")),
+            Err(error) => error,
+        };
+        ensure(
+            error.code(),
+            "maintenance_job_lock_open_failed",
+            "non-regular lock error code",
+        )?;
+        ensure(
+            error.message().contains("path is not a regular file"),
+            true,
+            "non-regular lock error message",
+        )?;
+        ensure(
+            fs::read_dir(&lock_path)
+                .map_err(|error| error.to_string())?
+                .next()
+                .is_none(),
+            true,
+            "non-regular lock target must not be modified",
         )
     }
 
