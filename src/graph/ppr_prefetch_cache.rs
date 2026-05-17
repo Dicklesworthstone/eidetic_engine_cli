@@ -437,6 +437,34 @@ mod tests {
     }
 
     #[test]
+    fn zero_capacity_insert_returns_hash_without_retaining_entries() {
+        let mut cache = PprPrefetchCache::new(0);
+        let score_key = key("seed-score", 1);
+        let expected_scores = scores(&[("mem-a", 0.7), ("mem-b", 0.3)]);
+        let result_key = key("seed-result", 1);
+        let expected_result = page_rank_result(&[("mem-c", 1.0)]);
+
+        let score_insert = cache.insert(score_key.clone(), expected_scores.clone());
+        let result_insert = cache.insert_result(result_key.clone(), expected_result.clone());
+
+        assert_eq!(
+            score_insert.result_hash,
+            ppr_prefetch_result_hash(&score_key, &expected_scores)
+        );
+        assert_eq!(
+            result_insert.result_hash,
+            ppr_prefetch_page_rank_result_hash(&result_key, &expected_result)
+        );
+        assert!(score_insert.evicted.is_empty());
+        assert!(result_insert.evicted.is_empty());
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.get(&score_key), None);
+        assert_eq!(cache.get_result(&result_key), None);
+        assert!(cache.debug_dump().is_empty());
+    }
+
+    #[test]
     fn full_result_hash_length_prefixes_witness_strings() {
         let key = key("seed-a", 1);
         let left = page_rank_result_with_witness(&[("mem-a", 1.0)], "ab", "c");
