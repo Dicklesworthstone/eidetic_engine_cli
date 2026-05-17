@@ -1146,6 +1146,36 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn registry_write_rejects_symlinked_workspace_before_directory_create() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir()?;
+        let workspace = tempdir.path().join("workspace-link");
+        let outside_workspace = tempdir.path().join("outside-workspace");
+        fs::create_dir_all(&outside_workspace)?;
+        symlink(&outside_workspace, &workspace)?;
+
+        let error = publish_qos_lane_record(
+            &workspace,
+            &record_input(QosLane::VerificationRch, "cargo-test", "query", 100),
+        )
+        .expect_err("symlinked workspace should reject registry write");
+
+        assert!(
+            error.message().contains("through symlink"),
+            "unexpected symlinked workspace error: {}",
+            error.message()
+        );
+        assert!(
+            fs::symlink_metadata(outside_workspace.join(".ee"))
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "registry write must not create .ee through a symlinked workspace"
+        );
+        Ok(())
+    }
+
     #[test]
     fn registry_write_rejects_non_regular_temp_file() -> TestResult {
         let tempdir = tempfile::tempdir()?;
