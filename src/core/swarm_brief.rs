@@ -730,7 +730,7 @@ pub fn collect_workspace_git_snapshot(
             "--branch",
             "--untracked-files=all",
         ],
-        &options.workspace,
+        &repository_root_path,
         options.command_timeout_ms,
     )?;
     let mut entries = parse_workspace_git_status_porcelain_v2(&status_output.stdout);
