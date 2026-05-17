@@ -62,9 +62,16 @@ fn read_dir_order(_: &ee::runtime::determinism::Deterministic<Seed>) {
     let _ = fs::read_dir(".");
 }
 
+#[determinism::required]
+fn ambient_chrono_clock(_: &ee::runtime::determinism::Deterministic<Seed>) {
+    let _ = chrono::Utc::now();
+    let _ = chrono::Local::now();
+}
+
 fn benign_documentation_mentions() {
-    let _ = "rand::random::<u64>() Instant::now() SystemTime::now() std::fs::read_dir(.)";
+    let _ = "rand::random::<u64>() Instant::now() SystemTime::now() chrono::Utc::now() std::fs::read_dir(.)";
     // rand::thread_rng();
+    // chrono::Local::now();
     // std::env::var("EE_SEED");
     // std::env::var_os("EE_SEED");
     // std::env::vars();
@@ -76,7 +83,8 @@ fn benign_block_comment_and_raw_string_mentions() {
      * rand::thread_rng();
      * Uuid::new_v4();
      * Uuid::now_v7();
+     * chrono::Utc::now();
      * std::fs::read_dir(".");
      */
-    let _ = r#"std::env::var("EE_SEED") Instant::now() SystemTime::now()"#;
+    let _ = r#"std::env::var("EE_SEED") Instant::now() SystemTime::now() chrono::Local::now()"#;
 }

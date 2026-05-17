@@ -88,6 +88,20 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "inject wall-clock time at the boundary instead of calling SystemTime::now",
             });
         }
+        if line.contains("Utc::now(") || line.contains("chrono::Utc::now(") {
+            findings.push(Finding {
+                line: line_no,
+                code: "ambient_chrono_utc_now",
+                message: "inject UTC timestamps at the boundary instead of calling Utc::now",
+            });
+        }
+        if line.contains("Local::now(") || line.contains("chrono::Local::now(") {
+            findings.push(Finding {
+                line: line_no,
+                code: "ambient_chrono_local_now",
+                message: "inject local timestamps at the boundary instead of calling Local::now",
+            });
+        }
         if line.contains("std::env::var(") {
             findings.push(Finding {
                 line: line_no,
@@ -359,8 +373,9 @@ mod self_tests {
     fn comments_and_strings_do_not_emit_known_violations() {
         let fixture = r#"
             fn documentation_mentions() {
-                let _ = "rand::random::<u64>() Instant::now() std::fs::read_dir(.)";
+                let _ = "rand::random::<u64>() Instant::now() chrono::Utc::now() std::fs::read_dir(.)";
                 // rand::thread_rng();
+                // chrono::Local::now();
                 // std::env::var("EE_SEED");
                 // std::env::var_os("EE_SEED");
                 // std::env::vars();
@@ -379,11 +394,12 @@ mod self_tests {
              * std::env::var("EE_SEED");
              * std::env::var_os("EE_SEED");
              * std::env::vars();
+             * chrono::Utc::now();
              * std::fs::read_dir(".");
              * fs::read_dir(".");
              */
             fn documentation_mentions() {
-                let _ = r#"Uuid::new_v4() Instant::now() SystemTime::now()"#;
+                let _ = r#"Uuid::new_v4() Instant::now() SystemTime::now() chrono::Local::now()"#;
             }
         "##;
         let report = render_report(&scan_fixture(fixture));
