@@ -743,6 +743,7 @@ fn maybe_store_frozen_episode(
     fs::create_dir_all(parent)
         .map_err(|error| lab_storage_error("create frozen episode directory", error))?;
     ensure_no_lab_symlink_components(&artifact_path, "write frozen episode artifact")?;
+    ensure_lab_write_path_is_regular_or_missing(&artifact_path, "write frozen episode artifact")?;
     let bytes = serde_json::to_vec_pretty(&artifact).map_err(|error| {
         lab_storage_error_message("serialize frozen episode artifact", error.to_string())
     })?;
@@ -760,6 +761,26 @@ fn maybe_store_frozen_episode(
     report.episode_hash = Some(artifact.episode_hash);
     report.stored = true;
     Ok(())
+}
+
+fn ensure_lab_write_path_is_regular_or_missing(
+    path: &Path,
+    operation: &str,
+) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(lab_storage_error_message(
+            operation,
+            format!(
+                "refusing to write frozen episode artifact {} because it is not a regular file",
+                path.display()
+            ),
+        )),
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            Ok(())
+        }
+        Err(error) => Err(lab_storage_error(operation, error)),
+    }
 }
 
 fn read_frozen_episode(
@@ -1502,6 +1523,33 @@ mod tests {
             error.message().contains("not a regular file"),
             true,
             "directory artifact error message",
+        )
+    }
+
+    #[test]
+    fn capture_rejects_non_regular_frozen_episode_artifact_before_write() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let episode_id = "episode_lab_directory_write_artifact".to_string();
+        let artifact_path = frozen_episode_path(workspace.path(), &episode_id);
+        fs::create_dir_all(&artifact_path).map_err(|error| error.to_string())?;
+        let mut report = CaptureReport::new(episode_id, workspace.path().to_path_buf());
+
+        let error = maybe_store_frozen_episode(&mut report, workspace.path())
+            .expect_err("directory frozen episode artifact should be rejected before write");
+        ensure(
+            error.message().contains("not a regular file"),
+            true,
+            "directory artifact write error message",
+        )?;
+        ensure(
+            artifact_path.is_dir(),
+            true,
+            "directory artifact path remains untouched",
+        )?;
+        ensure(
+            report.stored,
+            false,
+            "capture remains unstored after rejection",
         )
     }
 
