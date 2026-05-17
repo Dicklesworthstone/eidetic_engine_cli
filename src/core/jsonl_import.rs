@@ -195,8 +195,8 @@ impl JsonlImportReport {
             "command": "import jsonl",
             "workspacePath": self.workspace_path,
             "databasePath": self.database_path,
-            "sourcePath": self.source_path,
-            "sourceId": self.source_id,
+            "sourcePath": redact_jsonl_import_source_ref(&self.source_path),
+            "sourceId": redact_jsonl_import_source_ref(&self.source_id),
             "dryRun": self.dry_run,
             "status": self.status,
             "header": self.header.as_ref().map(JsonlImportHeaderSummary::data_json),
@@ -232,6 +232,59 @@ impl JsonlImportReport {
             memories = self.memory_records,
         )
     }
+}
+
+fn redact_jsonl_import_source_ref(value: &str) -> String {
+    let secret_redacted = crate::policy::redact_secret_like_content(value).content;
+    redact_jsonl_import_source_path_segments(&secret_redacted)
+}
+
+fn redact_jsonl_import_source_path_segments(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, c)| *c == '/')
+        else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        let start = cursor + relative_index;
+        if !jsonl_import_source_path_starts_sensitive_segment(&value[start..]) {
+            output.push_str(&value[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        }
+
+        output.push_str(&value[cursor..start]);
+        output.push_str("[REDACTED_PATH]");
+        cursor = value[start..]
+            .char_indices()
+            .find_map(|(index, c)| jsonl_import_source_path_boundary(c).then_some(start + index))
+            .unwrap_or(value.len());
+    }
+    output
+}
+
+fn jsonl_import_source_path_starts_sensitive_segment(value: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/Users/",
+        "/Volumes/",
+        "/private/",
+        "/var/",
+        "/tmp/",
+        "/home/",
+        "/data/",
+        "/dp/",
+        "/workspace/",
+        "/repo/",
+        "/etc/",
+    ];
+
+    PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+}
+
+fn jsonl_import_source_path_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
 }
 
 /// Stable subset of header metadata exposed by import reports.
@@ -1327,6 +1380,29 @@ mod tests {
         .join("\n")
     }
 
+    fn import_report_fixture(source_path: &str, source_id: &str) -> JsonlImportReport {
+        JsonlImportReport {
+            schema: IMPORT_JSONL_SCHEMA_V1,
+            workspace_path: "/workspace/project".to_owned(),
+            database_path: None,
+            source_path: source_path.to_owned(),
+            source_id: source_id.to_owned(),
+            dry_run: true,
+            status: "dry_run".to_owned(),
+            header: None,
+            footer: None,
+            records_total: 0,
+            memory_records: 0,
+            tag_records: 0,
+            ignored_records: 0,
+            memories_imported: 0,
+            memories_skipped_duplicate: 0,
+            tags_imported: 0,
+            imported_memory_ids: Vec::new(),
+            issues: Vec::new(),
+        }
+    }
+
     #[test]
     fn parse_jsonl_header_accepts_header_record_only() -> TestResult {
         let header_line = sample_jsonl()
@@ -1544,6 +1620,52 @@ mod tests {
             }),
             true,
             "orphaned tag issue",
+        )
+    }
+
+    #[test]
+    fn import_report_json_redacts_sensitive_source_refs() -> TestResult {
+        let report = import_report_fixture(
+            "/Users/alice/private/export.jsonl?api_key=redaction-fixture",
+            "jsonl:///Users/alice/private/export.jsonl?api_key=redaction-fixture",
+        );
+        let json = report.data_json();
+        let rendered = json.to_string();
+
+        assert!(
+            rendered.contains("[REDACTED_PATH]"),
+            "source refs should redact path-like values: {rendered}"
+        );
+        assert!(
+            rendered.contains("[REDACTED:"),
+            "source refs should redact secret-like values: {rendered}"
+        );
+        assert!(
+            !rendered.contains("/Users/alice") && !rendered.contains("redaction-fixture"),
+            "source refs leaked sensitive material: {rendered}"
+        );
+        ensure(
+            report.source_path,
+            "/Users/alice/private/export.jsonl?api_key=redaction-fixture".to_owned(),
+            "raw report source_path remains available internally",
+        )
+    }
+
+    #[test]
+    fn import_report_json_preserves_safe_source_refs() -> TestResult {
+        let report =
+            import_report_fixture("fixtures/export.jsonl", "jsonl://fixtures/export.jsonl");
+        let json = report.data_json();
+
+        ensure(
+            json["sourcePath"].as_str(),
+            Some("fixtures/export.jsonl"),
+            "safe sourcePath",
+        )?;
+        ensure(
+            json["sourceId"].as_str(),
+            Some("jsonl://fixtures/export.jsonl"),
+            "safe sourceId",
         )
     }
 
