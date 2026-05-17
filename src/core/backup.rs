@@ -3479,10 +3479,11 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), DomainError> {
 fn copy_new_file(source: &Path, destination: &Path) -> Result<(), DomainError> {
     ensure_backup_write_path_has_no_symlink_components(source, "backup source artifact")?;
     ensure_backup_write_path_has_no_symlink_components(destination, "backup restore artifact")?;
-    let mut source_file = File::open(source).map_err(|error| DomainError::Storage {
-        message: format!("failed to open '{}': {error}", source.display()),
-        repair: Some("verify the backup artifact and retry restore".to_owned()),
-    })?;
+    let mut source_file =
+        open_backup_artifact_for_read(source).map_err(|error| DomainError::Storage {
+            message: format!("failed to open '{}': {error}", source.display()),
+            repair: Some("verify the backup artifact and retry restore".to_owned()),
+        })?;
     let mut destination_file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -3547,8 +3548,25 @@ fn ensure_backup_write_path_has_no_symlink_components(
     Ok(())
 }
 
+fn open_backup_artifact_for_read(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_backup_artifact_read_options(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_backup_artifact_read_options(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_backup_artifact_read_options(_options: &mut OpenOptions) {}
+
 fn hash_file(path: &Path) -> Result<String, DomainError> {
-    let mut file = File::open(path).map_err(|error| DomainError::Storage {
+    let mut file = open_backup_artifact_for_read(path).map_err(|error| DomainError::Storage {
         message: format!("failed to read '{}': {error}", path.display()),
         repair: Some("inspect the backup directory and rerun verification".to_owned()),
     })?;
@@ -5269,6 +5287,34 @@ mod tests {
             !outside.join("payload.bin").exists(),
             "backup relative artifact write must not follow symlinked parent",
         )
+    }
+
+    #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+    #[test]
+    fn open_backup_artifact_for_read_rejects_symlinked_final_path() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_artifact = tempdir.path().join("outside-records.jsonl");
+        fs::write(&outside_artifact, "outside").map_err(|error| error.to_string())?;
+        let artifact_path = tempdir.path().join("records.jsonl");
+        std::os::unix::fs::symlink(&outside_artifact, &artifact_path)
+            .map_err(|error| error.to_string())?;
+
+        match open_backup_artifact_for_read(&artifact_path) {
+            Ok(_) => Err("symlinked backup artifact final read unexpectedly succeeded".to_owned()),
+            Err(error) => {
+                ensure(
+                    error.raw_os_error().is_some() || error.kind() == io::ErrorKind::Other,
+                    "final read open returns an OS no-follow error",
+                )?;
+                let outside =
+                    fs::read_to_string(&outside_artifact).map_err(|error| error.to_string())?;
+                ensure_equal(
+                    outside.as_str(),
+                    "outside",
+                    "backup artifact final read must not mutate symlink target",
+                )
+            }
+        }
     }
 
     #[test]
