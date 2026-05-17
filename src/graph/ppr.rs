@@ -798,38 +798,44 @@ mod tests {
     fn personalized_pagerank_uses_relation_weighted_edges() -> TestResult {
         let mut graph = DiGraph::strict();
         let seed = memory_id(21);
-        let strong = memory_id(22);
-        let weak = memory_id(23);
-        let zero = memory_id(24);
-        graph
-            .add_edge_with_attrs(
-                seed.to_string(),
-                strong.to_string(),
-                edge_attrs("supports", 1.0, 1.0),
-            )
-            .map_err(|error| error.to_string())?;
-        graph
-            .add_edge_with_attrs(
-                seed.to_string(),
-                weak.to_string(),
-                edge_attrs("co_mention", 1.0, 1.0),
-            )
-            .map_err(|error| error.to_string())?;
-        graph
-            .add_edge_with_attrs(
-                seed.to_string(),
-                zero.to_string(),
-                edge_attrs("contradicts", 1.0, 1.0),
-            )
-            .map_err(|error| error.to_string())?;
+        let supports = memory_id(22);
+        let derived_from = memory_id(23);
+        let related = memory_id(24);
+        let co_tag = memory_id(25);
+        let co_mention = memory_id(26);
+        let contradicts = memory_id(27);
+        let supersedes = memory_id(28);
+        for (target, relation) in [
+            (supports, "supports"),
+            (derived_from, "derived_from"),
+            (related, "related"),
+            (co_tag, "co_tag"),
+            (co_mention, "co_mention"),
+            (contradicts, "contradicts"),
+            (supersedes, "supersedes"),
+        ] {
+            graph
+                .add_edge_with_attrs(
+                    seed.to_string(),
+                    target.to_string(),
+                    edge_attrs(relation, 1.0, 1.0),
+                )
+                .map_err(|error| error.to_string())?;
+        }
         let seeds = HashMap::from([(seed, 1.0)]);
 
         let result = graph_result(compute_personalized_pagerank(&graph, &seeds))?;
 
+        let score = |memory_id: MemoryId| result.get(&memory_id).copied().unwrap_or(0.0);
         assert!(
-            result.get(&strong).copied().unwrap_or(0.0) > result.get(&weak).copied().unwrap_or(0.0)
+            score(supports) > score(derived_from)
+                && score(derived_from) > score(related)
+                && score(related) > score(co_tag)
+                && score(co_tag) > score(co_mention),
+            "documented relation weights should drive PPR mass ordering: {result:?}"
         );
-        assert!((result.get(&zero).copied().unwrap_or(0.0)).abs() < 1.0e-12);
+        assert!((score(contradicts)).abs() < 1.0e-12);
+        assert!((score(supersedes)).abs() < 1.0e-12);
         Ok(())
     }
 
