@@ -608,10 +608,7 @@ impl RecorderImportPlanReport {
     #[must_use]
     pub fn data_json(&self) -> JsonValue {
         let source_id = redact_recorder_source_ref(&self.source_id);
-        let input_path = self
-            .input_path
-            .as_deref()
-            .map(redact_recorder_source_ref);
+        let input_path = self.input_path.as_deref().map(redact_recorder_source_ref);
         json!({
             "schema": self.schema,
             "command": "recorder import",
@@ -3751,7 +3748,11 @@ mod tests {
             true,
             "path placeholder present",
         )?;
-        ensure(json.contains("[REDACTED:"), true, "secret placeholder present")?;
+        ensure(
+            json.contains("[REDACTED:"),
+            true,
+            "secret placeholder present",
+        )?;
         ensure(json.contains("/tmp/private"), false, "source path redacted")?;
         ensure(
             json.contains("redaction-fixture"),
