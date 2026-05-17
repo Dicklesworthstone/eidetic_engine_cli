@@ -1397,7 +1397,7 @@ fn top_consumers(
     max_depth: usize,
     entry_limit: usize,
 ) -> Vec<DiskPressureTopConsumer> {
-    if !root.is_dir() {
+    if !path_is_directory_no_follow(root) {
         return Vec::new();
     }
     let mut entries = Vec::new();
@@ -1420,6 +1420,12 @@ fn top_consumers(
     entries.sort_by_key(|entry| Reverse(entry.bytes));
     entries.truncate(top_limit);
     entries
+}
+
+fn path_is_directory_no_follow(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_dir())
+        .unwrap_or(false)
 }
 
 fn scan_artifact_retention_path(
@@ -1852,6 +1858,27 @@ mod tests {
             trusted_external_path(&linked_target, &external_root),
             false,
             "symlinked external child path",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn top_consumers_skips_symlinked_scan_root_before_read_dir() -> TestResult {
+        let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_root = temp_dir.path().join("outside-root");
+        let linked_root = temp_dir.path().join("linked-root");
+        std::fs::create_dir_all(&outside_root).map_err(|error| error.to_string())?;
+        std::fs::write(outside_root.join("outside.bin"), vec![7_u8; 128])
+            .map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_root, &linked_root)
+            .map_err(|error| error.to_string())?;
+
+        let consumers = top_consumers("fixture", &linked_root, 5, 2, 10);
+
+        ensure(
+            consumers.is_empty(),
+            true,
+            "symlinked scan root must not expose target consumers",
         )
     }
 
