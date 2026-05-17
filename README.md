@@ -1185,6 +1185,7 @@ No. The steward proposes; you approve. Every promotion, consolidation, replaceme
 | [`docs/trust-model.md`](docs/trust-model.md) | Memory advisory priority, trust classes, prompt-injection defenses |
 | [`docs/agent-outcome-scenarios.md`](docs/agent-outcome-scenarios.md) | North-star agent journey matrix and acceptance scenarios |
 | [`docs/agent-ux/insights-onboarding.md`](docs/agent-ux/insights-onboarding.md) | Agent workflow for graph-derived insights, Pack DNA, skyline, and proximity surfaces |
+| [`docs/agent-ux/auto_enrollment_onboarding.md`](docs/agent-ux/auto_enrollment_onboarding.md) | Agent workflow for optional Tailscale mesh auto-enrollment, drift handling, and safety previews |
 | [`docs/cli-reference/graph-flags.md`](docs/cli-reference/graph-flags.md) | Aggregated graph-related CLI flags by command, including implemented and pending surfaces |
 | [`docs/configuration/graph.md`](docs/configuration/graph.md) | Graph feature flags, thresholds, and tuning guidance |
 | [`docs/architecture/graph-snapshots.md`](docs/architecture/graph-snapshots.md) | Graph snapshot families, lifecycle, locks, budgets, and degraded behavior |
@@ -1195,6 +1196,7 @@ No. The steward proposes; you approve. Every promotion, consolidation, replaceme
 | [`docs/toon-output.md`](docs/toon-output.md) | TOON (Text-Only Object Notation) output format |
 | [`docs/pack-replay.md`](docs/pack-replay.md) | Pack replay, support-bundle safety, pack-quality operator guidance, and fixture authoring |
 | [`docs/adr/0025-replayable-context-pack-selection-ledgers.md`](docs/adr/0025-replayable-context-pack-selection-ledgers.md) | Pack replay/diff ledger contract, freshness states, and support-bundle safety rules |
+| [`docs/adr/0038-auto-enrollment-zero-touch.md`](docs/adr/0038-auto-enrollment-zero-touch.md) | Optional zero-touch Tailscale mesh auto-enrollment design, invariants, and rejected alternatives |
 | [`docs/adr/`](docs/adr/) | Architectural decision records |
 
 ---
