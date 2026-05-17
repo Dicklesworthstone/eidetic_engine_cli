@@ -299,6 +299,19 @@ impl PprPrefetchCache {
             }
         }
     }
+
+    #[cfg(test)]
+    fn corrupt_result_witness_algorithm_for_test(
+        &mut self,
+        key: &PprPrefetchCacheKey,
+        algorithm: &str,
+    ) {
+        if let Some(entry) = self.entries.get_mut(key)
+            && let Some(result) = &mut entry.result
+        {
+            result.witness.algorithm = algorithm.to_owned();
+        }
+    }
 }
 
 #[must_use]
@@ -601,6 +614,17 @@ mod tests {
         cache.corrupt_score_for_test(&key, 0.5);
 
         assert_eq!(cache.get(&key), None);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn full_result_hash_mismatch_evicts_witness_tampering() {
+        let mut cache = PprPrefetchCache::new(2);
+        let key = key("seed-a", 1);
+        cache.insert_result(key.clone(), page_rank_result(&[("mem-a", 1.0)]));
+        cache.corrupt_result_witness_algorithm_for_test(&key, "tampered_algorithm");
+
+        assert_eq!(cache.get_result(&key), None);
         assert!(cache.is_empty());
     }
 
