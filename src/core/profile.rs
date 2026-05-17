@@ -1543,6 +1543,12 @@ pub fn apply_profile_config(
             source,
         }
     })?;
+    ensure_profile_config_write_path_is_regular_or_missing(&path).map_err(|source| {
+        ProfileConfigError::Write {
+            path: path.clone(),
+            source,
+        }
+    })?;
     fs::write(&path, report.planned_toml.as_bytes()).map_err(|source| {
         ProfileConfigError::Write {
             path: path.clone(),
@@ -1695,6 +1701,21 @@ fn read_profile_config_if_regular(
         ));
     }
     fs::read_to_string(path).map(Some)
+}
+
+fn ensure_profile_config_write_path_is_regular_or_missing(path: &Path) -> Result<(), io::Error> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to write profile config `{}` because it is not a regular file",
+                path.display()
+            ),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn ensure_no_profile_config_symlink_components(
@@ -2759,6 +2780,25 @@ mod tests {
             selected_profile_from_config(temp.path()),
             None,
             "runtime profile must not read config directory",
+        )
+    }
+
+    #[test]
+    fn profile_config_write_preflight_rejects_non_regular_final_path() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_path = temp.path().join(".ee").join("config.toml");
+        fs::create_dir_all(&config_path).map_err(|error| error.to_string())?;
+
+        let error = ensure_profile_config_write_path_is_regular_or_missing(&config_path)
+            .expect_err("write preflight should reject a directory config path");
+
+        ensure_true(
+            error.to_string().contains("not a regular file"),
+            "write preflight error mentions non-regular path",
+        )?;
+        ensure_true(
+            config_path.is_dir(),
+            "write preflight leaves non-regular config path untouched",
         )
     }
 
