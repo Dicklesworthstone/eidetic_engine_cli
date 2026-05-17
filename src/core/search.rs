@@ -979,12 +979,14 @@ impl SearchReport {
         let results: Vec<serde_json::Value> = visible_results
             .iter()
             .map(|hit| {
+                let (provenance, provenance_redacted_patterns) =
+                    hit.provenance_json(output_redaction_enabled);
                 let mut obj = serde_json::json!({
                     "docId": hit.doc_id,
                     "score": hit.score,
                     "source": hit.source.as_str(),
                     "why": hit.why(),
-                    "provenance": hit.provenance_json(),
+                    "provenance": provenance,
                 });
                 if let Some(obj_map) = obj.as_object_mut() {
                     if let Some(fast) = hit.fast_score {
@@ -1000,8 +1002,9 @@ impl SearchReport {
                         obj_map.insert("rerankScore".to_string(), serde_json::json!(rerank));
                     }
                     if let Some(ref meta) = hit.metadata {
-                        let (metadata, redacted_patterns) =
+                        let (metadata, mut redacted_patterns) =
                             public_search_metadata(meta, output_redaction_enabled);
+                        redacted_patterns.extend(provenance_redacted_patterns.clone());
                         obj_map.insert("metadata".to_string(), metadata);
                         if let MeshQueryVisibility::Allowed(provenance) =
                             mesh_query_visibility(Some(meta))
@@ -1288,12 +1291,21 @@ impl SearchHit {
     }
 
     #[must_use]
-    fn provenance_json(&self) -> Vec<serde_json::Value> {
+    fn provenance_json(
+        &self,
+        output_redaction_enabled: bool,
+    ) -> (Vec<serde_json::Value>, Vec<String>) {
         let mut provenance = Vec::new();
+        let mut redacted_patterns = BTreeSet::new();
 
         if let Some(ref metadata) = self.metadata {
             for key in ["provenanceUri", "provenance_uri"] {
                 if let Some(uri) = metadata_string(metadata, key) {
+                    let uri = redact_search_provenance_uri(
+                        uri,
+                        output_redaction_enabled,
+                        &mut redacted_patterns,
+                    );
                     provenance.push(serde_json::json!({
                         "kind": "provenance_uri",
                         "uri": uri,
@@ -1307,8 +1319,82 @@ impl SearchHit {
             "kind": "search_document",
             "docId": self.doc_id,
         }));
-        provenance
+        (provenance, redacted_patterns.into_iter().collect())
     }
+}
+
+fn redact_search_provenance_uri(
+    value: &str,
+    output_redaction_enabled: bool,
+    redacted_patterns: &mut BTreeSet<String>,
+) -> String {
+    if !output_redaction_enabled {
+        return value.to_string();
+    }
+
+    let secret_report = crate::policy::redact_secret_like_content(value);
+    redacted_patterns.extend(
+        secret_report
+            .redacted_reasons
+            .into_iter()
+            .map(str::to_owned),
+    );
+    redact_search_absolute_path_like_segments(&secret_report.content, redacted_patterns)
+}
+
+fn redact_search_absolute_path_like_segments(
+    input: &str,
+    redacted_patterns: &mut BTreeSet<String>,
+) -> String {
+    const REDACTED_PATH: &str = "[REDACTED_PATH]";
+    const PATH_PREFIXES: &[&str] = &[
+        "/home/",
+        "/Users/",
+        "/data/",
+        "/workspace/",
+        "/Volumes/",
+        "C:\\",
+        "D:\\",
+    ];
+
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0usize;
+    while cursor < input.len() {
+        let remaining = &input[cursor..];
+        if let Some(prefix) = PATH_PREFIXES
+            .iter()
+            .find(|prefix| remaining.starts_with(**prefix))
+        {
+            redacted_patterns.insert("path".to_string());
+            output.push_str(REDACTED_PATH);
+            cursor += prefix.len();
+            while cursor < input.len() {
+                let next = input[cursor..]
+                    .chars()
+                    .next()
+                    .expect("cursor stays on a character boundary");
+                if next.is_whitespace()
+                    || matches!(
+                        next,
+                        '"' | '\'' | '`' | '<' | '>' | ')' | ']' | '}' | ',' | ';' | '|'
+                    )
+                {
+                    break;
+                }
+                cursor += next.len_utf8();
+            }
+            continue;
+        }
+
+        let next = remaining
+            .chars()
+            .next()
+            .expect("cursor stays on a character boundary");
+        output.push(next);
+        cursor += next.len_utf8();
+    }
+
+    output
 }
 
 fn metadata_string<'a>(metadata: &'a serde_json::Value, key: &str) -> Option<&'a str> {
@@ -1348,6 +1434,12 @@ fn public_search_metadata(
         .map(|(key, value)| {
             let value = if search_metadata_content_key_needs_redaction(key) {
                 redact_search_metadata_content_value(
+                    value,
+                    &mut redacted_patterns,
+                    output_redaction_enabled,
+                )
+            } else if search_metadata_provenance_key_needs_redaction(key) {
+                redact_search_metadata_provenance_value(
                     value,
                     &mut redacted_patterns,
                     output_redaction_enabled,
@@ -1427,6 +1519,10 @@ fn search_metadata_content_key_needs_redaction(key: &str) -> bool {
     matches!(key, "content" | "contentPreview" | "content_preview")
 }
 
+fn search_metadata_provenance_key_needs_redaction(key: &str) -> bool {
+    matches!(key, "provenanceUri" | "provenance_uri")
+}
+
 fn redact_search_metadata_content_value(
     value: &serde_json::Value,
     redacted_patterns: &mut BTreeSet<String>,
@@ -1446,6 +1542,21 @@ fn redact_search_metadata_content_value(
         redacted_patterns.insert(reason.to_owned());
     }
     serde_json::json!(report.content)
+}
+
+fn redact_search_metadata_provenance_value(
+    value: &serde_json::Value,
+    redacted_patterns: &mut BTreeSet<String>,
+    output_redaction_enabled: bool,
+) -> serde_json::Value {
+    let Some(content) = value.as_str() else {
+        return value.clone();
+    };
+    serde_json::json!(redact_search_provenance_uri(
+        content,
+        output_redaction_enabled,
+        redacted_patterns,
+    ))
 }
 
 fn search_hit_output_redaction_patterns(hit: &SearchHit) -> Vec<String> {
@@ -5709,6 +5820,83 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn search_json_redacts_sensitive_provenance_uri_output() {
+        let mut hit = SearchHit {
+            doc_id: "doc-sensitive-provenance".to_string(),
+            score: 0.82,
+            source: ScoreSource::Hybrid,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: None,
+            rerank_score: None,
+            metadata: Some(serde_json::json!({
+                "level": "episodic",
+                "provenance_uri": "file:///Users/alice/private/logs/build.log?api_key=redaction-fixture",
+            })),
+            explanation: None,
+        };
+        hit.explanation = Some(ScoreExplanation::generate(&hit));
+
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "provenance".to_string(),
+            requested_limit: 1,
+            results: vec![hit],
+            elapsed_ms: 1.0,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
+        };
+
+        let json = report.data_json();
+        let result = &json["results"][0];
+        let rendered = serde_json::to_string(result).expect("search result serializes");
+
+        assert!(
+            rendered.contains("[REDACTED_PATH]"),
+            "search provenance should preserve a path placeholder: {rendered}"
+        );
+        assert!(
+            rendered.contains("[REDACTED:api_key]"),
+            "search provenance should preserve a secret placeholder: {rendered}"
+        );
+        assert!(
+            !rendered.contains("/Users/alice/private/logs/build.log"),
+            "search provenance leaked an absolute path: {rendered}"
+        );
+        assert!(
+            !rendered.contains("redaction-fixture"),
+            "search provenance leaked a secret-like value: {rendered}"
+        );
+        assert_eq!(
+            result["provenance"][0]["uri"],
+            "file://[REDACTED_PATH]?api_key=[REDACTED:api_key]"
+        );
+        assert_eq!(
+            result["metadata"]["provenance_uri"],
+            "file://[REDACTED_PATH]?api_key=[REDACTED:api_key]"
+        );
+        assert_eq!(result["contentRedacted"], true);
+        let reasons = result["redactions"]
+            .as_array()
+            .expect("redactions are present")
+            .iter()
+            .filter_map(|entry| entry["reason"].as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(reasons.contains("api_key"));
+        assert!(reasons.contains("path"));
     }
 
     #[test]
