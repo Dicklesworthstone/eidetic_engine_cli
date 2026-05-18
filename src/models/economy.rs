@@ -76,11 +76,11 @@ impl UtilityValue {
     #[must_use]
     pub fn new(score: f64) -> Self {
         Self {
-            score: score.clamp(0.0, 1.0),
+            score: if score.is_nan() { 0.5 } else { score.clamp(0.0, 1.0) },
             retrieval_count: 0,
             success_count: 0,
             false_alarm_count: 0,
-            projected_utility: score.clamp(0.0, 1.0),
+            projected_utility: if score.is_nan() { 0.5 } else { score.clamp(0.0, 1.0) },
             confidence: 0.5,
         }
     }
@@ -90,7 +90,7 @@ impl UtilityValue {
     pub fn from_history(retrieval_count: u32, success_count: u32, false_alarm_count: u32) -> Self {
         let total = retrieval_count.max(1) as f64;
         let score = (success_count as f64 - false_alarm_count as f64 * 0.5) / total;
-        let score = score.clamp(0.0, 1.0);
+        let score = if score.is_nan() { 0.5 } else { score.clamp(0.0, 1.0) };
         let confidence = (total / 100.0).min(1.0);
 
         Self {
@@ -179,21 +179,21 @@ impl AttentionCost {
     /// Set cognitive load factor.
     #[must_use]
     pub fn with_cognitive_load(mut self, load: f64) -> Self {
-        self.cognitive_load = load.clamp(0.0, 1.0);
+        self.cognitive_load = if load.is_nan() { 0.3 } else { load.clamp(0.0, 1.0) };
         self
     }
 
     /// Set relevance decay.
     #[must_use]
     pub fn with_relevance_decay(mut self, decay: f64) -> Self {
-        self.relevance_decay = decay.clamp(0.0, 1.0);
+        self.relevance_decay = if decay.is_nan() { 0.0 } else { decay.clamp(0.0, 1.0) };
         self
     }
 
     /// Set context switch cost.
     #[must_use]
     pub fn with_context_switch(mut self, cost: f64) -> Self {
-        self.context_switch_cost = cost.clamp(0.0, 1.0);
+        self.context_switch_cost = if cost.is_nan() { 0.0 } else { cost.clamp(0.0, 1.0) };
         self
     }
 
@@ -1586,8 +1586,8 @@ impl EconomyReport {
         let debt_health = 1.0 - self.maintenance_debt.debt_score;
         let utility_health = self.aggregate_utility.mean_utility;
 
-        self.health_score =
-            (reserve_health * 0.3 + debt_health * 0.4 + utility_health * 0.3).clamp(0.0, 1.0);
+        let score = reserve_health * 0.3 + debt_health * 0.4 + utility_health * 0.3;
+        self.health_score = if score.is_nan() { 0.5 } else { score.clamp(0.0, 1.0) };
     }
 
     /// Add a recommendation.

@@ -871,7 +871,9 @@ impl ExperimentOutcome {
 
     #[must_use]
     pub fn with_confidence_delta(mut self, delta: f64) -> Self {
-        self.confidence_delta = if delta.is_finite() {
+        self.confidence_delta = if delta.is_nan() {
+            0.0
+        } else if delta.is_finite() {
             delta.clamp(-1.0, 1.0)
         } else {
             0.0
