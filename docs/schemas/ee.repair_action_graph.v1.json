@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.repair_action_graph.v1.json",
+  "title": "ee.repair_action_graph.v1",
+  "description": "Structured graph of repair actions emitted by both `ee mesh status` (SRR6.46.4 / bd-36bbk.1.4) and `ee doctor` (SRR6.46.16 / bd-36bbk.1.16). Downstream consumers (agent harnesses, human operators, doctor renderers) parse this single shape to topologically execute remediation. The schema lives in `src/mesh/repair_action_graph.rs` and is shared by both surfaces by construction so the two consumer paths cannot drift apart.",
+  "type": "object",
+  "required": [
+    "schema",
+    "actions",
+    "topologicallyOrderedExecution",
+    "parallelizableGroups",
+    "estimatedTotalDurationSeconds"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.repair_action_graph.v1"
+    },
+    "actions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/repairAction" },
+      "description": "All repair actions in the graph. Sorted lexicographically by id for deterministic output. Each id MUST be unique within the graph; cross-references in `prerequisites` and downstream doctor `fixActionId` fields resolve against this list."
+    },
+    "topologicallyOrderedExecution": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Deterministic Kahn topological order: each action id is preceded by all of its prerequisites. Ties between independent actions break by `(priority, id)` so the output is byte-reproducible across runs and machines.",
+      "uniqueItems": true
+    },
+    "parallelizableGroups": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "items": { "type": "string", "minLength": 1 },
+        "uniqueItems": true,
+        "minItems": 1
+      },
+      "description": "Layered Kahn output. Layer N contains actions whose prerequisites are entirely satisfied by layers 0..N-1; within a layer all actions can run concurrently. Empty when `actions` is empty."
+    },
+    "estimatedTotalDurationSeconds": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Sum of `estimatedDurationSeconds` across all actions. Coarse upper bound on serial-execution wall-clock time; under parallelization the actual wall-clock will be smaller."
+    }
+  },
+  "$defs": {
+    "actionKind": {
+      "type": "string",
+      "enum": ["shell_command", "ee_subcommand", "external_tool", "manual_step"],
+      "description": "What kind of action this is. `shell_command` runs in a shell, `ee_subcommand` invokes an `ee` subcommand the agent harness can drive directly, `external_tool` is a vendor tool the harness cannot drive (browser/GUI/portal), `manual_step` is operator-only (the `command` field is the human description; the renderer must not suggest auto-execution)."
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["critical", "high", "medium", "low"],
+      "description": "Operator-facing priority. Drives the order of human-readable rendering and biases the topological tiebreaker: independent actions sort with `critical` first."
+    },
+    "executionContext": {
+      "type": "string",
+      "enum": ["user_shell", "ee_subcommand", "external_tool"],
+      "description": "Where the action executes. The agent harness reads this to route to the right executor; the human renderer uses it to phrase the instruction (\"run in your shell\" vs \"run in ee\"). Semantically distinct from `kind`: kind describes WHAT the action is, executionContext describes WHERE it runs."
+    },
+    "expectedOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resolvesChecks": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Doctor check names (matching `name` in the doctor check output) that this action is expected to flip from `fail`/`warning` to `ok` on success."
+        },
+        "preconditionsForNextActions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Action ids that become unblocked once this action completes. Redundant with the inverse of `prerequisites[]` but emitted explicitly because downstream renderers find the forward adjacency easier to display. The builder auto-populates this from the reverse adjacency map when the caller leaves it empty; caller-supplied values are preserved verbatim."
+        }
+      }
+    },
+    "repairAction": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "command",
+        "humanReadable",
+        "priority",
+        "estimatedDurationSeconds",
+        "reversible",
+        "requiresUserConfirmation",
+        "executionContext"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "Unique action id within this graph. Lowercase snake_case so cross-references in `prerequisites` and doctor `fixActionId` are stable across renderers."
+        },
+        "kind": { "$ref": "#/$defs/actionKind" },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Command string to execute. For `kind=manual_step`, the human-facing instruction text rather than an executable."
+        },
+        "humanReadable": {
+          "type": "string",
+          "minLength": 1,
+          "description": "One-line operator-facing description; what the renderer prints next to the command."
+        },
+        "prerequisites": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Action ids (from this same graph) that must complete first. The builder rejects unknown prerequisites with `UnknownPrerequisite { from, missing }` and rejects cyclic dependencies with `DependencyCycle`."
+        },
+        "expectedOutcome": { "$ref": "#/$defs/expectedOutcome" },
+        "priority": { "$ref": "#/$defs/priority" },
+        "estimatedDurationSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400,
+          "description": "Wall-clock estimate for the action in seconds. Used to compute the envelope-level `estimatedTotalDurationSeconds` and to size a watchdog when the agent harness auto-executes."
+        },
+        "reversible": {
+          "type": "boolean",
+          "description": "Whether running this action is reversible by a deterministic reverse command. When true, `reversalCommand` SHOULD be present."
+        },
+        "reversalCommand": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "Deterministic reversal command, present when `reversible == true` and a reversal exists. Null for irreversible actions (e.g. `tailscale logout` that requires re-authentication)."
+        },
+        "requiresUserConfirmation": {
+          "type": "boolean",
+          "description": "Whether the renderer must surface an interactive confirmation prompt before running. Always true for destructive actions and for any action whose `reversible == false`."
+        },
+        "executionContext": { "$ref": "#/$defs/executionContext" }
+      }
+    }
+  }
+}

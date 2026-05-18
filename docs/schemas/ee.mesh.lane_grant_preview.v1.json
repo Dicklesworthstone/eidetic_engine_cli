@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.lane_grant_preview.v1.json",
+  "title": "ee.mesh.lane_grant_preview.v1",
+  "description": "Pre-grant lane visibility audit emitted by the future `ee mesh preview-grant <peer> --lane <lane>` command (SRR6.46.17 / bd-36bbk.1.17). Lets the operator see EXACTLY which memories would become visible to a peer through a proposed lane grant before they run `ee mesh grant`. Read-only invariant: this surface MUST NOT mutate the workspace or emit audit rows; the pure-decision module `src/mesh/lane_grant_preview.rs` enforces this by construction.",
+  "type": "object",
+  "required": [
+    "schema",
+    "peerNodeKey",
+    "lane",
+    "workspaceId",
+    "currentPolicy",
+    "proposedPolicy",
+    "affectedMemoryCount",
+    "redactedFromExposureCount",
+    "previewSampleStrategy",
+    "previewSample",
+    "redactionRulesApplied",
+    "cautions"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.lane_grant_preview.v1"
+    },
+    "peerNodeKey": {
+      "$ref": "#/$defs/nodeKey",
+      "description": "The peer this preview targets. Redactable under the `tailscale_metadata` class."
+    },
+    "lane": { "$ref": "#/$defs/lane" },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Workspace this preview was computed against. The visibility math is scoped to one workspace at a time."
+    },
+    "currentPolicy": { "$ref": "#/$defs/policySnapshot" },
+    "proposedPolicy": { "$ref": "#/$defs/policySnapshot" },
+    "affectedMemoryCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total count of memories the lane grant would expose under the proposed policy. Counted across ALL memories, not just the preview sample."
+    },
+    "redactedFromExposureCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Count of memories that would still be hidden via redaction-class rules even after the lane is granted. These appear in `affectedMemoryCount` conceptually but `wouldExposeUnderProposedPolicy` is false on their row."
+    },
+    "previewSampleStrategy": {
+      "type": "string",
+      "enum": ["random", "highest-trust", "most-recent"],
+      "description": "Strategy used to choose which memories appear in `previewSample` when total exceeds `--limit`. `random` is deterministic-random (seeded) so repeated calls with the same seed reproduce the same preview."
+    },
+    "previewSample": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/previewRow" },
+      "maxItems": 500,
+      "description": "Capped sample of memories that would be exposed. Capped at `LANE_GRANT_PREVIEW_MAX_LIMIT` (500) regardless of caller-requested `--limit`. Ordered per `previewSampleStrategy`."
+    },
+    "redactionRulesApplied": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Names of redaction classes the upstream pipeline applied (e.g. `[\"api_key\", \"jwt\", \"tailscale_metadata\"]`). Forwarded unchanged from the caller-supplied input."
+    },
+    "cautions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/caution" },
+      "description": "UX hazard signals the renderer surfaces visually. The pure-decision module emits up to 7 cautions: `peer_not_in_group`, `lane_already_granted`, `high_trust_class_exposure`, `large_volume_exposure`, `sensitive_tags_in_exposure`, `tombstoned_in_exposure`, `redaction_active`. Severity is `info` or `warning` only; `error` is not a path this read-only computation takes."
+    }
+  },
+  "$defs": {
+    "nodeKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Stable tailscale node identifier (e.g. `nodekey:<base64>`). Redactable under the `tailscale_metadata` class."
+    },
+    "lane": {
+      "type": "string",
+      "enum": [
+        "metadata",
+        "body",
+        "embedding",
+        "graph_link",
+        "curation_signal",
+        "revision_notice"
+      ],
+      "description": "The six trust-lane channels a peer-group binding can grant or deny. Matches the field names on `IntendedLanePolicy` in `src/mesh/auto_enrollment_safety.rs`."
+    },
+    "laneDecision": {
+      "type": "string",
+      "enum": ["allow", "quarantine", "deny"],
+      "description": "Per-lane decision matching `LaneDecision` in `src/mesh/auto_enrollment_safety.rs`."
+    },
+    "policySnapshot": {
+      "type": "object",
+      "required": ["lane", "decision"],
+      "additionalProperties": false,
+      "properties": {
+        "lane": { "$ref": "#/$defs/lane" },
+        "decision": { "$ref": "#/$defs/laneDecision" }
+      }
+    },
+    "trustClass": {
+      "type": "string",
+      "enum": [
+        "human_explicit",
+        "human_revised",
+        "agent_validated",
+        "agent_proposed",
+        "external"
+      ],
+      "description": "SRR6.5 trust authority class. `human_explicit` is the user's directly-authored material — most sensitive to leak — and triggers the `high_trust_class_exposure` caution when exposed."
+    },
+    "previewRow": {
+      "type": "object",
+      "required": [
+        "memoryId",
+        "level",
+        "kind",
+        "contentPreview",
+        "tags",
+        "trustClass",
+        "hasSensitiveTags",
+        "redactedFields",
+        "wouldExposeUnderProposedPolicy"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "level": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "contentPreview": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "First 100 characters of memory body (multibyte-safe, char-counted not byte-counted). The caller is responsible for redacting the content BEFORE passing it into the preview; this module only truncates."
+        },
+        "tags": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "trustClass": { "$ref": "#/$defs/trustClass" },
+        "hasSensitiveTags": {
+          "type": "boolean",
+          "description": "True when any tag matches the canonical sensitive vocabulary `{secret, private, personal, internal}` (per `SENSITIVE_TAGS` in the pure module)."
+        },
+        "redactedFields": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Names of fields the redaction pipeline already stripped from this memory before it reached the preview module."
+        },
+        "wouldExposeUnderProposedPolicy": {
+          "type": "boolean",
+          "description": "Whether the memory would actually become visible to the peer under the proposed policy. False when the memory is tombstoned, when redaction-class rules still hide it, or when the proposed lane is not `allow`."
+        }
+      }
+    },
+    "caution": {
+      "type": "object",
+      "required": ["kind", "message", "severity"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "high_trust_class_exposure",
+            "large_volume_exposure",
+            "sensitive_tags_in_exposure",
+            "tombstoned_in_exposure",
+            "redaction_active",
+            "peer_not_in_group",
+            "lane_already_granted"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1 },
+        "severity": { "type": "string", "enum": ["info", "warning"] }
+      }
+    }
+  }
+}

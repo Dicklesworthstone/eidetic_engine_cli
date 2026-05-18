@@ -1867,27 +1867,34 @@ pub fn run_score_decay_job(
         BTreeMap::new()
     };
 
+    let all_feedback_events = conn
+        .list_feedback_events(&options.workspace_id)
+        .map_err(|error| format!("Failed to list feedback events: {error}"))?;
+    let mut feedback_by_memory: std::collections::HashMap<String, Vec<StoredFeedbackEvent>> =
+        std::collections::HashMap::new();
+    for event in all_feedback_events {
+        if event.target_type == "memory" && event.applied_at.is_none() {
+            feedback_by_memory
+                .entry(event.target_id.clone())
+                .or_default()
+                .push(event);
+        }
+    }
+
     let mut scanned_count = 0usize;
     let mut changes = Vec::new();
+    let empty_feedback = Vec::new();
 
     for memory in memories {
         scanned_count = scanned_count.saturating_add(1);
-        let feedback_events = conn
-            .list_feedback_events_for_target("memory", &memory.id)
-            .map_err(|error| {
-                format!(
-                    "Failed to list feedback events for memory {}: {error}",
-                    memory.id
-                )
-            })?
-            .into_iter()
-            .filter(|event| event.applied_at.is_none())
-            .collect::<Vec<_>>();
-        let feedback_counts = feedback_counts_from_events(&feedback_events);
+        let feedback_events = feedback_by_memory
+            .get(&memory.id)
+            .unwrap_or(&empty_feedback);
+        let feedback_counts = feedback_counts_from_events(feedback_events);
         let Some(mut change) = score_decay_change_for_memory(
             &memory,
             &feedback_counts,
-            &feedback_events,
+            feedback_events,
             &as_of_timestamp,
             access_times.get(&memory.id).copied(),
             structural_adjustments.get(&memory.id).cloned(),
