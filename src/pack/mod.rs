@@ -4689,7 +4689,7 @@ fn compare_candidates(left: &PackCandidate, right: &PackCandidate) -> Ordering {
                 .total_cmp(&left.utility.into_inner())
         })
         .then_with(|| left.section.cmp(&right.section))
-        .then_with(|| left.memory_id.to_string().cmp(&right.memory_id.to_string()))
+        .then_with(|| left.memory_id.cmp(&right.memory_id))
 }
 
 fn trim_required(value: String, error: PackValidationError) -> Result<String, PackValidationError> {
