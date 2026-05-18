@@ -1,3 +1,12 @@
+# Empty [workspace] table opts this package OUT of any containing workspace
+# found by Cargo's parent-directory autodiscovery. AGENTS.md is explicit:
+# "single binary crate with a library surface in the same package; not a
+# workspace in phase 0". On RCH workers, the synced project sometimes
+# lands under /data/projects/ which contains an unrelated FCP workspace
+# Cargo.toml at the parent — without this opt-out, cargo treats eidetic
+# as a member of that workspace and tries to load its (missing) crates.
+[workspace]
+
 [package]
 name = "eidetic-engine"
 version = "0.1.0"
