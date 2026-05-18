@@ -13,6 +13,9 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 
+use super::audit_lane::{
+    AuditEvent as AuditLaneEvent, AuditLaneHandle, emit_with_direct_fallback, insert_audit_event,
+};
 use super::config_surface::{ConfigSurfaceOptions, get_config};
 use super::index::{
     DEFAULT_INDEX_SUBDIR, IndexProcessingJobReport, process_index_job_for_connection,
@@ -437,7 +440,7 @@ pub fn remember_memory(
     options: &RememberMemoryOptions<'_>,
 ) -> Result<RememberMemoryReport, DomainError> {
     let mut id_source = RememberIdSource::Ambient;
-    remember_memory_inner(options, &mut id_source)
+    remember_memory_inner(options, &mut id_source, None)
 }
 
 pub fn remember_memory_seeded(
@@ -445,7 +448,7 @@ pub fn remember_memory_seeded(
     determinism: &mut Deterministic<Seed>,
 ) -> Result<RememberMemoryReport, DomainError> {
     let mut id_source = RememberIdSource::Seeded(determinism);
-    remember_memory_inner(options, &mut id_source)
+    remember_memory_inner(options, &mut id_source, None)
 }
 
 enum RememberIdSource<'a> {
@@ -479,6 +482,7 @@ impl RememberIdSource<'_> {
 fn remember_memory_inner(
     options: &RememberMemoryOptions<'_>,
     id_source: &mut RememberIdSource<'_>,
+    audit_lane: Option<&AuditLaneHandle>,
 ) -> Result<RememberMemoryReport, DomainError> {
     let prepared = prepare_remember_memory(options, id_source.next_memory_id())?;
     if options.dry_run {
@@ -525,15 +529,8 @@ fn remember_memory_inner(
     let mut write_replay_guard = RememberWriteReplayGuard::arm(&prepared.workspace_path)?;
 
     ensure_database_parent_exists(&prepared.database_path)?;
-    let connection =
-        DbConnection::open_file(&prepared.database_path).map_err(|error| DomainError::Storage {
-            message: format!("Failed to open database: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
-    connection.migrate().map_err(|error| DomainError::Storage {
-        message: format!("Failed to migrate database: {error}"),
-        repair: Some("ee doctor".to_string()),
-    })?;
+    let connection = open_remember_database_with_retry(&prepared.database_path)?;
+    migrate_remember_database_with_retry(&connection)?;
     ensure_workspace(
         &connection,
         &prepared.workspace_id,
@@ -586,6 +583,7 @@ fn remember_memory_inner(
         &audit_details,
         &index_input,
         policy_bypass.as_ref(),
+        audit_lane,
     )?;
 
     append_remember_audit_jsonl(&prepared, &audit_id, &memory_id, &memory_input)?;
@@ -673,11 +671,8 @@ fn remember_memory_inner(
         .workspace_path
         .join(".ee")
         .join(DEFAULT_INDEX_SUBDIR);
-    let index_report = process_index_job_for_connection(&connection, &index_job_id, &index_dir)
-        .map_err(|error| DomainError::SearchIndex {
-            message: format!("Remembered memory but failed to publish search index: {error}"),
-            repair: Some("ee index rebuild --workspace .".to_owned()),
-        })?;
+    let index_report =
+        process_remember_index_job_with_retry(&connection, &index_job_id, &index_dir)?;
     let index_status = remember_index_status(&index_report);
 
     let (curation_candidate, curation_candidate_status, curation_candidate_degradations) =
@@ -907,6 +902,129 @@ fn remember_index_status(report: &IndexProcessingJobReport) -> String {
         "skipped" => "queued".to_owned(),
         "failed" => "failed".to_owned(),
         other => other.to_owned(),
+    }
+}
+
+const REMEMBER_CONTENTION_MAX_ATTEMPTS: usize = 64;
+
+fn open_remember_database_with_retry(database_path: &Path) -> Result<DbConnection, DomainError> {
+    for attempt in 0..REMEMBER_CONTENTION_MAX_ATTEMPTS {
+        match DbConnection::open_file(database_path) {
+            Ok(connection) => return Ok(connection),
+            Err(error) if remember_write_contention_is_retryable(&error) => {
+                if attempt + 1 < REMEMBER_CONTENTION_MAX_ATTEMPTS {
+                    std::thread::sleep(remember_write_retry_delay(attempt));
+                } else {
+                    return Err(DomainError::Storage {
+                        message: format!(
+                            "Failed to open database after contention retries: {error}"
+                        ),
+                        repair: Some("ee doctor".to_string()),
+                    });
+                }
+            }
+            Err(error) => {
+                return Err(DomainError::Storage {
+                    message: format!("Failed to open database: {error}"),
+                    repair: Some("ee doctor".to_string()),
+                });
+            }
+        }
+    }
+
+    Err(DomainError::Storage {
+        message: "Failed to open database after contention retries.".to_owned(),
+        repair: Some("ee doctor".to_string()),
+    })
+}
+
+fn migrate_remember_database_with_retry(connection: &DbConnection) -> Result<(), DomainError> {
+    for attempt in 0..REMEMBER_CONTENTION_MAX_ATTEMPTS {
+        match connection.migrate() {
+            Ok(_) => return Ok(()),
+            Err(error) if remember_write_contention_is_retryable(&error) => {
+                if attempt + 1 < REMEMBER_CONTENTION_MAX_ATTEMPTS {
+                    std::thread::sleep(remember_write_retry_delay(attempt));
+                } else {
+                    return Err(DomainError::Storage {
+                        message: format!(
+                            "Failed to migrate database after contention retries: {error}"
+                        ),
+                        repair: Some("ee doctor".to_string()),
+                    });
+                }
+            }
+            Err(error) => {
+                return Err(DomainError::Storage {
+                    message: format!("Failed to migrate database: {error}"),
+                    repair: Some("ee doctor".to_string()),
+                });
+            }
+        }
+    }
+
+    Err(DomainError::Storage {
+        message: "Failed to migrate database after contention retries.".to_owned(),
+        repair: Some("ee doctor".to_string()),
+    })
+}
+
+fn process_remember_index_job_with_retry(
+    connection: &DbConnection,
+    index_job_id: &str,
+    index_dir: &Path,
+) -> Result<IndexProcessingJobReport, DomainError> {
+    for attempt in 0..REMEMBER_CONTENTION_MAX_ATTEMPTS {
+        match process_index_job_for_connection(connection, index_job_id, index_dir) {
+            Ok(report) => return Ok(report),
+            Err(error) if remember_write_contention_is_retryable(&error) => {
+                if attempt + 1 < REMEMBER_CONTENTION_MAX_ATTEMPTS {
+                    std::thread::sleep(remember_write_retry_delay(attempt));
+                } else {
+                    return Ok(remember_index_job_queued_after_contention(
+                        index_job_id,
+                        error,
+                    ));
+                }
+            }
+            Err(error) => return Err(remember_search_index_error(error)),
+        }
+    }
+
+    Err(DomainError::SearchIndex {
+        message: "Remembered memory but failed to publish search index after contention retries."
+            .to_owned(),
+        repair: Some("ee index rebuild --workspace .".to_owned()),
+    })
+}
+
+fn remember_index_job_queued_after_contention(
+    index_job_id: &str,
+    error: impl ToString,
+) -> IndexProcessingJobReport {
+    IndexProcessingJobReport {
+        job_id: index_job_id.to_owned(),
+        job_type: SearchIndexJobType::SingleDocument.as_str().to_owned(),
+        document_source: Some("memory".to_owned()),
+        document_id: None,
+        outcome: "skipped".to_owned(),
+        processing_mode: "single_document_as_full_rebuild".to_owned(),
+        documents_total: 1,
+        documents_indexed: 0,
+        error: Some(format!(
+            "search index publish deferred after contention retries: {}",
+            error.to_string()
+        )),
+    }
+}
+
+fn remember_search_index_error(error: impl ToString) -> DomainError {
+    DomainError::SearchIndex {
+        message: format!(
+            "Remembered memory but failed to publish search index after contention retries: {}",
+            error.to_string()
+        ),
+        repair: Some("ee index rebuild --workspace .".to_owned()),
     }
 }
 
@@ -2059,41 +2177,42 @@ fn store_remembered_memory_with_retry(
     audit_details: &str,
     index_input: &CreateSearchIndexJobInput,
     policy_bypass: Option<&RememberPolicyBypassReport>,
+    audit_lane: Option<&AuditLaneHandle>,
 ) -> Result<(), DomainError> {
-    const MAX_ATTEMPTS: usize = 8;
-
-    for attempt in 0..MAX_ATTEMPTS {
+    for attempt in 0..REMEMBER_CONTENTION_MAX_ATTEMPTS {
         match connection.with_transaction(|| {
             connection.insert_memory(memory_id, memory_input)?;
-            connection.insert_audit(
-                audit_id,
-                &CreateAuditInput {
-                    workspace_id: Some(memory_input.workspace_id.clone()),
-                    actor: Some("ee remember".to_owned()),
-                    action: audit_actions::MEMORY_CREATE.to_owned(),
-                    target_type: Some("memory".to_owned()),
-                    target_id: Some(memory_id.to_owned()),
-                    details: Some(audit_details.to_owned()),
-                },
-            )?;
-            if let Some(policy_bypass) = policy_bypass {
-                if let Some(policy_audit_id) = policy_bypass.audit_id.as_deref() {
-                    connection.insert_audit(
-                        policy_audit_id,
-                        &CreateAuditInput {
-                            workspace_id: Some(memory_input.workspace_id.clone()),
-                            actor: Some("ee remember".to_owned()),
-                            action: audit_actions::POLICY_BYPASS.to_owned(),
-                            target_type: Some("memory".to_owned()),
-                            target_id: Some(memory_id.to_owned()),
-                            details: Some(policy_bypass_audit_details(policy_bypass)),
-                        },
-                    )?;
-                }
+            if audit_lane.is_none() {
+                emit_remember_audit_events(
+                    connection,
+                    None,
+                    memory_id,
+                    audit_id,
+                    memory_input,
+                    audit_details,
+                    policy_bypass,
+                )?;
             }
             connection.insert_search_index_job(index_job_id, index_input)
         }) {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                if let Some(audit_lane) = audit_lane {
+                    emit_remember_audit_events(
+                        connection,
+                        Some(audit_lane),
+                        memory_id,
+                        audit_id,
+                        memory_input,
+                        audit_details,
+                        policy_bypass,
+                    )
+                    .map_err(|error| DomainError::Storage {
+                        message: format!("Failed to emit remember audit event: {error}"),
+                        repair: Some("ee doctor".to_owned()),
+                    })?;
+                }
+                return Ok(());
+            }
             Err(error) if remember_write_contention_is_retryable(&error) => {
                 if let Err(rollback_error) = connection.rollback() {
                     tracing::error!(
@@ -2106,7 +2225,7 @@ fn store_remembered_memory_with_retry(
                 if memory_exists_after_commit_ambiguity(connection, memory_id)? {
                     return Ok(());
                 }
-                if attempt + 1 < MAX_ATTEMPTS {
+                if attempt + 1 < REMEMBER_CONTENTION_MAX_ATTEMPTS {
                     std::thread::sleep(remember_write_retry_delay(attempt));
                 } else {
                     return Err(DomainError::Storage {
@@ -2132,6 +2251,48 @@ fn store_remembered_memory_with_retry(
     })
 }
 
+fn emit_remember_audit_events(
+    connection: &DbConnection,
+    audit_lane: Option<&AuditLaneHandle>,
+    memory_id: &str,
+    audit_id: &str,
+    memory_input: &CreateMemoryInput,
+    audit_details: &str,
+    policy_bypass: Option<&RememberPolicyBypassReport>,
+) -> crate::db::Result<()> {
+    let memory_audit = CreateAuditInput {
+        workspace_id: Some(memory_input.workspace_id.clone()),
+        actor: Some("ee remember".to_owned()),
+        action: audit_actions::MEMORY_CREATE.to_owned(),
+        target_type: Some("memory".to_owned()),
+        target_id: Some(memory_id.to_owned()),
+        details: Some(audit_details.to_owned()),
+    };
+    emit_with_direct_fallback(
+        audit_lane,
+        AuditLaneEvent::from_audit_input(audit_id, 1, &memory_audit),
+        |event| insert_audit_event(connection, event),
+    )?;
+    if let Some(policy_bypass) = policy_bypass {
+        if let Some(policy_audit_id) = policy_bypass.audit_id.as_deref() {
+            let policy_audit = CreateAuditInput {
+                workspace_id: Some(memory_input.workspace_id.clone()),
+                actor: Some("ee remember".to_owned()),
+                action: audit_actions::POLICY_BYPASS.to_owned(),
+                target_type: Some("memory".to_owned()),
+                target_id: Some(memory_id.to_owned()),
+                details: Some(policy_bypass_audit_details(policy_bypass)),
+            };
+            emit_with_direct_fallback(
+                audit_lane,
+                AuditLaneEvent::from_audit_input(policy_audit_id, 2, &policy_audit),
+                |event| insert_audit_event(connection, event),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn memory_exists_after_commit_ambiguity(
     connection: &DbConnection,
     memory_id: &str,
@@ -2151,6 +2312,9 @@ fn remember_write_contention_is_retryable(error: &impl ToString) -> bool {
         || message.contains("snapshot conflict")
         || message.contains("database is locked")
         || message.contains("sqlite_busy")
+        || message.contains("could not acquire database write lock")
+        || message.contains("index publish lock contention")
+        || message.contains("resource temporarily unavailable")
 }
 
 fn remember_write_retry_delay(attempt: usize) -> Duration {
@@ -2741,18 +2905,22 @@ fn remember_candidate_cluster(
     let required_tags = memory_input.tags.iter().cloned().collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
     let mut cluster = Vec::new();
-    for candidate_id in std::iter::once(memory_id.to_owned()).chain(member_ids) {
-        if !seen.insert(candidate_id.clone()) {
-            continue;
-        }
-        let Some(memory) =
-            connection
-                .get_memory(&candidate_id)
-                .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to load curation neighbor memory: {error}"),
-                    repair: Some("ee doctor --json".to_owned()),
-                })?
-        else {
+    let candidate_ids: Vec<String> = std::iter::once(memory_id.to_owned())
+        .chain(member_ids)
+        .filter(|id| seen.insert(id.clone()))
+        .collect();
+
+    let batch_ids = candidate_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+    let batch_result =
+        connection
+            .get_memories_batch(&batch_ids)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to load curation neighbor memory: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+
+    for candidate_id in candidate_ids {
+        let Some(memory) = batch_result.get(&candidate_id).cloned() else {
             continue;
         };
         if memory.workspace_id != workspace_id
@@ -6010,6 +6178,101 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    #[test]
+    fn store_remembered_memory_queues_audit_when_lane_is_enabled() -> TestResult {
+        use crate::core::audit_lane::{AuditLane, AuditLaneConfig, insert_audit_event_batch};
+
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+
+        let workspace_id = "wsp_01234567890123456789012345";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: "/tmp/audit-lane-memory-test".to_owned(),
+                    name: Some("audit lane memory test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let memory_id = "mem_auditlane000000000000000001";
+        let audit_id = "audit_auditlane00000000000000001";
+        let index_job_id = "sidx_auditlane000000000000000001";
+        let memory_input = CreateMemoryInput {
+            workspace_id: workspace_id.to_owned(),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            content: "Route remember audit through the audit lane.".to_owned(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.5,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+            trust_subclass: None,
+            tags: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+        };
+        let index_input = CreateSearchIndexJobInput {
+            workspace_id: workspace_id.to_owned(),
+            job_type: SearchIndexJobType::SingleDocument,
+            document_source: Some("memory".to_owned()),
+            document_id: Some(memory_id.to_owned()),
+            documents_total: 1,
+        };
+        let (handle, mut lane) = AuditLane::new(AuditLaneConfig {
+            capacity: 4,
+            batch_size: 4,
+            shutdown_event_limit: 4,
+        });
+
+        store_remembered_memory_with_retry(
+            &connection,
+            memory_id,
+            audit_id,
+            index_job_id,
+            &memory_input,
+            "{}",
+            &index_input,
+            None,
+            Some(&handle),
+        )
+        .map_err(|error| error.to_string())?;
+
+        ensure(
+            connection
+                .get_audit(audit_id)
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            true,
+            "enabled lane skips direct audit insert",
+        )?;
+        let report = lane.drain_available(|batch| {
+            insert_audit_event_batch(&connection, batch)
+                .expect("drained audit events should batch insert");
+        });
+        ensure(report.drained_events, 1, "drained event count")?;
+
+        let audit = connection
+            .get_audit(audit_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "drained audit row missing".to_owned())?;
+        ensure(
+            audit.action,
+            audit_actions::MEMORY_CREATE.to_owned(),
+            "audit action",
+        )?;
+        ensure(
+            audit.target_id,
+            Some(memory_id.to_owned()),
+            "audit target id",
+        )?;
+
+        connection.close().map_err(|error| error.to_string())
     }
 
     fn freshness_memory(content: &str, provenance_uri: Option<String>) -> StoredMemory {

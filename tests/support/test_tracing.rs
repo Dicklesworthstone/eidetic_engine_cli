@@ -160,6 +160,9 @@ pub fn normalize_trace_jsonl(path: &Path) -> Result<String, String> {
         let object = value
             .as_object()
             .ok_or_else(|| format!("trace line {} is not a JSON object", line_number + 1))?;
+        if object.get("target").and_then(Value::as_str) != Some("ee.test_tracing") {
+            continue;
+        }
         let fields = object
             .get("fields")
             .and_then(Value::as_object)

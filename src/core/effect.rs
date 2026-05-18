@@ -1548,7 +1548,7 @@ impl EffectManifest {
             CommandEffect::durable_write(
                 "remember",
                 vec!["memories", "memory_tags", "audit_log"],
-                "Store a new memory",
+                "Store a new memory with direct or audit-lane-backed audit_log provenance",
             ),
             CommandEffect::durable_write(
                 "memory expire",

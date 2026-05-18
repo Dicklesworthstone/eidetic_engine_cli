@@ -4,8 +4,9 @@
 planned under `bd-wp5ac`. The lane moves high-volume audit emission off the
 foreground mutation path without weakening the audit hash chain.
 
-This page documents the contract for the implementation slices that follow.
-It does not claim the runtime queue is already wired.
+This page documents the contract for the implementation slices. The bounded
+queue, batch sink, and conservative `ee remember` foreground fallback are wired;
+the process-wide lane lifecycle remains a later integration step.
 
 ## Event Contract
 
@@ -44,6 +45,26 @@ When the producer queue is full, the foreground operation must receive an
 foreground durable mutation may continue only if the implementation can either
 enqueue the audit event later or explicitly report that audit durability is
 degraded for that request.
+
+## Foreground Fallback
+
+Until the audit lane is enabled for a call site, foreground operations keep the
+existing direct `audit_log` insert behavior. Integration code should route
+events through `emit_with_direct_fallback`: when no lane handle is configured it
+executes the direct insert path; when enqueue succeeds it skips the direct path;
+when the lane is full it reports `audit_backpressure` and executes the direct
+insert path; when the lane is closed it executes the direct insert path without
+claiming queue durability.
+
+This fallback is deliberately conservative. Enabling the lane must be
+byte-stable for ordinary responses when the queue accepts events, and disabled
+lane behavior must remain identical to the pre-lane direct insert path.
+
+The current `ee remember` call site routes its memory-create and policy-bypass
+audit rows through this helper. Public CLI execution still passes no lane handle,
+so it keeps the pre-lane direct `audit_log` insert behavior. Unit coverage may
+inject a lane handle to prove the enqueue path and then drain the resulting
+events into `insert_audit_batch`.
 
 ## Shutdown
 

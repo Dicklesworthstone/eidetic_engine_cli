@@ -156,6 +156,16 @@ p50_ms_max = 120.0
 p99_ms_max = 350.0
 description = "Write audited memories through four concurrent writer threads"
 
+[operations.ee_audit_lane_enqueue]
+p50_ms_max = 0.5
+p99_ms_max = 2.0
+description = "Enqueue and drain 128 audit lane events from 64 foreground producers"
+
+[operations.ee_audit_lane_batch_commit]
+p50_ms_max = 20.0
+p99_ms_max = 100.0
+description = "Persist a 128-event audit lane batch into the audit log"
+
 [operations.ee_import_cass]
 p50_ms_max = 4100.0
 p99_ms_max = 11000.0
