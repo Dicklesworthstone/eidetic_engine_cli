@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -280,6 +282,17 @@ jobs:
                 "wrong_version_count": 1,
             },
         )
+
+    def test_parse_args_all_groups_selects_every_known_group(self) -> None:
+        args = self.mod.parse_args(["--all-groups"])
+        self.assertEqual(
+            self.mod.selected_groups(args),
+            sorted(self.mod.GROUPS),
+        )
+
+    def test_parse_args_rejects_all_groups_with_explicit_group(self) -> None:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.mod.parse_args(["--all-groups", "--group", "fnx"])
 
 
 if __name__ == "__main__":

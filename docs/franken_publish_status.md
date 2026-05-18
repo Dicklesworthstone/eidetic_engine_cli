@@ -17,6 +17,12 @@ Markdown for a tracker comment:
 scripts/franken_publish_status.py --group fnx --markdown
 ```
 
+Full refresh across every known franken-stack group:
+
+```bash
+scripts/franken_publish_status.py --all-groups --markdown
+```
+
 When multiple groups are selected, the Markdown output starts with a compact
 aggregate line, for example:
 

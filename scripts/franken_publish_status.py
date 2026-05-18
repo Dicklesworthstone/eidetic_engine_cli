@@ -469,10 +469,14 @@ def render_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def selected_groups(args: argparse.Namespace) -> list[str]:
+    return sorted(GROUPS) if args.all_groups else (args.group if args.group else ["fnx"])
+
+
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
-    selected_groups = args.group if args.group else ["fnx"]
+    groups_to_evaluate = selected_groups(args)
     groups = []
-    for group in selected_groups:
+    for group in groups_to_evaluate:
         spec = GROUPS[group]
         root = Path(args.root_override or args.roots.get(group) or spec["default_root"]).expanduser()
         fixtures_dir = Path(args.fixtures_dir).expanduser() if args.fixtures_dir else None
@@ -497,6 +501,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--group", action="append", choices=sorted(GROUPS), help="dependency group to inspect")
+    parser.add_argument(
+        "--all-groups",
+        action="store_true",
+        help="inspect every known dependency group in deterministic order",
+    )
     parser.add_argument("--fixtures-dir", help="directory of crates.io response fixtures named <crate>.json")
     parser.add_argument("--generated-at", help="override generated_at for deterministic tests")
     parser.add_argument("--timeout", type=float, default=10.0, help="crates.io API timeout in seconds")
@@ -506,6 +515,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     for group in sorted(GROUPS):
         parser.add_argument(f"--{group}-root", dest=f"{group}_root", help=f"override {group} sibling root")
     args = parser.parse_args(argv)
+    if args.all_groups and args.group:
+        parser.error("--all-groups cannot be combined with --group")
     args.roots = {group: getattr(args, f"{group}_root") for group in GROUPS}
     return args
 
