@@ -128,9 +128,7 @@ pub(crate) fn configured_workspace_redaction_default(
     workspace_path: &Path,
     surface: RedactionDefaultSurface,
 ) -> Option<RedactionLevel> {
-    let Some(contents) = workspace_config_contents(workspace_path) else {
-        return None;
-    };
+    let contents = workspace_config_contents(workspace_path)?;
     let Ok(config) = ConfigFile::parse(&contents) else {
         return None;
     };
@@ -143,9 +141,16 @@ pub(crate) fn configured_workspace_redaction_default(
 }
 
 fn workspace_config_contents(workspace_path: &Path) -> Option<String> {
-    read_workspace_config_contents(workspace_path)
-        .ok()
-        .flatten()
+    let config_path = workspace_path.join(".ee").join("config.toml");
+    if !config_path.exists() {
+        return None;
+    }
+    std::fs::read_to_string(config_path).ok()
+}
+
+pub fn workspace_config(workspace_path: &Path) -> Option<ConfigFile> {
+    let contents = workspace_config_contents(workspace_path)?;
+    ConfigFile::parse(&contents).ok()
 }
 
 pub(crate) fn read_workspace_config_contents(
@@ -230,6 +235,7 @@ mod tests {
     use super::{
         RedactionDefaultSurface, subsystem_name, trace_minhash_rank_centrality_config,
         workspace_output_redaction_enabled, workspace_redaction_default,
+        first_existing_config_symlink_component, open_workspace_config_file_for_read,
     };
     use crate::models::RedactionLevel;
 

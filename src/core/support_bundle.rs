@@ -1596,20 +1596,18 @@ fn singleflight_posture_json() -> String {
 fn qos_lane_summary_json(workspace: &Path) -> String {
     let workspace_identity = workspace.to_string_lossy();
     let now_epoch_ms = Utc::now().timestamp_millis().try_into().unwrap_or_default();
+    // EE-QOS-001: QoS lane summary (safe to bundle unredacted, keys are abstract)
     let value = serde_json::to_value(super::qos::summarize_qos_lane_registry(
         workspace,
         &workspace_identity,
         now_epoch_ms,
     ))
-    .map_or_else(
-        |error| {
-            json!({
-                "schema": "ee.support_bundle.serialization_error.v1",
-                "message": error.to_string(),
-            })
-        },
-        |value| value,
-    );
+    .unwrap_or_else(|error| {
+        json!({
+            "schema": "ee.support_bundle.serialization_error.v1",
+            "message": error.to_string(),
+        })
+    });
     stable_json(&value)
 }
 

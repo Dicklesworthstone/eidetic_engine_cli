@@ -65,6 +65,9 @@ fn inferred_command_name(args: &[OsString]) -> String {
                 | "--format"
                 | "--schema-version"
                 | "--fields"
+                | "--cards"
+                | "--policy"
+                | "--shadow"
         ) {
             skip_next = true;
             continue;
@@ -75,6 +78,9 @@ fn inferred_command_name(args: &[OsString]) -> String {
             || value.starts_with("--format=")
             || value.starts_with("--schema-version=")
             || value.starts_with("--fields=")
+            || value.starts_with("--cards=")
+            || value.starts_with("--policy=")
+            || value.starts_with("--shadow=")
             || value.starts_with('-')
         {
             continue;

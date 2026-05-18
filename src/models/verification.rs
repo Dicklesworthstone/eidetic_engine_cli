@@ -663,7 +663,7 @@ pub fn compile_blocker_cache_entry(
     input: CompileBlockerCacheInput<'_>,
 ) -> Option<CompileBlockerCacheEntry> {
     let record = input.record;
-    if !record.exit_code.is_some_and(|code| code != 0) {
+    if record.exit_code.is_none_or(|code| code == 0) {
         return None;
     }
 

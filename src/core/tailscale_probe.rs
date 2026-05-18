@@ -704,7 +704,6 @@ pub fn classify_binary(
     }
 }
 
-#[must_use]
 pub fn validate_binary_path(path: &Path) -> Result<(), TailscaleProbeDegradation> {
     if path.is_absolute() {
         return Ok(());

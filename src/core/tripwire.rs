@@ -2094,15 +2094,17 @@ mod tests {
 
         let json = proposal.to_json().to_string();
 
-        ensure(json.contains("[REDACTED_PATH]"), "path placeholder present")?;
-        ensure(json.contains("[REDACTED:"), "secret placeholder present")?;
+        ensure(json.contains("[REDACTED_PATH]"), true, "path placeholder present")?;
+        ensure(json.contains("[REDACTED:"), true, "secret placeholder present")?;
         ensure(
             !json.contains("/Users/alice"),
-            format!("source path leaked in proposal JSON: {json}"),
+            true,
+            &format!("source path leaked in proposal JSON: {json}"),
         )?;
         ensure(
             !json.contains("redaction-fixture"),
-            format!("source secret leaked in proposal JSON: {json}"),
+            true,
+            &format!("source secret leaked in proposal JSON: {json}"),
         )
     }
 

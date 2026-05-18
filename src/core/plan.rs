@@ -1169,7 +1169,12 @@ fn plan_preconditions(task_frame_posture: Option<&TaskFramePlanPosture>) -> Vec<
 /// Generate a pseudo-random ID (deterministic for testing when seeded).
 fn rand_id() -> u32 {
     let mut bytes = [0u8; 4];
-    let _ = getrandom::fill(&mut bytes);
+    if getrandom::fill(&mut bytes).is_err() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        return now.subsec_nanos() ^ (now.as_secs() as u32);
+    }
     u32::from_ne_bytes(bytes)
 }
 
@@ -1288,7 +1293,9 @@ impl PlanRecommendReport {
 #[must_use]
 pub fn recommend_recipes(options: &PlanRecommendOptions) -> PlanRecommendReport {
     let task_lower = options.task.to_lowercase();
-    let task_words: Vec<&str> = task_lower.split_whitespace().collect();
+    let mut task_words: Vec<&str> = task_lower.split_whitespace().collect();
+    task_words.sort_unstable();
+    task_words.dedup();
     let all_recipes = recipes_by_category(None);
     let total_recipes_considered = all_recipes.len();
 

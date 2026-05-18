@@ -240,7 +240,7 @@ pub fn build_snapshot_refreshed_payload(inputs: SnapshotRefreshedInputs<'_>) -> 
         target_type: SNAPSHOT_TARGET_TYPE,
         target_id: inputs.snapshot_id.to_owned(),
         mutation_kind: STATE_CHANGE_MUTATION_KIND,
-        details: serde_json::to_value(details).expect("BTreeMap<String, Value> serializes"),
+        details: serde_json::to_value(details).unwrap_or_else(|_| serde_json::Value::Null),
     }
 }
 

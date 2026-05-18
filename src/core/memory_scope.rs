@@ -1258,6 +1258,7 @@ fn mesh_decision(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mesh_peer_policy_decision(
     input: &MeshImportDecisionInput<'_>,
     policy_id: Option<String>,

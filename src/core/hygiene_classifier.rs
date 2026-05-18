@@ -934,14 +934,12 @@ fn source_test_docs_classification(
     }
 
     // Source.
-    if path.starts_with("src/") {
-        if lower.ends_with(".rs") {
-            return Some((
-                vec![reason::SRC_RUST_SOURCE],
-                CONFIDENCE_MEDIUM_HIGH,
-                (Kind::Source, "source"),
-            ));
-        }
+    if path.starts_with("src/") && lower.ends_with(".rs") {
+        return Some((
+            vec![reason::SRC_RUST_SOURCE],
+            CONFIDENCE_MEDIUM_HIGH,
+            (Kind::Source, "source"),
+        ));
     }
     if path == "Cargo.toml" {
         return Some((

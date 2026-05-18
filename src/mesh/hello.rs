@@ -649,8 +649,8 @@ mod tests {
         let req = fixture_request();
         let bytes = serialize_within_budget(&req).expect("under budget");
         assert!(bytes.len() < HELLO_PAYLOAD_BUDGET_BYTES);
-        let bytes_owned = bytes.into_owned();
-        let round_trip: HelloRequest = serde_json::from_slice(&bytes_owned).expect("round-trip");
+        let bytes_owned: &'static [u8] = bytes.leak();
+        let round_trip: HelloRequest = serde_json::from_slice(bytes_owned).expect("round-trip");
         assert_eq!(round_trip, req);
     }
 

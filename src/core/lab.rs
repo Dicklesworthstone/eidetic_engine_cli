@@ -1379,6 +1379,10 @@ fn hash_content(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::io::ErrorKind;
+    use std::path::PathBuf;
+    use crate::testing::ensure_equal;
 
     type TestResult = Result<(), String>;
 
@@ -1552,11 +1556,12 @@ mod tests {
 
         ensure(
             error.kind() != ErrorKind::NotFound,
+            true,
             "final symlink read should fail because the path is a symlink",
         )?;
         ensure_equal(
-            fs::read_to_string(&outside_artifact).map_err(|error| error.to_string())?,
-            "{\"schema\":\"outside\"}\n",
+            &fs::read_to_string(&outside_artifact).map_err(|error| error.to_string())?,
+            &"{\"schema\":\"outside\"}\n".to_string(),
             "outside artifact content",
         )?;
         ensure(
@@ -1564,6 +1569,7 @@ mod tests {
                 .map_err(|error| error.to_string())?
                 .file_type()
                 .is_symlink(),
+            true,
             "final artifact symlink remains untouched",
         )
     }

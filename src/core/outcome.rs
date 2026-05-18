@@ -2193,6 +2193,7 @@ mod tests {
 
     use crate::db::{
         CreateMemoryInput, CreateSessionInput, CreateWorkspaceInput, DbConnection, feedback_scoring,
+        CreateFeedbackEventInput, CreateFeedbackQuarantineInput, StoredFeedbackQuarantine,
     };
 
     use super::{
@@ -2203,6 +2204,7 @@ mod tests {
         OutcomeRecordReport, OutcomeRecordStatus, default_feedback_weight,
         generate_feedback_event_id, outcome_class, outcome_exit_code, record_outcome,
         record_outcome_seeded, validate_feedback_event_id,
+        outcome_audit_details, feedback_quarantine_audit_details, feedback_quarantine_review_audit_details,
     };
     use crate::models::{DomainError, ProcessExitCode};
     use crate::runtime::determinism::Deterministic;

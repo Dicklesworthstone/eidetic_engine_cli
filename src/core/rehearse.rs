@@ -1526,7 +1526,6 @@ fn generate_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
 
     type TestResult = Result<(), String>;
 

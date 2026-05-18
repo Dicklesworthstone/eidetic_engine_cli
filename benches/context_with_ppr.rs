@@ -2,9 +2,10 @@
 //!
 //! Group name: `ee_context_with_ppr`
 //!
-//! Measures the same 1k-memory fixture with PPR disabled and enabled so the
-//! bench job can track the PPR rerank overhead budget separately from the base
-//! context-pack SLO.
+//! Measures the same 1k-memory fixture with PPR disabled and enabled. The
+//! Criterion pair remains a full-context diagnostic; the 30ms budget applies to
+//! the instrumented `pprRerank` stage so search and persistence variance do not
+//! get misattributed to the graph reranker.
 
 #![allow(clippy::expect_used)]
 
@@ -260,6 +261,7 @@ impl OverheadAttribution {
         serde_json::json!({
             "schema": "ee.bench.context_with_ppr.attribution.v1",
             "budgetMs": PPR_OVERHEAD_P50_BUDGET_MS,
+            "budgetAppliesTo": "pprRerank",
             "deltasMs": {
                 "total": self.total_delta_ms,
                 "search": self.search_delta_ms,
@@ -320,7 +322,7 @@ fn emit_stage_diagnostics(workspace_path: &Path, db_path: &Path, index_dir: &Pat
         let attribution = OverheadAttribution::from_diagnostics(base, ppr);
         println!("ppr_overhead_attribution_json {}", attribution.to_json());
         println!(
-            "ppr_overhead_attribution total_delta_ms={:.3} search_delta_ms={:.3} candidate_resolution_delta_ms={:.3} ppr_rerank_delta_ms={:.3} pack_assembly_delta_ms={:.3} pack_persistence_delta_ms={:.3} residual_delta_ms={:.3} budget_ms={PPR_OVERHEAD_P50_BUDGET_MS:.3} total_budget_status={} ppr_rerank_budget_status={}",
+            "ppr_overhead_attribution total_delta_ms={:.3} search_delta_ms={:.3} candidate_resolution_delta_ms={:.3} ppr_rerank_delta_ms={:.3} pack_assembly_delta_ms={:.3} pack_persistence_delta_ms={:.3} residual_delta_ms={:.3} ppr_rerank_budget_ms={PPR_OVERHEAD_P50_BUDGET_MS:.3} total_budget_status={} ppr_rerank_budget_status={}",
             attribution.total_delta_ms,
             attribution.search_delta_ms,
             attribution.candidate_resolution_delta_ms,
@@ -441,6 +443,7 @@ mod tests {
         let json = attribution.to_json();
 
         assert_eq!(json["schema"], "ee.bench.context_with_ppr.attribution.v1");
+        assert_eq!(json["budgetAppliesTo"], "pprRerank");
         assert_close(json["deltasMs"]["total"].as_f64().unwrap(), 35.0);
         assert_close(json["deltasMs"]["search"].as_f64().unwrap(), 2.0);
         assert_close(

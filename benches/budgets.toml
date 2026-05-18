@@ -108,7 +108,7 @@ description = "Build 4k-token context pack; S4 resource-scale benchmark covers 1
 [operations.ee_context_with_ppr]
 p50_ms_max = 125.0
 p99_ms_max = 300.0
-description = "Build 4k-token context pack with PPR rerank enabled on a 1k-memory graph; p50 allows 30ms over base context"
+description = "Build 4k-token context pack with PPR rerank enabled on a 1k-memory graph; full-context deltas are diagnostic, while the 30ms PPR overhead budget applies to the instrumented pprRerank stage"
 
 [operations.ee_context_s4_resource_scales]
 p50_ms_max = 1000.0

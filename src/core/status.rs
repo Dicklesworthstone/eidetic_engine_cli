@@ -1476,7 +1476,7 @@ fn apply_tailscale_socket_override(
 fn mesh_enabled_for_tailscale_probe() -> bool {
     read_env_var(EnvVar::MeshEnabled)
         .as_deref()
-        .is_some_and(|value| matches_truthy_env(value))
+        .is_some_and(matches_truthy_env)
 }
 
 fn matches_truthy_env(value: &str) -> bool {

@@ -5852,7 +5852,7 @@ mod tests {
         AccessLevel, CandidateResolutionMetrics, CapabilitySet, CommandContext,
         ContextPerformanceTrace, PackSlotAcquisition, PerformanceTiming, ReadSnapshotTrace,
         candidate_selection_why, context_performance_json, focus_candidate_why, focus_relevance,
-        pack_assembly_slo_for_run, try_acquire_pack_slot, unit_score,
+        open_pack_slot_lock_file, pack_assembly_slo_for_run, try_acquire_pack_slot, unit_score,
     };
     use crate::config::{ReadPoolConfig, WorkspaceLocation};
     use crate::core::budget::RequestBudget;
