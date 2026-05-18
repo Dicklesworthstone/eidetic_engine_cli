@@ -184,13 +184,19 @@ use crate::core::rule::{
 use crate::core::search::{
     SearchDegradation, SearchOptions, SearchReport, SearchSourceMode, run_diag_search, run_search,
 };
-use crate::core::status::{StatusOptions, StatusReport, StatusSkylineReport};
+use crate::core::status::{
+    StatusOptions, StatusReport, StatusSkylineReport, WalStatusReport,
+    wal_checkpoint_bytes_threshold,
+};
 use crate::core::swarm_brief::{
     SwarmBriefCollectOptions, SwarmBriefReport, SwarmBriefSourceKind, SwarmBriefSourceStatus,
     SystemSwarmBriefCommandRunner, all_swarm_brief_sources, collect_swarm_brief,
     default_swarm_brief_sources,
 };
-use crate::core::swarm_next_action::{SwarmNextActionSnapshot, collect_swarm_next_action_snapshot};
+use crate::core::swarm_next_action::{
+    SwarmNextActionSnapshot, collect_swarm_next_action_snapshot_with_verifier_evidence,
+    verifier_evidence_from_json,
+};
 use crate::core::task_frame::{
     TaskEvidenceLink, TaskFrameCloseOptions, TaskFrameCreateOptions, TaskFrameReport,
     TaskFrameShowOptions, TaskFrameStatus, TaskFrameUpdateOptions, TaskSubgoalAddOptions,
@@ -1663,6 +1669,8 @@ pub struct ServeArgs {
 pub enum MaintenanceCommand {
     /// Run a bounded maintenance job now.
     Run(MaintenanceRunArgs),
+    /// Checkpoint the workspace WAL sidecar through the explicit writer path.
+    WalCheckpoint(MaintenanceWalCheckpointArgs),
     /// Prune archived graph snapshots using the graph snapshot lifecycle policy.
     GraphSnapshotPrune(MaintenanceGraphSnapshotPruneArgs),
     /// Prune graph algorithm witnesses past retention and not tied to active snapshots.
@@ -1804,6 +1812,46 @@ pub struct MaintenanceGraphWitnessesPruneArgs {
     /// Override one algorithm TTL as <algorithm>=<days>; repeatable.
     #[arg(long = "algorithm-ttl", value_name = "NAME=DAYS")]
     pub algorithm_ttl: Vec<String>,
+}
+
+/// Arguments for `ee maintenance wal-checkpoint`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct MaintenanceWalCheckpointArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// SQLite checkpoint mode to run.
+    #[arg(long, value_enum, default_value_t = MaintenanceWalCheckpointMode::Passive)]
+    pub mode: MaintenanceWalCheckpointMode,
+
+    /// Report current WAL status without running a checkpoint.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum MaintenanceWalCheckpointMode {
+    Passive,
+    Truncate,
+}
+
+impl From<MaintenanceWalCheckpointMode> for crate::db::WalCheckpointMode {
+    fn from(value: MaintenanceWalCheckpointMode) -> Self {
+        match value {
+            MaintenanceWalCheckpointMode::Passive => Self::Passive,
+            MaintenanceWalCheckpointMode::Truncate => Self::Truncate,
+        }
+    }
+}
+
+impl MaintenanceWalCheckpointMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Passive => "passive",
+            Self::Truncate => "truncate",
+        }
+    }
 }
 
 /// Arguments for `ee maintenance status`.
@@ -5826,6 +5874,8 @@ pub enum WorkspaceCommand {
     List(WorkspaceListArgs),
     /// Set or clear a human alias for a registered workspace.
     Alias(WorkspaceAliasArgs),
+    /// Report dirty-path hygiene and commit-readiness guidance.
+    Hygiene(WorkspaceHygieneArgs),
 }
 
 /// Arguments for `ee workspace resolve`.
@@ -5839,6 +5889,18 @@ pub struct WorkspaceResolveArgs {
 /// Arguments for `ee workspace list`.
 #[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
 pub struct WorkspaceListArgs {}
+
+/// Arguments for `ee workspace hygiene`.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct WorkspaceHygieneArgs {
+    /// Agent name to treat as the current reservation holder when overlays are available.
+    #[arg(long, value_name = "NAME")]
+    pub agent_name: Option<String>,
+
+    /// Redacted Agent Mail snapshot JSON to apply as a read-only coordination overlay.
+    #[arg(long = "agent-mail-snapshot", value_name = "PATH")]
+    pub agent_mail_snapshot: Option<PathBuf>,
+}
 
 /// Arguments for `ee workspace alias`.
 #[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
@@ -8077,6 +8139,10 @@ pub struct SwarmNextActionArgs {
     #[arg(long, value_name = "PATH")]
     pub agent_mail_snapshot: Option<PathBuf>,
 
+    /// Recent ee.rch.verify.v1 proof JSON to include for compile-health preflight.
+    #[arg(long, value_name = "PATH")]
+    pub verifier_evidence: Option<PathBuf>,
+
     /// Comma-separated agent connector slugs to inspect when agent-inventory is enabled.
     #[arg(long, value_name = "SLUGS")]
     pub agent_inventory_only: Option<String>,
@@ -8447,6 +8513,9 @@ where
         Some(Command::Job(ref job_cmd)) => handle_job(&cli, job_cmd, stdout),
         Some(Command::Maintenance(ref maintenance_cmd)) => match maintenance_cmd {
             MaintenanceCommand::Run(args) => handle_maintenance_run(&cli, args, stdout),
+            MaintenanceCommand::WalCheckpoint(args) => {
+                handle_maintenance_wal_checkpoint(&cli, args, stdout)
+            }
             MaintenanceCommand::GraphSnapshotPrune(args) => {
                 handle_maintenance_graph_snapshot_prune(&cli, args, stdout)
             }
@@ -12629,6 +12698,17 @@ where
                 Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
             }
         }
+        WorkspaceCommand::Hygiene(args) => {
+            let options = workspace_core::WorkspaceHygieneOptions {
+                workspace_path: cli.resolve_workspace(),
+                self_agent_name: args.agent_name.clone(),
+                agent_mail_snapshot_path: args.agent_mail_snapshot.clone(),
+            };
+            match workspace_core::build_workspace_hygiene_report(&options) {
+                Ok(report) => render_workspace_hygiene(cli, &report, stdout),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            }
+        }
     }
 }
 
@@ -12748,6 +12828,55 @@ where
             &format!(
                 "workspace_resolve: source={} id={} root={}\n",
                 report.source, report.workspace_id, report.root
+            ),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(workspace_response_json(report) + "\n")),
+    }
+}
+
+fn render_workspace_hygiene<W>(
+    cli: &Cli,
+    report: &workspace_core::WorkspaceHygieneReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let mut out = format!(
+                "Workspace hygiene: {} dirty paths\nRepository: {}\n",
+                report.dirty_path_count, report.repository_root
+            );
+            if !report.bucket_counts.is_empty() {
+                out.push_str("\nBuckets:\n");
+                for count in &report.bucket_counts {
+                    out.push_str(&format!("  {}: {}\n", count.name, count.count));
+                }
+            }
+            if !report.staging_groups.is_empty() {
+                out.push_str("\nStage candidates:\n");
+                for group in &report.staging_groups {
+                    out.push_str(&format!("  {}: {} paths\n", group.name, group.paths.len()));
+                }
+            }
+            if !report.degraded_codes.is_empty() {
+                out.push_str("\nDegraded:\n");
+                for code in &report.degraded_codes {
+                    out.push_str(&format!("  {code}\n"));
+                }
+            }
+            write_stdout(stdout, &out)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &format!(
+                "workspace_hygiene: dirty_paths={} degraded={}\n",
+                report.dirty_path_count,
+                report.degraded_codes.len()
             ),
         ),
         output::Renderer::Json
@@ -18821,7 +18950,11 @@ where
             workspace_id: workspace_id.clone(),
             failure_id: args.failure_id.clone(),
             candidate_cause_id: args.candidate_cause_id.clone(),
-            contribution_score: if args.contribution_score.is_nan() { 0.0 } else { args.contribution_score.clamp(0.0, 1.0) },
+            contribution_score: if args.contribution_score.is_nan() {
+                0.0
+            } else {
+                args.contribution_score.clamp(0.0, 1.0)
+            },
             evidence_uris: evidence_uris.clone(),
             computed_at: args.computed_at.clone(),
             method,
@@ -21190,14 +21323,14 @@ where
             write_stdout(stdout, &proximity_human_output(report))
         }
         output::Renderer::Toon => {
-            let json = serde_json::to_string(report).unwrap_or_else(|_| "{}".to_string());
+            let json = serde_json::to_string(report).unwrap_or_else(|_| r#"{"schema":"ee.error.v1","error":"serialization_failed"}"#.to_string());
             write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
         }
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
-            let json = serde_json::to_string(report).unwrap_or_else(|_| "{}".to_string());
+            let json = serde_json::to_string(report).unwrap_or_else(|_| r#"{"schema":"ee.error.v1","error":"serialization_failed"}"#.to_string());
             write_stdout(stdout, &(json + "\n"))
         }
     }
@@ -35453,6 +35586,264 @@ where
     )
 }
 
+fn handle_maintenance_wal_checkpoint<W>(
+    cli: &Cli,
+    args: &MaintenanceWalCheckpointArgs,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let (workspace_path, workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
+    let selected_workspace = selected_maintenance_workspace_path(
+        workspace_path,
+        workspace_source,
+        args.database.is_some(),
+    );
+    let database_path = args.database.clone().unwrap_or_else(|| {
+        selected_workspace
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".ee")
+            .join("ee.db")
+    });
+    let threshold = wal_checkpoint_bytes_threshold();
+    if !database_path.exists() {
+        let data = serde_json::json!({
+            "schema": MAINTENANCE_RUN_SCHEMA_V1,
+            "command": "maintenance wal-checkpoint",
+            "requestedJob": "wal_checkpoint",
+            "workspace": selected_workspace
+                .as_deref()
+                .map(|workspace_path| workspace_path.display().to_string()),
+            "databasePath": database_path.display().to_string(),
+            "dryRun": args.dry_run,
+            "mode": args.mode.as_str(),
+            "durableMutation": false,
+            "summary": {
+                "total": 1,
+                "succeeded": 0,
+                "skipped": 0,
+                "failed": 1,
+            },
+            "code": "wal_checkpoint_database_missing",
+            "severity": "medium",
+            "message": format!("Database not found at {}", database_path.display()),
+            "repair": "Run ee init --workspace . before checkpointing the WAL.",
+        });
+        return write_maintenance_response(cli, stdout, false, data);
+    }
+
+    let lock_holder = format!(
+        "ee-maintenance_wal_checkpoint-{}",
+        uuid::Uuid::now_v7().simple()
+    );
+    let _lock = if args.dry_run {
+        None
+    } else if let Some(workspace_path) = selected_workspace.as_ref() {
+        Some(
+            match crate::steward::try_acquire_maintenance_job_lock(workspace_path, &lock_holder) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    let data = serde_json::json!({
+                        "schema": MAINTENANCE_RUN_SCHEMA_V1,
+                        "command": "maintenance wal-checkpoint",
+                        "requestedJob": "wal_checkpoint",
+                        "workspace": workspace_path.display().to_string(),
+                        "databasePath": database_path.display().to_string(),
+                        "dryRun": args.dry_run,
+                        "mode": args.mode.as_str(),
+                        "durableMutation": false,
+                        "summary": {
+                            "total": 1,
+                            "succeeded": 0,
+                            "skipped": 0,
+                            "failed": 1,
+                        },
+                        "checkpoint": null,
+                        "degraded": [error.data_json()],
+                    });
+                    return write_maintenance_response(cli, stdout, false, data);
+                }
+            },
+        )
+    } else {
+        None
+    };
+
+    let connection = if args.dry_run {
+        crate::db::DbConnection::open_schema_only(&database_path)
+    } else {
+        crate::db::DbConnection::open_file(&database_path)
+    };
+    let connection = match connection {
+        Ok(connection) => connection,
+        Err(error) => {
+            let data = serde_json::json!({
+                "schema": MAINTENANCE_RUN_SCHEMA_V1,
+                "command": "maintenance wal-checkpoint",
+                "requestedJob": "wal_checkpoint",
+                "workspace": selected_workspace
+                    .as_deref()
+                    .map(|workspace_path| workspace_path.display().to_string()),
+                "databasePath": database_path.display().to_string(),
+                "dryRun": args.dry_run,
+                "mode": args.mode.as_str(),
+                "durableMutation": false,
+                "summary": {
+                    "total": 1,
+                    "succeeded": 0,
+                    "skipped": 0,
+                    "failed": 1,
+                },
+                "code": "wal_checkpoint_open_failed",
+                "severity": "high",
+                "message": format!("Failed to open database {}: {error}", database_path.display()),
+                "repair": "Run ee doctor --json and retry ee maintenance wal-checkpoint --dry-run --json.",
+            });
+            return write_maintenance_response(cli, stdout, false, data);
+        }
+    };
+
+    if args.dry_run {
+        let before = match connection.wal_status() {
+            Ok(status) => WalStatusReport::from_wal_status(status, threshold),
+            Err(error) => {
+                let data = serde_json::json!({
+                    "schema": MAINTENANCE_RUN_SCHEMA_V1,
+                    "command": "maintenance wal-checkpoint",
+                    "requestedJob": "wal_checkpoint",
+                    "workspace": selected_workspace
+                        .as_deref()
+                        .map(|workspace_path| workspace_path.display().to_string()),
+                    "databasePath": database_path.display().to_string(),
+                    "dryRun": true,
+                    "mode": args.mode.as_str(),
+                    "durableMutation": false,
+                    "summary": {
+                        "total": 1,
+                        "succeeded": 0,
+                        "skipped": 0,
+                        "failed": 1,
+                    },
+                    "code": "wal_checkpoint_status_failed",
+                    "severity": "medium",
+                    "message": format!("Failed to inspect WAL status: {error}"),
+                    "repair": "Run ee doctor --json and inspect database sidecar permissions.",
+                });
+                return write_maintenance_response(cli, stdout, false, data);
+            }
+        };
+        let data = serde_json::json!({
+            "schema": MAINTENANCE_RUN_SCHEMA_V1,
+            "command": "maintenance wal-checkpoint",
+            "requestedJob": "wal_checkpoint",
+            "workspace": selected_workspace
+                .as_deref()
+                .map(|workspace_path| workspace_path.display().to_string()),
+            "databasePath": database_path.display().to_string(),
+            "dryRun": true,
+            "mode": args.mode.as_str(),
+            "durableMutation": false,
+            "summary": {
+                "total": 1,
+                "succeeded": 0,
+                "skipped": 1,
+                "failed": 0,
+                "beforeBytes": before.bytes,
+                "afterBytes": before.bytes,
+                "bytesReduced": 0,
+                "thresholdExceededBefore": before.exceeds_threshold(),
+                "thresholdExceededAfter": before.exceeds_threshold(),
+                "busy": false,
+            },
+            "checkpoint": null,
+            "before": wal_status_report_json(&before),
+            "after": wal_status_report_json(&before),
+            "next": "ee maintenance wal-checkpoint --workspace . --json",
+        });
+        return write_maintenance_response(cli, stdout, true, data);
+    }
+
+    let checkpoint = match connection.wal_checkpoint(args.mode.into()) {
+        Ok(report) => report,
+        Err(error) => {
+            let data = serde_json::json!({
+                "schema": MAINTENANCE_RUN_SCHEMA_V1,
+                "command": "maintenance wal-checkpoint",
+                "requestedJob": "wal_checkpoint",
+                "workspace": selected_workspace
+                    .as_deref()
+                    .map(|workspace_path| workspace_path.display().to_string()),
+                "databasePath": database_path.display().to_string(),
+                "dryRun": false,
+                "mode": args.mode.as_str(),
+                "durableMutation": false,
+                "summary": {
+                    "total": 1,
+                    "succeeded": 0,
+                    "skipped": 0,
+                    "failed": 1,
+                },
+                "code": "wal_checkpoint_failed",
+                "severity": "high",
+                "message": format!("Failed to run WAL checkpoint: {error}"),
+                "repair": "Inspect active read-pool pins with ee status --json, then retry ee maintenance wal-checkpoint --mode truncate --json.",
+            });
+            return write_maintenance_response(cli, stdout, false, data);
+        }
+    };
+    let before = WalStatusReport::from_wal_status(checkpoint.before.clone(), threshold);
+    let after = WalStatusReport::from_wal_status(checkpoint.after.clone(), threshold);
+    let data = serde_json::json!({
+        "schema": MAINTENANCE_RUN_SCHEMA_V1,
+        "command": "maintenance wal-checkpoint",
+        "requestedJob": "wal_checkpoint",
+        "workspace": selected_workspace
+            .as_deref()
+            .map(|workspace_path| workspace_path.display().to_string()),
+        "databasePath": database_path.display().to_string(),
+        "dryRun": false,
+        "mode": checkpoint.mode.as_str(),
+        "durableMutation": true,
+        "summary": {
+            "total": 1,
+            "succeeded": 1,
+            "skipped": 0,
+            "failed": 0,
+            "beforeBytes": before.bytes,
+            "afterBytes": after.bytes,
+            "bytesReduced": before.bytes.saturating_sub(after.bytes),
+            "thresholdExceededBefore": before.exceeds_threshold(),
+            "thresholdExceededAfter": after.exceeds_threshold(),
+            "busy": checkpoint.busy,
+        },
+        "checkpoint": {
+            "busy": checkpoint.busy,
+            "logFrames": checkpoint.log_frames,
+            "checkpointedFrames": checkpoint.checkpointed_frames,
+        },
+        "before": wal_status_report_json(&before),
+        "after": wal_status_report_json(&after),
+        "next": if after.exceeds_threshold() {
+            "ee maintenance wal-checkpoint --workspace . --mode truncate --json"
+        } else {
+            "ee status --workspace . --json"
+        },
+    });
+    write_maintenance_response(cli, stdout, true, data)
+}
+
+fn wal_status_report_json(report: &WalStatusReport) -> serde_json::Value {
+    serde_json::json!({
+        "bytes": report.bytes,
+        "frames": report.frames,
+        "pageSize": report.page_size,
+        "checkpointThresholdBytes": report.checkpoint_threshold_bytes,
+        "exceedsThreshold": report.exceeds_threshold(),
+    })
+}
+
 fn handle_maintenance_graph_witnesses_prune<W>(
     cli: &Cli,
     args: &MaintenanceGraphWitnessesPruneArgs,
@@ -36091,6 +36482,13 @@ where
                 "description": job_type.description(),
                 "run": format!("ee job run {} --json", job_type.as_str()),
             }))
+            .chain(std::iter::once(serde_json::json!({
+                "name": "wal_checkpoint",
+                "available": true,
+                "stewardJobType": null,
+                "description": "Checkpoint the workspace WAL sidecar through the explicit writer path",
+                "run": "ee maintenance wal-checkpoint --json",
+            })))
             .collect::<Vec<_>>(),
         "historyPath": maintenance_job_history_path(
             &cli.resolve_workspace()
@@ -36513,6 +36911,7 @@ fn maintenance_degraded_source(data: &serde_json::Value) -> &'static str {
     match data["command"].as_str() {
         Some("maintenance graph-witnesses-prune") => "graph_witness_prune",
         Some("maintenance graph-snapshot-prune") => "graph_snapshot_prune",
+        Some("maintenance wal-checkpoint") => "wal_checkpoint",
         Some("job run" | "maintenance run") => "maintenance_run",
         _ => "maintenance",
     }
@@ -37321,8 +37720,16 @@ where
         .map(parse_comma_separated_values);
     options.command_timeout_ms = args.command_timeout_ms;
 
+    let verifier_evidence = match read_swarm_next_action_verifier_evidence(args) {
+        Ok(evidence) => evidence,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
     let runner = SystemSwarmBriefCommandRunner;
-    let snapshot = collect_swarm_next_action_snapshot(&options, &runner);
+    let snapshot = collect_swarm_next_action_snapshot_with_verifier_evidence(
+        &options,
+        &runner,
+        &verifier_evidence,
+    );
     let unavailable_sources = swarm_next_action_unavailable_sources(&snapshot);
     if args.require_sources && !unavailable_sources.is_empty() {
         let error = DomainError::UnsatisfiedDegradedMode {
@@ -37455,6 +37862,30 @@ fn parse_comma_separated_values(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn read_swarm_next_action_verifier_evidence(
+    args: &SwarmNextActionArgs,
+) -> Result<Vec<crate::core::swarm_next_action::SwarmNextActionRecentFirstError>, DomainError> {
+    let Some(path) = &args.verifier_evidence else {
+        return Ok(Vec::new());
+    };
+    let text = std::fs::read_to_string(path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to read swarm next-action verifier evidence {}: {error}",
+            path.display()
+        ),
+        repair: Some("Pass a readable ee.rch.verify.v1 JSON proof file.".to_string()),
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| DomainError::Usage {
+            message: format!(
+                "Failed to parse swarm next-action verifier evidence {} as JSON: {error}",
+                path.display()
+            ),
+            repair: Some("Pass a valid ee.rch.verify.v1 proof object or array.".to_string()),
+        })?;
+    Ok(verifier_evidence_from_json(&value))
+}
+
 fn swarm_brief_unavailable_sources(report: &SwarmBriefReport) -> Vec<String> {
     report
         .sources
@@ -37502,6 +37933,7 @@ fn render_swarm_next_action_json(
             "checkout": {
                 "dirtyPathCount": snapshot.checkout.dirty_path_count,
             },
+            "compileHealth": &snapshot.compile_health,
             "verification": &snapshot.verification,
             "environment": &snapshot.environment,
             "topCandidates": snapshot.candidates.iter().take(8).collect::<Vec<_>>(),
@@ -37565,14 +37997,30 @@ fn render_swarm_next_action_markdown(snapshot: &SwarmNextActionSnapshot) -> Stri
             .map(|slots| slots.to_string())
             .unwrap_or_else(|| "unknown".to_string())
     ));
+    output.push_str(&format!(
+        "- Compile-health blockers: {}\n- Safe to launch RCH: {}\n\n",
+        snapshot.compile_health.blocker_count,
+        snapshot
+            .compile_health
+            .safe_to_launch_rch
+            .map(|safe| safe.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    ));
     if snapshot.candidates.is_empty() {
         output.push_str("No candidates were available from the selected sources.\n");
     } else {
         output.push_str("## Top Candidates\n\n");
         for candidate in snapshot.candidates.iter().take(8) {
             output.push_str(&format!(
-                "- `{}` {} [{}]\n",
-                candidate.id, candidate.title, candidate.source
+                "- `{}` {} [{}]{}\n",
+                candidate.id,
+                candidate.title,
+                candidate.source,
+                if candidate.blocked_by_compile_health {
+                    " (compile health blocked)"
+                } else {
+                    ""
+                }
             ));
         }
     }
@@ -38232,7 +38680,7 @@ const TASK_FRAME_SUBGOAL_SUBCOMMANDS: &[&str] = &["add"];
 const TRIPWIRE_SUBCOMMANDS: &[&str] = &["list", "check"];
 const VERIFICATION_SUBCOMMANDS: &[&str] =
     &["ingest", "record", "proofs", "broker", "closure-guidance"];
-const WORKSPACE_SUBCOMMANDS: &[&str] = &["resolve", "list", "alias"];
+const WORKSPACE_SUBCOMMANDS: &[&str] = &["resolve", "list", "alias", "hygiene"];
 
 /// Read-only normalized representation of a CLI invocation.
 #[derive(Clone, Debug, PartialEq)]
@@ -38339,6 +38787,9 @@ impl NormalizedInvocation {
                 },
                 Command::Maintenance(maintenance) => match maintenance {
                     MaintenanceCommand::Run(_) => "maintenance run".to_string(),
+                    MaintenanceCommand::WalCheckpoint(_) => {
+                        "maintenance wal-checkpoint".to_string()
+                    }
                     MaintenanceCommand::GraphSnapshotPrune(_) => {
                         "maintenance graph-snapshot-prune".to_string()
                     }
@@ -38671,6 +39122,7 @@ impl NormalizedInvocation {
                     WorkspaceCommand::Resolve(_) => "workspace resolve".to_string(),
                     WorkspaceCommand::List(_) => "workspace list".to_string(),
                     WorkspaceCommand::Alias(_) => "workspace alias".to_string(),
+                    WorkspaceCommand::Hygiene(_) => "workspace hygiene".to_string(),
                 },
                 Command::Workflow(workflow) => match workflow {
                     WorkflowCommand::Close(_) => "workflow close".to_string(),
@@ -39294,13 +39746,14 @@ mod tests {
         GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY,
         GraphCommand, GraphSnapshotCommand, HandoffCommand, HealthArgs, ImportCommand, JobCommand,
         LearnCommand, LearnExperimentCommand, MaintenanceCommand,
-        MaintenanceGraphWitnessesPruneArgs, McpCommand, MemoryCommand, OutcomeQuarantineCommand,
+        MaintenanceGraphWitnessesPruneArgs, MaintenanceWalCheckpointArgs,
+        MaintenanceWalCheckpointMode, McpCommand, MemoryCommand, OutcomeQuarantineCommand,
         OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand, RedactionLevelSource,
-        RuleCommand, ShadowMode, SituationCommand, StatusArgs,
-        SupportCommand, SwarmBriefArgs, SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand,
-        VerifyCommand, WorkflowCommand, db_inspect_redact_source_uri, decay_settings_from_config,
-        load_maintenance_decay_settings, load_witness_retention_policy, run,
-        write_index_rebuild_error,
+        RuleCommand, ShadowMode, SituationCommand, StatusArgs, SupportCommand, SwarmBriefArgs,
+        SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand, VerifyCommand, WorkflowCommand,
+        WorkspaceCommand, WorkspaceHygieneArgs, db_inspect_redact_source_uri,
+        decay_settings_from_config, load_maintenance_decay_settings, load_witness_retention_policy,
+        run, write_index_rebuild_error,
     };
     use crate::config::MeshCommandMode;
     use crate::core::index::IndexRebuildError;
@@ -39837,6 +40290,14 @@ mod tests {
             checkout: crate::core::swarm_next_action::SwarmNextActionCheckoutSummary {
                 dirty_path_count: 0,
                 dirty_paths: Vec::new(),
+            },
+            compile_health: crate::core::swarm_next_action::SwarmNextActionCompileHealthSummary {
+                safe_to_launch_rch: Some(true),
+                blocker_count: 0,
+                blockers: Vec::new(),
+                recommended_alternative_work: vec![
+                    "launch_rch_when_other_verification_inputs_are_ready".to_string(),
+                ],
             },
             verification: crate::core::swarm_next_action::SwarmNextActionVerificationSummary {
                 rch_source_enabled: true,
@@ -43059,6 +43520,161 @@ mod tests {
             &parsed,
             &(true, true, Some(Command::Status(StatusArgs::default()))),
             "workspace and no-color globals",
+        )
+    }
+
+    #[test]
+    fn parser_accepts_maintenance_wal_checkpoint_mode() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "maintenance",
+            "wal-checkpoint",
+            "--mode",
+            "truncate",
+            "--dry-run",
+            "--database",
+            "fixtures/checkpoint.db",
+        ])
+        .map(|cli| cli.command)
+        .map_err(|error| format!("failed to parse wal-checkpoint: {:?}", error.kind()))?;
+
+        ensure_equal(
+            &parsed,
+            &Some(Command::Maintenance(MaintenanceCommand::WalCheckpoint(
+                MaintenanceWalCheckpointArgs {
+                    database: Some(PathBuf::from("fixtures/checkpoint.db")),
+                    mode: MaintenanceWalCheckpointMode::Truncate,
+                    dry_run: true,
+                },
+            ))),
+            "maintenance wal-checkpoint command",
+        )
+    }
+
+    #[test]
+    fn maintenance_wal_checkpoint_missing_database_returns_json_error() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = workspace
+            .path()
+            .to_str()
+            .ok_or_else(|| "workspace path was not valid UTF-8".to_string())?;
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "--workspace",
+            workspace,
+            "maintenance",
+            "wal-checkpoint",
+            "--dry-run",
+        ]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::UnsatisfiedDegradedMode,
+            "missing database exit",
+        )?;
+        ensure(stderr.is_empty(), "missing database stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(&value["success"], &serde_json::json!(false), "success flag")?;
+        ensure_equal(
+            &value["data"]["command"],
+            &serde_json::json!("maintenance wal-checkpoint"),
+            "command",
+        )?;
+        ensure_equal(
+            &value["data"]["code"],
+            &serde_json::json!("wal_checkpoint_database_missing"),
+            "missing database code",
+        )
+    }
+
+    #[test]
+    fn parser_accepts_workspace_hygiene_agent_name() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--json",
+            "workspace",
+            "hygiene",
+            "--agent-name",
+            "IvoryCondor",
+        ])
+        .map(|cli| cli.command)
+        .map_err(|error| format!("failed to parse workspace hygiene: {:?}", error.kind()))?;
+
+        ensure_equal(
+            &parsed,
+            &Some(Command::Workspace(WorkspaceCommand::Hygiene(
+                WorkspaceHygieneArgs {
+                    agent_name: Some("IvoryCondor".to_string()),
+                    agent_mail_snapshot: None,
+                },
+            ))),
+            "workspace hygiene command",
+        )
+    }
+
+    #[test]
+    fn parser_accepts_workspace_hygiene_agent_mail_snapshot() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--json",
+            "workspace",
+            "hygiene",
+            "--agent-mail-snapshot",
+            "agent-mail.json",
+        ])
+        .map(|cli| cli.command)
+        .map_err(|error| {
+            format!(
+                "failed to parse workspace hygiene agent mail snapshot: {:?}",
+                error.kind()
+            )
+        })?;
+
+        ensure_equal(
+            &parsed,
+            &Some(Command::Workspace(WorkspaceCommand::Hygiene(
+                WorkspaceHygieneArgs {
+                    agent_name: None,
+                    agent_mail_snapshot: Some(PathBuf::from("agent-mail.json")),
+                },
+            ))),
+            "workspace hygiene command",
+        )
+    }
+
+    #[test]
+    fn parser_accepts_workspace_hygiene_workspace_path_in_human_mode() -> TestResult {
+        let cli = Cli::try_parse_from([
+            "ee",
+            "--workspace",
+            "fixtures/hygiene",
+            "workspace",
+            "hygiene",
+        ])
+        .map_err(|error| {
+            format!(
+                "failed to parse workspace hygiene workspace path: {:?}",
+                error.kind()
+            )
+        })?;
+
+        ensure_equal(
+            &cli.workspace,
+            &Some(PathBuf::from("fixtures/hygiene")),
+            "workspace hygiene workspace path",
+        )?;
+        ensure_equal(&cli.json, &false, "workspace hygiene human mode")?;
+        ensure_equal(
+            &cli.command,
+            &Some(Command::Workspace(WorkspaceCommand::Hygiene(
+                WorkspaceHygieneArgs {
+                    agent_name: None,
+                    agent_mail_snapshot: None,
+                },
+            ))),
+            "workspace hygiene human command",
         )
     }
 
