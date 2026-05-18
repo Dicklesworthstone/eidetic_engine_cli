@@ -7122,6 +7122,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: completion_audit_report_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::preflight::AGENT_OPERATING_CONTRACT_SCHEMA_V1,
+            version: "1",
+            description: "Read-only agent operating contract extracted from repository docs",
+            category: "preflight",
+            definition: agent_operating_contract_schema_definition,
+        },
+        SchemaEntry {
             id: MCP_MANIFEST_SCHEMA_V1,
             version: "1",
             description: "MCP adapter manifest generated from ee's public command and schema registries",
@@ -7446,6 +7453,10 @@ fn completion_audit_checklist_schema_definition() -> String {
 
 fn completion_audit_report_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.completion_audit.report.v1.json").to_string()
+}
+
+fn agent_operating_contract_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.agent_operating_contract.v1.json").to_string()
 }
 
 fn mcp_manifest_schema_definition() -> String {

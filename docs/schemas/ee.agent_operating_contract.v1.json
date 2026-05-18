@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine.local/schemas/ee.agent_operating_contract.v1.json",
+  "title": "ee agent operating contract",
+  "description": "Read-only operating rules extracted from repository-local agent instructions and README requirements.",
+  "type": "object",
+  "required": ["schema", "rules", "degraded"],
+  "properties": {
+    "schema": {
+      "const": "ee.agent_operating_contract.v1"
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "severity",
+          "category",
+          "source_file",
+          "source_heading",
+          "line_start",
+          "line_end",
+          "excerpt_hash",
+          "instruction"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^agent\\.[a-z0-9_]+$"
+          },
+          "severity": {
+            "enum": ["info", "low", "warning", "medium", "high", "critical"]
+          },
+          "category": {
+            "enum": [
+              "hard_denial",
+              "required_before_edit",
+              "required_before_verify",
+              "coordination_required",
+              "environment_fact",
+              "reporting_required",
+              "advisory"
+            ]
+          },
+          "source_file": {
+            "enum": ["AGENTS.md", "README.md"]
+          },
+          "source_heading": {
+            "type": "string",
+            "minLength": 1
+          },
+          "line_start": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "line_end": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "excerpt_hash": {
+            "type": "string",
+            "pattern": "^blake3:[0-9a-f]{16}$"
+          },
+          "instruction": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "uniqueItems": true
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "severity", "message", "repair"],
+        "properties": {
+          "code": {
+            "enum": ["agent_contract_source_unavailable"]
+          },
+          "severity": {
+            "enum": ["info", "low", "warning", "medium", "high", "critical"]
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "repair": {
+            "type": ["string", "null"]
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

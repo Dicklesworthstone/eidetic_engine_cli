@@ -9,6 +9,7 @@
 //! - **show**: Display details of a preflight run
 //! - **close**: Mark a preflight run as completed
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -28,6 +29,9 @@ use crate::models::preflight::{
 
 /// Schema for preflight reports.
 pub const PREFLIGHT_REPORT_SCHEMA_V1: &str = "ee.preflight.report.v1";
+
+/// Schema for the read-only agent operating contract extracted from repo docs.
+pub const AGENT_OPERATING_CONTRACT_SCHEMA_V1: &str = "ee.agent_operating_contract.v1";
 
 /// Schema for the lightweight project-local preflight run store.
 pub const PREFLIGHT_RUN_STORE_SCHEMA_V1: &str = "ee.preflight_run_store.v1";
@@ -1222,6 +1226,317 @@ fn risk_rank(level: RiskLevel) -> u8 {
     }
 }
 
+/// Options for extracting an agent operating contract from repository docs.
+#[derive(Clone, Debug)]
+pub struct AgentOperatingContractOptions {
+    /// Workspace path whose AGENTS.md and README.md should be inspected.
+    pub workspace: PathBuf,
+}
+
+impl Default for AgentOperatingContractOptions {
+    fn default() -> Self {
+        Self {
+            workspace: PathBuf::from("."),
+        }
+    }
+}
+
+/// Machine-readable rule report for agent operating obligations.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentOperatingContractReport {
+    pub schema: String,
+    pub rules: Vec<AgentOperatingContractRule>,
+    pub degraded: Vec<PreflightDegradation>,
+}
+
+impl AgentOperatingContractReport {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            schema: AGENT_OPERATING_CONTRACT_SCHEMA_V1.to_owned(),
+            rules: Vec::new(),
+            degraded: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        crate::core::serialize_or_error(self)
+    }
+}
+
+impl Default for AgentOperatingContractReport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One deterministic operating rule extracted from repository-local docs.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentOperatingContractRule {
+    pub id: String,
+    pub severity: String,
+    pub category: String,
+    pub source_file: String,
+    pub source_heading: String,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub excerpt_hash: String,
+    pub instruction: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AgentContractRulePattern {
+    id: &'static str,
+    severity: &'static str,
+    category: &'static str,
+    instruction: &'static str,
+    needles: &'static [&'static str],
+}
+
+const AGENT_CONTRACT_RULE_PATTERNS: &[AgentContractRulePattern] = &[
+    AgentContractRulePattern {
+        id: "agent.no_file_deletion",
+        severity: "critical",
+        category: "hard_denial",
+        instruction: "Do not delete files or folders without explicit written human permission.",
+        needles: &["no file deletion", "never allowed to delete a file"],
+    },
+    AgentContractRulePattern {
+        id: "agent.no_worktrees",
+        severity: "critical",
+        category: "hard_denial",
+        instruction: "Do not create or use git worktrees for this repository.",
+        needles: &["no worktrees", "git worktree add"],
+    },
+    AgentContractRulePattern {
+        id: "agent.no_git_reset_hard",
+        severity: "critical",
+        category: "hard_denial",
+        instruction: "Do not run git reset --hard without exact explicit human authorization.",
+        needles: &["git reset --hard"],
+    },
+    AgentContractRulePattern {
+        id: "agent.no_git_stash",
+        severity: "critical",
+        category: "hard_denial",
+        instruction: "Do not use git stash to park repository changes.",
+        needles: &["never run `git stash`", "never run git stash"],
+    },
+    AgentContractRulePattern {
+        id: "agent.no_git_checkout_other_ref",
+        severity: "critical",
+        category: "hard_denial",
+        instruction: "Do not use git checkout to move off main or detach HEAD.",
+        needles: &[
+            "never run `git checkout <other-ref>`",
+            "never run git checkout <other-ref>",
+        ],
+    },
+    AgentContractRulePattern {
+        id: "agent.no_script_based_code_changes",
+        severity: "high",
+        category: "hard_denial",
+        instruction: "Make code edits manually; do not run scripts that transform code files.",
+        needles: &[
+            "no script-based changes",
+            "never run a script that processes/changes code",
+        ],
+    },
+    AgentContractRulePattern {
+        id: "agent.main_branch_only",
+        severity: "high",
+        category: "required_before_edit",
+        instruction: "Keep repository work on the main branch and do not introduce master references.",
+        needles: &["only use `main`", "default branch is `main`"],
+    },
+    AgentContractRulePattern {
+        id: "agent.rch_remote_verification",
+        severity: "critical",
+        category: "required_before_verify",
+        instruction: "Run Cargo builds, tests, clippy, and other CPU-heavy Rust verification through RCH only.",
+        needles: &[
+            "must be done using $rch",
+            "rch-only",
+            "no local cargo fallback",
+        ],
+    },
+    AgentContractRulePattern {
+        id: "agent.external_build_drive",
+        severity: "high",
+        category: "environment_fact",
+        instruction: "Preserve the Mac external USB-NVMe Cargo target and temporary build routing.",
+        needles: &[
+            "external usb-nvme",
+            "cargo_target_dir",
+            "/volumes/usbnvme16tb",
+        ],
+    },
+    AgentContractRulePattern {
+        id: "agent.no_tokio_runtime",
+        severity: "critical",
+        category: "hard_denial",
+        instruction: "Use Asupersync as the runtime; do not introduce Tokio.",
+        needles: &["no tokio", "runtime is `/dp/asupersync`"],
+    },
+    AgentContractRulePattern {
+        id: "agent.no_rusqlite_sqlx_diesel",
+        severity: "critical",
+        category: "hard_denial",
+        instruction: "Use FrankenSQLite through SQLModel; do not introduce rusqlite, SQLx, Diesel, or SeaORM.",
+        needles: &["no `rusqlite`", "no sqlx", "no diesel", "no seaorm"],
+    },
+    AgentContractRulePattern {
+        id: "agent.no_petgraph",
+        severity: "critical",
+        category: "hard_denial",
+        instruction: "Use FrankenNetworkX for graph analytics; do not introduce petgraph.",
+        needles: &["no `petgraph`", "no petgraph"],
+    },
+    AgentContractRulePattern {
+        id: "agent.stable_json",
+        severity: "high",
+        category: "reporting_required",
+        instruction: "Machine-facing commands must keep stable versioned JSON output.",
+        needles: &["stable json output", "stable json contract"],
+    },
+    AgentContractRulePattern {
+        id: "agent.context_provenance",
+        severity: "high",
+        category: "reporting_required",
+        instruction: "Generated context must include provenance and score or selection explanations.",
+        needles: &[
+            "provenance and score explanation",
+            "provenance-tagged context",
+        ],
+    },
+    AgentContractRulePattern {
+        id: "agent.agent_mail_coordination",
+        severity: "high",
+        category: "coordination_required",
+        instruction: "Coordinate with active agents through Agent Mail when it is available.",
+        needles: &["agent mail", "file reservations"],
+    },
+    AgentContractRulePattern {
+        id: "agent.beads_bv_triage",
+        severity: "medium",
+        category: "coordination_required",
+        instruction: "Use Beads and BV for task tracking and prioritization instead of ad hoc selection.",
+        needles: &["beads", "bv"],
+    },
+];
+
+/// Extract the agent operating contract from the repository's AGENTS.md and README.md.
+pub fn extract_agent_operating_contract(
+    options: &AgentOperatingContractOptions,
+) -> Result<AgentOperatingContractReport, DomainError> {
+    let mut docs = Vec::new();
+    let mut report = AgentOperatingContractReport::new();
+    for file_name in ["AGENTS.md", "README.md"] {
+        let path = options.workspace.join(file_name);
+        match fs::read_to_string(&path) {
+            Ok(text) => docs.push((file_name.to_owned(), text)),
+            Err(error) => report
+                .degraded
+                .push(agent_contract_source_unavailable(file_name, error)),
+        }
+    }
+
+    let doc_refs = docs
+        .iter()
+        .map(|(source_file, text)| (source_file.as_str(), text.as_str()))
+        .collect::<Vec<_>>();
+    report.rules = extract_agent_operating_contract_rules(&doc_refs);
+    Ok(report)
+}
+
+/// Extract operating rules from already-loaded markdown documents.
+#[must_use]
+pub fn extract_agent_operating_contract_rules(
+    docs: &[(&str, &str)],
+) -> Vec<AgentOperatingContractRule> {
+    let mut rules_by_id = BTreeMap::new();
+    for (source_file, text) in docs {
+        extract_agent_operating_contract_rules_from_doc(source_file, text, &mut rules_by_id);
+    }
+    rules_by_id.into_values().collect()
+}
+
+fn extract_agent_operating_contract_rules_from_doc(
+    source_file: &str,
+    text: &str,
+    rules_by_id: &mut BTreeMap<String, AgentOperatingContractRule>,
+) {
+    let mut current_heading = "document".to_owned();
+    for (line_index, raw_line) in text.lines().enumerate() {
+        let trimmed = raw_line.trim();
+        if let Some(heading) = markdown_heading_text(trimmed) {
+            current_heading = heading.to_owned();
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+        let normalized = trimmed.to_lowercase();
+        for pattern in AGENT_CONTRACT_RULE_PATTERNS {
+            if !pattern
+                .needles
+                .iter()
+                .any(|needle| normalized.contains(needle))
+            {
+                continue;
+            }
+            rules_by_id.entry(pattern.id.to_owned()).or_insert_with(|| {
+                AgentOperatingContractRule {
+                    id: pattern.id.to_owned(),
+                    severity: pattern.severity.to_owned(),
+                    category: pattern.category.to_owned(),
+                    source_file: source_file.to_owned(),
+                    source_heading: current_heading.clone(),
+                    line_start: line_index + 1,
+                    line_end: line_index + 1,
+                    excerpt_hash: excerpt_hash(trimmed),
+                    instruction: pattern.instruction.to_owned(),
+                }
+            });
+        }
+    }
+}
+
+fn markdown_heading_text(line: &str) -> Option<&str> {
+    let marker_count = line.chars().take_while(|ch| *ch == '#').count();
+    if marker_count == 0 || marker_count > 6 {
+        return None;
+    }
+    line.get(marker_count..)?
+        .trim()
+        .strip_prefix(' ')
+        .or_else(|| {
+            let rest = line.get(marker_count..)?.trim();
+            (!rest.is_empty()).then_some(rest)
+        })
+}
+
+fn excerpt_hash(excerpt: &str) -> String {
+    let digest = blake3::hash(excerpt.as_bytes()).to_hex().to_string();
+    format!("blake3:{}", &digest[..16])
+}
+
+fn agent_contract_source_unavailable(
+    source_file: &str,
+    error: std::io::Error,
+) -> PreflightDegradation {
+    PreflightDegradation {
+        code: "agent_contract_source_unavailable".to_owned(),
+        severity: "warning".to_owned(),
+        message: format!(
+            "Could not read {source_file} while extracting the agent operating contract: {error}"
+        ),
+        repair: Some(format!(
+            "Restore readable {source_file} documentation or pass an explicit contract fixture."
+        )),
+    }
+}
+
 /// Run a preflight risk assessment.
 pub fn run_preflight(options: &RunOptions) -> Result<RunReport, DomainError> {
     let started = Instant::now();
@@ -2005,6 +2320,142 @@ mod tests {
                 .any(|entry| entry.code == "preflight_evidence_stale"),
             true,
             "stale evidence degradation present",
+        )
+    }
+
+    #[test]
+    fn agent_operating_contract_extraction_is_stable_and_deduped() -> TestResult {
+        let docs = [(
+            "AGENTS.md",
+            r#"# Root Rules
+
+## Git Branch: ONLY Use `main`, NEVER `master`
+
+The default branch is `main`.
+
+## RULE NUMBER 2: NO WORKTREES. EVER. NO EXCEPTIONS.
+
+Never run `git worktree add`.
+Never run `git worktree add`.
+
+## Compiler Checks
+
+All cargo builds and tests and other CPU intensive operations MUST be done using $rch.
+"#,
+        )];
+
+        let first = extract_agent_operating_contract_rules(&docs);
+        let second = extract_agent_operating_contract_rules(&docs);
+
+        ensure(first.clone(), second, "stable extraction")?;
+        ensure(
+            first
+                .iter()
+                .filter(|rule| rule.id == "agent.no_worktrees")
+                .count(),
+            1,
+            "duplicate rule id collapsed",
+        )?;
+        let ids = first
+            .iter()
+            .map(|rule| rule.id.as_str())
+            .collect::<Vec<_>>();
+        ensure(
+            ids,
+            vec![
+                "agent.main_branch_only",
+                "agent.no_worktrees",
+                "agent.rch_remote_verification",
+            ],
+            "deterministic sorted rule ids",
+        )?;
+        let no_worktrees = first
+            .iter()
+            .find(|rule| rule.id == "agent.no_worktrees")
+            .ok_or_else(|| "missing no-worktrees rule".to_owned())?;
+        ensure(
+            no_worktrees.source_heading.clone(),
+            "RULE NUMBER 2: NO WORKTREES. EVER. NO EXCEPTIONS.".to_owned(),
+            "source heading",
+        )?;
+        ensure(no_worktrees.line_start, 9, "line_start")
+    }
+
+    #[test]
+    fn agent_operating_contract_extracts_readme_hard_requirements() -> TestResult {
+        let docs = [(
+            "README.md",
+            r#"# Eidetic Engine
+
+## Hard Requirements
+
+- Runtime is `/dp/asupersync`. **No Tokio.** Anywhere. Ever.
+- Database is `/dp/frankensqlite` through `/dp/sqlmodel_rust`. **No `rusqlite`, no SQLx, no Diesel, no SeaORM.**
+- Graph is `/dp/franken_networkx`. **No `petgraph`.**
+- Every machine-facing command supports stable JSON output.
+- Every generated context includes provenance and score explanation.
+"#,
+        )];
+
+        let rules = extract_agent_operating_contract_rules(&docs);
+        let ids = rules
+            .iter()
+            .map(|rule| rule.id.as_str())
+            .collect::<Vec<_>>();
+        ensure(
+            ids,
+            vec![
+                "agent.context_provenance",
+                "agent.no_petgraph",
+                "agent.no_rusqlite_sqlx_diesel",
+                "agent.no_tokio_runtime",
+                "agent.stable_json",
+            ],
+            "README hard requirement rule ids",
+        )?;
+        ensure(
+            rules
+                .iter()
+                .all(|rule| rule.source_heading == "Hard Requirements"),
+            true,
+            "README source headings",
+        )
+    }
+
+    #[test]
+    fn agent_operating_contract_reports_missing_docs_as_degraded() -> TestResult {
+        let workspace = temp_workspace()?;
+        std::fs::write(
+            workspace.path().join("AGENTS.md"),
+            "# AGENTS\n\nNo Tokio.\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report = extract_agent_operating_contract(&AgentOperatingContractOptions {
+            workspace: workspace.path().to_path_buf(),
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            report.schema.clone(),
+            AGENT_OPERATING_CONTRACT_SCHEMA_V1.to_owned(),
+            "schema",
+        )?;
+        ensure(
+            report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "agent_contract_source_unavailable"),
+            true,
+            "missing README degradation",
+        )?;
+        ensure(
+            report
+                .rules
+                .iter()
+                .any(|rule| rule.id == "agent.no_tokio_runtime"),
+            true,
+            "extracts available AGENTS rule",
         )
     }
 

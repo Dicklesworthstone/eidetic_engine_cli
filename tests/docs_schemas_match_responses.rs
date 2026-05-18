@@ -66,6 +66,10 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
         COMPLETION_AUDIT_REPORT_SCHEMA_V1,
         "ee.completion_audit.report.v1.json",
     ),
+    (
+        ee::core::preflight::AGENT_OPERATING_CONTRACT_SCHEMA_V1,
+        "ee.agent_operating_contract.v1.json",
+    ),
     ("ee.mcp.manifest.v1", "ee.mcp.manifest.v1.json"),
 ];
 
