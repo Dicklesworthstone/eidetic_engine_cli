@@ -18056,15 +18056,9 @@ where
     }
 
     let status = owner.status();
-    let degraded = busy.as_ref().map_or_else(Vec::new, |error| {
-        vec![serde_json::json!({
-            "code": error.code,
-            "severity": "medium",
-            "message": format!("Write owner busy: {}", error.message),
-            "repair": error.repair,
-            "queueDepth": error.queue_depth,
-        })]
-    });
+    let degraded = busy
+        .as_ref()
+        .map_or_else(Vec::new, write_owner_busy_degraded_json);
     let data = serde_json::json!({
         "schema": "ee.write_owner.diagnostics.v1",
         "command": "diag write-owner",
@@ -18112,6 +18106,30 @@ where
     }
 }
 
+fn write_owner_busy_degraded_json(
+    error: &crate::core::write_owner::WriteOwnerBusyError,
+) -> Vec<serde_json::Value> {
+    aggregate_degraded_entries([DegradationAggregationInput::new(
+        "write_owner_diagnostics",
+        error.code,
+        "medium",
+        format!("Write owner busy: {}", error.message),
+        error.repair,
+    )])
+    .into_iter()
+    .map(|entry| {
+        serde_json::json!({
+            "code": entry.code,
+            "severity": entry.severity,
+            "message": entry.message,
+            "repair": entry.repair,
+            "sources": entry.sources,
+            "queueDepth": error.queue_depth,
+        })
+    })
+    .collect()
+}
+
 fn handle_diag_write_spool<W>(
     cli: &Cli,
     args: &DiagWriteSpoolArgs,
@@ -18148,50 +18166,9 @@ where
 
     let now_ms = u64::from(args.enqueue);
     let status = spool.status(now_ms);
-    let degraded = backpressure.as_ref().map_or_else(Vec::new, |error| {
-        let mut entries = vec![serde_json::json!({
-            "code": error.code,
-            "severity": "medium",
-            "reason": error.reason.as_str(),
-            "message": format!("Write spool backpressure: {}", error.message),
-            "repair": error.repair,
-            "next": error.next,
-            "queueDepth": error.queue_depth,
-            "maxPending": error.max_pending,
-            "pendingBytes": error.pending_bytes,
-            "maxPendingBytes": error.max_pending_bytes,
-            "oldestQueuedAgeMs": error.oldest_queued_age_ms,
-        })];
-        if error.reason == crate::core::write_owner::WriteSpoolBackpressureReason::QueueDepth {
-            entries.push(serde_json::json!({
-                "code": crate::core::write_owner::WRITE_QUEUE_FULL_CODE,
-                "severity": "low",
-                "reason": "queue_depth",
-                "message": format!(
-                    "Workspace write queue at capacity ({}/{}); retry recommended.",
-                    error.queue_depth,
-                    error.max_pending
-                ),
-                "repair": "retry with exponential backoff",
-                "queueCap": error.max_pending,
-                "queueDepth": error.queue_depth,
-                "recovery": [
-                    {
-                        "priority": 1,
-                        "kind": "flag",
-                        "hint": "Retry with --backoff-ms 100"
-                    },
-                    {
-                        "priority": 2,
-                        "kind": "config",
-                        "key": "writeSpool.queueCap",
-                        "valueHint": "increase if memory permits"
-                    }
-                ]
-            }));
-        }
-        entries
-    });
+    let degraded = backpressure
+        .as_ref()
+        .map_or_else(Vec::new, write_spool_backpressure_degraded_json);
     let data = serde_json::json!({
         "schema": "ee.write_spool.diagnostics.v1",
         "command": "diag write-spool",
@@ -18239,6 +18216,73 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
     }
+}
+
+fn write_spool_backpressure_degraded_json(
+    error: &crate::core::write_owner::WriteSpoolBackpressureError,
+) -> Vec<serde_json::Value> {
+    let mut entries = vec![DegradationAggregationInput::new(
+        "write_spool_diagnostics",
+        error.code,
+        "medium",
+        format!("Write spool backpressure: {}", error.message),
+        error.repair,
+    )];
+    if error.reason == crate::core::write_owner::WriteSpoolBackpressureReason::QueueDepth {
+        entries.push(DegradationAggregationInput::new(
+            "write_spool_diagnostics",
+            crate::core::write_owner::WRITE_QUEUE_FULL_CODE,
+            "low",
+            format!(
+                "Workspace write queue at capacity ({}/{}); retry recommended.",
+                error.queue_depth, error.max_pending
+            ),
+            "retry with exponential backoff",
+        ));
+    }
+
+    aggregate_degraded_entries(entries)
+        .into_iter()
+        .map(|entry| {
+            let mut value = serde_json::json!({
+                "code": entry.code,
+                "severity": entry.severity,
+                "message": entry.message,
+                "repair": entry.repair,
+                "sources": entry.sources,
+            });
+            if value["code"].as_str()
+                == Some(crate::core::write_owner::WRITE_SPOOL_BACKPRESSURE_CODE)
+            {
+                value["reason"] = serde_json::json!(error.reason.as_str());
+                value["next"] = serde_json::json!(error.next);
+                value["queueDepth"] = serde_json::json!(error.queue_depth);
+                value["maxPending"] = serde_json::json!(error.max_pending);
+                value["pendingBytes"] = serde_json::json!(error.pending_bytes);
+                value["maxPendingBytes"] = serde_json::json!(error.max_pending_bytes);
+                value["oldestQueuedAgeMs"] = serde_json::json!(error.oldest_queued_age_ms);
+            }
+            if value["code"].as_str() == Some(crate::core::write_owner::WRITE_QUEUE_FULL_CODE) {
+                value["reason"] = serde_json::json!("queue_depth");
+                value["queueCap"] = serde_json::json!(error.max_pending);
+                value["queueDepth"] = serde_json::json!(error.queue_depth);
+                value["recovery"] = serde_json::json!([
+                    {
+                        "priority": 1,
+                        "kind": "flag",
+                        "hint": "Retry with --backoff-ms 100"
+                    },
+                    {
+                        "priority": 2,
+                        "kind": "config",
+                        "key": "writeSpool.queueCap",
+                        "valueHint": "increase if memory permits"
+                    }
+                ]);
+            }
+            value
+        })
+        .collect()
 }
 
 fn handle_diag_integrity<W>(cli: &Cli, args: &DiagIntegrityArgs, stdout: &mut W) -> ProcessExitCode
@@ -29222,6 +29266,7 @@ where
     }
 }
 
+#[allow(clippy::expect_used)]
 fn write_verify_proofs_report<W>(
     cli: &Cli,
     report: &ProofCheckReport,
@@ -29235,16 +29280,14 @@ where
             write_stdout(stdout, &render_verify_proofs_human(report))
         }
         output::Renderer::Toon => {
-            let json =
-                serde_json::to_string(report).expect("proof check report should serialize to JSON");
+            let json = crate::core::serialize_or_error(report);
             write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
         }
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
-            let json =
-                serde_json::to_string(report).expect("proof check report should serialize to JSON");
+            let json = crate::core::serialize_or_error(report);
             write_stdout(stdout, &(json + "\n"))
         }
     }
@@ -36368,7 +36411,11 @@ fn write_graph_witness_prune_response<W>(
 where
     W: Write,
 {
-    let degraded = data["degraded"].as_array().cloned().unwrap_or_default();
+    let mut data = data;
+    let degraded = graph_witness_prune_degraded_json(&data);
+    if !degraded.is_empty() {
+        data["degraded"] = serde_json::Value::Array(degraded.clone());
+    }
     let response = if degraded.is_empty() {
         serde_json::json!({
             "schema": crate::models::RESPONSE_SCHEMA_V1,
@@ -36420,6 +36467,25 @@ where
     }
 }
 
+fn graph_witness_prune_degraded_json(data: &serde_json::Value) -> Vec<serde_json::Value> {
+    let entries = data["degraded"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            Some(DegradationAggregationInput::new(
+                "graph_witness_prune",
+                entry["code"].as_str()?,
+                entry["severity"].as_str().unwrap_or("medium"),
+                entry["message"]
+                    .as_str()
+                    .unwrap_or("Graph witness pruning completed with degraded output."),
+                entry["repair"].as_str().unwrap_or_default(),
+            ))
+        });
+    aggregate_cli_degraded_json(entries)
+}
+
 fn maintenance_response_degraded(
     success: bool,
     data: &serde_json::Value,
@@ -36427,20 +36493,45 @@ fn maintenance_response_degraded(
     if success {
         return Vec::new();
     }
-    let Some(code) = data["code"].as_str() else {
-        return Vec::new();
-    };
-    let message = data["message"]
-        .as_str()
-        .unwrap_or("Maintenance command completed in degraded mode.");
-    let repair = data["repair"].as_str();
 
-    vec![serde_json::json!({
-        "code": code,
-        "severity": "medium",
-        "message": message,
-        "repair": repair,
-    })]
+    let source = maintenance_degraded_source(data);
+    let data_entries = data["degraded"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            Some(DegradationAggregationInput::new(
+                source,
+                entry["code"].as_str()?,
+                entry["severity"].as_str().unwrap_or("medium"),
+                entry["message"]
+                    .as_str()
+                    .unwrap_or("Maintenance command completed in degraded mode."),
+                entry["repair"].as_str().unwrap_or_default(),
+            ))
+        });
+    let root_entry = data["code"].as_str().map(|code| {
+        DegradationAggregationInput::new(
+            source,
+            code,
+            data["severity"].as_str().unwrap_or("medium"),
+            data["message"]
+                .as_str()
+                .unwrap_or("Maintenance command completed in degraded mode."),
+            data["repair"].as_str().unwrap_or_default(),
+        )
+    });
+
+    aggregate_cli_degraded_json(data_entries.chain(root_entry))
+}
+
+fn maintenance_degraded_source(data: &serde_json::Value) -> &'static str {
+    match data["command"].as_str() {
+        Some("maintenance graph-witnesses-prune") => "graph_witness_prune",
+        Some("maintenance graph-snapshot-prune") => "graph_snapshot_prune",
+        Some("job run" | "maintenance run") => "maintenance_run",
+        _ => "maintenance",
+    }
 }
 
 fn render_maintenance_human(response: &serde_json::Value) -> String {
@@ -37408,6 +37499,7 @@ fn render_swarm_next_action_json(
     snapshot: &SwarmNextActionSnapshot,
     profile: output::FieldProfile,
 ) -> Result<String, DomainError> {
+    let degraded = aggregate_swarm_next_action_degraded_json(&snapshot.degraded);
     let data = match profile {
         output::FieldProfile::Minimal => serde_json::json!({
             "schema": snapshot.schema,
@@ -37415,7 +37507,7 @@ fn render_swarm_next_action_json(
             "redactionStatus": snapshot.redaction_status,
             "candidateCount": snapshot.candidates.len(),
             "dirtyPathCount": snapshot.checkout.dirty_path_count,
-            "degradedCount": snapshot.degraded.len(),
+            "degradedCount": degraded.len(),
         }),
         output::FieldProfile::Summary => serde_json::json!({
             "schema": snapshot.schema,
@@ -37429,27 +37521,49 @@ fn render_swarm_next_action_json(
             "verification": &snapshot.verification,
             "environment": &snapshot.environment,
             "topCandidates": snapshot.candidates.iter().take(8).collect::<Vec<_>>(),
-            "degraded": &snapshot.degraded,
+            "degraded": degraded.clone(),
         }),
         output::FieldProfile::Standard | output::FieldProfile::Full => {
-            serde_json::to_value(snapshot).map_err(|error| DomainError::Storage {
-                message: format!("Failed to serialize swarm next-action snapshot: {error}."),
-                repair: Some(
-                    "Fix the swarm next-action serializer before emitting JSON.".to_string(),
-                ),
-            })?
+            let mut data =
+                serde_json::to_value(snapshot).map_err(|error| DomainError::Storage {
+                    message: format!("Failed to serialize swarm next-action snapshot: {error}."),
+                    repair: Some(
+                        "Fix the swarm next-action serializer before emitting JSON.".to_string(),
+                    ),
+                })?;
+            if let Some(object) = data.as_object_mut() {
+                object.insert(
+                    "degraded".to_string(),
+                    serde_json::Value::Array(degraded.clone()),
+                );
+            }
+            data
         }
     };
     let response = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V1,
         "success": true,
         "data": data,
-        "degraded": &snapshot.degraded,
+        "degraded": degraded,
     });
     serde_json::to_string_pretty(&response).map_err(|error| DomainError::Storage {
         message: format!("Failed to serialize swarm next-action response: {error}."),
         repair: Some("Fix the swarm next-action response serializer.".to_string()),
     })
+}
+
+fn aggregate_swarm_next_action_degraded_json(
+    degraded: &[crate::core::swarm_next_action::SwarmNextActionDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_cli_degraded_json(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            entry.source.clone(),
+            entry.code.clone(),
+            entry.severity,
+            entry.message.clone(),
+            entry.repair.clone().unwrap_or_default(),
+        )
+    }))
 }
 
 fn render_swarm_next_action_markdown(snapshot: &SwarmNextActionSnapshot) -> String {
@@ -39713,6 +39827,97 @@ mod tests {
         ensure(
             !reset_sources.contains(&crate::core::swarm_brief::SwarmBriefSourceKind::Rch),
             "none still clears next-action default rch",
+        )
+    }
+
+    #[test]
+    fn swarm_next_action_json_degraded_entries_are_aggregated() -> TestResult {
+        let snapshot = crate::core::swarm_next_action::SwarmNextActionSnapshot {
+            schema: crate::core::swarm_next_action::SWARM_NEXT_ACTION_SCHEMA_V1,
+            workspace: "/tmp/ee-swarm-next-action".to_string(),
+            redaction_status: crate::core::swarm_next_action::SWARM_NEXT_ACTION_REDACTION_STATUS,
+            inputs: crate::core::swarm_next_action::SwarmNextActionInputSummary {
+                source_count: 2,
+                ready_bead_count: 0,
+                in_progress_bead_count: 0,
+                blocked_bead_count: 0,
+                bv_top_pick_count: 0,
+            },
+            candidates: Vec::new(),
+            coordination: crate::core::swarm_next_action::SwarmNextActionCoordinationSummary {
+                active_reservation_count: 0,
+                reservation_holders: Vec::new(),
+                unread_inbox_count: 0,
+                ack_required_count: 0,
+            },
+            checkout: crate::core::swarm_next_action::SwarmNextActionCheckoutSummary {
+                dirty_path_count: 0,
+                dirty_paths: Vec::new(),
+            },
+            verification: crate::core::swarm_next_action::SwarmNextActionVerificationSummary {
+                rch_source_enabled: true,
+                remote_only_required: true,
+                remote_only_safe: None,
+                healthy_worker_count: None,
+                active_remote_build_count: None,
+                queued_remote_build_count: None,
+                slots_available: None,
+                queue_head_slots_needed: None,
+                queue_status: None,
+            },
+            environment: crate::core::swarm_next_action::SwarmNextActionEnvironmentSummary {
+                cargo_target_externalized: false,
+                tmpdir_externalized: false,
+                external_agent_space_present: false,
+                disk_pressure_hint_count: 0,
+            },
+            degraded: vec![
+                crate::core::swarm_next_action::SwarmNextActionDegradation {
+                    code: "swarm_source_unavailable".to_string(),
+                    source: "beads".to_string(),
+                    severity: "warning",
+                    message: "Beads state is unavailable.".to_string(),
+                    repair: Some("br ready --json".to_string()),
+                },
+                crate::core::swarm_next_action::SwarmNextActionDegradation {
+                    code: "swarm_source_unavailable".to_string(),
+                    source: "agent_mail".to_string(),
+                    severity: "medium",
+                    message: "Agent Mail is unavailable.".to_string(),
+                    repair: Some("am status".to_string()),
+                },
+            ],
+        };
+
+        let rendered =
+            super::render_swarm_next_action_json(&snapshot, output::FieldProfile::Standard)
+                .map_err(|error| error.message)?;
+        let value: serde_json::Value =
+            serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+        let degraded = value["data"]["degraded"]
+            .as_array()
+            .ok_or_else(|| "swarm next-action data degraded should be an array".to_string())?;
+
+        ensure_equal(&degraded.len(), &1, "duplicate next-action degraded count")?;
+        ensure_equal(
+            &degraded[0]["code"],
+            &serde_json::json!("swarm_source_unavailable"),
+            "next-action degraded code",
+        )?;
+        ensure_equal(
+            &degraded[0]["severity"],
+            &serde_json::json!("medium"),
+            "next-action degraded severity escalates",
+        )?;
+        ensure_equal(
+            &degraded[0]["sources"],
+            &serde_json::json!(["agent_mail", "beads"]),
+            "next-action degraded sources",
+        )?;
+        ensure_equal(
+            &value["degraded"],
+            &value["data"]["degraded"],
+            "top-level next-action degraded matches data degraded",
         )
     }
 
@@ -45424,6 +45629,84 @@ mod tests {
     }
 
     #[test]
+    fn maintenance_graph_witness_prune_degraded_entries_are_aggregated() -> TestResult {
+        let cli = Cli::try_parse_from(["ee", "maintenance", "graph-witnesses-prune", "--json"])
+            .map_err(|error| {
+                format!(
+                    "failed to parse maintenance graph-witnesses-prune: {:?}",
+                    error.kind()
+                )
+            })?;
+        let data = serde_json::json!({
+            "schema": crate::core::witness_retention::WITNESS_PRUNE_REPORT_SCHEMA_V1,
+            "command": "maintenance graph-witnesses-prune",
+            "summary": {
+                "totalCount": 2,
+                "pruneCount": 0,
+                "deletedCount": 0,
+                "keepActiveSnapshotCount": 0,
+                "keepWithinTtlCount": 0,
+                "keepUnparseableRecordedAtCount": 2,
+            },
+            "degraded": [
+                {
+                    "code": "graph_witness_unparseable_recorded_at",
+                    "severity": "low",
+                    "message": "A graph witness timestamp could not be parsed.",
+                    "repair": "Inspect graph_algorithm_witnesses recorded_at values.",
+                },
+                {
+                    "code": "graph_witness_unparseable_recorded_at",
+                    "severity": "medium",
+                    "message": "Multiple graph witness timestamps could not be parsed.",
+                    "repair": "Repair graph_algorithm_witnesses recorded_at values before pruning.",
+                },
+            ],
+        });
+        let mut stdout = Vec::new();
+
+        let exit = super::write_graph_witness_prune_response(&cli, &mut stdout, true, data);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "graph witness prune response exit",
+        )?;
+        let stdout = String::from_utf8(stdout).map_err(|error| error.to_string())?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        let degraded = value["degraded"]
+            .as_array()
+            .ok_or_else(|| "response degraded should be an array".to_string())?;
+        ensure_equal(&degraded.len(), &1, "duplicate graph witness degrade count")?;
+        ensure_equal(
+            &degraded[0]["code"],
+            &serde_json::json!("graph_witness_unparseable_recorded_at"),
+            "graph witness degraded code",
+        )?;
+        ensure_equal(
+            &degraded[0]["severity"],
+            &serde_json::json!("medium"),
+            "graph witness degraded severity escalates",
+        )?;
+        ensure_equal(
+            &degraded[0]["message"],
+            &serde_json::json!("Multiple graph witness timestamps could not be parsed."),
+            "graph witness degraded message follows highest severity",
+        )?;
+        ensure_equal(
+            &degraded[0]["sources"],
+            &serde_json::json!(["graph_witness_prune"]),
+            "graph witness degraded sources",
+        )?;
+        ensure_equal(
+            &value["data"]["degraded"],
+            &value["degraded"],
+            "data degraded is aggregated with top-level degraded",
+        )
+    }
+
+    #[test]
     fn learn_decay_workspace_config_maps_to_runner_settings() -> TestResult {
         let config = crate::config::ConfigFile::parse(
             r#"
@@ -45669,6 +45952,56 @@ default_half_life_days = 45
             &result["details"]["command"],
             &serde_json::json!("maintenance graph-snapshot-prune"),
             "graph snapshot prune details command",
+        )
+    }
+
+    #[test]
+    fn maintenance_response_degraded_entries_are_aggregated() -> TestResult {
+        let data = serde_json::json!({
+            "schema": "ee.maintenance.run.v1",
+            "command": "job run",
+            "code": "maintenance_job_failed",
+            "severity": "medium",
+            "message": "Maintenance job failed before completion.",
+            "repair": "ee job run decay_sweep --json",
+            "degraded": [
+                {
+                    "code": "maintenance_job_failed",
+                    "severity": "high",
+                    "message": "Decay sweep failed while writing history.",
+                    "repair": "ee doctor --workspace . --json"
+                },
+                {
+                    "code": "maintenance_job_failed",
+                    "severity": "medium",
+                    "message": "Duplicate maintenance failure.",
+                    "repair": "ee job run decay_sweep --json"
+                }
+            ],
+        });
+
+        let degraded = super::maintenance_response_degraded(false, &data);
+
+        ensure_equal(&degraded.len(), &1, "maintenance degraded aggregate count")?;
+        ensure_equal(
+            &degraded[0]["code"],
+            &serde_json::json!("maintenance_job_failed"),
+            "maintenance degraded code",
+        )?;
+        ensure_equal(
+            &degraded[0]["severity"],
+            &serde_json::json!("high"),
+            "maintenance degraded severity escalates",
+        )?;
+        ensure_equal(
+            &degraded[0]["repair"],
+            &serde_json::json!("ee doctor --workspace . --json"),
+            "maintenance degraded repair follows highest severity",
+        )?;
+        ensure_equal(
+            &degraded[0]["sources"],
+            &serde_json::json!(["maintenance_run"]),
+            "maintenance degraded source label",
         )
     }
 
@@ -46058,6 +46391,11 @@ default_half_life_days = 45
             "\"repair\":\"ee daemon status --json\"",
             "write-spool repair",
         )?;
+        ensure_contains(
+            &stdout,
+            "\"sources\":[\"write_spool_diagnostics\"]",
+            "write-spool degraded source",
+        )?;
         ensure(stderr.is_empty(), "diag write-spool json stderr empty")
     }
 
@@ -46167,6 +46505,11 @@ default_half_life_days = 45
             &stdout,
             "\"repair\":\"ee diag locks --json\"",
             "write-owner repair",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"sources\":[\"write_owner_diagnostics\"]",
+            "write-owner degraded source",
         )?;
         ensure(stderr.is_empty(), "diag write-owner json stderr empty")
     }

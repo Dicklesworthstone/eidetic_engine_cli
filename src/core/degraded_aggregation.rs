@@ -180,14 +180,14 @@ where
             acc.message = report.message.clone();
             acc.repair = report.repair.clone();
         }
-        if !acc.sources.iter().any(|s| *s == report.source) {
-            acc.sources.push(report.source);
+        if !acc.sources.contains(&report.source) {
+            acc.sources.push(report.source.clone());
         }
     }
 
     let mut aggregates: Vec<AggregatedDegradation> = by_code
-        .into_iter()
-        .map(|(_, acc)| {
+        .into_values()
+        .map(|acc| {
             let mut sources = acc.sources;
             sources.sort_unstable();
             sources.dedup();
