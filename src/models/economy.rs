@@ -2521,6 +2521,10 @@ fn push_json_string(output: &mut String, value: &str) {
             '\n' => output.push_str("\\n"),
             '\r' => output.push_str("\\r"),
             '\t' => output.push_str("\\t"),
+            other if (other as u32) < 0x20 => {
+                use std::fmt::Write;
+                let _ = write!(output, "\\u{:04x}", other as u32);
+            }
             other => output.push(other),
         }
     }

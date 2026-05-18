@@ -1401,8 +1401,22 @@ pub fn embedding_metadata_schema_catalog_json() -> String {
 }
 
 fn push_json_string(output: &mut String, value: &str) {
-    let encoded = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string());
-    output.push_str(&encoded);
+    output.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            other if (other as u32) < 0x20 => {
+                use std::fmt::Write;
+                let _ = write!(output, "\\u{:04x}", other as u32);
+            }
+            other => output.push(other),
+        }
+    }
+    output.push('"');
 }
 
 #[cfg(test)]
