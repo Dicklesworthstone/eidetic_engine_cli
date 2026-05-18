@@ -147,6 +147,7 @@ jobs:
             report["aggregate"],
             {
                 "all_required_crates_ready": False,
+                "available_count": 0,
                 "blocked_count": 7,
                 "crate_count": 7,
                 "group_count": 1,
@@ -187,7 +188,10 @@ jobs:
         )
         self.assertIn("franken_networkx", output)
         self.assertIn("Aggregate: `0/7` crates ready; `7` blocked", output)
-        self.assertIn("`7` missing, `0` wrong-version, `0` network-unavailable", output)
+        self.assertIn(
+            "`0` available on crates.io; `7` missing, `0` wrong-version, `0` network-unavailable",
+            output,
+        )
         self.assertIn("crates_io_missing", output)
         self.assertNotIn("/Users/", output)
         self.assertNotIn("CARGO_REGISTRY_TOKEN=", output)
@@ -202,6 +206,7 @@ jobs:
                     "group": "first",
                     "summary": {
                         "crate_count": 3,
+                        "available_count": 1,
                         "ready_count": 1,
                         "blocked_count": 2,
                         "missing_count": 1,
@@ -222,6 +227,7 @@ jobs:
                     "group": "second",
                     "summary": {
                         "crate_count": 2,
+                        "available_count": 1,
                         "ready_count": 1,
                         "blocked_count": 1,
                         "missing_count": 0,
@@ -243,13 +249,17 @@ jobs:
         output = self.mod.render_markdown(report)
 
         self.assertIn("Aggregate: `2/5` crates ready; `3` blocked", output)
-        self.assertIn("`1` missing, `1` wrong-version, `1` network-unavailable", output)
+        self.assertIn(
+            "`2` available on crates.io; `1` missing, `1` wrong-version, `1` network-unavailable",
+            output,
+        )
 
     def test_json_aggregate_counts_multiple_groups(self) -> None:
         groups = [
             {
                 "summary": {
                     "crate_count": 3,
+                    "available_count": 1,
                     "ready_count": 1,
                     "blocked_count": 2,
                     "missing_count": 1,
@@ -260,6 +270,7 @@ jobs:
             {
                 "summary": {
                     "crate_count": 2,
+                    "available_count": 1,
                     "ready_count": 1,
                     "blocked_count": 1,
                     "missing_count": 0,
@@ -273,6 +284,7 @@ jobs:
             self.mod.aggregate_summary(groups),
             {
                 "all_required_crates_ready": False,
+                "available_count": 2,
                 "blocked_count": 3,
                 "crate_count": 5,
                 "group_count": 2,

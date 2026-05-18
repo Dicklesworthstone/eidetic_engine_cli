@@ -27,7 +27,7 @@ When multiple groups are selected, the Markdown output starts with a compact
 aggregate line, for example:
 
 ```text
-Aggregate: `1/9` crates ready; `8` blocked (`7` missing, `1` wrong-version, `0` network-unavailable).
+Aggregate: `1/9` crates ready; `8` blocked (`1` available on crates.io; `7` missing, `1` wrong-version, `0` network-unavailable).
 ```
 
 The JSON output carries the same counts in a top-level `aggregate` object so
@@ -37,6 +37,7 @@ agents and audit scripts do not need to parse Markdown:
 {
   "aggregate": {
     "all_required_crates_ready": false,
+    "available_count": 1,
     "blocked_count": 8,
     "crate_count": 9,
     "group_count": 2,

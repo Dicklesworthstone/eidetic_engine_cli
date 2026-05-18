@@ -409,6 +409,7 @@ def evaluate_group(
 
 def aggregate_summary(groups: list[dict[str, Any]]) -> dict[str, Any]:
     total_crates = sum(group["summary"]["crate_count"] for group in groups)
+    available_crates = sum(group["summary"].get("available_count", 0) for group in groups)
     ready_crates = sum(group["summary"]["ready_count"] for group in groups)
     blocked_crates = sum(group["summary"]["blocked_count"] for group in groups)
     missing_crates = sum(group["summary"]["missing_count"] for group in groups)
@@ -419,6 +420,7 @@ def aggregate_summary(groups: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "group_count": len(groups),
         "crate_count": total_crates,
+        "available_count": available_crates,
         "ready_count": ready_crates,
         "blocked_count": blocked_crates,
         "missing_count": missing_crates,
@@ -436,7 +438,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         (
             f"Aggregate: `{aggregate['ready_count']}/{aggregate['crate_count']}` crates ready; "
             f"`{aggregate['blocked_count']}` blocked "
-            f"(`{aggregate['missing_count']}` missing, "
+            f"(`{aggregate['available_count']}` available on crates.io; "
+            f"`{aggregate['missing_count']}` missing, "
             f"`{aggregate['wrong_version_count']}` wrong-version, "
             f"`{aggregate['network_unavailable_count']}` network-unavailable)."
         ),
