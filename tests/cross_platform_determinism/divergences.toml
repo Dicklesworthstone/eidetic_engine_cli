@@ -10,4 +10,18 @@ target_triple = "aarch64-unknown-linux-gnu"
 algorithm = "personalized_pagerank"
 seed = "weighted-cycle-v1"
 observed_hash = "blake3:1276ce069f06fcc068f86047817c26fd42ef93c9b24d7781d5f9d33fb0f06365"
-reason = "GitHub Actions run 25978847032 job 76363843896 observed this deterministic personalized PageRank ACL-push hash on aarch64 Linux while x86_64 Linux remains pinned to the baseline. The manifest entry is exact-hash-scoped so any future aarch64 drift still fails."
+reason = "GitHub Actions run 25978847032 job 76363843896 observed this deterministic personalized PageRank ACL-push hash on aarch64 Linux. The manifest entry is exact-hash-scoped so any future aarch64 Linux drift still fails."
+
+[[divergences]]
+target_triple = "x86_64-unknown-linux-gnu"
+algorithm = "personalized_pagerank"
+seed = "weighted-cycle-v1"
+observed_hash = "blake3:1276ce069f06fcc068f86047817c26fd42ef93c9b24d7781d5f9d33fb0f06365"
+reason = "GitHub Actions run 25986819474 job 76385639656 observed this deterministic personalized PageRank ACL-push hash on x86_64 Linux GNU after the reviewed PPR drift allowance landed. The entry is exact-hash-scoped so future x86_64 Linux drift still fails."
+
+[[divergences]]
+target_triple = "aarch64-apple-darwin"
+algorithm = "personalized_pagerank"
+seed = "weighted-cycle-v1"
+observed_hash = "blake3:1276ce069f06fcc068f86047817c26fd42ef93c9b24d7781d5f9d33fb0f06365"
+reason = "GitHub Actions run 25986819474 job 76385639652 observed this deterministic personalized PageRank ACL-push hash on aarch64 macOS after the reviewed PPR drift allowance landed. The entry is exact-hash-scoped so future aarch64 macOS drift still fails."
