@@ -1,72 +1,6 @@
 {
   "violations": [
     {
-      "bead": "bd-2y8yk",
-      "label": "implements-surface",
-      "surface": "serve",
-      "reason": "SERVE_UNAVAILABLE_CODE still exists in src/cli/mod.rs"
-    },
-    {
-      "bead": "bd-2zyo0",
-      "label": "implements-surface",
-      "surface": "serve",
-      "reason": "SERVE_UNAVAILABLE_CODE still exists in src/cli/mod.rs"
-    },
-    {
-      "bead": "bd-36bbk.1.10",
-      "label": "implements-surface",
-      "surface": "fake_tailscale_e2e_harness",
-      "reason": "close_reason contains abstention language"
-    },
-    {
-      "bead": "bd-36bbk.1.7",
-      "label": "implements-surface",
-      "surface": "peer_discovery_policy",
-      "reason": "referenced test path missing: tests/mesh_discovery_policy_audit.rs"
-    },
-    {
-      "bead": "bd-36bbk.1.8",
-      "label": "implements-surface",
-      "surface": "tailnet_change_guard",
-      "reason": "referenced test path missing: tests/fixtures/tailnet_change"
-    },
-    {
-      "bead": "bd-36bbk.1.8",
-      "label": "implements-surface",
-      "surface": "tailnet_change_guard",
-      "reason": "referenced test path missing: tests/mesh_identity_change_guard_audit.rs"
-    },
-    {
-      "bead": "bd-36bbk.1.8",
-      "label": "implements-surface",
-      "surface": "tailnet_change_guard",
-      "reason": "referenced test path missing: tests/mesh_tailnet_change_audit.rs"
-    },
-    {
-      "bead": "bd-3usjw.1",
-      "label": "implements-surface",
-      "surface": "db_inspect",
-      "reason": "referenced test path missing: tests/fixtures/db_inspect"
-    },
-    {
-      "bead": "bd-3usjw.2",
-      "label": "implements-surface",
-      "surface": "graph_centrality_read",
-      "reason": "referenced test path missing: tests/e2e_graph_centrality.rs"
-    },
-    {
-      "bead": "bd-3usjw.3",
-      "label": "implements-surface",
-      "surface": "mcp_top_level",
-      "reason": "referenced test path missing: tests/e2e_mcp_top_level.rs"
-    },
-    {
-      "bead": "bd-3usjw.3",
-      "label": "implements-surface",
-      "surface": "mcp_top_level",
-      "reason": "referenced test path missing: tests/golden/mcp_manifest_disabled.snap"
-    },
-    {
       "bead": "bd-3usjw.4",
       "label": "defer-to-v2",
       "surface": "serve_localhost",
@@ -77,30 +11,6 @@
       "label": "defer-to-v2",
       "surface": "serve_localhost",
       "reason": "missing defer_until_iso8601: YYYY-MM-DD"
-    },
-    {
-      "bead": "bd-3usjw.4",
-      "label": "implements-surface",
-      "surface": "serve_localhost",
-      "reason": "declared e2e FILE SURFACE missing: tests/e2e_serve_localhost.rs"
-    },
-    {
-      "bead": "bd-3usjw.4",
-      "label": "implements-surface",
-      "surface": "serve_localhost",
-      "reason": "referenced test path missing: tests/e2e_serve_localhost.rs"
-    },
-    {
-      "bead": "bd-3usjw.6",
-      "label": "implements-surface",
-      "surface": "trauma_guard_preflight",
-      "reason": "close_reason contains abstention language"
-    },
-    {
-      "bead": "bd-3usjw.6",
-      "label": "implements-surface",
-      "surface": "trauma_guard_preflight",
-      "reason": "referenced test path missing: tests/preflight_destructive_unit.rs"
     },
     {
       "bead": "bd-3usjw.6",
@@ -121,26 +31,8 @@
       "missing_fixture_path": "tests/fixtures/failure_modes/preflight_patterns_unavailable.json",
       "emitted_code": "preflight_patterns_unavailable",
       "severity": "medium"
-    },
-    {
-      "bead": "bd-h64j",
-      "label": "implements-surface",
-      "surface": "serve",
-      "reason": "SERVE_UNAVAILABLE_CODE still exists in src/cli/mod.rs"
-    },
-    {
-      "bead": "bd-k2p52",
-      "label": "implements-surface",
-      "surface": "tailscale_local_probe",
-      "reason": "close_reason contains abstention language"
-    },
-    {
-      "bead": "bd-s9kgl",
-      "label": "implements-surface",
-      "surface": "serve",
-      "reason": "SERVE_UNAVAILABLE_CODE still exists in src/cli/mod.rs"
     }
   ],
-  "count": 22,
+  "count": 4,
   "status": "fail"
 }
