@@ -1,10 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://eidetic-engine.local/schemas/ee.agent_operating_contract.v1.json",
-  "title": "ee agent operating contract",
+  "$id": "https://eidetic-engine/schemas/ee.agent_operating_contract.v1.json",
+  "title": "ee.agent_operating_contract.v1",
   "description": "Read-only operating rules extracted from repository-local agent instructions and README requirements.",
   "type": "object",
-  "required": ["schema", "rules", "degraded"],
+  "required": ["schema", "rules", "reporting_obligations", "degraded"],
   "properties": {
     "schema": {
       "const": "ee.agent_operating_contract.v1"
@@ -71,6 +71,69 @@
       },
       "uniqueItems": true
     },
+    "reporting_obligations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "severity",
+          "obligation_type",
+          "trigger",
+          "instruction",
+          "evidence_kinds",
+          "evidence_refs",
+          "gap_code"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^agent\\.report\\.[a-z0-9_]+$"
+          },
+          "severity": {
+            "enum": ["info", "low", "warning", "medium", "high", "critical"]
+          },
+          "obligation_type": {
+            "enum": ["must_report", "advisory"]
+          },
+          "trigger": {
+            "type": "string",
+            "minLength": 1
+          },
+          "instruction": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_kinds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "gap_code": {
+            "type": ["string", "null"],
+            "enum": [
+              "missing_rch_proof",
+              "dirty_worktree_caveat_required",
+              "destructive_command_audit_required",
+              "memory_citation_required",
+              null
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "uniqueItems": true
+    },
     "degraded": {
       "type": "array",
       "items": {
@@ -95,5 +158,11 @@
       }
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "field_presets": {
+    "minimal": ["schema"],
+    "summary": ["schema", "rules", "reporting_obligations", "degraded"],
+    "standard": ["schema", "rules", "reporting_obligations", "degraded"],
+    "full": ["*"]
+  }
 }

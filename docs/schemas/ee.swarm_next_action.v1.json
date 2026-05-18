@@ -23,6 +23,7 @@
         "inputs": {"$ref": "#/$defs/inputSummary"},
         "coordination": {"$ref": "#/$defs/coordinationSummary"},
         "checkout": {"$ref": "#/$defs/checkoutSummary"},
+        "compileHealth": {"$ref": "#/$defs/compileHealthSummary"},
         "verification": {"$ref": "#/$defs/verificationSummary"},
         "environment": {"$ref": "#/$defs/environmentSummary"},
         "candidates": {
@@ -46,8 +47,8 @@
   },
   "field_presets": {
     "minimal": ["schema", "workspace", "redactionStatus", "candidateCount", "dirtyPathCount", "degradedCount"],
-    "summary": ["schema", "workspace", "redactionStatus", "inputs", "coordination", "checkout", "verification", "environment", "topCandidates", "degraded"],
-    "standard": ["schema", "workspace", "redactionStatus", "inputs", "candidates", "coordination", "checkout", "verification", "environment", "degraded"],
+    "summary": ["schema", "workspace", "redactionStatus", "inputs", "coordination", "checkout", "compileHealth", "verification", "environment", "topCandidates", "degraded"],
+    "standard": ["schema", "workspace", "redactionStatus", "inputs", "candidates", "coordination", "checkout", "compileHealth", "verification", "environment", "degraded"],
     "full": ["*"]
   },
   "examples": [
@@ -75,6 +76,7 @@
             "priority": 2,
             "assignee": null,
             "blockedBy": [],
+            "blockedByCompileHealth": true,
             "actionHint": "inspect_and_reserve_before_editing"
           }
         ],
@@ -87,6 +89,31 @@
         "checkout": {
           "dirtyPathCount": 1,
           "dirtyPaths": ["docs/schemas/ee.swarm_next_action.v1.json"]
+        },
+        "compileHealth": {
+          "safeToLaunchRch": false,
+          "blockerCount": 1,
+          "blockers": [
+            {
+              "path": "src/db/mod.rs",
+              "severity": "high",
+              "reason": "dirty_compile_critical_path_reserved_by_other_agent",
+              "ownerAgent": "GoldenCompass",
+              "ownerPattern": "src/db/*.rs",
+              "recentFirstError": {
+                "file": "src/db/mod.rs",
+                "line": 431,
+                "commandKind": "cargo_test",
+                "command": "cargo test --lib ppr_proof -- --nocapture",
+                "commandHash": "abc123",
+                "status": "remote_failure",
+                "degradedCodes": ["rch_verify_remote_command_failed"]
+              },
+              "affectedCommandKinds": ["cargo_test"],
+              "suggestedNextAction": "message_owner_before_rch"
+            }
+          ],
+          "recommendedAlternativeWork": ["message_compile_blocker_owner_before_rch", "prefer_static_or_non_cargo_work"]
         },
         "verification": {
           "rchSourceEnabled": true,
@@ -125,7 +152,7 @@
     },
     "candidate": {
       "type": "object",
-      "required": ["id", "title", "source", "scoreMilli", "status", "priority", "assignee", "blockedBy", "actionHint"],
+      "required": ["id", "title", "source", "scoreMilli", "status", "priority", "assignee", "blockedBy", "blockedByCompileHealth", "actionHint"],
       "additionalProperties": false,
       "properties": {
         "id": {"type": "string"},
@@ -136,6 +163,7 @@
         "priority": {"type": ["integer", "null"]},
         "assignee": {"type": ["string", "null"]},
         "blockedBy": {"type": "array", "items": {"type": "string"}},
+        "blockedByCompileHealth": {"type": "boolean"},
         "actionHint": {"type": "string"}
       }
     },
@@ -157,6 +185,54 @@
       "properties": {
         "dirtyPathCount": {"type": "integer", "minimum": 0},
         "dirtyPaths": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "compileHealthSummary": {
+      "type": "object",
+      "required": ["safeToLaunchRch", "blockerCount", "blockers", "recommendedAlternativeWork"],
+      "additionalProperties": false,
+      "properties": {
+        "safeToLaunchRch": {"type": ["boolean", "null"]},
+        "blockerCount": {"type": "integer", "minimum": 0},
+        "blockers": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/compileHealthBlocker"}
+        },
+        "recommendedAlternativeWork": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "compileHealthBlocker": {
+      "type": "object",
+      "required": ["path", "severity", "reason", "ownerAgent", "ownerPattern", "recentFirstError", "affectedCommandKinds", "suggestedNextAction"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string"},
+        "severity": {"type": "string", "enum": ["medium", "high"]},
+        "reason": {"type": "string"},
+        "ownerAgent": {"type": ["string", "null"]},
+        "ownerPattern": {"type": ["string", "null"]},
+        "recentFirstError": {
+          "anyOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/recentFirstError"}
+          ]
+        },
+        "affectedCommandKinds": {"type": "array", "items": {"type": "string"}},
+        "suggestedNextAction": {"type": "string"}
+      }
+    },
+    "recentFirstError": {
+      "type": "object",
+      "required": ["file", "line", "commandKind", "command", "commandHash", "status", "degradedCodes"],
+      "additionalProperties": false,
+      "properties": {
+        "file": {"type": "string"},
+        "line": {"type": ["integer", "null"], "minimum": 0},
+        "commandKind": {"type": ["string", "null"]},
+        "command": {"type": ["string", "null"]},
+        "commandHash": {"type": ["string", "null"]},
+        "status": {"type": ["string", "null"]},
+        "degradedCodes": {"type": "array", "items": {"type": "string"}}
       }
     },
     "verificationSummary": {

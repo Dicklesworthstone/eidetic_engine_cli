@@ -23,6 +23,14 @@
       "dirtyPathCount": 0,
       "dirtyPaths": []
     },
+    "compileHealth": {
+      "safeToLaunchRch": true,
+      "blockerCount": 0,
+      "blockers": [],
+      "recommendedAlternativeWork": [
+        "launch_rch_when_other_verification_inputs_are_ready"
+      ]
+    },
     "verification": {
       "rchSourceEnabled": false,
       "remoteOnlyRequired": false,

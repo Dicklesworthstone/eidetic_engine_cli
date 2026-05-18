@@ -22,6 +22,7 @@
         "priority": 2,
         "assignee": null,
         "blockedBy": [],
+        "blockedByCompileHealth": false,
         "actionHint": "Pick source-only work until remote slots clear"
       }
     ],
@@ -34,6 +35,14 @@
     "checkout": {
       "dirtyPathCount": 0,
       "dirtyPaths": []
+    },
+    "compileHealth": {
+      "safeToLaunchRch": true,
+      "blockerCount": 0,
+      "blockers": [],
+      "recommendedAlternativeWork": [
+        "launch_rch_when_other_verification_inputs_are_ready"
+      ]
     },
     "verification": {
       "rchSourceEnabled": true,

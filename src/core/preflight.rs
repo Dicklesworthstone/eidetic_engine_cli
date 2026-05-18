@@ -1246,6 +1246,7 @@ impl Default for AgentOperatingContractOptions {
 pub struct AgentOperatingContractReport {
     pub schema: String,
     pub rules: Vec<AgentOperatingContractRule>,
+    pub reporting_obligations: Vec<AgentOperatingContractReportingObligation>,
     pub degraded: Vec<PreflightDegradation>,
 }
 
@@ -1255,6 +1256,9 @@ impl AgentOperatingContractReport {
         Self {
             schema: AGENT_OPERATING_CONTRACT_SCHEMA_V1.to_owned(),
             rules: Vec::new(),
+            reporting_obligations: agent_operating_contract_reporting_obligations(
+                &AgentReportingObligationInput::default(),
+            ),
             degraded: Vec::new(),
         }
     }
@@ -1283,6 +1287,167 @@ pub struct AgentOperatingContractRule {
     pub line_end: usize,
     pub excerpt_hash: String,
     pub instruction: String,
+}
+
+/// One final-answer or handoff obligation agents must consider before
+/// claiming work is complete. The list is compact enough to prepend into an
+/// agent handoff and explicit enough for a later completion-audit adapter.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentOperatingContractReportingObligation {
+    pub id: String,
+    pub severity: String,
+    pub obligation_type: String,
+    pub trigger: String,
+    pub instruction: String,
+    pub evidence_kinds: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub gap_code: Option<String>,
+}
+
+/// Fixture-friendly evidence input for reporting-obligation evaluation.
+/// Production integrations can populate this from Beads, Agent Mail, RCH, git
+/// status, and memory citations without making the contract extractor itself
+/// mutate or execute those substrates.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AgentReportingObligationInput {
+    pub code_changed: bool,
+    pub rch_proof_refs: Vec<String>,
+    pub dirty_tree: bool,
+    pub unrelated_dirty_changes: bool,
+    pub git_evidence_refs: Vec<String>,
+    pub memory_used: bool,
+    pub memory_citation_refs: Vec<String>,
+    pub destructive_command_refs: Vec<String>,
+    pub destructive_approval_refs: Vec<String>,
+    pub coordination_refs: Vec<String>,
+    pub static_only_work: bool,
+    pub static_check_refs: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReportingObligationTemplate {
+    id: &'static str,
+    severity: &'static str,
+    obligation_type: &'static str,
+    trigger: &'static str,
+    instruction: &'static str,
+    evidence_kinds: &'static [&'static str],
+}
+
+const REPORTING_OBLIGATION_TEMPLATES: &[ReportingObligationTemplate] = &[
+    ReportingObligationTemplate {
+        id: "agent.report.rch_proof",
+        severity: "critical",
+        obligation_type: "must_report",
+        trigger: "code_or_rust_verification_changed",
+        instruction: "Final answers and handoffs must state the RCH proof command/result or the exact remote-verification blocker; never imply local Cargo was run.",
+        evidence_kinds: &["rch_proof_json", "beads_comment", "agent_mail_message"],
+    },
+    ReportingObligationTemplate {
+        id: "agent.report.dirty_worktree",
+        severity: "high",
+        obligation_type: "must_report",
+        trigger: "dirty_worktree_or_unrelated_changes_present",
+        instruction: "Report dirty-tree caveats and distinguish own edits from unrelated active-agent changes.",
+        evidence_kinds: &["git_status", "git_diff"],
+    },
+    ReportingObligationTemplate {
+        id: "agent.report.destructive_command_audit",
+        severity: "critical",
+        obligation_type: "must_report",
+        trigger: "destructive_or_denied_command_observed",
+        instruction: "Report the exact destructive command, policy decision, approval text if any, and audit timestamp.",
+        evidence_kinds: &[
+            "preflight_guard_json",
+            "human_approval_text",
+            "session_note",
+        ],
+    },
+    ReportingObligationTemplate {
+        id: "agent.report.memory_citation",
+        severity: "high",
+        obligation_type: "must_report",
+        trigger: "memory_derived_fact_used",
+        instruction: "Cite memory-derived facts with the required memory citation block, or state that the fact is memory-derived and unverified.",
+        evidence_kinds: &["memory_citation_block", "memory_source_path"],
+    },
+    ReportingObligationTemplate {
+        id: "agent.report.coordination_evidence",
+        severity: "medium",
+        obligation_type: "advisory",
+        trigger: "handoff_or_interrupted_work",
+        instruction: "Prefer Beads comment ids, Agent Mail message ids, and RCH command hashes as compact handoff evidence.",
+        evidence_kinds: &["beads_comment", "agent_mail_message", "rch_proof_json"],
+    },
+    ReportingObligationTemplate {
+        id: "agent.report.static_only_work",
+        severity: "low",
+        obligation_type: "advisory",
+        trigger: "static_only_or_docs_only_work",
+        instruction: "For static-only work, say which non-Cargo checks were run and why Rust verification was not required.",
+        evidence_kinds: &["rustfmt_or_schema_check", "git_diff_check"],
+    },
+];
+
+#[must_use]
+pub fn agent_operating_contract_reporting_obligations(
+    input: &AgentReportingObligationInput,
+) -> Vec<AgentOperatingContractReportingObligation> {
+    REPORTING_OBLIGATION_TEMPLATES
+        .iter()
+        .map(|template| reporting_obligation_from_template(template, input))
+        .collect()
+}
+
+fn reporting_obligation_from_template(
+    template: &ReportingObligationTemplate,
+    input: &AgentReportingObligationInput,
+) -> AgentOperatingContractReportingObligation {
+    let (evidence_refs, gap_code) = match template.id {
+        "agent.report.rch_proof" => (
+            input.rch_proof_refs.clone(),
+            (input.code_changed && input.rch_proof_refs.is_empty()).then_some("missing_rch_proof"),
+        ),
+        "agent.report.dirty_worktree" => (
+            input.git_evidence_refs.clone(),
+            ((input.dirty_tree || input.unrelated_dirty_changes)
+                && input.git_evidence_refs.is_empty())
+            .then_some("dirty_worktree_caveat_required"),
+        ),
+        "agent.report.destructive_command_audit" => {
+            let mut refs = input.destructive_command_refs.clone();
+            refs.extend(input.destructive_approval_refs.clone());
+            (
+                refs,
+                (!input.destructive_command_refs.is_empty()
+                    && input.destructive_approval_refs.is_empty())
+                .then_some("destructive_command_audit_required"),
+            )
+        }
+        "agent.report.memory_citation" => (
+            input.memory_citation_refs.clone(),
+            (input.memory_used && input.memory_citation_refs.is_empty())
+                .then_some("memory_citation_required"),
+        ),
+        "agent.report.coordination_evidence" => (input.coordination_refs.clone(), None),
+        "agent.report.static_only_work" => (input.static_check_refs.clone(), None),
+        _ => (Vec::new(), None),
+    };
+
+    AgentOperatingContractReportingObligation {
+        id: template.id.to_owned(),
+        severity: template.severity.to_owned(),
+        obligation_type: template.obligation_type.to_owned(),
+        trigger: template.trigger.to_owned(),
+        instruction: template.instruction.to_owned(),
+        evidence_kinds: template
+            .evidence_kinds
+            .iter()
+            .map(|kind| (*kind).to_owned())
+            .collect(),
+        evidence_refs,
+        gap_code: gap_code.map(str::to_owned),
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1340,7 +1505,8 @@ const AGENT_CONTRACT_RULE_PATTERNS: &[AgentContractRulePattern] = &[
         instruction: "Make code edits manually; do not run scripts that transform code files.",
         needles: &[
             "no script-based changes",
-            "never run a script that processes/changes code",
+            "processes/changes code files",
+            "always make code changes manually",
         ],
     },
     AgentContractRulePattern {
@@ -1472,6 +1638,7 @@ fn extract_agent_operating_contract_rules_from_doc(
         let trimmed = raw_line.trim();
         if let Some(heading) = markdown_heading_text(trimmed) {
             current_heading = heading.to_owned();
+            continue;
         }
         if trimmed.is_empty() {
             continue;
@@ -1892,6 +2059,10 @@ mod tests {
         rule_count: usize,
         rule_ids: Vec<String>,
         categories: Vec<String>,
+        reporting_obligation_count: usize,
+        reporting_obligation_ids: Vec<String>,
+        reporting_obligation_types: Vec<String>,
+        reporting_gap_codes: Vec<String>,
         degraded_codes: Vec<String>,
     }
 
@@ -1912,6 +2083,26 @@ mod tests {
             .collect::<Vec<_>>();
         categories.sort();
         categories.dedup();
+        let mut reporting_obligation_ids = report
+            .reporting_obligations
+            .iter()
+            .map(|obligation| obligation.id.clone())
+            .collect::<Vec<_>>();
+        reporting_obligation_ids.sort();
+        let mut reporting_obligation_types = report
+            .reporting_obligations
+            .iter()
+            .map(|obligation| obligation.obligation_type.clone())
+            .collect::<Vec<_>>();
+        reporting_obligation_types.sort();
+        reporting_obligation_types.dedup();
+        let mut reporting_gap_codes = report
+            .reporting_obligations
+            .iter()
+            .filter_map(|obligation| obligation.gap_code.clone())
+            .collect::<Vec<_>>();
+        reporting_gap_codes.sort();
+        reporting_gap_codes.dedup();
         let mut degraded_codes = report
             .degraded
             .iter()
@@ -1926,6 +2117,10 @@ mod tests {
             rule_count: report.rules.len(),
             rule_ids,
             categories,
+            reporting_obligation_count: report.reporting_obligations.len(),
+            reporting_obligation_ids,
+            reporting_obligation_types,
+            reporting_gap_codes,
             degraded_codes,
         }
     }
@@ -2568,6 +2763,122 @@ RULE NUMBER 2: NO WORKTREES. EVER.
     }
 
     #[test]
+    fn agent_operating_contract_reporting_obligations_flag_missing_rch_proof() -> TestResult {
+        let obligations =
+            agent_operating_contract_reporting_obligations(&AgentReportingObligationInput {
+                code_changed: true,
+                ..AgentReportingObligationInput::default()
+            });
+        let rch = obligations
+            .iter()
+            .find(|obligation| obligation.id == "agent.report.rch_proof")
+            .ok_or_else(|| "missing RCH reporting obligation".to_owned())?;
+
+        ensure(
+            rch.obligation_type.clone(),
+            "must_report".to_owned(),
+            "RCH obligation type",
+        )?;
+        ensure(
+            rch.gap_code.clone(),
+            Some("missing_rch_proof".to_owned()),
+            "RCH proof gap",
+        )
+    }
+
+    #[test]
+    fn agent_operating_contract_reporting_obligations_flag_memory_citation_gap() -> TestResult {
+        let obligations =
+            agent_operating_contract_reporting_obligations(&AgentReportingObligationInput {
+                memory_used: true,
+                ..AgentReportingObligationInput::default()
+            });
+        let memory = obligations
+            .iter()
+            .find(|obligation| obligation.id == "agent.report.memory_citation")
+            .ok_or_else(|| "missing memory citation obligation".to_owned())?;
+
+        ensure(
+            memory.gap_code.clone(),
+            Some("memory_citation_required".to_owned()),
+            "memory citation gap",
+        )
+    }
+
+    #[test]
+    fn agent_operating_contract_reporting_obligations_flag_dirty_tree_caveat_gap() -> TestResult {
+        let obligations =
+            agent_operating_contract_reporting_obligations(&AgentReportingObligationInput {
+                dirty_tree: true,
+                unrelated_dirty_changes: true,
+                ..AgentReportingObligationInput::default()
+            });
+        let dirty = obligations
+            .iter()
+            .find(|obligation| obligation.id == "agent.report.dirty_worktree")
+            .ok_or_else(|| "missing dirty-worktree obligation".to_owned())?;
+
+        ensure(
+            dirty.gap_code.clone(),
+            Some("dirty_worktree_caveat_required".to_owned()),
+            "dirty tree gap",
+        )
+    }
+
+    #[test]
+    fn agent_operating_contract_reporting_obligations_flag_destructive_command_audit_gap()
+    -> TestResult {
+        let obligations =
+            agent_operating_contract_reporting_obligations(&AgentReportingObligationInput {
+                destructive_command_refs: vec!["preflight_guard_json:cmd123".to_owned()],
+                ..AgentReportingObligationInput::default()
+            });
+        let destructive = obligations
+            .iter()
+            .find(|obligation| obligation.id == "agent.report.destructive_command_audit")
+            .ok_or_else(|| "missing destructive-command obligation".to_owned())?;
+
+        ensure(
+            destructive.gap_code.clone(),
+            Some("destructive_command_audit_required".to_owned()),
+            "destructive command gap",
+        )
+    }
+
+    #[test]
+    fn agent_operating_contract_reporting_obligations_preserve_clean_static_only_evidence()
+    -> TestResult {
+        let obligations =
+            agent_operating_contract_reporting_obligations(&AgentReportingObligationInput {
+                static_only_work: true,
+                static_check_refs: vec![
+                    "rustfmt:src/core/preflight.rs".to_owned(),
+                    "git_diff_check".to_owned(),
+                ],
+                ..AgentReportingObligationInput::default()
+            });
+        let static_only = obligations
+            .iter()
+            .find(|obligation| obligation.id == "agent.report.static_only_work")
+            .ok_or_else(|| "missing static-only obligation".to_owned())?;
+
+        ensure(
+            static_only.obligation_type.clone(),
+            "advisory".to_owned(),
+            "static-only type",
+        )?;
+        ensure(
+            static_only.evidence_refs.clone(),
+            vec![
+                "rustfmt:src/core/preflight.rs".to_owned(),
+                "git_diff_check".to_owned(),
+            ],
+            "static check refs",
+        )?;
+        ensure(static_only.gap_code.clone(), None, "static-only gap")
+    }
+
+    #[test]
     fn agent_operating_contract_minimal_workspace_matches_golden() -> TestResult {
         let docs = [
             (
@@ -2595,6 +2906,9 @@ RULE NUMBER 2: NO WORKTREES. EVER.
         let report = AgentOperatingContractReport {
             schema: AGENT_OPERATING_CONTRACT_SCHEMA_V1.to_owned(),
             rules: extract_agent_operating_contract_rules(&docs),
+            reporting_obligations: agent_operating_contract_reporting_obligations(
+                &AgentReportingObligationInput::default(),
+            ),
             degraded: Vec::new(),
         };
 

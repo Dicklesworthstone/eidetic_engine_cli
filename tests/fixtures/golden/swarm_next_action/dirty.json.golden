@@ -22,6 +22,7 @@
         "priority": 1,
         "assignee": null,
         "blockedBy": ["bd-parent"],
+        "blockedByCompileHealth": true,
         "actionHint": "Work on bd-parent first"
       }
     ],
@@ -37,6 +38,26 @@
         ".beads/issues.jsonl",
         "src/core/rule.rs",
         "tests/fixtures/golden/swarm_next_action/dirty.json.golden"
+      ]
+    },
+    "compileHealth": {
+      "safeToLaunchRch": false,
+      "blockerCount": 1,
+      "blockers": [
+        {
+          "path": "src/core/rule.rs",
+          "severity": "high",
+          "reason": "dirty_compile_critical_path_reserved_by_other_agent",
+          "ownerAgent": "BlueLake",
+          "ownerPattern": "src/core/*.rs",
+          "recentFirstError": null,
+          "affectedCommandKinds": [],
+          "suggestedNextAction": "message_owner_before_rch"
+        }
+      ],
+      "recommendedAlternativeWork": [
+        "message_compile_blocker_owner_before_rch",
+        "prefer_static_or_non_cargo_work"
       ]
     },
     "verification": {

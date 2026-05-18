@@ -26,5 +26,19 @@
     "reporting_required",
     "required_before_edit"
   ],
+  "reporting_obligation_count": 6,
+  "reporting_obligation_ids": [
+    "agent.report.coordination_evidence",
+    "agent.report.destructive_command_audit",
+    "agent.report.dirty_worktree",
+    "agent.report.memory_citation",
+    "agent.report.rch_proof",
+    "agent.report.static_only_work"
+  ],
+  "reporting_obligation_types": [
+    "advisory",
+    "must_report"
+  ],
+  "reporting_gap_codes": [],
   "degraded_codes": []
 }

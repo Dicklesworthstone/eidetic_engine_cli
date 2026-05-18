@@ -59,6 +59,10 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
     ),
     ("ee.db.inspect.v1", "ee.db.inspect.v1.json"),
     (
+        ee::core::workspace::WORKSPACE_HYGIENE_SCHEMA_V1,
+        "ee.workspace_hygiene.v1.json",
+    ),
+    (
         COMPLETION_AUDIT_CHECKLIST_SCHEMA_V1,
         "ee.completion_audit.checklist.v1.json",
     ),
@@ -571,6 +575,7 @@ fn swarm_next_action_sample() -> Value {
                 "priority": 2,
                 "assignee": null,
                 "blockedBy": [],
+                "blockedByCompileHealth": false,
                 "actionHint": "inspect_and_reserve_before_editing"
             }],
             "coordination": {
@@ -582,6 +587,12 @@ fn swarm_next_action_sample() -> Value {
             "checkout": {
                 "dirtyPathCount": 1,
                 "dirtyPaths": ["docs/schemas/ee.swarm_next_action.v1.json"]
+            },
+            "compileHealth": {
+                "safeToLaunchRch": true,
+                "blockerCount": 0,
+                "blockers": [],
+                "recommendedAlternativeWork": ["launch_rch_when_other_verification_inputs_are_ready"]
             },
             "verification": {
                 "rchSourceEnabled": true,

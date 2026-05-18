@@ -204,6 +204,24 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         category: EnvVar::AgentMode.category(),
     },
     EnvVarEntry {
+        name: EnvVar::AuditLaneBatchMax.name(),
+        description: EnvVar::AuditLaneBatchMax.description(),
+        default: EnvVar::AuditLaneBatchMax.default_value(),
+        category: EnvVar::AuditLaneBatchMax.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::AuditLaneCapacity.name(),
+        description: EnvVar::AuditLaneCapacity.description(),
+        default: EnvVar::AuditLaneCapacity.default_value(),
+        category: EnvVar::AuditLaneCapacity.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::AuditLaneFlushMs.name(),
+        description: EnvVar::AuditLaneFlushMs.description(),
+        default: EnvVar::AuditLaneFlushMs.default_value(),
+        category: EnvVar::AuditLaneFlushMs.category(),
+    },
+    EnvVarEntry {
         name: EnvVar::CassBinary.name(),
         description: EnvVar::CassBinary.description(),
         default: EnvVar::CassBinary.default_value(),
@@ -454,6 +472,48 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         description: EnvVar::TailscaleProbeSocketOverride.description(),
         default: EnvVar::TailscaleProbeSocketOverride.default_value(),
         category: EnvVar::TailscaleProbeSocketOverride.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::TailscaleDiscoveryMode.name(),
+        description: EnvVar::TailscaleDiscoveryMode.description(),
+        default: EnvVar::TailscaleDiscoveryMode.default_value(),
+        category: EnvVar::TailscaleDiscoveryMode.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::TailscaleRespondMode.name(),
+        description: EnvVar::TailscaleRespondMode.description(),
+        default: EnvVar::TailscaleRespondMode.default_value(),
+        category: EnvVar::TailscaleRespondMode.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::WorkspaceHygieneAlwaysReviewPatterns.name(),
+        description: EnvVar::WorkspaceHygieneAlwaysReviewPatterns.description(),
+        default: EnvVar::WorkspaceHygieneAlwaysReviewPatterns.default_value(),
+        category: EnvVar::WorkspaceHygieneAlwaysReviewPatterns.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::WorkspaceHygieneGeneratedPatterns.name(),
+        description: EnvVar::WorkspaceHygieneGeneratedPatterns.description(),
+        default: EnvVar::WorkspaceHygieneGeneratedPatterns.default_value(),
+        category: EnvVar::WorkspaceHygieneGeneratedPatterns.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::WorkspaceHygieneLocalMachinePatterns.name(),
+        description: EnvVar::WorkspaceHygieneLocalMachinePatterns.description(),
+        default: EnvVar::WorkspaceHygieneLocalMachinePatterns.default_value(),
+        category: EnvVar::WorkspaceHygieneLocalMachinePatterns.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::WorkspaceHygieneScratchPatterns.name(),
+        description: EnvVar::WorkspaceHygieneScratchPatterns.description(),
+        default: EnvVar::WorkspaceHygieneScratchPatterns.default_value(),
+        category: EnvVar::WorkspaceHygieneScratchPatterns.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::WalCheckpointBytesThreshold.name(),
+        description: EnvVar::WalCheckpointBytesThreshold.description(),
+        default: EnvVar::WalCheckpointBytesThreshold.default_value(),
+        category: EnvVar::WalCheckpointBytesThreshold.category(),
     },
     EnvVarEntry {
         name: EnvVar::Workspace.name(),
