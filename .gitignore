@@ -109,6 +109,19 @@ Cargo.lock.bak
 .codex_write_probe
 .cursor/
 .stash_janitor_workspace/
+# Per-tool MCP wiring configs at the repo root. These are emitted by
+# `am setup` and similar provisioners and contain per-machine bearer
+# tokens for the MCP Agent Mail HTTP server. They MUST NOT be committed.
+# Covers cline.mcp.json, codex.mcp.json, cursor.mcp.json, gemini.mcp.json,
+# windsurf.mcp.json, opencode.json, and any future *.mcp.json sibling
+# (the project-level .mcp.json is canonical/checked-in elsewhere when
+# present; this glob only matches root-level *.mcp.json with a tool prefix).
+/cline.mcp.json
+/codex.mcp.json
+/cursor.mcp.json
+/gemini.mcp.json
+/windsurf.mcp.json
+/opencode.json
 # mcp-agent-mail per-project Python stub installed by `install_guard`.
 # The real coordinator lives outside this repo; the on-disk stub is
 # scratch and must never be committed.
@@ -147,6 +160,10 @@ tests/logs/
 /find_async_sleep.sh
 /fix_unwrap_err.sh
 /patch.py
+# Scratch .rs files dropped at repo root during cross-project investigation
+# (e.g., temp_signal.rs from upstream asupersync triage). Not real test
+# binaries — those live under /test_* patterns above with paired binaries.
+/temp_*.rs
 
 # scripts/audit_install_pipeline.sh writes a timestamped JSON snapshot per
 # run into tests/audit_artifacts/. The "latest_install_pipeline.json" symlink
