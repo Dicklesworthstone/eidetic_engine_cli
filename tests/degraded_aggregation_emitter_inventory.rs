@@ -112,6 +112,13 @@ fn collect_literal_source_labels(files: &[PathBuf]) -> BTreeSet<String> {
         };
         let lines: Vec<&str> = contents.lines().collect();
         for (idx, line) in lines.iter().enumerate() {
+            // Skip line/doc comments so a documentation example like
+            // `/// DegradationAggregationInput::new("foo", ...)` cannot
+            // falsely contribute a label.
+            let trimmed_start = line.trim_start();
+            if trimmed_start.starts_with("//") {
+                continue;
+            }
             // Same-line form: `DegradationAggregationInput::new("foo",`.
             if let Some(start) = line.find("DegradationAggregationInput::new(") {
                 let tail = &line[start + "DegradationAggregationInput::new(".len()..];
@@ -121,13 +128,18 @@ fn collect_literal_source_labels(files: &[PathBuf]) -> BTreeSet<String> {
                 }
             }
             // Multi-line form: `DegradationAggregationInput::new(` on
-            // one line, label literal on the next line.
+            // one line, label literal on the next line. Skip if the
+            // next line is itself a comment.
             if line
                 .trim_end()
                 .ends_with("DegradationAggregationInput::new(")
             {
                 if let Some(next) = lines.get(idx + 1) {
-                    if let Some(label) = first_string_literal(next.trim_start()) {
+                    let next_trimmed = next.trim_start();
+                    if next_trimmed.starts_with("//") {
+                        continue;
+                    }
+                    if let Some(label) = first_string_literal(next_trimmed) {
                         labels.insert(label);
                     }
                 }
