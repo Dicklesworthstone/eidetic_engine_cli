@@ -219,7 +219,7 @@ rejects before symlink canonicalization can prove they're under `/Users/jemanuel
 - Disable compression (`RCH_COMPRESSION=0`).
 - Topology is **flaky** — succeeded slots last 1–2 minutes then re-block. If
   you hit `RCH-E327`, retry every ~30s up to 3 times before reporting blocked.
-- Pin a known-good worker: `RCH_WORKER=trj` (or css/csd).
+- Pin a known-good worker: `RCH_WORKERS=trj` (or css/csd).
 
 ### "All workers busy" (capacity wait)
 
