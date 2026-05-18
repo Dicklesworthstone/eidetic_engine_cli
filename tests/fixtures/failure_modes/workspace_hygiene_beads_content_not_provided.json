@@ -1,0 +1,34 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "workspace_hygiene_beads_content_not_provided",
+  "introduced_by": {
+    "bead": "bd-1eq3l.4",
+    "epic_letter": "WH"
+  },
+  "surfaces": [
+    "workspace hygiene"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "Workspace hygiene could not pass .beads/issues.jsonl bytes to the Beads-state classifier, so conflict-marker and parse-error detection are skipped. This typically happens when the JSONL is unreadable (permission denied, disk error, transient race) or when the caller elected not to read the file.",
+    "setup_commands": [
+      "# In a temporary workspace, remove read permission on .beads/issues.jsonl before invoking workspace hygiene",
+      "chmod 000 .beads/issues.jsonl"
+    ],
+    "invocation": "ee workspace hygiene --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "workspace_hygiene_beads_content_not_provided",
+    "severity": "low",
+    "message_contains": [
+      ".beads/issues.jsonl",
+      "content"
+    ],
+    "repair_contains": "readable",
+    "repair_strings": [
+      "Ensure .beads/issues.jsonl is readable by the agent so hygiene can scan it for conflict markers.",
+      "Re-run hygiene after restoring read access to the JSONL export."
+    ]
+  }
+}

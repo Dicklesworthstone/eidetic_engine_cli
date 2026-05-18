@@ -97,7 +97,7 @@ Per-workspace defaults live in `.ee/config.toml`:
 ```toml
 [redaction.defaults]
 export         = "standard"
-handoff_create = "strict"
+handoff_create = "standard"
 context_json   = "minimal"
 support_bundle = "paranoid"
 ```

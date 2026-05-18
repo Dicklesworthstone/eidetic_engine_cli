@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "workspace_hygiene_beads_jsonl_truncated",
+  "introduced_by": {
+    "bead": "bd-1eq3l.4",
+    "epic_letter": "WH"
+  },
+  "surfaces": [
+    "workspace hygiene"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Workspace hygiene capped its content inspection of .beads/issues.jsonl at BEADS_JSONL_MAX_INSPECT_BYTES (8 MiB) because the file exceeded the bound. Classification of the inspected prefix is unaffected, but conflict markers and parse errors past the cap will not be detected.",
+    "setup_commands": [
+      "# In a temporary workspace, write a .beads/issues.jsonl payload larger than BEADS_JSONL_MAX_INSPECT_BYTES (8 MiB) so the inspector hits the truncation cap"
+    ],
+    "invocation": "ee workspace hygiene --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "workspace_hygiene_beads_jsonl_truncated",
+    "severity": "warning",
+    "message_contains": [
+      ".beads/issues.jsonl",
+      "truncated"
+    ],
+    "repair_contains": "archive",
+    "repair_strings": [
+      "Archive closed beads or split the tracker so the JSONL stays under the inspection bound.",
+      "Re-run hygiene after pruning so conflict markers past the cap are seen."
+    ]
+  }
+}

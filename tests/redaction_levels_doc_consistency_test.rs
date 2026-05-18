@@ -455,12 +455,16 @@ fn workspace_redaction_defaults_claim_matches_config_parser() -> TestResult {
     ensure(
         doc.contains("[redaction.defaults]")
             && doc.contains("export         = \"standard\"")
+            && doc.contains("handoff_create = \"standard\"")
+            && doc.contains("context_json   = \"minimal\"")
             && doc.contains("support_bundle = \"paranoid\""),
         "docs/redaction_levels.md must document the live redaction.defaults config table",
     )?;
     ensure(
         config_file.contains("pub struct RedactionDefaultsConfig")
             && config_file.contains("export: optional_redaction_level_path")
+            && config_file.contains("handoff_create: optional_redaction_level_path")
+            && config_file.contains("context_json: optional_redaction_level_path")
             && config_file.contains("support_bundle: optional_redaction_level_path"),
         "ConfigFile must parse redaction.defaults surface defaults",
     )?;

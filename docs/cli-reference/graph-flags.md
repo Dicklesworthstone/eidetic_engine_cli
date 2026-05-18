@@ -117,6 +117,11 @@ Command-specific graph flags:
 | `ee graph export` | `--workspace-id <ID>` | workspace ID | current workspace stable ID | Selects the workspace snapshot namespace. |
 | `ee graph export` | `--snapshot-id <ID>` | snapshot ID | latest by type | Exports a specific graph snapshot. |
 | `ee graph export` | `--graph-type <TYPE>` / `--type <TYPE>` | graph snapshot type | `memory_links` | Selects the graph family to export. |
+| `ee graph centrality` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Reads persisted centrality scores from the latest memory-link snapshot. |
+| `ee graph centrality` | `--algorithm <ALGORITHM>` | `pagerank`, `betweenness`, `authority`, `hits-hubs`, `hits-authorities` | `pagerank` | Selects which persisted centrality score family to list. |
+| `ee graph centrality` | `--limit <COUNT>` | integer | `10` | Caps returned centrality rows. |
+| `ee graph centrality` | `--memory-id <MEMORY_ID>` | memory ID | omitted | Returns scores for one memory instead of top rows. |
+| `ee graph centrality` | `--require-fresh` | boolean | false | Exits 6 when the latest graph snapshot is stale. |
 | `ee graph centrality-refresh` | `--dry-run` | boolean | false | Reports the refresh plan without computing. |
 | `ee graph centrality-refresh` | `--database`, `--min-weight`, `--min-confidence`, `--link-limit` | see above | see above | Filters the centrality refresh graph. |
 | `ee graph snapshot refresh` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Reads and writes graph snapshots. |
@@ -137,6 +142,7 @@ Example:
 
 ```bash
 ee graph snapshot refresh --workspace . --graph memory_links --dry-run --json
+ee graph centrality --workspace . --algorithm pagerank --limit 10 --json
 ```
 
 ## Curation And Maintenance Flags
@@ -160,6 +166,10 @@ ee graph snapshot refresh --workspace . --graph memory_links --dry-run --json
 | `ee maintenance graph-snapshot-prune` | `--dry-run` | boolean | false | Reports planned pruning without mutating graph snapshot rows. |
 | `ee maintenance graph-snapshot-prune` | `--time-limit-ms <MS>` | integer | job default | Overrides per-job time budget. |
 | `ee maintenance graph-snapshot-prune` | `--item-limit <N>` | integer | job default | Overrides per-job item budget. |
+| `ee maintenance graph-witnesses-prune` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Reads graph algorithm witness rows. |
+| `ee maintenance graph-witnesses-prune` | `--dry-run` | boolean | false | Reports planned witness pruning without mutating witness rows. |
+| `ee maintenance graph-witnesses-prune` | `--retention-days <DAYS>` | integer days | witness policy default | Overrides the default witness retention window. |
+| `ee maintenance graph-witnesses-prune` | `--algorithm-ttl <NAME=DAYS>` | repeatable key/value | omitted | Overrides one algorithm-specific witness TTL; repeat for multiple algorithms. |
 | `ee job run <KIND>` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Runs a steward handler against an explicit DB. |
 | `ee job run <KIND>` | `--dry-run` | boolean | false | Reports planned work without mutating memory scores or job history. |
 | `ee job run <KIND>` | `--time-limit-ms <MS>` | integer | job default | Overrides per-job time budget. |

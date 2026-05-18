@@ -133,6 +133,19 @@ fn graph_command_flags_are_help_discoverable() -> TestResult {
         "ee graph export --help",
     )?;
 
+    let centrality_help = help_for(&["ee", "graph", "centrality", "--help"])?;
+    assert_contains_all(
+        &centrality_help,
+        &[
+            "--database",
+            "--algorithm",
+            "--limit",
+            "--memory-id",
+            "--require-fresh",
+        ],
+        "ee graph centrality --help",
+    )?;
+
     let snapshot_help = help_for(&["ee", "graph", "snapshot", "refresh", "--help"])?;
     assert_contains_all(
         &snapshot_help,
@@ -213,6 +226,18 @@ fn proximity_health_and_maintenance_flags_are_help_discoverable() -> TestResult 
         &prune_help,
         &["--database", "--dry-run", "--time-limit-ms", "--item-limit"],
         "ee maintenance graph-snapshot-prune --help",
+    )?;
+
+    let witness_prune_help = help_for(&["ee", "maintenance", "graph-witnesses-prune", "--help"])?;
+    assert_contains_all(
+        &witness_prune_help,
+        &[
+            "--database",
+            "--dry-run",
+            "--retention-days",
+            "--algorithm-ttl",
+        ],
+        "ee maintenance graph-witnesses-prune --help",
     )
 }
 
@@ -245,6 +270,17 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
         &[
             "ee",
             "graph",
+            "centrality",
+            "--algorithm",
+            "pagerank",
+            "--limit",
+            "10",
+            "--require-fresh",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "graph",
             "snapshot",
             "refresh",
             "--graph",
@@ -263,6 +299,17 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "--json",
         ][..],
         &["ee", "status", "--skyline", "--json"][..],
+        &[
+            "ee",
+            "maintenance",
+            "graph-witnesses-prune",
+            "--dry-run",
+            "--retention-days",
+            "30",
+            "--algorithm-ttl",
+            "pagerank=14",
+            "--json",
+        ][..],
     ] {
         Cli::try_parse_from(args)
             .map_err(|error| format!("{} failed to parse: {:?}", args.join(" "), error.kind()))?;

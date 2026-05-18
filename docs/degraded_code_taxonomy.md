@@ -141,6 +141,7 @@ Current conventions:
 | `graph_dominance` | `ee why` revision-dominance impact analysis degradation. |
 | `graph_export` | `ee graph export` graph snapshot export degradation. |
 | `graph_feature_enrichment` | `ee graph feature-enrichment` graph-derived scoring degradation. |
+| `graph_witness_prune` | `ee maintenance graph-witnesses-prune` witness-retention degradation. |
 | `hits` | `ee graph hits` HITS algorithm degradation. |
 | `gomory_hu_proximity` | `ee proximity` Gomory-Hu min-cut proximity degradation. |
 | `review_session` | `ee review session` curation proposal degradation. |
@@ -161,6 +162,8 @@ Current conventions:
 | `why` | Top-level `ee why` memory explanation degradation. |
 | `why_graph_retrieval` | `ee why` graph-retrieval feature degradation. |
 | `why_revision_lineage` | `ee why` revision-lineage sentinel degradation. |
+| `write_owner_diagnostics` | `ee diag write-owner` queue-busy degradation. |
+| `write_spool_diagnostics` | `ee diag write-spool` queue-backpressure degradation. |
 
 When adding a new renderer, prefer the most specific stable section, command,
 or algorithm label available. Do not include workspace paths, query text, or
@@ -516,7 +519,7 @@ memory bodies in `sources[]`.
 | `quarantine_rows_unreadable` | medium | bd-17c65.10.6 (J6) |
 | `trust_quarantine_rows_unreadable` | medium | bd-17c65.10.6 (J6) |
 
-#### Coordination / external tools (20)
+#### Coordination / external tools (24)
 | Code | Severity | Bead |
 |------|----------|------|
 | `agent_mail_unavailable` | medium | bd-2nkbn (Agent Mail resilience) |
@@ -532,8 +535,12 @@ memory bodies in `sources[]`.
 | `rch_worker_topology_blocked` | warning | bd-1zb7k.13.4 (C4) |
 | `workspace_hygiene_agent_mail_timeout` | warning | bd-1eq3l.11 |
 | `workspace_hygiene_agent_mail_unavailable` | warning | bd-1eq3l.11 |
+| `workspace_hygiene_beads_content_not_provided` | low | bd-1eq3l.4 |
+| `workspace_hygiene_beads_db_divergence_unknown` | low | bd-1eq3l.4 |
+| `workspace_hygiene_beads_jsonl_truncated` | warning | bd-1eq3l.4 |
 | `workspace_hygiene_beads_parse_error` | medium | bd-1eq3l.11 |
 | `workspace_hygiene_beads_reserved` | warning | bd-1eq3l.11 |
+| `workspace_hygiene_beads_self_reservation` | info | bd-1eq3l.4 |
 | `workspace_hygiene_beads_unavailable` | medium | bd-1eq3l.11 |
 | `workspace_hygiene_config_invalid` | medium | bd-1eq3l.11 |
 | `workspace_hygiene_output_truncated` | warning | bd-1eq3l.11 |
