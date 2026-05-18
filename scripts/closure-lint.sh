@@ -852,7 +852,14 @@ close_reason_contains_abstention() {
             sed -E 's/[A-Z0-9_]+_UNAVAILABLE_CODE[[:space:]]+(deleted|removed)//Ig' |
             sed -E 's/(deleted|removed)[[:space:]]+[A-Z0-9_]+_UNAVAILABLE_CODE//Ig' |
             sed -E 's/unavailable stubs removed//Ig' |
-            sed -E 's/instead of degraded-mode errors//Ig'
+            sed -E 's/instead of degraded-mode errors//Ig' |
+            # bd-37u08 false-positive scrubs: explicit negation, fixture/code
+            # name conventions, and references to the failure-mode taxonomy.
+            sed -E 's/non-abstention//Ig' |
+            sed -E 's/\*_UNAVAILABLE_CODE//g' |
+            sed -E 's/docs\/degraded_code(s|_taxonomy)\.md//Ig' |
+            sed -E 's/degraded[[:space:]]+(case|code|mode|entry)s?//Ig' |
+            sed -E 's/[a-z][a-z0-9_]*_unavailable\b//Ig'
     )
 
     echo "$scrubbed" | grep -qiE "$ABSTENTION_REGEX"
