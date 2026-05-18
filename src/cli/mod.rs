@@ -18166,9 +18166,9 @@ where
 
     let now_ms = u64::from(args.enqueue);
     let status = spool.status(now_ms);
-    let degraded = backpressure
-        .as_ref()
-        .map_or_else(Vec::new, write_spool_backpressure_degraded_json);
+    let degraded = backpressure.as_ref().map_or_else(Vec::new, |error| {
+        write_spool_backpressure_degraded_json(error.as_ref())
+    });
     let data = serde_json::json!({
         "schema": "ee.write_spool.diagnostics.v1",
         "command": "diag write-spool",
@@ -18823,7 +18823,7 @@ where
             workspace_id: workspace_id.clone(),
             failure_id: args.failure_id.clone(),
             candidate_cause_id: args.candidate_cause_id.clone(),
-            contribution_score: args.contribution_score.clamp(0.0, 1.0),
+            contribution_score: if args.contribution_score.is_nan() { 0.0 } else { args.contribution_score.clamp(0.0, 1.0) },
             evidence_uris: evidence_uris.clone(),
             computed_at: args.computed_at.clone(),
             method,
@@ -18847,7 +18847,7 @@ where
             "edgeId": args.edge_id,
             "failureId": args.failure_id,
             "candidateCauseId": args.candidate_cause_id,
-            "contributionScore": args.contribution_score.clamp(0.0, 1.0),
+            "contributionScore": if args.contribution_score.is_nan() { 0.0 } else { args.contribution_score.clamp(0.0, 1.0) },
             "evidenceUris": evidence_uris,
             "degraded": []
         }
@@ -39877,7 +39877,7 @@ mod tests {
 
         let rendered =
             super::render_swarm_next_action_json(&snapshot, output::FieldProfile::Standard)
-                .map_err(|error| error.message)?;
+                .map_err(|error| error.message())?;
         let value: serde_json::Value =
             serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
         let degraded = value["data"]["degraded"]
