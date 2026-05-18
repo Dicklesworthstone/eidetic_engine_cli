@@ -3879,10 +3879,7 @@ fn apply_personalized_pagerank_rerank(
     let mut reranked_candidates = 0_usize;
     for candidate in candidates {
         let base = candidate.relevance.into_inner();
-        let raw_ppr = scores
-            .get(&candidate.memory_id)
-            .copied()
-            .unwrap_or(0.0);
+        let raw_ppr = scores.get(&candidate.memory_id).copied().unwrap_or(0.0);
         let ppr_score = if raw_ppr.is_nan() {
             0.0
         } else {
