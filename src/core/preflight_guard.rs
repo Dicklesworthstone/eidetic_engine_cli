@@ -339,6 +339,17 @@ fn rule_matches_command(rule: &PreflightGuardRule, command: &str) -> bool {
         match name.as_str() {
             "rm_rf_root" => return matches_rm_rf_target(command, RmTargetClass::Absolute),
             "rm_rf_home" => return matches_rm_rf_target(command, RmTargetClass::Home),
+            "file_deletion" => return matches_file_deletion(command),
+            "local_cargo_heavy_verification" => {
+                return matches_local_cargo_heavy_verification(command);
+            }
+            "local_cargo_target_dir_override" => {
+                return matches_local_cargo_target_dir_override(command);
+            }
+            "git_checkout_off_main" => return matches_git_checkout_off_main(command),
+            "git_clean_fd" => return matches_git_clean_destructive(command),
+            "script_code_rewrite" => return matches_script_code_rewrite(command),
+            "unsafe_cleanup" => return matches_unsafe_cleanup(command),
             "kubectl_mass_delete" => return matches_kubectl_mass_delete(command),
             "drop_table_sql" => return matches_drop_table_sql(command),
             "terraform_destroy" => return matches_terraform_destroy(command),
@@ -366,7 +377,10 @@ fn rm_segment_matches_target(segment: &[String], target_class: RmTargetClass) ->
     let Some(command_index) = shell_segment_command_index(segment) else {
         return false;
     };
-    if segment.get(command_index).is_none_or(|word| word != "rm") {
+    if segment
+        .get(command_index)
+        .is_none_or(|word| command_basename(word) != "rm")
+    {
         return false;
     }
 
@@ -397,6 +411,47 @@ fn rm_segment_matches_target(segment: &[String], target_class: RmTargetClass) ->
         && targets
             .iter()
             .any(|target| rm_target_matches_class(target, target_class))
+}
+
+fn matches_file_deletion(command: &str) -> bool {
+    shell_command_segments(command)
+        .iter()
+        .any(file_deletion_segment_matches)
+}
+
+fn file_deletion_segment_matches(segment: &[String]) -> bool {
+    let Some(command_index) = shell_segment_command_index(segment) else {
+        return false;
+    };
+    if let Some(shell_body) = shell_c_argument(segment, command_index) {
+        return matches_file_deletion(shell_body);
+    }
+    let Some(command_name) = segment
+        .get(command_index)
+        .map(|word| command_basename(word))
+    else {
+        return false;
+    };
+    match command_name {
+        "rm" => rm_has_deletion_target(segment, command_index),
+        "unlink" | "rmdir" => rm_has_deletion_target(segment, command_index),
+        _ => false,
+    }
+}
+
+fn rm_has_deletion_target(segment: &[String], command_index: usize) -> bool {
+    let mut saw_option_end = false;
+    for word in segment.iter().skip(command_index + 1) {
+        if !saw_option_end && word == "--" {
+            saw_option_end = true;
+            continue;
+        }
+        if !saw_option_end && word.starts_with('-') && word != "-" {
+            continue;
+        }
+        return true;
+    }
+    false
 }
 
 fn shell_segment_command_index(segment: &[String]) -> Option<usize> {
@@ -434,6 +489,394 @@ fn shell_segment_command_index(segment: &[String]) -> Option<usize> {
         return Some(index);
     }
     None
+}
+
+fn matches_local_cargo_heavy_verification(command: &str) -> bool {
+    shell_command_segments(command)
+        .iter()
+        .any(local_cargo_heavy_segment_matches)
+}
+
+fn matches_local_cargo_target_dir_override(command: &str) -> bool {
+    shell_command_segments(command)
+        .iter()
+        .any(local_cargo_target_dir_override_segment_matches)
+}
+
+fn local_cargo_heavy_segment_matches(segment: &[String]) -> bool {
+    let Some(command_index) = shell_segment_command_index(segment) else {
+        return false;
+    };
+    let Some(command_name) = segment.get(command_index) else {
+        return false;
+    };
+    if is_rch_wrapper_command(command_name) {
+        return false;
+    }
+    if let Some(shell_body) = shell_c_argument(segment, command_index) {
+        return matches_local_cargo_heavy_verification(shell_body);
+    }
+    cargo_heavy_subcommand(segment, command_index).is_some()
+}
+
+fn local_cargo_target_dir_override_segment_matches(segment: &[String]) -> bool {
+    let Some(command_index) = shell_segment_command_index(segment) else {
+        return false;
+    };
+    let Some(command_name) = segment.get(command_index) else {
+        return false;
+    };
+    if is_rch_wrapper_command(command_name) {
+        return false;
+    }
+    if let Some(shell_body) = shell_c_argument(segment, command_index) {
+        return matches_local_cargo_target_dir_override(shell_body);
+    }
+    cargo_heavy_subcommand(segment, command_index).is_some()
+        && segment[..command_index].iter().any(|word| {
+            word.strip_prefix("CARGO_TARGET_DIR=")
+                .is_some_and(local_cargo_target_dir_is_non_external)
+        })
+}
+
+fn cargo_heavy_subcommand(segment: &[String], command_index: usize) -> Option<&str> {
+    let command_name = segment.get(command_index)?;
+    let command_base = command_basename(command_name);
+    if command_base == "cargo-clippy" {
+        return Some("clippy");
+    }
+    if command_base != "cargo" {
+        return None;
+    }
+
+    let mut index = command_index + 1;
+    while index < segment.len() {
+        let word = segment[index].as_str();
+        if word.starts_with('+') {
+            index += 1;
+            continue;
+        }
+        if cargo_global_option_takes_value(word) {
+            index += 2;
+            continue;
+        }
+        if word.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return cargo_subcommand_is_heavy(word).then_some(word);
+    }
+    None
+}
+
+fn cargo_subcommand_is_heavy(word: &str) -> bool {
+    matches!(
+        word,
+        "bench" | "build" | "check" | "clippy" | "doc" | "run" | "test"
+    )
+}
+
+fn cargo_global_option_takes_value(word: &str) -> bool {
+    matches!(
+        word,
+        "--color" | "--config" | "--lockfile-path" | "--manifest-path" | "--target-dir"
+    )
+}
+
+fn local_cargo_target_dir_is_non_external(value: &str) -> bool {
+    !value.starts_with("/Volumes/USBNVME16TB/temp_agent_space/")
+}
+
+fn shell_c_argument(segment: &[String], command_index: usize) -> Option<&str> {
+    if !is_shell_command(segment.get(command_index)?) {
+        return None;
+    }
+    let mut index = command_index + 1;
+    while index < segment.len() {
+        let word = segment[index].as_str();
+        if word == "-c" {
+            return segment.get(index + 1).map(String::as_str);
+        }
+        if word.starts_with('-') && !word.starts_with("--") && word.contains('c') {
+            return segment.get(index + 1).map(String::as_str);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_shell_command(word: &str) -> bool {
+    matches!(
+        command_basename(word),
+        "bash" | "dash" | "fish" | "sh" | "zsh"
+    )
+}
+
+fn is_rch_wrapper_command(word: &str) -> bool {
+    let base = command_basename(word);
+    base == "rch" || base == "rch_verify.sh" || word.ends_with("/scripts/rch_verify.sh")
+}
+
+fn command_basename(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
+
+fn matches_git_checkout_off_main(command: &str) -> bool {
+    shell_command_segments(command)
+        .iter()
+        .any(git_checkout_segment_is_off_main)
+}
+
+fn git_checkout_segment_is_off_main(segment: &[String]) -> bool {
+    let Some(command_index) = shell_segment_command_index(segment) else {
+        return false;
+    };
+    if let Some(shell_body) = shell_c_argument(segment, command_index) {
+        return matches_git_checkout_off_main(shell_body);
+    }
+    let Some(command_name) = segment.get(command_index) else {
+        return false;
+    };
+    if command_basename(command_name) != "git" {
+        return false;
+    }
+    let Some(subcommand_index) = git_subcommand_index(segment, command_index) else {
+        return false;
+    };
+    if segment
+        .get(subcommand_index)
+        .is_none_or(|subcommand| subcommand != "checkout")
+    {
+        return false;
+    }
+    let Some(target) = git_checkout_target(segment, subcommand_index) else {
+        return false;
+    };
+    target != "main"
+}
+
+fn git_subcommand_index(segment: &[String], command_index: usize) -> Option<usize> {
+    let mut index = command_index + 1;
+    while index < segment.len() {
+        let word = segment[index].as_str();
+        if git_global_option_takes_value(word) {
+            index += 2;
+            continue;
+        }
+        if word.starts_with("--") && word.contains('=') {
+            index += 1;
+            continue;
+        }
+        if word.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return Some(index);
+    }
+    None
+}
+
+fn git_global_option_takes_value(word: &str) -> bool {
+    matches!(
+        word,
+        "-C" | "-c" | "--config-env" | "--exec-path" | "--git-dir" | "--namespace" | "--work-tree"
+    )
+}
+
+fn git_checkout_target(segment: &[String], checkout_index: usize) -> Option<&str> {
+    let mut index = checkout_index + 1;
+    while index < segment.len() {
+        let word = segment[index].as_str();
+        if word == "--" {
+            return segment.get(index + 1).map(String::as_str);
+        }
+        if matches!(word, "-b" | "-B" | "--branch" | "--orphan") {
+            return segment.get(index + 1).map(String::as_str);
+        }
+        if git_checkout_option_takes_value(word) {
+            index += 2;
+            continue;
+        }
+        if word.starts_with("--") && word.contains('=') {
+            index += 1;
+            continue;
+        }
+        if word.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return Some(word);
+    }
+    None
+}
+
+fn git_checkout_option_takes_value(word: &str) -> bool {
+    matches!(word, "--conflict" | "--pathspec-from-file")
+}
+
+fn matches_git_clean_destructive(command: &str) -> bool {
+    shell_command_segments(command)
+        .iter()
+        .any(git_clean_segment_is_destructive)
+}
+
+fn git_clean_segment_is_destructive(segment: &[String]) -> bool {
+    let Some(command_index) = shell_segment_command_index(segment) else {
+        return false;
+    };
+    if let Some(shell_body) = shell_c_argument(segment, command_index) {
+        return matches_git_clean_destructive(shell_body);
+    }
+    if segment
+        .get(command_index)
+        .is_none_or(|word| command_basename(word) != "git")
+    {
+        return false;
+    }
+    let Some(subcommand_index) = git_subcommand_index(segment, command_index) else {
+        return false;
+    };
+    if segment
+        .get(subcommand_index)
+        .is_none_or(|subcommand| subcommand != "clean")
+    {
+        return false;
+    }
+    segment
+        .iter()
+        .skip(subcommand_index + 1)
+        .any(|word| git_clean_option_has_force(word))
+}
+
+fn git_clean_option_has_force(word: &str) -> bool {
+    if word == "--force" || word.starts_with("--force=") {
+        return true;
+    }
+    word.starts_with('-') && !word.starts_with("--") && word.chars().skip(1).any(|ch| ch == 'f')
+}
+
+fn matches_script_code_rewrite(command: &str) -> bool {
+    shell_command_segments(command)
+        .iter()
+        .any(script_rewrite_segment_matches)
+}
+
+fn script_rewrite_segment_matches(segment: &[String]) -> bool {
+    let Some(command_index) = shell_segment_command_index(segment) else {
+        return false;
+    };
+    if let Some(shell_body) = shell_c_argument(segment, command_index) {
+        return matches_script_code_rewrite(shell_body);
+    }
+    let Some(command_name) = segment
+        .get(command_index)
+        .map(|word| command_basename(word))
+    else {
+        return false;
+    };
+    match command_name {
+        "sed" => segment.iter().skip(command_index + 1).any(|word| {
+            word == "--in-place" || word.starts_with("--in-place=") || word.starts_with("-i")
+        }),
+        "perl" | "ruby" => segment.iter().skip(command_index + 1).any(|word| {
+            word.starts_with('-')
+                && !word.starts_with("--")
+                && word.chars().skip(1).any(|ch| ch == 'i')
+        }),
+        "python" | "python3" | "node" | "bun" | "deno" => {
+            inline_script_body(segment, command_index, command_name)
+                .is_some_and(inline_script_rewrites_code)
+        }
+        _ => false,
+    }
+}
+
+fn inline_script_body<'a>(
+    segment: &'a [String],
+    command_index: usize,
+    command_name: &str,
+) -> Option<&'a str> {
+    let mut index = command_index + 1;
+    while index < segment.len() {
+        let word = segment[index].as_str();
+        if matches!(word, "-c" | "-e" | "--eval") {
+            return segment.get(index + 1).map(String::as_str);
+        }
+        if command_name == "deno" && word == "eval" {
+            return segment.get(index + 1).map(String::as_str);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn inline_script_rewrites_code(body: &str) -> bool {
+    let has_write = [
+        "write_text",
+        ".write(",
+        "open(",
+        "writeFile",
+        "writeFileSync",
+        "createWriteStream",
+    ]
+    .iter()
+    .any(|needle| body.contains(needle));
+    has_write && inline_script_mentions_repo_code(body)
+}
+
+fn inline_script_mentions_repo_code(body: &str) -> bool {
+    [
+        "src/",
+        "tests/",
+        ".rs",
+        "Cargo.toml",
+        "AGENTS.md",
+        "README.md",
+    ]
+    .iter()
+    .any(|needle| body.contains(needle))
+}
+
+fn matches_unsafe_cleanup(command: &str) -> bool {
+    shell_command_segments(command)
+        .iter()
+        .any(unsafe_cleanup_segment_matches)
+}
+
+fn unsafe_cleanup_segment_matches(segment: &[String]) -> bool {
+    let Some(command_index) = shell_segment_command_index(segment) else {
+        return false;
+    };
+    if let Some(shell_body) = shell_c_argument(segment, command_index) {
+        return matches_unsafe_cleanup(shell_body);
+    }
+    let Some(command_name) = segment
+        .get(command_index)
+        .map(|word| command_basename(word))
+    else {
+        return false;
+    };
+    match command_name {
+        "find" => find_segment_deletes(segment, command_index),
+        "xargs" => segment
+            .iter()
+            .skip(command_index + 1)
+            .any(|word| command_basename(word) == "rm"),
+        _ => false,
+    }
+}
+
+fn find_segment_deletes(segment: &[String], command_index: usize) -> bool {
+    let mut words = segment.iter().skip(command_index + 1);
+    while let Some(word) = words.next() {
+        if word == "-delete" {
+            return true;
+        }
+        if word == "-exec" || word == "-execdir" {
+            return words.any(|candidate| command_basename(candidate) == "rm");
+        }
+    }
+    false
 }
 
 fn looks_like_env_assignment(word: &str) -> bool {
@@ -723,17 +1166,24 @@ fn builtin_rules() -> Vec<PreflightGuardRule> {
             source: RuleSource::Builtin { name: "rm_rf_home".to_owned() },
         },
         PreflightGuardRule {
+            id: "builtin:file_deletion".to_owned(),
+            pattern: "*".to_owned(),
+            action: GuardAction::Halt,
+            message: "Deleting files or folders requires explicit written user permission under AGENTS.md RULE NUMBER 1.".to_owned(),
+            source: RuleSource::Builtin { name: "file_deletion".to_owned() },
+        },
+        PreflightGuardRule {
             id: "builtin:git_reset_hard".to_owned(),
             pattern: "*git reset --hard*".to_owned(),
             action: GuardAction::Halt,
-            message: "git reset --hard is on the AGENTS.md absolutely-forbidden list. Use git stash, git diff, or a backup branch instead.".to_owned(),
+            message: "git reset --hard is on the AGENTS.md absolutely-forbidden list. Use git diff and ask the user before any rollback.".to_owned(),
             source: RuleSource::Builtin { name: "git_reset_hard".to_owned() },
         },
         PreflightGuardRule {
             id: "builtin:git_clean_fd".to_owned(),
-            pattern: "*git clean -fd*".to_owned(),
+            pattern: "*git clean*".to_owned(),
             action: GuardAction::Halt,
-            message: "git clean -fd will delete other agents' uncommitted work and is forbidden by AGENTS.md.".to_owned(),
+            message: "git clean with force deletes untracked work and is forbidden by AGENTS.md.".to_owned(),
             source: RuleSource::Builtin { name: "git_clean_fd".to_owned() },
         },
         PreflightGuardRule {
@@ -742,6 +1192,55 @@ fn builtin_rules() -> Vec<PreflightGuardRule> {
             action: GuardAction::Halt,
             message: "git worktree add is forbidden by AGENTS.md RULE 2 (\"NO WORKTREES. EVER.\").".to_owned(),
             source: RuleSource::Builtin { name: "git_worktree_add".to_owned() },
+        },
+        PreflightGuardRule {
+            id: "builtin:git_stash".to_owned(),
+            pattern: "*git stash*".to_owned(),
+            action: GuardAction::Halt,
+            message: "git stash is forbidden by AGENTS.md because stashed work is easily lost in multi-agent sessions.".to_owned(),
+            source: RuleSource::Builtin { name: "git_stash".to_owned() },
+        },
+        PreflightGuardRule {
+            id: "builtin:git_rebase".to_owned(),
+            pattern: "*git rebase*".to_owned(),
+            action: GuardAction::Halt,
+            message: "git rebase is forbidden by AGENTS.md; keep work on main without rewriting history.".to_owned(),
+            source: RuleSource::Builtin { name: "git_rebase".to_owned() },
+        },
+        PreflightGuardRule {
+            id: "builtin:git_checkout_off_main".to_owned(),
+            pattern: "*git checkout*".to_owned(),
+            action: GuardAction::Halt,
+            message: "git checkout away from main or checkout-based file overwrite is forbidden by AGENTS.md.".to_owned(),
+            source: RuleSource::Builtin { name: "git_checkout_off_main".to_owned() },
+        },
+        PreflightGuardRule {
+            id: "builtin:local_cargo_heavy_verification".to_owned(),
+            pattern: "*cargo *".to_owned(),
+            action: GuardAction::Halt,
+            message: "Local heavy Cargo verification is forbidden in this repository; route cargo check/test/clippy/build/bench/run/doc through RCH.".to_owned(),
+            source: RuleSource::Builtin { name: "local_cargo_heavy_verification".to_owned() },
+        },
+        PreflightGuardRule {
+            id: "builtin:local_cargo_target_dir_override".to_owned(),
+            pattern: "*CARGO_TARGET_DIR=*cargo *".to_owned(),
+            action: GuardAction::Halt,
+            message: "Local Cargo with a non-external CARGO_TARGET_DIR violates this Mac's external USB-NVMe build routing policy.".to_owned(),
+            source: RuleSource::Builtin { name: "local_cargo_target_dir_override".to_owned() },
+        },
+        PreflightGuardRule {
+            id: "builtin:script_code_rewrite".to_owned(),
+            pattern: "*".to_owned(),
+            action: GuardAction::Halt,
+            message: "Script-based in-place code rewrites are forbidden by AGENTS.md; edit source files manually.".to_owned(),
+            source: RuleSource::Builtin { name: "script_code_rewrite".to_owned() },
+        },
+        PreflightGuardRule {
+            id: "builtin:unsafe_cleanup".to_owned(),
+            pattern: "*".to_owned(),
+            action: GuardAction::Halt,
+            message: "Unsafe cleanup commands that delete selected files require explicit human approval before proceeding.".to_owned(),
+            source: RuleSource::Builtin { name: "unsafe_cleanup".to_owned() },
         },
         PreflightGuardRule {
             id: "builtin:git_push_force".to_owned(),
@@ -894,6 +1393,7 @@ impl PreflightGuardReport {
                 "pattern": m.pattern,
                 "action": m.action.as_str(),
                 "message": m.message,
+                "recovery": recovery_guidance_for_match(m),
                 "source": m.source,
                 "resolution": m.resolution.as_str(),
             })).collect::<Vec<_>>(),
@@ -937,6 +1437,38 @@ impl PreflightGuardReport {
             ));
         }
         out
+    }
+}
+
+fn recovery_guidance_for_match(matched: &GuardMatch) -> &'static str {
+    match matched.rule_id.as_str() {
+        "builtin:local_cargo_heavy_verification" | "builtin:local_cargo_target_dir_override" => {
+            "Route Cargo verification through RCH, for example scripts/rch_verify.sh or rch exec; do not run local Cargo."
+        }
+        "builtin:script_code_rewrite" => {
+            "Make source edits manually in the affected files; do not use script-based rewrites."
+        }
+        "builtin:file_deletion"
+        | "builtin:rm_rf_root"
+        | "builtin:rm_rf_home"
+        | "builtin:git_clean_fd"
+        | "builtin:unsafe_cleanup" => {
+            "Stop and obtain explicit written user approval for the exact deletion or cleanup command before proceeding."
+        }
+        "builtin:git_worktree_add"
+        | "builtin:git_checkout_off_main"
+        | "builtin:git_stash"
+        | "builtin:git_rebase"
+        | "builtin:git_reset_hard" => {
+            "Stay on main, inspect with git status or git diff, and coordinate instead of rewriting or hiding work."
+        }
+        "builtin:git_push_force" => {
+            "Proceed only with explicit user authorization for the exact history rewrite."
+        }
+        _ if matched.action.stops_execution() => {
+            "Stop and obtain explicit human approval for the exact command before proceeding."
+        }
+        _ => "Review the warning and confirm the command is intentional before proceeding.",
     }
 }
 
@@ -1536,9 +2068,20 @@ action = "explode"
             "rm -rf /",
             "rm -rf /tmp/work",
             "rm -rf ~/projects",
+            "rm src/lib.rs",
+            "unlink src/lib.rs",
+            "rmdir scratch",
+            "bash -lc 'rm test_clamp.rs'",
             "git reset --hard HEAD~3",
             "git clean -fd",
+            "git clean -xdf",
+            "git clean -f untracked.rs",
             "git worktree add ../parallel main",
+            "git stash push -m savepoint",
+            "git rebase -i origin/main",
+            "git checkout feature/other",
+            "git -C . checkout HEAD~1",
+            "bash -lc 'git checkout old-branch'",
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
             assert_eq!(
@@ -1560,6 +2103,123 @@ action = "explode"
     }
 
     #[test]
+    fn builtin_file_deletion_ignores_help_and_text_mentions() {
+        let registry = PreflightGuardRegistry::with_builtins();
+
+        for command in [
+            "rm --help",
+            "echo rm src/lib.rs",
+            "rg 'rm src/lib.rs' docs src",
+            "bash -lc 'echo rm src/lib.rs'",
+        ] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(report.exit_code, 0, "command `{command}` should pass");
+            assert!(
+                report
+                    .matches
+                    .iter()
+                    .all(|matched| matched.rule_id != "builtin:file_deletion")
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_git_clean_allows_dry_run_only() {
+        let registry = PreflightGuardRegistry::with_builtins();
+
+        for command in ["git clean -nd", "git clean --dry-run -d"] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(report.exit_code, 0, "command `{command}` should pass");
+            assert!(
+                report
+                    .matches
+                    .iter()
+                    .all(|matched| matched.rule_id != "builtin:git_clean_fd")
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_git_checkout_allows_explicit_main_checkout_only() {
+        let registry = PreflightGuardRegistry::with_builtins();
+
+        for command in ["git checkout main", "git pull --rebase origin main"] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(report.exit_code, 0, "command `{command}` should pass");
+            assert!(report.matches.iter().all(|matched| {
+                matched.rule_id != "builtin:git_checkout_off_main"
+                    && matched.rule_id != "builtin:git_rebase"
+            }));
+        }
+
+        for command in ["git checkout -- src/lib.rs", "git checkout -b experiment"] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert!(
+                report
+                    .matches
+                    .iter()
+                    .any(|matched| matched.rule_id == "builtin:git_checkout_off_main")
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_script_rewrite_and_cleanup_rules_halt_known_risky_shapes() {
+        let registry = PreflightGuardRegistry::with_builtins();
+
+        for (command, rule_id) in [
+            (
+                "sed -i '' 's/old/new/' src/lib.rs",
+                "builtin:script_code_rewrite",
+            ),
+            (
+                "perl -pi -e 's/old/new/' src/lib.rs",
+                "builtin:script_code_rewrite",
+            ),
+            (
+                "python -c 'from pathlib import Path; Path(\"src/lib.rs\").write_text(\"x\")'",
+                "builtin:script_code_rewrite",
+            ),
+            ("find src -name '*.rs' -delete", "builtin:unsafe_cleanup"),
+            (
+                "find . -name '*.tmp' -exec rm {} ;",
+                "builtin:unsafe_cleanup",
+            ),
+            ("rg TODO src | xargs rm", "builtin:unsafe_cleanup"),
+        ] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert!(
+                report
+                    .matches
+                    .iter()
+                    .any(|matched| matched.rule_id == rule_id),
+                "command `{command}` did not cite {rule_id}: {:?}",
+                report.matches,
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_script_rewrite_and_cleanup_rules_allow_read_only_shapes() {
+        let registry = PreflightGuardRegistry::with_builtins();
+
+        for command in [
+            "sed -n '1,20p' src/lib.rs",
+            "python -c 'print(\"src/lib.rs\")'",
+            "find src -name '*.rs' -print",
+        ] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(report.exit_code, 0, "command `{command}` should pass");
+            assert!(report.matches.iter().all(|matched| {
+                matched.rule_id != "builtin:script_code_rewrite"
+                    && matched.rule_id != "builtin:unsafe_cleanup"
+            }));
+        }
+    }
+
+    #[test]
     fn builtin_rm_rf_rules_require_command_position() {
         let registry = PreflightGuardRegistry::with_builtins();
 
@@ -1570,6 +2230,16 @@ action = "explode"
             "rm --force --preserve-root /var/cache",
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
+            if command.starts_with("rm ") {
+                assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+                assert!(
+                    report
+                        .matches
+                        .iter()
+                        .any(|matched| matched.rule_id == "builtin:file_deletion")
+                );
+                continue;
+            }
             assert_eq!(report.exit_code, 0, "command `{command}` should pass");
             assert!(report.matches.iter().all(|matched| {
                 matched.rule_id != "builtin:rm_rf_root" && matched.rule_id != "builtin:rm_rf_home"
@@ -1588,6 +2258,84 @@ action = "explode"
                 matched.rule_id == "builtin:rm_rf_root" || matched.rule_id == "builtin:rm_rf_home"
             }));
         }
+    }
+
+    #[test]
+    fn builtins_block_local_heavy_cargo_verification() {
+        let registry = PreflightGuardRegistry::with_builtins();
+
+        for command in [
+            "cargo check --lib",
+            "cargo +nightly clippy --all-targets -- -D warnings",
+            "env TMPDIR=/tmp cargo test --workspace --no-run",
+            "CARGO_TARGET_DIR=/tmp/cargo_target cargo test --workspace --no-run",
+            "cargo-clippy clippy --all-targets -- -D warnings",
+            "bash -lc 'cargo check --lib --message-format=short 2>&1 | tail -20'",
+        ] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(
+                report.exit_code, 7,
+                "command `{command}` should be halted by local Cargo guard",
+            );
+            assert!(
+                report
+                    .matches
+                    .iter()
+                    .any(|matched| matched.rule_id == "builtin:local_cargo_heavy_verification"),
+                "command `{command}` did not cite local Cargo guard: {:?}",
+                report.matches,
+            );
+        }
+    }
+
+    #[test]
+    fn local_cargo_guard_allows_rch_wrapped_cargo_and_lightweight_commands() {
+        let registry = PreflightGuardRegistry::with_builtins();
+
+        for command in [
+            "rch exec -- env TMPDIR=/tmp CARGO_TARGET_DIR=/tmp/ee-rch-target cargo test --lib foo",
+            "scripts/rch_verify.sh --bead-id bd-123 -- cargo check --all-targets",
+            "bash scripts/rch_verify.sh --summary -- cargo clippy --all-targets -- -D warnings",
+            "cargo metadata --no-deps --format-version 1",
+            "cargo fmt --check",
+            "rustfmt +nightly --edition 2024 --check src/core/preflight_guard.rs",
+            "rg 'cargo check' src docs",
+        ] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(report.exit_code, 0, "command `{command}` should pass");
+            assert!(
+                report.matches.iter().all(|matched| {
+                    matched.rule_id != "builtin:local_cargo_heavy_verification"
+                        && matched.rule_id != "builtin:local_cargo_target_dir_override"
+                }),
+                "command `{command}` unexpectedly matched local Cargo rules: {:?}",
+                report.matches,
+            );
+        }
+    }
+
+    #[test]
+    fn local_cargo_target_dir_override_is_reported_separately() {
+        let registry = PreflightGuardRegistry::with_builtins();
+        let report = run_preflight_guard(
+            &registry,
+            &opts("env CARGO_TARGET_DIR=/tmp/cargo_target cargo test --workspace --no-run"),
+        );
+
+        let ids = report
+            .matches
+            .iter()
+            .map(|matched| matched.rule_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            ids.contains(&"builtin:local_cargo_heavy_verification"),
+            "expected local Cargo rule in {ids:?}",
+        );
+        assert!(
+            ids.contains(&"builtin:local_cargo_target_dir_override"),
+            "expected target-dir override rule in {ids:?}",
+        );
+        assert_eq!(report.exit_code, 7);
     }
 
     #[test]
@@ -1641,6 +2389,12 @@ action = "explode"
         assert_eq!(m0["ruleId"].as_str(), Some("r1"));
         assert_eq!(m0["action"].as_str(), Some("halt"));
         assert_eq!(m0["resolution"].as_str(), Some("enforced"));
+        assert_eq!(
+            m0["recovery"].as_str(),
+            Some(
+                "Stop and obtain explicit human approval for the exact command before proceeding."
+            )
+        );
     }
 
     #[test]
