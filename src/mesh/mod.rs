@@ -17,3 +17,4 @@ pub mod hello;
 pub mod identity_change_guard;
 pub mod lane_grant_preview;
 pub mod repair_action_graph;
+pub mod steward_decision;
