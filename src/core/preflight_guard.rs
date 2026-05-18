@@ -416,7 +416,7 @@ fn rm_segment_matches_target(segment: &[String], target_class: RmTargetClass) ->
 fn matches_file_deletion(command: &str) -> bool {
     shell_command_segments(command)
         .iter()
-        .any(file_deletion_segment_matches)
+        .any(|segment| file_deletion_segment_matches(segment))
 }
 
 fn file_deletion_segment_matches(segment: &[String]) -> bool {
@@ -494,13 +494,13 @@ fn shell_segment_command_index(segment: &[String]) -> Option<usize> {
 fn matches_local_cargo_heavy_verification(command: &str) -> bool {
     shell_command_segments(command)
         .iter()
-        .any(local_cargo_heavy_segment_matches)
+        .any(|segment| local_cargo_heavy_segment_matches(segment))
 }
 
 fn matches_local_cargo_target_dir_override(command: &str) -> bool {
     shell_command_segments(command)
         .iter()
-        .any(local_cargo_target_dir_override_segment_matches)
+        .any(|segment| local_cargo_target_dir_override_segment_matches(segment))
 }
 
 fn local_cargo_heavy_segment_matches(segment: &[String]) -> bool {
@@ -624,7 +624,7 @@ fn command_basename(word: &str) -> &str {
 fn matches_git_checkout_off_main(command: &str) -> bool {
     shell_command_segments(command)
         .iter()
-        .any(git_checkout_segment_is_off_main)
+        .any(|segment| git_checkout_segment_is_off_main(segment))
 }
 
 fn git_checkout_segment_is_off_main(segment: &[String]) -> bool {
@@ -717,7 +717,7 @@ fn git_checkout_option_takes_value(word: &str) -> bool {
 fn matches_git_clean_destructive(command: &str) -> bool {
     shell_command_segments(command)
         .iter()
-        .any(git_clean_segment_is_destructive)
+        .any(|segment| git_clean_segment_is_destructive(segment))
 }
 
 fn git_clean_segment_is_destructive(segment: &[String]) -> bool {
@@ -758,7 +758,7 @@ fn git_clean_option_has_force(word: &str) -> bool {
 fn matches_script_code_rewrite(command: &str) -> bool {
     shell_command_segments(command)
         .iter()
-        .any(script_rewrite_segment_matches)
+        .any(|segment| script_rewrite_segment_matches(segment))
 }
 
 fn script_rewrite_segment_matches(segment: &[String]) -> bool {
@@ -840,7 +840,7 @@ fn inline_script_mentions_repo_code(body: &str) -> bool {
 fn matches_unsafe_cleanup(command: &str) -> bool {
     shell_command_segments(command)
         .iter()
-        .any(unsafe_cleanup_segment_matches)
+        .any(|segment| unsafe_cleanup_segment_matches(segment))
 }
 
 fn unsafe_cleanup_segment_matches(segment: &[String]) -> bool {
