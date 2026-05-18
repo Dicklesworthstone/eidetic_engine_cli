@@ -156,3 +156,38 @@ tests/audit_artifacts/install_pipeline_*.json
 !tests/audit_artifacts/install_pipeline_2026-05-13T052258Z.json
 !tests/audit_artifacts/install_pipeline_2026-05-13T192108Z.json
 .stash_janitor_workspace/
+
+# UBS (Ultimate Bug Scanner) reports at the repo root. `ubs` writes its
+# outputs into the current working directory; root-level dumps are scratch
+# and must not be committed.
+/ubs.json
+/ubs_out.json
+/ubs_full.txt
+/ubs_full_v.txt
+/ubs_findings.jsonl
+
+# One-off Rust scratch files agents drop at the repo root while probing
+# numerics or multibyte handling. Real tests live under tests/. If one of
+# these ever earns a permanent home, move it into tests/ rather than
+# allow-listing it here.
+/test_drop
+/test_drop.rs
+/test_ln_1p
+/test_ln_1p.rs
+/test_multibyte
+/test_multibyte.rs
+
+# Miscellaneous ad-hoc analysis reports agents dump at the repo root.
+/clippy_output.json
+/critical.json
+/functions.txt
+/pass1.jsonl
+/.plan-drift-report.json
+
+# Accidental shell-redirect artifact: `some-cmd --help > --help` lands a
+# file literally named "--help" at the repo root.
+/--help
+
+# bv (beads viewer) lock file under .beads/. The upstream .beads/.gitignore
+# template does not cover this name, and locks are per-machine state.
+.beads/.bv.lock
