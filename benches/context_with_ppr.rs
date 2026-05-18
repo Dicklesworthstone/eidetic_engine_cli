@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, black_box};
 use tempfile::TempDir;
 
 use ee::core::context::{
@@ -363,16 +363,141 @@ fn bench_context_with_ppr(c: &mut Criterion) {
     emit_stage_diagnostics(&workspace_path, &db_path, &index_dir);
 }
 
-criterion_group!(benches, bench_context_with_ppr);
-criterion_main!(benches);
+fn run_criterion_mode() {
+    let mut criterion = Criterion::default().configure_from_args();
+    bench_context_with_ppr(&mut criterion);
+    criterion.final_summary();
+}
+
+fn run_self_test_mode() -> Result<(), String> {
+    if BENCH_GROUP_NAME != "ee_context_with_ppr" {
+        return Err(format!(
+            "unexpected benchmark group name: {BENCH_GROUP_NAME}"
+        ));
+    }
+    if MEMORY_COUNT != 1_000 {
+        return Err(format!("unexpected benchmark memory count: {MEMORY_COUNT}"));
+    }
+    if PPR_OVERHEAD_P50_BUDGET_MS != 30.0 {
+        return Err(format!(
+            "unexpected PPR overhead budget: {PPR_OVERHEAD_P50_BUDGET_MS}"
+        ));
+    }
+
+    let performance = serde_json::json!({
+        "data": {
+            "timings": [
+                { "name": "total", "elapsedMs": 100.0 },
+                { "name": "search", "elapsedMs": 80.0 },
+                { "name": "candidateResolution", "elapsedMs": 2.0 },
+                { "name": "pprRerank", "elapsedMs": 7.0 },
+                { "name": "packAssembly", "elapsedMs": 3.0 },
+                { "name": "packPersistence", "elapsedMs": 5.0 }
+            ]
+        }
+    });
+    let diagnostics = StageDiagnostics::from_performance(&performance);
+    assert_close(diagnostics.total_ms, 100.0)?;
+    assert_close(diagnostics.tracked_ms(), 97.0)?;
+
+    let base = StageDiagnostics {
+        total_ms: 100.0,
+        search_ms: 80.0,
+        candidate_resolution_ms: 2.0,
+        ppr_rerank_ms: 0.0,
+        pack_assembly_ms: 3.0,
+        pack_persistence_ms: 5.0,
+    };
+    let ppr = StageDiagnostics {
+        total_ms: 135.0,
+        search_ms: 82.0,
+        candidate_resolution_ms: 2.5,
+        ppr_rerank_ms: 7.0,
+        pack_assembly_ms: 3.25,
+        pack_persistence_ms: 6.0,
+    };
+    let attribution = OverheadAttribution::from_diagnostics(base, ppr);
+    let json = attribution.to_json();
+
+    if json["schema"] != "ee.bench.context_with_ppr.attribution.v1" {
+        return Err(format!("unexpected attribution schema: {}", json["schema"]));
+    }
+    if json["budgetAppliesTo"] != "pprRerank" {
+        return Err(format!(
+            "unexpected attribution budget target: {}",
+            json["budgetAppliesTo"]
+        ));
+    }
+    assert_close(json["deltasMs"]["total"].as_f64().unwrap_or(f64::NAN), 35.0)?;
+    assert_close(json["deltasMs"]["search"].as_f64().unwrap_or(f64::NAN), 2.0)?;
+    assert_close(
+        json["deltasMs"]["candidateResolution"]
+            .as_f64()
+            .unwrap_or(f64::NAN),
+        0.5,
+    )?;
+    assert_close(
+        json["deltasMs"]["pprRerank"].as_f64().unwrap_or(f64::NAN),
+        7.0,
+    )?;
+    assert_close(
+        json["deltasMs"]["packAssembly"]
+            .as_f64()
+            .unwrap_or(f64::NAN),
+        0.25,
+    )?;
+    assert_close(
+        json["deltasMs"]["packPersistence"]
+            .as_f64()
+            .unwrap_or(f64::NAN),
+        1.0,
+    )?;
+    assert_close(
+        json["deltasMs"]["residual"].as_f64().unwrap_or(f64::NAN),
+        24.25,
+    )?;
+    if json["budgetStatus"]["total"] != "over_budget" {
+        return Err(format!(
+            "total budget status should remain diagnostic over_budget: {}",
+            json["budgetStatus"]["total"]
+        ));
+    }
+    if json["budgetStatus"]["pprRerank"] != "within_budget" {
+        return Err(format!(
+            "pprRerank budget status should be within_budget: {}",
+            json["budgetStatus"]["pprRerank"]
+        ));
+    }
+
+    println!("context_with_ppr self-test passed");
+    Ok(())
+}
+
+fn assert_close(actual: f64, expected: f64) -> Result<(), String> {
+    if (actual - expected).abs() < f64::EPSILON {
+        Ok(())
+    } else {
+        Err(format!("expected {actual} to equal {expected}"))
+    }
+}
+
+fn main() {
+    if std::env::args().any(|arg| arg == "--self-test") {
+        if let Err(error) = run_self_test_mode() {
+            eprintln!("context_with_ppr self-test failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    run_criterion_mode();
+}
 
 #[cfg(test)]
+#[allow(dead_code)]
 mod tests {
     fn assert_close(actual: f64, expected: f64) {
-        assert!(
-            (actual - expected).abs() < f64::EPSILON,
-            "expected {actual} to equal {expected}"
-        );
+        super::assert_close(actual, expected).expect("floating-point value should match exactly");
     }
 
     #[test]

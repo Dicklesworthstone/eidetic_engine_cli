@@ -12,6 +12,9 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+import urllib.request
+import urllib.error
+import shutil
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "franken_publish_status.py"

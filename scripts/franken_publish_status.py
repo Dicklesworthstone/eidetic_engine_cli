@@ -17,6 +17,7 @@ import sys
 import tomllib
 import urllib.error
 import urllib.request
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -275,10 +276,13 @@ def workflow_status(root: Path, workflow_rel: str, expected_order: list[str]) ->
 def git_status_summary(root: Path, enabled: bool) -> dict[str, Any]:
     if not enabled:
         return {"checked": False, "dirty": None, "entry_count": None}
+    git_bin = shutil.which("git")
+    if not git_bin:
+        return {"checked": True, "dirty": None, "entry_count": None, "status": "unavailable"}
     try:
         # nosec B603
         output = subprocess.check_output(
-            ["git", "-C", str(root), "status", "--short"],
+            [git_bin, "-C", str(root), "status", "--short"],
             text=True,
             stderr=subprocess.DEVNULL,
             timeout=5,
