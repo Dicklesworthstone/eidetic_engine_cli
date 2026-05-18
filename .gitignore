@@ -159,8 +159,16 @@ tests/audit_artifacts/install_pipeline_*.json
 
 # UBS (Ultimate Bug Scanner) reports at the repo root. `ubs` writes its
 # outputs into the current working directory; root-level dumps are scratch
-# and must not be committed.
+# and must not be committed. The glob covers the per-subsystem dumps
+# agents emit (ubs_cli.txt, ubs_obs.txt, ubs_graph.txt, ubs_runtime.txt,
+# ubs_output.txt, ubs_hooks.txt, ubs_science.txt, ubs_cache.txt,
+# ubs_curate_v.txt, ubs_cli_models_config.txt, ubs_output_runtime.txt,
+# ubs_aux.txt, ubs_all.txt, …) without needing a new line per file.
 /ubs.json
+/ubs.jsonl
+/ubs_*.json
+/ubs_*.jsonl
+/ubs_*.txt
 /ubs_out.json
 /ubs_full.txt
 /ubs_full_v.txt
@@ -176,6 +184,14 @@ tests/audit_artifacts/install_pipeline_*.json
 /test_ln_1p.rs
 /test_multibyte
 /test_multibyte.rs
+/test_clamp
+/test_clamp.rs
+/test_clamp2
+/test_clamp2.rs
+/test_min
+/test_min.rs
+/test_minmax
+/test_minmax.rs
 
 # Miscellaneous ad-hoc analysis reports agents dump at the repo root.
 /clippy_output.json
@@ -183,6 +199,9 @@ tests/audit_artifacts/install_pipeline_*.json
 /functions.txt
 /pass1.jsonl
 /.plan-drift-report.json
+/closure_lint_out.txt
+/db_for_loops.txt
+/findings.jsonl
 
 # Accidental shell-redirect artifact: `some-cmd --help > --help` lands a
 # file literally named "--help" at the repo root.
