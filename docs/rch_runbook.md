@@ -163,6 +163,7 @@ RCH proof:
 - exit_code: <exit_code>
 - degraded_codes: <degraded_codes or none>
 - source_state_degraded_codes: <source_state_degraded_codes or none>
+- worker_state_degraded_codes: <worker_state_degraded_codes or none>
 - first_error: <first_error_file>:<first_error_line or none>
 ```
 
@@ -170,6 +171,8 @@ Use precise Agent Mail wording:
 
 - `strict_clean_tree` + `remote_pass`: closeout-quality proof.
 - `live_dirty_checkout` + `remote_pass`: useful signal, but not clean proof.
+- `committed_tree` + `remote_pass`: remote run passed from the committed-tree
+  export named by `resolved_commit`, `git_tree`, and `source_manifest_hash`.
 - `source_state_refused`: implementation may be done, but clean proof is
   blocked by dirty checkout state.
 - `committed_tree_unsupported`: committed source identity is known, but remote

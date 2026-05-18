@@ -177,6 +177,7 @@ fn rch_runbook_beads_comment_template_names_source_attribution_fields() -> TestR
         "exit_code",
         "degraded_codes",
         "source_state_degraded_codes",
+        "worker_state_degraded_codes",
         "first_error",
     ];
     let mut missing: Vec<&str> = Vec::new();
@@ -189,7 +190,7 @@ fn rch_runbook_beads_comment_template_names_source_attribution_fields() -> TestR
         return Err(format!(
             "docs/rch_runbook.md Beads comment template is missing bd-9ygik source-attribution \
              field name(s): {missing:?}. Restore them in the template so closeout proof carries \
-             the full source-state provenance."
+             the full source-state and worker-state provenance."
         ));
     }
     Ok(())
@@ -207,6 +208,7 @@ fn rch_runbook_names_handoff_attribution_buckets() -> TestResult {
     let required_buckets = [
         "strict_clean_tree",
         "live_dirty_checkout",
+        "committed_tree",
         "source_state_refused",
         "committed_tree_unsupported",
     ];
