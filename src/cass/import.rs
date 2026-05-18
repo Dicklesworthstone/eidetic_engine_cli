@@ -585,20 +585,48 @@ fn with_import_session_transaction<T>(
             Ok(result) => match connection.commit() {
                 Ok(()) => return Ok(result),
                 Err(error) if import_session_transaction_error_is_retryable(&error) => {
-                    let _ = connection.rollback();
+                    if let Err(rollback_error) = connection.rollback() {
+                        tracing::error!(
+                            phase = "cass_import_commit_retryable",
+                            error = %error,
+                            rollback_error = %rollback_error,
+                            "failed to rollback import session transaction after commit failure"
+                        );
+                    }
                     last_retryable_error = Some(error);
                 }
                 Err(error) => {
-                    let _ = connection.rollback();
+                    if let Err(rollback_error) = connection.rollback() {
+                        tracing::error!(
+                            phase = "cass_import_commit",
+                            error = %error,
+                            rollback_error = %rollback_error,
+                            "failed to rollback import session transaction after commit failure"
+                        );
+                    }
                     return Err(error);
                 }
             },
             Err(error) if import_session_transaction_error_is_retryable(&error) => {
-                let _ = connection.rollback();
+                if let Err(rollback_error) = connection.rollback() {
+                    tracing::error!(
+                        phase = "cass_import_operation_retryable",
+                        error = %error,
+                        rollback_error = %rollback_error,
+                        "failed to rollback import session transaction after operation failure"
+                    );
+                }
                 last_retryable_error = Some(error);
             }
             Err(error) => {
-                let _ = connection.rollback();
+                if let Err(rollback_error) = connection.rollback() {
+                    tracing::error!(
+                        phase = "cass_import_operation",
+                        error = %error,
+                        rollback_error = %rollback_error,
+                        "failed to rollback import session transaction after operation failure"
+                    );
+                }
                 return Err(error);
             }
         }

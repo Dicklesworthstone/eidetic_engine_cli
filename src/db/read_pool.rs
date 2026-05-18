@@ -323,7 +323,14 @@ impl ReadConnectionPool {
         let connection = self.acquire()?;
         if pin_snapshot {
             if let Err(error) = connection.begin_read_snapshot() {
-                let _ = connection.rollback_read_snapshot();
+                if let Err(rollback_error) = connection.rollback_read_snapshot() {
+                    tracing::error!(
+                        phase = "db_read_pool_begin_snapshot",
+                        error = %error,
+                        rollback_error = %rollback_error,
+                        "failed to rollback read snapshot after begin failure"
+                    );
+                }
                 return Err(error);
             }
         }
@@ -1116,7 +1123,7 @@ mod tests {
     }
 
     #[test]
-    fn drop__on_panic_path_releases_pin_idempotently() {
+    fn drop_on_panic_path_releases_pin_idempotently() {
         let (_tempdir, _database_path, pool) = file_pool(1);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _pin = must(pool.pin_snapshot(), "snapshot pin opens before panic");
@@ -1134,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn drop__double_drop_does_not_double_release() {
+    fn drop_double_drop_does_not_double_release() {
         let (_tempdir, _database_path, pool) = file_pool(1);
         let pin = must(pool.pin_snapshot(), "snapshot pin opens");
         let slot_id = pin.slot_id();
@@ -1154,7 +1161,7 @@ mod tests {
     }
 
     #[test]
-    fn drop__field_order_releases_pin_before_returning_connection_under_panic() {
+    fn drop_field_order_releases_pin_before_returning_connection_under_panic() {
         let (_tempdir, _database_path, pool) = file_pool(1);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _pin = must(pool.pin_snapshot(), "snapshot pin opens before panic");
@@ -1236,7 +1243,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_during_wait__no_connection_acquired_no_leak() {
+    fn cancel_during_wait_no_connection_acquired_no_leak() {
         let pool = ReadConnectionPool::new(
             DatabaseConfig::memory(),
             PoolConfig::new(1, Duration::from_secs(30)).with_acquire_timeout(Duration::ZERO),
@@ -1262,7 +1269,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_just_after_acquire__connection_returns_to_lifo_no_pin_state() {
+    fn cancel_just_after_acquire_connection_returns_to_lifo_no_pin_state() {
         let pool = memory_pool(1, Duration::from_secs(30));
         let acquired = must(pool.acquire(), "pooled connection opens");
         let slot_id = acquired.slot_id();
@@ -1279,7 +1286,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_during_pin__rollback_runs_connection_returns_to_lifo() {
+    fn cancel_during_pin_rollback_runs_connection_returns_to_lifo() {
         let (_tempdir, database_path, pool) = file_pool(1);
         let pin = must(pool.pin_snapshot(), "snapshot pin opens");
         let slot_id = pin.slot_id();

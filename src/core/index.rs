@@ -1350,7 +1350,9 @@ fn publish_staged_index(index_dir: &Path, staging_dir: &Path) -> Result<(), Inde
         if let Some(retained) = retained_dir
             && !path_exists_no_follow(index_dir)
         {
-            let _ = rename_index_dir(&retained, index_dir, "restore previous index generation");
+            if let Err(recovery_error) = rename_index_dir(&retained, index_dir, "restore previous index generation") {
+                tracing::error!(%recovery_error, "failed to restore previous index generation after publish failure");
+            }
         }
         return Err(error);
     }

@@ -579,7 +579,7 @@ fn audit_reject(
         reason,
         "rejected preflight bypass token"
     );
-    let _ = insert_token_audit(
+    if let Err(error) = insert_token_audit(
         connection,
         &options.workspace_id,
         options.actor.as_deref(),
@@ -590,7 +590,9 @@ fn audit_reject(
             "code": code,
             "reason": reason,
         }),
-    );
+    ) {
+        tracing::error!(%error, "failed to insert token audit");
+    }
 }
 
 fn insert_token_audit(

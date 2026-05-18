@@ -322,11 +322,11 @@ fn lock_database_write_file(database_path: &Path) -> Result<File> {
                     break;
                 }
                 Err(error) => {
-                    if error == Errno::WOULDBLOCK || error == Errno::AGAIN {
-                        if attempt + 1 < FILE_DATABASE_OPEN_MAX_ATTEMPTS {
-                            std::thread::sleep(advisory_lock_retry_delay(attempt));
-                            continue;
-                        }
+                    if (error == Errno::WOULDBLOCK || error == Errno::AGAIN)
+                        && attempt + 1 < FILE_DATABASE_OPEN_MAX_ATTEMPTS
+                    {
+                        std::thread::sleep(advisory_lock_retry_delay(attempt));
+                        continue;
                     }
                     return Err(DbError::InvalidPath {
                         operation: DbOperation::BeginTransaction,
@@ -4693,7 +4693,14 @@ impl DbConnection {
             Ok(()) => match self.commit() {
                 Ok(()) => Ok(ApplyOutcome::Applied),
                 Err(error) => {
-                    let _ = self.rollback();
+                    if let Err(rollback_error) = self.rollback() {
+                        tracing::error!(
+                            phase = "db_migration_apply_commit",
+                            error = %error,
+                            rollback_error = %rollback_error,
+                            "failed to rollback transaction after commit failure"
+                        );
+                    }
                     Err(error)
                 }
             },

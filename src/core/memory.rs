@@ -2095,7 +2095,14 @@ fn store_remembered_memory_with_retry(
         }) {
             Ok(()) => return Ok(()),
             Err(error) if remember_write_contention_is_retryable(&error) => {
-                let _ = connection.rollback();
+                if let Err(rollback_error) = connection.rollback() {
+                    tracing::error!(
+                        phase = "remember_retryable_write",
+                        error = %error,
+                        rollback_error = %rollback_error,
+                        "failed to rollback transaction after write contention"
+                    );
+                }
                 if memory_exists_after_commit_ambiguity(connection, memory_id)? {
                     return Ok(());
                 }

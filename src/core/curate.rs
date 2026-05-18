@@ -4626,7 +4626,14 @@ fn persist_candidate_disposition(
             Ok(audit_id)
         }
         Err(error) => {
-            let _ = connection.rollback();
+            if let Err(rollback_error) = connection.rollback() {
+                tracing::error!(
+                    phase = "curate_write",
+                    error = %error,
+                    rollback_error = %rollback_error,
+                    "failed to rollback transaction after curate write failure"
+                );
+            }
             Err(error)
         }
     }
