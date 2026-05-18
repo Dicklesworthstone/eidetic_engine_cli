@@ -13,6 +13,11 @@ use crate::pack::{ContextResponse, ContextResponseDegradation, ContextResponseSe
 use super::{ContextJsonRenderOptions, render_context_response_json_with_options};
 
 pub const PACK_STREAM_SCHEMA_V1: &str = "ee.pack.stream.v1";
+pub const CONTEXT_STREAM_PARTIAL_EMISSION_CODE: &str = "context_stream_partial_emission";
+const CONTEXT_STREAM_PARTIAL_EMISSION_MESSAGE: &str =
+    "Context stream ended before a terminal frame arrived.";
+const CONTEXT_STREAM_PARTIAL_EMISSION_REPAIR: &str =
+    "Retry `ee context --stream`; treat the partial stream as incomplete.";
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -465,6 +470,37 @@ impl fmt::Display for StreamValidationError {
 }
 
 impl std::error::Error for StreamValidationError {}
+
+impl StreamValidationError {
+    #[must_use]
+    pub const fn degraded_code(&self) -> Option<&'static str> {
+        match self {
+            Self::MissingTerminal => Some(CONTEXT_STREAM_PARTIAL_EMISSION_CODE),
+            Self::MissingHeader
+            | Self::DuplicateHeader
+            | Self::ItemBeforeHeader
+            | Self::TerminalBeforeHeader
+            | Self::FrameAfterTerminal
+            | Self::DuplicateTerminal
+            | Self::UnexpectedItemSeq { .. }
+            | Self::UnexpectedItemRank { .. }
+            | Self::TrailerItemCountMismatch { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn degraded_entry(&self) -> Option<StreamDegradation> {
+        self.degraded_code().map(|code| {
+            StreamDegradation::new(
+                code,
+                StreamSeverity::Warning,
+                CONTEXT_STREAM_PARTIAL_EMISSION_MESSAGE,
+                Some(CONTEXT_STREAM_PARTIAL_EMISSION_REPAIR.to_string()),
+            )
+            .with_sources(vec!["context_stream".to_string()])
+        })
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContextStreamFrameOptions {
@@ -1280,6 +1316,31 @@ mod tests {
         assert_eq!(
             validator.finish(),
             Err(StreamValidationError::MissingTerminal)
+        );
+    }
+
+    #[test]
+    fn error_or_invalid_missing_terminal_maps_to_partial_emission_degradation() {
+        let degradation = StreamValidationError::MissingTerminal
+            .degraded_entry()
+            .expect("missing terminal has a cataloged degradation");
+
+        assert_eq!(degradation.code, CONTEXT_STREAM_PARTIAL_EMISSION_CODE);
+        assert_eq!(degradation.severity, StreamSeverity::Warning);
+        assert!(
+            degradation
+                .message
+                .contains("before a terminal frame arrived")
+        );
+        assert_eq!(
+            degradation.repair.as_deref(),
+            Some(CONTEXT_STREAM_PARTIAL_EMISSION_REPAIR)
+        );
+        assert_eq!(degradation.sources, vec!["context_stream".to_string()]);
+        assert!(
+            StreamValidationError::DuplicateTerminal
+                .degraded_entry()
+                .is_none()
         );
     }
 

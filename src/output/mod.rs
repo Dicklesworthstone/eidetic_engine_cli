@@ -3204,6 +3204,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
             r.field_str("asyncBoundary", report.runtime.async_boundary);
         });
         render_read_pool_status_json(d, &report.read_pool);
+        render_wal_status_json(d, &report.wal);
         render_pack_budget_buckets_json(d, &report.pack_budget_buckets);
         render_qos_status_json(d, &report.qos_posture, false);
         render_memory_health_json(d, &report.memory_health);
@@ -3484,6 +3485,18 @@ fn render_read_pool_status_json(
             wait.field_raw("p50_ns", &report.acquire_wait.p50_ns.to_string());
             wait.field_raw("p99_ns", &report.acquire_wait.p99_ns.to_string());
         });
+    });
+}
+
+fn render_wal_status_json(parent: &mut JsonBuilder, report: &crate::core::status::WalStatusReport) {
+    parent.field_object("wal", |wal| {
+        wal.field_raw("bytes", &report.bytes.to_string());
+        wal.field_raw("frames", &report.frames.to_string());
+        wal.field_raw("page_size", &report.page_size.to_string());
+        wal.field_raw(
+            "checkpoint_threshold_bytes",
+            &report.checkpoint_threshold_bytes.to_string(),
+        );
     });
 }
 
@@ -3939,6 +3952,7 @@ pub fn render_status_json_with_meta(
             r.field_str("asyncBoundary", report.runtime.async_boundary);
         });
         render_read_pool_status_json(d, &report.read_pool);
+        render_wal_status_json(d, &report.wal);
         render_pack_budget_buckets_json(d, &report.pack_budget_buckets);
         render_memory_health_json(d, &report.memory_health);
         render_graph_compute_json(d, &report.graph_compute);
@@ -7108,6 +7122,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: db_inspect_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::workspace::WORKSPACE_HYGIENE_SCHEMA_V1,
+            version: "1",
+            description: "Read-only workspace hygiene and commit-readiness response envelope",
+            category: "ops",
+            definition: workspace_hygiene_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::completion_audit::COMPLETION_AUDIT_CHECKLIST_SCHEMA_V1,
             version: "1",
             description: "Objective-to-artifact completion audit checklist",
@@ -7445,6 +7466,10 @@ fn graph_witness_prune_schema_definition() -> String {
 
 fn db_inspect_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.db.inspect.v1.json").to_string()
+}
+
+fn workspace_hygiene_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.workspace_hygiene.v1.json").to_string()
 }
 
 fn completion_audit_checklist_schema_definition() -> String {
@@ -9362,6 +9387,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
                 r.field_str("asyncBoundary", report.runtime.async_boundary);
             });
             render_read_pool_status_json(d, &report.read_pool);
+            render_wal_status_json(d, &report.wal);
             render_pack_budget_buckets_json(d, &report.pack_budget_buckets);
             render_memory_health_json(d, &report.memory_health);
             render_curation_health_json(d, &report.curation_health);
