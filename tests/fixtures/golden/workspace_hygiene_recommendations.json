@@ -1,0 +1,62 @@
+[
+  {
+    "name": "docs",
+    "paths": [
+      "docs/guide.md"
+    ],
+    "pathCount": 1,
+    "kinds": [
+      "docs"
+    ],
+    "reasons": [
+      "documentation"
+    ],
+    "recommendation": "review_and_stage_as_one_logical_commit",
+    "readOnly": true
+  },
+  {
+    "name": "goldens",
+    "paths": [
+      "tests/fixtures/golden/workspace.json"
+    ],
+    "pathCount": 1,
+    "kinds": [
+      "test"
+    ],
+    "reasons": [
+      "test_or_fixture"
+    ],
+    "recommendation": "review_and_stage_as_one_logical_commit",
+    "readOnly": true
+  },
+  {
+    "name": "source",
+    "paths": [
+      "src/core/workspace.rs"
+    ],
+    "pathCount": 1,
+    "kinds": [
+      "source"
+    ],
+    "reasons": [
+      "src_rust_source"
+    ],
+    "recommendation": "review_and_stage_as_one_logical_commit",
+    "readOnly": true
+  },
+  {
+    "name": "tests",
+    "paths": [
+      "tests/workspace_hygiene.rs"
+    ],
+    "pathCount": 1,
+    "kinds": [
+      "test"
+    ],
+    "reasons": [
+      "test_or_fixture"
+    ],
+    "recommendation": "review_and_stage_as_one_logical_commit",
+    "readOnly": true
+  }
+]

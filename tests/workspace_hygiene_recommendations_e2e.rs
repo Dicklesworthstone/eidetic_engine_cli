@@ -190,6 +190,13 @@ fn staging_group<'a>(value: &'a Value, name: &str) -> Result<&'a Value, String> 
         .ok_or_else(|| format!("missing staging group {name}: {value}"))
 }
 
+fn expected_staging_groups() -> Result<Value, String> {
+    serde_json::from_str(include_str!(
+        "fixtures/golden/workspace_hygiene_recommendations.json"
+    ))
+    .map_err(|error| format!("recommendations staging golden must parse: {error}"))
+}
+
 #[test]
 fn workspace_hygiene_recommendations_are_grouped_read_only_and_explainable() -> TestResult {
     let workspace = init_mixed_dirty_workspace()?;
@@ -218,6 +225,16 @@ fn workspace_hygiene_recommendations_are_grouped_read_only_and_explainable() -> 
     }
     if value.pointer("/data/readOnly").and_then(Value::as_bool) != Some(true) {
         return Err(format!("workspace hygiene must be read-only: {value}"));
+    }
+
+    let staging_recommendations = value
+        .pointer("/data/stagingRecommendations")
+        .ok_or_else(|| format!("missing staging recommendations: {value}"))?;
+    let expected = expected_staging_groups()?;
+    if staging_recommendations != &expected {
+        return Err(format!(
+            "staging recommendations drifted from golden\nexpected: {expected}\nactual: {staging_recommendations}"
+        ));
     }
 
     let group_names = value
