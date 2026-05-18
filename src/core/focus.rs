@@ -1311,7 +1311,9 @@ fn canonicalize_state(state: &mut FocusState) {
 }
 
 fn state_hash(state: &FocusState) -> String {
-    let serialized = serde_json::to_string(&state.data_json()).unwrap_or_else(|_| "{}".to_owned());
+    let serialized = serde_json::to_string(&state.data_json()).unwrap_or_else(|_| {
+        r#"{"schema":"ee.error.v1","error":"serialization_failed"}"#.to_owned()
+    });
     format!("blake3:{}", blake3::hash(serialized.as_bytes()).to_hex())
 }
 

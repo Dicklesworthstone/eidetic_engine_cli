@@ -117,7 +117,9 @@ impl MemoryScopeStats {
             self.candidates_in_scope = self.candidates_in_scope.saturating_add(1);
         } else {
             self.candidates_excluded_by_scope = self.candidates_excluded_by_scope.saturating_add(1);
-            self.strict_violations = self.strict_violations.saturating_add(1);
+            if self.strict_scope {
+                self.strict_violations = self.strict_violations.saturating_add(1);
+            }
             if let Some(memory_id) = memory_id {
                 self.excluded_memory_ids.push(memory_id.to_owned());
             }
