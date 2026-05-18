@@ -5526,7 +5526,7 @@ pub fn render_structural_health_json(report: &StructuralHealthReport) -> String 
         })
         .collect();
     serde_json::to_string(&report)
-        .unwrap_or_else(|_| "{\"schema\":\"ee.health.structural.v1\"}".to_owned())
+        .unwrap_or_else(|_| r#"{"schema":"ee.error.v1","error":"serialization_failed"}"#.to_owned())
 }
 
 /// Render the opt-in structural health surface as human-readable text.
