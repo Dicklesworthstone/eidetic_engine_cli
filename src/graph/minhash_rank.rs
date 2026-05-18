@@ -205,13 +205,11 @@ fn compute_minhash_rank_unbudgeted(
         }
 
         let needed_from_marginal = top_k.saturating_sub(strict.len());
-        if marginal_density == 0 {
-            if marginal.len() > needed_from_marginal {
-                marginal.select_nth_unstable_by(needed_from_marginal, |left, right| {
-                    candidate_zero_marginal_order(left, right, &nodes)
-                });
-                marginal.truncate(needed_from_marginal);
-            }
+        if marginal_density == 0 && marginal.len() > needed_from_marginal {
+            marginal.select_nth_unstable_by(needed_from_marginal, |left, right| {
+                candidate_zero_marginal_order(left, right, &nodes)
+            });
+            marginal.truncate(needed_from_marginal);
         }
         strict.extend(marginal);
         strict

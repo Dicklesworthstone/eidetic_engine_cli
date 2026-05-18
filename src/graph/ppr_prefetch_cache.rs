@@ -171,9 +171,7 @@ impl PprPrefetchCache {
         }
 
         let last_used_sequence = self.next_access_sequence();
-        let Some(entry) = self.entries.get_mut(key) else {
-            return None;
-        };
+        let entry = self.entries.get_mut(key)?;
         entry.last_used_sequence = last_used_sequence;
         Some(PprPrefetchCacheHit {
             scores: entry.scores().to_vec(),
@@ -188,9 +186,7 @@ impl PprPrefetchCache {
         }
 
         let last_used_sequence = self.next_access_sequence();
-        let Some(entry) = self.entries.get_mut(key) else {
-            return None;
-        };
+        let entry = self.entries.get_mut(key)?;
         let result = entry.result.clone()?;
         entry.last_used_sequence = last_used_sequence;
         Some(PprPrefetchCacheResultHit {

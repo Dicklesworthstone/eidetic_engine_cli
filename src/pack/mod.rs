@@ -1161,7 +1161,7 @@ fn redact_pack_absolute_path_like_segments(input: &str) -> String {
                 let next = input[cursor..]
                     .chars()
                     .next()
-                    .expect("cursor stays on a character boundary");
+                    .unwrap_or('\0');
                 if next.is_whitespace()
                     || matches!(
                         next,
@@ -1189,7 +1189,7 @@ fn redact_pack_absolute_path_like_segments(input: &str) -> String {
         let next = remaining
             .chars()
             .next()
-            .expect("cursor stays on a character boundary");
+            .unwrap_or('\0');
         output.push(next);
         cursor += next.len_utf8();
     }
@@ -4357,44 +4357,29 @@ fn select_next_candidate_index(
     selected: &[CandidateSignature],
 ) -> usize {
     let mut best_index = 0_usize;
+    let mut best_score = strict_mmr_marginal_gain(&candidates[0], selected);
     for (candidate_index, candidate) in candidates.iter().enumerate().skip(1) {
-        let best = &candidates[best_index];
-        if compare_candidates_with_redundancy(candidate, best, selected) == Ordering::Less {
+        let score = strict_mmr_marginal_gain(candidate, selected);
+        let ordering = best_score
+            .total_cmp(&score)
+            .then_with(|| compare_candidates(&candidate.candidate, &candidates[best_index].candidate));
+        if ordering == Ordering::Less {
             best_index = candidate_index;
+            best_score = score;
         }
     }
     best_index
 }
 
-fn compare_candidates_with_redundancy(
-    left: &MmrCandidate,
-    right: &MmrCandidate,
-    selected: &[CandidateSignature],
-) -> Ordering {
-    let left_score = strict_mmr_marginal_gain(left, selected);
-    let right_score = strict_mmr_marginal_gain(right, selected);
-    right_score
-        .total_cmp(&left_score)
-        .then_with(|| compare_candidates(&left.candidate, &right.candidate))
-}
-
 fn strict_mmr_marginal_gain(candidate: &MmrCandidate, selected: &[CandidateSignature]) -> f32 {
-    if is_redundant(&candidate.signature, selected) {
+    let max_similarity = max_selected_similarity(&candidate.signature, selected);
+    if max_similarity >= 1.0 {
         0.0
     } else {
-        redundancy_adjusted_score(candidate, selected)
+        let relevance_score = candidate.candidate.relevance.into_inner();
+        (DEFAULT_MMR_RELEVANCE_WEIGHT * relevance_score)
+            - ((1.0 - DEFAULT_MMR_RELEVANCE_WEIGHT) * max_similarity)
     }
-}
-
-fn redundancy_adjusted_score(candidate: &MmrCandidate, selected: &[CandidateSignature]) -> f32 {
-    let relevance_score = candidate.candidate.relevance.into_inner();
-    let max_similarity = max_selected_similarity(&candidate.signature, selected);
-    (DEFAULT_MMR_RELEVANCE_WEIGHT * relevance_score)
-        - ((1.0 - DEFAULT_MMR_RELEVANCE_WEIGHT) * max_similarity)
-}
-
-fn is_redundant(candidate: &CandidateSignature, selected: &[CandidateSignature]) -> bool {
-    max_selected_similarity(candidate, selected) >= 1.0
 }
 
 fn max_selected_similarity(candidate: &CandidateSignature, selected: &[CandidateSignature]) -> f32 {

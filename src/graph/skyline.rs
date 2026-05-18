@@ -95,6 +95,12 @@ pub fn compute_knowledge_skyline(input: &KnowledgeSkylineInput) -> KnowledgeSkyl
     let ppr_percentiles = ppr_percentiles(&input.ppr_scores);
     let age_deciles = age_deciles(&memories, input.as_of);
 
+    let k_truss_ranks: BTreeMap<String, usize> = k_truss
+        .top_memories_at_k
+        .into_iter()
+        .map(|entry| (entry.memory_id, entry.max_k))
+        .collect();
+
     let mut trust_classes = BTreeSet::new();
     let mut metrics_by_memory = BTreeMap::<String, MemoryMetrics>::new();
     for memory in &memories {
@@ -104,11 +110,9 @@ pub fn compute_knowledge_skyline(input: &KnowledgeSkylineInput) -> KnowledgeSkyl
             .get(&memory.memory_id)
             .copied()
             .unwrap_or(0);
-        let k_truss_rank = k_truss
-            .top_memories_at_k
-            .iter()
-            .find(|entry| entry.memory_id == memory.memory_id)
-            .map(|entry| entry.max_k)
+        let k_truss_rank = k_truss_ranks
+            .get(&memory.memory_id)
+            .copied()
             .unwrap_or(0);
         let age_days = age_days(memory.created_at, input.as_of);
         metrics_by_memory.insert(
@@ -133,6 +137,14 @@ pub fn compute_knowledge_skyline(input: &KnowledgeSkylineInput) -> KnowledgeSkyl
     }
     let trust_classes = trust_classes.into_iter().collect::<Vec<_>>();
 
+    let mut metrics_by_cell: BTreeMap<(usize, String), Vec<&MemoryMetrics>> = BTreeMap::new();
+    for metrics in metrics_by_memory.values() {
+        metrics_by_cell
+            .entry((metrics.onion_layer, metrics.trust_class.clone()))
+            .or_default()
+            .push(metrics);
+    }
+
     let rows = row_layers
         .into_iter()
         .map(|onion_layer| KnowledgeSkylineLayerRow {
@@ -140,7 +152,11 @@ pub fn compute_knowledge_skyline(input: &KnowledgeSkylineInput) -> KnowledgeSkyl
             cells: trust_classes
                 .iter()
                 .map(|trust_class| {
-                    skyline_cell(&metrics_by_memory, onion_layer, trust_class.as_str())
+                    let matching = metrics_by_cell
+                        .get(&(onion_layer, trust_class.clone()))
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[]);
+                    skyline_cell(matching, trust_class.as_str())
                 })
                 .collect(),
         })
@@ -158,14 +174,9 @@ pub fn compute_knowledge_skyline(input: &KnowledgeSkylineInput) -> KnowledgeSkyl
 }
 
 fn skyline_cell(
-    metrics_by_memory: &BTreeMap<String, MemoryMetrics>,
-    onion_layer: usize,
+    matching: &[&MemoryMetrics],
     trust_class: &str,
 ) -> KnowledgeSkylineCell {
-    let matching = metrics_by_memory
-        .values()
-        .filter(|metrics| metrics.onion_layer == onion_layer && metrics.trust_class == trust_class)
-        .collect::<Vec<_>>();
     let count = matching.len();
     if count == 0 {
         return KnowledgeSkylineCell {

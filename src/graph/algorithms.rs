@@ -584,9 +584,7 @@ where
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(entry) = cache.get(cache_key) else {
-        return None;
-    };
+    let entry = cache.get(cache_key)?;
     if entry
         .expires_at
         .is_some_and(|expires_at| expires_at <= Instant::now())
