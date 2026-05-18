@@ -14,9 +14,11 @@ line 53: hashmap_iteration: sort HashMap entries before deterministic output
 line 54: hashmap_iteration: sort HashMap entries before deterministic output
 line 55: hashmap_iteration: sort HashMap entries before deterministic output
 line 56: hashmap_iteration: sort HashMap entries before deterministic output
-line 61: unsorted_read_dir: sort read_dir entries before deterministic output
-line 62: unsorted_read_dir: sort read_dir entries before deterministic output
-line 67: ambient_chrono_utc_now: inject UTC timestamps at the boundary instead of calling Utc::now
-line 68: ambient_chrono_local_now: inject local timestamps at the boundary instead of calling Local::now
-line 73: ambient_domain_id_now: use seeded ID helpers instead of ambient typed Id::now
-line 74: ambient_domain_id_now: use seeded ID helpers instead of ambient typed Id::now
+line 62: hashset_iteration: sort HashSet entries before deterministic output
+line 63: hashset_iteration: sort HashSet entries before deterministic output
+line 68: unsorted_read_dir: sort read_dir entries before deterministic output
+line 69: unsorted_read_dir: sort read_dir entries before deterministic output
+line 74: ambient_chrono_utc_now: inject UTC timestamps at the boundary instead of calling Utc::now
+line 75: ambient_chrono_local_now: inject local timestamps at the boundary instead of calling Local::now
+line 80: ambient_domain_id_now: use seeded ID helpers instead of ambient typed Id::now
+line 81: ambient_domain_id_now: use seeded ID helpers instead of ambient typed Id::now

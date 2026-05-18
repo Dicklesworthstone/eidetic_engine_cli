@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::time::{Instant, SystemTime};
 
@@ -57,6 +57,13 @@ fn hashmap_iteration(_: &ee::runtime::determinism::Deterministic<Seed>) {
 }
 
 #[determinism::required]
+fn hashset_iteration(_: &ee::runtime::determinism::Deterministic<Seed>) {
+    let set: HashSet<String> = HashSet::new();
+    for _ in set.iter() {}
+    for _ in set.into_iter() {}
+}
+
+#[determinism::required]
 fn read_dir_order(_: &ee::runtime::determinism::Deterministic<Seed>) {
     let _ = std::fs::read_dir(".");
     let _ = fs::read_dir(".");
@@ -75,7 +82,7 @@ fn ambient_domain_id(_: &ee::runtime::determinism::Deterministic<Seed>) {
 }
 
 fn benign_documentation_mentions() {
-    let _ = "rand::random::<u64>() Instant::now() SystemTime::now() chrono::Utc::now() MemoryId::now() std::fs::read_dir(.)";
+    let _ = "rand::random::<u64>() Instant::now() SystemTime::now() chrono::Utc::now() MemoryId::now() std::fs::read_dir(.) HashSet";
     // rand::thread_rng();
     // chrono::Local::now();
     // RuleId::now();
@@ -93,6 +100,7 @@ fn benign_block_comment_and_raw_string_mentions() {
      * chrono::Utc::now();
      * MemoryId::now();
      * std::fs::read_dir(".");
+     * HashSet<String>::new().iter();
      */
     let _ = r#"std::env::var("EE_SEED") Instant::now() SystemTime::now() chrono::Local::now() RuleId::now()"#;
 }

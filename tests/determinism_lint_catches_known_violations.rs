@@ -130,11 +130,22 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "iterate env only through a deterministic registered boundary",
             });
         }
-        if hash_map_iteration_call(line) && nearby_lines_contain(&scan_lines, index, "HashMap") {
+        if hash_collection_iteration_call(line)
+            && nearby_lines_contain(&scan_lines, index, "HashMap")
+        {
             findings.push(Finding {
                 line: line_no,
                 code: "hashmap_iteration",
                 message: "sort HashMap entries before deterministic output",
+            });
+        }
+        if hash_collection_iteration_call(line)
+            && nearby_lines_contain(&scan_lines, index, "HashSet")
+        {
+            findings.push(Finding {
+                line: line_no,
+                code: "hashset_iteration",
+                message: "sort HashSet entries before deterministic output",
             });
         }
         if line.contains("std::fs::read_dir(") || line.contains("fs::read_dir(") {
@@ -333,7 +344,7 @@ fn nearby_lines_contain(lines: &[String], index: usize, needle: &str) -> bool {
         .any(|line| line.contains(needle))
 }
 
-fn hash_map_iteration_call(line: &str) -> bool {
+fn hash_collection_iteration_call(line: &str) -> bool {
     [".iter()", ".keys()", ".values()", ".into_iter()"]
         .iter()
         .any(|needle| line.contains(needle))
@@ -393,7 +404,7 @@ mod self_tests {
     fn comments_and_strings_do_not_emit_known_violations() {
         let fixture = r#"
             fn documentation_mentions() {
-                let _ = "rand::random::<u64>() Instant::now() chrono::Utc::now() std::fs::read_dir(.)";
+                let _ = "rand::random::<u64>() Instant::now() chrono::Utc::now() std::fs::read_dir(.) HashSet";
                 // rand::thread_rng();
                 // chrono::Local::now();
                 // std::env::var("EE_SEED");
@@ -445,18 +456,21 @@ mod self_tests {
     }
 
     #[test]
-    fn hashmap_iteration_aliases_emit_known_violations() {
+    fn hash_collection_iteration_aliases_emit_known_violations() {
         let fixture = r#"
-            use std::collections::HashMap;
+            use std::collections::{HashMap, HashSet};
 
-            fn ambient(map: HashMap<String, String>) {
+            fn ambient(map: HashMap<String, String>, set: HashSet<String>) {
                 for _ in map.keys() {}
                 for _ in map.values() {}
                 for _ in map.into_iter() {}
+                for _ in set.iter() {}
+                for _ in set.into_iter() {}
             }
         "#;
         let report = render_report(&scan_fixture(fixture));
         assert_eq!(report.matches("hashmap_iteration").count(), 3);
+        assert_eq!(report.matches("hashset_iteration").count(), 2);
     }
 
     #[test]
