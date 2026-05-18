@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.workspace_hygiene.v1.json",
+  "title": "ee.workspace_hygiene.v1",
+  "description": "Read-only workspace hygiene and commit-readiness response envelope.",
+  "type": "object",
+  "required": ["schema", "success", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v1"},
+    "success": {"type": "boolean", "const": true},
+    "fields": {"type": "string"},
+    "data": {
+      "type": "object",
+      "required": [
+        "schema",
+        "command",
+        "readOnly",
+        "workspace",
+        "gitSummary",
+        "pathClassifications",
+        "stagingRecommendations",
+        "doNotCommit",
+        "needsHumanReview",
+        "coordinationState",
+        "beadsState",
+        "degraded",
+        "nextActions"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.workspace_hygiene.v1"},
+        "command": {"type": "string", "const": "workspace hygiene"},
+        "readOnly": {"type": "boolean", "const": true},
+        "workspace": {"type": "string"},
+        "gitSummary": {
+          "type": "object",
+          "required": ["repositoryRoot", "dirtyPathCount", "bucketCounts", "kindCounts"],
+          "additionalProperties": true,
+          "properties": {
+            "repositoryRoot": {"type": "string"},
+            "dirtyPathCount": {"type": "integer", "minimum": 0},
+            "bucketCounts": {"type": "array", "items": {"$ref": "#/$defs/count"}},
+            "kindCounts": {"type": "array", "items": {"$ref": "#/$defs/count"}}
+          }
+        },
+        "pathClassifications": {"type": "array", "items": {"type": "object"}},
+        "stagingRecommendations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "paths"],
+            "additionalProperties": true,
+            "properties": {
+              "name": {"type": "string"},
+              "paths": {"type": "array", "items": {"type": "string"}},
+              "pathCount": {"type": "integer", "minimum": 0},
+              "kinds": {"type": "array", "items": {"type": "string"}},
+              "reasons": {"type": "array", "items": {"type": "string"}},
+              "recommendation": {"type": "string"},
+              "readOnly": {"type": "boolean", "const": true}
+            }
+          }
+        },
+        "doNotCommit": {"type": "array", "items": {"type": "string"}},
+        "needsHumanReview": {"type": "array", "items": {"type": "string"}},
+        "coordinationState": {"type": "object"},
+        "beadsState": {"type": "object"},
+        "degraded": {"type": "array", "items": {"type": "string"}},
+        "nextActions": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  },
+  "$defs": {
+    "count": {
+      "type": "object",
+      "required": ["name", "count"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "count": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["data.schema", "data.command", "data.readOnly", "data.gitSummary.dirtyPathCount"],
+    "summary": ["data.schema", "data.command", "data.gitSummary", "data.stagingRecommendations", "data.doNotCommit", "data.needsHumanReview", "data.degraded", "data.nextActions"],
+    "standard": ["data.schema", "data.command", "data.readOnly", "data.workspace", "data.gitSummary", "data.pathClassifications", "data.stagingRecommendations", "data.doNotCommit", "data.needsHumanReview", "data.coordinationState", "data.beadsState", "data.degraded", "data.nextActions"],
+    "full": ["*"]
+  }
+}

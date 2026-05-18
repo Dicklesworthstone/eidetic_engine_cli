@@ -63,6 +63,9 @@ pub mod degraded {
     /// that depend on content scanning fall back to the dirty-bit signal
     /// alone.
     pub const CONTENT_NOT_PROVIDED: &str = "workspace_hygiene_beads_content_not_provided";
+    /// JSONL content contains conflict markers, invalid UTF-8, or a
+    /// non-object line and cannot be trusted as a parseable Beads export.
+    pub const PARSE_ERROR: &str = "workspace_hygiene_beads_parse_error";
     /// Caller did not provide a DB/export divergence signal, so a dirty
     /// JSONL posture can only be classified as export-only with this
     /// diagnostic.
@@ -361,7 +364,7 @@ fn scan_jsonl_content(content: Option<&[u8]>) -> (bool, Option<usize>, Vec<&'sta
         Some(bytes) => bytes,
         None => {
             degraded.push(degraded::CONTENT_NOT_PROVIDED);
-            return (false, None, degraded);
+            return (false, None, finalized_degraded_codes(degraded));
         }
     };
     let mut bytes = raw;
@@ -374,7 +377,8 @@ fn scan_jsonl_content(content: Option<&[u8]>) -> (bool, Option<usize>, Vec<&'sta
         Err(_) => {
             // Non-UTF-8 content in a JSONL export is itself a parse
             // error; report at line 0 (the file as a whole).
-            return (false, Some(0), degraded);
+            degraded.push(degraded::PARSE_ERROR);
+            return (false, Some(0), finalized_degraded_codes(degraded));
         }
     };
     let mut conflict_markers_found = false;
@@ -399,7 +403,20 @@ fn scan_jsonl_content(content: Option<&[u8]>) -> (bool, Option<usize>, Vec<&'sta
             parse_error_line = Some(line_number);
         }
     }
-    (conflict_markers_found, parse_error_line, degraded)
+    if conflict_markers_found || parse_error_line.is_some() {
+        degraded.push(degraded::PARSE_ERROR);
+    }
+    (
+        conflict_markers_found,
+        parse_error_line,
+        finalized_degraded_codes(degraded),
+    )
+}
+
+fn finalized_degraded_codes(mut degraded: Vec<&'static str>) -> Vec<&'static str> {
+    degraded.sort_unstable();
+    degraded.dedup();
+    degraded
 }
 
 /// Strict JSONL line validator for Beads export rows.
@@ -603,6 +620,7 @@ mod tests {
             BeadsClassification::BeadsConflictOrParseError
         );
         assert!(state.conflict_markers_found);
+        assert!(state.degraded_codes.contains(&degraded::PARSE_ERROR));
     }
 
     #[test]
@@ -622,6 +640,7 @@ mod tests {
         );
         assert_eq!(state.parse_error_line, Some(2));
         assert!(!state.conflict_markers_found);
+        assert!(state.degraded_codes.contains(&degraded::PARSE_ERROR));
     }
 
     #[test]

@@ -4,21 +4,43 @@
 //! `workspaces` table. `workspaces.name` is the stable human alias for a
 //! workspace path, while the deterministic workspace ID remains path-derived.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::config::{
     EnvVar, WORKSPACE_MARKER, WorkspaceDiagnostic, WorkspaceResolutionMode,
     WorkspaceResolutionRequest, WorkspaceResolutionSource, WorkspaceScope, derive_workspace_scope,
     diagnose_workspace_resolution, read_env_var, resolve_workspace,
 };
+use crate::core::hygiene_beads_state::{
+    BEADS_JSONL_MAX_INSPECT_BYTES, BEADS_JSONL_RELATIVE_PATH, BeadsHygieneInputs,
+    BeadsHygieneState, BeadsMetadataSignal, BeadsReservationHolder, classify_beads_state,
+};
+use crate::core::hygiene_classifier::{
+    Bucket, ClassificationRow, HygieneClassifierConfig, Kind, SecretEvidenceLookup,
+    classify_workspace_with_config,
+};
+use crate::core::hygiene_coordination::{
+    AgentMailCoordinationInput, HygieneCoordinationOverlay, overlay_coordination_state,
+};
+use crate::core::swarm_brief::{
+    SystemSwarmBriefCommandRunner, WorkspaceGitSnapshot, WorkspaceGitSnapshotOptions,
+    collect_workspace_git_snapshot, parse_agent_mail_snapshot_json,
+};
 use crate::db::{
     CreateAuditInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, StoredWorkspace,
     WorkspaceScopeFields, generate_audit_id,
+};
+use crate::models::degradation::{
+    WORKSPACE_HYGIENE_AGENT_MAIL_UNAVAILABLE_CODE, WORKSPACE_HYGIENE_PARTIAL_METADATA_CODE,
 };
 use crate::models::{DomainError, WorkspaceId};
 use crate::runtime::determinism::{Deterministic, Seed};
@@ -26,6 +48,7 @@ use crate::runtime::determinism::{Deterministic, Seed};
 pub const WORKSPACE_REGISTRY_SCHEMA_V1: &str = "ee.workspace.registry.v1";
 pub const WORKSPACE_ALIAS_SCHEMA_V1: &str = "ee.workspace.alias.v1";
 pub const WORKSPACE_RESOLVE_SCHEMA_V1: &str = "ee.workspace.resolve.v1";
+pub const WORKSPACE_HYGIENE_SCHEMA_V1: &str = "ee.workspace_hygiene.v1";
 pub const WORKSPACE_REGISTRY_ENV_VAR: &str = EnvVar::WorkspaceRegistry.name();
 
 const WORKSPACE_ALIAS_SET_ACTION: &str = "workspace.alias.set";
@@ -51,6 +74,13 @@ pub struct WorkspaceAliasOptions {
     pub clear: bool,
     pub dry_run: bool,
     pub registry_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceHygieneOptions {
+    pub workspace_path: PathBuf,
+    pub self_agent_name: Option<String>,
+    pub agent_mail_snapshot_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -131,6 +161,78 @@ pub struct WorkspaceResolveReport {
     pub subproject_path: Option<String>,
     pub registry_path: String,
     pub diagnostics: Vec<WorkspaceDiagnosticEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceHygieneReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub read_only: bool,
+    #[serde(rename = "workspace")]
+    pub workspace_path: String,
+    #[serde(rename = "gitSummary")]
+    pub git_summary: WorkspaceHygieneGitSummary,
+    pub repository_root: String,
+    pub dirty_path_count: usize,
+    pub bucket_counts: Vec<WorkspaceHygieneCount>,
+    pub kind_counts: Vec<WorkspaceHygieneCount>,
+    #[serde(rename = "stagingRecommendations")]
+    pub staging_groups: Vec<WorkspaceHygieneStagingGroup>,
+    #[serde(rename = "pathClassifications")]
+    pub classifications: Vec<ClassificationRow>,
+    #[serde(rename = "doNotCommit")]
+    pub do_not_commit: Vec<String>,
+    #[serde(rename = "needsHumanReview")]
+    pub needs_human_review: Vec<String>,
+    #[serde(rename = "beadsState")]
+    pub beads_state: BeadsHygieneState,
+    #[serde(rename = "coordinationState")]
+    pub coordination: HygieneCoordinationOverlay,
+    #[serde(rename = "degraded")]
+    pub degraded_codes: Vec<&'static str>,
+    #[serde(rename = "nextActions")]
+    pub next_actions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceHygieneGitSummary {
+    pub repository_root: String,
+    pub dirty_path_count: usize,
+    pub bucket_counts: Vec<WorkspaceHygieneCount>,
+    pub kind_counts: Vec<WorkspaceHygieneCount>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceHygieneCount {
+    pub name: String,
+    pub count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceHygieneStagingGroup {
+    pub name: String,
+    pub paths: Vec<String>,
+    pub path_count: usize,
+    pub kinds: Vec<String>,
+    pub reasons: Vec<String>,
+    pub recommendation: &'static str,
+    pub read_only: bool,
+}
+
+struct WorkspaceHygieneReportInputs<'a> {
+    workspace_path: &'a Path,
+    snapshot: WorkspaceGitSnapshot,
+    classifier_config: &'a HygieneClassifierConfig,
+    jsonl_content: Option<&'a [u8]>,
+    self_agent_name: Option<&'a str>,
+    beads_metadata_signal: BeadsMetadataSignal,
+    beads_reservations: &'a [BeadsReservationHolder],
+    agent_mail_input: &'a AgentMailCoordinationInput,
+    now: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -263,6 +365,493 @@ pub fn resolve_workspace_report(
     }
 
     resolve_path_report(&registry_path, None, options.workspace_path.clone())
+}
+
+pub fn build_workspace_hygiene_report(
+    options: &WorkspaceHygieneOptions,
+) -> Result<WorkspaceHygieneReport, DomainError> {
+    let classifier_config = workspace_hygiene_classifier_config()?;
+    let snapshot_options = WorkspaceGitSnapshotOptions::for_workspace(&options.workspace_path);
+    let snapshot =
+        collect_workspace_git_snapshot(&snapshot_options, &SystemSwarmBriefCommandRunner)
+            .map_err(workspace_git_error)?;
+    let jsonl_content = read_bounded_file(
+        &options.workspace_path.join(BEADS_JSONL_RELATIVE_PATH),
+        BEADS_JSONL_MAX_INSPECT_BYTES + 1,
+    )
+    .ok();
+    let beads_metadata_signal = detect_beads_metadata_signal(&options.workspace_path);
+    let agent_mail_input =
+        load_agent_mail_coordination_input(options.agent_mail_snapshot_path.as_deref());
+
+    Ok(build_workspace_hygiene_report_from_inputs(
+        WorkspaceHygieneReportInputs {
+            workspace_path: &options.workspace_path,
+            snapshot,
+            classifier_config: &classifier_config,
+            jsonl_content: jsonl_content.as_deref(),
+            self_agent_name: options.self_agent_name.as_deref(),
+            beads_metadata_signal,
+            beads_reservations: &[],
+            agent_mail_input: &agent_mail_input,
+            now: Utc::now(),
+        },
+    ))
+}
+
+fn build_workspace_hygiene_report_from_inputs(
+    inputs: WorkspaceHygieneReportInputs<'_>,
+) -> WorkspaceHygieneReport {
+    let secret_evidence = SecretEvidenceLookup::default();
+    let classifications = classify_workspace_with_config(
+        &inputs.snapshot,
+        &secret_evidence,
+        inputs.classifier_config,
+    );
+    let beads_state = classify_beads_state(BeadsHygieneInputs {
+        snapshot: &inputs.snapshot,
+        jsonl_content: inputs.jsonl_content,
+        self_agent_name: inputs.self_agent_name,
+        metadata_signal: inputs.beads_metadata_signal,
+        reservations: inputs.beads_reservations,
+    });
+    let coordination = overlay_coordination_state(
+        &classifications,
+        inputs.agent_mail_input,
+        inputs.now,
+        inputs.self_agent_name,
+    );
+    let degraded_codes = workspace_hygiene_degraded_codes(&beads_state, &coordination);
+
+    let bucket_counts = workspace_hygiene_bucket_counts(&classifications);
+    let kind_counts = workspace_hygiene_kind_counts(&classifications);
+    let staging_groups = workspace_hygiene_staging_groups(&classifications, &coordination);
+    let do_not_commit = workspace_hygiene_paths_for_bucket(&classifications, Bucket::DoNotCommit);
+    let needs_human_review =
+        workspace_hygiene_paths_for_bucket(&classifications, Bucket::NeedsHumanReview);
+    let next_actions = workspace_hygiene_next_actions(
+        &staging_groups,
+        &do_not_commit,
+        &needs_human_review,
+        &degraded_codes,
+    );
+
+    WorkspaceHygieneReport {
+        schema: WORKSPACE_HYGIENE_SCHEMA_V1,
+        command: "workspace hygiene",
+        read_only: true,
+        workspace_path: inputs.workspace_path.display().to_string(),
+        git_summary: WorkspaceHygieneGitSummary {
+            repository_root: inputs.snapshot.repository_root.clone(),
+            dirty_path_count: classifications.len(),
+            bucket_counts: bucket_counts.clone(),
+            kind_counts: kind_counts.clone(),
+        },
+        repository_root: inputs.snapshot.repository_root,
+        dirty_path_count: classifications.len(),
+        bucket_counts,
+        kind_counts,
+        staging_groups,
+        classifications,
+        do_not_commit,
+        needs_human_review,
+        beads_state,
+        coordination,
+        degraded_codes,
+        next_actions,
+    }
+}
+
+fn load_agent_mail_coordination_input(path: Option<&Path>) -> AgentMailCoordinationInput {
+    let Some(path) = path else {
+        return AgentMailCoordinationInput::Unavailable;
+    };
+    let Ok(contents) = read_agent_mail_snapshot(path) else {
+        return AgentMailCoordinationInput::Unavailable;
+    };
+    if agent_mail_snapshot_status_is_timeout(&contents) {
+        return AgentMailCoordinationInput::TimedOut;
+    }
+    let Ok(snapshot) = parse_agent_mail_snapshot_json(&contents) else {
+        return AgentMailCoordinationInput::Unavailable;
+    };
+    if snapshot.degraded.iter().any(|entry| {
+        entry.code == "agent_mail_unavailable" && snapshot.file_reservations.is_empty()
+    }) {
+        return AgentMailCoordinationInput::Unavailable;
+    }
+    let reservations = snapshot
+        .file_reservations
+        .into_iter()
+        .map(
+            |reservation| crate::core::hygiene_coordination::AgentMailReservation {
+                path_pattern: reservation.path_pattern,
+                holder_agent: reservation.holder,
+                exclusive: reservation.exclusive,
+                expires_at: reservation.expires_at,
+                reservation_id: None,
+                bead_id: None,
+                thread_id: None,
+            },
+        )
+        .collect();
+    let active_agents = parse_active_agents_from_snapshot(&contents);
+    AgentMailCoordinationInput::Available {
+        reservations,
+        active_agents,
+    }
+}
+
+fn read_agent_mail_snapshot(path: &Path) -> io::Result<String> {
+    if let Some(symlink) = first_existing_symlink_component(path)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to read Agent Mail snapshot through symlink '{}'",
+                symlink.display()
+            ),
+        ));
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Agent Mail snapshot path '{}' is not a file",
+                path.display()
+            ),
+        ));
+    }
+    fs::read_to_string(path)
+}
+
+fn first_existing_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                current.push(component.as_os_str());
+                continue;
+            }
+            Component::CurDir => continue,
+            Component::ParentDir | Component::Normal(_) => {
+                current.push(component.as_os_str());
+            }
+        }
+
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
+fn agent_mail_snapshot_status_is_timeout(contents: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(contents) else {
+        return false;
+    };
+    value
+        .get("status")
+        .or_else(|| value.get("agentMailStatus"))
+        .or_else(|| value.get("agent_mail_status"))
+        .and_then(Value::as_str)
+        .is_some_and(|status| matches!(status, "timed_out" | "timeout" | "timedOut"))
+}
+
+fn parse_active_agents_from_snapshot(
+    contents: &str,
+) -> Vec<crate::core::hygiene_coordination::ActiveAgent> {
+    let Ok(value) = serde_json::from_str::<Value>(contents) else {
+        return Vec::new();
+    };
+    let Some(items) = value
+        .get("active_agents")
+        .or_else(|| value.get("activeAgents"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut agents = items
+        .iter()
+        .filter_map(|item| {
+            let name = item
+                .get("name")
+                .or_else(|| item.get("agent_name"))
+                .or_else(|| item.get("agentName"))
+                .and_then(Value::as_str)?
+                .trim();
+            if name.is_empty() {
+                return None;
+            }
+            let last_active_at = item
+                .get("last_active_at")
+                .or_else(|| item.get("lastActiveAt"))
+                .or_else(|| item.get("last_active_ts"))
+                .or_else(|| item.get("lastActiveTs"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            Some(crate::core::hygiene_coordination::ActiveAgent {
+                name: name.to_owned(),
+                last_active_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    agents.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.last_active_at.cmp(&right.last_active_at))
+    });
+    agents.dedup();
+    agents
+}
+
+fn workspace_hygiene_classifier_config() -> Result<HygieneClassifierConfig, DomainError> {
+    let generated = read_env_var(EnvVar::WorkspaceHygieneGeneratedPatterns);
+    let scratch = read_env_var(EnvVar::WorkspaceHygieneScratchPatterns);
+    let local_machine = read_env_var(EnvVar::WorkspaceHygieneLocalMachinePatterns);
+    let always_review = read_env_var(EnvVar::WorkspaceHygieneAlwaysReviewPatterns);
+    HygieneClassifierConfig::from_raw_pattern_values(
+        generated.as_deref(),
+        scratch.as_deref(),
+        local_machine.as_deref(),
+        always_review.as_deref(),
+    )
+    .map_err(|error| DomainError::Configuration {
+        message: format!("invalid workspace hygiene configuration: {error}"),
+        repair: Some(format!(
+            "Use matcher syntax like `{}=prefix:target/` or clear the invalid variable.",
+            EnvVar::WorkspaceHygieneGeneratedPatterns.name()
+        )),
+    })
+}
+
+fn read_bounded_file(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+    let mut file = fs::File::open(path)?;
+    let mut buffer = Vec::new();
+    file.by_ref()
+        .take(u64::try_from(max_bytes).unwrap_or(u64::MAX))
+        .read_to_end(&mut buffer)?;
+    Ok(buffer)
+}
+
+fn detect_beads_metadata_signal(workspace_path: &Path) -> BeadsMetadataSignal {
+    let beads_dir = workspace_path.join(".beads");
+    let jsonl_modified = modified_at(&beads_dir.join("issues.jsonl"));
+    let marker_modified =
+        newest_modified_at(&[beads_dir.join("beads.db"), beads_dir.join("last-touched")]);
+
+    match (marker_modified, jsonl_modified) {
+        (Some(_), None) => BeadsMetadataSignal::DbDirtyPendingFlush,
+        (Some(marker), Some(jsonl)) if marker > jsonl => BeadsMetadataSignal::DbDirtyPendingFlush,
+        (Some(marker), Some(jsonl)) if jsonl > marker => {
+            BeadsMetadataSignal::ExternalChangesPendingImport
+        }
+        _ => BeadsMetadataSignal::Unknown,
+    }
+}
+
+fn newest_modified_at(paths: &[PathBuf]) -> Option<SystemTime> {
+    paths.iter().filter_map(|path| modified_at(path)).max()
+}
+
+fn modified_at(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
+
+fn workspace_hygiene_bucket_counts(rows: &[ClassificationRow]) -> Vec<WorkspaceHygieneCount> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for row in rows {
+        *counts.entry(row.bucket.as_str().to_owned()).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(name, count)| WorkspaceHygieneCount { name, count })
+        .collect()
+}
+
+fn workspace_hygiene_kind_counts(rows: &[ClassificationRow]) -> Vec<WorkspaceHygieneCount> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for row in rows {
+        *counts.entry(row.kind.as_str().to_owned()).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(name, count)| WorkspaceHygieneCount { name, count })
+        .collect()
+}
+
+fn workspace_hygiene_staging_groups(
+    rows: &[ClassificationRow],
+    coordination: &HygieneCoordinationOverlay,
+) -> Vec<WorkspaceHygieneStagingGroup> {
+    let mut groups: BTreeMap<String, WorkspaceHygieneStagingGroupBuilder> = BTreeMap::new();
+    let blocked_paths = coordination
+        .blocked_by_coordination
+        .iter()
+        .map(|blocked| blocked.path.as_str())
+        .collect::<BTreeSet<_>>();
+    for row in rows {
+        if row.bucket != Bucket::StageCandidate {
+            continue;
+        }
+        if blocked_paths.contains(row.path.as_str()) {
+            continue;
+        }
+        let group = workspace_hygiene_stage_group_name(row);
+        groups.entry(group).or_default().push(row);
+    }
+    groups
+        .into_iter()
+        .map(|(name, builder)| builder.into_group(name))
+        .collect()
+}
+
+fn workspace_hygiene_stage_group_name(row: &ClassificationRow) -> String {
+    if row.path.starts_with("tests/fixtures/golden/")
+        || row.path.starts_with("tests/fixtures/goldens/")
+        || row.path.contains("/golden/")
+        || row.path.contains("/goldens/")
+    {
+        return "goldens".to_owned();
+    }
+    match row.kind {
+        Kind::Source => row
+            .suggested_group
+            .clone()
+            .unwrap_or_else(|| "source".to_owned()),
+        Kind::Test => row
+            .suggested_group
+            .clone()
+            .unwrap_or_else(|| "tests".to_owned()),
+        Kind::Docs => "docs".to_owned(),
+        Kind::BeadsMetadata => "beads_metadata".to_owned(),
+        Kind::Generated => "generated".to_owned(),
+        Kind::Scratch => "scratch".to_owned(),
+        Kind::LocalMachine => "local_machine".to_owned(),
+        Kind::SecretRisk => "secret_risk".to_owned(),
+        Kind::Binary => "binary".to_owned(),
+        Kind::Unknown => "human_review".to_owned(),
+    }
+}
+
+#[derive(Default)]
+struct WorkspaceHygieneStagingGroupBuilder {
+    paths: BTreeSet<String>,
+    kinds: BTreeSet<String>,
+    reasons: BTreeSet<String>,
+}
+
+impl WorkspaceHygieneStagingGroupBuilder {
+    fn push(&mut self, row: &ClassificationRow) {
+        self.paths.insert(row.path.clone());
+        self.kinds.insert(row.kind.as_str().to_owned());
+        self.reasons
+            .extend(row.reasons.iter().map(|reason| (*reason).to_owned()));
+    }
+
+    fn into_group(self, name: String) -> WorkspaceHygieneStagingGroup {
+        let paths = self.paths.into_iter().collect::<Vec<_>>();
+        let path_count = paths.len();
+        WorkspaceHygieneStagingGroup {
+            name,
+            paths,
+            path_count,
+            kinds: self.kinds.into_iter().collect(),
+            reasons: self.reasons.into_iter().collect(),
+            recommendation: "review_and_stage_as_one_logical_commit",
+            read_only: true,
+        }
+    }
+}
+
+fn workspace_hygiene_paths_for_bucket(rows: &[ClassificationRow], bucket: Bucket) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    for row in rows {
+        if row.bucket == bucket {
+            paths.insert(row.path.clone());
+        }
+    }
+    paths.into_iter().collect()
+}
+
+fn workspace_hygiene_next_actions(
+    staging_groups: &[WorkspaceHygieneStagingGroup],
+    do_not_commit: &[String],
+    needs_human_review: &[String],
+    degraded_codes: &[&'static str],
+) -> Vec<String> {
+    let mut actions = Vec::new();
+    if !staging_groups.is_empty() {
+        actions.push(
+            "Review stagingRecommendations and commit one logical group at a time.".to_string(),
+        );
+    }
+    if !needs_human_review.is_empty() {
+        actions.push("Inspect needsHumanReview paths before staging.".to_string());
+    }
+    if !do_not_commit.is_empty() {
+        actions.push(
+            "Leave doNotCommit paths unstaged unless a human explicitly overrides.".to_string(),
+        );
+    }
+    if degraded_codes
+        .iter()
+        .any(|code| *code == WORKSPACE_HYGIENE_AGENT_MAIL_UNAVAILABLE_CODE)
+    {
+        actions.push(
+            "Refresh Agent Mail reservations before committing coordination-sensitive paths."
+                .to_string(),
+        );
+    }
+    actions
+}
+
+fn workspace_hygiene_degraded_codes(
+    beads_state: &BeadsHygieneState,
+    coordination: &HygieneCoordinationOverlay,
+) -> Vec<&'static str> {
+    let mut codes: BTreeSet<&'static str> = BTreeSet::new();
+    codes.insert(WORKSPACE_HYGIENE_PARTIAL_METADATA_CODE);
+    codes.extend(beads_state.degraded_codes.iter().copied());
+    codes.extend(coordination.degraded_codes.iter().copied());
+    codes.into_iter().collect()
+}
+
+fn workspace_git_error(error: crate::core::swarm_brief::SwarmBriefCommandError) -> DomainError {
+    match error {
+        crate::core::swarm_brief::SwarmBriefCommandError::Unavailable(message)
+        | crate::core::swarm_brief::SwarmBriefCommandError::InvalidUtf8(message) => {
+            DomainError::Configuration {
+                message,
+                repair: Some("Run `ee workspace hygiene` inside a git checkout.".to_string()),
+            }
+        }
+        crate::core::swarm_brief::SwarmBriefCommandError::Failed { status, stderr } => {
+            DomainError::Configuration {
+                message: format!(
+                    "read-only git status collection failed with status {}: {}",
+                    status
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| "terminated_by_signal".to_string()),
+                    stderr
+                ),
+                repair: Some(
+                    "Run `git status --porcelain=v2 --branch` to inspect the checkout.".to_string(),
+                ),
+            }
+        }
+        crate::core::swarm_brief::SwarmBriefCommandError::TimedOut { timeout_ms } => {
+            DomainError::Configuration {
+                message: format!("read-only git status collection timed out after {timeout_ms} ms"),
+                repair: Some("Retry after any long-running git operation finishes.".to_string()),
+            }
+        }
+    }
 }
 
 pub fn alias_workspace(
@@ -894,9 +1483,13 @@ pub(crate) fn stable_workspace_id_seeded(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::thread;
+    use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use crate::core::hygiene_coordination::{ActiveAgent, AgentMailReservation};
+    use crate::core::swarm_brief::{WorkspaceGitOperationState, WorkspaceGitStatusEntry};
 
     type TestResult = Result<(), String>;
 
@@ -912,6 +1505,123 @@ mod tests {
         let root = unique_dir(prefix)?;
         fs::create_dir_all(root.join(WORKSPACE_MARKER)).map_err(|error| error.to_string())?;
         Ok(root)
+    }
+
+    fn status_entry(path: &str, staged: &str, unstaged: &str) -> WorkspaceGitStatusEntry {
+        WorkspaceGitStatusEntry {
+            path: path.to_owned(),
+            original_path: None,
+            staged: staged.to_owned(),
+            unstaged: unstaged.to_owned(),
+            entry_kind: "ordinary".to_owned(),
+            submodule_state: None,
+            metadata: None,
+        }
+    }
+
+    fn hygiene_snapshot(entries: Vec<WorkspaceGitStatusEntry>) -> WorkspaceGitSnapshot {
+        WorkspaceGitSnapshot {
+            repository_root: "/repo".to_owned(),
+            entries,
+            operation_state: WorkspaceGitOperationState::default(),
+        }
+    }
+
+    fn hygiene_report_from_parts(
+        snapshot: WorkspaceGitSnapshot,
+        agent_mail_input: &AgentMailCoordinationInput,
+        beads_metadata_signal: BeadsMetadataSignal,
+        beads_reservations: &[BeadsReservationHolder],
+    ) -> WorkspaceHygieneReport {
+        build_workspace_hygiene_report_from_inputs(WorkspaceHygieneReportInputs {
+            workspace_path: Path::new("/repo"),
+            snapshot,
+            classifier_config: &HygieneClassifierConfig::default(),
+            jsonl_content: Some(b"{\"id\":\"bd-test\",\"title\":\"test\"}\n"),
+            self_agent_name: Some("IvoryCondor"),
+            beads_metadata_signal,
+            beads_reservations,
+            agent_mail_input,
+            now: DateTime::parse_from_rfc3339("2026-05-18T08:00:00Z")
+                .expect("valid test timestamp")
+                .with_timezone(&Utc),
+        })
+    }
+
+    fn write_file(path: &Path, body: &str) -> TestResult {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        fs::write(path, body).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn detects_beads_db_pending_flush_when_db_marker_is_newer_than_jsonl() -> TestResult {
+        let workspace = unique_dir("ee-beads-db-newer")?;
+        let beads_dir = workspace.join(".beads");
+        write_file(&beads_dir.join("issues.jsonl"), "{\"id\":\"bd-test\"}\n")?;
+        thread::sleep(Duration::from_millis(1_100));
+        write_file(&beads_dir.join("beads.db"), "sqlite marker")?;
+
+        assert_eq!(
+            detect_beads_metadata_signal(&workspace),
+            BeadsMetadataSignal::DbDirtyPendingFlush
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn detects_beads_external_import_pending_when_jsonl_is_newer_than_db_marker() -> TestResult {
+        let workspace = unique_dir("ee-beads-jsonl-newer")?;
+        let beads_dir = workspace.join(".beads");
+        write_file(&beads_dir.join("beads.db"), "sqlite marker")?;
+        thread::sleep(Duration::from_millis(1_100));
+        write_file(&beads_dir.join("issues.jsonl"), "{\"id\":\"bd-test\"}\n")?;
+
+        assert_eq!(
+            detect_beads_metadata_signal(&workspace),
+            BeadsMetadataSignal::ExternalChangesPendingImport
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn loads_agent_mail_snapshot_as_coordination_input() -> TestResult {
+        let workspace = unique_dir("ee-agent-mail-snapshot")?;
+        let snapshot_path = workspace.join("agent-mail.json");
+        write_file(
+            &snapshot_path,
+            r#"{
+              "file_reservations": [
+                {
+                  "path_pattern": "src/core/workspace.rs",
+                  "holder": "OtherAgent",
+                  "exclusive": true,
+                  "expires_at": "2026-05-18T09:00:00Z"
+                }
+              ],
+              "active_agents": [
+                {"name": "OtherAgent", "last_active_at": "2026-05-18T08:45:00Z"}
+              ],
+              "inbox": [],
+              "threads": []
+            }"#,
+        )?;
+
+        let input = load_agent_mail_coordination_input(Some(&snapshot_path));
+        let AgentMailCoordinationInput::Available {
+            reservations,
+            active_agents,
+        } = input
+        else {
+            return Err("snapshot must load as available Agent Mail input".to_string());
+        };
+        assert_eq!(reservations.len(), 1);
+        assert_eq!(reservations[0].path_pattern, "src/core/workspace.rs");
+        assert_eq!(reservations[0].holder_agent, "OtherAgent");
+        assert_eq!(active_agents.len(), 1);
+        assert_eq!(active_agents[0].name, "OtherAgent");
+        Ok(())
     }
 
     #[test]
@@ -1130,5 +1840,156 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn hygiene_report_applies_precollected_agent_mail_reservations() {
+        let agent_mail = AgentMailCoordinationInput::Available {
+            reservations: vec![AgentMailReservation {
+                path_pattern: "src/core/workspace.rs".to_owned(),
+                holder_agent: "OtherAgent".to_owned(),
+                exclusive: true,
+                expires_at: Some("2026-05-18T09:00:00Z".to_owned()),
+                reservation_id: Some("reservation-1".to_owned()),
+                bead_id: Some("bd-1eq3l.5".to_owned()),
+                thread_id: Some("bd-1eq3l.5".to_owned()),
+            }],
+            active_agents: vec![ActiveAgent {
+                name: "OtherAgent".to_owned(),
+                last_active_at: Some("2026-05-18T07:55:00Z".to_owned()),
+            }],
+        };
+        let report = hygiene_report_from_parts(
+            hygiene_snapshot(vec![status_entry("src/core/workspace.rs", ".", "M")]),
+            &agent_mail,
+            BeadsMetadataSignal::Unknown,
+            &[],
+        );
+
+        assert!(report.coordination.agent_mail_available);
+        assert_eq!(report.coordination.active_agent_count, 1);
+        assert_eq!(report.coordination.blocked_by_coordination.len(), 1);
+        assert_eq!(
+            report.coordination.blocked_by_coordination[0].path,
+            "src/core/workspace.rs"
+        );
+        assert!(
+            report.staging_groups.iter().all(|group| group
+                .paths
+                .iter()
+                .all(|path| path != "src/core/workspace.rs")),
+            "coordination-blocked paths must not be suggested as commit-ready"
+        );
+        assert!(
+            !report
+                .degraded_codes
+                .contains(&WORKSPACE_HYGIENE_AGENT_MAIL_UNAVAILABLE_CODE),
+            "available Agent Mail input must not report unavailable degradation"
+        );
+    }
+
+    #[test]
+    fn hygiene_report_applies_beads_metadata_signal_and_reservation_priority() {
+        let beads_reservations = vec![BeadsReservationHolder {
+            agent_name: "OtherAgent".to_owned(),
+            exclusive: true,
+            expires_ts_rfc3339: "2026-05-18T09:00:00Z".to_owned(),
+        }];
+        let report = hygiene_report_from_parts(
+            hygiene_snapshot(vec![status_entry(BEADS_JSONL_RELATIVE_PATH, ".", "M")]),
+            &AgentMailCoordinationInput::Unavailable,
+            BeadsMetadataSignal::DbDirtyPendingFlush,
+            &beads_reservations,
+        );
+
+        assert_eq!(
+            report.beads_state.classification,
+            crate::core::hygiene_beads_state::BeadsClassification::BeadsReservedByOtherAgent
+        );
+        assert_eq!(
+            report.beads_state.metadata_signal,
+            BeadsMetadataSignal::DbDirtyPendingFlush
+        );
+        assert_eq!(report.beads_state.reservation_holders.len(), 1);
+    }
+
+    #[test]
+    fn hygiene_recommendations_split_logical_groups_and_explain_reasons() {
+        let agent_mail = AgentMailCoordinationInput::Available {
+            reservations: vec![AgentMailReservation {
+                path_pattern: "src/core/lib.rs".to_owned(),
+                holder_agent: "OtherAgent".to_owned(),
+                exclusive: true,
+                expires_at: Some("2026-05-18T09:00:00Z".to_owned()),
+                reservation_id: Some("reservation-1".to_owned()),
+                bead_id: None,
+                thread_id: None,
+            }],
+            active_agents: Vec::new(),
+        };
+        let report = hygiene_report_from_parts(
+            hygiene_snapshot(vec![
+                status_entry("src/core/lib.rs", ".", "M"),
+                status_entry("src/core/workspace.rs", ".", "M"),
+                status_entry("tests/workspace_hygiene.rs", ".", "M"),
+                status_entry("tests/fixtures/golden/workspace.json", ".", "M"),
+                status_entry("docs/agent-ux/workspace-hygiene.md", ".", "M"),
+            ]),
+            &agent_mail,
+            BeadsMetadataSignal::Unknown,
+            &[],
+        );
+
+        let group_names = report
+            .staging_groups
+            .iter()
+            .map(|group| group.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(group_names, vec!["docs", "goldens", "source", "tests"]);
+        assert!(
+            report.staging_groups.iter().all(|group| group.read_only),
+            "recommendations must remain read-only"
+        );
+        assert!(
+            report
+                .staging_groups
+                .iter()
+                .all(|group| !group.paths.iter().any(|path| path == "src/core/lib.rs")),
+            "coordination-blocked paths must not be stage recommendations"
+        );
+        let source = report
+            .staging_groups
+            .iter()
+            .find(|group| group.name == "source")
+            .expect("source group");
+        assert_eq!(source.paths, vec!["src/core/workspace.rs"]);
+        assert_eq!(source.path_count, 1);
+        assert_eq!(source.kinds, vec!["source"]);
+        assert!(source.reasons.contains(&"src_rust_source".to_owned()));
+        assert_eq!(
+            source.recommendation,
+            "review_and_stage_as_one_logical_commit"
+        );
+    }
+
+    #[test]
+    fn hygiene_recommendations_keep_beads_only_metadata_out_of_fast_stage_groups() {
+        let report = hygiene_report_from_parts(
+            hygiene_snapshot(vec![status_entry(BEADS_JSONL_RELATIVE_PATH, ".", "M")]),
+            &AgentMailCoordinationInput::Available {
+                reservations: Vec::new(),
+                active_agents: Vec::new(),
+            },
+            BeadsMetadataSignal::Unknown,
+            &[],
+        );
+
+        assert!(report.staging_groups.is_empty());
+        assert!(report.do_not_commit.is_empty());
+        assert!(report.needs_human_review.is_empty());
+        assert_eq!(report.classifications.len(), 1);
+        assert_eq!(report.classifications[0].bucket, Bucket::IgnoreForNow);
+        assert_eq!(report.classifications[0].kind, Kind::BeadsMetadata);
+        assert!(report.read_only);
     }
 }

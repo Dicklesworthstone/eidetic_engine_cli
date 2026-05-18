@@ -6,6 +6,22 @@ Agent Mail coordination state, file metadata, and redacted secret-risk evidence,
 but it must not stage, unstage, delete, move, stash, reset, checkout, or commit
 files.
 
+Initial CLI usage:
+
+```bash
+ee workspace hygiene --workspace . --json
+ee workspace hygiene --workspace . --agent-name IvoryCondor --json
+ee workspace hygiene --workspace . --agent-name IvoryCondor --agent-mail-snapshot agent-mail.json --json
+```
+
+The machine report uses schema `ee.workspace_hygiene.v1` and sets
+`readOnly=true`; callers must treat it as a diagnostic surface, not as a staging
+or cleanup command.
+
+Key agent-facing fields are `workspace`, `gitSummary`, `pathClassifications`,
+`stagingRecommendations`, `doNotCommit`, `needsHumanReview`, `coordinationState`,
+`beadsState`, `degraded`, and `nextActions`.
+
 The diagnostic exists to help agents decide what is safe to include in a commit
 slice. It does not replace human review, Beads ownership, or Agent Mail file
 reservations.
@@ -23,6 +39,20 @@ Each dirty path is classified into one top-level bucket:
 
 Downstream staging recommendations must treat `secret_risk` and active
 coordination blockers as stronger than any local allow or stage pattern.
+
+## Staging Recommendations
+
+`stagingRecommendations[]` are deterministic, read-only commit-slice hints.
+Each entry contains `name`, sorted `paths`, `pathCount`, `kinds`, `reasons`,
+`recommendation`, and `readOnly=true`. They are not shell commands and must not
+stage files on their own.
+
+Default grouping keeps source, tests, docs, and golden fixture updates in
+separate logical slices. Coordination-blocked paths are omitted from staging
+recommendations even when their classifier bucket is `stage_candidate`.
+Scratch, generated, local-machine, secret-risk, binary, and unknown-review paths
+stay in `doNotCommit` or `needsHumanReview` instead of being recommended for a
+fast commit.
 
 ## Kinds
 
@@ -140,6 +170,14 @@ The Agent Mail overlay is a pure second pass over already-collected facts. Core
 classification code consumes a caller-provided reservation snapshot; it does not
 query Agent Mail, read message bodies, send mail, release reservations, or mutate
 files. The caller owns timeout budgets and data collection.
+
+The CLI accepts a redacted snapshot with `--agent-mail-snapshot <path>`. The
+file is read side-effect free and may use the same compact shape consumed by
+`ee swarm brief`: `file_reservations[]` or `reservations[]` entries with
+`path_pattern`/`path`, `holder`/`agent_name`, `exclusive`, and `expires_at` or
+`expires_ts`. Optional `active_agents[]` entries may include `name` and
+`last_active_at`. Snapshot message bodies, subjects, attachments, and mailbox
+contents are ignored by workspace hygiene.
 
 The overlay distinguishes three Agent Mail states:
 
