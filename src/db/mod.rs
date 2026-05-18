@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::error::Error;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -225,6 +226,46 @@ pub struct DbConnection {
     location: DatabaseLocation,
     mode: DatabaseOpenMode,
     agent_context_profile_pack_cache: Mutex<Option<AgentContextProfilePackCache>>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WalStatus {
+    pub bytes: u64,
+    pub frames: u64,
+    pub page_size: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WalCheckpointMode {
+    Passive,
+    Truncate,
+}
+
+impl WalCheckpointMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Passive => "passive",
+            Self::Truncate => "truncate",
+        }
+    }
+
+    const fn pragma_sql(self) -> &'static str {
+        match self {
+            Self::Passive => "PRAGMA wal_checkpoint(PASSIVE)",
+            Self::Truncate => "PRAGMA wal_checkpoint(TRUNCATE)",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WalCheckpointReport {
+    pub mode: WalCheckpointMode,
+    pub busy: bool,
+    pub log_frames: u64,
+    pub checkpointed_frames: u64,
+    pub before: WalStatus,
+    pub after: WalStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -798,6 +839,69 @@ impl DbConnection {
         Ok(u64::try_from(value).unwrap_or(0))
     }
 
+    /// Return non-mutating WAL sidecar size details for file-backed databases.
+    pub fn wal_status(&self) -> Result<WalStatus> {
+        let DatabaseLocation::File(database_path) = &self.location else {
+            return Ok(WalStatus::default());
+        };
+
+        let bytes = match std::fs::metadata(wal_path_for_database(database_path)) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => {
+                return Err(DbError::InvalidPath {
+                    operation: DbOperation::Query,
+                    path: wal_path_for_database(database_path),
+                    message: format!("could not inspect WAL sidecar: {error}"),
+                });
+            }
+        };
+        let page_size = self.page_size()?;
+        Ok(WalStatus {
+            bytes,
+            frames: wal_frame_count(bytes, page_size),
+            page_size,
+        })
+    }
+
+    /// Run a SQLite WAL checkpoint while holding the file writer ownership gate.
+    pub fn wal_checkpoint(&self, mode: WalCheckpointMode) -> Result<WalCheckpointReport> {
+        let before = self.wal_status()?;
+        let operation = DbOperation::WalCheckpoint;
+        let sql = mode.pragma_sql();
+        let rows = if matches!(self.location, DatabaseLocation::File(_)) {
+            retry_sqlite_contention(operation, || {
+                let _write_owner = lock_file_write_owner_gate(&self.location)?;
+                self.inner
+                    .query_sync(sql, &[])
+                    .map_err(|source| DbError::sqlmodel(operation, source))
+            })?
+        } else {
+            self.inner
+                .query_sync(sql, &[])
+                .map_err(|source| DbError::sqlmodel(operation, source))?
+        };
+        let first = rows.first().ok_or_else(|| DbError::MalformedRow {
+            operation,
+            message: "wal_checkpoint returned no result row".to_string(),
+        })?;
+        let busy = sqlite_i64_column(first, 0, operation, "busy")? != 0;
+        let log_frames =
+            u64::try_from(sqlite_i64_column(first, 1, operation, "log")?).unwrap_or_default();
+        let checkpointed_frames =
+            u64::try_from(sqlite_i64_column(first, 2, operation, "checkpointed")?)
+                .unwrap_or_default();
+        let after = self.wal_status()?;
+        Ok(WalCheckpointReport {
+            mode,
+            busy,
+            log_frames,
+            checkpointed_frames,
+            before,
+            after,
+        })
+    }
+
     /// List user-defined table names (excluding internal `sqlite_*` tables).
     pub fn list_user_tables(&self) -> Result<Vec<String>> {
         let rows = self.query_for(
@@ -1220,6 +1324,41 @@ fn configure_file_durability_pragmas(
     inner
         .execute_raw("PRAGMA synchronous = NORMAL")
         .map_err(|source| DbError::sqlmodel(DbOperation::ConfigureDurabilityPragmas, source))
+}
+
+fn wal_path_for_database(database_path: &Path) -> PathBuf {
+    let mut path = OsString::from(database_path.as_os_str());
+    path.push("-wal");
+    PathBuf::from(path)
+}
+
+fn wal_frame_count(bytes: u64, page_size: u32) -> u64 {
+    if bytes < 32 || page_size == 0 {
+        return 0;
+    }
+    let frame_size = u64::from(page_size).saturating_add(24);
+    if frame_size == 0 {
+        return 0;
+    }
+    bytes.saturating_sub(32) / frame_size
+}
+
+fn sqlite_i64_column(
+    row: &Row,
+    index: usize,
+    operation: DbOperation,
+    label: &'static str,
+) -> Result<i64> {
+    row.get(index)
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_str().and_then(|raw| raw.parse::<i64>().ok()))
+        })
+        .ok_or_else(|| DbError::MalformedRow {
+            operation,
+            message: format!("wal_checkpoint result column `{label}` was not an integer"),
+        })
 }
 
 const FILE_DATABASE_OPEN_MAX_ATTEMPTS: usize = 8;
@@ -1731,6 +1870,7 @@ pub enum DbOperation {
     ConfigureBusyTimeout,
     ConfigureDurabilityPragmas,
     EnableForeignKeys,
+    WalCheckpoint,
     Query,
     Execute,
     Close,
@@ -1755,6 +1895,7 @@ impl fmt::Display for DbOperation {
             Self::ConfigureBusyTimeout => f.write_str("busy timeout configure"),
             Self::ConfigureDurabilityPragmas => f.write_str("durability pragma configure"),
             Self::EnableForeignKeys => f.write_str("foreign key enforcement enable"),
+            Self::WalCheckpoint => f.write_str("wal checkpoint"),
             Self::Query => f.write_str("query"),
             Self::Execute => f.write_str("execute"),
             Self::Close => f.write_str("close"),
@@ -8822,11 +8963,21 @@ impl FeedbackCounts {
         }
 
         let decayed_positive = self.positive_weight * helpful_decay_factor(age_days);
-        let positive_effect = if decayed_positive.is_nan() { 0.0 } else { (decayed_positive / 10.0).min(MAX_CONFIDENCE_BOOST) };
-        let negative_effect = if self.negative_weight.is_nan() { 0.0 } else {
+        let positive_effect = if decayed_positive.is_nan() {
+            0.0
+        } else {
+            (decayed_positive / 10.0).min(MAX_CONFIDENCE_BOOST)
+        };
+        let negative_effect = if self.negative_weight.is_nan() {
+            0.0
+        } else {
             (self.negative_weight * NEGATIVE_MULTIPLIER / 10.0).min(MAX_CONFIDENCE_PENALTY)
         };
-        let decay_effect = if self.decay_weight.is_nan() { 0.0 } else { self.decay_weight * DECAY_MULTIPLIER / 20.0 };
+        let decay_effect = if self.decay_weight.is_nan() {
+            0.0
+        } else {
+            self.decay_weight * DECAY_MULTIPLIER / 20.0
+        };
 
         let effect = positive_effect - negative_effect - decay_effect;
         if effect.is_nan() {
@@ -12061,6 +12212,75 @@ fn next_audit_batch_timestamp(last_timestamp: &mut Option<DateTime<Utc>>) -> Str
     rendered
 }
 
+const AUDIT_INSERT_MAX_BIND_PARAMS: usize = 900;
+const AUDIT_INSERT_VALUE_COUNT: usize = 14;
+const AUDIT_INSERT_BATCH_ROWS: usize = AUDIT_INSERT_MAX_BIND_PARAMS / AUDIT_INSERT_VALUE_COUNT;
+const AUDIT_INSERT_SQL_PREFIX: &str = "INSERT INTO audit_log (id, workspace_id, timestamp, actor, action, target_type, target_id, details, surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash) VALUES ";
+const AUDIT_INSERT_SQL: &str = "INSERT INTO audit_log (id, workspace_id, timestamp, actor, action, target_type, target_id, details, surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
+
+fn push_audit_insert_params(
+    params: &mut Vec<Value>,
+    entry: &StoredAuditEntry,
+    this_row_hash: &str,
+) {
+    params.push(Value::Text(entry.id.clone()));
+    params.push(
+        entry
+            .workspace_id
+            .as_ref()
+            .map_or(Value::Null, |workspace_id| {
+                Value::Text(workspace_id.clone())
+            }),
+    );
+    params.push(Value::Text(entry.timestamp.clone()));
+    params.push(
+        entry
+            .actor
+            .as_ref()
+            .map_or(Value::Null, |actor| Value::Text(actor.clone())),
+    );
+    params.push(Value::Text(entry.action.clone()));
+    params.push(
+        entry
+            .target_type
+            .as_ref()
+            .map_or(Value::Null, |target_type| Value::Text(target_type.clone())),
+    );
+    params.push(
+        entry
+            .target_id
+            .as_ref()
+            .map_or(Value::Null, |target_id| Value::Text(target_id.clone())),
+    );
+    params.push(
+        entry
+            .details
+            .as_ref()
+            .map_or(Value::Null, |details| Value::Text(details.clone())),
+    );
+    params.push(Value::Text(entry.surface.clone()));
+    params.push(Value::Text(entry.mutation_kind.clone()));
+    params.push(
+        entry
+            .before_hash
+            .as_ref()
+            .map_or(Value::Null, |hash| Value::Text(hash.clone())),
+    );
+    params.push(
+        entry
+            .after_hash
+            .as_ref()
+            .map_or(Value::Null, |hash| Value::Text(hash.clone())),
+    );
+    params.push(
+        entry
+            .prev_row_hash
+            .as_ref()
+            .map_or(Value::Null, |hash| Value::Text(hash.clone())),
+    );
+    params.push(Value::Text(this_row_hash.to_owned()));
+}
+
 impl DbConnection {
     /// Insert a new audit log entry.
     pub fn insert_audit(&self, id: &str, input: &CreateAuditInput) -> Result<()> {
@@ -12084,64 +12304,52 @@ impl DbConnection {
         self.with_transaction(|| {
             let mut prev_row_hash = self.latest_audit_row_hash()?;
             let mut last_timestamp = None;
+            let mut prepared_entries = Vec::with_capacity(entries.len());
             for (id, input) in entries {
                 let timestamp = next_audit_batch_timestamp(&mut last_timestamp);
-                let entry = build_audit_entry(id, input, timestamp, prev_row_hash.clone());
-                prev_row_hash = Some(self.insert_prepared_audit_entry(&entry)?);
+                let mut entry = build_audit_entry(id, input, timestamp, prev_row_hash.clone());
+                let this_row_hash = compute_audit_row_hash(&entry);
+                entry.this_row_hash = Some(this_row_hash.clone());
+                prev_row_hash = Some(this_row_hash);
+                prepared_entries.push(entry);
             }
-            Ok(())
+            self.insert_prepared_audit_entry_batch(&prepared_entries)
         })
     }
 
     fn insert_prepared_audit_entry(&self, entry: &StoredAuditEntry) -> Result<String> {
         let this_row_hash = compute_audit_row_hash(entry);
 
-        self.execute_for(
-            DbOperation::Execute,
-            "INSERT INTO audit_log (id, workspace_id, timestamp, actor, action, target_type, target_id, details, surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            &[
-                Value::Text(entry.id.clone()),
-                entry
-                    .workspace_id
-                    .as_ref()
-                    .map_or(Value::Null, |w| Value::Text(w.clone())),
-                Value::Text(entry.timestamp.clone()),
-                entry
-                    .actor
-                    .as_ref()
-                    .map_or(Value::Null, |a| Value::Text(a.clone())),
-                Value::Text(entry.action.clone()),
-                entry
-                    .target_type
-                    .as_ref()
-                    .map_or(Value::Null, |t| Value::Text(t.clone())),
-                entry
-                    .target_id
-                    .as_ref()
-                    .map_or(Value::Null, |t| Value::Text(t.clone())),
-                entry
-                    .details
-                    .as_ref()
-                    .map_or(Value::Null, |d| Value::Text(d.clone())),
-                Value::Text(entry.surface.clone()),
-                Value::Text(entry.mutation_kind.clone()),
-                entry
-                    .before_hash
-                    .as_ref()
-                    .map_or(Value::Null, |hash| Value::Text(hash.clone())),
-                entry
-                    .after_hash
-                    .as_ref()
-                    .map_or(Value::Null, |hash| Value::Text(hash.clone())),
-                entry
-                    .prev_row_hash
-                    .as_ref()
-                    .map_or(Value::Null, |hash| Value::Text(hash.clone())),
-                Value::Text(this_row_hash.clone()),
-            ],
-        )?;
+        let mut params = Vec::with_capacity(AUDIT_INSERT_VALUE_COUNT);
+        push_audit_insert_params(&mut params, entry, &this_row_hash);
+        self.execute_for(DbOperation::Execute, AUDIT_INSERT_SQL, &params)?;
 
         Ok(this_row_hash)
+    }
+
+    fn insert_prepared_audit_entry_batch(&self, entries: &[StoredAuditEntry]) -> Result<()> {
+        for chunk in entries.chunks(AUDIT_INSERT_BATCH_ROWS) {
+            let mut sql = String::from(AUDIT_INSERT_SQL_PREFIX);
+            append_multi_row_placeholders(&mut sql, chunk.len(), AUDIT_INSERT_VALUE_COUNT);
+
+            let mut params = Vec::with_capacity(chunk.len() * AUDIT_INSERT_VALUE_COUNT);
+            for entry in chunk {
+                let this_row_hash =
+                    entry
+                        .this_row_hash
+                        .as_deref()
+                        .ok_or_else(|| DbError::MalformedRow {
+                            operation: DbOperation::Execute,
+                            message: "prepared audit batch entry is missing this_row_hash"
+                                .to_owned(),
+                        })?;
+                push_audit_insert_params(&mut params, entry, this_row_hash);
+            }
+
+            self.execute_for(DbOperation::Execute, &sql, &params)?;
+        }
+
+        Ok(())
     }
 
     fn latest_audit_row_hash(&self) -> Result<Option<String>> {
@@ -16257,7 +16465,8 @@ mod tests {
         CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput, CreateTaskEpisodeInput,
         CreateWorkspaceInput, DatabaseConfig, DatabaseLocation, DatabaseOpenMode, DbConnection,
         DbError, DbOperation, GraphSnapshotStatus, GraphSnapshotType, MIGRATION_TABLE_NAME,
-        Migration, MigrationRecord, MigrationTableColumn, StoredEpisodeAction, subsystem_name,
+        Migration, MigrationRecord, MigrationTableColumn, StoredEpisodeAction, WalCheckpointMode,
+        subsystem_name,
     };
     use crate::models::{
         AgentContextProfileCounts, EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider,
@@ -18384,6 +18593,48 @@ mod tests {
             &busy_timeout.as_i64(),
             &Some(0),
             "file database busy timeout returns contention immediately",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn wal_checkpoint_reports_before_after_status() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let database_path = tempdir.path().join("checkpoint.db");
+        let connection = DbConnection::open_file(&database_path)?;
+
+        connection
+            .execute_raw("CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")?;
+        for index in 0..64 {
+            connection.execute_raw(&format!(
+                "INSERT INTO items (value) VALUES ('item-{index}')"
+            ))?;
+        }
+
+        let report = connection.wal_checkpoint(WalCheckpointMode::Truncate)?;
+        ensure_equal(
+            &report.mode,
+            &WalCheckpointMode::Truncate,
+            "checkpoint mode",
+        )?;
+        ensure(!report.busy, "single-writer checkpoint should not be busy")?;
+        ensure(
+            report.before.page_size > 0,
+            "checkpoint report preserves the before page size",
+        )?;
+        ensure_equal(
+            &report.after.page_size,
+            &report.before.page_size,
+            "checkpoint keeps the database page size stable",
+        )?;
+        ensure(
+            report.after.bytes <= report.before.bytes,
+            format!(
+                "truncate checkpoint should not grow the WAL: before={} after={}",
+                report.before.bytes, report.after.bytes
+            ),
         )?;
 
         connection.close()?;
