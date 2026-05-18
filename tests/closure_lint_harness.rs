@@ -307,6 +307,46 @@ fn closure_lint_accepts_clean_implementation_and_honesty_sibling() -> TestResult
     )
 }
 
+// CLAUDE.md lists three canonical golden artifact locations: tests/golden/*.snap,
+// tests/snapshots/*.snap (insta), and tests/fixtures/golden/**. The closure
+// linter must accept a real insta snapshot under tests/snapshots/ as evidence
+// for a closed implements-surface bead. Regression for bd-1k5cu.
+#[test]
+fn closure_lint_accepts_tests_snapshots_as_golden_evidence() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    write_workspace(
+        temp.path(),
+        &[
+            r#"{"id":"closed-insta","title":"[implements-surface:insta-surface] real implementation with insta snapshot","status":"closed","close_reason":"implemented with durable evidence","labels":["implements-surface:insta-surface"]}"#,
+        ],
+        "",
+        // Intentionally no tests/golden/insta-surface.snap; evidence lives
+        // under tests/snapshots/ instead, like tests/snapshots/health_structural.snap.
+        &[],
+    )?;
+    write_text_file(
+        temp.path(),
+        "tests/snapshots/insta-surface.snap",
+        "---\nsource: tests/insta_surface.rs\nexpression: snapshot\n---\n\"evidence\"\n",
+    )?;
+
+    let (output, report) = run_linter(temp.path())?;
+    ensure(
+        output.status.success(),
+        format!(
+            "linter should pass when evidence lives under tests/snapshots/\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    ensure_eq(report_status(&report)?, "pass", "report status")?;
+    ensure_eq(report_count(&report)?, 0, "report count")?;
+    ensure_eq(
+        violation_keys(&report)?,
+        Vec::<(String, String, String)>::new(),
+        "tests/snapshots/<surface>.snap must satisfy surface_has_golden_snapshot",
+    )
+}
+
 #[test]
 fn closure_lint_validates_referenced_test_paths_and_assertions() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;

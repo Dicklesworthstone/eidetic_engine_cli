@@ -1,10 +1,70 @@
 {
   "violations": [
     {
-      "bead": "bd-2caru.1",
+      "bead": "bd-2y8yk",
       "label": "implements-surface",
-      "surface": "read_pool_core",
-      "reason": "missing tests/golden/read_pool_core.snap"
+      "surface": "serve",
+      "reason": "SERVE_UNAVAILABLE_CODE still exists in src/cli/mod.rs"
+    },
+    {
+      "bead": "bd-2zyo0",
+      "label": "implements-surface",
+      "surface": "serve",
+      "reason": "SERVE_UNAVAILABLE_CODE still exists in src/cli/mod.rs"
+    },
+    {
+      "bead": "bd-36bbk.1.1",
+      "label": "implements-surface",
+      "surface": "tailscale_local_probe",
+      "reason": "close_reason contains abstention language"
+    },
+    {
+      "bead": "bd-36bbk.1.10",
+      "label": "implements-surface",
+      "surface": "fake_tailscale_e2e_harness",
+      "reason": "close_reason contains abstention language"
+    },
+    {
+      "bead": "bd-36bbk.1.7",
+      "label": "implements-surface",
+      "surface": "peer_discovery_policy",
+      "reason": "close_reason contains abstention language"
+    },
+    {
+      "bead": "bd-36bbk.1.7",
+      "label": "implements-surface",
+      "surface": "peer_discovery_policy",
+      "reason": "referenced test path missing: tests/mesh_discovery_policy_audit.rs"
+    },
+    {
+      "bead": "bd-36bbk.1.8",
+      "label": "implements-surface",
+      "surface": "tailnet_change_guard",
+      "reason": "close_reason contains abstention language"
+    },
+    {
+      "bead": "bd-36bbk.1.8",
+      "label": "implements-surface",
+      "surface": "tailnet_change_guard",
+      "reason": "missing tests/golden/tailnet_change_guard.snap"
+    },
+    {
+      "bead": "bd-36bbk.1.8",
+      "label": "implements-surface",
+      "surface": "tailnet_change_guard",
+      "reason": "referenced test path missing: tests/fixtures/tailnet_change"
+    },
+    {
+      "bead": "bd-36bbk.1.8",
+      "label": "implements-surface",
+      "surface": "tailnet_change_guard",
+      "reason": "referenced test path missing: tests/mesh_identity_change_guard_audit.rs"
+    },
+    {
+      "bead": "bd-36bbk.1.8",
+      "label": "implements-surface",
+      "surface": "tailnet_change_guard",
+      "reason": "referenced test path missing: tests/mesh_tailnet_change_audit.rs"
     },
     {
       "bead": "bd-3usjw.1",
@@ -43,12 +103,6 @@
       "reason": "referenced test path missing: tests/e2e_graph_centrality.rs"
     },
     {
-      "bead": "bd-3usjw.25",
-      "label": "implements-surface",
-      "surface": "cross_platform_determinism",
-      "reason": "missing tests/golden/cross_platform_determinism.snap"
-    },
-    {
       "bead": "bd-3usjw.3",
       "label": "implements-surface",
       "surface": "mcp_top_level",
@@ -65,6 +119,48 @@
       "label": "implements-surface",
       "surface": "mcp_top_level",
       "reason": "referenced test path missing: tests/golden/mcp_manifest_disabled.snap"
+    },
+    {
+      "bead": "bd-3usjw.4",
+      "label": "defer-to-v2",
+      "surface": "serve_localhost",
+      "reason": "missing sibling adr:serve_localhost_v2_design ADR and open v2:serve_localhost bead"
+    },
+    {
+      "bead": "bd-3usjw.4",
+      "label": "defer-to-v2",
+      "surface": "serve_localhost",
+      "reason": "missing defer_until_iso8601: YYYY-MM-DD"
+    },
+    {
+      "bead": "bd-3usjw.4",
+      "label": "implements-surface",
+      "surface": "serve_localhost",
+      "reason": "missing tests/golden/serve_localhost.snap"
+    },
+    {
+      "bead": "bd-3usjw.4",
+      "label": "implements-surface",
+      "surface": "serve_localhost",
+      "reason": "declared e2e FILE SURFACE missing: tests/e2e_serve_localhost.rs"
+    },
+    {
+      "bead": "bd-3usjw.4",
+      "label": "implements-surface",
+      "surface": "serve_localhost",
+      "reason": "referenced test path missing: tests/e2e_serve_localhost.rs"
+    },
+    {
+      "bead": "bd-3usjw.46",
+      "label": "math-ambition",
+      "surface": "rejection_criteria",
+      "reason": "close_reason must include rejection_threshold_passed, measured_value, expected_value, and decision fields"
+    },
+    {
+      "bead": "bd-3usjw.46",
+      "label": "implements-surface",
+      "surface": "minhash_rank_centrality",
+      "reason": "missing tests/golden/minhash_rank_centrality.snap"
     },
     {
       "bead": "bd-3usjw.49",
@@ -117,18 +213,60 @@
       "severity": "medium"
     },
     {
+      "bead": "bd-3usjw.7",
+      "label": "implements-surface",
+      "surface": "trauma_guard_hook_helper",
+      "reason": "close_reason contains abstention language"
+    },
+    {
+      "bead": "bd-3usjw.7",
+      "label": "implements-surface",
+      "surface": "trauma_guard_hook_helper",
+      "reason": "missing tests/golden/trauma_guard_hook_helper.snap"
+    },
+    {
       "bead": "bd-3usjw.70",
       "label": "implements-surface",
       "surface": "mcp_validate_subcommand",
       "reason": "missing tests/golden/mcp_validate_subcommand.snap"
     },
     {
+      "bead": "bd-8jvg",
+      "label": "implements-surface",
+      "surface": "graph-determinism-harness",
+      "reason": "missing tests/golden/graph-determinism-harness.snap"
+    },
+    {
+      "bead": "bd-h64j",
+      "label": "implements-surface",
+      "surface": "serve",
+      "reason": "SERVE_UNAVAILABLE_CODE still exists in src/cli/mod.rs"
+    },
+    {
       "bead": "bd-igvt",
       "label": "implements-surface",
       "surface": "graph-algorithm-witnesses",
       "reason": "missing tests/golden/graph-algorithm-witnesses.snap"
+    },
+    {
+      "bead": "bd-k2p52",
+      "label": "implements-surface",
+      "surface": "tailscale_local_probe",
+      "reason": "close_reason contains abstention language"
+    },
+    {
+      "bead": "bd-qnfw",
+      "label": "implements-surface",
+      "surface": "why-causal-explain",
+      "reason": "missing tests/golden/why-causal-explain.snap"
+    },
+    {
+      "bead": "bd-s9kgl",
+      "label": "implements-surface",
+      "surface": "serve",
+      "reason": "SERVE_UNAVAILABLE_CODE still exists in src/cli/mod.rs"
     }
   ],
-  "count": 20,
+  "count": 43,
   "status": "fail"
 }

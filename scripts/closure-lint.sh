@@ -373,14 +373,21 @@ surface_has_golden_snapshot() {
     local underscored
     underscored=$(echo "$surface" | tr '-' '_')
 
+    # CLAUDE.md lists three canonical golden artifact locations:
+    # tests/golden/*.snap, tests/snapshots/*.snap (insta), and
+    # tests/fixtures/golden/**. All three count as evidence.
     [ -f "$GOLDEN_DIR/$surface.snap" ] && return 0
     [ -d "$GOLDEN_DIR/$surface" ] &&
         find "$GOLDEN_DIR/$surface" -type f 2>/dev/null | grep -q . &&
         return 0
+    [ -f "$SNAPSHOT_DIR/$surface.snap" ] && return 0
+    [ -d "$SNAPSHOT_DIR/$surface" ] &&
+        find "$SNAPSHOT_DIR/$surface" -type f 2>/dev/null | grep -q . &&
+        return 0
     [ -d "tests/fixtures/golden/$surface" ] &&
         find "tests/fixtures/golden/$surface" -type f 2>/dev/null | grep -q . &&
         return 0
-    find "$GOLDEN_DIR" "tests/fixtures/golden" -type f \
+    find "$GOLDEN_DIR" "$SNAPSHOT_DIR" "tests/fixtures/golden" -type f \
         \( -name "*$surface*" -o -name "*$underscored*" \) 2>/dev/null |
         grep -q .
 }
