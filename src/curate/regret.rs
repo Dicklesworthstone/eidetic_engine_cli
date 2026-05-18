@@ -365,7 +365,7 @@ impl RegretStatistics {
         let max_score = outputs
             .iter()
             .map(|o| o.weighted_score)
-            .fold(0.0_f64, f64::max);
+            .fold(0.0_f64, |a, b| if b.is_nan() { a } else { a.max(b) });
 
         // Count by category
         let mut category_counts = std::collections::HashMap::new();

@@ -65,7 +65,7 @@ impl AgentContextProfileCounts {
 
         AgentContextProfileBias {
             observed_outcomes,
-            weight: raw.clamp(-AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_BIAS_CAP),
+            weight: if raw.is_nan() { 0.0 } else { raw.clamp(-AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_BIAS_CAP) },
             cold_start: false,
         }
     }
@@ -113,7 +113,7 @@ impl AgentContextProfileDecayedCounts {
 
         AgentContextProfileBias {
             observed_outcomes: observed_outcomes.floor() as u32,
-            weight: raw.clamp(-AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_BIAS_CAP),
+            weight: if raw.is_nan() { 0.0 } else { raw.clamp(-AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_BIAS_CAP) },
             cold_start: false,
         }
     }

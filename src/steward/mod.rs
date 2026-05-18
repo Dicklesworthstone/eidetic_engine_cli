@@ -2297,17 +2297,26 @@ fn decayed_confidence(
 ) -> f32 {
     let stale_factor = feedback_scoring::STALENESS_DECAY_RATE
         .powi(i32::try_from(stale_periods).unwrap_or(i32::MAX));
-    let time_decayed = (current_confidence * stale_factor).clamp(
-        feedback_scoring::CONFIDENCE_FLOOR,
-        feedback_scoring::CONFIDENCE_CEILING,
-    );
-    feedback_counts
-        .apply_to_confidence_at_age(time_decayed, age_days)
-        .min(current_confidence)
-        .clamp(
+    let raw_time_decayed = current_confidence * stale_factor;
+    let time_decayed = if raw_time_decayed.is_nan() {
+        feedback_scoring::CONFIDENCE_FLOOR
+    } else {
+        raw_time_decayed.clamp(
             feedback_scoring::CONFIDENCE_FLOOR,
             feedback_scoring::CONFIDENCE_CEILING,
         )
+    };
+    let adjusted = feedback_counts
+        .apply_to_confidence_at_age(time_decayed, age_days)
+        .min(current_confidence);
+    if adjusted.is_nan() {
+        feedback_scoring::CONFIDENCE_FLOOR
+    } else {
+        adjusted.clamp(
+            feedback_scoring::CONFIDENCE_FLOOR,
+            feedback_scoring::CONFIDENCE_CEILING,
+        )
+    }
 }
 
 fn score_decay_stale_periods(age_days: u32, options: &ScoreDecayJobOptions) -> u32 {
