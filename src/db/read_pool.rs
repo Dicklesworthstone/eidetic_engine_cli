@@ -208,6 +208,39 @@ pub enum SnapshotPinReleaseState {
     Poisoned,
 }
 
+/// Checkpoint-blocker attribution: the oldest active SnapshotPin holding a
+/// WAL reader reference at the moment a WAL checkpoint reported BUSY.
+///
+/// Populated by [`ReadConnectionPool::oldest_active_pin_for_checkpoint_blocker`].
+/// The workspace identifier is attached at the status-report layer; the pool
+/// itself only owns the per-pin metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckpointBlocker {
+    pub pin_id: u64,
+    pub slot_id: Option<u64>,
+    pub workflow_id: Option<String>,
+    pub request_id: Option<String>,
+    pub pin_age_ms: u128,
+    pub max_pin_duration_ms: u128,
+    pub poisoned: bool,
+    pub release_state: SnapshotPinReleaseState,
+}
+
+impl From<ActiveSnapshotPin> for CheckpointBlocker {
+    fn from(pin: ActiveSnapshotPin) -> Self {
+        Self {
+            pin_id: pin.pin_id,
+            slot_id: pin.slot_id,
+            workflow_id: pin.workflow_id,
+            request_id: pin.request_id,
+            pin_age_ms: pin.pin_age_ms,
+            max_pin_duration_ms: pin.max_pin_duration_ms,
+            poisoned: pin.poisoned,
+            release_state: pin.release_state,
+        }
+    }
+}
+
 impl ReadConnectionPool {
     #[must_use]
     pub fn new(database: DatabaseConfig, config: PoolConfig) -> Self {
@@ -386,6 +419,22 @@ impl ReadConnectionPool {
             .iter()
             .map(|(pin_id, record)| active_snapshot_pin_from_record(*pin_id, record, now))
             .collect()
+    }
+
+    /// Return the oldest active SnapshotPin as a checkpoint-blocker attribution.
+    ///
+    /// When a WAL checkpoint reports BUSY because a reader still holds a snapshot
+    /// reference to an old WAL page, callers query this helper to identify the
+    /// reader most likely responsible. The oldest pin is the one whose snapshot
+    /// reference predates the most WAL activity, so it is the strongest blocker
+    /// candidate. Returns `None` when no pins are currently active.
+    #[must_use]
+    pub fn oldest_active_pin_for_checkpoint_blocker(&self) -> Option<CheckpointBlocker> {
+        let active = self.active_snapshot_pins();
+        active
+            .into_iter()
+            .max_by_key(|pin| pin.pin_age_ms)
+            .map(CheckpointBlocker::from)
     }
 
     fn release(&self, slot_id: u64, connection: DbConnection) {
@@ -1425,6 +1474,79 @@ mod tests {
 
         drop(pin);
         assert!(pool.active_snapshot_pins().is_empty());
+    }
+
+    #[test]
+    fn checkpoint_blocked_reports_oldest_pin_as_blocker() {
+        let (_tempdir, _database_path, pool) = file_pool(3);
+
+        // Empty pool: no candidate blocker.
+        assert!(pool.oldest_active_pin_for_checkpoint_blocker().is_none());
+
+        let first = must(
+            pool.pin_snapshot_with_metadata(SnapshotPinMetadata {
+                workflow_id: Some("workflow-oldest".to_owned()),
+                request_id: Some("request-oldest".to_owned()),
+            }),
+            "first (oldest) pin opens",
+        );
+        // The first pin must be observably older than later acquisitions. The
+        // pool surfaces `pin_age_ms` derived from a monotonic clock and the
+        // oldest-pin tie-breaker is age, not pin_id, so sleep briefly to keep
+        // the age separation deterministic on fast CI hardware.
+        thread::sleep(Duration::from_millis(5));
+        let second = must(
+            pool.pin_snapshot_with_metadata(SnapshotPinMetadata {
+                workflow_id: Some("workflow-mid".to_owned()),
+                request_id: Some("request-mid".to_owned()),
+            }),
+            "second (middle) pin opens",
+        );
+        thread::sleep(Duration::from_millis(5));
+        let third = must(
+            pool.pin_snapshot_with_metadata(SnapshotPinMetadata {
+                workflow_id: Some("workflow-newest".to_owned()),
+                request_id: Some("request-newest".to_owned()),
+            }),
+            "third (newest) pin opens",
+        );
+
+        let blocker = must_some(
+            pool.oldest_active_pin_for_checkpoint_blocker(),
+            "oldest pin is reported as checkpoint blocker",
+        );
+        assert_eq!(blocker.workflow_id.as_deref(), Some("workflow-oldest"));
+        assert_eq!(blocker.request_id.as_deref(), Some("request-oldest"));
+        assert_eq!(blocker.slot_id, first.slot_id());
+        assert_eq!(blocker.release_state, SnapshotPinReleaseState::Active);
+        assert!(!blocker.poisoned);
+        // Oldest pin's age is strictly greater than newer pins' ages.
+        let active = pool.active_snapshot_pins();
+        let mid_age = active
+            .iter()
+            .find(|pin| pin.slot_id == second.slot_id())
+            .expect("middle pin present")
+            .pin_age_ms;
+        let newest_age = active
+            .iter()
+            .find(|pin| pin.slot_id == third.slot_id())
+            .expect("newest pin present")
+            .pin_age_ms;
+        assert!(blocker.pin_age_ms >= mid_age);
+        assert!(mid_age >= newest_age);
+
+        // Drop the oldest pin: the next-oldest pin becomes the new blocker.
+        drop(first);
+        let blocker = must_some(
+            pool.oldest_active_pin_for_checkpoint_blocker(),
+            "next-oldest pin becomes the blocker after oldest is dropped",
+        );
+        assert_eq!(blocker.workflow_id.as_deref(), Some("workflow-mid"));
+        assert_eq!(blocker.slot_id, second.slot_id());
+
+        drop(second);
+        drop(third);
+        assert!(pool.oldest_active_pin_for_checkpoint_blocker().is_none());
     }
 
     #[test]
