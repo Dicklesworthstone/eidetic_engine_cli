@@ -5,7 +5,18 @@
 # lands under /data/projects/ which contains an unrelated FCP workspace
 # Cargo.toml at the parent — without this opt-out, cargo treats eidetic
 # as a member of that workspace and tries to load its (missing) crates.
+#
+# `exclude` keeps cargo's subdirectory autodiscovery from picking up the
+# fuzz/ subproject (its own [package]) and the franken_publish_status
+# test fixture (its own nested [workspace]). Without these excludes,
+# cargo would try to inherit workspace.package.license-file from
+# eidetic's root, which is undefined on purpose — see
+# tests/fixtures/franken_publish_status/fnx_repo/Cargo.toml.
 [workspace]
+exclude = [
+    "fuzz",
+    "tests/fixtures",
+]
 
 [package]
 name = "eidetic-engine"
