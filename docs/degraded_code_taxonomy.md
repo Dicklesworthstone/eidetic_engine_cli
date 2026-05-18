@@ -218,6 +218,7 @@ memory bodies in `sources[]`.
 | `coordination_source_unavailable` | medium | bd-1zb7k.4 (S3) |
 | `context_evidence_freshness_changed_source` | low | bd-17c65.1.2 (A2) |
 | `context_profile_budget_capped` | info | bd-17c65.2.4 (B7) |
+| `context_stream_partial_emission` | warning | bd-17c65.10.18 |
 | `duplicates_collapsed` | low | bd-17c65.2.3 (B3) |
 | `expired_filtered` | low | bd-17c65.2.8 (B8) |
 | `future_validity_filtered` | low | bd-17c65.2.10 (B11) |
@@ -269,6 +270,8 @@ memory bodies in `sources[]`.
 |------|----------|------|
 | `db_migration_pending` | medium | bd-3usjw.1 (db inspect) |
 | `db_wal_stale` | medium | bd-3usjw.1 (db inspect) |
+| `wal_growth_exceeds_threshold` | warning | bd-2caru.8 |
+| `wal_growth_no_writer` | medium | bd-2caru.8 |
 | `read_pool_acquire_timeout` | medium | bd-2caru.7 |
 | `read_pool_undersized` | low | bd-2caru.7 |
 | `search_not_inspected` | low | bd-17c65.10.6 (J6) |

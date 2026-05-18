@@ -720,7 +720,7 @@ pub fn analyze_drift(options: &DriftAnalysisOptions) -> DriftAnalysisReport {
     let drift_magnitude = comparable
         .iter()
         .map(|drift| drift.magnitude)
-        .fold(0.0_f64, f64::max);
+        .fold(0.0_f64, |a, b| if b.is_nan() { a } else { a.max(b) });
     let drift_detected = comparable.iter().any(|drift| drift.exceeds_threshold);
     let metric_drifts = if options.detailed {
         comparable

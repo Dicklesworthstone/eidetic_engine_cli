@@ -4386,7 +4386,7 @@ fn max_selected_similarity(candidate: &CandidateSignature, selected: &[Candidate
     selected
         .iter()
         .map(|signature| candidate_signature_similarity(candidate, signature))
-        .fold(0.0_f32, f32::max)
+        .fold(0.0_f32, |a, b| if b.is_nan() { a } else { a.max(b) })
 }
 
 fn facility_queue_entry(
@@ -4511,7 +4511,7 @@ pub(crate) fn facility_location_value(
             let coverage = selected
                 .iter()
                 .map(|signature| facility_signature_similarity(&candidate.signature, signature))
-                .fold(0.0_f32, f32::max);
+                .fold(0.0_f32, |a, b| if b.is_nan() { a } else { a.max(b) });
             candidate.weight * coverage
         })
         .sum()

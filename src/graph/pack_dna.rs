@@ -281,7 +281,7 @@ fn dominant_voronoi_anchor(
         .map(ToString::to_string)
         .collect::<BTreeSet<_>>();
     let cells = fnx_algorithms::voronoi_cells(graph, &anchor_refs);
-    let mut candidates = cells
+    cells
         .into_iter()
         .filter_map(|(anchor, mut cell)| {
             cell.sort();
@@ -295,15 +295,13 @@ fn dominant_voronoi_anchor(
                 pack_member_count,
             })
         })
-        .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        right
-            .pack_member_count
-            .cmp(&left.pack_member_count)
-            .then_with(|| right.cell_size.cmp(&left.cell_size))
-            .then_with(|| left.memory_id.cmp(&right.memory_id))
-    });
-    candidates.into_iter().next()
+        .min_by(|left, right| {
+            right
+                .pack_member_count
+                .cmp(&left.pack_member_count)
+                .then_with(|| right.cell_size.cmp(&left.cell_size))
+                .then_with(|| left.memory_id.cmp(&right.memory_id))
+        })
 }
 
 fn pack_community_of_mass(graph: &Graph, pack_ids: &[MemoryId]) -> Option<PackDnaCommunity> {
@@ -323,7 +321,7 @@ fn pack_community_of_mass(graph: &Graph, pack_ids: &[MemoryId]) -> Option<PackDn
         .collect::<Vec<_>>();
     communities.sort();
 
-    let mut candidates = communities
+    communities
         .into_iter()
         .enumerate()
         .filter_map(|(index, community)| {
@@ -347,15 +345,13 @@ fn pack_community_of_mass(graph: &Graph, pack_ids: &[MemoryId]) -> Option<PackDn
                 exemplar_memory_ids,
             })
         })
-        .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        right
-            .pack_member_count
-            .cmp(&left.pack_member_count)
-            .then_with(|| right.size.cmp(&left.size))
-            .then_with(|| left.community_id.cmp(&right.community_id))
-    });
-    candidates.into_iter().next()
+        .min_by(|left, right| {
+            right
+                .pack_member_count
+                .cmp(&left.pack_member_count)
+                .then_with(|| right.size.cmp(&left.size))
+                .then_with(|| left.community_id.cmp(&right.community_id))
+        })
 }
 
 fn pack_dna_ego_subgraph(

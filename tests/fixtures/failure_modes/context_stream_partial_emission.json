@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "context_stream_partial_emission",
+  "introduced_by": {
+    "bead": "bd-17c65.10.18",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "context --stream"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A context stream consumer observes a header and item prefix but the stream ends before a trailer, error, or cancelled terminal frame arrives.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Partial stream terminal fixture.' --workspace . --level procedural --kind rule --json",
+      "ee context 'Partial stream terminal fixture' --workspace . --stream --format json | sed '$d' > /tmp/ee-partial-context-stream.ndjson"
+    ],
+    "invocation": "validate /tmp/ee-partial-context-stream.ndjson with StreamSequenceValidator::finish"
+  },
+  "expected_emission": {
+    "code": "context_stream_partial_emission",
+    "severity": "warning",
+    "message_contains": [
+      "Context stream ended",
+      "terminal frame"
+    ],
+    "repair_contains": "Retry `ee context --stream`",
+    "repair_string": "Retry `ee context --stream`; treat the partial stream as incomplete.",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}

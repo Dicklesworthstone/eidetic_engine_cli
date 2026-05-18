@@ -4004,7 +4004,7 @@ fn enriched_feature_for_score(
 fn max_finite_score(values: impl Iterator<Item = f64>) -> f64 {
     values
         .filter(|value| value.is_finite())
-        .fold(0.0_f64, f64::max)
+        .fold(0.0_f64, |a, b| if b.is_nan() { a } else { a.max(b) })
 }
 
 fn normalize_graph_score(value: f64, max_value: f64) -> f64 {

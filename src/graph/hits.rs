@@ -435,8 +435,8 @@ mod tests {
         // Sanity check non-uniformity so the determinism test is not
         // trivially satisfied by a degenerate output.
         let hub_values: Vec<f64> = first.hubs.values().copied().collect();
-        let max = hub_values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let min = hub_values.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = hub_values.iter().cloned().fold(f64::NEG_INFINITY, |a, b| if b.is_nan() { a } else { a.max(b) });
+        let min = hub_values.iter().cloned().fold(f64::INFINITY, |a, b| if b.is_nan() { a } else { a.min(b) });
         assert!(
             max - min > 1.0e-6,
             "deterministic-run fixture should produce non-uniform hubs (range {min}..={max})"

@@ -301,6 +301,66 @@ ee swarm brief --sources agent-inventory --agent-inventory-only not-a-real-agent
 
 ---
 
+## `audit_backpressure`
+
+**Severity:** warning
+
+**Surfaces:** audit lane
+
+**Introduced by:** bd-wp5ac.1 (epic Swarm-X)
+
+**Trigger.** The audit-lane producer queue is full while a foreground durable mutation attempts to enqueue an audit event.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+```
+
+**Invocation.**
+
+```bash
+ee remember 'audit lane pressure fixture' --workspace . --json
+```
+
+**Expected emission.** Message contains: `audit`, `backpressure`
+
+**Repair hint.** `EE_AUDIT_LANE_CAPACITY`
+
+**Fixture.** [`tests/fixtures/failure_modes/audit_backpressure.json`](../tests/fixtures/failure_modes/audit_backpressure.json)
+
+---
+
+## `audit_lane_shutdown_drain_timeout`
+
+**Severity:** medium
+
+**Surfaces:** audit lane
+
+**Introduced by:** bd-wp5ac.1 (epic Swarm-X)
+
+**Trigger.** Audit-lane shutdown cannot drain all queued audit events before the configured shutdown budget expires.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+```
+
+**Invocation.**
+
+```bash
+ee daemon --foreground --once --workspace . --json
+```
+
+**Expected emission.** Message contains: `audit`, `shutdown`, `drain`
+
+**Repair hint.** `EE_AUDIT_LANE_FLUSH_MS`
+
+**Fixture.** [`tests/fixtures/failure_modes/audit_lane_shutdown_drain_timeout.json`](../tests/fixtures/failure_modes/audit_lane_shutdown_drain_timeout.json)
+
+---
+
 ## `artifact_destination_not_external`
 
 **Severity:** warning
@@ -1754,6 +1814,38 @@ ee context 'J6 context task' --workspace . --json
 **Repair hint.** `ee profile config plan`
 
 **Fixture.** [`tests/fixtures/failure_modes/context_profile_budget_capped.json`](../tests/fixtures/failure_modes/context_profile_budget_capped.json)
+
+---
+
+## `context_stream_partial_emission`
+
+**Severity:** warning
+
+**Surfaces:** context --stream
+
+**Introduced by:** bd-17c65.10.18 (epic J)
+
+**Trigger.** A context stream consumer observes a header and item prefix but the stream ends before a trailer, error, or cancelled terminal frame arrives.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+ee remember 'Partial stream terminal fixture.' --workspace . --level procedural --kind rule --json
+ee context 'Partial stream terminal fixture' --workspace . --stream --format json | sed '$d' > /tmp/ee-partial-context-stream.ndjson
+```
+
+**Invocation.**
+
+```bash
+validate /tmp/ee-partial-context-stream.ndjson with StreamSequenceValidator::finish
+```
+
+**Expected emission.** Message contains: `Context stream ended`, `terminal frame`
+
+**Repair hint.** Retry `ee context --stream`; treat the partial stream as incomplete.
+
+**Fixture.** [`tests/fixtures/failure_modes/context_stream_partial_emission.json`](../tests/fixtures/failure_modes/context_stream_partial_emission.json)
 
 ---
 
@@ -8121,6 +8213,68 @@ ee why <memory-id> --workspace . --json
 **Repair hint.** `ee verification ingest`
 
 **Fixture.** [`tests/fixtures/failure_modes/verification_evidence_not_found.json`](../tests/fixtures/failure_modes/verification_evidence_not_found.json)
+
+---
+
+## `wal_growth_exceeds_threshold`
+
+**Severity:** warning
+
+**Surfaces:** status, doctor
+
+**Introduced by:** bd-2caru.8 (epic READ_POOL)
+
+**Trigger.** A workspace WAL sidecar grows beyond the configured checkpoint warning threshold.
+
+**Setup.**
+
+```bash
+ee init --workspace . --json
+EE_WAL_CHECKPOINT_BYTES_THRESHOLD=1 ee status --workspace . --json
+```
+
+**Invocation.**
+
+```bash
+EE_WAL_CHECKPOINT_BYTES_THRESHOLD=1 ee status --workspace . --json
+```
+
+**Expected emission.** Message contains: `WAL`, `checkpoint threshold`
+
+**Repair hint.** Run `ee maintenance wal-checkpoint --workspace .`.
+
+**Fixture.** [`tests/fixtures/failure_modes/wal_growth_exceeds_threshold.json`](../tests/fixtures/failure_modes/wal_growth_exceeds_threshold.json)
+
+---
+
+## `wal_growth_no_writer`
+
+**Severity:** medium
+
+**Surfaces:** status, doctor
+
+**Introduced by:** bd-2caru.8 (epic READ_POOL)
+
+**Trigger.** A pure-read deployment observes WAL growth beyond threshold but no local checkpoint writer or daemon path is active.
+
+**Setup.**
+
+```bash
+ee init --workspace . --json
+EE_WAL_CHECKPOINT_BYTES_THRESHOLD=1 ee status --workspace . --json
+```
+
+**Invocation.**
+
+```bash
+EE_WAL_CHECKPOINT_BYTES_THRESHOLD=1 ee status --workspace . --json
+```
+
+**Expected emission.** Message contains: `WAL growth`, `checkpoint writer`
+
+**Repair hint.** Run `ee maintenance wal-checkpoint --workspace .`.
+
+**Fixture.** [`tests/fixtures/failure_modes/wal_growth_no_writer.json`](../tests/fixtures/failure_modes/wal_growth_no_writer.json)
 
 ---
 
