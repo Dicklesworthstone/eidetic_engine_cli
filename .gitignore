@@ -155,3 +155,4 @@ tests/logs/
 tests/audit_artifacts/install_pipeline_*.json
 !tests/audit_artifacts/install_pipeline_2026-05-13T052258Z.json
 !tests/audit_artifacts/install_pipeline_2026-05-13T192108Z.json
+.stash_janitor_workspace/
