@@ -322,7 +322,12 @@ fn cosine_similarity(left: &[f64], right: &[f64]) -> Result<f64, ClusterCoherenc
             "cluster embeddings must not be zero vectors",
         ));
     }
-    Ok((dot / (left_norm * right_norm)).clamp(-1.0, 1.0))
+    let score = dot / (left_norm * right_norm);
+    if score.is_nan() {
+        Ok(0.0)
+    } else {
+        Ok(score.clamp(-1.0, 1.0))
+    }
 }
 
 fn best_merge(
@@ -453,7 +458,12 @@ fn silhouette_score(
         .abs()
         .max(nearest_external_similarity.abs())
         .max(FLOAT_EPSILON);
-    Some(((internal_similarity - nearest_external_similarity) / denominator).clamp(-1.0, 1.0))
+    let score = (internal_similarity - nearest_external_similarity) / denominator;
+    if score.is_nan() {
+        Some(0.0)
+    } else {
+        Some(score.clamp(-1.0, 1.0))
+    }
 }
 
 fn cluster_id(member_memory_ids: &[String], threshold: f64) -> String {

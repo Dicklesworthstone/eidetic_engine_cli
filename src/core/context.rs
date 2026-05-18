@@ -2580,7 +2580,7 @@ fn sort_context_candidates(candidates: &mut [PackCandidate]) {
                 compare_optional_f32_desc(left.proximity_to_seed, right.proximity_to_seed)
             })
             .then_with(|| left.section.cmp(&right.section))
-            .then_with(|| left.memory_id.to_string().cmp(&right.memory_id.to_string()))
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
     });
 }
 
@@ -2724,7 +2724,11 @@ fn summarize_agent_context_profiles(
         }
 
         let base_relevance = candidate.relevance.into_inner();
-        let adjusted_relevance = (f64::from(base_relevance) + bias.weight).clamp(0.0, 1.0) as f32;
+        let adjusted_relevance = if bias.weight.is_nan() {
+            base_relevance
+        } else {
+            (f64::from(base_relevance) + bias.weight).clamp(0.0, 1.0) as f32
+        };
         if let Ok(relevance) = UnitScore::parse(adjusted_relevance) {
             candidate.relevance = relevance;
             memory_bias_applied = memory_bias_applied.saturating_add(1);
@@ -3748,7 +3752,11 @@ fn apply_personalized_pagerank_rerank(
     ppr_weight: f32,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> PersonalizedPageRankRerankMetrics {
-    let ppr_weight = ppr_weight.clamp(0.0, 1.0);
+    let ppr_weight = if ppr_weight.is_nan() {
+        0.0
+    } else {
+        ppr_weight.clamp(0.0, 1.0)
+    };
     if candidates.is_empty() || ppr_weight == 0.0 {
         return PersonalizedPageRankRerankMetrics::default();
     }
@@ -3871,11 +3879,15 @@ fn apply_personalized_pagerank_rerank(
     let mut reranked_candidates = 0_usize;
     for candidate in candidates {
         let base = candidate.relevance.into_inner();
-        let ppr_score = scores
+        let raw_ppr = scores
             .get(&candidate.memory_id)
             .copied()
-            .unwrap_or(0.0)
-            .clamp(0.0, 1.0) as f32;
+            .unwrap_or(0.0);
+        let ppr_score = if raw_ppr.is_nan() {
+            0.0
+        } else {
+            raw_ppr.clamp(0.0, 1.0) as f32
+        };
         let blended = (ppr_weight * ppr_score) + ((1.0 - ppr_weight) * base);
         let Some(score) = unit_score(blended) else {
             continue;
@@ -4295,7 +4307,10 @@ fn effective_context_ppr_weight(value: Option<f32>, configured: Option<f32>) -> 
     match value {
         Some(value) if value.is_finite() => value.clamp(0.0, 1.0),
         Some(_) => DEFAULT_CONTEXT_PPR_WEIGHT,
-        None => configured.unwrap_or(0.0).clamp(0.0, 1.0),
+        None => match configured {
+            Some(configured) if configured.is_finite() => configured.clamp(0.0, 1.0),
+            _ => 0.0,
+        },
     }
 }
 

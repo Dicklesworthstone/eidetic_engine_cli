@@ -2862,7 +2862,7 @@ fn memory_health_from_rows_with_accesses(
         }
     }
 
-    let average_confidence = if active_count == 0 {
+    let average_confidence = if active_count == 0 || confidence_sum.is_nan() {
         None
     } else {
         Some((confidence_sum / active_count as f32).clamp(0.0, 1.0))
@@ -2872,7 +2872,7 @@ fn memory_health_from_rows_with_accesses(
     } else {
         Some(bounded_ratio(provenance_count, active_count))
     };
-    let freshness_score = if active_count == 0 {
+    let freshness_score = if active_count == 0 || freshness_sum.is_nan() {
         0.0
     } else {
         (freshness_sum / active_count as f32).clamp(0.0, 1.0)

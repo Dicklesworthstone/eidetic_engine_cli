@@ -1733,10 +1733,10 @@ fn search_hit_pack_item(index: usize, hit: &SearchHit) -> Option<PackDraftItem> 
                 .or_else(|| metadata_string(metadata, "content"))
                 .unwrap_or_default(),
         ),
-        relevance: UnitScore::parse(hit.score.clamp(0.0, 1.0))
+        relevance: UnitScore::parse(if hit.score.is_nan() { 0.0 } else { hit.score.clamp(0.0, 1.0) })
             .unwrap_or_else(|_| UnitScore::neutral()),
         utility: metadata_f32(metadata, SEARCH_ANALYSIS_UTILITY_KEY)
-            .and_then(|value| UnitScore::parse(value.clamp(0.0, 1.0)).ok())
+            .and_then(|value| UnitScore::parse(if value.is_nan() { 0.0 } else { value.clamp(0.0, 1.0) }).ok())
             .unwrap_or_else(UnitScore::neutral),
         proximity_to_seed: None,
         score_breakdown: None,
@@ -1999,12 +1999,19 @@ impl RetrievalMetrics {
         // scores? Smaller spread → higher confidence. Approximate
         // variance with (max - min) / max, bounded.
         let variance_proxy = match (self.score_distribution.max, self.score_distribution.min) {
-            (Some(max), Some(min)) if max > 0.0 => ((max - min) / max).clamp(0.0, 1.0),
+            (Some(max), Some(min)) if max > 0.0 => {
+                let v = (max - min) / max;
+                if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) }
+            }
             _ => 0.0,
         };
-        let variance_signal = (1.0_f32 - variance_proxy).clamp(0.0, 1.0);
+        let variance_signal = if variance_proxy.is_nan() {
+            1.0
+        } else {
+            (1.0_f32 - variance_proxy).clamp(0.0, 1.0)
+        };
         let raw = 0.5 * top_signal + 0.3 * recall + 0.2 * variance_signal;
-        Some(raw.clamp(0.0, 1.0))
+        Some(if raw.is_nan() { 0.0 } else { raw.clamp(0.0, 1.0) })
     }
 }
 

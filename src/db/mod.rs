@@ -8252,13 +8252,17 @@ impl DbConnection {
             let mut confidence = before.confidence;
             if helpful {
                 helpful_count = helpful_count.saturating_add(1);
-                utility = (utility + 0.08 * input.weight).clamp(0.0, 1.0);
-                confidence = (confidence + 0.04 * input.weight).clamp(0.0, 1.0);
+                let new_utility = utility + 0.08 * input.weight;
+                utility = if new_utility.is_nan() { utility } else { new_utility.clamp(0.0, 1.0) };
+                let new_confidence = confidence + 0.04 * input.weight;
+                confidence = if new_confidence.is_nan() { confidence } else { new_confidence.clamp(0.0, 1.0) };
             }
             if harmful {
                 harmful_count = harmful_count.saturating_add(1);
-                utility = (utility - 0.12 * input.weight).clamp(0.0, 1.0);
-                confidence = (confidence - 0.10 * input.weight).clamp(0.0, 1.0);
+                let new_utility = utility - 0.12 * input.weight;
+                utility = if new_utility.is_nan() { utility } else { new_utility.clamp(0.0, 1.0) };
+                let new_confidence = confidence - 0.10 * input.weight;
+                confidence = if new_confidence.is_nan() { confidence } else { new_confidence.clamp(0.0, 1.0) };
             }
             let auto_retired = harmful
                 && harmful_count >= input.auto_retire_harmful_threshold
@@ -8758,7 +8762,12 @@ pub mod feedback_scoring {
         }
 
         let half_lives = age_days as f32 / HELPFUL_HALF_LIFE_DAYS as f32;
-        0.5_f32.powf(half_lives).clamp(CONFIDENCE_FLOOR, 1.0)
+        let factor = 0.5_f32.powf(half_lives);
+        if factor.is_nan() {
+            CONFIDENCE_FLOOR
+        } else {
+            factor.clamp(CONFIDENCE_FLOOR, 1.0)
+        }
     }
 
     /// Returns the signal multiplier for a given signal type.
@@ -8813,13 +8822,18 @@ impl FeedbackCounts {
         }
 
         let decayed_positive = self.positive_weight * helpful_decay_factor(age_days);
-        let positive_effect = (decayed_positive / 10.0).min(MAX_CONFIDENCE_BOOST);
-        let negative_effect =
-            (self.negative_weight * NEGATIVE_MULTIPLIER / 10.0).min(MAX_CONFIDENCE_PENALTY);
-        let decay_effect = self.decay_weight * DECAY_MULTIPLIER / 20.0;
+        let positive_effect = if decayed_positive.is_nan() { 0.0 } else { (decayed_positive / 10.0).min(MAX_CONFIDENCE_BOOST) };
+        let negative_effect = if self.negative_weight.is_nan() { 0.0 } else {
+            (self.negative_weight * NEGATIVE_MULTIPLIER / 10.0).min(MAX_CONFIDENCE_PENALTY)
+        };
+        let decay_effect = if self.decay_weight.is_nan() { 0.0 } else { self.decay_weight * DECAY_MULTIPLIER / 20.0 };
 
-        (positive_effect - negative_effect - decay_effect)
-            .clamp(-MAX_CONFIDENCE_PENALTY, MAX_CONFIDENCE_BOOST)
+        let effect = positive_effect - negative_effect - decay_effect;
+        if effect.is_nan() {
+            0.0
+        } else {
+            effect.clamp(-MAX_CONFIDENCE_PENALTY, MAX_CONFIDENCE_BOOST)
+        }
     }
 
     /// Apply confidence adjustment to a base confidence value (EE-081).
@@ -8834,7 +8848,11 @@ impl FeedbackCounts {
         use feedback_scoring::*;
 
         let adjusted = base_confidence + self.confidence_adjustment_at_age(age_days);
-        adjusted.clamp(CONFIDENCE_FLOOR, CONFIDENCE_CEILING)
+        if adjusted.is_nan() {
+            CONFIDENCE_FLOOR
+        } else {
+            adjusted.clamp(CONFIDENCE_FLOOR, CONFIDENCE_CEILING)
+        }
     }
 
     /// Returns true if feedback indicates the target is unreliable.
@@ -8880,7 +8898,12 @@ impl FeedbackCounts {
         let positive_ratio = self.positive_weight / total_weight;
         let negative_ratio = self.negative_weight / total_weight;
 
-        (0.5 + (positive_ratio - negative_ratio) * 0.5).clamp(0.0, 1.0)
+        let score = 0.5 + (positive_ratio - negative_ratio) * 0.5;
+        if score.is_nan() {
+            0.5
+        } else {
+            score.clamp(0.0, 1.0)
+        }
     }
 }
 
@@ -11976,67 +11999,118 @@ pub struct StoredAuditEntry {
     pub this_row_hash: Option<String>,
 }
 
+fn build_audit_entry(
+    id: &str,
+    input: &CreateAuditInput,
+    timestamp: String,
+    prev_row_hash: Option<String>,
+) -> StoredAuditEntry {
+    let surface = input
+        .target_type
+        .clone()
+        .unwrap_or_else(|| audit_surface_from_action(&input.action));
+    let mutation_kind = input.action.clone();
+    let before_hash = audit_detail_hash(
+        input.details.as_deref(),
+        &[
+            "before_hash",
+            "beforeHash",
+            "before_state_hash",
+            "beforeStateHash",
+        ],
+    );
+    let after_hash = audit_detail_hash(
+        input.details.as_deref(),
+        &[
+            "after_hash",
+            "afterHash",
+            "after_state_hash",
+            "afterStateHash",
+        ],
+    );
+
+    StoredAuditEntry {
+        id: id.to_owned(),
+        workspace_id: input.workspace_id.clone(),
+        timestamp,
+        actor: input.actor.clone(),
+        action: input.action.clone(),
+        target_type: input.target_type.clone(),
+        target_id: input.target_id.clone(),
+        details: input.details.clone(),
+        surface,
+        mutation_kind,
+        before_hash,
+        after_hash,
+        prev_row_hash,
+        this_row_hash: None,
+    }
+}
+
+fn next_audit_batch_timestamp(last_timestamp: &mut Option<DateTime<Utc>>) -> String {
+    let mut timestamp = Utc::now();
+    if let Some(previous) = last_timestamp.as_ref() {
+        if timestamp <= previous.to_owned() {
+            timestamp = previous
+                .checked_add_signed(chrono::TimeDelta::nanoseconds(1))
+                .unwrap_or(timestamp);
+        }
+    }
+    let rendered = timestamp.to_rfc3339_opts(SecondsFormat::Nanos, false);
+    *last_timestamp = Some(timestamp);
+    rendered
+}
+
 impl DbConnection {
     /// Insert a new audit log entry.
     pub fn insert_audit(&self, id: &str, input: &CreateAuditInput) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        let surface = input
-            .target_type
-            .clone()
-            .unwrap_or_else(|| audit_surface_from_action(&input.action));
-        let mutation_kind = input.action.clone();
-        let before_hash = audit_detail_hash(
-            input.details.as_deref(),
-            &[
-                "before_hash",
-                "beforeHash",
-                "before_state_hash",
-                "beforeStateHash",
-            ],
-        );
-        let after_hash = audit_detail_hash(
-            input.details.as_deref(),
-            &[
-                "after_hash",
-                "afterHash",
-                "after_state_hash",
-                "afterStateHash",
-            ],
-        );
         let prev_row_hash = self.latest_audit_row_hash()?;
-        let entry = StoredAuditEntry {
-            id: id.to_owned(),
-            workspace_id: input.workspace_id.clone(),
-            timestamp: now.clone(),
-            actor: input.actor.clone(),
-            action: input.action.clone(),
-            target_type: input.target_type.clone(),
-            target_id: input.target_id.clone(),
-            details: input.details.clone(),
-            surface,
-            mutation_kind,
-            before_hash,
-            after_hash,
-            prev_row_hash,
-            this_row_hash: None,
-        };
-        let this_row_hash = compute_audit_row_hash(&entry);
+        let entry = build_audit_entry(id, input, Utc::now().to_rfc3339(), prev_row_hash);
+        self.insert_prepared_audit_entry(&entry)?;
+
+        Ok(())
+    }
+
+    /// Insert an ordered batch of audit log entries in one transaction.
+    ///
+    /// The first row points at the current audit-chain tip. Each following row
+    /// points at the row hash computed for the previous entry in the same
+    /// batch.
+    pub fn insert_audit_batch(&self, entries: &[(String, CreateAuditInput)]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        self.with_transaction(|| {
+            let mut prev_row_hash = self.latest_audit_row_hash()?;
+            let mut last_timestamp = None;
+            for (id, input) in entries {
+                let timestamp = next_audit_batch_timestamp(&mut last_timestamp);
+                let entry = build_audit_entry(id, input, timestamp, prev_row_hash.clone());
+                prev_row_hash = Some(self.insert_prepared_audit_entry(&entry)?);
+            }
+            Ok(())
+        })
+    }
+
+    fn insert_prepared_audit_entry(&self, entry: &StoredAuditEntry) -> Result<String> {
+        let this_row_hash = compute_audit_row_hash(entry);
 
         self.execute_for(
             DbOperation::Execute,
             "INSERT INTO audit_log (id, workspace_id, timestamp, actor, action, target_type, target_id, details, surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             &[
-                Value::Text(id.to_string()),
+                Value::Text(entry.id.clone()),
                 entry
                     .workspace_id
                     .as_ref()
                     .map_or(Value::Null, |w| Value::Text(w.clone())),
-                Value::Text(entry.timestamp),
+                Value::Text(entry.timestamp.clone()),
                 entry
                     .actor
                     .as_ref()
                     .map_or(Value::Null, |a| Value::Text(a.clone())),
-                Value::Text(entry.action),
+                Value::Text(entry.action.clone()),
                 entry
                     .target_type
                     .as_ref()
@@ -12049,8 +12123,8 @@ impl DbConnection {
                     .details
                     .as_ref()
                     .map_or(Value::Null, |d| Value::Text(d.clone())),
-                Value::Text(entry.surface),
-                Value::Text(entry.mutation_kind),
+                Value::Text(entry.surface.clone()),
+                Value::Text(entry.mutation_kind.clone()),
                 entry
                     .before_hash
                     .as_ref()
@@ -12063,11 +12137,11 @@ impl DbConnection {
                     .prev_row_hash
                     .as_ref()
                     .map_or(Value::Null, |hash| Value::Text(hash.clone())),
-                Value::Text(this_row_hash),
+                Value::Text(this_row_hash.clone()),
             ],
         )?;
 
-        Ok(())
+        Ok(this_row_hash)
     }
 
     fn latest_audit_row_hash(&self) -> Result<Option<String>> {
@@ -18431,6 +18505,59 @@ mod tests {
         Ok(())
     }
 
+    fn audit_input(workspace_id: &str, action: &str, target_id: &str) -> super::CreateAuditInput {
+        super::CreateAuditInput {
+            workspace_id: Some(workspace_id.to_owned()),
+            actor: Some("test-agent".to_owned()),
+            action: action.to_owned(),
+            target_type: Some("memory".to_owned()),
+            target_id: Some(target_id.to_owned()),
+            details: Some(r#"{"kind":"rule"}"#.to_owned()),
+        }
+    }
+
+    fn required_audit(
+        connection: &DbConnection,
+        id: &str,
+    ) -> std::result::Result<super::StoredAuditEntry, TestFailure> {
+        connection
+            .get_audit(id)?
+            .ok_or_else(|| TestFailure::new(format!("audit row {id} must exist")))
+    }
+
+    fn assert_ordered_audit_chain(
+        first: &super::StoredAuditEntry,
+        second: &super::StoredAuditEntry,
+        third: &super::StoredAuditEntry,
+    ) -> TestResult {
+        ensure(first.prev_row_hash.is_none(), "first row has no prev hash")?;
+        ensure_equal(
+            &first.this_row_hash,
+            &Some(super::compute_audit_row_hash(first)),
+            "first row hash recomputes",
+        )?;
+        ensure_equal(
+            &second.prev_row_hash,
+            &first.this_row_hash,
+            "second row points to first row hash",
+        )?;
+        ensure_equal(
+            &second.this_row_hash,
+            &Some(super::compute_audit_row_hash(second)),
+            "second row hash recomputes",
+        )?;
+        ensure_equal(
+            &third.prev_row_hash,
+            &second.this_row_hash,
+            "third row points to second row hash",
+        )?;
+        ensure_equal(
+            &third.this_row_hash,
+            &Some(super::compute_audit_row_hash(third)),
+            "third row hash recomputes",
+        )
+    }
+
     fn hash(ch: char) -> String {
         format!("blake3:{}", ch.to_string().repeat(64))
     }
@@ -21760,6 +21887,192 @@ mod tests {
             &audit.this_row_hash,
             &Some(super::compute_audit_row_hash(&audit)),
             "stored audit row hash matches recomputed row hash",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_audit_batch_preserves_ordered_chain() -> TestResult {
+        let sequential = DbConnection::open_memory()?;
+        sequential.migrate()?;
+        setup_workspace(&sequential)?;
+
+        let entries = vec![
+            (
+                "audit_00000000000000000000000000000001".to_owned(),
+                audit_input(
+                    "wsp_01234567890123456789012345",
+                    "memory.create",
+                    "mem_batch000000000000000000001",
+                ),
+            ),
+            (
+                "audit_00000000000000000000000000000002".to_owned(),
+                audit_input(
+                    "wsp_01234567890123456789012345",
+                    "memory.update",
+                    "mem_batch000000000000000000001",
+                ),
+            ),
+            (
+                "audit_00000000000000000000000000000003".to_owned(),
+                audit_input(
+                    "wsp_01234567890123456789012345",
+                    "memory.tag_add",
+                    "mem_batch000000000000000000001",
+                ),
+            ),
+        ];
+
+        for (id, input) in &entries {
+            sequential.insert_audit(id, input)?;
+        }
+        let sequential_first = required_audit(&sequential, &entries[0].0)?;
+        let sequential_second = required_audit(&sequential, &entries[1].0)?;
+        let sequential_third = required_audit(&sequential, &entries[2].0)?;
+        assert_ordered_audit_chain(&sequential_first, &sequential_second, &sequential_third)?;
+
+        let batched = DbConnection::open_memory()?;
+        batched.migrate()?;
+        setup_workspace(&batched)?;
+        batched.insert_audit_batch(&entries)?;
+        let batch_first = required_audit(&batched, &entries[0].0)?;
+        let batch_second = required_audit(&batched, &entries[1].0)?;
+        let batch_third = required_audit(&batched, &entries[2].0)?;
+        assert_ordered_audit_chain(&batch_first, &batch_second, &batch_third)?;
+        ensure_equal(
+            &[
+                batch_first.action.as_str(),
+                batch_second.action.as_str(),
+                batch_third.action.as_str(),
+            ],
+            &["memory.create", "memory.update", "memory.tag_add"],
+            "batch preserves caller order",
+        )?;
+
+        sequential.close()?;
+        batched.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_audit_batch_empty_is_noop() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        connection.insert_audit_batch(&[])?;
+
+        let entries = connection.list_audit_entries(None, None)?;
+        ensure(entries.is_empty(), "empty batch writes no audit rows")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_audit_batch_keeps_global_chain_across_workspaces() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        connection.insert_workspace(
+            "wsp_11111111111111111111111111",
+            &super::CreateWorkspaceInput {
+                path: "/tmp/test-secondary".to_owned(),
+                name: Some("secondary".to_owned()),
+            },
+        )?;
+
+        let entries = vec![
+            (
+                "audit_00000000000000000000000000000033".to_owned(),
+                audit_input(
+                    "wsp_01234567890123456789012345",
+                    "memory.create",
+                    "mem_batchmixed000000000000001",
+                ),
+            ),
+            (
+                "audit_00000000000000000000000000000032".to_owned(),
+                audit_input(
+                    "wsp_11111111111111111111111111",
+                    "memory.create",
+                    "mem_batchmixed000000000000002",
+                ),
+            ),
+            (
+                "audit_00000000000000000000000000000031".to_owned(),
+                audit_input(
+                    "wsp_01234567890123456789012345",
+                    "memory.update",
+                    "mem_batchmixed000000000000001",
+                ),
+            ),
+        ];
+
+        connection.insert_audit_batch(&entries)?;
+
+        let first = required_audit(&connection, &entries[0].0)?;
+        let second = required_audit(&connection, &entries[1].0)?;
+        let third = required_audit(&connection, &entries[2].0)?;
+        assert_ordered_audit_chain(&first, &second, &third)?;
+        ensure_equal(
+            &second.workspace_id,
+            &Some("wsp_11111111111111111111111111".to_owned()),
+            "middle row uses secondary workspace",
+        )?;
+        connection.insert_audit(
+            "audit_00000000000000000000000000000034",
+            &audit_input(
+                "wsp_01234567890123456789012345",
+                "memory.tag_add",
+                "mem_batchmixed000000000000001",
+            ),
+        )?;
+        let followup = required_audit(&connection, "audit_00000000000000000000000000000034")?;
+        ensure_equal(
+            &followup.prev_row_hash,
+            &third.this_row_hash,
+            "next single audit row follows final batch row despite caller id ordering",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_audit_batch_rolls_back_on_insert_error() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let entries = vec![
+            (
+                "audit_00000000000000000000000000000021".to_owned(),
+                audit_input(
+                    "wsp_01234567890123456789012345",
+                    "memory.create",
+                    "mem_batchrollback000000000001",
+                ),
+            ),
+            (
+                "audit_00000000000000000000000000000021".to_owned(),
+                audit_input(
+                    "wsp_01234567890123456789012345",
+                    "memory.update",
+                    "mem_batchrollback000000000001",
+                ),
+            ),
+        ];
+
+        let result = connection.insert_audit_batch(&entries);
+        ensure(result.is_err(), "duplicate audit id must fail")?;
+
+        let entries = connection.list_audit_entries(None, None)?;
+        ensure(
+            entries.is_empty(),
+            "failed batch must roll back all audit rows",
         )?;
 
         connection.close()?;

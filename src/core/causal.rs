@@ -947,11 +947,18 @@ fn causal_ledger_edge_from_row(row: &Row) -> Result<CausalLedgerEdge, DomainErro
             repair: Some("Use method manual, graph-inferred, or cass-derived.".to_owned()),
         })?;
 
+    let contribution_raw = row_f64(row, 3, "causal_evidence.contribution_score")?;
+    let contribution_score = if contribution_raw.is_nan() {
+        0.0
+    } else {
+        contribution_raw.clamp(0.0, 1.0)
+    };
+
     Ok(CausalLedgerEdge {
         edge_id: row_text(row, 0, "causal_evidence.id")?,
         failure_id: row_text(row, 1, "causal_evidence.failure_id")?,
         candidate_cause_id: row_text(row, 2, "causal_evidence.candidate_cause_id")?,
-        contribution_score: row_f64(row, 3, "causal_evidence.contribution_score")?.clamp(0.0, 1.0),
+        contribution_score,
         evidence_uris,
         computed_at: row_text(row, 5, "causal_evidence.computed_at")?,
         method,
@@ -991,7 +998,13 @@ fn path_contribution_estimate(path: &[CausalLedgerEdge]) -> f64 {
     }
     rounded_causal_metric(
         path.iter()
-            .map(|edge| edge.contribution_score.clamp(0.0, 1.0))
+            .map(|edge| {
+                if edge.contribution_score.is_nan() {
+                    0.0
+                } else {
+                    edge.contribution_score.clamp(0.0, 1.0)
+                }
+            })
             .product::<f64>(),
     )
 }
@@ -2426,7 +2439,11 @@ impl PromotePlanOptions {
 
     #[must_use]
     pub fn with_minimum_uplift(mut self, uplift: f64) -> Self {
-        self.minimum_uplift = uplift.clamp(-1.0, 1.0);
+        self.minimum_uplift = if uplift.is_nan() {
+            0.0
+        } else {
+            uplift.clamp(-1.0, 1.0)
+        };
         self
     }
 
@@ -3147,8 +3164,16 @@ fn project_downstream_effects(
         PromotionAction::Demote => -0.06,
         PromotionAction::Archive | PromotionAction::Quarantine => -0.09,
     };
-    let utility_delta = (utility_base + (estimated_uplift * 0.5)).clamp(-1.0, 1.0);
-    let confidence_delta = estimated_uplift.clamp(-0.25, 0.25);
+    let utility_delta = if estimated_uplift.is_nan() {
+        utility_base
+    } else {
+        (utility_base + (estimated_uplift * 0.5)).clamp(-1.0, 1.0)
+    };
+    let confidence_delta = if estimated_uplift.is_nan() {
+        0.0
+    } else {
+        estimated_uplift.clamp(-0.25, 0.25)
+    };
 
     let learning_priority_delta = match action {
         PromotionAction::Promote => 2,
