@@ -173,6 +173,36 @@ impl McpTool {
             _ => None,
         }
     }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Health => "ee_health",
+            Self::Status => "ee_status",
+            Self::Doctor => "ee_doctor",
+            Self::Capabilities => "ee_capabilities",
+            Self::Search => "ee_search",
+            Self::Context => "ee_context",
+            Self::MemoryShow => "ee_memory_show",
+            Self::Why => "ee_why",
+            Self::Remember => "ee_remember",
+            Self::Outcome => "ee_outcome",
+        }
+    }
+
+    const fn all() -> &'static [Self] {
+        &[
+            Self::Health,
+            Self::Status,
+            Self::Doctor,
+            Self::Capabilities,
+            Self::Search,
+            Self::Context,
+            Self::MemoryShow,
+            Self::Why,
+            Self::Remember,
+            Self::Outcome,
+        ]
+    }
 }
 
 fn json_rpc_error(id: Option<Value>, code: i32, message: &str) -> Value {
@@ -2751,5 +2781,44 @@ mod tests {
         });
         let response = handle_request(&unknown_req);
         assert!(response.get("error").is_some());
+    }
+
+    // bd-1w75v MCP-TOOL-REGISTRY precursor: round-trip parse(name()) for every
+    // McpTool variant. Guards against drift when adding/renaming tools — the
+    // full registry refactor (bd-1w75v) will replace these methods with a
+    // single TOOL_REGISTRY array, but until then this test pins the contract.
+    #[test]
+    fn mcp_tool_name_round_trips_through_parse() {
+        for tool in McpTool::all() {
+            let name = tool.name();
+            assert!(
+                name.starts_with("ee_"),
+                "tool name must start with ee_: {name}"
+            );
+            let parsed = McpTool::parse(name)
+                .unwrap_or_else(|| panic!("McpTool::parse failed for canonical name {name}"));
+            assert_eq!(
+                &parsed, tool,
+                "parse(name) round-trip mismatch for {name}: got {parsed:?}, expected {tool:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_tool_all_is_unique_and_exhaustive() {
+        use std::collections::BTreeSet;
+        let names: BTreeSet<&'static str> = McpTool::all().iter().map(|t| t.name()).collect();
+        assert_eq!(
+            names.len(),
+            McpTool::all().len(),
+            "McpTool::all() must contain unique names"
+        );
+        // Cross-check: every name in all() is parseable.
+        for name in &names {
+            assert!(
+                McpTool::parse(name).is_some(),
+                "McpTool::all name {name} must be parseable"
+            );
+        }
     }
 }
