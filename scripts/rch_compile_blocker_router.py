@@ -16,6 +16,7 @@ from typing import Any
 
 
 SCHEMA = "ee.rch.compile_blocker_route.v1"
+PREFLIGHT_SCHEMA = "ee.swarm_compile_blockers.v1"
 LOCAL_REMOTE_ROOT = "/data/projects/eidetic_engine_cli/"
 UPSTREAM_ROOT = "/data/projects/"
 
@@ -35,15 +36,38 @@ class Reservation:
     expires_ts: str | None
 
 
+@dataclass(frozen=True)
+class DirtyPath:
+    path: str
+    state: str
+
+
+@dataclass(frozen=True)
+class VerifierEvidence:
+    file: str | None
+    line: int | None
+    command: str | None
+    command_hash: str | None
+    status: str | None
+    degraded_codes: tuple[str, ...]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Route a failed RCH transcript to an owner decision."
     )
     parser.add_argument("transcript", nargs="?", help="Transcript path, default stdin")
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="Emit a pre-RCH shared-checkout compile-blocker recommendation",
+    )
     parser.add_argument("--command", default="", help="Verifier command text")
     parser.add_argument("--bead-id", default="", help="Current bead id")
     parser.add_argument("--agent-name", default="", help="Current agent name")
     parser.add_argument("--reservations", help="Reservation JSON path")
+    parser.add_argument("--dirty-paths", help="Dirty-path snapshot JSON path")
+    parser.add_argument("--verifier-evidence", help="Recent ee.rch.verify.v1 JSON path")
     parser.add_argument("--now", help="UTC timestamp for deterministic expiry checks")
     parser.add_argument("--json", action="store_true", help="Accepted for symmetry")
     return parser.parse_args()
@@ -77,6 +101,14 @@ def normalize_file(path: str | None) -> str | None:
     if path.startswith(LOCAL_REMOTE_ROOT):
         return path[len(LOCAL_REMOTE_ROOT) :]
     return path
+
+
+def is_compile_critical(path: str) -> bool:
+    if path == "Cargo.toml" or path == "Cargo.lock":
+        return True
+    if path.endswith(".rs") or path.endswith("/Cargo.toml") or path.endswith("/build.rs"):
+        return True
+    return False
 
 
 def first_error(transcript: str) -> FirstError:
@@ -156,6 +188,131 @@ def extract_reservations(payload: Any, now: datetime) -> list[Reservation]:
     return reservations
 
 
+def extract_dirty_paths(payload: Any) -> list[DirtyPath]:
+    paths: list[DirtyPath] = []
+
+    def add_path(item: Any) -> None:
+        if isinstance(item, str):
+            path = normalize_file(item)
+            if path:
+                paths.append(DirtyPath(path=path, state="dirty"))
+            return
+        if not isinstance(item, dict):
+            return
+        path = normalize_file(
+            item.get("path")
+            or item.get("file")
+            or item.get("file_path")
+            or item.get("relative_path")
+        )
+        if not path:
+            return
+        state = str(
+            item.get("state")
+            or item.get("git_state")
+            or item.get("entry_kind")
+            or item.get("bucket")
+            or "dirty"
+        )
+        paths.append(DirtyPath(path=path, state=state))
+
+    def walk(value: Any) -> None:
+        if isinstance(value, list):
+            for item in value:
+                add_path(item)
+        elif isinstance(value, dict):
+            add_path(value)
+            for key in (
+                "dirtyPaths",
+                "dirty_paths",
+                "dirty_paths_sample",
+                "paths",
+                "entries",
+                "classificationRows",
+                "classification_rows",
+            ):
+                if key in value:
+                    walk(value[key])
+            source_state = value.get("source_state")
+            if isinstance(source_state, dict):
+                walk(source_state)
+
+    walk(payload)
+    dedup: dict[str, DirtyPath] = {}
+    for path in paths:
+        if is_compile_critical(path.path):
+            dedup.setdefault(path.path, path)
+    return [dedup[path] for path in sorted(dedup)]
+
+
+def extract_verifier_evidence(payload: Any) -> list[VerifierEvidence]:
+    evidence: list[VerifierEvidence] = []
+
+    def strings(value: Any) -> tuple[str, ...]:
+        if not isinstance(value, list):
+            return ()
+        return tuple(str(item) for item in value if isinstance(item, str))
+
+    def add_item(item: Any) -> None:
+        if not isinstance(item, dict):
+            return
+        first = item.get("first_error") or item.get("firstError") or {}
+        first_file = None
+        first_line = None
+        if isinstance(first, dict):
+            first_file = first.get("file") or first.get("path")
+            first_line = first.get("line")
+        first_file = normalize_file(
+            item.get("first_error_file")
+            or item.get("firstErrorFile")
+            or item.get("first_error_path")
+            or first_file
+        )
+        if not first_file:
+            return
+        raw_line = item.get("first_error_line") or item.get("firstErrorLine") or first_line
+        line = int(raw_line) if isinstance(raw_line, int) or str(raw_line).isdigit() else None
+        degraded_codes = strings(item.get("degraded_codes") or item.get("degradedCodes"))
+        status = item.get("status") or item.get("result")
+        failure_like = (
+            status in {"remote_failure", "failed", "failure"}
+            or "rch_verify_remote_command_failed" in degraded_codes
+        )
+        if not failure_like:
+            return
+        evidence.append(
+            VerifierEvidence(
+                file=first_file,
+                line=line,
+                command=item.get("command_text") or item.get("command"),
+                command_hash=item.get("command_hash") or item.get("commandHash"),
+                status=str(status) if status is not None else None,
+                degraded_codes=degraded_codes,
+            )
+        )
+
+    def walk(value: Any) -> None:
+        if isinstance(value, list):
+            for item in value:
+                add_item(item)
+        elif isinstance(value, dict):
+            add_item(value)
+            for key in ("runs", "proofs", "entries", "ledger", "items"):
+                if key in value:
+                    walk(value[key])
+
+    walk(payload)
+    evidence.sort(
+        key=lambda item: (
+            item.file or "",
+            item.command_hash or "",
+            item.command or "",
+            item.line if item.line is not None else -1,
+        )
+    )
+    return evidence
+
+
 def matching_owner(path: str | None, reservations: list[Reservation]) -> Reservation | None:
     if not path:
         return None
@@ -215,8 +372,161 @@ def markdown_summary(
     return "\n".join(lines)
 
 
+def recent_first_error_payload(evidence: VerifierEvidence | None) -> dict[str, Any] | None:
+    if not evidence:
+        return None
+    return {
+        "file": evidence.file,
+        "line": evidence.line,
+        "command": evidence.command,
+        "commandHash": evidence.command_hash,
+        "status": evidence.status,
+        "degradedCodes": list(evidence.degraded_codes),
+    }
+
+
+def blocker_mail_template(
+    bead_id: str,
+    command: str,
+    path: str,
+    owner: Reservation | None,
+    evidence: VerifierEvidence | None,
+) -> str | None:
+    if not owner:
+        return None
+    lines = [
+        f"[compile-blocker] `{path}` is blocking an RCH proof I was about to launch.",
+    ]
+    if bead_id:
+        lines.append(f"- bead_id: `{bead_id}`")
+    if command:
+        lines.append(f"- requested_command: `{command}`")
+    lines.append(f"- owner_pattern: `{owner.pattern}`")
+    if evidence and evidence.line is not None:
+        lines.append(f"- recent_first_error: `{path}:{evidence.line}`")
+    elif evidence:
+        lines.append(f"- recent_first_error: `{path}`")
+    lines.append("Can you send a status or a no-edit proof when your slice is ready?")
+    return "\n".join(lines)
+
+
+def compile_blocker_preflight(args: argparse.Namespace) -> dict[str, Any]:
+    degraded_codes: list[str] = []
+    reservations_payload = load_json(args.reservations)
+    if args.reservations is None:
+        degraded_codes.append("agent_mail_reservations_unavailable")
+    reservations = extract_reservations(reservations_payload, parse_now(args.now))
+    dirty_paths = extract_dirty_paths(load_json(args.dirty_paths))
+    verifier_evidence = extract_verifier_evidence(load_json(args.verifier_evidence))
+    dirty_by_path = {item.path: item for item in dirty_paths}
+    evidence_by_path: dict[str, VerifierEvidence] = {}
+    for item in verifier_evidence:
+        if item.file in dirty_by_path:
+            evidence_by_path.setdefault(str(item.file), item)
+
+    compile_blockers: list[dict[str, Any]] = []
+    for dirty in dirty_paths:
+        owner = matching_owner(dirty.path, reservations)
+        evidence = evidence_by_path.get(dirty.path)
+        if owner and owner.agent != args.agent_name:
+            severity = "high"
+            reason = "dirty_compile_critical_path_reserved_by_other_agent"
+            action = "message_owner_before_rch"
+        elif evidence:
+            severity = "high"
+            reason = "recent_rch_first_error_matches_dirty_path"
+            action = "fix_or_coordinate_before_rch"
+        else:
+            severity = "medium"
+            reason = "dirty_compile_critical_path_without_recent_first_error"
+            action = "prefer_static_or_non_cargo_work_until_compile_health_is_known"
+        template = blocker_mail_template(args.bead_id, args.command, dirty.path, owner, evidence)
+        compile_blockers.append(
+            {
+                "path": dirty.path,
+                "severity": severity,
+                "reason": reason,
+                "dirtyState": dirty.state,
+                "ownerAgent": owner.agent if owner else None,
+                "ownerPattern": owner.pattern if owner else None,
+                "reservationExpiresTs": owner.expires_ts if owner else None,
+                "recentFirstError": recent_first_error_payload(evidence),
+                "suggestedNextAction": action,
+                "mailTemplate": template,
+            }
+        )
+
+    severity_rank = {"high": 0, "medium": 1, "low": 2}
+    compile_blockers.sort(
+        key=lambda item: (
+            severity_rank.get(str(item["severity"]), 9),
+            0 if item["ownerAgent"] else 1,
+            str(item["path"]),
+        )
+    )
+    if any(item["severity"] == "high" for item in compile_blockers):
+        safe_to_launch: bool | str = False
+    elif compile_blockers:
+        safe_to_launch = "unknown"
+    else:
+        safe_to_launch = True
+
+    alternatives: list[dict[str, str]] = []
+    if safe_to_launch is not True:
+        alternatives.extend(
+            [
+                {
+                    "kind": "static_check",
+                    "message": "Run non-Cargo static checks or JSON/schema validation for your files.",
+                },
+                {
+                    "kind": "coordination",
+                    "message": "Coordinate with the owner before spending an RCH slot.",
+                },
+            ]
+        )
+    else:
+        alternatives.append(
+            {
+                "kind": "rch",
+                "message": "No dirty compile-critical blocker was found in the supplied snapshots.",
+            }
+        )
+
+    mail_template = next(
+        (
+            item["mailTemplate"]
+            for item in compile_blockers
+            if item.get("mailTemplate")
+        ),
+        None,
+    )
+    degraded_codes.sort()
+    return {
+        "schema": PREFLIGHT_SCHEMA,
+        "success": True,
+        "command": args.command or None,
+        "beadId": args.bead_id or None,
+        "safeToLaunchRch": safe_to_launch,
+        "compileBlockers": compile_blockers,
+        "recommendedAlternativeWork": alternatives,
+        "mailTemplate": mail_template,
+        "degradedCodes": degraded_codes,
+    }
+
+
 def main() -> int:
     args = parse_args()
+    if args.preflight:
+        print(
+            json.dumps(
+                compile_blocker_preflight(args),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return 0
+
     transcript = read_text(args.transcript)
     reservations = extract_reservations(load_json(args.reservations), parse_now(args.now))
     error = first_error(transcript)

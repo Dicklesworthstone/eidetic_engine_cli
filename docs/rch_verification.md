@@ -206,6 +206,30 @@ Routing decisions:
 - `environment_failure`: the transcript is an RCH topology/local-fallback
   blocker or lacks an actionable compiler diagnostic.
 
+The same helper also has a snapshot-only preflight mode for crowded shared
+checkouts. It does not run Cargo or inspect live Agent Mail itself; callers pass
+dirty-path, reservation, and recent verifier-evidence snapshots they already
+collected:
+
+```bash
+scripts/rch_compile_blocker_router.py --preflight \
+  --dirty-paths dirty-paths.json \
+  --reservations reservations.json \
+  --verifier-evidence recent-rch-proofs.json \
+  --command "cargo test --lib focused_case -- --nocapture" \
+  --bead-id bd-123 \
+  --agent-name SilentLark \
+  --json
+```
+
+Preflight emits `ee.swarm_compile_blockers.v1` with `safeToLaunchRch`,
+`compileBlockers[]`, `recommendedAlternativeWork[]`, and an optional
+`mailTemplate`. A dirty compile-critical path reserved by another active agent,
+or a recent RCH first-error file matching a currently dirty path, returns
+`safeToLaunchRch=false`. Dirty compile-critical paths without ownership or
+recent first-error evidence return `safeToLaunchRch="unknown"` so agents can
+prefer static work or coordinate before burning a remote slot.
+
 ## Control-Plane Fixtures and E2E
 
 `bd-1h8ji.6` pins the verification control plane with a dedicated fixture
