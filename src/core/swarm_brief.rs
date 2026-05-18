@@ -572,6 +572,7 @@ pub struct RchQueueHealth {
     pub queued_count: u64,
     pub active_count: u64,
     pub slots_available: Option<u64>,
+    pub queue_head_slots_needed: Option<u64>,
     pub status: String,
 }
 
@@ -4350,6 +4351,7 @@ fn rch_queue_health(status: &Value) -> Option<RchQueueHealth> {
         queued_count,
         active_count,
         slots_available,
+        queue_head_slots_needed: first_slots_needed,
         status: status_label.to_string(),
     })
 }
@@ -6579,6 +6581,7 @@ mod tests {
         assert_eq!(queue.queued_count, 1);
         assert_eq!(queue.active_count, 0);
         assert_eq!(queue.slots_available, Some(8));
+        assert_eq!(queue.queue_head_slots_needed, Some(8));
         assert_eq!(queue.status, "start_stalled");
         assert!(!report.remote_only_safe);
         assert!(report.degraded.iter().any(|degradation| {
@@ -6635,6 +6638,7 @@ mod tests {
         assert_eq!(queue.queued_count, 1);
         assert_eq!(queue.active_count, 1);
         assert_eq!(queue.slots_available, Some(2));
+        assert_eq!(queue.queue_head_slots_needed, Some(4));
         assert_eq!(queue.status, "capacity_blocked");
         assert!(!report.remote_only_safe);
         assert!(report.degraded.iter().any(|degradation| {

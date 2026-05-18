@@ -586,7 +586,9 @@ fn swarm_next_action_sample() -> Value {
                 "healthyWorkerCount": 1,
                 "activeRemoteBuildCount": 4,
                 "queuedRemoteBuildCount": 0,
-                "slotsAvailable": 0
+                "slotsAvailable": 0,
+                "queueHeadSlotsNeeded": null,
+                "queueStatus": "saturated"
             },
             "environment": {
                 "cargoTargetExternalized": true,

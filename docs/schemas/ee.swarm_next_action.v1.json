@@ -95,7 +95,9 @@
           "healthyWorkerCount": 1,
           "activeRemoteBuildCount": 4,
           "queuedRemoteBuildCount": 0,
-          "slotsAvailable": 0
+          "slotsAvailable": 0,
+          "queueHeadSlotsNeeded": null,
+          "queueStatus": "saturated"
         },
         "environment": {
           "cargoTargetExternalized": true,
@@ -159,7 +161,7 @@
     },
     "verificationSummary": {
       "type": "object",
-      "required": ["rchSourceEnabled", "remoteOnlyRequired", "remoteOnlySafe", "healthyWorkerCount", "activeRemoteBuildCount", "queuedRemoteBuildCount", "slotsAvailable"],
+      "required": ["rchSourceEnabled", "remoteOnlyRequired", "remoteOnlySafe", "healthyWorkerCount", "activeRemoteBuildCount", "queuedRemoteBuildCount", "slotsAvailable", "queueHeadSlotsNeeded", "queueStatus"],
       "additionalProperties": false,
       "properties": {
         "rchSourceEnabled": {"type": "boolean"},
@@ -168,7 +170,9 @@
         "healthyWorkerCount": {"type": ["integer", "null"], "minimum": 0},
         "activeRemoteBuildCount": {"type": ["integer", "null"], "minimum": 0},
         "queuedRemoteBuildCount": {"type": ["integer", "null"], "minimum": 0},
-        "slotsAvailable": {"type": ["integer", "null"], "minimum": 0}
+        "slotsAvailable": {"type": ["integer", "null"], "minimum": 0},
+        "queueHeadSlotsNeeded": {"type": ["integer", "null"], "minimum": 0},
+        "queueStatus": {"type": ["string", "null"]}
       }
     },
     "environmentSummary": {

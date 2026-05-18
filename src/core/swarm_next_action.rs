@@ -84,6 +84,8 @@ pub struct SwarmNextActionVerificationSummary {
     pub active_remote_build_count: Option<u64>,
     pub queued_remote_build_count: Option<u64>,
     pub slots_available: Option<u64>,
+    pub queue_head_slots_needed: Option<u64>,
+    pub queue_status: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -275,6 +277,12 @@ fn verification_summary(brief: &SwarmBriefReport) -> SwarmNextActionVerification
         slots_available: rch
             .and_then(|report| report.queue_health.as_ref())
             .and_then(|queue| queue.slots_available),
+        queue_head_slots_needed: rch
+            .and_then(|report| report.queue_health.as_ref())
+            .and_then(|queue| queue.queue_head_slots_needed),
+        queue_status: rch
+            .and_then(|report| report.queue_health.as_ref())
+            .map(|queue| queue.status.clone()),
     }
 }
 
@@ -389,6 +397,7 @@ mod tests {
                 queued_count: 2,
                 active_count: 4,
                 slots_available: Some(0),
+                queue_head_slots_needed: Some(4),
                 status: "saturated".to_owned(),
             }),
             remote_only_required: true,
@@ -407,6 +416,11 @@ mod tests {
         assert_eq!(snapshot.verification.active_remote_build_count, Some(4));
         assert_eq!(snapshot.verification.queued_remote_build_count, Some(2));
         assert_eq!(snapshot.verification.slots_available, Some(0));
+        assert_eq!(snapshot.verification.queue_head_slots_needed, Some(4));
+        assert_eq!(
+            snapshot.verification.queue_status.as_deref(),
+            Some("saturated")
+        );
     }
 
     #[test]

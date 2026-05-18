@@ -30,7 +30,9 @@
       "healthyWorkerCount": null,
       "activeRemoteBuildCount": null,
       "queuedRemoteBuildCount": null,
-      "slotsAvailable": null
+      "slotsAvailable": null,
+      "queueHeadSlotsNeeded": null,
+      "queueStatus": null
     },
     "environment": {
       "cargoTargetExternalized": true,
