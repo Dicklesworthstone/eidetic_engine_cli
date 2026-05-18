@@ -340,4 +340,72 @@ mod tests {
         assert!(labels.contains("pack_dna"));
         assert!(!labels.contains("not_an_aggregation_label"));
     }
+
+    /// Synthetic-source-tree round trip: the walker must catch the
+    /// same-line form, the multi-line form, ignore variable-passed
+    /// arguments (no literal to extract), and skip doc-comment
+    /// examples. Build the fixture as a real temp directory so the
+    /// walker exercises its actual readdir/filter path.
+    #[test]
+    fn walker_finds_all_literal_forms_and_skips_variables_and_comments() {
+        let temp =
+            std::env::temp_dir().join(format!("ee_degraded_audit_fixture_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+
+        let same_line = "fn a() {\n\
+                         DegradationAggregationInput::new(\"label_same_line\", x, y, z, w);\n\
+                         }\n";
+        let multi_line = "fn b() {\n\
+                          DegradationAggregationInput::new(\n\
+                              \"label_multi_line\",\n\
+                              code,\n\
+                          );\n\
+                          }\n";
+        let variable_arg = "fn c(source: &str) {\n\
+                            DegradationAggregationInput::new(\n\
+                                source,\n\
+                                code,\n\
+                            );\n\
+                            }\n";
+        let doc_example = "/// DegradationAggregationInput::new(\"doc_only_label\", x);\n\
+                           // DegradationAggregationInput::new(\"line_comment_label\", x);\n\
+                           fn d() {}\n";
+
+        let nested = temp.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(temp.join("same.rs"), same_line).unwrap();
+        fs::write(nested.join("multi.rs"), multi_line).unwrap();
+        fs::write(temp.join("variable.rs"), variable_arg).unwrap();
+        fs::write(temp.join("docs.rs"), doc_example).unwrap();
+        fs::write(temp.join("ignored.txt"), same_line).unwrap();
+
+        let files = rust_files(&temp);
+        let labels = collect_literal_source_labels(&files);
+
+        assert!(
+            labels.contains("label_same_line"),
+            "expected same-line form to register, got: {labels:?}"
+        );
+        assert!(
+            labels.contains("label_multi_line"),
+            "expected multi-line form to register, got: {labels:?}"
+        );
+        assert!(
+            !labels.contains("doc_only_label"),
+            "doc comment example must not register, got: {labels:?}"
+        );
+        assert!(
+            !labels.contains("line_comment_label"),
+            "line comment example must not register, got: {labels:?}"
+        );
+        // Variable-passed args produce no literal — there's nothing to
+        // assert for them; success is the absence of a spurious entry.
+        assert!(
+            !labels.iter().any(|label| label == "source"),
+            "variable name must not be captured as a label"
+        );
+
+        let _ = fs::remove_dir_all(&temp);
+    }
 }
