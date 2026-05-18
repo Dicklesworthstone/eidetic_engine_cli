@@ -307,6 +307,69 @@ fn closure_lint_accepts_clean_implementation_and_honesty_sibling() -> TestResult
     )
 }
 
+// Regression for bd-37u08: close_reason_contains_abstention must scrub
+// false-positive abstention triggers before applying the regex. The five
+// patterns covered: 'non-abstention' (negation), '*_UNAVAILABLE_CODE' (literal
+// constant-pattern meta-reference), 'docs/degraded_code{s,_taxonomy}.md'
+// (path reference to the failure-mode docs), 'degraded {case,code,mode,entry}s'
+// (concept references), 'degraded_codes none' (RCH verifier status field),
+// and the lowercase '[a-z_]+_unavailable' fixture/code-name convention.
+//
+// All five forms appear together in a synthetic close_reason; the linter
+// must report 0 violations for that bead. A sixth fixture uses an actual
+// abstention phrase ("closed with a stub placeholder") to prove the
+// scrub doesn't disable the genuine abstention rule.
+#[test]
+fn closure_lint_scrubs_abstention_false_positives() -> TestResult {
+    let temp = closure_lint_worker_local_tempdir("closure-lint-abstention-scrub")?;
+    write_workspace(
+        temp.path(),
+        &[
+            // Synthetic bead with close_reason carrying every documented
+            // false-positive trigger. The linter must NOT flag it.
+            r#"{"id":"closed-false-positive","title":"[implements-surface:false-positive-surface] real implementation with hygiene-noisy close_reason","status":"closed","close_reason":"Real implementation: returns non-abstention payloads. Documented degraded codes in docs/degraded_code_taxonomy.md and docs/degraded_codes.md, with named entries cass_unavailable and preflight_patterns_unavailable carrying full fixtures. Covered degraded cases and degraded modes in the integration suite. RCH remote proof: 9 tests passed, degraded_codes none. No *_UNAVAILABLE_CODE constant precedent existed for this surface.","labels":["implements-surface:false-positive-surface"]}"#,
+            // Sibling that legitimately abstains; proves the scrub did not
+            // disable the rule globally.
+            r#"{"id":"closed-real-abstention","title":"[implements-surface:real-abstention-surface] closed with stub language","status":"closed","close_reason":"closed with a stub placeholder","labels":["implements-surface:real-abstention-surface"]}"#,
+        ],
+        "",
+        &["false-positive-surface", "real-abstention-surface"],
+    )?;
+
+    let (output, report) = run_linter(temp.path())?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "linter must still flag the genuine abstention sibling\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    let keys = violation_keys(&report)?;
+    let abstention_violations: Vec<_> = keys
+        .iter()
+        .filter(|(_, _, reason)| reason == "close_reason contains abstention language")
+        .collect();
+    ensure_eq(
+        abstention_violations.len(),
+        1,
+        "exactly one bead should fail abstention check (the genuine one)",
+    )?;
+    ensure_eq(
+        abstention_violations[0].0.as_str(),
+        "closed-real-abstention",
+        "the genuine abstention fixture must be the only one flagged",
+    )?;
+    for (bead, _, reason) in &keys {
+        if bead == "closed-false-positive" && reason == "close_reason contains abstention language"
+        {
+            return Err(
+                "bd-37u08 regression: false-positive fixture flagged as abstention".to_owned(),
+            );
+        }
+    }
+    Ok(())
+}
+
 // CLAUDE.md lists three canonical golden artifact locations: tests/golden/*.snap,
 // tests/snapshots/*.snap (insta), and tests/fixtures/golden/**. The closure
 // linter must accept a real insta snapshot under tests/snapshots/ as evidence
