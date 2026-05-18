@@ -120,20 +120,14 @@ fn redact_paths_in_content(content: &str) -> String {
                                 output.push_str(REDACTED_PATH_PLACEHOLDER);
                                 cursor += prefix.len();
                                 while cursor < line.len() {
-                                    let next = line[cursor..]
-                                        .chars()
-                                        .next()
-                                        .unwrap_or('\0');
+                                    let next = line[cursor..].chars().next().unwrap_or('\0');
                                     if path_redaction_boundary(next) {
                                         break;
                                     }
                                     cursor += next.len_utf8();
                                 }
                             } else {
-                                let c = remaining
-                                    .chars()
-                                    .next()
-                                    .unwrap_or('\0');
+                                let c = remaining.chars().next().unwrap_or('\0');
                                 output.push(c);
                                 cursor += c.len_utf8();
                             }
