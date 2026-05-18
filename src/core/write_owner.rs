@@ -43,6 +43,8 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::cx::Cx;
@@ -70,6 +72,9 @@ pub const WRITE_SPOOL_RECOVERY_STATE_PATH: &str = ".ee/write-spool/recovery-stat
 
 const WRITE_SPOOL_RECOVERY_STATE_CLEAN: &str = "clean";
 const WRITE_SPOOL_RECOVERY_STATE_REPLAY_REQUIRED: &str = "uncommitted_write_replay_required";
+const WRITE_SPOOL_RECOVERY_TEMP_CREATE_ATTEMPTS: usize = 16;
+
+static WRITE_SPOOL_RECOVERY_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Default channel capacity for write requests.
 pub const DEFAULT_CHANNEL_CAPACITY: usize = 64;
@@ -182,24 +187,64 @@ fn write_recovery_state(workspace_path: &Path, state: &str) -> std::io::Result<(
         "{{\"schema\":\"{WRITE_SPOOL_RECOVERY_STATE_SCHEMA_V1}\",\"state\":\"{state}\"}}\n"
     );
 
-    let mut temp_path = path.clone();
-    temp_path.set_extension("tmp");
-    ensure_recovery_state_path_has_no_symlink_components(&temp_path)?;
-    ensure_recovery_state_temp_path_is_regular_or_missing(&temp_path)?;
+    for _ in 0..WRITE_SPOOL_RECOVERY_TEMP_CREATE_ATTEMPTS {
+        let temp_path = unique_recovery_state_temp_path(&path)?;
+        ensure_recovery_state_path_has_no_symlink_components(&temp_path)?;
 
-    {
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)?;
-        file.write_all(payload.as_bytes())?;
-        file.sync_data()?;
+        {
+            use std::io::Write;
+            let open_result = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path);
+            let mut file = match open_result {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            };
+            file.write_all(payload.as_bytes())?;
+            file.sync_data()?;
+        }
+
+        publish_recovery_state_temp_file(&path, &temp_path)?;
+        return Ok(());
     }
 
-    publish_recovery_state_temp_file(&path, &temp_path)?;
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "could not create unique write-spool recovery temp path for {} after {WRITE_SPOOL_RECOVERY_TEMP_CREATE_ATTEMPTS} attempts",
+            path.display()
+        ),
+    ))
+}
 
-    Ok(())
+fn unique_recovery_state_temp_path(path: &Path) -> io::Result<PathBuf> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "write-spool recovery state path has no parent: {}",
+                path.display()
+            ),
+        )
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "write-spool recovery state path has no file name: {}",
+                path.display()
+            ),
+        )
+    })?;
+    let counter = WRITE_SPOOL_RECOVERY_TEMP_COUNTER.fetch_add(1, Ordering::AcqRel);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let mut temp_name = file_name.to_os_string();
+    temp_name.push(format!(".{}.{}.{}.tmp", std::process::id(), counter, nanos));
+    Ok(parent.join(temp_name))
 }
 
 fn publish_recovery_state_temp_file(path: &Path, temp_path: &Path) -> io::Result<()> {
@@ -229,27 +274,6 @@ fn ensure_recovery_state_created_temp_path_is_regular(path: &Path) -> io::Result
                 path.display()
             ),
         )),
-        Err(error) => Err(error),
-    }
-}
-
-fn ensure_recovery_state_temp_path_is_regular_or_missing(path: &Path) -> io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!(
-                "write-spool recovery temp path already exists: {}",
-                path.display()
-            ),
-        )),
-        Ok(_) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "write-spool recovery temp path is not a file: {}",
-                path.display()
-            ),
-        )),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
 }
@@ -2630,7 +2654,7 @@ mod tests {
     }
 
     #[test]
-    fn write_spool_recovery_state_rejects_existing_temp_without_truncating() -> Result<(), String> {
+    fn write_spool_recovery_state_ignores_legacy_temp_without_truncating() -> Result<(), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let marker_path = write_spool_recovery_state_path(temp.path());
         let parent = marker_path
@@ -2641,22 +2665,44 @@ mod tests {
         temp_path.set_extension("tmp");
         fs::write(&temp_path, "keep me").map_err(|error| error.to_string())?;
 
-        let error =
-            mark_write_replay_required(temp.path()).expect_err("existing temp should be rejected");
-
-        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-        assert!(
-            error.to_string().contains("already exists"),
-            "error should explain the stale temp path"
-        );
+        mark_write_replay_required(temp.path()).map_err(|error| error.to_string())?;
         assert_eq!(
             fs::read_to_string(&temp_path).map_err(|error| error.to_string())?,
             "keep me",
             "recovery temp path must not be truncated"
         );
         assert!(
-            !marker_path.exists(),
-            "final recovery marker must not be written after temp collision"
+            workspace_write_replay_required(temp.path()),
+            "final recovery marker should still be published through a unique temp path"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn write_spool_recovery_state_allows_concurrent_marker_writes() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = std::sync::Arc::new(temp.path().to_path_buf());
+        let start = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let handles = (0..16)
+            .map(|_| {
+                let workspace_path = std::sync::Arc::clone(&workspace_path);
+                let start = std::sync::Arc::clone(&start);
+                std::thread::spawn(move || -> Result<(), String> {
+                    start.wait();
+                    mark_write_replay_required(&workspace_path).map_err(|error| error.to_string())
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|_| "recovery marker writer panicked".to_owned())??;
+        }
+        assert!(
+            workspace_write_replay_required(temp.path()),
+            "concurrent marker writers should leave replay-required state"
         );
 
         Ok(())
@@ -2757,7 +2803,8 @@ mod tests {
     }
 
     #[test]
-    fn write_spool_recovery_state_rejects_non_regular_temp_before_write() -> Result<(), String> {
+    fn write_spool_recovery_state_ignores_non_regular_legacy_temp_before_write()
+    -> Result<(), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let marker_path = write_spool_recovery_state_path(temp.path());
         let parent = marker_path
@@ -2768,24 +2815,17 @@ mod tests {
         temp_path.set_extension("tmp");
         fs::create_dir_all(&temp_path).map_err(|error| error.to_string())?;
 
-        let error = mark_write_replay_required(temp.path())
-            .expect_err("non-regular temp marker path should be rejected");
-
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert!(
-            error.to_string().contains("temp path is not a file"),
-            "error should explain the non-file temp path"
-        );
+        mark_write_replay_required(temp.path()).map_err(|error| error.to_string())?;
         assert!(
             fs::symlink_metadata(&temp_path)
                 .map_err(|error| error.to_string())?
                 .file_type()
                 .is_dir(),
-            "recovery temp path must remain a directory"
+            "legacy recovery temp path must remain a directory"
         );
         assert!(
-            !marker_path.exists(),
-            "final recovery marker must not be written after temp path preflight fails"
+            workspace_write_replay_required(temp.path()),
+            "final recovery marker should still be published through a unique temp path"
         );
 
         Ok(())
