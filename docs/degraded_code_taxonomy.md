@@ -130,6 +130,7 @@ Current conventions:
 | `curate_validate` | `ee curate validate` candidate-validation degradation. |
 | `db_status` | `ee db status` migration or sidecar-file degradation. |
 | `dependency_contract` | `ee diag dependencies` dependency-contract degradation. |
+| `daemon_status` | `ee daemon status` foreground-supervisor capability degradation. |
 | `qos_registry` | QoS active-lane registry read or integrity degradation. |
 | `economy_prune` | `ee economy prune-plan` memory-economy recommendation degradation. |
 | `economy_report` | `ee economy report` memory-economy metric degradation. |

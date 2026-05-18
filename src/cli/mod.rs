@@ -21154,22 +21154,8 @@ where
     #[cfg(not(feature = "graph"))]
     {
         let _ = stderr;
-        let report = serde_json::json!({
-            "schema": crate::graph::gomory_hu::PROXIMITY_SCHEMA_V1,
-            "memoryA": args.memory_a,
-            "memoryB": args.memory_b,
-            "snapshotVersion": 0,
-            "minCut": null,
-            "interpretation": "graph_feature_disabled",
-            "treePath": null,
-            "degraded": [{
-                "code": "graph_feature_disabled",
-                "severity": "medium",
-                "message": "Proximity requires graph feature support.",
-                "repair": "Build or run ee with --features graph."
-            }]
-        });
-        write_stdout(stdout, &(report.to_string() + "\n"))
+        let report = proximity_feature_disabled_report(args);
+        write_proximity_report(cli, &report, stdout)
     }
 }
 
@@ -46779,6 +46765,11 @@ default_half_life_days = 45
                 "ee config set {GRAPH_FEATURE_PROXIMITY_ENABLED_KEY} true"
             )),
             "disabled proximity repair",
+        )?;
+        ensure_equal(
+            &json["degraded"][0]["sources"],
+            &serde_json::json!(["gomory_hu_proximity"]),
+            "disabled proximity degraded source",
         )
     }
 

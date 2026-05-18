@@ -7,6 +7,9 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
+use crate::core::degraded_aggregation::{
+    AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
+};
 use crate::models::DomainError;
 use crate::steward::{DaemonForegroundOptions, DaemonForegroundReport, JobRunResult, JobType};
 
@@ -177,6 +180,7 @@ impl DaemonStatusReport {
     #[must_use]
     pub fn data_json(&self) -> JsonValue {
         let spool_config = crate::core::WriteSpoolConfig::default();
+        let degraded = daemon_status_degraded();
         json!({
             "schema": DAEMON_STATUS_SCHEMA_V1,
             "command": "daemon status",
@@ -226,14 +230,30 @@ impl DaemonStatusReport {
                 "code": "daemon_background_mode_unimplemented",
                 "capabilitiesCommand": "ee capabilities --json"
             },
-            "degraded": [{
-                "code": "daemon_background_mode_unimplemented",
-                "severity": "low",
-                "message": "Only bounded foreground daemon mode is available; background daemonization is not implemented.",
-                "repair": "Run `ee daemon --foreground --once --json` for bounded maintenance."
-            }],
+            "degraded": degraded,
         })
     }
+}
+
+fn daemon_status_degraded() -> Vec<AggregatedDegradation> {
+    aggregate_daemon_status_degraded([daemon_background_mode_degradation_input()])
+}
+
+fn aggregate_daemon_status_degraded<I>(entries: I) -> Vec<AggregatedDegradation>
+where
+    I: IntoIterator<Item = DegradationAggregationInput>,
+{
+    aggregate_degraded_entries(entries)
+}
+
+fn daemon_background_mode_degradation_input() -> DegradationAggregationInput {
+    DegradationAggregationInput::new(
+        "daemon_status",
+        "daemon_background_mode_unimplemented",
+        "low",
+        "Only bounded foreground daemon mode is available; background daemonization is not implemented.",
+        "Run `ee daemon --foreground --once --json` for bounded maintenance.",
+    )
 }
 
 #[must_use]
@@ -753,6 +773,32 @@ mod tests {
             status.data_json()["running"].as_bool(),
             Some(false),
             "running flag",
+        )
+    }
+
+    #[test]
+    fn daemon_status_degraded_entries_are_aggregated() -> TestResult {
+        let degraded = aggregate_daemon_status_degraded([
+            daemon_background_mode_degradation_input(),
+            daemon_background_mode_degradation_input(),
+        ]);
+        let value = serde_json::to_value(&degraded).map_err(|error| error.to_string())?;
+
+        ensure(degraded.len(), 1, "aggregated daemon degraded count")?;
+        ensure(
+            value[0]["code"].as_str(),
+            Some("daemon_background_mode_unimplemented"),
+            "daemon degraded code",
+        )?;
+        ensure(
+            value[0]["severity"].as_str(),
+            Some("low"),
+            "daemon severity",
+        )?;
+        ensure(
+            value[0]["sources"].clone(),
+            json!(["daemon_status"]),
+            "daemon degraded source",
         )
     }
 
