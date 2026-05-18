@@ -97,11 +97,22 @@ plot p99(lock_wait_ms) over time
 
 ## Wiring status
 
-This page documents the emission **contract**. Call-site wiring
-into the F2 algorithm wrappers and F1 snapshot refresh path is
-tracked as a follow-up bead (see the bd-bife.22 progress
-comment); until that wiring lands, the events fire only from tests
-and any code that calls the emission helpers directly.
+This page documents the emission **contract** and the current
+production call-site wiring:
+
+- F2 algorithm wrappers emit `ee.graph.algorithm.compute`,
+  `ee.graph.algorithm.timeout`, and `ee.graph.algorithm.cancelled`.
+- The algorithm-result cache emits `ee.graph.cache.hit`,
+  `ee.graph.cache.miss`, and TTL-driven `ee.graph.cache.evict`.
+- Snapshot persistence emits `ee.graph.snapshot.refresh`, and emits
+  `ee.graph.cache.evict` with `reason = "snapshot_archived"` when a
+  new graph snapshot evicts stale `graph_algorithm_results` rows tied
+  to older snapshots.
+
+The `operator_request` eviction reason is reserved in the public enum
+and docs, but no production operator-request cache-eviction command is
+currently wired to emit it. That call site remains bd-2inbn follow-up
+work.
 
 ## Versioning
 
