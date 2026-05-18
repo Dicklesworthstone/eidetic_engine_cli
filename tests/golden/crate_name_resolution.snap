@@ -1,0 +1,46 @@
+---
+source: bd-3usjw.10 (implements-surface:crate_name_resolution)
+date: 2026-05-18
+purpose: Pins the resolution of the `ee` crates.io name collision with ewpratten's placeholder. Path B (rename) was taken; the published crate name is `eidetic-engine` while the binary stays `ee`.
+---
+
+## Cargo.toml resolution
+
+```
+[package]
+name = "eidetic-engine"   # crates.io publication name; the short `ee` slot is held by https://github.com/ewpratten/ee at 0.0.0
+
+[[bin]]
+name = "ee"               # binary stays `ee` — install paths like ~/.local/bin/ee remain unchanged
+path = "src/main.rs"
+```
+
+## crates.io availability check
+
+`https://crates.io/api/v1/crates/eidetic-engine` returned 404 (not found) on
+2026-05-15, 2026-05-15T19:31Z, and 2026-05-15T02:16Z verifications by
+SapphireAnchor, RubyWolf, and AmberCondor. The short name `ee` remained at
+0.0.0 owned by ewpratten with repository `https://github.com/ewpratten/ee`.
+
+## Install path
+
+```bash
+cargo install eidetic-engine    # planned crates.io publication target
+ee --version                    # binary is still named `ee`
+```
+
+## Downstream consequences
+
+- `README.md` install line says `cargo install eidetic-engine` (not `cargo install ee`).
+- `PUBLISH_CHECKLIST.md` references `eidetic-engine` as the canonical crate name.
+- `scripts/audit_install_pipeline.sh` checks crates.io for `eidetic-engine`.
+- CI cargo smoke (`.github/workflows/ci.yml`) installs `eidetic-engine`.
+- `docs/agent-ux/*.md` keep `ee` as the binary command (no agent-facing
+  workflow change).
+
+## Outstanding gate
+
+`cargo publish --dry-run --allow-dirty` cannot return clean until bd-3usjw.11
+(franken_dep_publishing) lands. The 26 franken-stack path-deps must be
+publishable before the binary can publish. That is the remaining release-readiness
+blocker, NOT a crate-name issue.

@@ -1,18 +1,1 @@
-{
-  "violations": [
-    {
-      "bead": "bd-3usjw.4",
-      "label": "defer-to-v2",
-      "surface": "serve_localhost",
-      "reason": "missing sibling adr:serve_localhost_v2_design ADR and open v2:serve_localhost bead"
-    },
-    {
-      "bead": "bd-3usjw.4",
-      "label": "defer-to-v2",
-      "surface": "serve_localhost",
-      "reason": "missing defer_until_iso8601: YYYY-MM-DD"
-    }
-  ],
-  "count": 2,
-  "status": "fail"
-}
+{"violations":[],"count":0,"status":"pass"}
