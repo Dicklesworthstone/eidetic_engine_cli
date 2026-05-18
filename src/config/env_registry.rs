@@ -14,6 +14,12 @@ pub enum EnvVar {
     AgentName,
     /// `EE_AGENT_MODE`
     AgentMode,
+    /// `EE_AUDIT_LANE_BATCH_MAX`
+    AuditLaneBatchMax,
+    /// `EE_AUDIT_LANE_CAPACITY`
+    AuditLaneCapacity,
+    /// `EE_AUDIT_LANE_FLUSH_MS`
+    AuditLaneFlushMs,
     /// `EE_CASS_BINARY`
     CassBinary,
     /// `EE_DATABASE_PATH`
@@ -110,6 +116,8 @@ pub enum EnvVar {
     WorkspaceHygieneLocalMachinePatterns,
     /// `EE_WORKSPACE_HYGIENE_SCRATCH_PATTERNS`
     WorkspaceHygieneScratchPatterns,
+    /// `EE_WAL_CHECKPOINT_BYTES_THRESHOLD`
+    WalCheckpointBytesThreshold,
     /// `EE_WORKSPACE`
     Workspace,
     /// `EE_WORKSPACE_CLOSE_DRAIN_TIMEOUT_S`
@@ -125,6 +133,9 @@ impl EnvVar {
         &[
             Self::AgentName,
             Self::AgentMode,
+            Self::AuditLaneBatchMax,
+            Self::AuditLaneCapacity,
+            Self::AuditLaneFlushMs,
             Self::CassBinary,
             Self::DatabasePath,
             Self::DemoEvidenceRoot,
@@ -173,6 +184,7 @@ impl EnvVar {
             Self::WorkspaceHygieneGeneratedPatterns,
             Self::WorkspaceHygieneLocalMachinePatterns,
             Self::WorkspaceHygieneScratchPatterns,
+            Self::WalCheckpointBytesThreshold,
             Self::Workspace,
             Self::WorkspaceCloseDrainTimeoutSeconds,
             Self::WorkspaceRegistry,
@@ -185,6 +197,9 @@ impl EnvVar {
         match self {
             Self::AgentName => "EE_AGENT_NAME",
             Self::AgentMode => "EE_AGENT_MODE",
+            Self::AuditLaneBatchMax => "EE_AUDIT_LANE_BATCH_MAX",
+            Self::AuditLaneCapacity => "EE_AUDIT_LANE_CAPACITY",
+            Self::AuditLaneFlushMs => "EE_AUDIT_LANE_FLUSH_MS",
             Self::CassBinary => "EE_CASS_BINARY",
             Self::DatabasePath => "EE_DATABASE_PATH",
             Self::DemoEvidenceRoot => "EE_DEMO_EVIDENCE_ROOT",
@@ -237,6 +252,7 @@ impl EnvVar {
                 "EE_WORKSPACE_HYGIENE_LOCAL_MACHINE_PATTERNS"
             }
             Self::WorkspaceHygieneScratchPatterns => "EE_WORKSPACE_HYGIENE_SCRATCH_PATTERNS",
+            Self::WalCheckpointBytesThreshold => "EE_WAL_CHECKPOINT_BYTES_THRESHOLD",
             Self::Workspace => "EE_WORKSPACE",
             Self::WorkspaceCloseDrainTimeoutSeconds => "EE_WORKSPACE_CLOSE_DRAIN_TIMEOUT_S",
             Self::WorkspaceRegistry => "EE_WORKSPACE_REGISTRY",
@@ -249,6 +265,14 @@ impl EnvVar {
         match self {
             Self::AgentName => "Identify the current agent for scoped memory retrieval.",
             Self::AgentMode => "Use agent-oriented output defaults.",
+            Self::AuditLaneBatchMax => "Override the audit-lane writer batch size before flushing.",
+            Self::AuditLaneCapacity => "Override the audit-lane producer queue capacity.",
+            Self::AuditLaneFlushMs => {
+                "Override the audit-lane time-based flush interval in milliseconds."
+            }
+            Self::WalCheckpointBytesThreshold => {
+                "Override the WAL checkpoint warning threshold in bytes."
+            }
             Self::CassBinary => "Override the trusted cass import binary path.",
             Self::DatabasePath => "Override the configured storage database path.",
             Self::DemoEvidenceRoot => "Override the demo evidence storage root.",
@@ -349,6 +373,9 @@ impl EnvVar {
         match self {
             Self::MeshMode => Some("off"),
             Self::MeshEnabled => Some("false"),
+            Self::AuditLaneBatchMax => Some("64"),
+            Self::AuditLaneCapacity => Some("1024"),
+            Self::AuditLaneFlushMs => Some("5"),
             Self::TailscaleProbeTimeoutMs => Some("1500"),
             Self::TailscaleDiscoveryMode => Some("service_tag"),
             Self::TailscaleRespondMode => Some("service_tag"),
@@ -356,6 +383,7 @@ impl EnvVar {
             Self::GraphWitnessesRetentionDays => Some("30"),
             Self::ReadPoolAcquireTimeoutMs => Some("5000"),
             Self::ReadPoolMaxPinSeconds => Some("30"),
+            Self::WalCheckpointBytesThreshold => Some("67108864"),
             Self::WorkspaceCloseDrainTimeoutSeconds => Some("5"),
             Self::IndexPublishLockRetryAttempts => Some("200"),
             Self::RememberCurationSyncBudgetMs => Some("50"),
@@ -403,6 +431,9 @@ impl EnvVar {
             | Self::TailscaleDiscoveryMode
             | Self::TailscaleRespondMode => "mesh",
             Self::HarmfulBurstWindowSeconds
+            | Self::AuditLaneBatchMax
+            | Self::AuditLaneCapacity
+            | Self::AuditLaneFlushMs
             | Self::GraphWitnessesRetentionDays
             | Self::HarmfulPerSourcePerHour
             | Self::L2PackCacheBytes
@@ -415,6 +446,7 @@ impl EnvVar {
             | Self::ReadPoolIdleTimeoutSeconds
             | Self::ReadPoolMaxPinSeconds
             | Self::ReadPoolSize
+            | Self::WalCheckpointBytesThreshold
             | Self::WorkspaceCloseDrainTimeoutSeconds
             | Self::DisableRememberSearchNeighbors
             | Self::IndexPublishLockRetryAttempts

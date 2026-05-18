@@ -12,6 +12,9 @@ must not expose their current value.
 |---|---|---|---|---|---|
 | `EE_AGENT_NAME` | output | string | none | Identify the current agent for scoped memory retrieval. | Used by agent-aware memory and context surfaces. |
 | `EE_AGENT_MODE` | output | boolean flag | none | Use agent-oriented output defaults. | Optimizes renderer auto-detection for agent consumption. |
+| `EE_AUDIT_LANE_BATCH_MAX` | tuning | integer count | `64` | Override the audit-lane writer batch size before flushing. | Used by the audit-lane writer once foreground audit emission is enabled; preserving the default keeps existing direct insert behavior unchanged. |
+| `EE_AUDIT_LANE_CAPACITY` | tuning | integer count | `1024` | Override the audit-lane producer queue capacity. | Capacity is normalized by the runtime config before queue construction; full queues report `audit_backpressure` instead of silently dropping events. |
+| `EE_AUDIT_LANE_FLUSH_MS` | tuning | integer milliseconds | `5` | Override the audit-lane time-based flush interval in milliseconds. | Bounds how long the audit writer waits before flushing a partial batch. |
 | `EE_CASS_BINARY` | integration | absolute path | none | Override the trusted cass import binary path. | Used before config and trusted PATH lookup for CASS import discovery. |
 | `EE_DATABASE_PATH` | paths | path | none | Override the configured storage database path. | Equivalent to overriding the storage database path in config. |
 | `EE_DEMO_EVIDENCE_ROOT` | paths | path | none | Override the demo evidence storage root. | Used by demo evidence capture surfaces. |
@@ -40,8 +43,8 @@ must not expose their current value.
 | `EE_PREFLIGHT_BYPASS_SECRET` | policy | secret string | none | Supply preflight bypass secret material. | Capabilities must never expose this current value. |
 | `EE_PROFILE` | tuning | profile name | none | Override the default context pack profile. | Applies when pack/context profile is not specified explicitly. |
 | `EE_PPR_CACHE_ENTRIES` | tuning | integer count | `4096` | Override the in-process PPR prefetch cache entry cap. | Set to `0` to disable prefetch entries while keeping the algorithm result cache intact. |
-| `EE_READ_POOL_ACQUIRE_TIMEOUT_MS` | tuning | integer milliseconds | `5000` | Override the read-side connection pool acquire timeout in milliseconds. | When all pooled reads are active, context waits this long before opening a one-shot ad-hoc read connection. |
 | `EE_READ_POOL_DISABLE_PIN` | tuning | boolean flag | none | Disable read-side snapshot pinning. | Inverts `[storage.read_pool].pin_snapshot` for read-heavy status/context paths. |
+| `EE_READ_POOL_ACQUIRE_TIMEOUT_MS` | tuning | integer milliseconds | `5000` | Override the read-side connection pool acquire timeout in milliseconds. | When all pooled reads are active, context waits this long before opening a one-shot ad-hoc read connection. |
 | `EE_READ_POOL_IDLE_TIMEOUT_S` | tuning | integer seconds | none | Override the read-side connection pool idle timeout in seconds. | Maps to `[storage.read_pool].idle_timeout_seconds`; idle pooled handles are closed after the configured age. |
 | `EE_READ_POOL_MAX_PIN_SECONDS` | tuning | integer seconds | `30` | Override the read-side snapshot pin maximum lifetime in seconds. | Maps to `[storage.read_pool].max_pin_duration_seconds`; expired pins are reported through the snapshot-pin degraded-code family. |
 | `EE_READ_POOL_SIZE` | tuning | integer count | none | Override the read-side connection pool size. | Maps to `[storage.read_pool].size`; pool construction normalizes zero to one connection. |
@@ -60,6 +63,7 @@ must not expose their current value.
 | `EE_WORKSPACE_HYGIENE_GENERATED_PATTERNS` | policy | comma-separated path matchers | none | Add local workspace-hygiene generated-artifact path patterns. | Matching paths classify as `generated` / `do_not_commit` unless secret-risk evidence overrides first. |
 | `EE_WORKSPACE_HYGIENE_LOCAL_MACHINE_PATTERNS` | policy | comma-separated path matchers | none | Add local workspace-hygiene machine-local artifact path patterns. | Matching paths classify as `local_machine` / `do_not_commit`; use for host-specific files only. |
 | `EE_WORKSPACE_HYGIENE_SCRATCH_PATTERNS` | policy | comma-separated path matchers | none | Add local workspace-hygiene scratch-artifact path patterns. | Matching paths classify as `scratch` / `do_not_commit`; keep patterns narrow and repo-relative. |
+| `EE_WAL_CHECKPOINT_BYTES_THRESHOLD` | tuning | integer bytes | `67108864` | Override the WAL checkpoint warning threshold in bytes. | `ee status --json` reports `wal_growth_exceeds_threshold` once `data.wal.bytes` is above this value. |
 | `EE_WORKSPACE` | paths | path | none | Override workspace root discovery. | Used after explicit `--workspace` and before cwd walk-up. |
 | `EE_WORKSPACE_CLOSE_DRAIN_TIMEOUT_S` | tuning | integer seconds | `5` | Override workspace-close wait time for read snapshot pins in seconds. | Bounds how long workspace-close lifecycle waits for active SnapshotPins before force-poisoning remaining read snapshots. |
 | `EE_WORKSPACE_REGISTRY` | paths | path | none | Override the workspace alias registry database path. | Controls where workspace aliases are stored. |
