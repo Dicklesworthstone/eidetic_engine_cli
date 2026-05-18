@@ -20,12 +20,13 @@
 //! all three modes — denylisted peers are never probed and never
 //! receive a response.
 //!
-//! This module owns the **pure decision logic** and the TOML
-//! allowlist/denylist file loaders. The CLI surface (`ee mesh
-//! discovery-policy [set|allow|deny|--explain]`) and the env-var
-//! plumbing (`EE_TAILSCALE_DISCOVERY_MODE`, `EE_TAILSCALE_RESPOND_MODE`)
-//! land in follow-up slices to avoid touching `src/cli/mod.rs` and
-//! `src/config/env_registry.rs` while other agents hold reservations.
+//! This module owns the **pure decision logic**, the TOML
+//! allowlist/denylist file loaders, and the env-var reader for
+//! `EE_TAILSCALE_DISCOVERY_MODE` / `EE_TAILSCALE_RESPOND_MODE`
+//! (registered in `src/config/env_registry.rs`). The CLI surface
+//! (`ee mesh discovery-policy [set|allow|deny|--explain]`) lands in
+//! a follow-up slice to avoid touching `src/cli/mod.rs` while other
+//! agents hold reservations.
 //!
 //! The SRR6.46.6 hello-handshake responder integration and the
 //! SRR6.46.2 autodiscovery integration both consume this module's
@@ -34,9 +35,12 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::{fs, io};
 
 use serde::{Deserialize, Serialize};
+
+use crate::config::env_registry::{self, EnvVar};
 
 /// JSON schema identifier for the `ee mesh discovery-policy --json`
 /// surface. Held here as the source-of-truth constant so the renderer
@@ -102,6 +106,91 @@ impl DiscoveryMode {
     #[must_use]
     pub const fn default_mode() -> Self {
         Self::ServiceTag
+    }
+
+    /// Read [`EnvVar::TailscaleDiscoveryMode`] and parse it through
+    /// [`FromStr`]. Returns the registry-defined default (`service_tag`)
+    /// when the variable is unset or carries an unknown value. The
+    /// `unknown_value` callback receives the raw string for
+    /// degraded-code reporting; pass a no-op closure when only the mode
+    /// matters.
+    #[must_use]
+    pub fn from_env_discovery<F>(on_unknown: F) -> Self
+    where
+        F: FnOnce(&str),
+    {
+        Self::from_env_var(EnvVar::TailscaleDiscoveryMode, on_unknown)
+    }
+
+    /// Symmetric reader for [`EnvVar::TailscaleRespondMode`].
+    #[must_use]
+    pub fn from_env_respond<F>(on_unknown: F) -> Self
+    where
+        F: FnOnce(&str),
+    {
+        Self::from_env_var(EnvVar::TailscaleRespondMode, on_unknown)
+    }
+
+    fn from_env_var<F>(var: EnvVar, on_unknown: F) -> Self
+    where
+        F: FnOnce(&str),
+    {
+        Self::from_raw_with_default(env_registry::read(var).as_deref(), on_unknown)
+    }
+
+    /// Pure helper: given an already-read raw value (or `None`), return
+    /// the resolved mode, invoking `on_unknown` if the value is set but
+    /// unparseable. Kept private; exposed only to unit tests so the env
+    /// wrapper has a deterministic, env-free verification path.
+    #[must_use]
+    pub(crate) fn from_raw_with_default<F>(raw: Option<&str>, on_unknown: F) -> Self
+    where
+        F: FnOnce(&str),
+    {
+        let Some(raw) = raw else {
+            return Self::default_mode();
+        };
+        match Self::from_str(raw) {
+            Ok(mode) => mode,
+            Err(_) => {
+                on_unknown(raw);
+                Self::default_mode()
+            }
+        }
+    }
+}
+
+/// Error returned by [`DiscoveryMode::from_str`] when the raw token
+/// does not match one of the three canonical lowercase modes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseDiscoveryModeError {
+    pub raw: String,
+}
+
+impl std::fmt::Display for ParseDiscoveryModeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unknown discovery mode {:?}; expected one of service_tag, auto_admit, allowlist",
+            self.raw
+        )
+    }
+}
+
+impl std::error::Error for ParseDiscoveryModeError {}
+
+impl FromStr for DiscoveryMode {
+    type Err = ParseDiscoveryModeError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim() {
+            "service_tag" => Ok(Self::ServiceTag),
+            "auto_admit" => Ok(Self::AutoAdmit),
+            "allowlist" => Ok(Self::Allowlist),
+            other => Err(ParseDiscoveryModeError {
+                raw: other.to_owned(),
+            }),
+        }
     }
 }
 
@@ -575,6 +664,70 @@ mod tests {
         assert_eq!(DiscoveryMode::default(), DiscoveryMode::ServiceTag);
         assert_eq!(DiscoveryMode::default_mode(), DiscoveryMode::ServiceTag);
         assert_eq!(DiscoveryMode::default().as_str(), "service_tag");
+    }
+
+    #[test]
+    fn discovery_mode_from_str_accepts_three_canonical_tokens() {
+        assert_eq!(
+            DiscoveryMode::from_str("service_tag").expect("service_tag parses"),
+            DiscoveryMode::ServiceTag
+        );
+        assert_eq!(
+            DiscoveryMode::from_str("auto_admit").expect("auto_admit parses"),
+            DiscoveryMode::AutoAdmit
+        );
+        assert_eq!(
+            DiscoveryMode::from_str("allowlist").expect("allowlist parses"),
+            DiscoveryMode::Allowlist
+        );
+    }
+
+    #[test]
+    fn discovery_mode_from_str_trims_surrounding_whitespace() {
+        assert_eq!(
+            DiscoveryMode::from_str("  auto_admit\n").expect("trim parses"),
+            DiscoveryMode::AutoAdmit
+        );
+    }
+
+    #[test]
+    fn discovery_mode_from_str_rejects_unknown_token() {
+        let err = DiscoveryMode::from_str("AUTO_ADMIT").expect_err("uppercase rejected");
+        assert_eq!(err.raw, "AUTO_ADMIT");
+        let err = DiscoveryMode::from_str("anything").expect_err("unknown rejected");
+        assert_eq!(err.raw, "anything");
+        let display = format!("{err}");
+        assert!(display.contains("service_tag"), "{display}");
+        assert!(display.contains("auto_admit"), "{display}");
+        assert!(display.contains("allowlist"), "{display}");
+    }
+
+    #[test]
+    fn discovery_mode_from_raw_missing_falls_back_to_default() {
+        let mut unknown_seen = String::new();
+        let mode = DiscoveryMode::from_raw_with_default(None, |raw| unknown_seen.push_str(raw));
+        assert_eq!(mode, DiscoveryMode::ServiceTag);
+        assert!(unknown_seen.is_empty(), "no on_unknown when value unset");
+    }
+
+    #[test]
+    fn discovery_mode_from_raw_valid_returns_parsed_without_calling_on_unknown() {
+        let mut unknown_seen = String::new();
+        let mode = DiscoveryMode::from_raw_with_default(Some("allowlist"), |raw| {
+            unknown_seen.push_str(raw);
+        });
+        assert_eq!(mode, DiscoveryMode::Allowlist);
+        assert!(unknown_seen.is_empty(), "on_unknown not called on valid");
+    }
+
+    #[test]
+    fn discovery_mode_from_raw_invalid_calls_on_unknown_and_falls_back() {
+        let mut unknown_seen = String::new();
+        let mode = DiscoveryMode::from_raw_with_default(Some("AUTO_ADMIT"), |raw| {
+            unknown_seen.push_str(raw);
+        });
+        assert_eq!(mode, DiscoveryMode::ServiceTag);
+        assert_eq!(unknown_seen, "AUTO_ADMIT");
     }
 
     #[test]

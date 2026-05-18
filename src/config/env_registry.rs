@@ -98,6 +98,10 @@ pub enum EnvVar {
     TailscaleProbeTimeoutMs,
     /// `EE_TAILSCALE_PROBE_SOCKET_OVERRIDE`
     TailscaleProbeSocketOverride,
+    /// `EE_TAILSCALE_DISCOVERY_MODE`
+    TailscaleDiscoveryMode,
+    /// `EE_TAILSCALE_RESPOND_MODE`
+    TailscaleRespondMode,
     /// `EE_WORKSPACE_HYGIENE_ALWAYS_REVIEW_PATTERNS`
     WorkspaceHygieneAlwaysReviewPatterns,
     /// `EE_WORKSPACE_HYGIENE_GENERATED_PATTERNS`
@@ -163,6 +167,8 @@ impl EnvVar {
             Self::TailscaleBinaryOverride,
             Self::TailscaleProbeTimeoutMs,
             Self::TailscaleProbeSocketOverride,
+            Self::TailscaleDiscoveryMode,
+            Self::TailscaleRespondMode,
             Self::WorkspaceHygieneAlwaysReviewPatterns,
             Self::WorkspaceHygieneGeneratedPatterns,
             Self::WorkspaceHygieneLocalMachinePatterns,
@@ -221,6 +227,8 @@ impl EnvVar {
             Self::TailscaleBinaryOverride => "EE_TAILSCALE_BINARY_OVERRIDE",
             Self::TailscaleProbeTimeoutMs => "EE_TAILSCALE_PROBE_TIMEOUT_MS",
             Self::TailscaleProbeSocketOverride => "EE_TAILSCALE_PROBE_SOCKET_OVERRIDE",
+            Self::TailscaleDiscoveryMode => "EE_TAILSCALE_DISCOVERY_MODE",
+            Self::TailscaleRespondMode => "EE_TAILSCALE_RESPOND_MODE",
             Self::WorkspaceHygieneAlwaysReviewPatterns => {
                 "EE_WORKSPACE_HYGIENE_ALWAYS_REVIEW_PATTERNS"
             }
@@ -309,6 +317,12 @@ impl EnvVar {
             Self::TailscaleProbeSocketOverride => {
                 "Test-only override for fake mesh hello responder socket discovery."
             }
+            Self::TailscaleDiscoveryMode => {
+                "Select the caller-side mesh peer discovery policy (service_tag, auto_admit, allowlist)."
+            }
+            Self::TailscaleRespondMode => {
+                "Select the responder-side mesh discovery consent policy (service_tag, auto_admit, allowlist)."
+            }
             Self::WorkspaceHygieneAlwaysReviewPatterns => {
                 "Add local workspace-hygiene patterns that force matching paths into human review."
             }
@@ -336,6 +350,8 @@ impl EnvVar {
             Self::MeshMode => Some("off"),
             Self::MeshEnabled => Some("false"),
             Self::TailscaleProbeTimeoutMs => Some("1500"),
+            Self::TailscaleDiscoveryMode => Some("service_tag"),
+            Self::TailscaleRespondMode => Some("service_tag"),
             Self::PprCacheEntries => Some("4096"),
             Self::GraphWitnessesRetentionDays => Some("30"),
             Self::ReadPoolAcquireTimeoutMs => Some("5000"),
@@ -383,7 +399,9 @@ impl EnvVar {
             | Self::MeshMode
             | Self::TailscaleBinaryOverride
             | Self::TailscaleProbeTimeoutMs
-            | Self::TailscaleProbeSocketOverride => "mesh",
+            | Self::TailscaleProbeSocketOverride
+            | Self::TailscaleDiscoveryMode
+            | Self::TailscaleRespondMode => "mesh",
             Self::HarmfulBurstWindowSeconds
             | Self::GraphWitnessesRetentionDays
             | Self::HarmfulPerSourcePerHour
