@@ -143,6 +143,23 @@
           ]
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "direction": { "const": "inbound" },
+          "action": { "const": "allow" },
+          "materialLane": { "const": "body" }
+        },
+        "required": ["direction", "action", "materialLane"]
+      },
+      "then": {
+        "required": ["bodyFetchAllowed", "failure"],
+        "properties": {
+          "bodyFetchAllowed": { "const": true },
+          "failure": { "type": "null" }
+        }
+      }
     }
   ]
 }

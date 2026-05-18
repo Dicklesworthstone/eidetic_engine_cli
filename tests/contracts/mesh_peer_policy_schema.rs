@@ -289,6 +289,42 @@ fn peer_policy_decision_schema_pins_directional_side_effect_fields() -> TestResu
             format!("policy decision schema missing {field}"),
         )?;
     }
+
+    ensure_equal(
+        &schema
+            .pointer("/allOf/2/if/properties/direction/const")
+            .and_then(Value::as_str),
+        &Some("inbound"),
+        "inbound body allow invariant direction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/2/if/properties/action/const")
+            .and_then(Value::as_str),
+        &Some("allow"),
+        "inbound body allow invariant action",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/2/if/properties/materialLane/const")
+            .and_then(Value::as_str),
+        &Some("body"),
+        "inbound body allow invariant lane",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/2/then/properties/bodyFetchAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "inbound allowed body decisions must permit body fetch",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/2/then/properties/failure/type")
+            .and_then(Value::as_str),
+        &Some("null"),
+        "inbound allowed body decisions must not carry failure",
+    )?;
     Ok(())
 }
 
