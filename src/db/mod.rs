@@ -12050,7 +12050,7 @@ fn build_audit_entry(
 fn next_audit_batch_timestamp(last_timestamp: &mut Option<DateTime<Utc>>) -> String {
     let mut timestamp = Utc::now();
     if let Some(previous) = last_timestamp.as_ref() {
-        if timestamp <= previous.to_owned() {
+        if timestamp <= *previous {
             timestamp = previous
                 .checked_add_signed(chrono::TimeDelta::nanoseconds(1))
                 .unwrap_or(timestamp);
