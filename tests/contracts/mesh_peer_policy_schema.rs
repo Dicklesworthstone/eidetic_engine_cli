@@ -32,6 +32,7 @@ const DECISION_FIXTURES: &[&str] = &[
     "tests/fixtures/mesh/peer_policy_decision_inbound_allowed.json",
     "tests/fixtures/mesh/peer_policy_decision_inbound_denied.json",
     "tests/fixtures/mesh/peer_policy_decision_outbound_redacted_body_allowed.json",
+    "tests/fixtures/mesh/peer_policy_decision_outbound_denied.json",
 ];
 
 fn repo_root() -> PathBuf {
@@ -547,6 +548,71 @@ fn peer_policy_decision_fixture_pins_nested_inbound_failure() -> TestResult {
     ensure_equal(
         &failure.pointer("/code").and_then(Value::as_str),
         &Some("mesh_peer_policy_denied"),
+        "failure code",
+    )?;
+    ensure_equal(
+        &failure.pointer("/reason").and_then(Value::as_str),
+        &value.pointer("/reason").and_then(Value::as_str),
+        "failure reason mirrors decision reason",
+    )?;
+    ensure_equal(
+        &failure.pointer("/policyRef").and_then(Value::as_str),
+        &value.pointer("/policyRef").and_then(Value::as_str),
+        "failure policy ref mirrors decision policy ref",
+    )
+}
+
+#[test]
+fn peer_policy_decision_fixture_pins_nested_outbound_failure() -> TestResult {
+    let value = read_json("tests/fixtures/mesh/peer_policy_decision_outbound_denied.json")?;
+    ensure_equal(
+        &value.pointer("/schema").and_then(Value::as_str),
+        &Some(MESH_POLICY_DECISION_SCHEMA_V1),
+        "decision schema",
+    )?;
+    ensure_equal(
+        &value.pointer("/direction").and_then(Value::as_str),
+        &Some("outbound"),
+        "decision direction",
+    )?;
+    ensure_equal(
+        &value.pointer("/action").and_then(Value::as_str),
+        &Some("deny"),
+        "decision action",
+    )?;
+    ensure_equal(
+        &value
+            .pointer("/payloadExportAllowed")
+            .and_then(Value::as_bool),
+        &Some(false),
+        "payload export allowed",
+    )?;
+    ensure_equal(
+        &value
+            .pointer("/rawPayloadExportAllowed")
+            .and_then(Value::as_bool),
+        &Some(false),
+        "raw payload export allowed",
+    )?;
+    ensure_equal(
+        &value
+            .pointer("/redactedPayloadRequired")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "redacted payload required",
+    )?;
+
+    let failure = value
+        .pointer("/failure")
+        .ok_or_else(|| "denied outbound decision missing nested failure".to_owned())?;
+    ensure_equal(
+        &failure.pointer("/schema").and_then(Value::as_str),
+        &Some(MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1),
+        "failure schema",
+    )?;
+    ensure_equal(
+        &failure.pointer("/code").and_then(Value::as_str),
+        &Some("mesh_outbound_policy_denied"),
         "failure code",
     )?;
     ensure_equal(

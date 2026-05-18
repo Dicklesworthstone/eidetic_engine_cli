@@ -169,6 +169,9 @@ Initial fixtures live under `tests/fixtures/mesh/`:
   with a nested redaction-safe `ee.mesh.policy_failure_surface.v1` failure.
 - `peer_policy_decision_outbound_redacted_body_allowed.json` pins the outbound
   redacted body export decision shape.
+- `peer_policy_decision_outbound_denied.json` pins an outbound denied embedding
+  decision with a nested redaction-safe `ee.mesh.policy_failure_surface.v1`
+  failure.
 - `peer_policy_failure_surface_denied.json` pins the standalone inbound body
   denial failure surface.
 - `peer_policy_failure_surface_quarantined.json` pins the standalone inbound
