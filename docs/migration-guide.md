@@ -511,6 +511,8 @@ is byte-identical to v0.2.x. This invariant is gated by
 | `EE_TAILSCALE_BINARY_OVERRIDE` | unset | bd-36bbk.1.1 | Test-only: pin the `tailscale` binary path (production code rejects relative paths) |
 | `EE_TAILSCALE_PROBE_SOCKET_OVERRIDE` | unset | bd-36bbk.1.1 | Test-only: pin the tailscaled socket path |
 | `EE_TAILSCALE_PROBE_TIMEOUT_MS` | `1500` | bd-36bbk.1.1 | Hard budget for the local probe subprocess/socket call |
+| `EE_TAILSCALE_DISCOVERY_MODE` | `service_tag` | bd-36bbk.1.7 | Caller-side mesh peer discovery policy; accepted values are `service_tag`, `auto_admit`, `allowlist` |
+| `EE_TAILSCALE_RESPOND_MODE` | `service_tag` | bd-36bbk.1.7 | Responder-side mesh discovery consent policy; same value space as `EE_TAILSCALE_DISCOVERY_MODE` |
 
 Future v0.3.x point releases will register further `EE_MESH_*` and
 `EE_TAILSCALE_*` env vars as the remaining SRR6.46 sub-beads land
@@ -525,6 +527,10 @@ interval, daily cap, etc.). Every new var is registered in
 | `ee.tailscale.local.v1` | bd-36bbk.1.1 | Local `tailscaled` probe report block on `ee status` |
 | `ee.mesh.auto_enrollment_summary.v1` | bd-36bbk.1.5 | Forensic audit-row payload before any peer-group write |
 | `ee.mesh.discovery_policy.v1` | bd-36bbk.1.7 | Service-tag, allowlist, denylist, and discovery consent policy |
+| `ee.mesh.hello.v1` | bd-36bbk.1.2 (SRR6.46.2) | Tiny bounded handshake request sent to candidate peers (read-only; payload ≤ 4096 bytes) |
+| `ee.mesh.hello.response.v1` | bd-36bbk.1.12 (SRR6.46.12) | Hello-handshake success response from the responder when discovery policy grants consent |
+| `ee.mesh.hello.error.v1` | bd-36bbk.1.12 (SRR6.46.12) | Hello-handshake decline response; privacy-invariant — must NOT carry responder-side metadata |
+| `ee.mesh.lane_grant_preview.v1` | bd-36bbk.1.17 (SRR6.46.17) | Pre-grant lane visibility audit; read-only by construction (`src/mesh/lane_grant_preview.rs`) |
 | `ee.mesh.peer_group_binding.v1` | bd-2jb3s (SRR6.30) | Workspace-scoped peer-group authorization record |
 | `ee.mesh.peer_policy.v1` | bd-29ulx (SRR6.5) | Per-peer trust, lane policy, and redaction grant |
 | `ee.mesh.policy_decision.v1` | bd-29ulx | Per-call policy evaluation outcome |
