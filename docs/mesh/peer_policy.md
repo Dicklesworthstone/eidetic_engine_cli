@@ -165,6 +165,9 @@ Initial fixtures live under `tests/fixtures/mesh/`:
   consent and redacted body payloads while embeddings remain denied.
 - `peer_policy_decision_inbound_allowed.json` pins the stable JSON shape for an
   allowed inbound metadata decision and its local side-effect booleans.
+- `peer_policy_decision_inbound_redacted_body_allowed.json` pins the allowed
+  inbound redacted body-fetch decision without ever promoting peer material to
+  `human_explicit`.
 - `peer_policy_decision_inbound_denied.json` pins a denied inbound body decision
   with a nested redaction-safe `ee.mesh.policy_failure_surface.v1` failure.
 - `peer_policy_decision_outbound_redacted_body_allowed.json` pins the outbound

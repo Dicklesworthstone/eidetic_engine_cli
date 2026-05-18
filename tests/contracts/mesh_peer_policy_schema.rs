@@ -30,6 +30,7 @@ const FAILURE_SURFACE_FIXTURES: &[&str] = &[
 ];
 const DECISION_FIXTURES: &[&str] = &[
     "tests/fixtures/mesh/peer_policy_decision_inbound_allowed.json",
+    "tests/fixtures/mesh/peer_policy_decision_inbound_redacted_body_allowed.json",
     "tests/fixtures/mesh/peer_policy_decision_inbound_denied.json",
     "tests/fixtures/mesh/peer_policy_decision_outbound_redacted_body_allowed.json",
     "tests/fixtures/mesh/peer_policy_decision_outbound_denied.json",
@@ -559,6 +560,56 @@ fn peer_policy_decision_fixture_pins_nested_inbound_failure() -> TestResult {
         &failure.pointer("/policyRef").and_then(Value::as_str),
         &value.pointer("/policyRef").and_then(Value::as_str),
         "failure policy ref mirrors decision policy ref",
+    )
+}
+
+#[test]
+fn peer_policy_decision_fixture_pins_inbound_redacted_body_allow() -> TestResult {
+    let value =
+        read_json("tests/fixtures/mesh/peer_policy_decision_inbound_redacted_body_allowed.json")?;
+    ensure_equal(
+        &value.pointer("/schema").and_then(Value::as_str),
+        &Some(MESH_POLICY_DECISION_SCHEMA_V1),
+        "decision schema",
+    )?;
+    ensure_equal(
+        &value.pointer("/direction").and_then(Value::as_str),
+        &Some("inbound"),
+        "decision direction",
+    )?;
+    ensure_equal(
+        &value.pointer("/action").and_then(Value::as_str),
+        &Some("allow"),
+        "decision action",
+    )?;
+    ensure_equal(
+        &value.pointer("/materialLane").and_then(Value::as_str),
+        &Some("body"),
+        "material lane",
+    )?;
+    ensure_equal(
+        &value.pointer("/redaction").and_then(Value::as_str),
+        &Some("redact"),
+        "redaction posture",
+    )?;
+    ensure_equal(
+        &value.pointer("/importTrustClass").and_then(Value::as_str),
+        &Some("agent_validated"),
+        "import trust class",
+    )?;
+    ensure(
+        value.pointer("/importTrustClass").and_then(Value::as_str) != Some("human_explicit"),
+        "peer-imported redacted body must not be human_explicit",
+    )?;
+    ensure_equal(
+        &value.pointer("/bodyFetchAllowed").and_then(Value::as_bool),
+        &Some(true),
+        "body fetch allowed",
+    )?;
+    ensure_equal(
+        &value.pointer("/failure"),
+        &Some(&Value::Null),
+        "allowed redacted body decision must not include failure",
     )
 }
 
