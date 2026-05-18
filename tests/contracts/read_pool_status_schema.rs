@@ -8,7 +8,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use ee::core::doctor::DoctorReport;
-use ee::core::status::{ReadPoolStatusReport, StatusReport};
+use ee::core::status::{ReadPoolStatusReport, StatusReport, WalStatusReport};
+use ee::db::WalStatus;
 use ee::db::read_pool::{AcquireWaitStats, PoolStats};
 use ee::output::{render_doctor_json, render_status_json};
 use serde_json::Value;
@@ -29,6 +30,7 @@ const READ_POOL_FIELDS: &[&str] = &[
     "acquire_wait",
 ];
 const ACQUIRE_WAIT_FIELDS: &[&str] = &["samples", "p50_ns", "p99_ns"];
+const WAL_FIELDS: &[&str] = &["bytes", "frames", "page_size", "checkpoint_threshold_bytes"];
 const QOS_STATUS_FIELDS: &[&str] = &[
     "schema",
     "workspaceHash",
@@ -133,12 +135,14 @@ fn read_pool_status_schema_declares_counters_and_wait_summary() -> TestResult {
     // `read_pool` must appear in the envelope's `data.required` list so the
     // schema refuses status payloads that omit the field.
     ensure_string_array_contains(&schema, "/properties/data/required", "read_pool")?;
+    ensure_string_array_contains(&schema, "/properties/data/required", "wal")?;
     ensure_string_array_contains(&schema, "/properties/data/required", "qos")?;
 
     // The `standard` field profile (`ee status --json` default) must
     // emit `read_pool`, so the per-profile registry stays consistent
     // with the schema's required-set.
     ensure_string_array_contains(&schema, "/field_presets/standard", "read_pool")?;
+    ensure_string_array_contains(&schema, "/field_presets/standard", "wal")?;
     ensure_string_array_contains(&schema, "/field_presets/summary", "qos")?;
     ensure_string_array_contains(&schema, "/field_presets/standard", "qos")?;
 
@@ -148,6 +152,11 @@ fn read_pool_status_schema_declares_counters_and_wait_summary() -> TestResult {
         &schema,
         "/properties/data/properties/read_pool/$ref",
         "#/$defs/readPoolStatus",
+    )?;
+    ensure_str_eq(
+        &schema,
+        "/properties/data/properties/wal/$ref",
+        "#/$defs/walStatus",
     )?;
 
     // The `$defs/readPoolStatus` definition must enforce the exact
@@ -188,6 +197,17 @@ fn read_pool_status_schema_declares_counters_and_wait_summary() -> TestResult {
             format!("/$defs/readPoolStatus/properties/acquire_wait/properties/{counter}/type");
         let minimum_pointer =
             format!("/$defs/readPoolStatus/properties/acquire_wait/properties/{counter}/minimum");
+        ensure_str_eq(&schema, &type_pointer, "integer")?;
+        ensure_u64_eq(&schema, &minimum_pointer, 0)?;
+    }
+
+    ensure_str_eq(&schema, "/$defs/walStatus/type", "object")?;
+    ensure_bool_eq(&schema, "/$defs/walStatus/additionalProperties", false)?;
+    ensure_object_keys_eq(&schema, "/$defs/walStatus/properties", WAL_FIELDS)?;
+    for counter in WAL_FIELDS {
+        ensure_string_array_contains(&schema, "/$defs/walStatus/required", counter)?;
+        let type_pointer = format!("/$defs/walStatus/properties/{counter}/type");
+        let minimum_pointer = format!("/$defs/walStatus/properties/{counter}/minimum");
         ensure_str_eq(&schema, &type_pointer, "integer")?;
         ensure_u64_eq(&schema, &minimum_pointer, 0)?;
     }
@@ -364,6 +384,33 @@ fn read_pool_status_report_preserves_lifecycle_pool_stats() -> TestResult {
 }
 
 #[test]
+fn wal_status_report_preserves_sidecar_observability() -> TestResult {
+    let report = WalStatusReport::from_wal_status(
+        WalStatus {
+            bytes: 4096,
+            frames: 1,
+            page_size: 1024,
+        },
+        2048,
+    );
+
+    if report.bytes != 4096
+        || report.frames != 1
+        || report.page_size != 1024
+        || report.checkpoint_threshold_bytes != 2048
+    {
+        return Err(format!(
+            "WalStatusReport must preserve sidecar observability counters; got {report:?}"
+        ));
+    }
+    if !report.exceeds_threshold() {
+        return Err("WAL report should flag bytes above checkpoint threshold".to_owned());
+    }
+
+    Ok(())
+}
+
+#[test]
 fn rendered_status_json_includes_qos_posture_without_active_records_by_default() -> TestResult {
     let status = StatusReport::gather();
     let rendered = render_status_json(&status);
@@ -471,6 +518,14 @@ fn rendered_status_json_includes_read_pool_with_all_counters() -> TestResult {
         },
         size_was_zero: false,
     });
+    status.wal = WalStatusReport::from_wal_status(
+        WalStatus {
+            bytes: 4096,
+            frames: 1,
+            page_size: 1024,
+        },
+        2048,
+    );
     let rendered = render_status_json(&status);
     let parsed: Value = serde_json::from_str(&rendered)
         .map_err(|error| format!("status JSON did not parse: {error}"))?;
@@ -519,6 +574,11 @@ fn rendered_status_json_includes_read_pool_with_all_counters() -> TestResult {
     ensure_u64_eq(&parsed, "/data/read_pool/acquire_wait/samples", 13)?;
     ensure_u64_eq(&parsed, "/data/read_pool/acquire_wait/p50_ns", 17)?;
     ensure_u64_eq(&parsed, "/data/read_pool/acquire_wait/p99_ns", 19)?;
+    ensure_object_keys_eq(&parsed, "/data/wal", WAL_FIELDS)?;
+    ensure_u64_eq(&parsed, "/data/wal/bytes", 4096)?;
+    ensure_u64_eq(&parsed, "/data/wal/frames", 1)?;
+    ensure_u64_eq(&parsed, "/data/wal/page_size", 1024)?;
+    ensure_u64_eq(&parsed, "/data/wal/checkpoint_threshold_bytes", 2048)?;
 
     Ok(())
 }

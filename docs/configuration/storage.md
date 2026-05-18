@@ -60,6 +60,37 @@ the workload. Increase `storage.read_pool.size` explicitly; `ee` does not grow
 the pool automatically because automatic growth can hide writer starvation and
 WAL checkpoint pressure.
 
+## WAL Growth Observability
+
+`ee status --json` also reports the current workspace WAL sidecar as
+`data.wal.bytes` and `data.wal.frames`. The frame count is derived from the WAL
+file size and SQLite page size without running a checkpoint, so status remains a
+read-oriented inspection surface.
+
+`EE_WAL_CHECKPOINT_BYTES_THRESHOLD` defaults to 67108864 bytes (64 MiB). When
+`data.wal.bytes` exceeds that threshold, status reports
+`wal_growth_exceeds_threshold` with a repair command pointing at the explicit
+checkpoint path. If WAL growth is visible from a read-only deployment and no
+checkpoint writer is identified, status also reports `wal_growth_no_writer`.
+Long-lived snapshot pins can prevent truncation; use the read-pool pin counters
+and snapshot-pin degraded codes to identify readers that are holding old WAL
+pages.
+
+Run `ee maintenance wal-checkpoint --workspace . --json` to checkpoint through
+the explicit maintenance writer path. The default mode is `passive`, which
+moves checkpointable frames back into the main database without requiring every
+reader to release its snapshot. Use
+`ee maintenance wal-checkpoint --workspace . --mode truncate --json` after
+checking the read-pool counters when the WAL sidecar remains above the
+threshold and no long-lived snapshot pin is active. `--dry-run` reports the same
+WAL counters without running a checkpoint.
+
+Daemon ownership is intentionally not wired in this slice: `ee daemon status`
+reports foreground-supervisor availability, but no autonomous daemon checkpoint
+job owns WAL cleanup yet. Until that steward job exists, the explicit
+`ee maintenance wal-checkpoint` command is the supported writer path for WAL
+growth repairs.
+
 ## Why LIFO
 
 Idle read handles are reused as a LIFO stack. The most recently released
@@ -77,3 +108,4 @@ Environment overrides:
 | `storage.read_pool.max_pin_duration_seconds` | `EE_READ_POOL_MAX_PIN_SECONDS` |
 | `storage.read_pool.pin_snapshot` | `EE_READ_POOL_DISABLE_PIN` inverts this value |
 | acquire timeout runtime override | `EE_READ_POOL_ACQUIRE_TIMEOUT_MS` |
+| WAL checkpoint warning threshold | `EE_WAL_CHECKPOINT_BYTES_THRESHOLD` |

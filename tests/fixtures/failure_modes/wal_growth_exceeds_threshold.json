@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "wal_growth_exceeds_threshold",
+  "introduced_by": {
+    "bead": "bd-2caru.8",
+    "epic_letter": "READ_POOL"
+  },
+  "surfaces": [
+    "status",
+    "doctor"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A workspace WAL sidecar grows beyond the configured checkpoint warning threshold.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "EE_WAL_CHECKPOINT_BYTES_THRESHOLD=1 ee status --workspace . --json"
+    ],
+    "invocation": "EE_WAL_CHECKPOINT_BYTES_THRESHOLD=1 ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "wal_growth_exceeds_threshold",
+    "severity": "warning",
+    "message_contains": [
+      "WAL",
+      "checkpoint threshold"
+    ],
+    "repair_contains": "ee maintenance wal-checkpoint",
+    "repair_string": "Run `ee maintenance wal-checkpoint --workspace .`.",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}

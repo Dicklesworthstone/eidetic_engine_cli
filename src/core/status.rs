@@ -14,13 +14,14 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use crate::config::{
     EnvVar, GRAPH_FEATURE_SKYLINE_ENABLED_KEY, WorkspaceDiagnostic, WorkspaceDiagnosticSeverity,
     WorkspaceResolution, WorkspaceResolutionMode, WorkspaceResolutionRequest,
-    WorkspaceResolutionSource, diagnose_workspace_resolution, read_env_var, resolve_workspace,
+    WorkspaceResolutionSource, diagnose_workspace_resolution, read_env_var,
+    read_env_var_or_default, resolve_workspace,
 };
 use crate::db::{
     CreateWorkspaceInput, DbConnection, FeedbackSourceHarmfulCount, GraphSnapshotStatus,
     GraphSnapshotType, MeshStorageStatus, PROVENANCE_CHAIN_HASH_VERSION,
     PROVENANCE_STATUS_UNVERIFIED, StoredAuditEntry, StoredCurationCandidate,
-    StoredCurationTtlPolicy, StoredMemory, StoredMemoryLink, audit_actions,
+    StoredCurationTtlPolicy, StoredMemory, StoredMemoryLink, WalStatus, audit_actions,
     default_curation_ttl_policy_id_for_review_state, read_pool::PoolStats,
 };
 use crate::models::degradation::GRAPH_SKYLINE_DEGENERATE_COMMUNITIES_CODE;
@@ -70,6 +71,9 @@ const GRAPH_COMPUTE_ALGORITHMS: &[&str] = &[
 ];
 const PACK_BUDGET_BUCKET_SCHEMA_V1: &str = "ee.status.pack_budget_buckets.v1";
 const PACK_BUDGET_BUCKET_WINDOW_HOURS: u32 = 24;
+const DEFAULT_WAL_CHECKPOINT_BYTES_THRESHOLD: u64 = 64 * 1024 * 1024;
+pub const WAL_GROWTH_EXCEEDS_THRESHOLD_CODE: &str = "wal_growth_exceeds_threshold";
+pub const WAL_GROWTH_NO_WRITER_CODE: &str = "wal_growth_no_writer";
 
 /// Memory subsystem health status.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -962,6 +966,70 @@ impl From<PoolStats> for ReadPoolStatusReport {
     }
 }
 
+/// Current workspace WAL sidecar observability exposed by `ee status --json`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WalStatusReport {
+    pub bytes: u64,
+    pub frames: u64,
+    pub page_size: u32,
+    pub checkpoint_threshold_bytes: u64,
+}
+
+impl WalStatusReport {
+    #[must_use]
+    pub fn gather(workspace_path: Option<&Path>) -> Self {
+        let threshold = wal_checkpoint_bytes_threshold();
+        let Some(workspace_path) = workspace_path else {
+            return Self {
+                checkpoint_threshold_bytes: threshold,
+                ..Self::default()
+            };
+        };
+        let database_path = workspace_path.join(".ee").join("ee.db");
+        if !database_path.exists() {
+            return Self {
+                checkpoint_threshold_bytes: threshold,
+                ..Self::default()
+            };
+        }
+        let Ok(connection) = DbConnection::open_file(&database_path) else {
+            return Self {
+                checkpoint_threshold_bytes: threshold,
+                ..Self::default()
+            };
+        };
+        match connection.wal_status() {
+            Ok(status) => Self::from_wal_status(status, threshold),
+            Err(_) => Self {
+                checkpoint_threshold_bytes: threshold,
+                ..Self::default()
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn from_wal_status(status: WalStatus, checkpoint_threshold_bytes: u64) -> Self {
+        Self {
+            bytes: status.bytes,
+            frames: status.frames,
+            page_size: status.page_size,
+            checkpoint_threshold_bytes,
+        }
+    }
+
+    #[must_use]
+    pub const fn exceeds_threshold(&self) -> bool {
+        self.checkpoint_threshold_bytes > 0 && self.bytes > self.checkpoint_threshold_bytes
+    }
+}
+
+pub fn wal_checkpoint_bytes_threshold() -> u64 {
+    read_env_var_or_default(EnvVar::WalCheckpointBytesThreshold)
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_WAL_CHECKPOINT_BYTES_THRESHOLD)
+}
+
 /// Feedback-loop health status.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FeedbackHealthStatus {
@@ -1157,6 +1225,7 @@ pub struct StatusReport {
     pub capabilities: CapabilityReport,
     pub runtime: RuntimeReport,
     pub read_pool: ReadPoolStatusReport,
+    pub wal: WalStatusReport,
     pub pack_budget_buckets: PackBudgetBucketReport,
     pub qos_posture: super::qos::QosLaneSummary,
     pub memory_health: MemoryHealthReport,
@@ -1230,6 +1299,7 @@ impl StatusReport {
             CapabilityReport::gather_with_workspace(options.workspace_path.as_deref());
         let runtime = RuntimeReport::gather();
         let read_pool = ReadPoolStatusReport::gather();
+        let wal = WalStatusReport::gather(options.workspace_path.as_deref());
         let pack_budget_buckets = gather_pack_budget_buckets(options.workspace_path.as_deref());
         let qos_posture = gather_qos_posture(options.workspace_path.as_deref());
         let (memory_health, memory_health_degradations) =
@@ -1276,6 +1346,7 @@ impl StatusReport {
         );
         push_skyline_degenerate_communities_degradation(&mut degradations, skyline_community_count);
         push_toon_output_capability_degradation(&mut degradations, capabilities.output_toon);
+        push_wal_degradations(&mut degradations, &wal);
 
         degradations.extend(memory_health_degradations);
         degradations.extend(curation_degradations);
@@ -1303,6 +1374,7 @@ impl StatusReport {
             capabilities,
             runtime,
             read_pool,
+            wal,
             pack_budget_buckets,
             qos_posture,
             memory_health,
@@ -2736,6 +2808,25 @@ fn push_unique_workspace_id(candidates: &mut Vec<String>, workspace_id: String) 
     }
 }
 
+fn push_wal_degradations(degradations: &mut Vec<DegradationReport>, wal: &WalStatusReport) {
+    if !wal.exceeds_threshold() {
+        return;
+    }
+
+    degradations.push(DegradationReport {
+        code: WAL_GROWTH_EXCEEDS_THRESHOLD_CODE,
+        severity: "warning",
+        message: "Workspace WAL sidecar exceeds the configured checkpoint threshold.",
+        repair: "Run `ee maintenance wal-checkpoint --workspace .`.",
+    });
+    degradations.push(DegradationReport {
+        code: WAL_GROWTH_NO_WRITER_CODE,
+        severity: "medium",
+        message: "Workspace WAL growth is visible but this read-only status path found no checkpoint writer to drain it.",
+        repair: "Run `ee maintenance wal-checkpoint --workspace .`.",
+    });
+}
+
 fn gather_memory_health(
     workspace_path: Option<&Path>,
 ) -> (MemoryHealthReport, Vec<DegradationReport>) {
@@ -3454,7 +3545,7 @@ impl StatusBenchFixture {
         }
 
         let p50_ms = percentile_ms(&samples_ms, 0.50);
-        let max_ms = samples_ms.iter().copied().fold(0.0_f64, f64::max);
+        let max_ms = samples_ms.iter().copied().fold(0.0_f64, |a, b| if b.is_nan() { a } else { a.max(b) });
 
         Ok(StatusBenchSample {
             scale_name: self.scale.name,
@@ -4041,6 +4132,67 @@ mod tests {
             storage.reason,
             Some("uncommitted_write_replay_required"),
             "storage replay reason",
+        )
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn maintenance_wal_checkpoint__clears_growth_degradation() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ee_dir = temp.path().join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let database_path = ee_dir.join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+
+        connection
+            .execute_raw("PRAGMA wal_autocheckpoint = 0")
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(
+                "CREATE TABLE checkpoint_fixture (id INTEGER PRIMARY KEY, value TEXT NOT NULL)",
+            )
+            .map_err(|error| error.to_string())?;
+        for index in 0..64 {
+            connection
+                .execute_raw(&format!(
+                    "INSERT INTO checkpoint_fixture (value) VALUES ('value-{index}')"
+                ))
+                .map_err(|error| error.to_string())?;
+        }
+
+        let before = connection.wal_status().map_err(|error| error.to_string())?;
+        if before.bytes == 0 {
+            return Err("checkpoint fixture did not create a WAL sidecar".to_owned());
+        }
+        let threshold = before.bytes.saturating_sub(1).max(1);
+        let before_report = WalStatusReport::from_wal_status(before, threshold);
+        let mut before_degradations = Vec::new();
+        push_wal_degradations(&mut before_degradations, &before_report);
+        ensure(
+            before_degradations
+                .iter()
+                .any(|entry| entry.code == WAL_GROWTH_EXCEEDS_THRESHOLD_CODE),
+            true,
+            "WAL growth degradation exists before checkpoint",
+        )?;
+
+        let checkpoint = connection
+            .wal_checkpoint(crate::db::WalCheckpointMode::Truncate)
+            .map_err(|error| error.to_string())?;
+        if checkpoint.busy {
+            return Err("single-connection checkpoint should not report busy".to_owned());
+        }
+        let after_report = WalStatusReport::from_wal_status(checkpoint.after, threshold);
+        let mut after_degradations = Vec::new();
+        push_wal_degradations(&mut after_degradations, &after_report);
+        ensure(
+            after_degradations.iter().all(|entry| {
+                entry.code != WAL_GROWTH_EXCEEDS_THRESHOLD_CODE
+                    && entry.code != WAL_GROWTH_NO_WRITER_CODE
+            }),
+            true,
+            "WAL growth degradations are cleared after checkpoint",
         )
     }
 

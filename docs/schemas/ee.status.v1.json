@@ -20,6 +20,7 @@
         "capabilities",
         "runtime",
         "read_pool",
+        "wal",
         "qos",
         "memoryHealth",
         "curationHealth",
@@ -40,6 +41,7 @@
         "capabilities": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "runtime": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "read_pool": {"$ref": "#/$defs/readPoolStatus"},
+        "wal": {"$ref": "#/$defs/walStatus"},
         "qos": {"$ref": "#/$defs/qosStatus"},
         "memoryHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "curationHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
@@ -56,7 +58,7 @@
   "field_presets": {
     "minimal": ["command", "version", "workspace"],
     "summary": ["command", "version", "workspace", "posture", "singleFlight", "qos", "capabilities"],
-    "standard": ["command", "version", "workspace", "posture", "capabilities", "runtime", "read_pool", "qos", "memoryHealth", "curationHealth", "feedbackHealth", "singleFlight", "graphCompute", "graphSnapshotArtifact", "derivedAssets", "agentInventory", "degraded"],
+    "standard": ["command", "version", "workspace", "posture", "capabilities", "runtime", "read_pool", "wal", "qos", "memoryHealth", "curationHealth", "feedbackHealth", "singleFlight", "graphCompute", "graphSnapshotArtifact", "derivedAssets", "agentInventory", "degraded"],
     "full": ["*"]
   },
   "$defs": {
@@ -83,6 +85,17 @@
             "p99_ns": {"type": "integer", "minimum": 0}
           }
         }
+      }
+    },
+    "walStatus": {
+      "type": "object",
+      "required": ["bytes", "frames", "page_size", "checkpoint_threshold_bytes"],
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 0},
+        "frames": {"type": "integer", "minimum": 0},
+        "page_size": {"type": "integer", "minimum": 0},
+        "checkpoint_threshold_bytes": {"type": "integer", "minimum": 0}
       }
     },
     "qosStatus": {

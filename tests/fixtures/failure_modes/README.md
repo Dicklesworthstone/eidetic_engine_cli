@@ -41,6 +41,7 @@ in the same commit, keeping the catalog complete by construction.
 | `handoff_snapshot_stale` | handoff resume | medium | bd-17c65.13.5 (M4) |
 | `profile_search_limit_capped` | search, diag search | low | bd-17c65.2.4 (B7) |
 | `context_profile_budget_capped` | context | low | bd-17c65.10.6 (J6) |
+| `context_stream_partial_emission` | context --stream | warning | bd-17c65.10.18 |
 | `context_evidence_freshness_changed_source` | context | low | bd-17c65.1.2 (A2) |
 | `policy_bypass_used` | remember, note | info | bd-17c65.3.2 (C2) |
 | `policy_tag_rejected_with_details` | remember, note | low | bd-17c65.3.4 (C4) |
@@ -108,6 +109,8 @@ in the same commit, keeping the catalog complete by construction.
 | `graph_query_relative_features_unavailable` | why | low | bd-17c65.10.6 (J6) |
 | `db_migration_pending` | db status | medium | bd-3usjw.1 |
 | `db_wal_stale` | db status | medium | bd-3usjw.1 |
+| `wal_growth_exceeds_threshold` | status, doctor | warning | bd-2caru.8 |
+| `wal_growth_no_writer` | status, doctor | medium | bd-2caru.8 |
 | `no_risk_memories` | preflight check | info | bd-3usjw.6 |
 | `preflight_evidence_unavailable` | preflight | medium | bd-17c65.10.6 (J6) |
 | `preflight_evidence_stale` | preflight | warning | bd-17c65.10.6 (J6) |
