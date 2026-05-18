@@ -160,6 +160,31 @@
           "failure": { "type": "null" }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "direction": { "const": "outbound" },
+          "action": { "const": "allow" },
+          "materialLane": { "const": "body" },
+          "redaction": { "const": "redact" }
+        },
+        "required": ["direction", "action", "materialLane", "redaction"]
+      },
+      "then": {
+        "required": [
+          "payloadExportAllowed",
+          "rawPayloadExportAllowed",
+          "redactedPayloadRequired",
+          "failure"
+        ],
+        "properties": {
+          "payloadExportAllowed": { "const": true },
+          "rawPayloadExportAllowed": { "const": false },
+          "redactedPayloadRequired": { "const": true },
+          "failure": { "type": "null" }
+        }
+      }
     }
   ]
 }

@@ -325,6 +325,62 @@ fn peer_policy_decision_schema_pins_directional_side_effect_fields() -> TestResu
         &Some("null"),
         "inbound allowed body decisions must not carry failure",
     )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/3/if/properties/direction/const")
+            .and_then(Value::as_str),
+        &Some("outbound"),
+        "outbound redacted body invariant direction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/3/if/properties/action/const")
+            .and_then(Value::as_str),
+        &Some("allow"),
+        "outbound redacted body invariant action",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/3/if/properties/materialLane/const")
+            .and_then(Value::as_str),
+        &Some("body"),
+        "outbound redacted body invariant lane",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/3/if/properties/redaction/const")
+            .and_then(Value::as_str),
+        &Some("redact"),
+        "outbound redacted body invariant redaction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/3/then/properties/payloadExportAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "outbound redacted body decisions may export only redacted payloads",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/3/then/properties/rawPayloadExportAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(false),
+        "outbound redacted body decisions must not export raw payloads",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/3/then/properties/redactedPayloadRequired/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "outbound redacted body decisions must require redacted payloads",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/3/then/properties/failure/type")
+            .and_then(Value::as_str),
+        &Some("null"),
+        "outbound redacted body allow decisions must not carry failure",
+    )?;
     Ok(())
 }
 
@@ -711,6 +767,63 @@ fn peer_policy_decision_fixture_pins_nested_outbound_failure() -> TestResult {
         &failure.pointer("/policyRef").and_then(Value::as_str),
         &value.pointer("/policyRef").and_then(Value::as_str),
         "failure policy ref mirrors decision policy ref",
+    )
+}
+
+#[test]
+fn peer_policy_decision_fixture_pins_outbound_redacted_body_allow() -> TestResult {
+    let value =
+        read_json("tests/fixtures/mesh/peer_policy_decision_outbound_redacted_body_allowed.json")?;
+    ensure_equal(
+        &value.pointer("/schema").and_then(Value::as_str),
+        &Some(MESH_POLICY_DECISION_SCHEMA_V1),
+        "decision schema",
+    )?;
+    ensure_equal(
+        &value.pointer("/direction").and_then(Value::as_str),
+        &Some("outbound"),
+        "decision direction",
+    )?;
+    ensure_equal(
+        &value.pointer("/action").and_then(Value::as_str),
+        &Some("allow"),
+        "decision action",
+    )?;
+    ensure_equal(
+        &value.pointer("/materialLane").and_then(Value::as_str),
+        &Some("body"),
+        "material lane",
+    )?;
+    ensure_equal(
+        &value.pointer("/redaction").and_then(Value::as_str),
+        &Some("redact"),
+        "redaction posture",
+    )?;
+    ensure_equal(
+        &value
+            .pointer("/payloadExportAllowed")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "payload export allowed",
+    )?;
+    ensure_equal(
+        &value
+            .pointer("/rawPayloadExportAllowed")
+            .and_then(Value::as_bool),
+        &Some(false),
+        "raw payload export allowed",
+    )?;
+    ensure_equal(
+        &value
+            .pointer("/redactedPayloadRequired")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "redacted payload required",
+    )?;
+    ensure_equal(
+        &value.pointer("/failure"),
+        &Some(&Value::Null),
+        "allowed outbound redacted body decision must not include failure",
     )
 }
 
