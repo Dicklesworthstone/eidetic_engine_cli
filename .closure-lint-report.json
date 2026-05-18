@@ -11,28 +11,8 @@
       "label": "defer-to-v2",
       "surface": "serve_localhost",
       "reason": "missing defer_until_iso8601: YYYY-MM-DD"
-    },
-    {
-      "bead": "bd-3usjw.6",
-      "label": "implements-surface",
-      "surface": "trauma_guard_preflight",
-      "reason": "emitted degraded code fixture missing from FILE SURFACE: tests/fixtures/failure_modes/no_risk_memories.json",
-      "bead_id": "bd-3usjw.6",
-      "missing_fixture_path": "tests/fixtures/failure_modes/no_risk_memories.json",
-      "emitted_code": "no_risk_memories",
-      "severity": "medium"
-    },
-    {
-      "bead": "bd-3usjw.6",
-      "label": "implements-surface",
-      "surface": "trauma_guard_preflight",
-      "reason": "emitted degraded code fixture missing from FILE SURFACE: tests/fixtures/failure_modes/preflight_patterns_unavailable.json",
-      "bead_id": "bd-3usjw.6",
-      "missing_fixture_path": "tests/fixtures/failure_modes/preflight_patterns_unavailable.json",
-      "emitted_code": "preflight_patterns_unavailable",
-      "severity": "medium"
     }
   ],
-  "count": 4,
+  "count": 2,
   "status": "fail"
 }
