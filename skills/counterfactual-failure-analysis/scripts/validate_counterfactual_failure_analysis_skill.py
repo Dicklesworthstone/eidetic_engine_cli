@@ -137,7 +137,11 @@ def main() -> int:
         if phrase not in skill_text:
             return fail(f"missing refusal or boundary phrase: {phrase}", log)
 
-    fixtures = json.loads(FIXTURES.read_text())
+    try:
+        fixtures = json.loads(FIXTURES.read_text())
+    except json.JSONDecodeError as e:
+        return fail(f"failed to parse fixtures JSON: {e}", log)
+
     if fixtures.get("schema") != "ee.skill.counterfactual_failure_analysis.fixtures.v1":
         return fail("fixture schema is missing or wrong", log)
 

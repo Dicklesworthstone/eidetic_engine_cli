@@ -337,8 +337,12 @@ def main() -> int:
     # Validate fixture coverage
     print("\nValidating fixture coverage...")
     if FIXTURES_FILE.exists():
-        fixtures_data = json.loads(FIXTURES_FILE.read_text())
-        coverage_errors = validate_fixture_coverage(fixtures_data.get("fixtures", []))
+        try:
+            fixtures_data = json.loads(FIXTURES_FILE.read_text())
+            coverage_errors = validate_fixture_coverage(fixtures_data.get("fixtures", []))
+        except json.JSONDecodeError as e:
+            coverage_errors = [f"Invalid JSON in fixtures file: {e}"]
+            
         if coverage_errors:
             print(f"  Coverage gaps: {len(coverage_errors)}")
             for err in coverage_errors:

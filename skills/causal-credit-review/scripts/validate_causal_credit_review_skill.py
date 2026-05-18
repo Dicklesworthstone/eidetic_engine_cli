@@ -207,7 +207,11 @@ def run_fixtures() -> tuple[list[E2ELog], list[str]]:
         return logs, errors
 
     fixtures_content = FIXTURES_FILE.read_text()
-    fixtures_data = json.loads(fixtures_content)
+    try:
+        fixtures_data = json.loads(fixtures_content)
+    except json.JSONDecodeError as e:
+        errors.append(f"failed to parse fixtures JSON: {e}")
+        return logs, errors
 
     for fixture in fixtures_data.get("fixtures", []):
         log = E2ELog(

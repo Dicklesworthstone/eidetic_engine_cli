@@ -29,21 +29,28 @@ def consume(response):
 
 
 def load_response(args):
-    if args.from_stdin or not args.query:
-        return json.load(sys.stdin)
+    try:
+        if args.from_stdin or not args.query:
+            return json.load(sys.stdin)
 
-    command = [
-        args.ee,
-        "context",
-        args.query,
-        "--workspace",
-        args.workspace,
-        "--max-tokens",
-        str(args.max_tokens),
-        "--json",
-    ]
-    output = subprocess.check_output(command, text=True)
-    return json.loads(output)
+        command = [
+            args.ee,
+            "context",
+            args.query,
+            "--workspace",
+            args.workspace,
+            "--max-tokens",
+            str(args.max_tokens),
+            "--json",
+        ]
+        output = subprocess.check_output(command, text=True)
+        return json.loads(output)
+    except json.JSONDecodeError as e:
+        print(f"Error decoding JSON response: {e}", file=sys.stderr)
+        sys.exit(1)
+    except subprocess.CalledProcessError as e:
+        print(f"Error executing command: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def main():
