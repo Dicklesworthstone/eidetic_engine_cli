@@ -1885,6 +1885,69 @@ mod tests {
         tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))
     }
 
+    #[derive(Debug, serde::Serialize)]
+    struct AgentContractGoldenProjection {
+        schema: String,
+        fixture: String,
+        rule_count: usize,
+        rule_ids: Vec<String>,
+        categories: Vec<String>,
+        degraded_codes: Vec<String>,
+    }
+
+    fn agent_contract_golden_projection(
+        fixture: &str,
+        report: &AgentOperatingContractReport,
+    ) -> AgentContractGoldenProjection {
+        let mut rule_ids = report
+            .rules
+            .iter()
+            .map(|rule| rule.id.clone())
+            .collect::<Vec<_>>();
+        rule_ids.sort();
+        let mut categories = report
+            .rules
+            .iter()
+            .map(|rule| rule.category.clone())
+            .collect::<Vec<_>>();
+        categories.sort();
+        categories.dedup();
+        let mut degraded_codes = report
+            .degraded
+            .iter()
+            .map(|entry| entry.code.clone())
+            .collect::<Vec<_>>();
+        degraded_codes.sort();
+        degraded_codes.dedup();
+
+        AgentContractGoldenProjection {
+            schema: report.schema.clone(),
+            fixture: fixture.to_owned(),
+            rule_count: report.rules.len(),
+            rule_ids,
+            categories,
+            degraded_codes,
+        }
+    }
+
+    fn assert_agent_contract_golden(
+        name: &str,
+        actual: &AgentContractGoldenProjection,
+    ) -> TestResult {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/golden/preflight")
+            .join(name);
+        let expected_text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        let expected: serde_json::Value = serde_json::from_str(&expected_text)
+            .map_err(|error| format!("parse {}: {error}", path.display()))?;
+        let actual_text = serde_json::to_string_pretty(actual)
+            .map_err(|error| format!("serialize golden projection: {error}"))?;
+        let actual_value: serde_json::Value = serde_json::from_str(&actual_text)
+            .map_err(|error| format!("parse actual projection: {error}"))?;
+        ensure(actual_value, expected, name)
+    }
+
     #[test]
     fn run_dry_run_completes_immediately() -> TestResult {
         let options = RunOptions {
@@ -2456,6 +2519,56 @@ All cargo builds and tests and other CPU intensive operations MUST be done using
                 .any(|rule| rule.id == "agent.no_tokio_runtime"),
             true,
             "extracts available AGENTS rule",
+        )
+    }
+
+    #[test]
+    fn agent_operating_contract_minimal_workspace_matches_golden() -> TestResult {
+        let docs = [
+            (
+                "AGENTS.md",
+                r#"# Minimal Agent Rules
+
+## Safety
+
+RULE NUMBER 1: NO FILE DELETION.
+RULE NUMBER 2: NO WORKTREES. EVER.
+"#,
+            ),
+            (
+                "README.md",
+                r#"# Minimal README
+
+## Hard Requirements
+
+- Runtime is `/dp/asupersync`. **No Tokio.** Anywhere. Ever.
+- Every machine-facing command supports stable JSON output.
+- Every generated context includes provenance and score explanation.
+"#,
+            ),
+        ];
+        let report = AgentOperatingContractReport {
+            schema: AGENT_OPERATING_CONTRACT_SCHEMA_V1.to_owned(),
+            rules: extract_agent_operating_contract_rules(&docs),
+            degraded: Vec::new(),
+        };
+
+        assert_agent_contract_golden(
+            "agent_operating_contract_minimal.json.golden",
+            &agent_contract_golden_projection("minimal_workspace", &report),
+        )
+    }
+
+    #[test]
+    fn agent_operating_contract_repository_projection_matches_golden() -> TestResult {
+        let report = extract_agent_operating_contract(&AgentOperatingContractOptions {
+            workspace: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        })
+        .map_err(|error| error.message())?;
+
+        assert_agent_contract_golden(
+            "agent_operating_contract_repository.json.golden",
+            &agent_contract_golden_projection("eidetic_engine_cli_repository", &report),
         )
     }
 

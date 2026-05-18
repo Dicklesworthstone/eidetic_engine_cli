@@ -1,0 +1,30 @@
+{
+  "schema": "ee.agent_operating_contract.v1",
+  "fixture": "eidetic_engine_cli_repository",
+  "rule_count": 15,
+  "rule_ids": [
+    "agent.agent_mail_coordination",
+    "agent.beads_bv_triage",
+    "agent.context_provenance",
+    "agent.external_build_drive",
+    "agent.main_branch_only",
+    "agent.no_file_deletion",
+    "agent.no_git_checkout_other_ref",
+    "agent.no_git_reset_hard",
+    "agent.no_git_stash",
+    "agent.no_petgraph",
+    "agent.no_rusqlite_sqlx_diesel",
+    "agent.no_script_based_code_changes",
+    "agent.no_tokio_runtime",
+    "agent.no_worktrees",
+    "agent.stable_json"
+  ],
+  "categories": [
+    "coordination_required",
+    "environment_fact",
+    "hard_denial",
+    "reporting_required",
+    "required_before_edit"
+  ],
+  "degraded_codes": []
+}
