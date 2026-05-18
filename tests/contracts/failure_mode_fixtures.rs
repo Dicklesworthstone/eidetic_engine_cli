@@ -46,6 +46,10 @@ fn degradation_source_file() -> PathBuf {
     src_dir().join("models").join("degradation.rs")
 }
 
+fn hygiene_beads_state_source_file() -> PathBuf {
+    src_dir().join("core").join("hygiene_beads_state.rs")
+}
+
 fn docs_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs")
 }
@@ -218,19 +222,33 @@ fn validate_fixture(path: &Path) -> TestResult {
 }
 
 fn collect_workspace_hygiene_codes() -> Result<Vec<String>, String> {
-    let path = degradation_source_file();
-    let source =
-        fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
-    let regex =
+    let mut codes = BTreeSet::new();
+
+    let degradation_path = degradation_source_file();
+    let degradation_source = fs::read_to_string(&degradation_path)
+        .map_err(|error| format!("read {}: {error}", degradation_path.display()))?;
+    let degradation_regex =
         Regex::new(r#"pub const WORKSPACE_HYGIENE_[A-Z0-9_]+_CODE:\s*&str\s*=\s*"([^"]+)""#)
             .map_err(|error| format!("compile workspace-hygiene code regex: {error}"))?;
-    let mut codes: Vec<String> = regex
-        .captures_iter(&source)
-        .filter_map(|captures| captures.get(1).map(|match_| match_.as_str().to_owned()))
-        .collect();
-    codes.sort();
-    codes.dedup();
-    Ok(codes)
+    codes.extend(
+        degradation_regex
+            .captures_iter(&degradation_source)
+            .filter_map(|captures| captures.get(1).map(|match_| match_.as_str().to_owned())),
+    );
+
+    let beads_path = hygiene_beads_state_source_file();
+    let beads_source = fs::read_to_string(&beads_path)
+        .map_err(|error| format!("read {}: {error}", beads_path.display()))?;
+    let beads_regex =
+        Regex::new(r#"pub const [A-Z0-9_]+:\s*&str\s*=\s*"(workspace_hygiene_[^"]+)""#)
+            .map_err(|error| format!("compile beads workspace-hygiene code regex: {error}"))?;
+    codes.extend(
+        beads_regex
+            .captures_iter(&beads_source)
+            .filter_map(|captures| captures.get(1).map(|match_| match_.as_str().to_owned())),
+    );
+
+    Ok(codes.into_iter().collect())
 }
 
 fn read_fixture(path: &Path) -> Result<Value, String> {
