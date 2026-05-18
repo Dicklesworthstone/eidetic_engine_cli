@@ -2486,6 +2486,51 @@ All cargo builds and tests and other CPU intensive operations MUST be done using
     }
 
     #[test]
+    fn agent_operating_contract_source_heading_tracks_heading_changes() -> TestResult {
+        let old_docs = [(
+            "AGENTS.md",
+            r#"# AGENTS
+
+## Old Safety Heading
+
+RULE NUMBER 2: NO WORKTREES. EVER.
+"#,
+        )];
+        let new_docs = [(
+            "AGENTS.md",
+            r#"# AGENTS
+
+## New Safety Heading
+
+RULE NUMBER 2: NO WORKTREES. EVER.
+"#,
+        )];
+
+        let old_rules = extract_agent_operating_contract_rules(&old_docs);
+        let new_rules = extract_agent_operating_contract_rules(&new_docs);
+        let old_rule = old_rules
+            .iter()
+            .find(|rule| rule.id == "agent.no_worktrees")
+            .ok_or_else(|| "missing old no-worktrees rule".to_owned())?;
+        let new_rule = new_rules
+            .iter()
+            .find(|rule| rule.id == "agent.no_worktrees")
+            .ok_or_else(|| "missing new no-worktrees rule".to_owned())?;
+
+        ensure(old_rule.id.clone(), new_rule.id.clone(), "stable rule id")?;
+        ensure(
+            old_rule.source_heading.clone(),
+            "Old Safety Heading".to_owned(),
+            "old source heading",
+        )?;
+        ensure(
+            new_rule.source_heading.clone(),
+            "New Safety Heading".to_owned(),
+            "new source heading",
+        )
+    }
+
+    #[test]
     fn agent_operating_contract_reports_missing_docs_as_degraded() -> TestResult {
         let workspace = temp_workspace()?;
         std::fs::write(
