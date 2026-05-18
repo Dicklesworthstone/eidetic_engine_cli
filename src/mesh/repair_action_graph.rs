@@ -278,7 +278,7 @@ pub fn build_repair_action_graph(
     let mut by_id: BTreeMap<String, RepairAction> = BTreeMap::new();
     for action in actions {
         let key = action.id.clone();
-        if by_id.insert(key, action).is_some() {
+        if by_id.insert(key.clone(), action).is_some() {
             return Err(RepairActionGraphError::DuplicateActionId(key));
         }
     }
