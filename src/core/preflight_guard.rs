@@ -163,7 +163,14 @@ impl PreflightGuardRegistry {
         let source_label = rules_path.to_string_lossy().into_owned();
         let body = match read_preflight_rules_file_no_follow(&rules_path) {
             Ok(body) => body,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(registry),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(registry);
+            }
             Err(error) => {
                 return Err(DomainError::Storage {
                     message: format!("Failed to read {source_label}: {error}"),

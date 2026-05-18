@@ -60,7 +60,10 @@ impl std::fmt::Display for RepairActionGraphError {
                 "action {from:?} declares prerequisite {missing:?}, which is not in the action set"
             ),
             Self::DependencyCycle { contains } => {
-                write!(f, "dependency cycle detected (contains action {contains:?})")
+                write!(
+                    f,
+                    "dependency cycle detected (contains action {contains:?})"
+                )
             }
         }
     }
@@ -229,7 +232,7 @@ pub struct RepairAction {
 /// Schema-shaped envelope.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RepairActionGraph {
-    pub schema: &'static str,
+    pub schema: String,
     pub actions: Vec<RepairAction>,
     /// Deterministic topological order: each action is preceded by
     /// all of its prerequisites. Ties between independent actions are
@@ -275,7 +278,7 @@ pub fn build_repair_action_graph(
     let mut by_id: BTreeMap<String, RepairAction> = BTreeMap::new();
     for action in actions {
         let key = action.id.clone();
-        if by_id.insert(key.clone(), action).is_some() {
+        if by_id.insert(key, action).is_some() {
             return Err(RepairActionGraphError::DuplicateActionId(key));
         }
     }
@@ -309,7 +312,11 @@ pub fn build_repair_action_graph(
 
     let mut actions_out: Vec<RepairAction> = by_id.into_values().collect();
     for action in &mut actions_out {
-        if action.expected_outcome.preconditions_for_next_actions.is_empty() {
+        if action
+            .expected_outcome
+            .preconditions_for_next_actions
+            .is_empty()
+        {
             if let Some(downstream) = reverse_adjacency.get(&action.id) {
                 let mut sorted = downstream.clone();
                 sorted.sort();
@@ -326,7 +333,7 @@ pub fn build_repair_action_graph(
         .sum();
 
     Ok(RepairActionGraph {
-        schema: REPAIR_ACTION_GRAPH_SCHEMA_V1,
+        schema: REPAIR_ACTION_GRAPH_SCHEMA_V1.to_owned(),
         actions: actions_out,
         topologically_ordered_execution: topologically_ordered,
         parallelizable_groups: topo_groups,
@@ -341,10 +348,8 @@ pub fn build_repair_action_graph(
 fn kahn_layers(
     by_id: &BTreeMap<String, RepairAction>,
 ) -> Result<Vec<Vec<String>>, RepairActionGraphError> {
-    let mut in_degree: BTreeMap<String, usize> = by_id
-        .keys()
-        .map(|id| (id.clone(), 0_usize))
-        .collect();
+    let mut in_degree: BTreeMap<String, usize> =
+        by_id.keys().map(|id| (id.clone(), 0_usize)).collect();
     for action in by_id.values() {
         for _ in &action.prerequisites {
             *in_degree.entry(action.id.clone()).or_default() += 1;
@@ -386,8 +391,14 @@ fn kahn_layers(
 
         // Sort by (priority, id) for deterministic within-layer order.
         current_layer.sort_by(|a, b| {
-            let pa = by_id.get(a).map(|act| act.priority.sort_key()).unwrap_or(u8::MAX);
-            let pb = by_id.get(b).map(|act| act.priority.sort_key()).unwrap_or(u8::MAX);
+            let pa = by_id
+                .get(a)
+                .map(|act| act.priority.sort_key())
+                .unwrap_or(u8::MAX);
+            let pb = by_id
+                .get(b)
+                .map(|act| act.priority.sort_key())
+                .unwrap_or(u8::MAX);
             pa.cmp(&pb).then_with(|| a.cmp(b))
         });
 
@@ -612,8 +623,7 @@ mod tests {
     #[test]
     fn caller_provided_expected_outcome_is_preserved() {
         let mut root = action("root", &[], Priority::Medium, 1);
-        root.expected_outcome.preconditions_for_next_actions =
-            vec!["manually-supplied".to_owned()];
+        root.expected_outcome.preconditions_for_next_actions = vec!["manually-supplied".to_owned()];
         let actions = vec![root, action("child", &["root"], Priority::Medium, 1)];
         let graph = build_repair_action_graph(actions).expect("graph builds");
         let root = graph
