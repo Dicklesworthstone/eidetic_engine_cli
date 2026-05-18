@@ -64,7 +64,7 @@
   "$defs": {
     "readPoolStatus": {
       "type": "object",
-      "required": ["active", "idle", "active_pins", "expired_pins", "max_seen", "drops", "release_failures", "ad_hoc_bypass_count", "acquire_wait"],
+      "required": ["active", "idle", "active_pins", "expired_pins", "max_seen", "drops", "release_failures", "ad_hoc_bypass_count", "acquire_wait", "checkpoint_blocked_by"],
       "additionalProperties": false,
       "properties": {
         "active": {"type": "integer", "minimum": 0},
@@ -84,6 +84,28 @@
             "p50_ns": {"type": "integer", "minimum": 0},
             "p99_ns": {"type": "integer", "minimum": 0}
           }
+        },
+        "checkpoint_blocked_by": {
+          "description": "Forward-looking checkpoint blocker attribution: the oldest active SnapshotPin in this process's read pool. If a `wal_checkpoint` were attempted now and returned BUSY, this entry is the most likely blocker. Null when no pins are active. Process-local: a reader pinning the WAL from a different process is not visible here.",
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["pin_id", "slot_id", "workflow_id", "request_id", "workspace_id", "pin_age_ms", "max_pin_duration_ms", "poisoned", "release_state"],
+              "additionalProperties": false,
+              "properties": {
+                "pin_id": {"type": "integer", "minimum": 0},
+                "slot_id": {"type": ["integer", "null"], "minimum": 0},
+                "workflow_id": {"type": ["string", "null"]},
+                "request_id": {"type": ["string", "null"]},
+                "workspace_id": {"type": ["string", "null"]},
+                "pin_age_ms": {"type": "integer", "minimum": 0},
+                "max_pin_duration_ms": {"type": "integer", "minimum": 0},
+                "poisoned": {"type": "boolean"},
+                "release_state": {"type": "string", "enum": ["active", "expired", "poisoned"]}
+              }
+            }
+          ]
         }
       }
     },

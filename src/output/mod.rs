@@ -3485,7 +3485,42 @@ fn render_read_pool_status_json(
             wait.field_raw("p50_ns", &report.acquire_wait.p50_ns.to_string());
             wait.field_raw("p99_ns", &report.acquire_wait.p99_ns.to_string());
         });
+        match report.checkpoint_blocked_by.as_ref() {
+            Some(blocker) => {
+                pool.field_object("checkpoint_blocked_by", |entry| {
+                    entry.field_raw("pin_id", &blocker.pin_id.to_string());
+                    field_optional_u64(entry, "slot_id", blocker.slot_id);
+                    field_optional_str(entry, "workflow_id", blocker.workflow_id.as_deref());
+                    field_optional_str(entry, "request_id", blocker.request_id.as_deref());
+                    field_optional_str(entry, "workspace_id", blocker.workspace_id.as_deref());
+                    entry.field_raw("pin_age_ms", &blocker.pin_age_ms.to_string());
+                    entry.field_raw(
+                        "max_pin_duration_ms",
+                        &blocker.max_pin_duration_ms.to_string(),
+                    );
+                    entry.field_bool("poisoned", blocker.poisoned);
+                    entry.field_str(
+                        "release_state",
+                        snapshot_pin_release_state_str(blocker.release_state),
+                    );
+                });
+            }
+            None => {
+                pool.field_raw("checkpoint_blocked_by", "null");
+            }
+        }
     });
+}
+
+fn snapshot_pin_release_state_str(
+    state: crate::db::read_pool::SnapshotPinReleaseState,
+) -> &'static str {
+    use crate::db::read_pool::SnapshotPinReleaseState;
+    match state {
+        SnapshotPinReleaseState::Active => "active",
+        SnapshotPinReleaseState::Expired => "expired",
+        SnapshotPinReleaseState::Poisoned => "poisoned",
+    }
 }
 
 fn render_wal_status_json(parent: &mut JsonBuilder, report: &crate::core::status::WalStatusReport) {

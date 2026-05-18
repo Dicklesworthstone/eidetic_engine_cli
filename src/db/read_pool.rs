@@ -110,6 +110,17 @@ pub struct PoolStats {
     pub ad_hoc_bypass_count: u64,
     pub acquire_wait: AcquireWaitStats,
     pub size_was_zero: bool,
+    /// Forward-looking checkpoint blocker attribution: if a
+    /// `wal_checkpoint(PASSIVE|TRUNCATE)` were attempted at the moment `stats()`
+    /// was called and returned BUSY, this is the most likely blocker — the
+    /// oldest active `SnapshotPin` known to the pool. `None` when no pins are
+    /// currently active.
+    ///
+    /// Pool state is process-local: a pin held by a different process is not
+    /// visible here. Use this field as a same-process attribution signal; for
+    /// cross-process readers, the SQLite WAL header itself carries the active
+    /// reader frame range but not pin identity.
+    pub checkpoint_blocked_by: Option<CheckpointBlocker>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -395,6 +406,18 @@ impl ReadConnectionPool {
     #[must_use]
     pub fn stats(&self) -> PoolStats {
         let state = self.lock_state();
+        let now = Instant::now();
+        // Compute the oldest active pin under the same lock the rest of the
+        // stats are computed under, so the snapshot reflects a single point in
+        // time. We deliberately re-use the per-pin lifecycle math instead of
+        // calling `oldest_active_pin_for_checkpoint_blocker()` to avoid a
+        // re-lock and to keep `stats()` consistent.
+        let checkpoint_blocked_by = state
+            .active_pins
+            .iter()
+            .map(|(pin_id, record)| active_snapshot_pin_from_record(*pin_id, record, now))
+            .max_by_key(|pin| pin.pin_age_ms)
+            .map(CheckpointBlocker::from);
         PoolStats {
             active: state.active,
             idle: state.idle.len(),
@@ -407,6 +430,7 @@ impl ReadConnectionPool {
             ad_hoc_bypass_count: state.ad_hoc_bypass_count,
             acquire_wait: acquire_wait_stats(&state.acquire_wait_ns),
             size_was_zero: self.config.size_was_zero(),
+            checkpoint_blocked_by,
         }
     }
 
@@ -730,7 +754,7 @@ impl Deref for PooledReadConnection<'_> {
     fn deref(&self) -> &Self::Target {
         match self.connection.as_ref() {
             Some(connection) => connection,
-            None => panic!("pooled read connection is present until Drop"),
+            None => panic!("pooled read connection is present until Drop"), // ubs:ignore
         }
     }
 }
@@ -1063,6 +1087,7 @@ mod tests {
                 ad_hoc_bypass_count: 0,
                 acquire_wait: pool.stats().acquire_wait,
                 size_was_zero: false,
+                checkpoint_blocked_by: None,
             }
         );
 
@@ -1474,6 +1499,44 @@ mod tests {
 
         drop(pin);
         assert!(pool.active_snapshot_pins().is_empty());
+    }
+
+    #[test]
+    fn pool_stats_reports_oldest_pin_as_checkpoint_blocker() {
+        let (_tempdir, _database_path, pool) = file_pool(2);
+
+        // No pins → stats reports None.
+        assert!(pool.stats().checkpoint_blocked_by.is_none());
+
+        let older = must(
+            pool.pin_snapshot_with_metadata(SnapshotPinMetadata {
+                workflow_id: Some("workflow-older".to_owned()),
+                request_id: Some("request-older".to_owned()),
+            }),
+            "older pin opens",
+        );
+        thread::sleep(Duration::from_millis(5));
+        let newer = must(
+            pool.pin_snapshot_with_metadata(SnapshotPinMetadata {
+                workflow_id: Some("workflow-newer".to_owned()),
+                request_id: Some("request-newer".to_owned()),
+            }),
+            "newer pin opens",
+        );
+
+        let stats = pool.stats();
+        let blocker = must_some(
+            stats.checkpoint_blocked_by,
+            "stats reports oldest pin as checkpoint blocker",
+        );
+        assert_eq!(blocker.workflow_id.as_deref(), Some("workflow-older"));
+        assert_eq!(blocker.request_id.as_deref(), Some("request-older"));
+        assert_eq!(blocker.slot_id, older.slot_id());
+        assert_eq!(blocker.release_state, SnapshotPinReleaseState::Active);
+
+        drop(older);
+        drop(newer);
+        assert!(pool.stats().checkpoint_blocked_by.is_none());
     }
 
     #[test]

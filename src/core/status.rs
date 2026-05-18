@@ -22,7 +22,8 @@ use crate::db::{
     GraphSnapshotType, MeshStorageStatus, PROVENANCE_CHAIN_HASH_VERSION,
     PROVENANCE_STATUS_UNVERIFIED, StoredAuditEntry, StoredCurationCandidate,
     StoredCurationTtlPolicy, StoredMemory, StoredMemoryLink, WalStatus, audit_actions,
-    default_curation_ttl_policy_id_for_review_state, read_pool::PoolStats,
+    default_curation_ttl_policy_id_for_review_state,
+    read_pool::{CheckpointBlocker, PoolStats, SnapshotPinReleaseState},
 };
 use crate::models::degradation::GRAPH_SKYLINE_DEGENERATE_COMMUNITIES_CODE;
 use crate::models::posture::{
@@ -915,6 +916,14 @@ pub struct ReadPoolStatusReport {
     pub release_failures: u64,
     pub ad_hoc_bypass_count: u64,
     pub acquire_wait: ReadPoolAcquireWaitReport,
+    /// Forward-looking checkpoint blocker attribution: the oldest active
+    /// SnapshotPin known to this process's read pool. If a `wal_checkpoint`
+    /// were attempted now and returned BUSY, this entry is the most likely
+    /// blocker.
+    ///
+    /// `None` when no pins are active. Process-local: a reader pinning the WAL
+    /// from a different process is not visible here.
+    pub checkpoint_blocked_by: Option<CheckpointBlockerReport>,
 }
 
 /// Sliding-window read-pool acquire wait summary exposed by `ee status --json`.
@@ -925,9 +934,52 @@ pub struct ReadPoolAcquireWaitReport {
     pub p99_ns: u128,
 }
 
+/// Status-layer rendering of a [`CheckpointBlocker`]: the per-pin fields the
+/// pool already knows, optionally enriched with the workspace identifier the
+/// caller supplies (the pool itself is workspace-agnostic).
+///
+/// Emitted under `data.read_pool.checkpoint_blocked_by` in `ee status --json`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckpointBlockerReport {
+    pub pin_id: u64,
+    pub slot_id: Option<u64>,
+    pub workflow_id: Option<String>,
+    pub request_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub pin_age_ms: u128,
+    pub max_pin_duration_ms: u128,
+    pub poisoned: bool,
+    pub release_state: SnapshotPinReleaseState,
+}
+
+impl From<CheckpointBlocker> for CheckpointBlockerReport {
+    fn from(blocker: CheckpointBlocker) -> Self {
+        Self {
+            pin_id: blocker.pin_id,
+            slot_id: blocker.slot_id,
+            workflow_id: blocker.workflow_id,
+            request_id: blocker.request_id,
+            workspace_id: None,
+            pin_age_ms: blocker.pin_age_ms,
+            max_pin_duration_ms: blocker.max_pin_duration_ms,
+            poisoned: blocker.poisoned,
+            release_state: blocker.release_state,
+        }
+    }
+}
+
+impl CheckpointBlockerReport {
+    /// Attach the workspace identifier the pool itself does not own.
+    #[must_use]
+    pub fn with_workspace_id(mut self, workspace_id: Option<String>) -> Self {
+        self.workspace_id = workspace_id;
+        self
+    }
+}
+
 impl ReadPoolStatusReport {
     #[must_use]
-    pub const fn gather() -> Self {
+    pub fn gather() -> Self {
         Self {
             active: 0,
             idle: 0,
@@ -942,6 +994,7 @@ impl ReadPoolStatusReport {
                 p50_ns: 0,
                 p99_ns: 0,
             },
+            checkpoint_blocked_by: None,
         }
     }
 }
@@ -962,6 +1015,7 @@ impl From<PoolStats> for ReadPoolStatusReport {
                 p50_ns: stats.acquire_wait.p50_ns,
                 p99_ns: stats.acquire_wait.p99_ns,
             },
+            checkpoint_blocked_by: stats.checkpoint_blocked_by.map(CheckpointBlockerReport::from),
         }
     }
 }

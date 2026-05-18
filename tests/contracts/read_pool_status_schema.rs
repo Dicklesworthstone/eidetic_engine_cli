@@ -361,6 +361,7 @@ fn read_pool_status_report_preserves_lifecycle_pool_stats() -> TestResult {
             p99_ns: 19,
         },
         size_was_zero: false,
+        checkpoint_blocked_by: None,
     });
 
     if report.active != 2
@@ -517,6 +518,7 @@ fn rendered_status_json_includes_read_pool_with_all_counters() -> TestResult {
             p99_ns: 19,
         },
         size_was_zero: false,
+        checkpoint_blocked_by: None,
     });
     status.wal = WalStatusReport::from_wal_status(
         WalStatus {
