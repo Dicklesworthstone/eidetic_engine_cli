@@ -471,7 +471,7 @@ fn classify_entry(
     // catastrophic), then local-machine artifacts, generated build
     // output, beads metadata, scratch, binary/large, then the
     // commit-friendly buckets (docs, tests, source), then unknown.
-    if let Some((reasons, confidence, redacted_evidence)) =
+    if let Some((mut reasons, confidence, redacted_evidence)) =
         secret_risk_classification(&path, report)
     {
         let bucket = if git_state.is_untracked() {
@@ -481,6 +481,9 @@ fn classify_entry(
             // human-review item, not a fast doNotCommit: the file is
             // already in git history (perhaps legitimately, e.g. an
             // example config) and the right answer requires a human.
+            if !reasons.contains(&reason::SECRET_RISK_OVERRIDES_TRACKED) {
+                reasons.push(reason::SECRET_RISK_OVERRIDES_TRACKED);
+            }
             Bucket::NeedsHumanReview
         };
         return assemble_row(
@@ -1464,6 +1467,12 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, Kind::SecretRisk);
         assert_eq!(rows[0].bucket, Bucket::NeedsHumanReview);
+        assert!(rows[0].reasons.contains(&reason::SECRET_PATH_PATTERN));
+        assert!(
+            rows[0]
+                .reasons
+                .contains(&reason::SECRET_RISK_OVERRIDES_TRACKED)
+        );
     }
 
     #[test]
