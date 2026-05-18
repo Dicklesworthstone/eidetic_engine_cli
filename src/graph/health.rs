@@ -152,7 +152,11 @@ pub fn detect_contradiction_clusters_with_threshold(
     graph: &Graph,
     density_threshold: f64,
 ) -> Vec<ContradictionCluster> {
-    let threshold = density_threshold.clamp(0.0, 1.0);
+    let threshold = if density_threshold.is_nan() {
+        DEFAULT_CONTRADICTION_DENSITY_THRESHOLD
+    } else {
+        density_threshold.clamp(0.0, 1.0)
+    };
     let mut clusters = detect_louvain_communities(graph)
         .into_iter()
         .enumerate()

@@ -145,7 +145,12 @@ pub fn normalized_retrieval_entropy(retrieval_scores: &[f32]) -> f64 {
             -probability * probability.ln()
         })
         .sum::<f64>();
-    (entropy / (positive_scores.len() as f64).ln()).clamp(0.0, 1.0)
+    let normalized = entropy / (positive_scores.len() as f64).ln();
+    if normalized.is_nan() {
+        0.0
+    } else {
+        normalized.clamp(0.0, 1.0)
+    }
 }
 
 #[must_use]

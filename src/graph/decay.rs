@@ -110,7 +110,11 @@ impl StructuralDecayIndex {
         let onion_multiplier =
             1.0 + (self.policy.onion_decay_max - 1.0).max(0.0) * onion_normalized;
         let articulation_multiplier = if is_articulation_point {
-            self.policy.articulation_protection.clamp(0.0, 1.0)
+            if self.policy.articulation_protection.is_nan() {
+                DEFAULT_ARTICULATION_PROTECTION
+            } else {
+                self.policy.articulation_protection.clamp(0.0, 1.0)
+            }
         } else {
             1.0
         };

@@ -4092,7 +4092,7 @@ fn redact_rule_public_path_like_segments(value: &str) -> String {
                 let next = value[cursor..]
                     .chars()
                     .next()
-                    .expect("cursor stays on a character boundary");
+                    .unwrap_or('\0');
                 if rule_public_path_boundary(next) {
                     break;
                 }
@@ -4104,7 +4104,7 @@ fn redact_rule_public_path_like_segments(value: &str) -> String {
         let next = remaining
             .chars()
             .next()
-            .expect("cursor stays on a character boundary");
+            .unwrap_or('\0');
         output.push(next);
         cursor += next.len_utf8();
     }

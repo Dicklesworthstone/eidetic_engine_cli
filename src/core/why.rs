@@ -1480,7 +1480,7 @@ fn redact_why_absolute_path_like_segments(input: &str) -> String {
                 let next = input[cursor..]
                     .chars()
                     .next()
-                    .expect("cursor stays on a character boundary");
+                    .unwrap_or('\0');
                 if next.is_whitespace()
                     || matches!(
                         next,
@@ -1497,7 +1497,7 @@ fn redact_why_absolute_path_like_segments(input: &str) -> String {
         let next = remaining
             .chars()
             .next()
-            .expect("cursor stays on a character boundary");
+            .unwrap_or('\0');
         output.push(next);
         cursor += next.len_utf8();
     }

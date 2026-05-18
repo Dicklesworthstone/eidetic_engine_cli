@@ -127,8 +127,7 @@ where
         .enumerate()
         .all(|(index, item)| validate_payload_key(index, key(item)).is_ok())
     {
-        sort_by_ulid_payload(items, key)
-            .expect("all ULID payload keys were validated before sorting");
+        let _ = sort_by_ulid_payload(items, key);
     } else {
         items.sort_by(|left, right| key(left).cmp(key(right)));
     }
@@ -171,7 +170,7 @@ fn payload_offset_opt(key: &str) -> Option<usize> {
 }
 
 fn digit_value(byte: u8) -> u8 {
-    digit_value_checked(byte).expect("ULID digit was validated before sorting")
+    digit_value_checked(byte).unwrap_or(0)
 }
 
 fn digit_value_checked(byte: u8) -> Option<u8> {

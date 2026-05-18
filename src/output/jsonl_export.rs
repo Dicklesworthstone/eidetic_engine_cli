@@ -123,7 +123,7 @@ fn redact_paths_in_content(content: &str) -> String {
                                     let next = line[cursor..]
                                         .chars()
                                         .next()
-                                        .expect("cursor stays on a character boundary");
+                                        .unwrap_or('\0');
                                     if path_redaction_boundary(next) {
                                         break;
                                     }
@@ -133,7 +133,7 @@ fn redact_paths_in_content(content: &str) -> String {
                                 let c = remaining
                                     .chars()
                                     .next()
-                                    .expect("cursor stays on a character boundary");
+                                    .unwrap_or('\0');
                                 output.push(c);
                                 cursor += c.len_utf8();
                             }
@@ -186,9 +186,10 @@ pub fn redact_identifier(id: &str, level: RedactionLevel) -> String {
     match level {
         RedactionLevel::None | RedactionLevel::Minimal | RedactionLevel::Strict => id.to_owned(),
         RedactionLevel::Standard => {
-            if id.len() > 8 {
-                let prefix = id.get(..4).unwrap_or("????");
-                let suffix = id.get(id.len() - 4..).unwrap_or("????");
+            let char_count = id.chars().count();
+            if char_count > 8 {
+                let prefix: String = id.chars().take(4).collect();
+                let suffix: String = id.chars().skip(char_count.saturating_sub(4)).collect();
                 format!("{prefix}...{suffix}")
             } else {
                 id.to_owned()
