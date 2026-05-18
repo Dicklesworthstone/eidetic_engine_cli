@@ -13,6 +13,7 @@ pub mod agent_docs;
 pub mod artifact;
 pub mod artifact_relocation;
 pub mod audit;
+pub mod audit_lane;
 pub mod backup;
 pub mod bayes;
 pub mod budget;

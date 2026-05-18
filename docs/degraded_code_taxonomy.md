@@ -109,6 +109,7 @@ Current conventions:
 | `agent_detection` | Agent inventory and agent-status detection degradation. |
 | `agent_mail` | Swarm brief Agent Mail source degradation. |
 | `artifact_register` | `ee artifact register` artifact metadata, redaction, or indexing degradation. |
+| `audit_lane` | Swarm-X audit-lane enqueue, drain, batch-commit, shutdown, and backpressure degradation. |
 | `backup_create` | `ee backup create` export, redaction, index, or graph-cache degradation. |
 | `backup_export` | Legacy `ee export` backup JSONL export degradation. |
 | `backup_inspect` | `ee backup inspect` manifest or artifact-inspection degradation. |
@@ -387,10 +388,12 @@ memory bodies in `sources[]`.
 | `serialization_failed` | medium | bd-17c65.10.6 (J6) |
 | `trust_promotion_evidence_rejected` | medium | bd-17c65.7.4 (G4) |
 
-#### Concurrency + write owner (7)
+#### Concurrency + write owner (9)
 | Code | Severity | Bead |
 |------|----------|------|
 | `advisory_lock_timeout` | medium | bd-3usjw.57 |
+| `audit_backpressure` | warning | bd-wp5ac.1 |
+| `audit_lane_shutdown_drain_timeout` | medium | bd-wp5ac.1 |
 | `index_publish_lock_contention` | warning | bd-17c65.12.2 (L1) |
 | `write_owner_busy` | warning | bd-17c65.12.2 (L1) |
 | `write_spool_backpressure` | warning | bd-17c65.12.2 (L1) |

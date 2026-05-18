@@ -100,6 +100,8 @@ in the same commit, keeping the catalog complete by construction.
 | `coordination_source_stale` | context, pack | low | bd-1zb7k.4 (S3) |
 | `coordination_source_unavailable` | context, pack | medium | bd-1zb7k.4 (S3) |
 | `qos_registry_unavailable` | qos registry, status, doctor, swarm brief | medium | bd-1zb7k.20.2 |
+| `audit_backpressure` | audit lane | warning | bd-wp5ac.1 |
+| `audit_lane_shutdown_drain_timeout` | audit lane | medium | bd-wp5ac.1 |
 | `why_pack_selection_unavailable` | why | low | bd-17c65.10.6 (J6) |
 | `why_result_target_unsupported_source` | why | medium | bd-17c65.10.6 (J6) |
 | `graph_memory_not_in_snapshot` | why | low | bd-17c65.10.6 (J6) |
