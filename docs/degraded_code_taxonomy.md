@@ -141,6 +141,7 @@ Current conventions:
 | `graph_dominance` | `ee why` revision-dominance impact analysis degradation. |
 | `graph_export` | `ee graph export` graph snapshot export degradation. |
 | `graph_feature_enrichment` | `ee graph feature-enrichment` graph-derived scoring degradation. |
+| `graph_snapshot_prune` | `ee maintenance graph-snapshot-prune` graph-snapshot retention degradation. |
 | `graph_witness_prune` | `ee maintenance graph-witnesses-prune` witness-retention degradation. |
 | `hits` | `ee graph hits` HITS algorithm degradation. |
 | `gomory_hu_proximity` | `ee proximity` Gomory-Hu min-cut proximity degradation. |
@@ -151,6 +152,8 @@ Current conventions:
 | `lab_counterfactual` | `ee lab counterfactual` replay-evidence degradation. |
 | `lab_replay` | `ee lab replay` replay-evidence degradation. |
 | `learn_cluster` | `ee learn cluster` deterministic clustering degradation. |
+| `maintenance` | Generic maintenance response degradation when a narrower command label is unavailable. |
+| `maintenance_run` | `ee maintenance run` and `ee job run` maintenance job execution degradation. |
 | `quarantine` | `ee diag quarantine` trust or feedback quarantine degradation. |
 | `rch` | Swarm brief RCH source degradation. |
 | `structural_health` | `ee health structural` graph-health degradation. |
