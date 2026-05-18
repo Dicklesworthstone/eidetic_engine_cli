@@ -262,8 +262,14 @@ where
                     }
                 }
             } else if let Some(key) = self.main.pop_back() {
-                if self.entries.remove(&key).is_some() {
-                    self.stats.record_eviction();
+                if let Some(mut entry) = self.entries.remove(&key) {
+                    if entry.access_count > 0 {
+                        entry.access_count -= 1;
+                        self.main.push_front(key.clone());
+                        self.entries.insert(key, entry);
+                    } else {
+                        self.stats.record_eviction();
+                    }
                 }
             } else {
                 break;
