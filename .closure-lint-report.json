@@ -13,12 +13,6 @@
       "reason": "SERVE_UNAVAILABLE_CODE still exists in src/cli/mod.rs"
     },
     {
-      "bead": "bd-36bbk.1.1",
-      "label": "implements-surface",
-      "surface": "tailscale_local_probe",
-      "reason": "close_reason contains abstention language"
-    },
-    {
       "bead": "bd-36bbk.1.10",
       "label": "implements-surface",
       "surface": "fake_tailscale_e2e_harness",
@@ -28,25 +22,7 @@
       "bead": "bd-36bbk.1.7",
       "label": "implements-surface",
       "surface": "peer_discovery_policy",
-      "reason": "close_reason contains abstention language"
-    },
-    {
-      "bead": "bd-36bbk.1.7",
-      "label": "implements-surface",
-      "surface": "peer_discovery_policy",
       "reason": "referenced test path missing: tests/mesh_discovery_policy_audit.rs"
-    },
-    {
-      "bead": "bd-36bbk.1.8",
-      "label": "implements-surface",
-      "surface": "tailnet_change_guard",
-      "reason": "close_reason contains abstention language"
-    },
-    {
-      "bead": "bd-36bbk.1.8",
-      "label": "implements-surface",
-      "surface": "tailnet_change_guard",
-      "reason": "missing tests/golden/tailnet_change_guard.snap"
     },
     {
       "bead": "bd-36bbk.1.8",
@@ -70,43 +46,13 @@
       "bead": "bd-3usjw.1",
       "label": "implements-surface",
       "surface": "db_inspect",
-      "reason": "close_reason contains abstention language"
-    },
-    {
-      "bead": "bd-3usjw.1",
-      "label": "implements-surface",
-      "surface": "db_inspect",
-      "reason": "missing tests/golden/db_inspect.snap"
-    },
-    {
-      "bead": "bd-3usjw.1",
-      "label": "implements-surface",
-      "surface": "db_inspect",
       "reason": "referenced test path missing: tests/fixtures/db_inspect"
     },
     {
       "bead": "bd-3usjw.2",
       "label": "implements-surface",
       "surface": "graph_centrality_read",
-      "reason": "close_reason contains abstention language"
-    },
-    {
-      "bead": "bd-3usjw.2",
-      "label": "implements-surface",
-      "surface": "graph_centrality_read",
-      "reason": "missing tests/golden/graph_centrality_read.snap"
-    },
-    {
-      "bead": "bd-3usjw.2",
-      "label": "implements-surface",
-      "surface": "graph_centrality_read",
       "reason": "referenced test path missing: tests/e2e_graph_centrality.rs"
-    },
-    {
-      "bead": "bd-3usjw.3",
-      "label": "implements-surface",
-      "surface": "mcp_top_level",
-      "reason": "missing tests/golden/mcp_top_level.snap"
     },
     {
       "bead": "bd-3usjw.3",
@@ -136,12 +82,6 @@
       "bead": "bd-3usjw.4",
       "label": "implements-surface",
       "surface": "serve_localhost",
-      "reason": "missing tests/golden/serve_localhost.snap"
-    },
-    {
-      "bead": "bd-3usjw.4",
-      "label": "implements-surface",
-      "surface": "serve_localhost",
       "reason": "declared e2e FILE SURFACE missing: tests/e2e_serve_localhost.rs"
     },
     {
@@ -151,40 +91,10 @@
       "reason": "referenced test path missing: tests/e2e_serve_localhost.rs"
     },
     {
-      "bead": "bd-3usjw.46",
-      "label": "math-ambition",
-      "surface": "rejection_criteria",
-      "reason": "close_reason must include rejection_threshold_passed, measured_value, expected_value, and decision fields"
-    },
-    {
-      "bead": "bd-3usjw.46",
-      "label": "implements-surface",
-      "surface": "minhash_rank_centrality",
-      "reason": "missing tests/golden/minhash_rank_centrality.snap"
-    },
-    {
-      "bead": "bd-3usjw.49",
-      "label": "math-ambition",
-      "surface": "rejection_criteria",
-      "reason": "close_reason must include rejection_threshold_passed, measured_value, expected_value, and decision fields"
-    },
-    {
-      "bead": "bd-3usjw.5",
-      "label": "implements-surface",
-      "surface": "swarm_subcommand",
-      "reason": "missing tests/golden/swarm_subcommand.snap"
-    },
-    {
       "bead": "bd-3usjw.6",
       "label": "implements-surface",
       "surface": "trauma_guard_preflight",
       "reason": "close_reason contains abstention language"
-    },
-    {
-      "bead": "bd-3usjw.6",
-      "label": "implements-surface",
-      "surface": "trauma_guard_preflight",
-      "reason": "missing tests/golden/trauma_guard_preflight.snap"
     },
     {
       "bead": "bd-3usjw.6",
@@ -213,40 +123,10 @@
       "severity": "medium"
     },
     {
-      "bead": "bd-3usjw.7",
-      "label": "implements-surface",
-      "surface": "trauma_guard_hook_helper",
-      "reason": "close_reason contains abstention language"
-    },
-    {
-      "bead": "bd-3usjw.7",
-      "label": "implements-surface",
-      "surface": "trauma_guard_hook_helper",
-      "reason": "missing tests/golden/trauma_guard_hook_helper.snap"
-    },
-    {
-      "bead": "bd-3usjw.70",
-      "label": "implements-surface",
-      "surface": "mcp_validate_subcommand",
-      "reason": "missing tests/golden/mcp_validate_subcommand.snap"
-    },
-    {
-      "bead": "bd-8jvg",
-      "label": "implements-surface",
-      "surface": "graph-determinism-harness",
-      "reason": "missing tests/golden/graph-determinism-harness.snap"
-    },
-    {
       "bead": "bd-h64j",
       "label": "implements-surface",
       "surface": "serve",
       "reason": "SERVE_UNAVAILABLE_CODE still exists in src/cli/mod.rs"
-    },
-    {
-      "bead": "bd-igvt",
-      "label": "implements-surface",
-      "surface": "graph-algorithm-witnesses",
-      "reason": "missing tests/golden/graph-algorithm-witnesses.snap"
     },
     {
       "bead": "bd-k2p52",
@@ -255,18 +135,12 @@
       "reason": "close_reason contains abstention language"
     },
     {
-      "bead": "bd-qnfw",
-      "label": "implements-surface",
-      "surface": "why-causal-explain",
-      "reason": "missing tests/golden/why-causal-explain.snap"
-    },
-    {
       "bead": "bd-s9kgl",
       "label": "implements-surface",
       "surface": "serve",
       "reason": "SERVE_UNAVAILABLE_CODE still exists in src/cli/mod.rs"
     }
   ],
-  "count": 43,
+  "count": 22,
   "status": "fail"
 }

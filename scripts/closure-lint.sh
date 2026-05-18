@@ -859,7 +859,8 @@ close_reason_contains_abstention() {
             sed -E 's/\*_UNAVAILABLE_CODE//g' |
             sed -E 's/docs\/degraded_code(s|_taxonomy)\.md//Ig' |
             sed -E 's/degraded[[:space:]]+(case|code|mode|entry)s?//Ig' |
-            sed -E 's/[a-z][a-z0-9_]*_unavailable\b//Ig'
+            sed -E 's/degraded_codes?(:?[[:space:]]+(none|\[\]|empty))?//Ig' |
+            sed -E 's/[a-z][a-z0-9_]*_unavailable//Ig'
     )
 
     echo "$scrubbed" | grep -qiE "$ABSTENTION_REGEX"
