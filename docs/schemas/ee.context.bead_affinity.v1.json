@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.context.bead_affinity.v1.json",
+  "title": "ee.context.bead_affinity.v1",
+  "description": "Bead-aware retrieval-bias summary emitted by ee context --explain --json (and ee why --json) when an --bead-id argument scopes pack ranking. Each memory in the candidate pool receives a small additive bias clamped to [-maxBiasMagnitude, +maxBiasMagnitude] (default 0.05, matching ee.context.agent_profile.v1) when its tags/content/links overlap with the supplied bead's labels, title tokens, or link graph. The block is purely explanatory: agents may use it to understand why ranking changed under --bead-id without mutating retrieval logic. Filed by bd-2942u (swarmx.barp: bead-aware retrieval prioritization).",
+  "type": "object",
+  "required": [
+    "schema",
+    "beadId",
+    "matchedFeatureCount",
+    "biasMagnitudeMax",
+    "maxBiasMagnitude",
+    "memoryBiasApplied",
+    "coldStart",
+    "determinismKey"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.context.bead_affinity.v1"},
+    "beadId": {"type": "string", "minLength": 1, "description": "The bead ID supplied via --bead-id; verbatim, never hashed."},
+    "beadTitle": {"type": ["string", "null"], "description": "Snapshot of the bead title at retrieval time. Optional; absent if the linter could not load the bead description."},
+    "beadLabels": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true,
+      "description": "Sorted unique label list extracted from the bead at retrieval time."
+    },
+    "beadGeneration": {"type": ["integer", "null"], "minimum": 0, "description": "Local .beads/issues.jsonl generation observed when the bias was computed. Pairs with workspaceGeneration in determinismKey for byte-stable replay."},
+    "workspaceId": {"type": ["string", "null"]},
+    "matchedFeatureCount": {"type": "integer", "minimum": 0, "description": "Total count of (memory, feature) match signals that produced a non-zero bias contribution. 0 implies coldStart=true."},
+    "biasMagnitudeMax": {"type": "number", "minimum": 0.0, "maximum": 0.05, "description": "Maximum |bias| applied across all memories in the candidate pool for this query (saturates at maxBiasMagnitude)."},
+    "maxBiasMagnitude": {"type": "number", "const": 0.05, "description": "Hard cap on per-memory bias magnitude. Matches ee.context.agent_profile.v1.maxBiasMagnitude for compositionally consistent behavior."},
+    "memoryBiasApplied": {"type": "integer", "minimum": 0, "description": "Count of memories whose final ranking score was modified by a non-zero bead_affinity_score."},
+    "coldStart": {"type": "boolean", "description": "True when the supplied bead has no matching memories under any of the feature dimensions (tags, title tokens, link graph). When true, no bias is applied and the degraded[] block records bead_affinity_cold_start."},
+    "halfLifeDays": {"type": ["integer", "null"], "minimum": 1, "description": "Optional recency half-life for label-derived signals. null implies no decay (purely structural match)."},
+    "featureWeights": {
+      "type": "object",
+      "description": "Per-feature relative weights summing to <= 1.0 that combine into the final bead_affinity_score. Exposed for determinism replay and tuning analysis.",
+      "additionalProperties": false,
+      "properties": {
+        "label": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "titleToken": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "link": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "parentChild": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+      }
+    },
+    "determinismKey": {
+      "type": "object",
+      "required": [
+        "workspaceGeneration",
+        "beadGeneration",
+        "beadId",
+        "basePackHash"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "workspaceGeneration": {"type": "integer", "minimum": 0},
+        "beadGeneration": {"type": ["integer", "null"], "minimum": 0},
+        "beadId": {"type": "string"},
+        "basePackHash": {"type": ["string", "null"], "description": "Pack hash that would have been produced without bead_affinity. Lets callers prove the bias was applied on top of the canonical pack."}
+      }
+    },
+    "topBiases": {
+      "type": "array",
+      "description": "Top-N highest-|bias| memories for operator inspection. Length-capped to keep response size bounded.",
+      "items": {"$ref": "#/$defs/memoryBias"}
+    },
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradation"}
+    }
+  },
+  "field_presets": {
+    "minimal": ["schema", "beadId", "memoryBiasApplied", "coldStart"],
+    "summary": ["schema", "beadId", "beadTitle", "matchedFeatureCount", "biasMagnitudeMax", "memoryBiasApplied", "coldStart", "degraded"],
+    "standard": ["schema", "beadId", "beadTitle", "beadLabels", "matchedFeatureCount", "biasMagnitudeMax", "maxBiasMagnitude", "memoryBiasApplied", "coldStart", "featureWeights", "determinismKey", "topBiases", "degraded"],
+    "full": ["*"]
+  },
+  "examples": [
+    {
+      "schema": "ee.context.bead_affinity.v1",
+      "beadId": "bd-2942u",
+      "beadTitle": "swarmx.barp: bead-aware retrieval prioritization for ee context and ee search",
+      "beadLabels": ["swarmx", "retrieval"],
+      "beadGeneration": 17,
+      "workspaceId": "workspace_eidetic_engine_cli",
+      "matchedFeatureCount": 3,
+      "biasMagnitudeMax": 0.035,
+      "maxBiasMagnitude": 0.05,
+      "memoryBiasApplied": 2,
+      "coldStart": false,
+      "halfLifeDays": null,
+      "featureWeights": {
+        "label": 0.5,
+        "titleToken": 0.3,
+        "link": 0.15,
+        "parentChild": 0.05
+      },
+      "determinismKey": {
+        "workspaceGeneration": 42,
+        "beadGeneration": 17,
+        "beadId": "bd-2942u",
+        "basePackHash": "pack_base_123"
+      },
+      "topBiases": [
+        {
+          "memoryId": "mem_retrieval_policy",
+          "bias": 0.035,
+          "features": ["label", "titleToken"],
+          "matchedLabels": ["retrieval"],
+          "matchedTokens": ["context"]
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "schema": "ee.context.bead_affinity.v1",
+      "beadId": "bd-new",
+      "beadTitle": null,
+      "beadLabels": [],
+      "beadGeneration": null,
+      "workspaceId": "workspace_eidetic_engine_cli",
+      "matchedFeatureCount": 0,
+      "biasMagnitudeMax": 0.0,
+      "maxBiasMagnitude": 0.05,
+      "memoryBiasApplied": 0,
+      "coldStart": true,
+      "determinismKey": {
+        "workspaceGeneration": 42,
+        "beadGeneration": null,
+        "beadId": "bd-new",
+        "basePackHash": "pack_base_456"
+      },
+      "topBiases": [],
+      "degraded": [
+        {
+          "code": "bead_affinity_cold_start",
+          "severity": "info",
+          "message": "No bead labels, title tokens, or link relationships matched the candidate memory pool.",
+          "repair": "Run without --bead-id or add bead-linked evidence before expecting a ranking bias.",
+          "details": {"beadId": "bd-new"}
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "memoryBias": {
+      "type": "object",
+      "required": [
+        "memoryId",
+        "bias",
+        "features"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": {"type": "string"},
+        "bias": {"type": "number", "minimum": -0.05, "maximum": 0.05},
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["label", "titleToken", "link", "parentChild"]
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "matchedLabels": {
+          "type": "array",
+          "items": {"type": "string"},
+          "uniqueItems": true
+        },
+        "matchedTokens": {
+          "type": "array",
+          "items": {"type": "string"},
+          "uniqueItems": true
+        }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "bead_affinity_cold_start",
+            "bead_affinity_unavailable",
+            "bead_affinity_capped",
+            "bead_affinity_lookup_failed"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {"type": "string"},
+        "repair": {"type": ["string", "null"]},
+        "details": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}
