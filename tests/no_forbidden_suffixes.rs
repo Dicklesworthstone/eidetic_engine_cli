@@ -92,6 +92,11 @@ fn matches_forbidden(name: &str) -> Option<&'static str> {
             return Some("mainV<digits>");
         }
     }
+    if let Some((prefix, suffix)) = stem.rsplit_once('V') {
+        if !prefix.is_empty() && !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+            return Some("V<digits>");
+        }
+    }
     if stem.ends_with("_new") && !is_documented_new_exception(stem) {
         return Some("_new");
     }
@@ -222,6 +227,56 @@ fn allowlist_reasons_are_non_empty() {
     }
 }
 
+#[test]
+fn allowlist_entries_are_unique() {
+    let mut seen = HashSet::new();
+    let mut duplicates = Vec::new();
+    for (path, _reason) in FORBIDDEN_SUFFIX_ALLOWLIST {
+        if !seen.insert(*path) {
+            duplicates.push(*path);
+        }
+    }
+
+    assert!(
+        duplicates.is_empty(),
+        "FORBIDDEN_SUFFIX_ALLOWLIST contains duplicate path entries. Keep one \
+         reason per exception so the policy audit stays deterministic.\n\nDuplicates:\n{}",
+        duplicates
+            .iter()
+            .map(|path| format!("  - {path}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
+fn allowlist_reasons_name_transitional_bead_or_permanent_fixture_context() {
+    let mut weak = Vec::new();
+    for (path, reason) in FORBIDDEN_SUFFIX_ALLOWLIST {
+        let reason = reason.trim();
+        let is_transitional = reason.starts_with("transitional:") && reason.contains("bd-");
+        let is_permanent = reason.starts_with("permanent:")
+            && (reason.contains("fixture")
+                || reason.contains("golden")
+                || reason.contains("snapshot")
+                || reason.contains("scenario"));
+        if !is_transitional && !is_permanent {
+            weak.push(*path);
+        }
+    }
+
+    assert!(
+        weak.is_empty(),
+        "FORBIDDEN_SUFFIX_ALLOWLIST reasons must be either transitional with a \
+         tracking bead (`transitional: bd-...`) or permanent with fixture/golden \
+         context. Weak reason(s):\n{}",
+        weak.iter()
+            .map(|path| format!("  - {path}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
 #[cfg(test)]
 mod unit_tests {
     use super::*;
@@ -241,6 +296,8 @@ mod unit_tests {
         assert_eq!(matches_forbidden("foo__V2"), Some("__V<digits>"));
         assert_eq!(matches_forbidden("foo__V42.rs"), Some("__V<digits>"));
         assert_eq!(matches_forbidden("mainV2.rs"), Some("mainV<digits>"));
+        assert_eq!(matches_forbidden("parserV2.rs"), Some("V<digits>"));
+        assert_eq!(matches_forbidden("moduleV42"), Some("V<digits>"));
     }
 
     #[test]
