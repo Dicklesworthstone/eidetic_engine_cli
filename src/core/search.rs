@@ -25,6 +25,9 @@ use super::degraded_aggregation::{DegradationAggregationInput, aggregate_degrade
 use super::index::{
     IndexHealth, IndexStatusError, IndexStatusOptions, IndexStatusReport, get_index_status,
 };
+use super::memory_drift::{
+    MemoryDriftSelectionHint, memory_drift_selection_hint_from_provenance_status,
+};
 use super::memory_scope::{MemoryScopeContext, MeshQueryVisibility, mesh_query_visibility};
 use super::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 #[cfg(feature = "lexical-bm25")]
@@ -793,6 +796,25 @@ impl SearchDegradation {
             repair: Some("ee doctor --json".to_string()),
         }
     }
+
+    #[must_use]
+    fn selected_memory_drift(count: usize, hint: &MemoryDriftSelectionHint) -> Self {
+        Self {
+            code: hint
+                .degraded_code
+                .clone()
+                .unwrap_or_else(|| "memory_drift_source_unverifiable".to_owned()),
+            severity: hint.severity.clone(),
+            message: format!(
+                "Search selected {count} memor{suffix} with stale provenance evidence; highest-risk status={} memoryId={} reason={}. Each affected result includes driftHint.",
+                hint.drift_status.as_str(),
+                hint.memory_id,
+                hint.top_reason,
+                suffix = if count == 1 { "y" } else { "ies" },
+            ),
+            repair: Some(hint.revalidation_command.clone()),
+        }
+    }
 }
 
 impl ScoreFactor {
@@ -1007,6 +1029,9 @@ impl SearchReport {
                             public_search_metadata(meta, output_redaction_enabled);
                         redacted_patterns.extend(provenance_redacted_patterns.clone());
                         obj_map.insert("metadata".to_string(), metadata);
+                        if let Some(drift_hint) = meta.get("driftHint") {
+                            obj_map.insert("driftHint".to_string(), drift_hint.clone());
+                        }
                         if let MeshQueryVisibility::Allowed(provenance) =
                             mesh_query_visibility(Some(meta))
                         {
@@ -3546,6 +3571,7 @@ fn apply_tombstone_visibility_with_connection(
     let mut stale_filtered = 0usize;
     let mut malformed_filtered = 0usize;
     let mut included = 0usize;
+    let mut drift_hints = Vec::new();
     let reference_time = options.as_of.unwrap_or_else(Utc::now);
 
     for mut hit in hits {
@@ -3582,6 +3608,9 @@ fn apply_tombstone_visibility_with_connection(
                             &memory.valid_to,
                             reference_time,
                         );
+                        if let Some(hint) = annotate_hit_memory_drift(&mut hit, &memory) {
+                            drift_hints.push(hint);
+                        }
                         visible_hits.push(hit);
                     }
                     MemoryValidityVisibility::Expired => {
@@ -3662,8 +3691,53 @@ fn apply_tombstone_visibility_with_connection(
     if included > 0 {
         degraded.push(SearchDegradation::tombstoned_in_results(included));
     }
+    if let Some(worst_hint) = highest_risk_memory_drift_hint(&drift_hints) {
+        degraded.push(SearchDegradation::selected_memory_drift(
+            drift_hints.len(),
+            worst_hint,
+        ));
+    }
 
     visible_hits
+}
+
+fn annotate_hit_memory_drift(
+    hit: &mut SearchHit,
+    memory: &crate::db::StoredMemory,
+) -> Option<MemoryDriftSelectionHint> {
+    let hint = memory_drift_selection_hint_from_provenance_status(
+        &memory.id,
+        &memory.provenance_verification_status,
+        memory.provenance_chain_hash.as_deref(),
+    )?;
+    let metadata = hit
+        .metadata
+        .get_or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !metadata.is_object() {
+        *metadata = serde_json::Value::Object(serde_json::Map::new());
+    }
+    if let Some(map) = metadata.as_object_mut() {
+        map.insert("driftHint".to_owned(), hint.compact_json());
+        map.insert(
+            "provenanceVerificationStatus".to_owned(),
+            serde_json::json!(&memory.provenance_verification_status),
+        );
+        if let Some(hash) = &memory.provenance_chain_hash {
+            map.insert("provenanceChainHash".to_owned(), serde_json::json!(hash));
+        }
+    }
+    Some(hint)
+}
+
+fn highest_risk_memory_drift_hint(
+    hints: &[MemoryDriftSelectionHint],
+) -> Option<&MemoryDriftSelectionHint> {
+    hints.iter().max_by_key(|hint| {
+        (
+            hint.drift_status.severity_rank(),
+            std::cmp::Reverse(hint.memory_id.as_str()),
+        )
+    })
 }
 
 fn apply_memory_scope_visibility(
@@ -4797,6 +4871,291 @@ mod tests {
         assert_eq!(json["results"][0]["tombstoned"], true);
         assert!(json["results"][0]["tombstonedAt"].is_string());
         assert_eq!(json["results"][0]["metadata"]["tombstoned"], true);
+        Ok(())
+    }
+
+    #[test]
+    fn drift_hint_is_added_to_visible_search_results() -> TestResult {
+        let workspace = unique_test_dir("drift-hint-visibility");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let database_path = workspace.join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                "wsp_31234567890123456789012345",
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("drift hint visibility".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_30000000000000000000000001",
+                &CreateMemoryInput {
+                    workspace_id: "wsp_31234567890123456789012345".to_string(),
+                    level: "procedural".to_string(),
+                    kind: "rule".to_string(),
+                    content: "Revalidate stale provenance before trusting search hits.".to_string(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "agent_assertion".to_string(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(
+                "UPDATE memories SET provenance_verification_status = 'mismatch', provenance_chain_hash = 'blake3:stale' WHERE id = 'mem_30000000000000000000000001'",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let hit = SearchHit {
+            doc_id: "mem_30000000000000000000000001".to_string(),
+            score: 0.9,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(0.9),
+            rerank_score: None,
+            metadata: Some(serde_json::json!({
+                "content": "Revalidate stale provenance before trusting search hits.",
+            })),
+            explanation: None,
+        };
+        let options = SearchOptions {
+            workspace_path: workspace,
+            database_path: Some(database_path),
+            index_dir: None,
+            query: "stale provenance".to_string(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        };
+
+        let mut degraded = Vec::new();
+        let visible =
+            apply_tombstone_visibility(&options, vec![hit], &mut degraded, Some(&connection));
+        assert_eq!(visible.len(), 1);
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "memory_drift_source_changed");
+
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "stale provenance".to_string(),
+            requested_limit: 10,
+            results: visible,
+            elapsed_ms: 1.0,
+            errors: Vec::new(),
+            degraded,
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        };
+        let json = report.data_json();
+        assert_eq!(json["degraded"][0]["code"], "memory_drift_source_changed");
+        assert_eq!(json["results"][0]["driftHint"]["driftStatus"], "changed");
+        assert_eq!(
+            json["results"][0]["metadata"]["driftHint"]["topReason"],
+            "provenance_chain_mismatch"
+        );
+        assert_eq!(
+            json["results"][0]["metadata"]["provenanceVerificationStatus"],
+            "mismatch"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn drift_hints_keep_search_order_and_report_highest_risk() -> TestResult {
+        let workspace = unique_test_dir("drift-hint-order");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let database_path = workspace.join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                "wsp_32234567890123456789012345",
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("drift hint order".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        for (memory_id, content, status) in [
+            (
+                "mem_31000000000000000000000001",
+                "Changed provenance should keep its original search rank.",
+                "mismatch",
+            ),
+            (
+                "mem_31000000000000000000000002",
+                "Missing provenance is the highest risk selected search hit.",
+                "missing",
+            ),
+        ] {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &CreateMemoryInput {
+                        workspace_id: "wsp_32234567890123456789012345".to_string(),
+                        level: "procedural".to_string(),
+                        kind: "rule".to_string(),
+                        content: content.to_string(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.5,
+                        importance: 0.5,
+                        provenance_uri: None,
+                        trust_class: "agent_assertion".to_string(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .execute_raw(&format!(
+                    "UPDATE memories SET provenance_verification_status = '{status}', provenance_chain_hash = 'blake3:{memory_id}' WHERE id = '{memory_id}'",
+                ))
+                .map_err(|error| error.to_string())?;
+        }
+
+        let hits = vec![
+            SearchHit {
+                doc_id: "mem_31000000000000000000000001".to_string(),
+                score: 0.95,
+                source: ScoreSource::Lexical,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: Some(0.95),
+                rerank_score: None,
+                metadata: Some(serde_json::json!({
+                    "content": "Changed provenance should keep its original search rank.",
+                })),
+                explanation: None,
+            },
+            SearchHit {
+                doc_id: "mem_31000000000000000000000002".to_string(),
+                score: 0.85,
+                source: ScoreSource::Lexical,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: Some(0.85),
+                rerank_score: None,
+                metadata: Some(serde_json::json!({
+                    "content": "Missing provenance is the highest risk selected search hit.",
+                })),
+                explanation: None,
+            },
+        ];
+        let options = SearchOptions {
+            workspace_path: workspace,
+            database_path: Some(database_path),
+            index_dir: None,
+            query: "provenance drift".to_string(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        };
+
+        let mut degraded = Vec::new();
+        let visible = apply_tombstone_visibility(&options, hits, &mut degraded, Some(&connection));
+        assert_eq!(
+            visible
+                .iter()
+                .map(|hit| hit.doc_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "mem_31000000000000000000000001",
+                "mem_31000000000000000000000002",
+            ]
+        );
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "memory_drift_source_missing");
+        assert!(
+            degraded[0]
+                .repair
+                .as_deref()
+                .is_some_and(|repair| repair.contains("mem_31000000000000000000000002"))
+        );
+
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "provenance drift".to_string(),
+            requested_limit: 10,
+            results: visible,
+            elapsed_ms: 1.0,
+            errors: Vec::new(),
+            degraded,
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        };
+        let json = report.data_json();
+        assert_eq!(
+            json["results"][0]["docId"],
+            "mem_31000000000000000000000001"
+        );
+        assert_eq!(
+            json["results"][1]["docId"],
+            "mem_31000000000000000000000002"
+        );
+        assert_eq!(json["degraded"][0]["code"], "memory_drift_source_missing");
+        assert_eq!(json["results"][0]["driftHint"]["driftStatus"], "changed");
+        assert_eq!(
+            json["results"][1]["driftHint"]["driftStatus"],
+            "missing_source"
+        );
+        assert_eq!(
+            json["results"][1]["metadata"]["driftHint"]["topReason"],
+            "provenance_chain_missing"
+        );
         Ok(())
     }
 
