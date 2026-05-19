@@ -392,7 +392,11 @@ fn workspace_hygiene_recommendations_are_grouped_read_only_and_explainable() -> 
 #[test]
 fn workspace_hygiene_scratch_only_paths_match_golden_without_staging() -> TestResult {
     let workspace = init_scratch_only_workspace()?;
-    let snapshot_path = workspace.join("agent-mail.json");
+    let workspace_name = workspace
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("workspace path has no file name: {}", workspace.display()))?;
+    let snapshot_path = workspace.with_file_name(format!("{workspace_name}-agent-mail.json"));
     write_file(
         &snapshot_path,
         r#"{
