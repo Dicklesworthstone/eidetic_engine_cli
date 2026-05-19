@@ -453,13 +453,8 @@ mod tests {
 
     #[test]
     fn severity_none_yields_noop() {
-        let decision = decide_steward_outcome(&input(
-            true,
-            DriftSeverity::None,
-            DriftKind::None,
-            5,
-            100,
-        ));
+        let decision =
+            decide_steward_outcome(&input(true, DriftSeverity::None, DriftKind::None, 5, 100));
         assert_eq!(decision.outcome, StewardOutcome::NoOp);
         assert_eq!(decision.reason, reasons::NO_ACTIONABLE_DRIFT);
         assert_eq!(

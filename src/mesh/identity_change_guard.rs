@@ -50,8 +50,7 @@ pub const HELLO_RESPONDER_NODE_KEY_MISMATCH_CODE: &str = "hello_responder_node_k
 /// Workspace-config opt-in for surfacing the identity-change check on
 /// every `ee status --json` (default off; v4 design decision per
 /// ADR 0038 / `bd-36bbk.1.8`).
-pub const EE_MESH_CHANGE_GUARD_CHECK_ON_STATUS_ENV: &str =
-    "EE_MESH_CHANGE_GUARD_CHECK_ON_STATUS";
+pub const EE_MESH_CHANGE_GUARD_CHECK_ON_STATUS_ENV: &str = "EE_MESH_CHANGE_GUARD_CHECK_ON_STATUS";
 
 /// The bound identity that a materialized auto-enrollment peer-group
 /// captured at materialization time. All fields are owned strings so
@@ -352,7 +351,10 @@ mod tests {
         let b = bound("tn_old", None, "nk_old");
         let c = current("tn_new", None, "nk_new");
         let verdict = evaluate_identity_guard(Some(&b), &c);
-        assert!(matches!(verdict, IdentityGuardVerdict::TailnetChanged { .. }));
+        assert!(matches!(
+            verdict,
+            IdentityGuardVerdict::TailnetChanged { .. }
+        ));
         assert!(verdict.refuses_auto_enrollment());
         assert_eq!(
             verdict.refusal_code(),
@@ -426,7 +428,10 @@ mod tests {
         let b = bound("tn_a", Some("team-a"), "nk_old");
         let c = current("tn_a", Some("team-a"), "nk_new");
         let verdict = evaluate_identity_guard(Some(&b), &c);
-        assert!(matches!(verdict, IdentityGuardVerdict::NodeKeyChanged { .. }));
+        assert!(matches!(
+            verdict,
+            IdentityGuardVerdict::NodeKeyChanged { .. }
+        ));
     }
 
     // ---- repair_command ----------------------------------------------------
@@ -459,15 +464,25 @@ mod tests {
 
     #[test]
     fn repair_command_returns_none_for_non_refusal_verdicts() {
-        assert!(IdentityGuardVerdict::NoChange.repair_command("/x").is_none());
-        assert!(IdentityGuardVerdict::NoBoundIdentity.repair_command("/x").is_none());
-        assert!(IdentityGuardVerdict::TailnetRenamed {
-            tailnet_id: "tn_a".to_owned(),
-            bound_display_name: Some("old".to_owned()),
-            current_display_name: Some("new".to_owned()),
-        }
-        .repair_command("/x")
-        .is_none());
+        assert!(
+            IdentityGuardVerdict::NoChange
+                .repair_command("/x")
+                .is_none()
+        );
+        assert!(
+            IdentityGuardVerdict::NoBoundIdentity
+                .repair_command("/x")
+                .is_none()
+        );
+        assert!(
+            IdentityGuardVerdict::TailnetRenamed {
+                tailnet_id: "tn_a".to_owned(),
+                bound_display_name: Some("old".to_owned()),
+                current_display_name: Some("new".to_owned()),
+            }
+            .repair_command("/x")
+            .is_none()
+        );
     }
 
     // ---- evaluate_responder_bind -------------------------------------------

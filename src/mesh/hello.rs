@@ -167,7 +167,11 @@ pub struct HelloRequest {
     pub requester_workspace_ids: Vec<String>,
     #[serde(rename = "requesterCapabilities", default)]
     pub requester_capabilities: Vec<String>,
-    #[serde(rename = "requesterAdvertisedTags", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "requesterAdvertisedTags",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub requester_advertised_tags: Vec<String>,
 }
 
@@ -187,7 +191,11 @@ pub struct HelloResponse {
     pub responder_workspace_ids: Vec<String>,
     #[serde(rename = "responderCapabilities", default)]
     pub responder_capabilities: Vec<String>,
-    #[serde(rename = "responderAdvertisedTags", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "responderAdvertisedTags",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub responder_advertised_tags: Vec<String>,
     #[serde(rename = "discoveryConsent")]
     pub discovery_consent: bool,
@@ -394,10 +402,7 @@ impl HelloOutcome {
 /// side effect, and only on the granted path so a malicious flood of
 /// invalid requests does not generate caller-controlled log spam.
 #[must_use]
-pub fn decide_hello_response(
-    request: &HelloRequest,
-    ctx: &ResponderContext<'_>,
-) -> HelloOutcome {
+pub fn decide_hello_response(request: &HelloRequest, ctx: &ResponderContext<'_>) -> HelloOutcome {
     let echo = request.request_id.clone();
 
     // 1. Rate limit.
@@ -410,7 +415,11 @@ pub fn decide_hello_response(
     }
     // 3. Tailscale unauthenticated.
     if !ctx.tailscale_authenticated {
-        return decline(echo, HelloErrorCode::ResponderUnauthenticatedTailscale, None);
+        return decline(
+            echo,
+            HelloErrorCode::ResponderUnauthenticatedTailscale,
+            None,
+        );
     }
     // 4. Shields up.
     if ctx.shields_up {
@@ -640,7 +649,10 @@ mod tests {
             vec![],
         );
         assert_eq!(req.schema, HELLO_REQUEST_SCHEMA_V1);
-        assert_eq!(req.requester_ee_protocol_version, local_protocol_version_string());
+        assert_eq!(
+            req.requester_ee_protocol_version,
+            local_protocol_version_string()
+        );
         assert_eq!(req.request_id, "req_x");
     }
 
@@ -779,7 +791,10 @@ mod tests {
         assert_eq!(resp.responder_capabilities, vec!["discovery"]);
         assert!(resp.discovery_consent);
         assert_eq!(resp.response_elapsed_micros, 42);
-        assert_eq!(resp.responder_ee_protocol_version, local_protocol_version_string());
+        assert_eq!(
+            resp.responder_ee_protocol_version,
+            local_protocol_version_string()
+        );
     }
 
     #[test]
@@ -869,8 +884,14 @@ mod tests {
     fn caller_classification_maps_decline_codes_to_skip_reasons() {
         // Lock the caller-side skip-reason vocabulary.
         for (code, expected) in [
-            (HelloErrorCode::UnsupportedProtocolVersion, "incompatible_protocol"),
-            (HelloErrorCode::DiscoveryConsentDenied, "no_discovery_consent"),
+            (
+                HelloErrorCode::UnsupportedProtocolVersion,
+                "incompatible_protocol",
+            ),
+            (
+                HelloErrorCode::DiscoveryConsentDenied,
+                "no_discovery_consent",
+            ),
             (HelloErrorCode::ResponderBusy, "probe_timeout"),
             (HelloErrorCode::ResponderMeshDisabled, "non_ee"),
             (HelloErrorCode::ResponderShieldsUp, "no_discovery_consent"),
