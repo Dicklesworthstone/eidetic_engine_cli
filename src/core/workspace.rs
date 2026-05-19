@@ -1519,6 +1519,18 @@ mod tests {
         }
     }
 
+    fn untracked_status_entry(path: &str) -> WorkspaceGitStatusEntry {
+        WorkspaceGitStatusEntry {
+            path: path.to_owned(),
+            original_path: None,
+            staged: "?".to_owned(),
+            unstaged: "?".to_owned(),
+            entry_kind: "untracked".to_owned(),
+            submodule_state: None,
+            metadata: None,
+        }
+    }
+
     fn hygiene_snapshot(entries: Vec<WorkspaceGitStatusEntry>) -> WorkspaceGitSnapshot {
         WorkspaceGitSnapshot {
             repository_root: "/repo".to_owned(),
@@ -1990,6 +2002,84 @@ mod tests {
         assert_eq!(report.classifications.len(), 1);
         assert_eq!(report.classifications[0].bucket, Bucket::IgnoreForNow);
         assert_eq!(report.classifications[0].kind, Kind::BeadsMetadata);
+        assert!(report.read_only);
+    }
+
+    #[test]
+    fn hygiene_recommendations_keep_scratch_only_workspaces_out_of_staging() {
+        let report = hygiene_report_from_parts(
+            hygiene_snapshot(vec![
+                untracked_status_entry("drift-report.txt"),
+                untracked_status_entry("ubs.json"),
+            ]),
+            &AgentMailCoordinationInput::Available {
+                reservations: Vec::new(),
+                active_agents: Vec::new(),
+            },
+            BeadsMetadataSignal::Unknown,
+            &[],
+        );
+
+        assert!(report.staging_groups.is_empty());
+        assert_eq!(report.do_not_commit, vec!["drift-report.txt", "ubs.json"]);
+        assert!(report.needs_human_review.is_empty());
+        assert!(
+            report
+                .classifications
+                .iter()
+                .all(|row| row.bucket == Bucket::DoNotCommit && row.kind == Kind::Scratch)
+        );
+        assert!(
+            report
+                .next_actions
+                .iter()
+                .any(|action| action.contains("Leave doNotCommit paths unstaged")),
+            "scratch-only report should tell agents not to stage scratch paths"
+        );
+        assert!(report.read_only);
+    }
+
+    #[test]
+    fn hygiene_recommendations_keep_secret_risk_paths_out_of_staging() {
+        let report = hygiene_report_from_parts(
+            hygiene_snapshot(vec![
+                untracked_status_entry(".env.local"),
+                status_entry("configs/secrets.toml", ".", "M"),
+                status_entry("src/core/workspace.rs", ".", "M"),
+            ]),
+            &AgentMailCoordinationInput::Available {
+                reservations: Vec::new(),
+                active_agents: Vec::new(),
+            },
+            BeadsMetadataSignal::Unknown,
+            &[],
+        );
+
+        let recommended_paths = report
+            .staging_groups
+            .iter()
+            .flat_map(|group| group.paths.iter())
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(recommended_paths, vec!["src/core/workspace.rs"]);
+        assert_eq!(report.do_not_commit, vec![".env.local"]);
+        assert_eq!(report.needs_human_review, vec!["configs/secrets.toml"]);
+
+        let env_row = report
+            .classifications
+            .iter()
+            .find(|row| row.path == ".env.local")
+            .expect("env file classification");
+        assert_eq!(env_row.kind, Kind::SecretRisk);
+        assert_eq!(env_row.bucket, Bucket::DoNotCommit);
+
+        let tracked_secret_row = report
+            .classifications
+            .iter()
+            .find(|row| row.path == "configs/secrets.toml")
+            .expect("tracked secret classification");
+        assert_eq!(tracked_secret_row.kind, Kind::SecretRisk);
+        assert_eq!(tracked_secret_row.bucket, Bucket::NeedsHumanReview);
         assert!(report.read_only);
     }
 }
