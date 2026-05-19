@@ -242,6 +242,23 @@ def has_tag_gate(workflow_text: str) -> bool:
     )
 
 
+def publish_token_fails_closed(workflow_text: str) -> bool:
+    if "CARGO_REGISTRY_TOKEN" not in workflow_text:
+        return False
+    token_missing_skip = re.search(
+        r"""(?ms)
+        if\s+\[\s+-z\s+["']?\$\{CARGO_REGISTRY_TOKEN:-\}["']?\s+\]\s*;\s*then
+        (?:(?!\bfi\b).)*
+        \bexit\s+0\b
+        (?:(?!\bfi\b).)*
+        \bfi\b
+        """,
+        workflow_text,
+        re.VERBOSE,
+    )
+    return token_missing_skip is None
+
+
 def workflow_status(root: Path, workflow_rel: str, expected_order: list[str]) -> dict[str, Any]:
     workflow_path = root / workflow_rel
     try:
@@ -252,6 +269,7 @@ def workflow_status(root: Path, workflow_rel: str, expected_order: list[str]) ->
             "path": workflow_rel,
             "tag_gate": False,
             "token_required": False,
+            "token_missing_fails_closed": False,
             "publish_job_present": False,
             "publish_order": [],
             "missing_from_publish_order": expected_order,
@@ -266,6 +284,7 @@ def workflow_status(root: Path, workflow_rel: str, expected_order: list[str]) ->
         "path": workflow_rel,
         "tag_gate": has_tag_gate(text),
         "token_required": "CARGO_REGISTRY_TOKEN" in text,
+        "token_missing_fails_closed": publish_token_fails_closed(text),
         "publish_job_present": "cargo publish" in text,
         "publish_order": publish_order,
         "missing_from_publish_order": missing,
@@ -316,6 +335,8 @@ def crate_blocking_reasons(
         reasons.append("workflow_tag_gate_missing")
     if not workflow.get("token_required"):
         reasons.append("workflow_publish_token_check_missing")
+    elif not workflow.get("token_missing_fails_closed"):
+        reasons.append("workflow_publish_token_missing_not_fail_closed")
     return reasons
 
 
@@ -374,6 +395,7 @@ def evaluate_group(
                     ),
                     "tag_gate": workflow.get("tag_gate"),
                     "token_required": workflow.get("token_required"),
+                    "token_missing_fails_closed": workflow.get("token_missing_fails_closed"),
                 },
                 "blocking_reasons": reasons,
                 "ready_to_publish": not reasons,
@@ -464,6 +486,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             "- workflow: "
             f"`publish_job={str(group['workflow'].get('publish_job_present')).lower()}` "
             f"`tag_gate={str(group['workflow'].get('tag_gate')).lower()}` "
+            f"`token_missing_fails_closed={str(group['workflow'].get('token_missing_fails_closed')).lower()}` "
             f"`dependency_order_ok={str(group['workflow'].get('dependency_order_ok')).lower()}`"
         )
         for crate in group["crates"]:

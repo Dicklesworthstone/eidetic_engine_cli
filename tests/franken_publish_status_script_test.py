@@ -89,6 +89,42 @@ class FrankenPublishStatusScriptTest(unittest.TestCase):
         self.assertIn("fnx-generators", expected)
         self.assertLess(expected.index("fnx-algorithms"), expected.index("fnx-generators"))
 
+    def test_publish_token_fails_closed_rejects_successful_skip(self) -> None:
+        skip_success = """
+if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+  echo "CARGO_REGISTRY_TOKEN is not set. Skipping crates.io publish."
+  exit 0
+fi
+cargo publish -p "${crate}" --token "${CARGO_REGISTRY_TOKEN}"
+"""
+        fail_closed = """
+if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+  echo "CARGO_REGISTRY_TOKEN is not set" >&2
+  exit 1
+fi
+cargo publish -p "${crate}" --token "${CARGO_REGISTRY_TOKEN}"
+"""
+
+        self.assertFalse(self.mod.publish_token_fails_closed(skip_success))
+        self.assertTrue(self.mod.publish_token_fails_closed(fail_closed))
+
+    def test_token_skip_success_is_a_workflow_blocker(self) -> None:
+        workflow = {
+            "publish_job_present": True,
+            "publish_order": ["fnx-runtime"],
+            "tag_gate": True,
+            "token_required": True,
+            "token_missing_fails_closed": False,
+        }
+        reasons = self.mod.crate_blocking_reasons(
+            self.mod.ApiStatus("available", "0.1.0", None, 200),
+            {"status": "ok"},
+            workflow,
+            "fnx-runtime",
+        )
+
+        self.assertIn("workflow_publish_token_missing_not_fail_closed", reasons)
+
     def test_workflow_tag_gate_accepts_generic_tag_refs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -102,6 +138,9 @@ jobs:
     if: ${{ (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') && !contains(github.ref, '-') }}
     steps:
       - run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            exit 1
+          fi
           crates=(sqlmodel-frankensqlite sqlmodel)
           cargo publish -p "${crate}"
         env:
@@ -161,6 +200,7 @@ jobs:
             },
         )
         group = report["groups"][0]
+        self.assertTrue(group["workflow"]["token_missing_fails_closed"])
         self.assertIn("fnx-generators", group["workflow"]["missing_from_publish_order"])
         generator = next(crate for crate in group["crates"] if crate["crate_name"] == "fnx-generators")
         self.assertEqual(generator["local_manifest"]["status"], "ok")
@@ -195,6 +235,7 @@ jobs:
             "`0` available on crates.io; `7` missing, `0` wrong-version, `0` network-unavailable",
             output,
         )
+        self.assertIn("token_missing_fails_closed=true", output)
         self.assertIn("crates_io_missing", output)
         self.assertNotIn("/Users/", output)
         self.assertNotIn("CARGO_REGISTRY_TOKEN=", output)
