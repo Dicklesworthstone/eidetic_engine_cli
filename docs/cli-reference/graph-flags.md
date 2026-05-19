@@ -221,6 +221,10 @@ Example:
 ee graph snapshot refresh --workspace . --graph memory_links --dry-run --json
 ee graph pagerank --workspace . --min-weight 0.2 --min-confidence 0.5 \
   --link-limit 500 --limit 10 --include-tombstoned --json
+ee graph betweenness --workspace . --min-weight 0.3 --limit 10 --json
+ee graph hits --workspace . --min-confidence 0.6 --limit 10 --json
+ee graph communities --workspace . --link-limit 500 --limit 5 --json
+ee graph articulation --workspace . --include-tombstoned --limit 10 --json
 ee graph louvain --workspace . --resolution 1.2 --threshold 0.000001 \
   --max-level 4 --seed 42 --limit 5 --json
 ee graph export --workspace . --type memory_links \
