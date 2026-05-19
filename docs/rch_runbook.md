@@ -83,7 +83,7 @@ response to an ambiguous proof is coordination, not mutation.
 | Env var | Why |
 |---|---|
 | `TMPDIR=/tmp` (outer + inner) | Mac `~/.zshenv` points TMPDIR at `/Volumes/USBNVME16TB/...`. That path does not exist on Linux workers; Rust's `tempfile::tempdir()` inherits it and panics with `os error 2`. The inner `env TMPDIR=/tmp` ensures the remote cargo invocation overrides whatever RCH happens to pass through. |
-| `RCH_REQUIRE_REMOTE=1` | Fail-closed when topology preflight fails. Without it, RCH falls back to **local** Cargo, which burns the Mac SSD and produces unsafe evidence. |
+| `RCH_REQUIRE_REMOTE=1` | Fail-closed when topology preflight fails. Bare `rch exec -- cargo ...` can fall back to **local** Cargo, which burns the Mac SSD and produces unsafe evidence. The repo tripwire denies bare `rch exec` Cargo commands unless this env var is present. |
 | `RCH_QUEUE_WHEN_BUSY=1` | Wait when all workers are busy rather than refusing. |
 | `RCH_TEST_SLOTS=2` | Bound concurrent test slots so heavy benches don't starve focused tests. |
 | `RCH_DAEMON_{WAIT_,}RESPONSE_TIMEOUT_SECS=900` | The full project metadata is large; the 30s default times out and triggers the manifest-fallback path that produces `RCH-E327`. 900s avoids the timeout. |
@@ -347,10 +347,11 @@ enough, but the command line lacks `rch exec`. RCH never gets a chance to
 route the command — `cargo` runs immediately on the local Mac.
 
 **Fix:** use `scripts/rch_verify.sh -- <cargo command>` for verification. A
-carefully shaped `rch exec -- ... cargo ...` is also accepted, but the wrapper is
-the agent-facing default because it records proof fields and fail-closed
-degraded evidence. The tripwire is read-only; it does not kill a running Cargo
-process, rewrite the command, or clean disk.
+carefully shaped `RCH_REQUIRE_REMOTE=1 rch exec -- ... cargo ...` is also
+accepted, but bare `rch exec -- cargo ...` is denied because it can fall back to
+local Cargo. The wrapper is the agent-facing default because it records proof
+fields and fail-closed degraded evidence. The tripwire is read-only; it does not
+kill a running Cargo process, rewrite the command, or clean disk.
 
 ### Mac TMPDIR leakage on Linux worker
 

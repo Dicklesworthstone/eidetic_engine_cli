@@ -2454,6 +2454,234 @@ mod tests {
     }
 
     #[test]
+    fn hygiene_recommendations_single_logical_commit_groups_only_source() {
+        let report = hygiene_report_from_parts(
+            hygiene_snapshot(vec![
+                status_entry("src/core/workspace.rs", ".", "M"),
+                status_entry("src/core/hygiene_classifier.rs", ".", "M"),
+                status_entry("src/cli/mod.rs", ".", "M"),
+            ]),
+            &AgentMailCoordinationInput::Available {
+                reservations: Vec::new(),
+                active_agents: Vec::new(),
+            },
+            BeadsMetadataSignal::Unknown,
+            &[],
+        );
+
+        let group_names: Vec<&str> = report
+            .staging_groups
+            .iter()
+            .map(|group| group.name.as_str())
+            .collect();
+        assert_eq!(
+            group_names,
+            vec!["source"],
+            "single-logical-commit scenario must produce one staging group"
+        );
+        let source = &report.staging_groups[0];
+        assert_eq!(source.path_count, 3);
+        assert_eq!(
+            source.paths,
+            vec![
+                "src/cli/mod.rs",
+                "src/core/hygiene_classifier.rs",
+                "src/core/workspace.rs",
+            ],
+            "paths must be sorted deterministically inside the single source group"
+        );
+        assert_eq!(source.kinds, vec!["source"]);
+        assert_eq!(
+            source.recommendation,
+            "review_and_stage_as_one_logical_commit"
+        );
+        assert!(source.read_only);
+        assert!(report.do_not_commit.is_empty());
+        assert!(report.needs_human_review.is_empty());
+        assert!(report.coordination.blocked_by_coordination.is_empty());
+        assert!(report.read_only);
+    }
+
+    #[test]
+    fn hygiene_recommendations_split_mixed_source_and_scratch_into_disjoint_lanes() {
+        let report = hygiene_report_from_parts(
+            hygiene_snapshot(vec![
+                status_entry("src/core/workspace.rs", ".", "M"),
+                status_entry("src/cli/mod.rs", ".", "M"),
+                untracked_status_entry("drift-report.txt"),
+                untracked_status_entry("ubs.json"),
+                untracked_status_entry(".plan-drift-report.json"),
+            ]),
+            &AgentMailCoordinationInput::Available {
+                reservations: Vec::new(),
+                active_agents: Vec::new(),
+            },
+            BeadsMetadataSignal::Unknown,
+            &[],
+        );
+
+        let staged_paths: Vec<&str> = report
+            .staging_groups
+            .iter()
+            .flat_map(|group| group.paths.iter().map(String::as_str))
+            .collect();
+        assert_eq!(
+            staged_paths,
+            vec!["src/cli/mod.rs", "src/core/workspace.rs"],
+            "mixed source+scratch must keep source in staging only"
+        );
+        assert_eq!(
+            report.do_not_commit,
+            vec![".plan-drift-report.json", "drift-report.txt", "ubs.json"],
+            "mixed source+scratch must route scratch paths to doNotCommit"
+        );
+        for staged in &staged_paths {
+            assert!(
+                !report.do_not_commit.contains(&(*staged).to_owned()),
+                "{staged} must not appear in both staging and doNotCommit"
+            );
+        }
+        for scratch in &report.do_not_commit {
+            assert!(
+                !staged_paths.contains(&scratch.as_str()),
+                "{scratch} must not be promoted into a staging group"
+            );
+        }
+        assert!(report.needs_human_review.is_empty());
+        assert!(report.read_only);
+    }
+
+    #[test]
+    fn hygiene_recommendations_realistic_multi_agent_workspace_holds_invariants() {
+        // Realistic multi-agent dirty workspace pinned by bd-1eq3l.2 acceptance:
+        // local source edits, accompanying tests, doc updates, golden refresh,
+        // Beads JSONL churn, untracked scratch reports, a tracked secret-looking
+        // path that must surface as needs-human-review, and one source path
+        // exclusively reserved by another agent.
+        let agent_mail = AgentMailCoordinationInput::Available {
+            reservations: vec![AgentMailReservation {
+                path_pattern: "src/core/curate.rs".to_owned(),
+                holder_agent: "OtherAgent".to_owned(),
+                exclusive: true,
+                expires_at: Some("2099-01-01T00:00:00Z".to_owned()),
+                reservation_id: Some("res-2".to_owned()),
+                bead_id: Some("bd-other".to_owned()),
+                thread_id: None,
+            }],
+            active_agents: vec![ActiveAgent {
+                name: "OtherAgent".to_owned(),
+                last_active_at: Some("2026-05-19T22:00:00Z".to_owned()),
+            }],
+        };
+        let report = hygiene_report_from_parts(
+            hygiene_snapshot(vec![
+                status_entry("src/core/workspace.rs", ".", "M"),
+                status_entry("src/core/curate.rs", ".", "M"),
+                status_entry("tests/workspace_hygiene_staging_e2e.rs", ".", "M"),
+                status_entry("docs/agent-ux/workspace-hygiene.md", ".", "M"),
+                status_entry("tests/fixtures/golden/workspace.json", ".", "M"),
+                status_entry(BEADS_JSONL_RELATIVE_PATH, ".", "M"),
+                untracked_status_entry("drift-report.txt"),
+                untracked_status_entry("ubs.json"),
+                status_entry("configs/secrets.toml", ".", "M"),
+            ]),
+            &agent_mail,
+            BeadsMetadataSignal::Unknown,
+            &[],
+        );
+
+        // Realistic invariants — these survive ordering/timestamp drift and
+        // are the closure contract for a multi-agent dirty workspace.
+        let group_names: Vec<&str> = report
+            .staging_groups
+            .iter()
+            .map(|group| group.name.as_str())
+            .collect();
+        assert_eq!(
+            group_names,
+            vec!["docs", "goldens", "source", "tests"],
+            "realistic multi-agent workspace must split four logical commit slices"
+        );
+
+        let staged_paths: Vec<&str> = report
+            .staging_groups
+            .iter()
+            .flat_map(|group| group.paths.iter().map(String::as_str))
+            .collect();
+        assert!(
+            !staged_paths.contains(&"src/core/curate.rs"),
+            "coordination-blocked source path must not appear in staging"
+        );
+        assert!(
+            staged_paths.contains(&"src/core/workspace.rs"),
+            "unblocked source path must appear in staging"
+        );
+        assert!(
+            !staged_paths.contains(&BEADS_JSONL_RELATIVE_PATH),
+            "Beads JSONL metadata must never be a staging recommendation"
+        );
+        assert!(
+            !staged_paths.iter().any(|path| *path == "drift-report.txt"
+                || *path == "ubs.json"
+                || *path == "configs/secrets.toml"),
+            "scratch + secret-risk paths must never appear in staging"
+        );
+
+        assert!(
+            report
+                .do_not_commit
+                .contains(&"drift-report.txt".to_owned())
+                && report.do_not_commit.contains(&"ubs.json".to_owned()),
+            "untracked scratch reports must be in doNotCommit"
+        );
+        assert!(
+            report
+                .needs_human_review
+                .contains(&"configs/secrets.toml".to_owned()),
+            "tracked secret-looking path must surface in needsHumanReview"
+        );
+
+        assert_eq!(
+            report.coordination.blocked_by_coordination.len(),
+            1,
+            "exactly one coordination block for the reserved source path"
+        );
+        assert_eq!(
+            report.coordination.blocked_by_coordination[0].path,
+            "src/core/curate.rs"
+        );
+        assert_eq!(
+            report.coordination.blocked_by_coordination[0].holder_agent,
+            "OtherAgent"
+        );
+        assert!(
+            report.coordination.agent_mail_available,
+            "agent mail availability must reflect the precollected snapshot"
+        );
+
+        // Read-only invariant: every group, the report itself, and the
+        // resulting JSON must declare readOnly=true with no mutation commands
+        // leaked into any field.
+        assert!(report.read_only);
+        for group in &report.staging_groups {
+            assert!(group.read_only, "group {} must be read-only", group.name);
+        }
+        let serialized = serde_json::to_string(&report).expect("serialize hygiene report");
+        for forbidden in [
+            "git add",
+            "git stash",
+            "git reset",
+            "git checkout",
+            "rm -rf",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "hygiene report must never emit mutation command {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn hygiene_secret_scan_collects_redacted_content_evidence() -> TestResult {
         let workspace = unique_dir("ee-workspace-hygiene-secret-scan")?;
         let raw_value = concat!(

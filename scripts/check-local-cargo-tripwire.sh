@@ -3,7 +3,8 @@
 #
 # Classifies a candidate cargo invocation against the bd-1h8ji.1 verifier
 # contract: direct `cargo build/check/test/bench/clippy` in this repo
-# fails-closed unless wrapped through `rch exec -- ... cargo ...`. Also
+# fails-closed unless wrapped through the repo verifier wrapper or an
+# explicitly remote-required `rch exec -- ... cargo ...` command. Also
 # detects already-running local `cargo`/`rustc` processes that are
 # writing into Mac-local USB target dirs without an RCH wrapper visible
 # in their parent chain — the exact failure the bead body cites where
@@ -93,11 +94,20 @@ classify_command() {
         return
     fi
 
-    # Whitelist: anything wrapped through `rch exec` is allowed. The
-    # canonical shape is `... rch exec -- env ... cargo <sub> ...`; we
-    # also accept `rch exec --json -- ...` and similar flag variants.
+    # Whitelist only remote-required `rch exec` cargo forms. Bare
+    # `rch exec -- cargo ...` can fall back to local Cargo when topology
+    # admission fails, so the tripwire denies it and points callers at
+    # scripts/rch_verify.sh or RCH_REQUIRE_REMOTE=1.
     if printf '%s' "$cmd" | grep -Eq '(^|[[:space:]/])rch([[:space:]]+--json)?[[:space:]]+exec([[:space:]]|--)'; then
-        printf 'allowed\tcargo wrapped through rch exec\t-\t-\n'
+        if printf '%s' "$cmd" | grep -Eq "(cargo|rustc|rustdoc)[[:space:]]"; then
+            if printf '%s' "$cmd" | grep -Eq 'RCH_REQUIRE_REMOTE[[:space:]]*=[[:space:]]*1'; then
+                printf 'allowed\tcargo wrapped through remote-required rch exec\t-\t-\n'
+                return
+            fi
+            printf 'denied\trch exec cargo command lacks RCH_REQUIRE_REMOTE=1\trch_exec_without_remote_required\tbare rch exec can fall back to local Cargo; use scripts/rch_verify.sh -- <cargo command> or prefix rch exec with RCH_REQUIRE_REMOTE=1\n'
+            return
+        fi
+        printf 'allowed\trch exec command without Rust verifier payload\t-\t-\n'
         return
     fi
 
@@ -506,11 +516,17 @@ run_self_test() {
         denied*) ;;
         *) printf 'self-test FAILED: absolute cargo path must be denied; got %s\n' "$result" >&2; exit 1 ;;
     esac
-    # Wrapped through rch exec → ALLOWED.
+    # Bare rch exec can fall back to local Cargo → DENIED.
     result=$(classify_command "rch exec -- env TMPDIR=/tmp cargo test --lib foo")
     case "$result" in
+        denied*'rch_exec_without_remote_required'*) ;;
+        *) printf 'self-test FAILED: bare rch exec wrapper must be denied; got %s\n' "$result" >&2; exit 1 ;;
+    esac
+    # Remote-required rch exec → ALLOWED.
+    result=$(classify_command "RCH_REQUIRE_REMOTE=1 rch exec -- env TMPDIR=/tmp cargo test --lib foo")
+    case "$result" in
         allowed*) ;;
-        *) printf 'self-test FAILED: rch exec wrapper must be allowed; got %s\n' "$result" >&2; exit 1 ;;
+        *) printf 'self-test FAILED: remote-required rch exec wrapper must be allowed; got %s\n' "$result" >&2; exit 1 ;;
     esac
     # Wrapped through the repo verifier → ALLOWED.
     result=$(classify_command "scripts/rch_verify.sh -- cargo test --lib foo")
@@ -530,11 +546,11 @@ run_self_test() {
         allowed*) ;;
         *) printf 'self-test FAILED: cargo metadata must be allowed; got %s\n' "$result" >&2; exit 1 ;;
     esac
-    # Absolute path wrapped rch exec → ALLOWED.
-    result=$(classify_command "/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch exec -- env TMPDIR=/tmp cargo bench --bench foo")
+    # Absolute path wrapped remote-required rch exec → ALLOWED.
+    result=$(classify_command "RCH_REQUIRE_REMOTE=1 /Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch exec -- env TMPDIR=/tmp cargo bench --bench foo")
     case "$result" in
         allowed*) ;;
-        *) printf 'self-test FAILED: absolute-path rch exec must be allowed; got %s\n' "$result" >&2; exit 1 ;;
+        *) printf 'self-test FAILED: absolute-path remote-required rch exec must be allowed; got %s\n' "$result" >&2; exit 1 ;;
     esac
     # Empty command → ALLOWED.
     result=$(classify_command "")
@@ -554,7 +570,7 @@ run_self_test() {
             *) printf 'self-test FAILED: command substitution repair action must be avoid_shell_command_substitution; got %s\n' "$repair_kind" >&2; exit 1 ;;
         esac
     fi
-    printf 'self-test PASSED: 15 classifier cases and JSON repair action produced expected outcomes\n'
+    printf 'self-test PASSED: 16 classifier cases and JSON repair action produced expected outcomes\n'
     exit 0
 }
 

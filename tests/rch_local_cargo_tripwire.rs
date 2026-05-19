@@ -4,7 +4,8 @@
 //! command strings and asserts the JSON report (`ee.rch_local_cargo_tripwire.v1`)
 //! classifies each one correctly under the bd-1h8ji.1 verifier contract:
 //! direct `cargo build/check/test/bench/clippy` is denied unless wrapped
-//! through `rch exec`, env-prefixed variants are still denied, the
+//! through `scripts/rch_verify.sh` or remote-required `rch exec`,
+//! env-prefixed variants without a wrapper are still denied, the
 //! `RCH_REQUIRE_REMOTE=1`-without-`rch exec` failure mode is surfaced
 //! with a specific detail line, and non-compile cargo subcommands
 //! (`metadata`, etc.) are allowed.
@@ -132,15 +133,32 @@ fn direct_cargo_clippy_is_denied() -> TestResult {
 }
 
 #[test]
-fn rch_exec_wrapper_is_allowed() -> TestResult {
+fn bare_rch_exec_wrapper_is_denied_without_remote_required() -> TestResult {
     let (code, report) = classify("rch exec -- env TMPDIR=/tmp cargo test --lib foo")?;
-    if code != 0 {
+    if code != 1 {
         return Err(format!(
-            "expected exit 0 for rch exec wrapper, got {code}; report={report}"
+            "expected exit 1 for bare rch exec wrapper, got {code}; report={report}"
         ));
     }
-    if report["allowed"].as_str() != Some("allowed") {
-        return Err(format!("expected allowed=allowed, got {report}"));
+    if report["allowed"].as_str() != Some("denied") {
+        return Err(format!("expected allowed=denied, got {report}"));
+    }
+    if report["subcommand"].as_str() != Some("rch_exec_without_remote_required") {
+        return Err(format!(
+            "expected bare-rch-exec subcommand marker, got {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn remote_required_rch_exec_wrapper_is_allowed() -> TestResult {
+    let (code, report) =
+        classify("RCH_REQUIRE_REMOTE=1 rch exec -- env TMPDIR=/tmp cargo test --lib foo")?;
+    if code != 0 || report["allowed"].as_str() != Some("allowed") {
+        return Err(format!(
+            "expected allowed for remote-required rch exec wrapper; got {report}"
+        ));
     }
     Ok(())
 }
@@ -148,11 +166,11 @@ fn rch_exec_wrapper_is_allowed() -> TestResult {
 #[test]
 fn absolute_path_rch_exec_wrapper_is_allowed() -> TestResult {
     let (code, report) = classify(
-        "/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch exec -- env TMPDIR=/tmp cargo bench --bench foo",
+        "RCH_REQUIRE_REMOTE=1 /Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch exec -- env TMPDIR=/tmp cargo bench --bench foo",
     )?;
     if code != 0 || report["allowed"].as_str() != Some("allowed") {
         return Err(format!(
-            "expected allowed for absolute-path rch wrapper; got {report}"
+            "expected allowed for absolute-path remote-required rch wrapper; got {report}"
         ));
     }
     Ok(())
@@ -160,10 +178,11 @@ fn absolute_path_rch_exec_wrapper_is_allowed() -> TestResult {
 
 #[test]
 fn rch_exec_with_json_flag_variant_is_allowed() -> TestResult {
-    let (code, report) = classify("rch exec --json -- env TMPDIR=/tmp cargo test --lib foo")?;
+    let (code, report) =
+        classify("RCH_REQUIRE_REMOTE=1 rch exec --json -- env TMPDIR=/tmp cargo test --lib foo")?;
     if code != 0 || report["allowed"].as_str() != Some("allowed") {
         return Err(format!(
-            "expected allowed for rch exec --json wrapper; got {report}"
+            "expected allowed for remote-required rch exec --json wrapper; got {report}"
         ));
     }
     Ok(())

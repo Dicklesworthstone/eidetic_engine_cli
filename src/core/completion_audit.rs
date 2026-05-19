@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::models::{
     VerificationEvidenceRecord, VerificationStatus, verification_evidence_beads_summary,
@@ -477,8 +478,59 @@ fn local_cargo_policy_workspace_evidence(workspace: &Path) -> Vec<EvidenceRecord
             "local_cargo_policy_state=remote_required_blocked; build admission blocked RCH-only verification before any local fallback",
         ));
     }
+    records.extend(local_cargo_process_scan_evidence(
+        &super::support_bundle::local_cargo_tripwire_process_scan_json(workspace),
+    ));
 
     records
+}
+
+fn local_cargo_process_scan_evidence(process_scan: &Value) -> Vec<EvidenceRecord> {
+    let status = process_scan
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unavailable");
+    let count = process_scan
+        .get("count")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| {
+            process_scan
+                .get("detectedLocalBuilds")
+                .and_then(Value::as_array)
+                .map_or(0, |items| items.len() as u64)
+        });
+    let source = "local Cargo active-process tripwire";
+
+    match status {
+        "bypass_detected" => vec![evidence_record(
+            "local_cargo_tripwire",
+            "cargo/build/test command",
+            source,
+            EvidenceRecordStatus::Fail,
+            "direct",
+            &format!(
+                "local_cargo_policy_state=local_disallowed_attempt; active process scan detected {count} local Cargo/rustc process(es) for this workspace without rch exec"
+            ),
+        )],
+        "clean" => vec![evidence_record(
+            "local_cargo_tripwire",
+            "cargo/build/test command",
+            source,
+            EvidenceRecordStatus::Pass,
+            "supporting",
+            "local_cargo_policy_state=remote_required_ready; active process scan found no local Cargo/rustc bypass",
+        )],
+        _ => vec![evidence_record(
+            "local_cargo_tripwire",
+            "cargo/build/test command",
+            source,
+            EvidenceRecordStatus::Inconclusive,
+            "weak",
+            &format!(
+                "local_cargo_policy_state=unknown; active process scan unavailable ({status})"
+            ),
+        )],
+    }
 }
 
 fn local_cargo_preflight_policy_status(workspace: &Path, command: &str) -> String {
@@ -2206,6 +2258,41 @@ mod tests {
                 .recommended_next_actions
                 .iter()
                 .any(|action| action == "rerun_or_record_remote_verifier_result")
+        );
+    }
+
+    #[test]
+    fn completion_report_flags_active_local_cargo_process_scan_as_local_attempt() {
+        let records = local_cargo_process_scan_evidence(&serde_json::json!({
+            "schema": "ee.rch_local_cargo_tripwire.v1",
+            "mode": "probe_processes",
+            "status": "bypass_detected",
+            "count": 1,
+            "detectedLocalBuilds": [{
+                "policyStatus": "local_cargo_disallowed",
+                "commandKind": "cargo",
+                "command": "cargo check --lib",
+            }],
+        }));
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, EvidenceRecordStatus::Fail);
+        assert!(
+            records[0].summary.contains("local_disallowed_attempt"),
+            "active bypass evidence must carry the local-disallowed state"
+        );
+
+        let report = build_completion_audit_report(
+            &extract_completion_checklist(
+                "objective",
+                "Run all cargo builds and tests through RCH.",
+            ),
+            &EvidenceBundle { records },
+        );
+
+        assert_eq!(
+            report.local_build_policy.state,
+            LocalBuildPolicyState::LocalDisallowedAttempt
         );
     }
 
