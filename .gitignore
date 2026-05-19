@@ -209,6 +209,10 @@ tests/audit_artifacts/install_pipeline_*.json
 /test_min.rs
 /test_minmax
 /test_minmax.rs
+/test_capture
+/test_capture.rs
+/test_capture_fail
+/test_capture_fail.rs
 
 # Miscellaneous ad-hoc analysis reports agents dump at the repo root.
 /clippy_output.json
