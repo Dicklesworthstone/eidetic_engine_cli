@@ -238,6 +238,7 @@ use crate::pack::{
     ContextPackProfile, ContextResponse, ContextResponseDegradation, ContextResponseSeverity,
     PackResourceProfile,
 };
+use crate::search::plan_cache::{DEFAULT_PLAN_CACHE_ENTRIES, EnvVarValueSource, PlanCache};
 use crate::search::{
     CanonicalSearchDocument, DocumentSource, Embedder, EmbedderStack, HashEmbedder, IndexBuilder,
     SpeedMode,
@@ -2406,6 +2407,8 @@ pub enum DiagCommand {
     PackRecord(DiagPackRecordArgs),
     /// Resolve the newest persisted context pack for a diagnostic query.
     PackLatest(DiagPackLatestArgs),
+    /// Report EQL query plan-cache capacity, counters, and integration posture.
+    PlanCache,
     /// Report quarantine status for import sources.
     #[command(subcommand)]
     Quarantine(DiagQuarantineCommand),
@@ -8615,6 +8618,7 @@ where
             }
             DiagCommand::PackRecord(args) => handle_diag_pack_record(&cli, args, stdout, stderr),
             DiagCommand::PackLatest(args) => handle_diag_pack_latest(&cli, args, stdout, stderr),
+            DiagCommand::PlanCache => handle_diag_plan_cache(&cli, stdout),
             DiagCommand::Quarantine(subcmd) => match subcmd {
                 DiagQuarantineCommand::List(args) => {
                     handle_diag_quarantine_list(&cli, args, stdout, stderr)
@@ -18327,6 +18331,102 @@ where
             write_stdout(stdout, &(workspace_response_json(&report) + "\n"))
         }
     }
+}
+
+fn handle_diag_plan_cache<W>(cli: &Cli, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    let (capacity, env_var_value_source) = resolve_plan_cache_diag_capacity();
+    let cache = PlanCache::new(capacity);
+    let report = cache.diag_report(env_var_value_source, 16);
+    let degraded = plan_cache_diag_degraded(&report);
+    let response = plan_cache_diag_response_json(&report, &degraded);
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let hit_rate = report
+                .hit_rate
+                .map_or_else(|| "n/a".to_owned(), |rate| format!("{rate:.4}"));
+            let mut out = format!(
+                "plan cache diagnostics\n\nenabled: {}\ncapacity: {}\ncurrent size: {}\nhits: {}\nmisses: {}\nhit rate: {}\n",
+                report.enabled,
+                report.capacity,
+                report.current_size,
+                report.hits,
+                report.misses,
+                hit_rate
+            );
+            for entry in degraded {
+                out.push_str(&format!(
+                    "\n{}: {}\nNext: {}\n",
+                    entry["severity"].as_str().unwrap_or("warning"),
+                    entry["message"].as_str().unwrap_or("plan cache degraded"),
+                    entry["repair"]
+                        .as_str()
+                        .unwrap_or("ee diag plan-cache --json")
+                ));
+            }
+            write_stdout(stdout, &out)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    }
+}
+
+fn resolve_plan_cache_diag_capacity() -> (usize, EnvVarValueSource) {
+    if let Some(capacity) =
+        read(EnvVar::QueryPlanCacheEntries).and_then(|value| value.parse::<usize>().ok())
+    {
+        return (capacity, EnvVarValueSource::ProcessEnv);
+    }
+
+    let capacity = EnvVar::QueryPlanCacheEntries
+        .default_value()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_PLAN_CACHE_ENTRIES);
+    (capacity, EnvVarValueSource::RegistryDefault)
+}
+
+fn plan_cache_diag_degraded(
+    report: &crate::search::plan_cache::PlanCacheDiagReport,
+) -> Vec<serde_json::Value> {
+    if !report.enabled {
+        return vec![serde_json::json!({
+            "code": "plan_cache_disabled",
+            "severity": "info",
+            "message": "EE_QUERY_PLAN_CACHE_ENTRIES is 0; plan caching is disabled.",
+            "repair": "Unset EE_QUERY_PLAN_CACHE_ENTRIES or set it to a positive integer to re-enable plan caching."
+        })];
+    }
+
+    vec![serde_json::json!({
+        "code": "plan_cache_not_yet_integrated",
+        "severity": "warning",
+        "message": "Plan cache module is present but search_sync does not consult it yet; counters will remain zero until the run_search_inner hook lands.",
+        "repair": "Tracked under bd-2mey5; pick up the run_search_inner integration slice or wait for it to land."
+    })]
+}
+
+fn plan_cache_diag_response_json(
+    report: &crate::search::plan_cache::PlanCacheDiagReport,
+    degraded: &[serde_json::Value],
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "ee.response.v2",
+        "success": true,
+        "data": {
+            "command": "diag plan-cache",
+            "report": report,
+        },
+        "degraded": degraded,
+    })
 }
 
 fn handle_diag_write_owner<W>(
@@ -39088,6 +39188,7 @@ impl NormalizedInvocation {
                     DiagCommand::ModelRegistry(_) => "diag model-registry".to_string(),
                     DiagCommand::PackLatest(_) => "diag pack-latest".to_string(),
                     DiagCommand::PackRecord(_) => "diag pack-record".to_string(),
+                    DiagCommand::PlanCache => "diag plan-cache".to_string(),
                     DiagCommand::Quarantine(subcmd) => match subcmd {
                         DiagQuarantineCommand::List(_) => "diag quarantine list".to_string(),
                         DiagQuarantineCommand::Show(_) => "diag quarantine show".to_string(),
@@ -45563,6 +45664,53 @@ mod tests {
             &parsed.command,
             &Some(Command::Diag(DiagCommand::Dependencies)),
             "diag dependencies command",
+        )
+    }
+
+    #[test]
+    fn diag_plan_cache_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "diag", "plan-cache"])
+            .map_err(|e| format!("failed to parse diag plan-cache: {:?}", e.kind()))?;
+
+        ensure_equal(
+            &parsed.command,
+            &Some(Command::Diag(DiagCommand::PlanCache)),
+            "diag plan-cache command",
+        )
+    }
+
+    #[test]
+    fn diag_plan_cache_json_contract() -> TestResult {
+        let cache = PlanCache::new(DEFAULT_PLAN_CACHE_ENTRIES);
+        let report = cache.diag_report(EnvVarValueSource::RegistryDefault, 16);
+        let degraded = plan_cache_diag_degraded(&report);
+        let response = plan_cache_diag_response_json(&report, &degraded);
+
+        ensure_equal(
+            &response["schema"],
+            &serde_json::json!("ee.response.v2"),
+            "response schema",
+        )?;
+        ensure_equal(&response["success"], &serde_json::json!(true), "success")?;
+        ensure_equal(
+            &response["data"]["command"],
+            &serde_json::json!("diag plan-cache"),
+            "command",
+        )?;
+        ensure_equal(
+            &response["data"]["report"]["schemaTag"],
+            &serde_json::json!("ee.diag.plan_cache.v1"),
+            "report schema tag",
+        )?;
+        ensure_equal(
+            &response["data"]["report"]["envVarName"],
+            &serde_json::json!("EE_QUERY_PLAN_CACHE_ENTRIES"),
+            "env var name",
+        )?;
+        ensure_equal(
+            &response["degraded"][0]["code"],
+            &serde_json::json!("plan_cache_not_yet_integrated"),
+            "integration degraded code",
         )
     }
 
