@@ -176,10 +176,16 @@ fn compute_min_cost_explanation_unbudgeted(
         return None;
     }
 
-    terminal_ancestors(graph, failure_id)
+    let mut explanations: Vec<_> = terminal_ancestors(graph, failure_id)
         .into_iter()
         .filter_map(|candidate| flow_explanation_for_candidate(graph, failure_id, &candidate))
-        .min_by(compare_explanations)
+        .collect();
+    sort_by_ulid_payload_or_lexical(&mut explanations, |explanation| {
+        explanation.cause_id.as_str()
+    });
+    // Stable sort preserves radix cause-id order for equal-cost explanations.
+    explanations.sort_by(compare_explanation_cost);
+    explanations.into_iter().next()
 }
 
 fn causal_degradations(graph: &DiGraph, failure_id: &str) -> Vec<CausalGraphDegradation> {
@@ -213,23 +219,13 @@ fn causal_algorithm_degradation(error: &GraphError) -> CausalGraphDegradation {
     }
 }
 
-fn compare_explanations(
+fn compare_explanation_cost(
     left: &MinCostExplanation,
     right: &MinCostExplanation,
 ) -> std::cmp::Ordering {
     left.total_cost
         .partial_cmp(&right.total_cost)
         .unwrap_or(std::cmp::Ordering::Equal)
-        .then_with(|| left.cause_id.cmp(&right.cause_id))
-        .then_with(|| explanation_path_key(left).cmp(&explanation_path_key(right)))
-}
-
-fn explanation_path_key(explanation: &MinCostExplanation) -> Vec<(&str, &str)> {
-    explanation
-        .path
-        .iter()
-        .map(|step| (step.source.as_str(), step.target.as_str()))
-        .collect()
 }
 
 fn terminal_ancestors(graph: &DiGraph, failure_id: &str) -> Vec<String> {
@@ -326,12 +322,13 @@ fn reconstruct_flow_path(
     visited.insert(current.clone());
 
     while current != target {
-        let next = flow_edges
+        let mut next_candidates: Vec<_> = flow_edges
             .keys()
             .filter(|(edge_source, _)| edge_source == &current)
             .map(|(_, edge_target)| edge_target)
-            .min()?
-            .clone();
+            .collect();
+        sort_by_ulid_payload_or_lexical(&mut next_candidates, |candidate| candidate.as_str());
+        let next = next_candidates.into_iter().next()?.clone();
         if !visited.insert(next.clone()) {
             return None;
         }
@@ -374,7 +371,7 @@ fn shortest_path_lengths(graph: &DiGraph, source: &str) -> BTreeMap<String, usiz
     while let Some(current) = queue.pop_front() {
         let next_length = lengths[&current].saturating_add(1);
         let mut successors: Vec<_> = graph.successors(&current).unwrap_or_default();
-        successors.sort_unstable();
+        sort_by_ulid_payload_or_lexical(&mut successors, |successor| *successor);
         for successor in successors {
             if !lengths.contains_key(successor) {
                 lengths.insert(successor.to_owned(), next_length);
@@ -567,10 +564,20 @@ mod tests {
     }
 
     #[test]
-    fn causal_ancestry_same_depth_ties_accept_radix_memory_ids() {
+    fn causal_ancestry_same_depth_ties_accept_radix_public_ids() {
         let mut graph = graph();
-        add_causal_edge(&mut graph, "failure", "mem_01J0000000000000000000000C", 0.8);
-        add_causal_edge(&mut graph, "failure", "mem_01J0000000000000000000000A", 0.8);
+        add_causal_edge(
+            &mut graph,
+            "failure",
+            "rule_01J0000000000000000000000C",
+            0.8,
+        );
+        add_causal_edge(
+            &mut graph,
+            "failure",
+            "note_01J0000000000000000000000A",
+            0.8,
+        );
         add_causal_edge(&mut graph, "failure", "mem_01J0000000000000000000000B", 0.8);
 
         let ancestry = compute_causal_ancestry(&graph, "failure");
@@ -583,9 +590,9 @@ mod tests {
         assert_eq!(
             ids,
             vec![
-                "mem_01J0000000000000000000000A",
+                "note_01J0000000000000000000000A",
                 "mem_01J0000000000000000000000B",
-                "mem_01J0000000000000000000000C",
+                "rule_01J0000000000000000000000C",
             ]
         );
     }
@@ -686,6 +693,73 @@ mod tests {
             path_pairs(&explanation),
             vec![("failure", "credible_mid"), ("credible_mid", "root_cause")]
         );
+    }
+
+    #[test]
+    fn min_cost_explanation_equal_cost_tiebreaks_by_radix_cause_id() {
+        let mut graph = graph();
+        add_causal_edge(
+            &mut graph,
+            "failure",
+            "rule_01J0000000000000000000000C",
+            0.8,
+        );
+        add_causal_edge(&mut graph, "failure", "mem_01J0000000000000000000000B", 0.8);
+        add_causal_edge(
+            &mut graph,
+            "failure",
+            "note_01J0000000000000000000000A",
+            0.8,
+        );
+
+        let explanation = require_min_cost_explanation(&graph, "failure");
+
+        assert_eq!(explanation.cause_id, "note_01J0000000000000000000000A");
+        assert_eq!(
+            path_pairs(&explanation),
+            vec![("failure", "note_01J0000000000000000000000A")]
+        );
+    }
+
+    #[test]
+    fn flow_path_reconstruction_uses_radix_next_edge_ties() {
+        let mut graph = graph();
+        add_causal_edge(
+            &mut graph,
+            "failure",
+            "note_01J0000000000000000000000A",
+            0.8,
+        );
+        add_causal_edge(&mut graph, "failure", "mem_01J0000000000000000000000B", 0.8);
+        let mut flow_edges = BTreeMap::new();
+        flow_edges.insert(
+            (
+                "failure".to_owned(),
+                "mem_01J0000000000000000000000B".to_owned(),
+            ),
+            FLOW_UNIT,
+        );
+        flow_edges.insert(
+            (
+                "failure".to_owned(),
+                "note_01J0000000000000000000000A".to_owned(),
+            ),
+            FLOW_UNIT,
+        );
+
+        let path = reconstruct_flow_path(
+            &graph,
+            "failure",
+            "note_01J0000000000000000000000A",
+            flow_edges,
+        )
+        .expect("radix-ordered next edge should reach target");
+        let pairs = path
+            .iter()
+            .map(|step| (step.source.as_str(), step.target.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(pairs, vec![("failure", "note_01J0000000000000000000000A")]);
     }
 
     #[test]
