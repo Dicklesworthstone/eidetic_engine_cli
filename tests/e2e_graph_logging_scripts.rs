@@ -75,6 +75,31 @@ fn graph_e2e_scripts_follow_structured_logging_contract() {
 }
 
 #[test]
+fn g10_hits_script_covers_why_hits_contract() {
+    let path = "scripts/e2e_overhaul/g10_hits.sh";
+    let contents = read_script(path);
+    for marker in [
+        "WHY_JSON=$(ee_workspace why \"$HITS_AUTHORITY_ID\" --json",
+        "g10_hits_surface=why graph.hits",
+        ".data.graph.hits != null",
+        ".data.graph.hits.authorityScore",
+        ".data.graph.hits.hubScore",
+        ".data.graph.hits.dominantRole",
+        ".data.graph.hits.profileInfluence",
+        ".data.graph.hits.evidence.schema",
+        "hits_centrality_directed",
+        ".data.graph.hits.evidence.graphType",
+        ".data.graph.hits.rationale",
+        "g10_hits_why_surface_available",
+    ] {
+        assert!(
+            contents.contains(marker),
+            "{path} must keep the ee why HITS e2e assertion marker `{marker}`",
+        );
+    }
+}
+
+#[test]
 fn graph_e2e_script_inventory_matches_bead_coverage() {
     let actual = GRAPH_E2E_SCRIPTS
         .iter()
