@@ -234,6 +234,16 @@ pub struct CosineConfirmation {
     pub confirmed: bool,
 }
 
+/// Candidate that survived both the SimHash Hamming-distance gate and the
+/// cosine confirmation gate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConfirmedSimHashCandidate<'a> {
+    pub candidate_id: &'a str,
+    pub fingerprint: SimHash128,
+    pub hamming_distance: u32,
+    pub cosine: CosineConfirmation,
+}
+
 /// Cosine similarity for stored embedding vectors.
 ///
 /// Invalid inputs return `None`: dimension mismatch, empty vectors, zero
@@ -283,12 +293,66 @@ pub fn confirm_cosine_similarity(
     })
 }
 
+/// Return the nearest SimHash candidate that also passes cosine confirmation.
+///
+/// Candidates are considered in the same deterministic order as
+/// [`ranked_simhash_candidates`]: smallest Hamming distance first, then
+/// candidate id. A candidate that fails cosine confirmation does not block a
+/// later candidate from reusing an embedding.
+#[must_use]
+pub fn first_confirmed_simhash_candidate<'a>(
+    query: SimHash128,
+    query_embedding: &[f32],
+    candidates: impl IntoIterator<Item = (&'a str, SimHash128, &'a [f32])>,
+    max_hamming_distance: u32,
+    cosine_floor: f32,
+) -> Option<ConfirmedSimHashCandidate<'a>> {
+    let mut ranked = Vec::new();
+    for (candidate_id, fingerprint, embedding) in candidates {
+        let distance = hamming_distance(query, fingerprint);
+        if distance > max_hamming_distance {
+            continue;
+        }
+        ranked.push((
+            NearestSimHashCandidate {
+                candidate_id,
+                fingerprint,
+                hamming_distance: distance,
+            },
+            embedding,
+        ));
+    }
+    ranked.sort_by(|(left, _), (right, _)| {
+        left.hamming_distance
+            .cmp(&right.hamming_distance)
+            .then_with(|| left.candidate_id.cmp(right.candidate_id))
+    });
+
+    for (candidate, embedding) in ranked {
+        let Some(cosine) = confirm_cosine_similarity(query_embedding, embedding, cosine_floor)
+        else {
+            continue;
+        };
+        if !cosine.confirmed {
+            continue;
+        }
+        return Some(ConfirmedSimHashCandidate {
+            candidate_id: candidate.candidate_id,
+            fingerprint: candidate.fingerprint,
+            hamming_distance: candidate.hamming_distance,
+            cosine,
+        });
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CosineConfirmation, NearestSimHashCandidate, SIMHASH_BITS, SimHash128,
-        canonicalize_content_for_simhash, confirm_cosine_similarity, cosine_similarity,
-        hamming_distance, nearest_simhash_candidate, ranked_simhash_candidates, simhash_128,
+        ConfirmedSimHashCandidate, CosineConfirmation, NearestSimHashCandidate, SIMHASH_BITS,
+        SimHash128, canonicalize_content_for_simhash, confirm_cosine_similarity, cosine_similarity,
+        first_confirmed_simhash_candidate, hamming_distance, nearest_simhash_candidate,
+        ranked_simhash_candidates, simhash_128,
     };
 
     fn candidate_ids(candidates: &[NearestSimHashCandidate<'_>]) -> Vec<&str> {
@@ -537,6 +601,121 @@ mod tests {
         let ranked = ranked_simhash_candidates(query, candidates, SIMHASH_BITS as u32, 0);
 
         assert!(ranked.is_empty());
+    }
+
+    #[test]
+    fn first_confirmed_candidate_skips_cosine_rejection_and_continues() {
+        let query = SimHash128::from_u128(0b0000);
+        let query_embedding = [1.0, 0.0, 0.0];
+        let rejected_embedding = [0.0, 1.0, 0.0];
+        let confirmed_embedding = [0.99, 0.01, 0.0];
+        let candidates = [
+            (
+                "mem_rejected",
+                SimHash128::from_u128(0b0001),
+                rejected_embedding.as_slice(),
+            ),
+            (
+                "mem_confirmed",
+                SimHash128::from_u128(0b0011),
+                confirmed_embedding.as_slice(),
+            ),
+        ];
+
+        let selected = first_confirmed_simhash_candidate(
+            query,
+            &query_embedding,
+            candidates,
+            SIMHASH_BITS as u32,
+            0.97,
+        )
+        .expect("confirmed candidate");
+
+        assert_eq!(selected.candidate_id, "mem_confirmed");
+        assert_eq!(selected.hamming_distance, 2);
+        assert!(selected.cosine.confirmed);
+    }
+
+    #[test]
+    fn first_confirmed_candidate_tie_breaks_before_cosine_confirmation() {
+        let query = SimHash128::from_u128(0);
+        let query_embedding = [1.0, 0.0];
+        let embedding_a = [1.0, 0.0];
+        let embedding_b = [1.0, 0.0];
+        let candidates = [
+            (
+                "mem_b",
+                SimHash128::from_u128(0b0011),
+                embedding_b.as_slice(),
+            ),
+            (
+                "mem_a",
+                SimHash128::from_u128(0b1100),
+                embedding_a.as_slice(),
+            ),
+        ];
+
+        let selected = first_confirmed_simhash_candidate(
+            query,
+            &query_embedding,
+            candidates,
+            SIMHASH_BITS as u32,
+            0.97,
+        )
+        .expect("confirmed candidate");
+
+        assert_eq!(
+            selected,
+            ConfirmedSimHashCandidate {
+                candidate_id: "mem_a",
+                fingerprint: SimHash128::from_u128(0b1100),
+                hamming_distance: 2,
+                cosine: CosineConfirmation {
+                    similarity: 1.0,
+                    floor: 0.97,
+                    confirmed: true,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn first_confirmed_candidate_respects_hamming_threshold() {
+        let query = SimHash128::from_u128(0);
+        let query_embedding = [1.0, 0.0];
+        let candidate_embedding = [1.0, 0.0];
+        let candidates = [(
+            "mem_outside_threshold",
+            SimHash128::from_u128(0b0011),
+            candidate_embedding.as_slice(),
+        )];
+
+        let selected =
+            first_confirmed_simhash_candidate(query, &query_embedding, candidates, 1, 0.97);
+
+        assert_eq!(selected, None);
+    }
+
+    #[test]
+    fn first_confirmed_candidate_rejects_non_finite_floor() {
+        let query = SimHash128::from_u128(0);
+        let query_embedding = [1.0];
+        let candidate_embedding = [1.0];
+        let candidates = [(
+            "mem_exact",
+            SimHash128::from_u128(0),
+            candidate_embedding.as_slice(),
+        )];
+
+        let selected = first_confirmed_simhash_candidate(
+            query,
+            &query_embedding,
+            candidates,
+            SIMHASH_BITS as u32,
+            f32::NAN,
+        );
+
+        assert_eq!(selected, None);
     }
 
     #[test]
