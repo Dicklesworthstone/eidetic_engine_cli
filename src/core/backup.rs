@@ -3428,6 +3428,14 @@ fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, Doma
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
+        #[cfg(windows)]
+        if matches!(component, Component::Prefix(_) | Component::RootDir) {
+            continue;
+        }
+        #[cfg(not(windows))]
+        if matches!(component, Component::RootDir) {
+            continue;
+        }
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
             Ok(_) => {}
@@ -5253,6 +5261,17 @@ mod tests {
             !real_root.join("restore-side-path").exists(),
             "restore must not write through a symlinked side-path parent",
         )
+    }
+
+    #[test]
+    fn backup_side_path_symlink_scan_accepts_absolute_roots() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let candidate = tempdir.path().join("restore-side-path");
+
+        let result = first_existing_symlink_component(&candidate)
+            .map_err(|error| format!("absolute side path scan should not fail: {error:?}"))?;
+
+        ensure_equal(result, None, "absolute side path symlink scan result")
     }
 
     #[cfg(unix)]
