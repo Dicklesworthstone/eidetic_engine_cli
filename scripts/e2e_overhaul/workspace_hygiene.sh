@@ -311,7 +311,8 @@ validate_scenario_plan() {
 }
 
 validate_event_log_contract() {
-    local diagnostics="$EVENT_ROOT/event_log_contract_diagnostics.txt"
+    local event_log="${1:-$EVENT_LOG}"
+    local diagnostics="${2:-$EVENT_ROOT/event_log_contract_diagnostics.txt}"
     local expected_scenarios_json
     expected_scenarios_json="$(scenario_plan_json)"
     if ! jq -s -e --argjson expected_scenarios "$expected_scenarios_json" '
@@ -372,8 +373,55 @@ validate_event_log_contract() {
         and ($expected_scenarios | all(. as $scenario | has_single_pass("schema_validation"; $scenario)))
         and only_expected_scenarios("scenario")
         and only_expected_scenarios("schema_validation")
-    ' "$EVENT_LOG" >/dev/null 2>"$diagnostics"; then
+    ' "$event_log" >/dev/null 2>"$diagnostics"; then
         printf 'event log contract check failed; diagnostics=%s\n' "$diagnostics"
+        return 1
+    fi
+}
+
+expect_event_log_contract_rejected() {
+    local label="${1:?label required}"
+    local event_log="${2:?event log required}"
+    local diagnostics="$EVENT_ROOT/${label}_diagnostics.txt"
+
+    if validate_event_log_contract "$event_log" "$diagnostics" >/dev/null 2>&1; then
+        printf '%s malformed event log was accepted: %s\n' "$label" "$event_log"
+        return 1
+    fi
+}
+
+validate_event_log_negative_contracts() {
+    local diagnostics="$EVENT_ROOT/event_log_negative_contracts_diagnostics.txt"
+    local failure_count=0
+    local missing_plan bad_schema_status unexpected_scenario bad_degraded_code
+    : > "$diagnostics"
+
+    missing_plan="$EVENT_ROOT/event_log_negative_missing_scenario_plan.jsonl"
+    jq -c 'select(.phase != "scenario_plan")' "$EVENT_LOG" > "$missing_plan"
+    if ! expect_event_log_contract_rejected "missing_scenario_plan" "$missing_plan" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    bad_schema_status="$EVENT_ROOT/event_log_negative_bad_schema_status.jsonl"
+    jq -c 'if .phase == "scenario" and .scenario == "clean" then .schemaValidationStatus = "failed" else . end' "$EVENT_LOG" > "$bad_schema_status"
+    if ! expect_event_log_contract_rejected "bad_schema_status" "$bad_schema_status" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    unexpected_scenario="$EVENT_ROOT/event_log_negative_unexpected_scenario.jsonl"
+    jq -c 'if (.phase == "scenario" or .phase == "schema_validation") and .scenario == "clean" then .scenario = "unexpected_clean_alias" else . end' "$EVENT_LOG" > "$unexpected_scenario"
+    if ! expect_event_log_contract_rejected "unexpected_scenario" "$unexpected_scenario" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    bad_degraded_code="$EVENT_ROOT/event_log_negative_bad_degraded_code.jsonl"
+    jq -c 'if .phase == "scenario_plan" then .degradedCodes = [42] else . end' "$EVENT_LOG" > "$bad_degraded_code"
+    if ! expect_event_log_contract_rejected "bad_degraded_code" "$bad_degraded_code" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    if [ "$failure_count" -ne 0 ]; then
+        printf 'event log negative contract checks failed; diagnostics=%s\n' "$diagnostics"
         return 1
     fi
 }
@@ -736,6 +784,14 @@ fi
 
 emit_event "teardown" "mutation_check" "pass" 0 "compare caller checkout state" "$REPO_ROOT" "" "" "not_run" "" "[]" "$REPO_BEFORE_HASH" "$REPO_AFTER_HASH" "$REPO_BEFORE_ARTIFACT" "$REPO_AFTER_ARTIFACT"
 emit_event "teardown" "teardown" "pass" 0 "complete workspace hygiene e2e run" "$REPO_ROOT" "" "" "not_run" "" "[]" "$REPO_BEFORE_HASH" "$REPO_AFTER_HASH" "$REPO_BEFORE_ARTIFACT" "$REPO_AFTER_ARTIFACT"
+
+NEGATIVE_CONTRACT_FAILURE="$(validate_event_log_negative_contracts || true)"
+if [ -n "$NEGATIVE_CONTRACT_FAILURE" ]; then
+    emit_event "event_log_negative_contracts" "negative_contract_check" "failed" 1 "validate malformed event logs are rejected" "$REPO_ROOT" "$EVENT_ROOT/event_log_negative_contracts_diagnostics.txt" "" "failed" "$NEGATIVE_CONTRACT_FAILURE" '["workspace_hygiene_event_log_contract_failed"]' "$REPO_BEFORE_HASH" "$REPO_AFTER_HASH" "$REPO_BEFORE_ARTIFACT" "$REPO_AFTER_ARTIFACT"
+    printf '%s\n' "$NEGATIVE_CONTRACT_FAILURE" >&2
+    exit 1
+fi
+emit_event "event_log_negative_contracts" "negative_contract_check" "pass" 0 "validate malformed event logs are rejected" "$REPO_ROOT" "$EVENT_ROOT/event_log_negative_contracts_diagnostics.txt" "" "passed" "" "[]" "$REPO_BEFORE_HASH" "$REPO_AFTER_HASH" "$REPO_BEFORE_ARTIFACT" "$REPO_AFTER_ARTIFACT"
 
 EVENT_LOG_FAILURE="$(validate_event_log_contract || true)"
 if [ -n "$EVENT_LOG_FAILURE" ]; then
