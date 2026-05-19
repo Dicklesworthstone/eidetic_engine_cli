@@ -13590,9 +13590,9 @@ mod tests {
         render_schema_export_json, render_shadow_run_human, render_shadow_run_json,
         render_shadow_run_toon, render_status_json, render_status_json_filtered,
         render_status_skyline_json, render_status_skyline_markdown, render_status_skyline_toon,
-        render_status_toon, render_structural_health_markdown, render_version_json,
-        render_why_causal_json, render_why_causal_markdown, render_why_causal_toon,
-        status_response_json,
+        render_status_toon, render_structural_health_json, render_structural_health_markdown,
+        render_structural_health_toon, render_version_json, render_why_causal_json,
+        render_why_causal_markdown, render_why_causal_toon, status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::doctor::{
