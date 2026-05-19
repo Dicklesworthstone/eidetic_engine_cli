@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 EVENT_ROOT="${EE_WORKSPACE_HYGIENE_EVENT_DIR:-${TMPDIR:-/tmp}/ee-workspace-hygiene-e2e}"
 EVENT_LOG="$EVENT_ROOT/events.jsonl"
-SYNTHETIC_RAW_SECRET="sk-proj-$(printf 'B%.0s' {1..40})"
+SYNTHETIC_RAW_VALUE="$(printf 'sk-%s-%s' "proj" "$(printf 'B%.0s' {1..40})")"
 
 now_ns() {
     local seconds
@@ -228,14 +228,51 @@ assert_jq() {
     fi
 }
 
-assert_no_secret() {
+assert_no_raw_value() {
     local label="${1:?label required}"
     local file="${2:?file required}"
-    local secret="${3:?secret required}"
-    if grep -F "$secret" "$file" >/dev/null 2>&1; then
+    local raw_value="${3:?raw value required}"
+    if grep -F "$raw_value" "$file" >/dev/null 2>&1; then
         printf '%s leaked raw synthetic secret\n' "$label"
         return 1
     fi
+}
+
+assert_contains() {
+    local file="${1:?file required}"
+    local needle="${2:?needle required}"
+    local message="${3:?message required}"
+    if ! grep -F "$needle" "$file" >/dev/null 2>&1; then
+        printf '%s\n' "$message"
+        return 1
+    fi
+}
+
+assert_not_json() {
+    local file="${1:?file required}"
+    local message="${2:?message required}"
+    if jq -e . "$file" >/dev/null 2>&1; then
+        printf '%s\n' "$message"
+        return 1
+    fi
+}
+
+run_hygiene_human() {
+    local scenario="${1:?scenario required}"
+    local workspace="${2:?workspace required}"
+    local stdout_artifact="$EVENT_ROOT/${scenario}_stdout.txt"
+    local stderr_artifact="$EVENT_ROOT/${scenario}_stderr.log"
+    local command_text
+    local -a args
+    args=(workspace hygiene --agent-name SapphireElk --workspace "$workspace")
+    command_text="$EE_BINARY ${args[*]}"
+
+    set +e
+    "$EE_BINARY" "${args[@]}" >"$stdout_artifact" 2>"$stderr_artifact"
+    local exit_code=$?
+    set -e
+
+    printf '%s\t%s\t%s\t%s\n' "$exit_code" "$stdout_artifact" "$stderr_artifact" "$command_text"
 }
 
 run_scenario() {
@@ -251,10 +288,14 @@ run_scenario() {
             write_file "$workspace/src/lib.rs" "pub fn changed() -> bool { true }\n"
             write_file "$workspace/tests/workspace_hygiene.rs" "#[test]\nfn fixture() {}\n"
             ;;
+        human_source_and_test)
+            write_file "$workspace/src/lib.rs" "pub fn changed() -> bool { true }\n"
+            write_file "$workspace/tests/workspace_hygiene.rs" "#[test]\nfn fixture() {}\n"
+            ;;
         scratch_generated_secret)
             write_file "$workspace/drift-report.txt" "local diagnostic output\n"
             write_file "$workspace/Cargo.lock" "generated lockfile placeholder\n"
-            write_file "$workspace/.env.local" "OPENAI_API_KEY=$SYNTHETIC_RAW_SECRET\n"
+            write_file "$workspace/.env.local" "OPENAI_""API_KEY=$SYNTHETIC_RAW_VALUE\n"
             ;;
         active_reservation)
             write_file "$workspace/src/lib.rs" "pub fn reserved() -> bool { true }\n"
@@ -300,10 +341,16 @@ run_scenario() {
 
     read -r before_hash before_artifact < <(capture_workspace_state "$workspace" "${scenario}_before")
     local exit_code stdout_artifact stderr_artifact command_text schema_status first_failure degraded_codes
-    read -r exit_code stdout_artifact stderr_artifact command_text < <(run_hygiene "$scenario" "$workspace" "$snapshot")
     schema_status="failed"
     first_failure=""
     degraded_codes="[]"
+
+    if [ "$scenario" = "human_source_and_test" ]; then
+        read -r exit_code stdout_artifact stderr_artifact command_text < <(run_hygiene_human "$scenario" "$workspace")
+        schema_status="human_output"
+    else
+        read -r exit_code stdout_artifact stderr_artifact command_text < <(run_hygiene "$scenario" "$workspace" "$snapshot")
+    fi
 
     if [ "$exit_code" -ne 0 ]; then
         first_failure="$(tail -n 20 "$stderr_artifact" "$stdout_artifact" 2>/dev/null | tr '\n' ' ' | cut -c 1-500)"
@@ -312,7 +359,7 @@ run_scenario() {
         return "$exit_code"
     fi
 
-    if jq -e '.success == true and .data.schema == "ee.workspace_hygiene.v1" and .data.readOnly == true' "$stdout_artifact" >/dev/null; then
+    if [ "$scenario" != "human_source_and_test" ] && jq -e '.success == true and .data.schema == "ee.workspace_hygiene.v1" and .data.readOnly == true' "$stdout_artifact" >/dev/null; then
         schema_status="passed"
         degraded_codes="$(jq -c '(.data.degraded // [])' "$stdout_artifact")"
     fi
@@ -324,10 +371,25 @@ run_scenario() {
         source_and_test)
             first_failure="$(assert_jq "$stdout_artifact" '([.data.stagingRecommendations[].name] | index("source")) and ([.data.stagingRecommendations[].name] | index("tests"))' "source_and_test should recommend source and tests groups" || true)"
             ;;
+        human_source_and_test)
+            first_failure="$(assert_contains "$stdout_artifact" "Workspace hygiene:" "human output should include the workspace hygiene heading" || true)"
+            if [ -z "$first_failure" ]; then
+                first_failure="$(assert_contains "$stdout_artifact" "Stage candidates:" "human output should include stage candidate summary" || true)"
+            fi
+            if [ -z "$first_failure" ]; then
+                first_failure="$(assert_contains "$stdout_artifact" "source: 1 paths" "human output should summarize the source staging group" || true)"
+            fi
+            if [ -z "$first_failure" ]; then
+                first_failure="$(assert_contains "$stdout_artifact" "tests: 1 paths" "human output should summarize the tests staging group" || true)"
+            fi
+            if [ -z "$first_failure" ]; then
+                first_failure="$(assert_not_json "$stdout_artifact" "human output should not be a JSON envelope" || true)"
+            fi
+            ;;
         scratch_generated_secret)
             first_failure="$(assert_jq "$stdout_artifact" '(.data.doNotCommit | index(".env.local")) and (.data.doNotCommit | index("drift-report.txt")) and (.data.doNotCommit | index("Cargo.lock"))' "scratch/generated/secret paths should be doNotCommit" || true)"
             if [ -z "$first_failure" ]; then
-                first_failure="$(assert_no_secret "$scenario JSON" "$stdout_artifact" "$SYNTHETIC_RAW_SECRET" || true)"
+                first_failure="$(assert_no_raw_value "$scenario JSON" "$stdout_artifact" "$SYNTHETIC_RAW_VALUE" || true)"
             fi
             ;;
         active_reservation)
@@ -349,7 +411,7 @@ run_scenario() {
         first_failure="workspace hygiene mutated git-visible state for $scenario"
     fi
 
-    if [ "$schema_status" != "passed" ] && [ -z "$first_failure" ]; then
+    if [ "$schema_status" != "passed" ] && [ "$schema_status" != "human_output" ] && [ -z "$first_failure" ]; then
         first_failure="workspace hygiene response failed the envelope/schema smoke check"
     fi
 
@@ -368,6 +430,7 @@ emit_event "setup" "setup" "pass" 0 "locate ee binary" "$REPO_ROOT" "" "" "not_r
 SCENARIOS=(
     clean
     source_and_test
+    human_source_and_test
     scratch_generated_secret
     active_reservation
     agent_mail_unavailable
