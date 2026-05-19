@@ -206,6 +206,35 @@ print(json.dumps({
 PY
 }
 
+assert_strict_clean_json() {
+    local path="${1:?json path required}"
+    python3 - "$path" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+if report.get("schema") != "ee.rch.verify.v1":
+    raise SystemExit(f"unexpected schema: {report}")
+if report.get("status") != "remote_pass":
+    raise SystemExit(f"expected remote_pass: {report}")
+if report.get("verification_attribution") != "strict_clean_tree":
+    raise SystemExit(f"expected strict_clean_tree attribution: {report}")
+if report.get("worker_id") != "css":
+    raise SystemExit(f"expected fake worker css: {report}")
+if report.get("dirty_summary", {}).get("total") != 0:
+    raise SystemExit(f"strict clean proof should have empty dirty summary: {report}")
+if report.get("source_state_degraded_codes") not in ([], None):
+    raise SystemExit(f"strict clean proof should have no source degraded codes: {report}")
+if "exec" not in (report.get("rch_invocation") or []):
+    raise SystemExit(f"strict clean proof should plan RCH invocation: {report}")
+print(json.dumps({
+    "command_hash": report.get("command_hash", ""),
+    "degraded_codes": report.get("degraded_codes") or [],
+}, sort_keys=True, separators=(",", ":")))
+PY
+}
+
 assert_committed_tree_json() {
     local path="${1:?json path required}"
     python3 - "$path" <<'PY'
@@ -233,6 +262,43 @@ if "tracked=seed" not in tail or "token-draft" in tail:
 print(json.dumps({
     "command_hash": report.get("command_hash", ""),
     "degraded_codes": report.get("degraded_codes") or [],
+}, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+assert_committed_tree_unsupported_json() {
+    local path="${1:?json path required}"
+    python3 - "$path" <<'PY'
+import json
+import sys
+
+required = {
+    "rch_verify_committed_tree_unsupported",
+    "rch_verify_committed_tree_path_deps_unsupported",
+}
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+codes = set(report.get("degraded_codes") or [])
+source_codes = set(report.get("source_state_degraded_codes") or [])
+if report.get("schema") != "ee.rch.verify.v1":
+    raise SystemExit(f"unexpected schema: {report}")
+if report.get("status") != "committed_tree_unsupported":
+    raise SystemExit(f"expected committed_tree_unsupported: {report}")
+if report.get("verification_attribution") != "committed_tree":
+    raise SystemExit(f"expected committed_tree attribution: {report}")
+if report.get("exit_code") != 1:
+    raise SystemExit(f"expected exit_code=1: {report}")
+if report.get("rch_invocation") != []:
+    raise SystemExit(f"unsupported committed-tree proof must not invoke RCH: {report}")
+if not str(report.get("source_manifest_hash") or "").startswith("sha256:"):
+    raise SystemExit(f"missing source manifest hash: {report}")
+if report.get("dirty_summary", {}).get("total") != 0:
+    raise SystemExit(f"committed-tree unsupported proof should ignore live dirty paths: {report}")
+if not required.issubset(codes) or not required.issubset(source_codes):
+    raise SystemExit(f"missing committed-tree unsupported degraded codes: {report}")
+print(json.dumps({
+    "command_hash": report.get("command_hash", ""),
+    "degraded_codes": sorted(codes),
 }, sort_keys=True, separators=(",", ":")))
 PY
 }
@@ -296,6 +362,46 @@ emit_event \
     "css" \
     "[]" \
     "remote proof and summary contract validated"
+
+start="$(started_ms)"
+clean_repo="$WORK_DIR/clean-checkout-repo"
+init_fixture_repo "$clean_repo"
+clean_before="$WORK_DIR/clean-checkout.before-status"
+git_status_v2 "$clean_repo" > "$clean_before"
+clean_fake_rch="$WORK_DIR/fake-rch-clean-checkout"
+clean_invocations="$WORK_DIR/clean-checkout-rch-invocations.txt"
+clean_json="$WORK_DIR/clean-checkout.json"
+clean_event_log="$WORK_DIR/clean-checkout-events.jsonl"
+write_fake_rch "$clean_fake_rch"
+FAKE_RCH_INVOCATIONS="$clean_invocations" \
+RCH_VERIFY_NOW="2026-05-16T06:40:08.000000Z" \
+RCH_VERIFY_CONFIGURED_WORKERS="css" \
+RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
+bash "$RCH_VERIFY" \
+    --bead-id bd-9ygik.3 \
+    --require-clean-tree \
+    --project-root "$clean_repo" \
+    --event-log "$clean_event_log" \
+    --rch-bin "$clean_fake_rch" \
+    -- \
+    cargo test --lib rch_verify_clean_checkout_e2e > "$clean_json"
+assert_status_unchanged "$clean_repo" "$clean_before" "clean-checkout"
+if [ "$(wc -l < "$clean_invocations" | tr -d ' ')" != "1" ]; then
+    printf 'clean checkout fixture should invoke fake RCH once:\n' >&2
+    sed -n '1,120p' "$clean_invocations" >&2
+    exit 1
+fi
+clean_assert="$(assert_strict_clean_json "$clean_json")"
+emit_event \
+    "assert" \
+    "clean_checkout_strict_mode_validated" \
+    "$(elapsed_since "$start")" \
+    "$(printf '%s' "$clean_assert" | python3 -c 'import json,sys; print(json.load(sys.stdin)["command_hash"])')" \
+    "css" \
+    "$(printf '%s' "$clean_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
+    "strict clean checkout proceeded through fake RCH with clean attribution" \
+    "clean_checkout"
 
 start="$(started_ms)"
 strict_repo="$WORK_DIR/strict-dirty-repo"
@@ -626,6 +732,66 @@ emit_event \
     "$(printf '%s' "$committed_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
     "committed-tree mode ignored live dirty paths and ran fake RCH from export" \
     "committed_tree_ignores_dirty"
+
+start="$(started_ms)"
+path_dep_repo="$WORK_DIR/path-dependency-repo"
+init_fixture_repo "$path_dep_repo"
+cat > "$path_dep_repo/Cargo.toml" <<'TOML'
+[package]
+name = "rch-path-dependency-fixture"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+helper = { path = "../helper" }
+TOML
+git -C "$path_dep_repo" add Cargo.toml
+git -C "$path_dep_repo" commit -q -m "add path dependency"
+path_dep_before="$WORK_DIR/path-dependency.before-status"
+git_status_v2 "$path_dep_repo" > "$path_dep_before"
+path_dep_fake_rch="$WORK_DIR/fake-rch-path-dependency"
+path_dep_invocations="$WORK_DIR/path-dependency-rch-invocations.txt"
+path_dep_json="$WORK_DIR/path-dependency-unsupported.json"
+path_dep_event_log="$WORK_DIR/path-dependency-events.jsonl"
+write_fake_rch "$path_dep_fake_rch"
+set +e
+FAKE_RCH_INVOCATIONS="$path_dep_invocations" \
+RCH_VERIFY_NOW="2026-05-16T06:40:09.000000Z" \
+RCH_VERIFY_CONFIGURED_WORKERS="css" \
+RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
+RCH_VERIFY_COMMITTED_TREE_BASE="$WORK_DIR/path-dependency-export" \
+bash "$RCH_VERIFY" \
+    --bead-id bd-9ygik.3 \
+    --committed-tree \
+    --treeish HEAD \
+    --project-root "$path_dep_repo" \
+    --event-log "$path_dep_event_log" \
+    --rch-bin "$path_dep_fake_rch" \
+    -- \
+    cargo test --lib rch_verify_path_dependency_e2e > "$path_dep_json"
+path_dep_exit=$?
+set -e
+if [ "$path_dep_exit" -eq 0 ]; then
+    printf 'path dependency fixture unexpectedly passed\n' >&2
+    exit 1
+fi
+assert_status_unchanged "$path_dep_repo" "$path_dep_before" "path-dependency"
+if [ -s "$path_dep_invocations" ]; then
+    printf 'path dependency unsupported fixture invoked fake RCH:\n' >&2
+    sed -n '1,120p' "$path_dep_invocations" >&2
+    exit 1
+fi
+path_dep_assert="$(assert_committed_tree_unsupported_json "$path_dep_json")"
+emit_event \
+    "assert" \
+    "path_dependency_unsupported_validated" \
+    "$(elapsed_since "$start")" \
+    "$(printf '%s' "$path_dep_assert" | python3 -c 'import json,sys; print(json.load(sys.stdin)["command_hash"])')" \
+    "" \
+    "$(printf '%s' "$path_dep_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
+    "committed-tree path dependency fixture reported unsupported before fake RCH" \
+    "path_dependency_unsupported"
 
 if [ "${RCH_VERIFY_CONTROL_PLANE_LONG_BENCH:-0}" = "1" ]; then
     start="$(started_ms)"
