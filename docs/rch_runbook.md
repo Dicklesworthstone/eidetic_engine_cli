@@ -5,10 +5,12 @@
 > evidence is trustworthy and whether direct local Cargo is blocked before
 > it can burn the Mac internal SSD.
 >
-> **The single rule:** Cargo compilation in this repo (`cargo build/check/test/bench/clippy`)
-> must go through `rch exec --` on a remote Linux worker. There is no acceptable
-> local-Cargo fallback. AGENTS.md, the bd-1h8ji.2 tripwire, and the
-> bd-1h8ji.4 portability diagnostic all enforce this contract.
+> **The single rule:** Cargo/Rust verification in this repo (`cargo
+> build/check/test/bench/clippy/doc/run/install/rustc/fix`, plus direct
+> `rustc`/`rustdoc`) must go through the approved RCH wrapper on a remote Linux
+> worker. There is no acceptable local-Cargo fallback. AGENTS.md, the local
+> Cargo tripwire, and the bd-1h8ji.4 portability diagnostic all enforce this
+> contract.
 
 ## TL;DR — the one canonical command shape
 
@@ -138,10 +140,50 @@ git diff --check -- <files>...
 scripts/closure-lint.sh --audit --json           # Tracks bead-closure invariants
 scripts/check-tracing-fields.sh --json           # bd-3usjw.58 tracing-field convention
 scripts/check-rch-portability.sh --json <transcript> # bd-1h8ji.4 portability anomalies
-scripts/check-local-cargo-tripwire.sh --cmd '<cmd>' --json # bd-1h8ji.2 RCH-bypass detection
+scripts/check-local-cargo-tripwire.sh --cmd '<cmd>' --json # RCH-bypass preflight
 ```
 
 None of those need a Cargo round-trip. They run instantly on your shell.
+
+## Local-Cargo tripwire contract
+
+Use the tripwire before shell execution when an agent or hook is about to run
+an arbitrary command string:
+
+```bash
+scripts/check-local-cargo-tripwire.sh --cmd 'cargo test --lib foo' --json
+scripts/check-local-cargo-tripwire.sh --probe-processes --json
+```
+
+The `--cmd` mode is the admission hook shape. Exit code `1` means block the
+command and show the JSON `repairActions[]`; it does not rewrite the command.
+The `--probe-processes` mode is read-only incident evidence for support bundles,
+completion audits, and Beads comments. It reports local `cargo`/`rustc`/`rustdoc`
+processes targeting this checkout, but never kills or cleans anything.
+
+Command-bearing Beads or Agent Mail updates need the same care as verifier
+commands. Do not place verifier commands inside shell command substitution when
+adding comments or messages: backtick and dollar-paren forms execute before the
+tracker or mail tool receives the text. The tripwire denies command strings that
+contain `cargo`, `rustc`, or `rustdoc` inside shell command substitution, even
+when the inner command uses the RCH wrapper. Use plain quoted prose, direct MCP
+tool calls, or an existing artifact path instead of shell expansion for evidence
+transport.
+
+Stable fields for automation:
+
+- `localBuildPolicy`: the policy name and status for the planned command or
+  live-process scan.
+- `requiredRemoteWrapper`: the canonical repair shape,
+  `scripts/rch_verify.sh -- <cargo command>`.
+- `repairActions[]`: machine-readable remediation steps for denied commands or
+  low disk headroom.
+- `evidence[]`: compact policy and disk-pressure facts for support bundles.
+- `detectedLocalBuilds[]`: bounded pid/ppid/cwd/elapsed/command-kind rows from
+  the read-only scanner.
+- `disk_pressure_context`: workspace, target-dir, tmp-dir, and external-drive
+  mount facts. This can recommend a repair action, but it must not recommend
+  deletion.
 
 ## Beads + Agent Mail workflow
 
@@ -274,17 +316,30 @@ error[E0XXX]: ...
 ### Local Cargo bypass detected
 
 ```text
-{"allowed":"denied","subcommand":"test","detail":"...RCH_REQUIRE_REMOTE=1 was
-set but rch exec wrapper is absent — exact bd-1h8ji.2 failure mode"}
+{
+  "schema": "ee.rch_local_cargo_tripwire.v1",
+  "allowed": "denied",
+  "policyStatus": "local_cargo_disallowed",
+  "subcommand": "test",
+  "requiredRemoteWrapper": "scripts/rch_verify.sh -- <cargo command>",
+  "repairActions": [
+    {
+      "kind": "use_remote_wrapper",
+      "command": "scripts/rch_verify.sh -- <cargo command>"
+    }
+  ]
+}
 ```
 
 **Root cause:** caller set `RCH_REQUIRE_REMOTE=1` thinking that alone was
 enough, but the command line lacks `rch exec`. RCH never gets a chance to
 route the command — `cargo` runs immediately on the local Mac.
 
-**Fix:** ALWAYS prefix with `rch exec --` (or use `scripts/rch_verify.sh`).
-The tripwire is read-only; it doesn't kill the running cargo. You're
-responsible for not starting it in the first place.
+**Fix:** use `scripts/rch_verify.sh -- <cargo command>` for verification. A
+carefully shaped `rch exec -- ... cargo ...` is also accepted, but the wrapper is
+the agent-facing default because it records proof fields and fail-closed
+degraded evidence. The tripwire is read-only; it does not kill a running Cargo
+process, rewrite the command, or clean disk.
 
 ### Mac TMPDIR leakage on Linux worker
 
@@ -359,7 +414,8 @@ bash and dash. Confirmed by repro on this Mac (`dash` is installed at
   out the operational details.
 - [`scripts/rch_verify.sh`](../scripts/rch_verify.sh) — the wrapper itself.
 - [`scripts/check-local-cargo-tripwire.sh`](../scripts/check-local-cargo-tripwire.sh)
-  — bd-1h8ji.2 detector for direct-cargo bypasses.
+  — local-Cargo preflight and read-only process scanner for direct-cargo
+  bypasses.
 - [`scripts/check-rch-portability.sh`](../scripts/check-rch-portability.sh)
   — bd-1h8ji.4 anomaly detector for Mac-only artifacts in remote transcripts.
 - [`scripts/rch_compile_blocker_router.py`](../scripts/rch_compile_blocker_router.py)
@@ -379,6 +435,7 @@ bash and dash. Confirmed by repro on this Mac (`dash` is installed at
 | Format check | `scripts/rch_verify.sh -- cargo fmt --check` |
 | Compare-only bench | `EE_BENCH_COMPARE_ONLY=1 scripts/rch_verify.sh -- cargo bench --bench <name>` |
 | Detect local-cargo bypass | `scripts/check-local-cargo-tripwire.sh --cmd '<cmd>' --json` |
+| Scan active local Cargo processes | `scripts/check-local-cargo-tripwire.sh --probe-processes --json` |
 | Detect Mac-leak in transcript | `scripts/check-rch-portability.sh --json /path/to/transcript` |
 | Generate closeout proof | `scripts/rch_verify.sh --bead-id <id> --summary --ledger .ee/derived/rch/runs.jsonl -- <cmd>` |
 

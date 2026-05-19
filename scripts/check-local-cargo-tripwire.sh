@@ -82,6 +82,17 @@ classify_command() {
         return
     fi
 
+    # Shell command substitution runs before the outer command receives
+    # its arguments. A tracker command such as `br comments add --message
+    # "$(cargo test ...)"` can therefore start local Cargo before Beads
+    # sees the comment text. Deny Rust verifier commands in substitution
+    # forms before applying the RCH-wrapper allowlist below.
+    # shellcheck disable=SC2016 # literal shell-substitution syntax is the pattern.
+    if printf '%s' "$cmd" | grep -Eq '`[^`]*(cargo|rustc|rustdoc)[^`]*`|\$\([^)]*(cargo|rustc|rustdoc)[^)]*\)'; then
+        printf 'denied\tshell command substitution would execute Rust verification before the outer command\tcommand_substitution\tcommand substitution containing cargo/rustc/rustdoc must not be used for tracker or mail evidence\n'
+        return
+    fi
+
     # Whitelist: anything wrapped through `rch exec` is allowed. The
     # canonical shape is `... rch exec -- env ... cargo <sub> ...`; we
     # also accept `rch exec --json -- ...` and similar flag variants.
@@ -445,6 +456,29 @@ run_self_test() {
         denied*) ;;
         *) printf 'self-test FAILED: cargo doc must be denied; got %s\n' "$result" >&2; exit 1 ;;
     esac
+    # Cargo inside shell command substitution → DENIED before the
+    # tracker/mail command can receive its argument.
+    # shellcheck disable=SC2016 # self-test must pass literal backticks.
+    result=$(classify_command 'br comments add bd-1 --message "`cargo test --lib foo`"')
+    case "$result" in
+        denied*) ;;
+        *) printf 'self-test FAILED: backtick cargo substitution must be denied; got %s\n' "$result" >&2; exit 1 ;;
+    esac
+    # Rustdoc inside dollar-paren substitution → DENIED.
+    # shellcheck disable=SC2016 # self-test must pass literal dollar-paren substitution.
+    result=$(classify_command 'am send --body "$(rustdoc --test src/lib.rs)"')
+    case "$result" in
+        denied*) ;;
+        *) printf 'self-test FAILED: dollar-paren rustdoc substitution must be denied; got %s\n' "$result" >&2; exit 1 ;;
+    esac
+    # Even an RCH-wrapped Cargo command inside substitution is denied:
+    # command substitution is not an evidence transport.
+    # shellcheck disable=SC2016 # self-test must pass literal dollar-paren substitution.
+    result=$(classify_command 'br comments add bd-1 --message "$(scripts/rch_verify.sh -- cargo test --lib foo)"')
+    case "$result" in
+        denied*) ;;
+        *) printf 'self-test FAILED: rch wrapper inside command substitution must be denied; got %s\n' "$result" >&2; exit 1 ;;
+    esac
     # Direct rustc → DENIED.
     result=$(classify_command "rustc src/main.rs")
     case "$result" in
@@ -499,7 +533,7 @@ run_self_test() {
         allowed*) ;;
         *) printf 'self-test FAILED: empty command must be allowed; got %s\n' "$result" >&2; exit 1 ;;
     esac
-    printf 'self-test PASSED: 12 classifier cases produced expected outcomes\n'
+    printf 'self-test PASSED: 15 classifier cases produced expected outcomes\n'
     exit 0
 }
 
