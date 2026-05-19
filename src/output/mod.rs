@@ -4168,6 +4168,79 @@ pub fn render_status_skyline_human(report: &StatusSkylineReport) -> String {
     output
 }
 
+/// Render the status skyline report as TOON.
+#[must_use]
+pub fn render_status_skyline_toon(report: &StatusSkylineReport) -> String {
+    render_toon_from_json(&render_status_skyline_json(report))
+}
+
+/// Render the status skyline report as Markdown.
+#[must_use]
+pub fn render_status_skyline_markdown(report: &StatusSkylineReport) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output, "# Status Skyline");
+    let _ = writeln!(output);
+    let _ = writeln!(output, "- Schema: `{}`", report.schema);
+    let _ = writeln!(output, "- Communities: {}", report.summary.community_count);
+    let _ = writeln!(
+        output,
+        "- Load-bearing memories: {}",
+        report.summary.load_bearing_memory_count
+    );
+    let _ = writeln!(
+        output,
+        "- Stale communities: {}",
+        report.summary.stale_community_count
+    );
+    match report.summary.highest_risk_community_id.as_deref() {
+        Some(community_id) => {
+            let _ = writeln!(output, "- Highest-risk community: `{community_id}`");
+        }
+        None => {
+            let _ = writeln!(output, "- Highest-risk community: none");
+        }
+    }
+
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## Communities");
+    if report.skyline.is_empty() {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "- No skyline communities available.");
+    } else {
+        for community in &report.skyline {
+            let filled = usize::min(community.memory_count, 20);
+            let bar = "#".repeat(filled);
+            let empty = ".".repeat(20_usize.saturating_sub(filled));
+            let _ = writeln!(
+                output,
+                "- `{}` [{}{}] memories={} trust={:.2} age={:.1}d onion={} health=`{}`",
+                community.community_id,
+                bar,
+                empty,
+                community.memory_count,
+                community.mean_trust,
+                community.mean_age_days,
+                community.onion_layer,
+                community.structural_health
+            );
+        }
+    }
+
+    let degraded = aggregate_status_degradations("skyline", &report.degraded);
+    if !degraded.is_empty() {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## Degraded");
+        for degraded in &degraded {
+            let _ = writeln!(
+                output,
+                "- **{}** `{}`: {}",
+                degraded.severity, degraded.code, degraded.message
+            );
+        }
+    }
+    output
+}
+
 /// Render a status report as TOON (Terse Object Output Notation).
 #[must_use]
 pub fn render_status_toon(report: &StatusReport) -> String {
@@ -13045,8 +13118,9 @@ mod tests {
         render_quarantine_entry_toon, render_quarantine_human, render_quarantine_json,
         render_quarantine_json_filtered, render_quarantine_toon, render_schema_export_json,
         render_shadow_run_human, render_shadow_run_json, render_shadow_run_toon,
-        render_status_json, render_status_json_filtered, render_status_toon, render_version_json,
-        status_response_json,
+        render_status_json, render_status_json_filtered, render_status_skyline_json,
+        render_status_skyline_markdown, render_status_skyline_toon, render_status_toon,
+        render_version_json, status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::doctor::{
@@ -13078,7 +13152,8 @@ mod tests {
     };
     use crate::core::status::{
         DegradationReport, FeedbackHealthReport, FeedbackHealthStatus, FeedbackSourceHealth,
-        MeshStorageStatusReport, StatusReport,
+        MeshStorageStatusReport, STATUS_SKYLINE_SCHEMA_V1, StatusReport,
+        StatusSkylineCommunityReport, StatusSkylineReport, StatusSkylineSummaryReport,
     };
     use crate::core::tailscale_probe::{TailscaleLocalReport, TailscaleProbeMethod};
     use crate::core::{
@@ -15576,6 +15651,82 @@ mod tests {
     // These tests prove the public renderer is valid TOON and semantically
     // equivalent to the JSON status output.
     // ========================================================================
+
+    fn sample_status_skyline_report() -> StatusSkylineReport {
+        StatusSkylineReport {
+            schema: STATUS_SKYLINE_SCHEMA_V1,
+            snapshot_version: 7,
+            summary: StatusSkylineSummaryReport {
+                community_count: 2,
+                highest_risk_community_id: Some("community-risk".to_owned()),
+                load_bearing_memory_count: 3,
+                stale_community_count: 1,
+            },
+            skyline: vec![StatusSkylineCommunityReport {
+                community_id: "community-risk".to_owned(),
+                memory_count: 4,
+                mean_trust: 0.75,
+                mean_age_days: 12.5,
+                onion_layer: 2,
+                structural_health: "stale".to_owned(),
+            }],
+            degraded: vec![DegradationReport {
+                code: "graph.skyline_fixture",
+                severity: "info",
+                message: "fixture degradation",
+                repair: "no repair needed",
+            }],
+        }
+    }
+
+    #[test]
+    fn status_skyline_markdown_renderer_preserves_summary_and_rows() -> TestResult {
+        let markdown = render_status_skyline_markdown(&sample_status_skyline_report());
+
+        ensure_contains(&markdown, "# Status Skyline", "markdown title")?;
+        ensure_contains(
+            &markdown,
+            "- Schema: `ee.status.skyline.v1`",
+            "markdown schema",
+        )?;
+        ensure_contains(&markdown, "- Communities: 2", "markdown communities")?;
+        ensure_contains(
+            &markdown,
+            "- Load-bearing memories: 3",
+            "markdown load-bearing count",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Highest-risk community: `community-risk`",
+            "markdown highest-risk community",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- `community-risk` [####................] memories=4 trust=0.75 age=12.5d onion=2 health=`stale`",
+            "markdown skyline row",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- **info** `graph.skyline_fixture`: fixture degradation",
+            "markdown degradation",
+        )
+    }
+
+    #[test]
+    fn status_skyline_toon_decodes_to_canonical_json() -> TestResult {
+        let report = sample_status_skyline_report();
+        let json = render_status_skyline_json(&report);
+        let toon = render_status_skyline_toon(&report);
+
+        let expected_json = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("status skyline JSON should parse: {error}"))?;
+        let expected = serde_json::Value::from(toon::JsonValue::from(expected_json));
+        let decoded = toon::try_decode(&toon, None)
+            .map_err(|error| format!("status skyline TOON should decode: {error}"))?;
+        let actual = serde_json::Value::from(decoded);
+
+        ensure_equal(&actual, &expected, "decoded status skyline TOON")
+    }
 
     #[test]
     fn toon_status_has_required_fields() -> TestResult {
