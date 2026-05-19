@@ -2094,8 +2094,16 @@ mod tests {
 
         let json = proposal.to_json().to_string();
 
-        ensure(json.contains("[REDACTED_PATH]"), true, "path placeholder present")?;
-        ensure(json.contains("[REDACTED:"), true, "secret placeholder present")?;
+        ensure(
+            json.contains("[REDACTED_PATH]"),
+            true,
+            "path placeholder present",
+        )?;
+        ensure(
+            json.contains("[REDACTED:"),
+            true,
+            "secret placeholder present",
+        )?;
         ensure(
             !json.contains("/Users/alice"),
             true,

@@ -43,6 +43,9 @@ use crate::config::{
 };
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
+use crate::core::memory_drift::{
+    MemoryDriftSelectionHint, memory_drift_selection_hint_from_provenance_status,
+};
 use crate::core::memory_scope::{
     MemoryScopeContext, MeshDisplayProvenance, MeshQueryVisibility, mesh_query_visibility,
 };
@@ -1541,6 +1544,8 @@ fn run_context_pack_with_performance_inner(
         .iter()
         .filter(|item| item.tombstoned_at.is_some())
         .count();
+    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+    push_selected_context_memory_drift_degradations(read_connection, &draft, &mut degraded);
     if options.include_tombstoned
         && tombstoned_item_count > 0
         && !degraded
@@ -2071,6 +2076,84 @@ fn push_search_degradations(
             entry.message.clone(),
             entry.repair.clone(),
         );
+    }
+}
+
+fn push_selected_context_memory_drift_degradations(
+    connection: &DbConnection,
+    draft: &PackDraft,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) {
+    let mut hints = Vec::new();
+    let mut read_errors = 0usize;
+    for item in &draft.items {
+        match connection.get_memory(&item.memory_id.to_string()) {
+            Ok(Some(memory)) => {
+                if let Some(hint) = memory_drift_selection_hint_from_provenance_status(
+                    &memory.id,
+                    &memory.provenance_verification_status,
+                    memory.provenance_chain_hash.as_deref(),
+                ) {
+                    hints.push(hint);
+                }
+            }
+            Ok(None) => {}
+            Err(_) => read_errors = read_errors.saturating_add(1),
+        }
+    }
+
+    if let Some(hint) = highest_risk_context_memory_drift_hint(&hints) {
+        push_degradation(
+            degraded,
+            hint.degraded_code
+                .as_deref()
+                .unwrap_or("memory_drift_source_unverifiable"),
+            context_severity_for_memory_drift_hint(hint),
+            format!(
+                "Context pack selected {count} memor{suffix} with stale provenance evidence; highest-risk status={} memoryId={} reason={}.",
+                hint.drift_status.as_str(),
+                hint.memory_id,
+                hint.top_reason,
+                count = hints.len(),
+                suffix = if hints.len() == 1 { "y" } else { "ies" },
+            ),
+            Some(hint.revalidation_command.clone()),
+        );
+    }
+
+    if read_errors > 0 {
+        push_degradation(
+            degraded,
+            "memory_drift_source_unverifiable",
+            ContextResponseSeverity::Medium,
+            format!(
+                "Context pack could not inspect provenance drift status for {read_errors} selected memor{suffix}.",
+                suffix = if read_errors == 1 { "y" } else { "ies" },
+            ),
+            Some("ee doctor --json".to_owned()),
+        );
+    }
+}
+
+fn highest_risk_context_memory_drift_hint(
+    hints: &[MemoryDriftSelectionHint],
+) -> Option<&MemoryDriftSelectionHint> {
+    hints.iter().max_by_key(|hint| {
+        (
+            hint.drift_status.severity_rank(),
+            std::cmp::Reverse(hint.memory_id.as_str()),
+        )
+    })
+}
+
+fn context_severity_for_memory_drift_hint(
+    hint: &MemoryDriftSelectionHint,
+) -> ContextResponseSeverity {
+    match hint.severity.as_str() {
+        "high" | "critical" => ContextResponseSeverity::High,
+        "medium" | "warning" => ContextResponseSeverity::Medium,
+        "info" => ContextResponseSeverity::Info,
+        _ => ContextResponseSeverity::Low,
     }
 }
 
@@ -9358,6 +9441,174 @@ mod tests {
             .with_narrowed_capabilities(mask_b);
         let combined = context.with_narrowed_capabilities(mask_a.narrow(mask_b));
         assert_eq!(chained.capabilities(), combined.capabilities());
+    }
+
+    #[test]
+    fn selected_context_memory_drift_degradation_reports_highest_risk_item() -> Result<(), String> {
+        use crate::pack::{
+            PackDraft, PackDraftItem, PackSelectionAudit, PackSelectionObjective,
+            PackSelectionPhase,
+        };
+
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_01234567890123456789033333";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-context-memory-drift".to_string(),
+                    name: Some("context memory drift".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let changed_id = MemoryId::from_uuid(uuid::Uuid::from_u128(3301));
+        let missing_id = MemoryId::from_uuid(uuid::Uuid::from_u128(3302));
+        for (memory_id, content) in [
+            (
+                changed_id.to_string(),
+                "Changed provenance should be reported.".to_string(),
+            ),
+            (
+                missing_id.to_string(),
+                "Missing provenance should outrank changed provenance.".to_string(),
+            ),
+        ] {
+            connection
+                .insert_memory(
+                    &memory_id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.to_string(),
+                        level: "procedural".to_string(),
+                        kind: "rule".to_string(),
+                        content,
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.8,
+                        importance: 0.7,
+                        provenance_uri: Some("file://AGENTS.md#L1".to_string()),
+                        trust_class: TrustClass::AgentAssertion.as_str().to_string(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection
+            .execute_raw(&format!(
+                "UPDATE memories SET provenance_verification_status = 'mismatch', provenance_chain_hash = 'blake3:changed' WHERE id = '{}'",
+                changed_id
+            ))
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(&format!(
+                "UPDATE memories SET provenance_verification_status = 'missing', provenance_chain_hash = 'blake3:missing' WHERE id = '{}'",
+                missing_id
+            ))
+            .map_err(|error| error.to_string())?;
+
+        fn draft_item(
+            rank: usize,
+            memory_id: MemoryId,
+            content: &str,
+        ) -> Result<PackDraftItem, String> {
+            Ok(PackDraftItem {
+                rank,
+                memory_id,
+                section: PackSection::ProceduralRules,
+                content: content.to_string(),
+                estimated_tokens: 8,
+                relevance: UnitScore::parse(0.8).map_err(|error| error.to_string())?,
+                utility: UnitScore::parse(0.7).map_err(|error| error.to_string())?,
+                proximity_to_seed: None,
+                score_breakdown: None,
+                provenance: vec![
+                    PackProvenance::new(ProvenanceUri::EeMemory(memory_id), "test source")
+                        .map_err(|error| error.to_string())?,
+                ],
+                why: "selected for drift test".to_string(),
+                diversity_key: None,
+                trust: crate::pack::PackTrustSignal::new(TrustClass::AgentAssertion, None),
+                redactions: Vec::new(),
+                tombstoned_at: None,
+                lifecycle: None,
+                selected_in: PackSelectionPhase::StrictMmr,
+            })
+        }
+
+        let budget = TokenBudget::default_context();
+        let draft = PackDraft {
+            query: "memory drift".to_string(),
+            budget,
+            used_tokens: 16,
+            items: vec![
+                draft_item(1, changed_id, "Changed provenance should be reported.")?,
+                draft_item(
+                    2,
+                    missing_id,
+                    "Missing provenance should outrank changed provenance.",
+                )?,
+            ],
+            omitted: Vec::new(),
+            selection_audit: PackSelectionAudit {
+                profile: ContextPackProfile::Balanced,
+                objective: PackSelectionObjective::MmrRedundancy,
+                algorithm_id: "test_drift_selection",
+                algorithm_description: "Test-only context drift selection audit.",
+                candidate_count: 2,
+                selected_count: 2,
+                omitted_count: 0,
+                budget_limit: budget.max_tokens(),
+                budget_used: 16,
+                total_objective_value: 1.0,
+                monotone: false,
+                submodular: false,
+                selected_items: Vec::new(),
+                steps: Vec::new(),
+            },
+            hash: None,
+        };
+        let original_order = draft
+            .items
+            .iter()
+            .map(|item| item.memory_id.to_string())
+            .collect::<Vec<_>>();
+
+        let mut degraded = Vec::new();
+        super::push_selected_context_memory_drift_degradations(&connection, &draft, &mut degraded);
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "memory_drift_source_missing");
+        assert_eq!(degraded[0].severity, ContextResponseSeverity::High);
+        let expected_repair = format!("ee memory drift {missing_id} --json");
+        assert_eq!(
+            degraded[0].repair.as_deref(),
+            Some(expected_repair.as_str())
+        );
+        assert!(
+            degraded[0]
+                .message
+                .contains("highest-risk status=missing_source")
+        );
+        assert!(
+            degraded[0]
+                .message
+                .contains("reason=provenance_chain_missing")
+        );
+        assert_eq!(
+            draft
+                .items
+                .iter()
+                .map(|item| item.memory_id.to_string())
+                .collect::<Vec<_>>(),
+            original_order
+        );
+
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     #[test]

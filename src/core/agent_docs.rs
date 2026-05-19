@@ -258,6 +258,24 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         category: EnvVar::DisableRememberSearchNeighbors.category(),
     },
     EnvVarEntry {
+        name: EnvVar::EmbedDedupCosineFloor.name(),
+        description: EnvVar::EmbedDedupCosineFloor.description(),
+        default: EnvVar::EmbedDedupCosineFloor.default_value(),
+        category: EnvVar::EmbedDedupCosineFloor.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::EmbedDedupEnabled.name(),
+        description: EnvVar::EmbedDedupEnabled.description(),
+        default: EnvVar::EmbedDedupEnabled.default_value(),
+        category: EnvVar::EmbedDedupEnabled.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::EmbedDedupHammingK.name(),
+        description: EnvVar::EmbedDedupHammingK.description(),
+        default: EnvVar::EmbedDedupHammingK.default_value(),
+        category: EnvVar::EmbedDedupHammingK.category(),
+    },
+    EnvVarEntry {
         name: EnvVar::ExperimentalTriad.name(),
         description: EnvVar::ExperimentalTriad.description(),
         default: EnvVar::ExperimentalTriad.default_value(),
@@ -330,6 +348,18 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         category: EnvVar::L2PackCacheDisable.category(),
     },
     EnvVarEntry {
+        name: EnvVar::LexicalIndexHugepages.name(),
+        description: EnvVar::LexicalIndexHugepages.description(),
+        default: EnvVar::LexicalIndexHugepages.default_value(),
+        category: EnvVar::LexicalIndexHugepages.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::LexicalIndexPinRam.name(),
+        description: EnvVar::LexicalIndexPinRam.description(),
+        default: EnvVar::LexicalIndexPinRam.default_value(),
+        category: EnvVar::LexicalIndexPinRam.category(),
+    },
+    EnvVarEntry {
         name: EnvVar::LogFormat.name(),
         description: EnvVar::LogFormat.description(),
         default: EnvVar::LogFormat.default_value(),
@@ -390,6 +420,12 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         category: EnvVar::PprCacheEntries.category(),
     },
     EnvVarEntry {
+        name: EnvVar::QueryPlanCacheEntries.name(),
+        description: EnvVar::QueryPlanCacheEntries.description(),
+        default: EnvVar::QueryPlanCacheEntries.default_value(),
+        category: EnvVar::QueryPlanCacheEntries.category(),
+    },
+    EnvVarEntry {
         name: EnvVar::ReadPoolDisablePin.name(),
         description: EnvVar::ReadPoolDisablePin.description(),
         default: EnvVar::ReadPoolDisablePin.default_value(),
@@ -436,6 +472,18 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         description: EnvVar::ScienceBackendPath.description(),
         default: EnvVar::ScienceBackendPath.default_value(),
         category: EnvVar::ScienceBackendPath.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::ShardFanoutEnabled.name(),
+        description: EnvVar::ShardFanoutEnabled.description(),
+        default: EnvVar::ShardFanoutEnabled.default_value(),
+        category: EnvVar::ShardFanoutEnabled.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::ShardsDir.name(),
+        description: EnvVar::ShardsDir.description(),
+        default: EnvVar::ShardsDir.default_value(),
+        category: EnvVar::ShardsDir.category(),
     },
     EnvVarEntry {
         name: EnvVar::TestLogLevel.name(),

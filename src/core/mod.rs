@@ -5,7 +5,7 @@ use crate::models::{
     MESH_EVENT_SCHEMA_V1, MESH_PEER_GROUP_BINDING_SCHEMA_V1, MESH_PEER_POLICY_SCHEMA_V1,
     MESH_POLICY_DECISION_SCHEMA_V1, MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1,
     MESH_STORAGE_STATUS_SCHEMA_V1, RESPONSE_SCHEMA_V1, SINGLEFLIGHT_KEY_SCHEMA_V1,
-    SINGLEFLIGHT_POSTURE_SCHEMA_V1, UPDATE_PLAN_SCHEMA_V1,
+    SINGLEFLIGHT_POSTURE_SCHEMA_V1, SYMBOL_SNAPSHOT_SCHEMA_V1, UPDATE_PLAN_SCHEMA_V1,
 };
 
 pub mod agent_detect;
@@ -79,6 +79,7 @@ pub mod streams;
 pub mod support_bundle;
 pub mod swarm_brief;
 pub mod swarm_next_action;
+pub mod symbol_graph;
 pub mod tailscale_probe;
 pub mod task_frame;
 pub mod tripwire;
@@ -219,6 +220,19 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
         SupportedSchema::new("response", RESPONSE_SCHEMA_V1),
         SupportedSchema::new("error", ERROR_SCHEMA_V2),
         SupportedSchema::new("version_provenance", VERSION_PROVENANCE_SCHEMA_V1),
+        SupportedSchema::new("symbol_snapshot", SYMBOL_SNAPSHOT_SCHEMA_V1),
+        SupportedSchema::new(
+            "memory_drift_snapshot",
+            memory_drift::MEMORY_DRIFT_SNAPSHOT_SCHEMA_V1,
+        ),
+        SupportedSchema::new(
+            "memory_drift_queue",
+            memory_drift::MEMORY_DRIFT_QUEUE_SCHEMA_V1,
+        ),
+        SupportedSchema::new(
+            "memory_drift_report",
+            memory_drift::MEMORY_DRIFT_REPORT_SCHEMA_V1,
+        ),
         SupportedSchema::new("install_check", INSTALL_CHECK_SCHEMA_V1),
         SupportedSchema::new("install_plan", INSTALL_PLAN_SCHEMA_V1),
         SupportedSchema::new("host_profile", profile::HOST_PROFILE_PROBE_SCHEMA_V1),
@@ -592,6 +606,10 @@ mod tests {
                 "response",
                 "error",
                 "version_provenance",
+                "symbol_snapshot",
+                "memory_drift_snapshot",
+                "memory_drift_queue",
+                "memory_drift_report",
                 "install_check",
                 "install_plan",
                 "host_profile",

@@ -25,6 +25,7 @@ use rustix::fs::{FlockOperation, flock};
 use rustix::io::Errno;
 use serde_json::{Value as JsonValue, json};
 
+use crate::core::graph_telemetry::{CacheEvictEvent, CacheEvictReason, emit_cache_evict};
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, ApplyMemoryDecayDemotionInput, ApplyMemoryScoreUpdateInput,
     CreateCurationCandidateInput, DbConnection, FeedbackCounts, GraphSnapshotPruneCandidate,
@@ -4081,6 +4082,15 @@ impl ManualRunner {
                 )),
             );
         }
+        let cache_result_counts_by_candidate = if self.options.dry_run || candidates.is_empty() {
+            Vec::new()
+        } else {
+            graph_algorithm_result_counts_for_prune_candidates(
+                &opened.connection,
+                &opened.workspace_id,
+                &candidates,
+            )
+        };
         let pruned_count = if self.options.dry_run || candidates.is_empty() {
             0
         } else {
@@ -4104,6 +4114,16 @@ impl ManualRunner {
                 }
             }
         };
+        let evicted_cache_result_count = cache_result_counts_by_candidate
+            .iter()
+            .take(usize::try_from(pruned_count).unwrap_or(usize::MAX))
+            .fold(0_u64, |total, count| total.saturating_add(*count));
+        if evicted_cache_result_count > 0 {
+            emit_cache_evict(CacheEvictEvent {
+                reason: CacheEvictReason::OperatorRequest,
+                count: u32::try_from(evicted_cache_result_count).unwrap_or(u32::MAX),
+            });
+        }
         let pruned_bytes = candidates
             .iter()
             .take(usize::try_from(pruned_count).unwrap_or(usize::MAX))
@@ -4757,6 +4777,31 @@ fn acquire_graph_snapshot_prune_lock_owner<'a>(
     }
 
     Ok(owner)
+}
+
+fn graph_algorithm_result_counts_for_prune_candidates(
+    conn: &DbConnection,
+    workspace_id: &str,
+    candidates: &[GraphSnapshotPruneCandidate],
+) -> Vec<u64> {
+    candidates
+        .iter()
+        .map(|candidate| {
+            match conn.list_graph_algorithm_results(workspace_id, &candidate.snapshot.id, None) {
+                Ok(rows) => usize_to_u64(rows.len()),
+                Err(error) => {
+                    tracing::warn!(
+                        target: "ee::steward",
+                        workspace_id,
+                        snapshot_id = candidate.snapshot.id.as_str(),
+                        error = %error,
+                        "graph snapshot prune could not count graph algorithm result cache rows before deletion"
+                    );
+                    0
+                }
+            }
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -5717,13 +5762,20 @@ pub fn diagnose_job(job: &Job) -> Vec<JobDiagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::graph_telemetry::CACHE_EVICT_EVENT;
     use crate::db::{
-        CreateFeedbackEventInput, CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput,
-        DbConnection, MemoryLinkRelation, MemoryLinkSource, audit_actions,
+        CreateFeedbackEventInput, CreateGraphAlgorithmResultInput, CreateGraphSnapshotInput,
+        CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection,
+        GraphSnapshotStatus, MemoryLinkRelation, MemoryLinkSource, audit_actions,
     };
     use asupersync::runtime::JoinError;
     use asupersync::{Budget, CancelReason, Cx, LabConfig, LabRuntime, Outcome};
+    use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex as StdMutex};
+    use tracing::subscriber::with_default;
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::registry::Registry;
 
     type TestResult = Result<(), String>;
 
@@ -5737,6 +5789,79 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    #[derive(Clone, Debug)]
+    struct CapturedEvent {
+        target: String,
+        fields: BTreeMap<String, String>,
+    }
+
+    #[derive(Default, Clone)]
+    struct CaptureLayer {
+        events: Arc<StdMutex<Vec<CapturedEvent>>>,
+    }
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            let mut captured = CapturedEvent {
+                target: event.metadata().target().to_owned(),
+                fields: BTreeMap::new(),
+            };
+            let mut visitor = CaptureVisitor {
+                fields: &mut captured.fields,
+            };
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("steward event capture lock")
+                .push(captured);
+        }
+    }
+
+    struct CaptureVisitor<'a> {
+        fields: &'a mut BTreeMap<String, String>,
+    }
+
+    impl tracing::field::Visit for CaptureVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_owned(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_owned());
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_string());
+        }
+
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_string());
+        }
+
+        fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_string());
+        }
+    }
+
+    fn capture_events<T>(thunk: impl FnOnce() -> T) -> (T, Vec<CapturedEvent>) {
+        let layer = CaptureLayer::default();
+        let events = Arc::clone(&layer.events);
+        let subscriber = Registry::default()
+            .with(layer)
+            .with(tracing_subscriber::filter::LevelFilter::TRACE);
+        let result = with_default(subscriber, thunk);
+        let captured = events.lock().expect("steward event capture lock").clone();
+        (result, captured)
     }
 
     #[cfg(unix)]
@@ -8200,6 +8325,109 @@ mod tests {
                 .is_none(),
             true,
             "refresh-conflict lock should release after the runner returns",
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn manual_runner_graph_snapshot_prune_emits_operator_request_cache_evict() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("ee.db");
+        let snapshot_id = "gsnap_steward_prune_operator_cache";
+        {
+            let connection =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            connection
+                .insert_workspace(
+                    SCORE_WORKSPACE_ID,
+                    &CreateWorkspaceInput {
+                        path: temp.path().to_string_lossy().into_owned(),
+                        name: Some("graph-snapshot-prune-operator-cache".to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .insert_graph_snapshot(
+                    snapshot_id,
+                    &CreateGraphSnapshotInput {
+                        workspace_id: SCORE_WORKSPACE_ID.to_owned(),
+                        snapshot_version: 1,
+                        schema_version: "ee.graph.snapshot.v1".to_owned(),
+                        graph_type: GraphSnapshotType::MemoryLinks,
+                        node_count: 2,
+                        edge_count: 1,
+                        metrics_json: r#"{"nodes":[],"edges":[]}"#.to_owned(),
+                        content_hash: "blake3:steward-prune-operator-cache".to_owned(),
+                        source_generation: 1,
+                        expires_at: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .update_graph_snapshot_status(snapshot_id, GraphSnapshotStatus::Archived)
+                .map_err(|error| error.to_string())?;
+            connection
+                .execute_raw(
+                    "UPDATE graph_snapshots \
+                     SET created_at = '2026-05-01T00:00:00Z' \
+                     WHERE id = 'gsnap_steward_prune_operator_cache'",
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
+                    workspace_id: SCORE_WORKSPACE_ID.to_owned(),
+                    snapshot_id: snapshot_id.to_owned(),
+                    algorithm: "pagerank".to_owned(),
+                    params_hash: "blake3:steward-prune-operator-cache-result".to_owned(),
+                    result_json: r#"{"scores":[["mem_a",0.42]]}"#.to_owned(),
+                    ttl_seconds: 300,
+                })
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
+
+        let opts = RunnerOptions::new()
+            .with_database_path(database_path.clone())
+            .with_workspace_id(SCORE_WORKSPACE_ID);
+        let mut runner = ManualRunner::new(opts);
+
+        let (result, events) = capture_events(|| {
+            runner.run_job_type(
+                JobType::GraphSnapshotPrune,
+                Some("operator requested graph snapshot prune".to_owned()),
+            )
+        });
+
+        ensure(result.outcome, RunOutcome::Success, "outcome")?;
+        let details = result
+            .details
+            .ok_or_else(|| "graph snapshot prune details missing".to_owned())?;
+        ensure(details["prunedCount"].as_u64(), Some(1), "pruned count")?;
+        let event = events
+            .iter()
+            .find(|event| event.target == CACHE_EVICT_EVENT)
+            .ok_or_else(|| "cache eviction telemetry should be emitted".to_owned())?;
+        ensure(
+            event.fields.get("reason").map(String::as_str),
+            Some("operator_request"),
+            "cache eviction reason",
+        )?;
+        ensure(
+            event.fields.get("count").map(String::as_str),
+            Some("1"),
+            "cache eviction count",
+        )?;
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .list_graph_algorithm_results(SCORE_WORKSPACE_ID, snapshot_id, None)
+                .map_err(|error| error.to_string())?
+                .is_empty(),
+            true,
+            "graph algorithm result rows should be evicted by snapshot prune",
         )?;
         connection.close().map_err(|error| error.to_string())
     }

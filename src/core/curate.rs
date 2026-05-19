@@ -5815,15 +5815,17 @@ impl CandidateEvidenceFacts {
         let mut tombstoned_member_count = 0_usize;
         let mut member_memories = Vec::new();
 
-        let batch_ids = member_memory_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>();
-        let batch_result = connection
-            .get_memories_batch(&batch_ids)
-            .map_err(|error| DomainError::Storage {
-                message: format!(
-                    "Failed to load curation candidate member memories: {error}"
-                ),
-                repair: Some("ee memory list --json".to_owned()),
-            })?;
+        let batch_ids = member_memory_ids
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>();
+        let batch_result =
+            connection
+                .get_memories_batch(&batch_ids)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to load curation candidate member memories: {error}"),
+                    repair: Some("ee memory list --json".to_owned()),
+                })?;
 
         for memory_id in &member_memory_ids {
             if let Some(memory) = batch_result.get(memory_id).cloned() {

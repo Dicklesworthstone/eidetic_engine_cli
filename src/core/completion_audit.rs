@@ -2,6 +2,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::models::{
+    VerificationEvidenceRecord, VerificationStatus, verification_evidence_beads_summary,
+};
+
 pub const COMPLETION_AUDIT_CHECKLIST_SCHEMA_V1: &str = "ee.completion_audit.checklist.v1";
 pub const COMPLETION_AUDIT_REPORT_SCHEMA_V2: &str = "ee.completion_audit.report.v2";
 const COMPLETION_AUDIT_REQUIRED_REMOTE_WRAPPER: &str = "scripts/rch_verify.sh -- <cargo command>";
@@ -152,6 +156,33 @@ pub struct EvidenceRecord {
 #[serde(rename_all = "camelCase")]
 pub struct EvidenceBundle {
     pub records: Vec<EvidenceRecord>,
+}
+
+#[must_use]
+pub fn evidence_bundle_from_verification_records(
+    records: &[VerificationEvidenceRecord],
+) -> EvidenceBundle {
+    let mut records = records
+        .iter()
+        .map(evidence_record_from_verification_record)
+        .collect::<Vec<_>>();
+    records.sort();
+    records.dedup();
+    EvidenceBundle { records }
+}
+
+#[must_use]
+pub fn evidence_record_from_verification_record(
+    record: &VerificationEvidenceRecord,
+) -> EvidenceRecord {
+    evidence_record(
+        verification_record_kind(record),
+        &record.gate_name,
+        &verification_record_source(record),
+        verification_record_status(record),
+        verification_record_strength(record),
+        &verification_record_summary(record),
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -345,6 +376,56 @@ fn evidence_record(
         strength: strength.to_owned(),
         summary: summary.to_owned(),
     }
+}
+
+fn verification_record_kind(record: &VerificationEvidenceRecord) -> &'static str {
+    if record.offload.required_remote || record.offload.offload_tool.as_deref() == Some("rch") {
+        "rch"
+    } else if record.offload.offload_tool.as_deref() == Some("github_actions") {
+        "ci"
+    } else {
+        "verification"
+    }
+}
+
+fn verification_record_status(record: &VerificationEvidenceRecord) -> EvidenceRecordStatus {
+    match record.status {
+        VerificationStatus::Passed if record.is_authoritative_pass() => EvidenceRecordStatus::Pass,
+        VerificationStatus::Passed => EvidenceRecordStatus::StaticOnly,
+        VerificationStatus::Failed => EvidenceRecordStatus::Fail,
+        VerificationStatus::Blocked => EvidenceRecordStatus::CapacityBlocked,
+        VerificationStatus::FallbackDetected if record.offload.required_remote => {
+            EvidenceRecordStatus::CapacityBlocked
+        }
+        VerificationStatus::FallbackDetected
+        | VerificationStatus::Interrupted
+        | VerificationStatus::Unknown => EvidenceRecordStatus::Inconclusive,
+    }
+}
+
+fn verification_record_strength(record: &VerificationEvidenceRecord) -> &'static str {
+    match verification_record_status(record) {
+        EvidenceRecordStatus::Pass | EvidenceRecordStatus::Fail => "direct",
+        EvidenceRecordStatus::CapacityBlocked => {
+            if record.offload.required_remote {
+                "direct"
+            } else {
+                "supporting"
+            }
+        }
+        EvidenceRecordStatus::StaticOnly => "supporting",
+        EvidenceRecordStatus::Stale
+        | EvidenceRecordStatus::Missing
+        | EvidenceRecordStatus::Inconclusive => "weak",
+    }
+}
+
+fn verification_record_source(record: &VerificationEvidenceRecord) -> String {
+    format!("{}:{}", record.schema, record.verification_id)
+}
+
+fn verification_record_summary(record: &VerificationEvidenceRecord) -> String {
+    verification_evidence_beads_summary(record)
 }
 
 fn local_cargo_policy_workspace_evidence(workspace: &Path) -> Vec<EvidenceRecord> {
@@ -2023,6 +2104,62 @@ mod tests {
 
         assert_eq!(item.support, RequirementSupport::Blocked);
         assert_eq!(item.confidence, "blocked");
+    }
+
+    #[test]
+    fn canonical_verification_records_feed_completion_audit_rch_policy() {
+        let passed =
+            crate::models::verification_evidence_record_from_rch_verify(&serde_json::json!({
+                "schema": crate::models::RCH_VERIFY_SCHEMA_V1,
+                "command_text": "cargo test --lib completion_audit",
+                "command_hash": "sha256:rch-pass",
+                "command_kind": "cargo_test",
+                "status": "remote_pass",
+                "exit_code": 0,
+                "bead_id": "bd-1nxz4.5",
+                "worker_id": "vmi123",
+                "remote_required": true
+            }))
+            .expect("RCH pass proof normalizes");
+        let blocked =
+            crate::models::verification_evidence_record_from_rch_verify(&serde_json::json!({
+                "schema": crate::models::RCH_VERIFY_SCHEMA_V1,
+                "command_text": "cargo clippy --all-targets -- -D warnings",
+                "command_hash": "sha256:rch-blocked",
+                "command_kind": "cargo_clippy",
+                "status": "rch_environment_failure",
+                "exit_code": 1,
+                "degraded_codes": ["rch_verify_client_daemon_version_skew"],
+                "remote_required": true
+            }))
+            .expect("RCH blocker proof normalizes");
+
+        let pass_bundle = evidence_bundle_from_verification_records(&[passed]);
+        assert_eq!(pass_bundle.records.len(), 1);
+        assert_eq!(pass_bundle.records[0].kind, "rch");
+        assert_eq!(pass_bundle.records[0].target, "cargo_test");
+        assert_eq!(pass_bundle.records[0].status, EvidenceRecordStatus::Pass);
+        assert_eq!(pass_bundle.records[0].strength, "direct");
+        assert!(
+            pass_bundle.records[0]
+                .summary
+                .contains("command_hash=sha256:rch-pass")
+        );
+        assert!(!pass_bundle.records[0].summary.contains("cargo test"));
+        assert_eq!(
+            local_build_policy_audit(&pass_bundle).state,
+            LocalBuildPolicyState::RemoteVerified
+        );
+
+        let blocked_bundle = evidence_bundle_from_verification_records(&[blocked]);
+        assert_eq!(
+            blocked_bundle.records[0].status,
+            EvidenceRecordStatus::CapacityBlocked
+        );
+        assert_eq!(
+            local_build_policy_audit(&blocked_bundle).state,
+            LocalBuildPolicyState::RemoteRequiredBlocked
+        );
     }
 
     #[test]

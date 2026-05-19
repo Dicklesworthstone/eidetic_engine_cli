@@ -35,6 +35,7 @@ use crate::models::{
     DomainError, ProducerMetadata, RESPONSE_SCHEMA_V1, VERIFICATION_EVIDENCE_SCHEMA_V1,
     VerificationClosureGuidance, VerificationEvidenceRecord, VerificationGateRequirement,
     VerificationStatus, rch_cargo_closure_requirements, verification_closure_guidance,
+    verification_evidence_beads_summary,
 };
 
 // ============================================================================
@@ -471,13 +472,14 @@ impl VerificationRecordReport {
             "verification evidence recorded"
         };
         format!(
-            "{verb}\n  ID: {}\n  Audit: {}\n  Content hash: {}\n  Target: {}:{}\n  Status: {}\n",
+            "{verb}\n  ID: {}\n  Audit: {}\n  Content hash: {}\n  Target: {}:{}\n  Status: {}\n  Beads summary: {}\n",
             self.evidence.verification_id,
             self.audit_id,
             self.content_hash,
             self.target_type,
             self.target_id,
-            self.evidence.status.as_str()
+            self.evidence.status.as_str(),
+            verification_evidence_beads_summary(&self.evidence)
         )
     }
 
@@ -495,6 +497,7 @@ impl VerificationRecordReport {
             "persisted": self.persisted,
             "replayed": self.replayed,
             "degradations": self.degradations,
+            "beadsSummary": verification_evidence_beads_summary(&self.evidence),
             "verificationEvidence": self.evidence,
         })
     }
@@ -1307,6 +1310,15 @@ mod tests {
             &records[0].verification_id,
             &evidence.verification_id,
             "verification id",
+        )?;
+        let data = report.data_json();
+        ensure_equal(
+            &data
+                .get("beadsSummary")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("record report has beads summary")?,
+            &verification_evidence_beads_summary(&evidence).as_str(),
+            "beads summary",
         )?;
 
         let replay = record_verification_evidence(VerificationRecordOptions {

@@ -4089,10 +4089,7 @@ fn redact_rule_public_path_like_segments(value: &str) -> String {
             output.push_str(REDACTED_PATH);
             cursor += prefix.len();
             while cursor < value.len() {
-                let next = value[cursor..]
-                    .chars()
-                    .next()
-                    .unwrap_or('\0');
+                let next = value[cursor..].chars().next().unwrap_or('\0');
                 if rule_public_path_boundary(next) {
                     break;
                 }
@@ -4101,10 +4098,7 @@ fn redact_rule_public_path_like_segments(value: &str) -> String {
             continue;
         }
 
-        let next = remaining
-            .chars()
-            .next()
-            .unwrap_or('\0');
+        let next = remaining.chars().next().unwrap_or('\0');
         output.push(next);
         cursor += next.len_utf8();
     }

@@ -1063,6 +1063,77 @@ mod tests {
     }
 
     #[test]
+    fn throttle_decision_never_throttles_foreground_lane() -> TestResult {
+        let foreground = QosLaneRecord::from_input(&record_input(
+            QosLane::ForegroundRead,
+            "context",
+            "foreground query",
+            100,
+        ));
+        let summary = summarize_qos_records("workspace-hash".to_owned(), vec![foreground], 500);
+
+        let decision = decide_background_throttle(
+            &summary,
+            QosBackgroundThrottleInput {
+                lane: QosLane::ForegroundRead,
+                checkpoint: QosThrottleCheckpoint::CheckpointBoundary,
+                remaining_item_budget: 100,
+                minimum_item_budget: 10,
+                may_yield: true,
+            },
+        );
+
+        assert_eq!(decision.action, QosBackgroundThrottleAction::Continue);
+        assert!(decision.foreground_pressure);
+        assert_eq!(decision.adjusted_item_budget, None);
+        assert!(!decision.behavior_changed());
+        assert_eq!(decision.reason, "lane_not_background_or_maintenance");
+        Ok(())
+    }
+
+    #[test]
+    fn throttle_decision_continues_at_minimum_budget_floor() -> TestResult {
+        let foreground = QosLaneRecord::from_input(&record_input(
+            QosLane::ForegroundRead,
+            "context",
+            "foreground query",
+            100,
+        ));
+        let background = QosLaneRecord::from_input(&record_input(
+            QosLane::BackgroundDerived,
+            "index",
+            "background work",
+            120,
+        ));
+        let summary = summarize_qos_records(
+            "workspace-hash".to_owned(),
+            vec![foreground, background],
+            500,
+        );
+
+        let decision = decide_background_throttle(
+            &summary,
+            QosBackgroundThrottleInput {
+                lane: QosLane::BackgroundDerived,
+                checkpoint: QosThrottleCheckpoint::BeforeExpensivePhase,
+                remaining_item_budget: 30,
+                minimum_item_budget: 30,
+                may_yield: false,
+            },
+        );
+
+        assert_eq!(decision.action, QosBackgroundThrottleAction::Continue);
+        assert!(decision.foreground_pressure);
+        assert_eq!(decision.adjusted_item_budget, None);
+        assert!(!decision.behavior_changed());
+        assert_eq!(
+            decision.reason,
+            "foreground_pressure_minimum_budget_reached"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn qos_summary_json_aggregates_duplicate_degraded_entries() -> TestResult {
         let mut summary = summarize_qos_records("workspace-hash".to_owned(), Vec::new(), 500);
         summary.degraded = vec![

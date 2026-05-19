@@ -2192,8 +2192,9 @@ mod tests {
     use asupersync::types::{CancelKind, CancelReason, PanicPayload, RegionId, Time};
 
     use crate::db::{
-        CreateMemoryInput, CreateSessionInput, CreateWorkspaceInput, DbConnection, feedback_scoring,
-        CreateFeedbackEventInput, CreateFeedbackQuarantineInput, StoredFeedbackQuarantine,
+        CreateFeedbackEventInput, CreateFeedbackQuarantineInput, CreateMemoryInput,
+        CreateSessionInput, CreateWorkspaceInput, DbConnection, StoredFeedbackQuarantine,
+        feedback_scoring,
     };
 
     use super::{
@@ -2202,9 +2203,9 @@ mod tests {
         OUTCOME_QUARANTINE_LIST_SCHEMA_V1, OutcomeFeedbackSummary, OutcomeQuarantineListReport,
         OutcomeQuarantineRecord, OutcomeQuarantineSummary, OutcomeRecordOptions,
         OutcomeRecordReport, OutcomeRecordStatus, default_feedback_weight,
-        generate_feedback_event_id, outcome_class, outcome_exit_code, record_outcome,
-        record_outcome_seeded, validate_feedback_event_id,
-        outcome_audit_details, feedback_quarantine_audit_details, feedback_quarantine_review_audit_details,
+        feedback_quarantine_audit_details, feedback_quarantine_review_audit_details,
+        generate_feedback_event_id, outcome_audit_details, outcome_class, outcome_exit_code,
+        record_outcome, record_outcome_seeded, validate_feedback_event_id,
     };
     use crate::models::{DomainError, ProcessExitCode};
     use crate::runtime::determinism::Deterministic;

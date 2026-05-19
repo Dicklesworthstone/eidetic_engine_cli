@@ -1379,10 +1379,10 @@ fn hash_content(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::ensure_equal;
     use std::fs;
     use std::io::ErrorKind;
     use std::path::PathBuf;
-    use crate::testing::ensure_equal;
 
     type TestResult = Result<(), String>;
 

@@ -534,16 +534,28 @@ pub struct StatusSkylineReport {
     pub degraded: Vec<DegradationReport>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+struct GatheredStatusSkyline {
+    community_count: usize,
+    rows: Vec<StatusSkylineCommunityReport>,
+}
+
 impl StatusSkylineReport {
     /// Gather the currently available status skyline posture for a workspace.
     #[must_use]
     pub fn gather_for_workspace(workspace_path: Option<&Path>) -> Self {
         let skyline_feature_enabled = status_skyline_feature_enabled(workspace_path);
-        let skyline_community_count = if skyline_feature_enabled == Some(true) {
-            gather_status_skyline_community_count(workspace_path)
+        let gathered_skyline = if skyline_feature_enabled == Some(true) {
+            gather_status_skyline(workspace_path)
         } else {
             None
         };
+        let skyline_community_count = gathered_skyline
+            .as_ref()
+            .map(|skyline| skyline.community_count);
+        let skyline_rows = gathered_skyline
+            .map(|skyline| skyline.rows)
+            .unwrap_or_default();
         let mut degraded = Vec::new();
         push_status_skyline_feature_disabled_degradation(&mut degraded, skyline_feature_enabled);
         push_skyline_degenerate_communities_degradation(&mut degraded, skyline_community_count);
@@ -557,7 +569,7 @@ impl StatusSkylineReport {
                 load_bearing_memory_count: 0,
                 stale_community_count: 0,
             },
-            skyline: Vec::new(),
+            skyline: skyline_rows,
             degraded,
         }
     }
@@ -2534,6 +2546,10 @@ fn push_toon_output_capability_degradation(
 }
 
 fn gather_status_skyline_community_count(workspace_path: Option<&Path>) -> Option<usize> {
+    gather_status_skyline(workspace_path).map(|skyline| skyline.community_count)
+}
+
+fn gather_status_skyline(workspace_path: Option<&Path>) -> Option<GatheredStatusSkyline> {
     let workspace_path = workspace_path?;
     #[cfg(feature = "graph")]
     {
@@ -2543,7 +2559,8 @@ fn gather_status_skyline_community_count(workspace_path: Option<&Path>) -> Optio
         }
         let connection = DbConnection::open_file(&database_path).ok()?;
         let links = status_visible_memory_links(connection.list_all_memory_links(None).ok()?);
-        Some(status_skyline_community_count_from_links(&links))
+        let memories = status_skyline_memories_for_workspace(&connection, workspace_path);
+        Some(status_skyline_from_links(&links, &memories, Utc::now()))
     }
     #[cfg(not(feature = "graph"))]
     {
@@ -2564,12 +2581,172 @@ fn status_skyline_feature_enabled(workspace_path: Option<&Path>) -> Option<bool>
 }
 
 #[cfg(feature = "graph")]
-fn status_skyline_community_count_from_links(links: &[StoredMemoryLink]) -> usize {
+fn status_skyline_from_links(
+    links: &[StoredMemoryLink],
+    memories: &[StoredMemory],
+    as_of: DateTime<Utc>,
+) -> GatheredStatusSkyline {
     if links.is_empty() {
-        return 0;
+        return GatheredStatusSkyline::default();
     }
+
     let graph = status_skyline_graph_from_links(links);
-    crate::graph::health::detect_louvain_communities(&graph).len()
+    let communities = crate::graph::health::detect_louvain_communities(&graph);
+    let community_count = communities.len();
+    let onion_layers = crate::graph::decay::compute_onion_layers(&graph);
+    let k_truss_ranks = crate::graph::health::compute_k_truss(&graph)
+        .top_memories_at_k
+        .into_iter()
+        .map(|entry| (entry.memory_id, entry.max_k))
+        .collect::<BTreeMap<_, _>>();
+    let memories_by_id = memories
+        .iter()
+        .map(|memory| (memory.id.as_str(), memory))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut rows = communities
+        .into_iter()
+        .enumerate()
+        .map(|(community_index, mut members)| {
+            members.sort();
+            status_skyline_community_row(
+                community_index,
+                &members,
+                &memories_by_id,
+                &onion_layers.layers_by_memory,
+                &k_truss_ranks,
+                as_of,
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        right
+            .memory_count
+            .cmp(&left.memory_count)
+            .then_with(|| left.community_id.cmp(&right.community_id))
+    });
+
+    GatheredStatusSkyline {
+        community_count,
+        rows,
+    }
+}
+
+#[cfg(feature = "graph")]
+fn status_skyline_community_row(
+    community_index: usize,
+    members: &[String],
+    memories_by_id: &BTreeMap<&str, &StoredMemory>,
+    onion_layers: &BTreeMap<String, usize>,
+    k_truss_ranks: &BTreeMap<String, usize>,
+    as_of: DateTime<Utc>,
+) -> StatusSkylineCommunityReport {
+    let mut trust_sum = 0.0_f32;
+    let mut trust_count = 0_usize;
+    let mut age_sum = 0.0_f32;
+    let mut age_count = 0_usize;
+    let mut layers = Vec::new();
+    let mut k_truss_core_count = 0_usize;
+
+    for member in members {
+        if let Some(memory) = memories_by_id.get(member.as_str()) {
+            if memory.confidence.is_finite() {
+                trust_sum += memory.confidence.clamp(0.0, 1.0);
+                trust_count += 1;
+            }
+            if let Some(created_at) = parse_memory_timestamp(&memory.created_at) {
+                age_sum += status_skyline_age_days(created_at, as_of);
+                age_count += 1;
+            }
+        }
+        if let Some(layer) = onion_layers.get(member) {
+            layers.push(*layer);
+        }
+        if k_truss_ranks.get(member).is_some_and(|rank| *rank >= 3) {
+            k_truss_core_count += 1;
+        }
+    }
+
+    let onion_layer = layers.iter().copied().max().unwrap_or(0);
+    let (core_count, periphery_count) = status_skyline_core_periphery_counts(&layers);
+
+    StatusSkylineCommunityReport {
+        community_id: format!("community_{:04}", community_index + 1),
+        memory_count: members.len(),
+        mean_trust: mean_or_zero(trust_sum, trust_count),
+        mean_age_days: mean_or_zero(age_sum, age_count),
+        onion_layer: u32::try_from(onion_layer).unwrap_or(u32::MAX),
+        structural_health: status_skyline_structural_health(
+            members.len(),
+            core_count,
+            periphery_count,
+            k_truss_core_count,
+        )
+        .to_owned(),
+    }
+}
+
+#[cfg(feature = "graph")]
+fn status_skyline_memories_for_workspace(
+    connection: &DbConnection,
+    workspace_path: &Path,
+) -> Vec<StoredMemory> {
+    let mut memories = Vec::new();
+    for workspace_id in resolve_status_workspace_ids(connection, workspace_path) {
+        if let Ok(mut workspace_memories) = connection.list_memories(&workspace_id, None, false) {
+            memories.append(&mut workspace_memories);
+        }
+    }
+    memories.sort_by(|left, right| left.id.cmp(&right.id));
+    memories.dedup_by(|left, right| left.id == right.id);
+    memories
+}
+
+#[cfg(feature = "graph")]
+fn status_skyline_core_periphery_counts(layers: &[usize]) -> (usize, usize) {
+    let Some(min_layer) = layers.iter().copied().min() else {
+        return (0, 0);
+    };
+    let max_layer = layers.iter().copied().max().unwrap_or(min_layer);
+    let midpoint = min_layer + (max_layer.saturating_sub(min_layer) / 2);
+    let periphery_count = layers.iter().filter(|layer| **layer <= midpoint).count();
+    let core_count = layers.len().saturating_sub(periphery_count);
+    (core_count, periphery_count)
+}
+
+#[cfg(feature = "graph")]
+fn status_skyline_structural_health(
+    size: usize,
+    core_count: usize,
+    periphery_count: usize,
+    k_truss_core_count: usize,
+) -> &'static str {
+    if size >= 3 && k_truss_core_count == 0 {
+        "core_sparse"
+    } else if periphery_count > core_count {
+        "periphery_heavy"
+    } else {
+        "balanced"
+    }
+}
+
+#[cfg(feature = "graph")]
+fn status_skyline_age_days(created_at: DateTime<Utc>, as_of: DateTime<Utc>) -> f32 {
+    let days = as_of.signed_duration_since(created_at).num_seconds().max(0) as f64 / 86_400.0;
+    if days.is_finite() {
+        days.min(f32::MAX as f64) as f32
+    } else {
+        0.0
+    }
+}
+
+#[cfg(feature = "graph")]
+fn mean_or_zero(sum: f32, count: usize) -> f32 {
+    if count == 0 || !sum.is_finite() {
+        0.0
+    } else {
+        (sum / count as f32).max(0.0)
+    }
 }
 
 #[cfg(feature = "graph")]
@@ -3941,6 +4118,53 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "graph")]
+    fn status_skyline_memory(id: &str, confidence: f32, created_at: &str) -> StoredMemory {
+        StoredMemory {
+            id: id.to_owned(),
+            workspace_id: "wsp_status_skyline".to_owned(),
+            level: "semantic".to_owned(),
+            kind: "note".to_owned(),
+            content: format!("Status skyline fixture memory {id}."),
+            workflow_id: None,
+            confidence,
+            utility: 0.5,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "agent_validated".to_owned(),
+            trust_subclass: None,
+            provenance_chain_hash: None,
+            provenance_chain_hash_version: PROVENANCE_CHAIN_HASH_VERSION.to_owned(),
+            provenance_verification_status: PROVENANCE_STATUS_UNVERIFIED.to_owned(),
+            provenance_verified_at: None,
+            provenance_verification_note: None,
+            created_at: created_at.to_owned(),
+            updated_at: created_at.to_owned(),
+            tombstoned_at: None,
+            valid_from: None,
+            valid_to: None,
+        }
+    }
+
+    #[cfg(feature = "graph")]
+    fn status_skyline_link(id: &str, src_memory_id: &str, dst_memory_id: &str) -> StoredMemoryLink {
+        StoredMemoryLink {
+            id: id.to_owned(),
+            src_memory_id: src_memory_id.to_owned(),
+            dst_memory_id: dst_memory_id.to_owned(),
+            relation: crate::db::MemoryLinkRelation::Related.as_str().to_owned(),
+            weight: 1.0,
+            confidence: 1.0,
+            directed: false,
+            evidence_count: 1,
+            last_reinforced_at: None,
+            source: crate::db::MemoryLinkSource::Agent.as_str().to_owned(),
+            created_at: "2026-05-01T00:00:00Z".to_owned(),
+            created_by: Some("status-skyline-test".to_owned()),
+            metadata_json: None,
+        }
+    }
+
     #[test]
     fn pack_budget_buckets_count_recent_pack_assembled_rows() -> TestResult {
         let now = parse_ts("2026-05-17T07:00:00Z")?;
@@ -4412,6 +4636,152 @@ mod tests {
             sufficient.is_empty(),
             true,
             "three communities is sufficient",
+        )
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn status_skyline_builds_rows_from_visible_link_communities() -> TestResult {
+        let links = vec![
+            status_skyline_link(
+                "link_status_skyline_0000000000001",
+                "mem_status_skyline_a1",
+                "mem_status_skyline_a2",
+            ),
+            status_skyline_link(
+                "link_status_skyline_0000000000002",
+                "mem_status_skyline_b1",
+                "mem_status_skyline_b2",
+            ),
+        ];
+        let memories = vec![
+            status_skyline_memory("mem_status_skyline_a1", 0.6, "2026-05-01T00:00:00Z"),
+            status_skyline_memory("mem_status_skyline_a2", 0.8, "2026-05-01T00:00:00Z"),
+            status_skyline_memory("mem_status_skyline_b1", 0.9, "2026-05-02T00:00:00Z"),
+            status_skyline_memory("mem_status_skyline_b2", 1.0, "2026-05-02T00:00:00Z"),
+        ];
+        let as_of = parse_ts("2026-05-03T00:00:00Z")?;
+
+        let skyline = status_skyline_from_links(&links, &memories, as_of);
+
+        ensure(skyline.community_count, 2, "community count")?;
+        ensure(skyline.rows.len(), 2, "skyline row count")?;
+        ensure(
+            skyline.rows.iter().all(|row| row.memory_count == 2),
+            true,
+            "each community row has two memories",
+        )?;
+        ensure(
+            skyline
+                .rows
+                .iter()
+                .any(|row| (row.mean_trust - 0.7).abs() <= 0.000_1),
+            true,
+            "first community mean trust surfaced",
+        )?;
+        ensure(
+            skyline
+                .rows
+                .iter()
+                .any(|row| (row.mean_age_days - 2.0).abs() <= 0.000_1),
+            true,
+            "first community mean age surfaced",
+        )?;
+        ensure(
+            skyline
+                .rows
+                .iter()
+                .all(|row| !row.structural_health.is_empty()),
+            true,
+            "structural health labels are populated",
+        )
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn status_skyline_report_populates_rows_when_enabled() -> TestResult {
+        const MEMORY_A: &str = "mem_status_skyline_enabled_a";
+        const MEMORY_B: &str = "mem_status_skyline_enabled_b";
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_dir = temp.path().join(".ee");
+        std::fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[graph.feature.skyline]\nenabled = true\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let database_path = config_dir.join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let canonical_workspace = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let workspace_id = stable_workspace_id(&canonical_workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: canonical_workspace.to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for memory_id in [MEMORY_A, MEMORY_B] {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &crate::db::CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "semantic".to_owned(),
+                        kind: "note".to_owned(),
+                        content: format!("Status skyline enabled fixture {memory_id}."),
+                        workflow_id: None,
+                        confidence: 0.8,
+                        utility: 0.5,
+                        importance: 0.5,
+                        provenance_uri: None,
+                        trust_class: "agent_validated".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection
+            .insert_memory_link(
+                "link_status_skyline_enabled_0001",
+                &crate::db::CreateMemoryLinkInput {
+                    src_memory_id: MEMORY_A.to_owned(),
+                    dst_memory_id: MEMORY_B.to_owned(),
+                    relation: crate::db::MemoryLinkRelation::Related,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    directed: false,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: crate::db::MemoryLinkSource::Agent,
+                    created_by: Some("status-skyline-test".to_owned()),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let report = StatusSkylineReport::gather_for_workspace(Some(temp.path()));
+
+        ensure(report.summary.community_count, 1, "report community count")?;
+        ensure(report.skyline.len(), 1, "report skyline row count")?;
+        ensure(
+            report.degraded.iter().all(|degradation| {
+                degradation.code != "graph_feature_disabled"
+                    || !degradation.message.contains("Knowledge skyline status")
+            }),
+            true,
+            "enabled status skyline should not emit feature-disabled degradation",
         )
     }
 
