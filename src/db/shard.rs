@@ -4,10 +4,14 @@
 //! the catalog and shard paths that later migration/router beads can materialize.
 
 use std::ffi::OsString;
+use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::time::Instant;
 
 use serde::Serialize;
+
+use super::{DatabaseConfig, DbConnection};
 
 pub const SHARD_FANOUT_STATUS_SCHEMA_V1: &str = "ee.shard_fanout.status.v1";
 pub const SHARD_FANOUT_CATALOG_SCHEMA_VERSION: u32 = 1;
@@ -146,6 +150,161 @@ pub struct ShardFanoutResolverInput {
     pub workspace_id: Option<String>,
     pub workspace_root: Option<PathBuf>,
     pub shards_dir_override: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DbShardRoutingMode {
+    Legacy,
+    ShardFanout,
+}
+
+impl DbShardRoutingMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::ShardFanout => "shard_fanout",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbShardHandle {
+    pub routing_mode: DbShardRoutingMode,
+    pub workspace_id: String,
+    pub shard_id: Option<String>,
+    pub database_path: PathBuf,
+    pub catalog_path: PathBuf,
+    pub legacy_database_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DbShardRouter {
+    status: ShardFanoutStatusReport,
+    handle: DbShardHandle,
+    request_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DbShardRouterInput {
+    pub resolver_input: ShardFanoutResolverInput,
+    pub request_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DbShardRouterError {
+    WorkspaceRootUnavailable,
+    WorkspaceIdUnavailable,
+    ShardPathUnavailable,
+    ShardNotAuthoritative {
+        posture: ShardFanoutPosture,
+        degraded_codes: Vec<&'static str>,
+    },
+}
+
+impl fmt::Display for DbShardRouterError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WorkspaceRootUnavailable => {
+                f.write_str("workspace root is required for database shard routing")
+            }
+            Self::WorkspaceIdUnavailable => {
+                f.write_str("workspace id is required for database shard routing")
+            }
+            Self::ShardPathUnavailable => {
+                f.write_str("shard fan-out did not produce a shard database path")
+            }
+            Self::ShardNotAuthoritative {
+                posture,
+                degraded_codes,
+            } => write!(
+                f,
+                "shard fan-out is not authoritative: posture={} degraded_codes={}",
+                posture.as_str(),
+                degraded_codes.join(",")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DbShardRouterError {}
+
+impl DbShardRouter {
+    pub fn resolve(input: ShardFanoutResolverInput) -> Result<Self, DbShardRouterError> {
+        Self::resolve_with_context(DbShardRouterInput {
+            resolver_input: input,
+            request_id: None,
+        })
+    }
+
+    pub fn resolve_with_context(input: DbShardRouterInput) -> Result<Self, DbShardRouterError> {
+        let started = Instant::now();
+        let request_id = input.request_id;
+        let status = resolve_shard_fanout_status(input.resolver_input);
+        trace_router_event("input", request_id.as_deref(), &status, started);
+
+        let legacy_database_path = status
+            .legacy_database_path
+            .clone()
+            .ok_or(DbShardRouterError::WorkspaceRootUnavailable)?;
+        let workspace_id = status
+            .workspace_id
+            .clone()
+            .ok_or(DbShardRouterError::WorkspaceIdUnavailable)?;
+
+        let handle = if !status.enabled {
+            DbShardHandle {
+                routing_mode: DbShardRoutingMode::Legacy,
+                workspace_id,
+                shard_id: status.shard_id.clone(),
+                database_path: legacy_database_path.clone(),
+                catalog_path: status.catalog_path.clone(),
+                legacy_database_path,
+            }
+        } else if status.posture == ShardFanoutPosture::Enabled {
+            DbShardHandle {
+                routing_mode: DbShardRoutingMode::ShardFanout,
+                workspace_id,
+                shard_id: status.shard_id.clone(),
+                database_path: status
+                    .shard_path
+                    .clone()
+                    .ok_or(DbShardRouterError::ShardPathUnavailable)?,
+                catalog_path: status.catalog_path.clone(),
+                legacy_database_path,
+            }
+        } else {
+            return Err(DbShardRouterError::ShardNotAuthoritative {
+                posture: status.posture,
+                degraded_codes: status.degraded.iter().map(|entry| entry.code).collect(),
+            });
+        };
+
+        trace_router_event("response", request_id.as_deref(), &status, started);
+        Ok(Self {
+            status,
+            handle,
+            request_id,
+        })
+    }
+
+    #[must_use]
+    pub const fn handle(&self) -> &DbShardHandle {
+        &self.handle
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> &ShardFanoutStatusReport {
+        &self.status
+    }
+
+    pub fn open(&self) -> super::Result<DbConnection> {
+        let started = Instant::now();
+        trace_router_event("write", self.request_id.as_deref(), &self.status, started);
+        DbConnection::open(DatabaseConfig::file(self.handle.database_path.clone()))
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -473,9 +632,35 @@ impl From<OsString> for ShardFanoutResolverInput {
     }
 }
 
+fn trace_router_event(
+    phase: &'static str,
+    request_id: Option<&str>,
+    status: &ShardFanoutStatusReport,
+    started: Instant,
+) {
+    let degraded_codes = status
+        .degraded
+        .iter()
+        .map(|entry| entry.code)
+        .collect::<Vec<_>>()
+        .join(",");
+    tracing::info!(
+        target: "ee::db::shard",
+        surface = "shard_fanout",
+        phase,
+        workspace_id = status.workspace_id.as_deref().unwrap_or(""),
+        shard_id = status.shard_id.as_deref().unwrap_or(""),
+        request_id = request_id.unwrap_or(""),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        degraded_codes = %degraded_codes,
+        "database shard router"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
+        DbShardRouter, DbShardRouterError, DbShardRoutingMode, SHARD_CATALOG_FILE_NAME,
         SHARD_FANOUT_CATALOG_MISSING_CODE, SHARD_FANOUT_STATUS_SCHEMA_V1, ShardFanoutPosture,
         ShardFanoutResolverInput, default_shards_dir_from_values, normalize_shard_root,
         resolve_shard_fanout_status, shard_fanout_enabled_from_env_value, shard_file_path,
@@ -570,6 +755,93 @@ mod tests {
             Some("ee migrate shard-fanout --workspace . --dry-run --json")
         );
         Ok(())
+    }
+
+    #[test]
+    fn router_disabled_returns_legacy_database_handle() -> TestResult {
+        let temp = temp_root("ee-shard-router-legacy")?;
+        let workspace_root = temp.path().join("workspace");
+        let router = DbShardRouter::resolve(ShardFanoutResolverInput {
+            enabled: false,
+            workspace_id: Some("wsp_router_legacy".to_owned()),
+            workspace_root: Some(workspace_root.clone()),
+            shards_dir_override: Some(temp.path().join("shards")),
+        })
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(router.status().posture, ShardFanoutPosture::Disabled);
+        assert_eq!(router.handle().routing_mode, DbShardRoutingMode::Legacy);
+        assert_eq!(router.handle().workspace_id, "wsp_router_legacy");
+        assert_eq!(
+            router.handle().database_path,
+            workspace_root.join(".ee").join("ee.db")
+        );
+        assert_eq!(
+            router.handle().shard_id.as_deref(),
+            Some("wsp_router_legacy")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn router_enabled_returns_authoritative_shard_handle() -> TestResult {
+        let temp = temp_root("ee-shard-router-authoritative")?;
+        let data_root = temp.path().join("data");
+        let shard_root = data_root.join("shards");
+        std::fs::create_dir_all(&shard_root).map_err(|error| error.to_string())?;
+        std::fs::write(data_root.join(SHARD_CATALOG_FILE_NAME), b"catalog")
+            .map_err(|error| error.to_string())?;
+        let expected_shard = shard_file_path(&shard_root, "wsp_router_shard");
+        std::fs::write(&expected_shard, b"shard").map_err(|error| error.to_string())?;
+
+        let router = DbShardRouter::resolve(ShardFanoutResolverInput {
+            enabled: true,
+            workspace_id: Some("wsp_router_shard".to_owned()),
+            workspace_root: Some(temp.path().join("workspace")),
+            shards_dir_override: Some(shard_root.clone()),
+        })
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(router.status().posture, ShardFanoutPosture::Enabled);
+        assert_eq!(
+            router.handle().routing_mode,
+            DbShardRoutingMode::ShardFanout
+        );
+        assert_eq!(router.handle().workspace_id, "wsp_router_shard");
+        assert_eq!(router.handle().database_path, expected_shard);
+        assert_eq!(
+            router.handle().catalog_path,
+            data_root.join(SHARD_CATALOG_FILE_NAME)
+        );
+        assert_eq!(
+            router.handle().shard_id.as_deref(),
+            Some("wsp_router_shard")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn router_enabled_refuses_non_authoritative_shard_layout() -> TestResult {
+        let temp = temp_root("ee-shard-router-missing")?;
+        let error = DbShardRouter::resolve(ShardFanoutResolverInput {
+            enabled: true,
+            workspace_id: Some("wsp_router_missing".to_owned()),
+            workspace_root: Some(temp.path().join("workspace")),
+            shards_dir_override: Some(temp.path().join("shards")),
+        })
+        .expect_err("missing catalog must not produce an authoritative router");
+
+        match error {
+            DbShardRouterError::ShardNotAuthoritative {
+                posture,
+                degraded_codes,
+            } => {
+                assert_eq!(posture, ShardFanoutPosture::MigrationRequired);
+                assert!(degraded_codes.contains(&SHARD_FANOUT_CATALOG_MISSING_CODE));
+                Ok(())
+            }
+            other => Err(format!("unexpected router error: {other}")),
+        }
     }
 
     #[test]

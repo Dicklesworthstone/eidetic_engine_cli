@@ -1,5 +1,5 @@
-use std::cell::Cell;
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::ffi::OsString;
 use std::fmt;
@@ -276,17 +276,45 @@ struct AgentContextProfilePackCache {
     rows: Vec<StoredAgentContextProfileForPack>,
 }
 
-static FILE_WRITE_OWNER_GATE: OnceLock<Mutex<()>> = OnceLock::new();
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum WriteOwnerKey {
+    Memory,
+    File(PathBuf),
+}
 
-fn file_write_owner_gate() -> &'static Mutex<()> {
-    FILE_WRITE_OWNER_GATE.get_or_init(|| Mutex::new(()))
+static FILE_WRITE_OWNER_GATES: OnceLock<Mutex<BTreeMap<WriteOwnerKey, &'static Mutex<()>>>> =
+    OnceLock::new();
+
+fn file_write_owner_gates() -> &'static Mutex<BTreeMap<WriteOwnerKey, &'static Mutex<()>>> {
+    FILE_WRITE_OWNER_GATES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn file_write_owner_gate(key: &WriteOwnerKey) -> &'static Mutex<()> {
+    let mut gates = file_write_owner_gates()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(gate) = gates.get(key) {
+        return *gate;
+    }
+    let gate = Box::leak(Box::new(Mutex::new(())));
+    gates.insert(key.clone(), gate);
+    gate
+}
+
+fn write_owner_key(location: &DatabaseLocation) -> WriteOwnerKey {
+    match location {
+        DatabaseLocation::Memory => WriteOwnerKey::Memory,
+        DatabaseLocation::File(path) => WriteOwnerKey::File(path.to_path_buf()),
+    }
 }
 
 thread_local! {
-    static FILE_WRITE_OWNER_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static FILE_WRITE_OWNER_DEPTHS: RefCell<BTreeMap<WriteOwnerKey, usize>> =
+        RefCell::new(BTreeMap::new());
 }
 
 struct FileWriteOwnerGuard {
+    key: WriteOwnerKey,
     _process_guard: Option<MutexGuard<'static, ()>>,
     _lock_file: Option<File>,
     active: bool,
@@ -298,33 +326,53 @@ impl Drop for FileWriteOwnerGuard {
             return;
         }
 
-        FILE_WRITE_OWNER_DEPTH.with(|depth| {
-            let current = depth.get();
+        FILE_WRITE_OWNER_DEPTHS.with(|depths| {
+            let mut depths = depths.borrow_mut();
+            let current = depths.get(&self.key).copied().unwrap_or(0);
             debug_assert!(current > 0);
-            depth.set(current.saturating_sub(1));
+            if current <= 1 {
+                depths.remove(&self.key);
+            } else {
+                depths.insert(self.key.clone(), current - 1);
+            }
         });
     }
 }
 
 fn lock_file_write_owner_gate(location: &DatabaseLocation) -> Result<FileWriteOwnerGuard> {
-    let nested = FILE_WRITE_OWNER_DEPTH.with(|depth| {
-        let current = depth.get();
+    let key = write_owner_key(location);
+    let mut cross_database_nested = false;
+    let nested = FILE_WRITE_OWNER_DEPTHS.with(|depths| {
+        let mut depths = depths.borrow_mut();
+        let current = depths.get(&key).copied().unwrap_or(0);
         if current == 0 {
-            false
+            if depths.is_empty() {
+                false
+            } else {
+                cross_database_nested = true;
+                false
+            }
         } else {
-            depth.set(current.saturating_add(1));
+            depths.insert(key.clone(), current.saturating_add(1));
             true
         }
     });
+    if cross_database_nested {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::BeginTransaction,
+            message: "nested writes across multiple database files are unsupported".to_string(),
+        });
+    }
     if nested {
         return Ok(FileWriteOwnerGuard {
+            key,
             _process_guard: None,
             _lock_file: None,
             active: true,
         });
     }
 
-    let process_guard = file_write_owner_gate()
+    let process_guard = file_write_owner_gate(&key)
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let lock_file = match location {
@@ -332,13 +380,28 @@ fn lock_file_write_owner_gate(location: &DatabaseLocation) -> Result<FileWriteOw
         DatabaseLocation::File(path) => Some(lock_database_write_file(path)?),
     };
 
-    FILE_WRITE_OWNER_DEPTH.with(|depth| depth.set(1));
+    FILE_WRITE_OWNER_DEPTHS.with(|depths| {
+        depths.borrow_mut().insert(key.clone(), 1);
+    });
 
     Ok(FileWriteOwnerGuard {
+        key,
         _process_guard: Some(process_guard),
         _lock_file: lock_file,
         active: true,
     })
+}
+
+#[cfg(test)]
+fn file_write_owner_gate_address_for_test(location: &DatabaseLocation) -> usize {
+    let key = write_owner_key(location);
+    file_write_owner_gate(&key) as *const Mutex<()> as usize
+}
+
+#[cfg(test)]
+fn file_write_owner_depth_for_test(location: &DatabaseLocation) -> usize {
+    let key = write_owner_key(location);
+    FILE_WRITE_OWNER_DEPTHS.with(|depths| depths.borrow().get(&key).copied().unwrap_or(0))
 }
 
 fn lock_database_write_file(database_path: &Path) -> Result<File> {
@@ -26203,6 +26266,91 @@ mod tests {
     }
 
     #[test]
+    fn file_write_owner_process_gate_is_keyed_by_database_path() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let shard_a = DatabaseLocation::File(tempdir.path().join("shard-a.db"));
+        let shard_a_again = DatabaseLocation::File(tempdir.path().join("shard-a.db"));
+        let shard_b = DatabaseLocation::File(tempdir.path().join("shard-b.db"));
+
+        let shard_a_gate = file_write_owner_gate_address_for_test(&shard_a);
+        let shard_a_again_gate = file_write_owner_gate_address_for_test(&shard_a_again);
+        let shard_b_gate = file_write_owner_gate_address_for_test(&shard_b);
+
+        ensure_equal(
+            &shard_a_gate,
+            &shard_a_again_gate,
+            "same database path reuses the same process gate",
+        )?;
+        ensure(
+            shard_a_gate != shard_b_gate,
+            "different database paths must not share one process gate",
+        )
+    }
+
+    #[test]
+    fn file_write_owner_depth_allows_same_file_nesting_only() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let shard_a = DatabaseLocation::File(tempdir.path().join("shard-a.db"));
+        let shard_b = DatabaseLocation::File(tempdir.path().join("shard-b.db"));
+
+        let shard_a_outer = lock_file_write_owner_gate(&shard_a)?;
+        ensure_equal(
+            &file_write_owner_depth_for_test(&shard_a),
+            &1usize,
+            "outer shard-a owner depth",
+        )?;
+        ensure_equal(
+            &file_write_owner_depth_for_test(&shard_b),
+            &0usize,
+            "shard-b owner depth before acquisition",
+        )?;
+
+        let shard_a_nested = lock_file_write_owner_gate(&shard_a)?;
+        ensure_equal(
+            &file_write_owner_depth_for_test(&shard_a),
+            &2usize,
+            "same-shard nested owner depth",
+        )?;
+
+        let shard_b_nested = lock_file_write_owner_gate(&shard_b);
+        ensure(
+            shard_b_nested.is_err(),
+            "nested writes across different database files are refused",
+        )?;
+        ensure_equal(
+            &file_write_owner_depth_for_test(&shard_a),
+            &2usize,
+            "cross-file refusal does not change shard-a depth",
+        )?;
+
+        drop(shard_a_nested);
+        ensure_equal(
+            &file_write_owner_depth_for_test(&shard_a),
+            &1usize,
+            "dropping nested shard-a owner restores outer depth",
+        )?;
+        drop(shard_a_outer);
+        ensure_equal(
+            &file_write_owner_depth_for_test(&shard_a),
+            &0usize,
+            "dropping final shard-a owner clears shard-a depth",
+        )?;
+
+        let shard_b_outer = lock_file_write_owner_gate(&shard_b)?;
+        ensure_equal(
+            &file_write_owner_depth_for_test(&shard_b),
+            &1usize,
+            "shard-b owner depth is independent after shard-a releases",
+        )?;
+        drop(shard_b_outer);
+        ensure_equal(
+            &file_write_owner_depth_for_test(&shard_b),
+            &0usize,
+            "dropping shard-b owner clears shard-b depth",
+        )
+    }
+
+    #[test]
     fn with_transaction_holds_write_owner_throughout() -> TestResult {
         // EE-07mq regression test: verify with_transaction holds the file write-owner
         // lock from BEGIN through commit/rollback, preventing concurrent writer contention.
@@ -26252,5 +26400,48 @@ mod tests {
         std::fs::remove_dir_all(&test_dir).ok();
 
         ensure_equal(&count, &2i64, "both rows committed atomically")
+    }
+
+    #[test]
+    fn with_transaction_rollback_clears_write_owner_depth() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let db_path = tempdir.path().join("rollback.db");
+        let location = DatabaseLocation::File(db_path.clone());
+
+        let conn = DbConnection::open(DatabaseConfig::file(&db_path)).map_err(TestFailure::from)?;
+        conn.migrate().map_err(TestFailure::from)?;
+
+        let result: std::result::Result<(), DbError> = conn.with_transaction(|| {
+            conn.execute_for(
+                DbOperation::Execute,
+                "CREATE TABLE rollback_owner (id INTEGER PRIMARY KEY)",
+                &[],
+            )?;
+            Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "intentional rollback test failure".to_string(),
+            })
+        });
+
+        ensure(result.is_err(), "transaction closure failure is returned")?;
+        ensure_equal(
+            &file_write_owner_depth_for_test(&location),
+            &0usize,
+            "write-owner depth is cleared after rollback",
+        )?;
+
+        let rows = conn
+            .query(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'rollback_owner'",
+                &[],
+            )
+            .map_err(TestFailure::from)?;
+        let count = rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(|value| value.as_i64())
+            .unwrap_or(-1);
+
+        ensure_equal(&count, &0i64, "rolled-back table was not committed")
     }
 }

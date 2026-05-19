@@ -8,8 +8,8 @@ The controlling ADR is [ADR 0040](../adr/0040-per-workspace-shard-fanout.md).
 
 ## Current Anchors
 
-- `src/db/mod.rs` defines a process-wide `FILE_WRITE_OWNER_GATE` around lines
-  278-282.
+- `src/db/mod.rs` defines per-database write-owner gates through
+  `FILE_WRITE_OWNER_GATES` near the top of the storage module.
 - `src/db/mod.rs` acquires that gate in `lock_file_write_owner_gate` around
   lines 308-340.
 - `src/db/mod.rs` reaches the gate from `DbConnection::open_once` for
@@ -92,6 +92,18 @@ The router takes a workspace identity and returns one shard handle:
 workspace path -> workspace_id -> catalog lookup -> shard path -> DbConnection
 ```
 
+The storage-layer router is `src/db/shard.rs::DbShardRouter`. It wraps the
+status-only resolver from the previous slice and chooses either:
+
+- `routingMode=legacy`, with `<workspace>/.ee/ee.db` as the database path when
+  `EE_SHARD_FANOUT_ENABLED` is false; or
+- `routingMode=shard_fanout`, with `<shards_dir>/<workspace_id>.db` only when
+  the resolver reports `posture=enabled`.
+
+Enabled-but-missing catalog or shard files are not opened through the router;
+they remain `migration_required` until the migration bead materializes and
+verifies the layout.
+
 Write rules:
 
 1. One durable write command targets exactly one workspace shard.
@@ -100,6 +112,13 @@ Write rules:
 4. Different-shard writes must not share the old process-wide mutex.
 5. Catalog writes stay rare and must not be on the foreground write hot path
    unless the command is creating, migrating, repairing, or deleting no data.
+
+Inside one process, `src/db/mod.rs` now keeps one write-owner mutex per database
+location instead of one process-wide mutex for every file database. Re-entrant
+same-file writes track depth per database path; a different shard file receives
+an independent process gate and still takes its own `.write.lock`. Nested
+attempts to hold two database-file write owners on the same thread fail closed
+rather than creating an implicit cross-shard write transaction.
 
 The router must treat symlink and unsafe-path checks as source-of-truth safety
 concerns. A shard path that escapes the configured data root or traverses a
