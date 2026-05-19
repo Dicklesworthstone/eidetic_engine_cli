@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 use blake3::Hasher;
 use chrono::Utc;
@@ -1675,7 +1676,37 @@ fn local_cargo_tripwire_json(workspace: &Path) -> String {
     } else {
         "remote_required_blocked"
     };
-    let policy_state = if !build_admission.admitted {
+    let process_scan = local_cargo_tripwire_process_scan_json(workspace);
+    let process_status = process_scan
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unavailable");
+    let detected_local_builds = process_scan
+        .get("detectedLocalBuilds")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let process_evidence = process_scan
+        .get("evidence")
+        .and_then(Value::as_array)
+        .and_then(|evidence| evidence.first())
+        .cloned()
+        .unwrap_or_else(|| {
+            json!({
+                "kind": "active_process_scan",
+                "result": process_status,
+            })
+        });
+    let disk_pressure_context = process_scan
+        .get("disk_pressure_context")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let process_scan_detected_bypass = process_status == "bypass_detected"
+        || detected_local_builds
+            .as_array()
+            .is_some_and(|items| !items.is_empty());
+    let policy_state = if process_scan_detected_bypass {
+        "local_disallowed_attempt"
+    } else if !build_admission.admitted {
         "remote_required_blocked"
     } else if direct_status == "local_cargo_disallowed"
         && wrapped_status == "remote_wrapper_required"
@@ -1684,33 +1715,52 @@ fn local_cargo_tripwire_json(workspace: &Path) -> String {
     } else {
         "needs_review"
     };
+    let collection_status = if process_scan_detected_bypass {
+        "local_cargo_bypass_detected"
+    } else if process_status == "clean" {
+        "policy_and_live_process_scan"
+    } else {
+        "policy_summary_process_scan_unavailable"
+    };
+    let policy_status = if process_scan_detected_bypass {
+        "blocked"
+    } else if direct_status == "local_cargo_disallowed"
+        && wrapped_status == "remote_wrapper_required"
+    {
+        "enforced"
+    } else {
+        "needs_review"
+    };
+    let repair_actions = if process_scan_detected_bypass {
+        process_scan
+            .get("repairActions")
+            .cloned()
+            .unwrap_or_else(|| json!([]))
+    } else if direct_status == "local_cargo_disallowed" {
+        json!([{
+            "priority": 1,
+            "kind": "use_remote_wrapper",
+            "command": SUPPORT_BUNDLE_REQUIRED_REMOTE_WRAPPER,
+            "message": "Run Rust verification through the repo RCH wrapper; do not retry local Cargo.",
+        }])
+    } else {
+        json!([])
+    };
 
     stable_json(&json!({
         "schema": "ee.support_bundle.local_cargo_tripwire.v1",
-        "collectionStatus": "policy_summary_no_live_process_scan",
+        "collectionStatus": collection_status,
         "localBuildPolicy": {
             "policy": "rch_only",
             "policyState": policy_state,
-            "status": if direct_status == "local_cargo_disallowed" && wrapped_status == "remote_wrapper_required" {
-                "enforced"
-            } else {
-                "needs_review"
-            },
+            "status": policy_status,
             "commandScope": "support_bundle_policy_summary",
             "allowedReadOnlyCargoSubcommands": ["metadata", "locate-project", "pkgid", "tree"],
         },
         "requiredRemoteWrapper": SUPPORT_BUNDLE_REQUIRED_REMOTE_WRAPPER,
-        "detectedLocalBuilds": [],
-        "repairActions": if direct_status == "local_cargo_disallowed" {
-            json!([{
-                "priority": 1,
-                "kind": "use_remote_wrapper",
-                "command": SUPPORT_BUNDLE_REQUIRED_REMOTE_WRAPPER,
-                "message": "Run Rust verification through the repo RCH wrapper; do not retry local Cargo.",
-            }])
-        } else {
-            json!([])
-        },
+        "detectedLocalBuilds": detected_local_builds,
+        "repairActions": repair_actions,
+        "disk_pressure_context": disk_pressure_context,
         "evidence": [
             {
                 "kind": "planned_command_classification",
@@ -1726,15 +1776,66 @@ fn local_cargo_tripwire_json(workspace: &Path) -> String {
                 "kind": "build_admission",
                 "result": build_admission_status,
                 "admitted": build_admission.admitted,
-            }
+            },
+            process_evidence
         ],
         "plannedCommandClassifications": [direct_cargo, wrapped_cargo],
         "buildAdmission": build_admission_json,
+        "processScan": process_scan,
         "notes": [
             "Support bundle collection is read-only and does not execute Cargo.",
-            "Live process evidence remains the responsibility of the explicit tripwire process scanner."
+            "Live process evidence comes from the read-only local-Cargo tripwire process scanner."
         ],
     }))
+}
+
+pub(crate) fn local_cargo_tripwire_process_scan_json(workspace: &Path) -> Value {
+    let script = workspace
+        .join("scripts")
+        .join("check-local-cargo-tripwire.sh");
+    if !script.is_file() {
+        return unavailable_local_cargo_process_scan_json("tripwire_script_missing", None);
+    }
+
+    match Command::new(&script)
+        .arg("--probe-processes")
+        .arg("--json")
+        .current_dir(workspace)
+        .output()
+    {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            match serde_json::from_str::<Value>(&stdout) {
+                Ok(value) => value,
+                Err(error) => unavailable_local_cargo_process_scan_json(
+                    "tripwire_output_unparseable",
+                    Some(&error.to_string()),
+                ),
+            }
+        }
+        Err(error) => unavailable_local_cargo_process_scan_json(
+            "tripwire_execution_failed",
+            Some(&error.to_string()),
+        ),
+    }
+}
+
+fn unavailable_local_cargo_process_scan_json(reason: &str, detail: Option<&str>) -> Value {
+    json!({
+        "schema": "ee.rch_local_cargo_tripwire.v1",
+        "mode": "probe_processes",
+        "status": "unavailable",
+        "count": 0,
+        "reason": reason,
+        "detail": detail,
+        "detectedLocalBuilds": [],
+        "repairActions": [],
+        "evidence": [{
+            "kind": "active_process_scan",
+            "result": "unavailable",
+            "reason": reason,
+        }],
+    })
 }
 
 fn local_cargo_preflight_classification(workspace: &Path, command: &str) -> Value {
@@ -3970,7 +4071,7 @@ mod tests {
         );
         assert_eq!(
             value.pointer("/collectionStatus"),
-            Some(&json!("policy_summary_no_live_process_scan"))
+            Some(&json!("policy_summary_process_scan_unavailable"))
         );
         assert_eq!(
             value.pointer("/localBuildPolicy/status"),
@@ -3999,6 +4100,29 @@ mod tests {
         assert!(
             value.pointer("/buildAdmission/admitted").is_some(),
             "summary must include build-admission evidence"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn local_cargo_tripwire_process_scan_detects_live_bypass_without_running_cargo() -> TestResult {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let value = local_cargo_tripwire_process_scan_json(workspace);
+
+        assert_eq!(
+            value.pointer("/schema"),
+            Some(&json!("ee.rch_local_cargo_tripwire.v1"))
+        );
+        assert_eq!(value.pointer("/mode"), Some(&json!("probe_processes")));
+        assert!(
+            value.pointer("/detectedLocalBuilds").is_some(),
+            "process scan must expose stable detectedLocalBuilds evidence"
+        );
+        assert!(
+            value.pointer("/disk_pressure_context").is_some()
+                || value.pointer("/status") == Some(&json!("unavailable")),
+            "available process scans must carry disk_pressure_context"
         );
 
         Ok(())
