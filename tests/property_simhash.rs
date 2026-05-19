@@ -10,7 +10,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use ee::search::simhash::{
-    SimHash128, canonicalize_content_for_simhash, hamming_distance, simhash_128,
+    NearestSimHashCandidate, SimHash128, canonicalize_content_for_simhash, hamming_distance,
+    ranked_simhash_candidates, simhash_128,
 };
 use proptest::prelude::*;
 use proptest::test_runner::Config as ProptestConfig;
@@ -45,6 +46,44 @@ fn arbitrary_simhash() -> impl Strategy<Value = SimHash128> {
         arr.copy_from_slice(&bytes);
         SimHash128::from_be_bytes(arr)
     })
+}
+
+fn ranked_fixture_candidates(raw: Vec<u128>) -> Vec<(String, SimHash128)> {
+    raw.into_iter()
+        .enumerate()
+        .map(|(index, fingerprint)| {
+            (
+                format!("mem_{index:03}"),
+                SimHash128::from_u128(fingerprint),
+            )
+        })
+        .collect()
+}
+
+fn expected_ranked_candidates<'a>(
+    query: SimHash128,
+    candidates: &'a [(String, SimHash128)],
+    max_hamming_distance: u32,
+    limit: usize,
+) -> Vec<NearestSimHashCandidate<'a>> {
+    let mut expected: Vec<_> = candidates
+        .iter()
+        .filter_map(|(candidate_id, fingerprint)| {
+            let hamming_distance = hamming_distance(query, *fingerprint);
+            (hamming_distance <= max_hamming_distance).then_some(NearestSimHashCandidate {
+                candidate_id: candidate_id.as_str(),
+                fingerprint: *fingerprint,
+                hamming_distance,
+            })
+        })
+        .collect();
+    expected.sort_by(|left, right| {
+        left.hamming_distance
+            .cmp(&right.hamming_distance)
+            .then_with(|| left.candidate_id.cmp(right.candidate_id))
+    });
+    expected.truncate(limit);
+    expected
 }
 
 fn config() -> ProptestConfig {
@@ -194,5 +233,64 @@ proptest! {
     ) {
         let content: String = spaces.into_iter().collect();
         prop_assert_eq!(simhash_128(&content), SimHash128::from_u128(0));
+    }
+
+    #[test]
+    fn prop_ranked_candidates_match_distance_threshold_limit_and_order(
+        query in arbitrary_simhash(),
+        raw_candidates in proptest::collection::vec(any::<u128>(), 0..32),
+        max_hamming_distance in 0_u32..=128,
+        limit in 0_usize..=32,
+    ) {
+        let candidates = ranked_fixture_candidates(raw_candidates);
+        let ranked = ranked_simhash_candidates(
+            query,
+            candidates
+                .iter()
+                .map(|(candidate_id, fingerprint)| (candidate_id.as_str(), *fingerprint)),
+            max_hamming_distance,
+            limit,
+        );
+        let expected =
+            expected_ranked_candidates(query, &candidates, max_hamming_distance, limit);
+
+        prop_assert_eq!(ranked, expected);
+        prop_assert!(ranked.len() <= limit);
+        for candidate in &ranked {
+            prop_assert!(candidate.hamming_distance <= max_hamming_distance);
+            prop_assert_eq!(
+                candidate.hamming_distance,
+                hamming_distance(query, candidate.fingerprint),
+            );
+        }
+    }
+
+    #[test]
+    fn prop_ranked_candidates_are_independent_of_iteration_order(
+        query in arbitrary_simhash(),
+        raw_candidates in proptest::collection::vec(any::<u128>(), 0..32),
+        max_hamming_distance in 0_u32..=128,
+        limit in 0_usize..=32,
+    ) {
+        let candidates = ranked_fixture_candidates(raw_candidates);
+        let forward = ranked_simhash_candidates(
+            query,
+            candidates
+                .iter()
+                .map(|(candidate_id, fingerprint)| (candidate_id.as_str(), *fingerprint)),
+            max_hamming_distance,
+            limit,
+        );
+        let reverse = ranked_simhash_candidates(
+            query,
+            candidates
+                .iter()
+                .rev()
+                .map(|(candidate_id, fingerprint)| (candidate_id.as_str(), *fingerprint)),
+            max_hamming_distance,
+            limit,
+        );
+
+        prop_assert_eq!(forward, reverse);
     }
 }
