@@ -44,6 +44,107 @@ fn read_graph_cli_reference() -> Result<String, String> {
         .map_err(|error| format!("failed to read {}: {error}", reference_path.display()))
 }
 
+fn graph_cli_reference_example_commands(reference: &str) -> Vec<(usize, String)> {
+    let mut commands = Vec::new();
+    let mut in_bash_fence = false;
+    let mut current: Option<(usize, String)> = None;
+
+    for (line_index, line) in reference.lines().enumerate() {
+        let line_number = line_index + 1;
+        let trimmed = line.trim();
+        if trimmed == "```bash" {
+            in_bash_fence = true;
+            continue;
+        }
+        if in_bash_fence && trimmed == "```" {
+            if let Some(command) = current.take() {
+                commands.push(command);
+            }
+            in_bash_fence = false;
+            continue;
+        }
+        if !in_bash_fence || trimmed.is_empty() {
+            continue;
+        }
+
+        let continued = trimmed.ends_with('\\');
+        let segment = trimmed.trim_end_matches('\\').trim_end();
+        if segment.starts_with("ee ") {
+            if let Some(command) = current.take() {
+                commands.push(command);
+            }
+            current = Some((line_number, segment.to_owned()));
+        } else if let Some((_, command)) = current.as_mut() {
+            command.push(' ');
+            command.push_str(segment);
+        }
+
+        if !continued && let Some(command) = current.take() {
+            commands.push(command);
+        }
+    }
+
+    commands
+}
+
+fn split_shell_words(command: &str) -> Result<Vec<String>, String> {
+    #[derive(Copy, Clone, Eq, PartialEq)]
+    enum Quote {
+        None,
+        Single,
+        Double,
+    }
+
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote = Quote::None;
+    let mut chars = command.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match quote {
+            Quote::None => match ch {
+                '\'' => quote = Quote::Single,
+                '"' => quote = Quote::Double,
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        current.push(next);
+                    }
+                }
+                ch if ch.is_whitespace() => {
+                    if !current.is_empty() {
+                        args.push(std::mem::take(&mut current));
+                    }
+                }
+                _ => current.push(ch),
+            },
+            Quote::Single => {
+                if ch == '\'' {
+                    quote = Quote::None;
+                } else {
+                    current.push(ch);
+                }
+            }
+            Quote::Double => match ch {
+                '"' => quote = Quote::None,
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        current.push(next);
+                    }
+                }
+                _ => current.push(ch),
+            },
+        }
+    }
+
+    if quote != Quote::None {
+        return Err(format!("unterminated quote in `{command}`"));
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    Ok(args)
+}
+
 #[test]
 fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
     let context_help = help_for(&["ee", "context", "--help"])?;
@@ -174,6 +275,33 @@ fn graph_cli_reference_documents_hits_centrality_examples() -> TestResult {
         ],
         "docs/cli-reference/graph-flags.md",
     )
+}
+
+#[test]
+fn documented_graph_cli_reference_examples_parse() -> TestResult {
+    let reference = read_graph_cli_reference()?;
+    let commands = graph_cli_reference_example_commands(&reference);
+    if commands.is_empty() {
+        return Err("docs/cli-reference/graph-flags.md has no fenced ee examples".to_owned());
+    }
+
+    for (line_number, command) in commands {
+        let args = split_shell_words(&command)
+            .map_err(|error| format!("graph-flags.md:{line_number}: {error}"))?;
+        if args.first().map(String::as_str) != Some("ee") {
+            return Err(format!(
+                "graph-flags.md:{line_number}: expected an ee command, got `{command}`"
+            ));
+        }
+        Cli::try_parse_from(args).map_err(|error| {
+            format!(
+                "graph-flags.md:{line_number}: documented example `{command}` failed to parse: {:?}",
+                error.kind()
+            )
+        })?;
+    }
+
+    Ok(())
 }
 
 #[test]
