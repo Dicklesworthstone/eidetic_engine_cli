@@ -282,25 +282,11 @@ assert_not_json() {
 
 validate_event_log_contract() {
     local diagnostics="$EVENT_ROOT/event_log_contract_diagnostics.txt"
-    if ! jq -s -e '
+    local expected_scenarios_json
+    expected_scenarios_json="$(printf '%s\n' "${SCENARIOS[@]}" | jq -R . | jq -s -c .)"
+    if ! jq -s -e --argjson expected_scenarios "$expected_scenarios_json" '
         . as $events
         | def has_phase($phase): any($events[]; .phase == $phase);
-        def expected_scenarios: [
-            "clean",
-            "source_and_test",
-            "human_source_and_test",
-            "human_secret_no_leak",
-            "scratch_only",
-            "generated_only",
-            "scratch_generated_secret",
-            "large_binary_scan_skip",
-            "active_reservation",
-            "agent_mail_empty_snapshot",
-            "agent_mail_unavailable",
-            "beads_pending_flush",
-            "beads_export_only",
-            "beads_parse_failure"
-        ];
         def phase_event_count($phase; $scenario): [
             $events[] | select(.phase == $phase and .scenario == $scenario)
         ] | length;
@@ -309,7 +295,7 @@ validate_event_log_contract() {
             and any($events[]; .phase == $phase and .scenario == $scenario and .status == "pass");
         def only_expected_scenarios($phase): [
             $events[] | select(.phase == $phase) | .scenario
-        ] | all(. as $scenario | expected_scenarios | index($scenario));
+        ] | all(. as $scenario | $expected_scenarios | index($scenario));
         all($events[];
             .schema == "ee.test_event.v1"
             and .beadId == "bd-1eq3l.8"
@@ -342,8 +328,8 @@ validate_event_log_contract() {
         and has_phase("stdout_stderr_isolation")
         and has_phase("mutation_check")
         and has_phase("teardown")
-        and (expected_scenarios | all(. as $scenario | has_single_pass("scenario"; $scenario)))
-        and (expected_scenarios | all(. as $scenario | has_single_pass("schema_validation"; $scenario)))
+        and ($expected_scenarios | all(. as $scenario | has_single_pass("scenario"; $scenario)))
+        and ($expected_scenarios | all(. as $scenario | has_single_pass("schema_validation"; $scenario)))
         and only_expected_scenarios("scenario")
         and only_expected_scenarios("schema_validation")
     ' "$EVENT_LOG" >/dev/null 2>"$diagnostics"; then
