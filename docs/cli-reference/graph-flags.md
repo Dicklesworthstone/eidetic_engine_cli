@@ -44,9 +44,9 @@ owns `--ppr-weight`, `--explain`, and `--no-pack-dna`.
 | `ee context`, `ee pack`, `ee pack build` | `--no-rendered-text[=BOOL]` | optional boolean | false | Suppresses rendered pack text in JSON output. |
 | `ee context`, `ee pack`, `ee pack build` | `--no-skipped[=BOOL]` | optional boolean | false | Suppresses omitted/skipped item explanations. |
 | `ee context`, `ee pack`, `ee pack build` | `--no-meta[=BOOL]` | optional boolean | false | Suppresses pack metadata. |
-| `ee pack` | `--coordination-snapshot <PATH>` | JSON file path | omitted | Embeds a redacted coordination snapshot in the pack. |
-| `ee pack` | `--coordination-stale-after-ms <MS>` | integer milliseconds | package default | Marks coordination sources stale after the configured age. |
-| `ee pack` | `--include-non-affecting-degradations[=BOOL]` | optional boolean | false | Keeps non-affecting degraded signals in `data.degraded[]`. |
+| `ee pack`, `ee pack build` | `--coordination-snapshot <PATH>` | JSON file path | omitted | Embeds a redacted coordination snapshot in the pack. |
+| `ee pack`, `ee pack build` | `--coordination-stale-after-ms <MS>` | integer milliseconds | package default | Marks coordination sources stale after the configured age. |
+| `ee pack`, `ee pack build` | `--include-non-affecting-degradations[=BOOL]` | optional boolean | false | Keeps non-affecting degraded signals in `data.degraded[]`. |
 | `ee pack`, `ee pack build` | `--as-of <RFC3339>` | timestamp | now | Replays validity-window filtering at a deterministic time. |
 | `ee pack`, `ee pack build` | `--include-expired` | boolean | false | Includes memories whose `valid_to` is before the reference time. |
 | `ee pack`, `ee pack build` | `--include-future` | boolean | false | Includes memories whose `valid_from` is after the reference time. |
@@ -57,6 +57,12 @@ Example:
 ```bash
 ee context "prepare release" --workspace . --profile thorough \
   --ppr-weight 0.5 --explain --json
+ee pack build --workspace . --query-file release.eeq.json \
+  --candidate-pool 150 --speed quality --profile thorough \
+  --pack-profile verbose --resource-profile swarm_heavy \
+  --coordination-snapshot coordination.json \
+  --include-non-affecting-degradations --as-of 2026-05-19T00:00:00Z \
+  --include-stale --json
 ```
 
 ## Insights And Narrow Graph Questions
