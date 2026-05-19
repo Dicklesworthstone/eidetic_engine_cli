@@ -1,0 +1,70 @@
+{
+  "beadId": "bd-17c65.9.1",
+  "evidence": {
+    "contextHash": "blake3:d9cd5231776c092139912d35bf428df14135d84687f5da9a8d9a1801158e162a",
+    "missing": [],
+    "noteInferenceCases": [
+      "procedural_rule",
+      "episodic_failure"
+    ],
+    "noteInferenceFixture": "tests/fixtures/note_inference_cases.jsonl",
+    "packHash": "blake3:d9cd5231776c092139912d35bf428df14135d84687f5da9a8d9a1801158e162a",
+    "packTextPresent": true,
+    "whyIncludesHistory": true,
+    "whyIncludesLinks": true,
+    "whyIncludesStorage": true
+  },
+  "generatedAt": "2026-05-13T02:43:14.534101Z",
+  "metrics": {
+    "compatibilityFlagOk": true,
+    "compatibility_flag_ok": true,
+    "coverage": 1.0,
+    "coveredCommands": 3,
+    "covered_commands": 3,
+    "discoverabilityPass": true,
+    "discoverability_pass": true,
+    "inferenceFixtureCases": 104,
+    "inferencePrecision": 1.0,
+    "inferenceRecall": 1.0,
+    "inference_fixture_cases": 104,
+    "inference_precision": 1.0,
+    "inference_recall": 1.0,
+    "packHashParity": true,
+    "packItemCount": 9,
+    "pack_hash_parity": true,
+    "pack_item_count": 9,
+    "slocReduction": 0.4007,
+    "sloc_reduction": 0.4007,
+    "totalCommands": 3,
+    "total_commands": 3,
+    "triadTotalSloc": 121,
+    "triad_total_sloc": 121,
+    "verboseTotalSloc": 302,
+    "verbose_total_sloc": 302
+  },
+  "nextActions": "Promote the triad to a feature epic and use this artifact as I2 compatibility input.",
+  "next_actions": "Promote the triad to a feature epic and use this artifact as I2 compatibility input.",
+  "outcome": "promote_to_epic",
+  "promoteConditionsMet": [
+    "coverage >= 0.90",
+    "sloc_reduction <= 0.60",
+    "inference_precision >= 0.80",
+    "inference_recall >= 0.80",
+    "pack_hash_parity == true",
+    "discoverability_pass == true",
+    "compatibility_flag_ok == true"
+  ],
+  "promoteConditionsMissed": [],
+  "promote_conditions_met": [
+    "coverage >= 0.90",
+    "sloc_reduction <= 0.60",
+    "inference_precision >= 0.80",
+    "inference_recall >= 0.80",
+    "pack_hash_parity == true",
+    "discoverability_pass == true",
+    "compatibility_flag_ok == true"
+  ],
+  "promote_conditions_missed": [],
+  "recommendation": "Promote the triad to a feature epic and use this artifact as I2 compatibility input.",
+  "schema": "ee.triad_spike_outcome.v1"
+}
