@@ -160,10 +160,56 @@ pub fn hamming_distance(a: SimHash128, b: SimHash128) -> u32 {
     (a.0 ^ b.0).count_ones()
 }
 
+/// Nearest SimHash candidate selected by [`nearest_simhash_candidate`].
+///
+/// This is intentionally only the cheap first-stage result. Insert-time
+/// embedding dedup must still run the cosine confirmation gate before reusing
+/// an existing embedding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NearestSimHashCandidate<'a> {
+    pub candidate_id: &'a str,
+    pub fingerprint: SimHash128,
+    pub hamming_distance: u32,
+}
+
+/// Select the nearest candidate whose Hamming distance is within
+/// `max_hamming_distance`.
+///
+/// Ties are broken by candidate id in ascending lexical order so callers get a
+/// deterministic choice regardless of index iteration order.
+#[must_use]
+pub fn nearest_simhash_candidate<'a>(
+    query: SimHash128,
+    candidates: impl IntoIterator<Item = (&'a str, SimHash128)>,
+    max_hamming_distance: u32,
+) -> Option<NearestSimHashCandidate<'a>> {
+    let mut best: Option<NearestSimHashCandidate<'a>> = None;
+    for (candidate_id, fingerprint) in candidates {
+        let distance = hamming_distance(query, fingerprint);
+        if distance > max_hamming_distance {
+            continue;
+        }
+        let candidate = NearestSimHashCandidate {
+            candidate_id,
+            fingerprint,
+            hamming_distance: distance,
+        };
+        match best {
+            Some(current)
+                if current.hamming_distance < distance
+                    || (current.hamming_distance == distance
+                        && current.candidate_id <= candidate_id) => {}
+            _ => best = Some(candidate),
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        SIMHASH_BITS, SimHash128, canonicalize_content_for_simhash, hamming_distance, simhash_128,
+        SIMHASH_BITS, SimHash128, canonicalize_content_for_simhash, hamming_distance,
+        nearest_simhash_candidate, simhash_128,
     };
 
     #[test]
@@ -298,5 +344,61 @@ mod tests {
             near_distance < far_distance,
             "near duplicate distance {near_distance} should be smaller than unrelated distance {far_distance}"
         );
+    }
+
+    #[test]
+    fn nearest_candidate_selects_exact_match_within_threshold() {
+        let query = simhash_128("rust edition is 2024");
+        let unrelated = simhash_128("release binaries are signed before upload");
+        let candidates = [("mem_b", unrelated), ("mem_a", query)];
+
+        let selected = nearest_simhash_candidate(query, candidates, 0).expect("exact match");
+
+        assert_eq!(selected.candidate_id, "mem_a");
+        assert_eq!(selected.fingerprint, query);
+        assert_eq!(selected.hamming_distance, 0);
+    }
+
+    #[test]
+    fn nearest_candidate_respects_max_hamming_distance() {
+        let query = simhash_128("forbidden deps include tokio rusqlite petgraph");
+        let near = simhash_128("forbidden deps include tokio rusqlite petgrph");
+        let distance = hamming_distance(query, near);
+        assert!(distance > 0, "test fixture must not be an exact match");
+
+        let candidates = [("mem_near", near)];
+        let selected = nearest_simhash_candidate(query, candidates, distance - 1);
+
+        assert_eq!(selected, None);
+    }
+
+    #[test]
+    fn nearest_candidate_chooses_smallest_distance_before_lexical_tie_break() {
+        let query = SimHash128::from_u128(0b0000);
+        let farther = SimHash128::from_u128(0b0111);
+        let closer = SimHash128::from_u128(0b0001);
+        let candidates = [("mem_a", farther), ("mem_z", closer)];
+
+        let selected =
+            nearest_simhash_candidate(query, candidates, SIMHASH_BITS as u32).expect("candidate");
+
+        assert_eq!(selected.candidate_id, "mem_z");
+        assert_eq!(selected.hamming_distance, 1);
+    }
+
+    #[test]
+    fn nearest_candidate_tie_breaks_by_candidate_id_not_iteration_order() {
+        let query = SimHash128::from_u128(0);
+        let left = SimHash128::from_u128(0b0011);
+        let right = SimHash128::from_u128(0b1100);
+
+        let forward = nearest_simhash_candidate(query, [("mem_b", left), ("mem_a", right)], 2)
+            .expect("forward candidate");
+        let reverse = nearest_simhash_candidate(query, [("mem_a", right), ("mem_b", left)], 2)
+            .expect("reverse candidate");
+
+        assert_eq!(forward.candidate_id, "mem_a");
+        assert_eq!(reverse.candidate_id, "mem_a");
+        assert_eq!(forward.hamming_distance, reverse.hamming_distance);
     }
 }
