@@ -83,7 +83,8 @@ Example:
 ```bash
 ee insights --section proximityHotspots --workspace . --limit 5 --json
 ee proximity mem_release_policy mem_rch_remote_required --workspace . --json
-ee why mem_failed_release --causal-explain --workspace . --json
+ee why mem_failed_release --causal-explain --confidence-threshold 0.7 \
+  --workspace . --json
 ee status --skyline --workspace . --json
 ```
 

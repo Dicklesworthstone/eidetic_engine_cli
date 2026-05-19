@@ -77,6 +77,13 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
         &insights_help,
         &["--section", "--explain", "--limit", "--offset"],
         "ee insights --help",
+    )?;
+
+    let why_help = help_for(&["ee", "why", "--help"])?;
+    assert_contains_all(
+        &why_help,
+        &["--database", "--confidence-threshold", "--causal-explain"],
+        "ee why --help",
     )
 }
 
@@ -391,6 +398,15 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "mem_target",
             "--link-limit",
             "250",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "why",
+            "mem_failed_release",
+            "--causal-explain",
+            "--confidence-threshold",
+            "0.7",
             "--json",
         ][..],
         &[
