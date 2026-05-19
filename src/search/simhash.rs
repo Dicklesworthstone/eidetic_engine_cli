@@ -172,45 +172,79 @@ pub struct NearestSimHashCandidate<'a> {
     pub hamming_distance: u32,
 }
 
-/// Select the nearest candidate whose Hamming distance is within
-/// `max_hamming_distance`.
+/// Rank candidates whose Hamming distance is within `max_hamming_distance`.
 ///
 /// Ties are broken by candidate id in ascending lexical order so callers get a
 /// deterministic choice regardless of index iteration order.
+#[must_use]
+pub fn ranked_simhash_candidates<'a>(
+    query: SimHash128,
+    candidates: impl IntoIterator<Item = (&'a str, SimHash128)>,
+    max_hamming_distance: u32,
+    limit: usize,
+) -> Vec<NearestSimHashCandidate<'a>> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut ranked = Vec::new();
+    for (candidate_id, fingerprint) in candidates {
+        let distance = hamming_distance(query, fingerprint);
+        if distance > max_hamming_distance {
+            continue;
+        }
+        ranked.push(NearestSimHashCandidate {
+            candidate_id,
+            fingerprint,
+            hamming_distance: distance,
+        });
+    }
+    ranked.sort_by(|left, right| {
+        left.hamming_distance
+            .cmp(&right.hamming_distance)
+            .then_with(|| left.candidate_id.cmp(right.candidate_id))
+    });
+    ranked.truncate(limit);
+    ranked
+}
+
+/// Select the nearest candidate whose Hamming distance is within
+/// `max_hamming_distance`.
+///
+/// This is a convenience wrapper around [`ranked_simhash_candidates`] for
+/// callers that only need one candidate. Insert-time dedup should prefer the
+/// ranked form when it needs to continue after a candidate fails cosine
+/// confirmation.
 #[must_use]
 pub fn nearest_simhash_candidate<'a>(
     query: SimHash128,
     candidates: impl IntoIterator<Item = (&'a str, SimHash128)>,
     max_hamming_distance: u32,
 ) -> Option<NearestSimHashCandidate<'a>> {
-    let mut best: Option<NearestSimHashCandidate<'a>> = None;
-    for (candidate_id, fingerprint) in candidates {
-        let distance = hamming_distance(query, fingerprint);
-        if distance > max_hamming_distance {
-            continue;
-        }
-        let candidate = NearestSimHashCandidate {
-            candidate_id,
-            fingerprint,
-            hamming_distance: distance,
-        };
-        match best {
-            Some(current)
-                if current.hamming_distance < distance
-                    || (current.hamming_distance == distance
-                        && current.candidate_id <= candidate_id) => {}
-            _ => best = Some(candidate),
-        }
-    }
-    best
+    ranked_simhash_candidates(query, candidates, max_hamming_distance, 1)
+        .into_iter()
+        .next()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        SIMHASH_BITS, SimHash128, canonicalize_content_for_simhash, hamming_distance,
-        nearest_simhash_candidate, simhash_128,
+        NearestSimHashCandidate, SIMHASH_BITS, SimHash128, canonicalize_content_for_simhash,
+        hamming_distance, nearest_simhash_candidate, ranked_simhash_candidates, simhash_128,
     };
+
+    fn candidate_ids(candidates: &[NearestSimHashCandidate<'_>]) -> Vec<&str> {
+        candidates
+            .iter()
+            .map(|candidate| candidate.candidate_id)
+            .collect()
+    }
+
+    fn candidate_distances(candidates: &[NearestSimHashCandidate<'_>]) -> Vec<u32> {
+        candidates
+            .iter()
+            .map(|candidate| candidate.hamming_distance)
+            .collect()
+    }
 
     #[test]
     fn happy_path__same_content_produces_identical_simhash() {
@@ -400,5 +434,49 @@ mod tests {
         assert_eq!(forward.candidate_id, "mem_a");
         assert_eq!(reverse.candidate_id, "mem_a");
         assert_eq!(forward.hamming_distance, reverse.hamming_distance);
+    }
+
+    #[test]
+    fn ranked_candidates_sort_by_distance_then_candidate_id() {
+        let query = SimHash128::from_u128(0);
+        let candidates = [
+            ("mem_c", SimHash128::from_u128(0b1111)),
+            ("mem_b", SimHash128::from_u128(0b0011)),
+            ("mem_a", SimHash128::from_u128(0b1100)),
+            ("mem_d", SimHash128::from_u128(0b0001)),
+        ];
+
+        let ranked = ranked_simhash_candidates(query, candidates, SIMHASH_BITS as u32, 10);
+
+        assert_eq!(
+            candidate_ids(&ranked),
+            vec!["mem_d", "mem_a", "mem_b", "mem_c"]
+        );
+        assert_eq!(candidate_distances(&ranked), vec![1, 2, 2, 4]);
+    }
+
+    #[test]
+    fn ranked_candidates_respect_threshold_and_limit() {
+        let query = SimHash128::from_u128(0);
+        let candidates = [
+            ("mem_exact", SimHash128::from_u128(0)),
+            ("mem_near", SimHash128::from_u128(0b0001)),
+            ("mem_far", SimHash128::from_u128(0b1111)),
+        ];
+
+        let ranked = ranked_simhash_candidates(query, candidates, 1, 1);
+
+        assert_eq!(candidate_ids(&ranked), vec!["mem_exact"]);
+        assert_eq!(candidate_distances(&ranked), vec![0]);
+    }
+
+    #[test]
+    fn ranked_candidates_limit_zero_returns_empty() {
+        let query = SimHash128::from_u128(0);
+        let candidates = [("mem_exact", SimHash128::from_u128(0))];
+
+        let ranked = ranked_simhash_candidates(query, candidates, SIMHASH_BITS as u32, 0);
+
+        assert!(ranked.is_empty());
     }
 }
