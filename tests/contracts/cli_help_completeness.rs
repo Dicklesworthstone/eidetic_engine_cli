@@ -411,6 +411,20 @@ fn proximity_health_and_maintenance_flags_are_help_discoverable() -> TestResult 
     let status_help = help_for(&["ee", "status", "--help"])?;
     assert_contains_all(&status_help, &["--skyline"], "ee status --help")?;
 
+    let backup_create_help = help_for(&["ee", "backup", "create", "--help"])?;
+    assert_contains_all(
+        &backup_create_help,
+        &["--include-graph-cache"],
+        "ee backup create --help",
+    )?;
+
+    let backup_restore_help = help_for(&["ee", "backup", "restore", "--help"])?;
+    assert_contains_all(
+        &backup_restore_help,
+        &["BACKUP_ID_OR_PATH", "--side-path", "--skip-graph-cache"],
+        "ee backup restore --help",
+    )?;
+
     let curate_disposition_help = help_for(&["ee", "curate", "disposition", "--help"])?;
     assert_contains_all(
         &curate_disposition_help,
@@ -769,6 +783,27 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "supports",
             "--limit",
             "20",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "backup",
+            "create",
+            "--label",
+            "pre-refactor",
+            "--include-graph-cache=false",
+            "--dry-run",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "backup",
+            "restore",
+            "bk_release",
+            "--side-path",
+            "./restore-check",
+            "--skip-graph-cache",
+            "--dry-run",
             "--json",
         ][..],
         &[

@@ -252,6 +252,27 @@ ee graph neighborhood mem_release_policy --workspace . --direction incoming \
   --relation supports --limit 20 --json
 ```
 
+## Backup And Restore Graph-Cache Flags
+
+Backups include graph-derived cache artifacts by default so restored workspaces
+can keep graph snapshots, algorithm witnesses, and result-cache rows warm when
+the source manifest proves them. Use the explicit graph-cache flags when you
+need a source-only backup or a cold-cache restore.
+
+| Command | Flag | Values | Default | Use |
+| --- | --- | --- | --- | --- |
+| `ee backup create` | `--include-graph-cache[=BOOL]` | optional boolean | `true` | Includes graph snapshot, witness, and result-cache assets in the backup manifest. Pass `--include-graph-cache=false` for a source-only archive. |
+| `ee backup restore <BACKUP_ID_OR_PATH>` | `--skip-graph-cache` | boolean | false | Restores durable records while leaving graph-cache assets cold for later rebuild. |
+
+Example:
+
+```bash
+ee backup create --workspace . --label pre-refactor \
+  --include-graph-cache=false --dry-run --json
+ee backup restore bk_release --workspace . --side-path ./restore-check \
+  --skip-graph-cache --dry-run --json
+```
+
 ## Diagnostic Graph Fixtures
 
 These commands seed deterministic graph-related diagnostic rows for contract and
