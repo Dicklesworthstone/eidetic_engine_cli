@@ -11,19 +11,19 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "ee perf explain-latency is invoked without live J1 command_end timing evidence for the requested search or context surface. With no log configured, the report may use bounded fixture replay and still emits this degraded code so callers do not confuse fixture timing with live evidence.",
+    "description": "ee perf explain-latency is invoked with a normalized search or context artifact that has neither live J1 command_end timing evidence nor fixture replay stage timings, so the report cannot attribute latency stages.",
     "setup_commands": [
-      "# leave EE_TEST_LOG_PATH unset to exercise bounded fixture replay; pass --log pointing at a log without matching command_end events to exercise no-timing recovery"
+      "printf '%s\\n' '{\"schema\":\"ee.perf.artifact_summary.v1\",\"artifactId\":\"latency-missing\",\"artifactKind\":\"cache_report\",\"sourceSchema\":\"ee.perf.source.v1\",\"commandFamily\":\"search\",\"metrics\":{},\"degraded\":[],\"redaction\":\"clean\",\"provenance\":[]}' > /tmp/ee-perf-latency-missing.json"
     ],
-    "invocation": "ee perf explain-latency --surface search --json"
+    "invocation": "ee perf explain-latency --surface search --report /tmp/ee-perf-latency-missing.json --json"
   },
   "expected_emission": {
     "code": "perf_latency_evidence_missing",
     "severity": "medium",
     "message_contains": [
       "J1 command_end timing evidence",
-      "fixture replay"
+      "fixture replay stage timings"
     ],
-    "repair_contains": "EE_TEST_LOG_PATH=<path>"
+    "repair_contains": "stage timing metrics"
   }
 }

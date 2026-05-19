@@ -1145,6 +1145,10 @@ impl EffectManifest {
                 "perf compare",
                 "Compare normalized performance artifact summaries",
             ),
+            CommandEffect::read_only(
+                "perf explain-latency",
+                "Explain latency stages for a normalized performance artifact",
+            ),
             CommandEffect::read_only("plan recipe list", "List static plan recipes"),
             CommandEffect::read_only("plan recipe show", "Show static plan recipe"),
             CommandEffect::read_only(

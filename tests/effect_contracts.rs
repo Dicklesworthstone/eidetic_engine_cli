@@ -285,7 +285,7 @@ fn effect_manifest_includes_perf_commands_as_read_only() -> TestResult {
     use ee::core::effect::{EffectClass, EffectManifest, SideEffectClass};
 
     let manifest = EffectManifest::build();
-    for command in ["perf compare", "perf budget check"] {
+    for command in ["perf compare", "perf budget check", "perf explain-latency"] {
         let effect = manifest
             .get(command)
             .ok_or_else(|| format!("{command} not in manifest"))?;

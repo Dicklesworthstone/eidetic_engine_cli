@@ -139,7 +139,8 @@ use crate::core::outcome::{
 };
 use crate::core::perf_forensics::{
     BUDGET_CHECK_SCHEMA_V1, BudgetCheckReport, COMPARE_RESULT_SCHEMA_V1, CompareReport,
-    check_perf_budget_report, compare_artifact_summary_files,
+    EXPLAIN_LATENCY_SCHEMA_V1, ExplainLatencyReport, PerfLatencySurface, check_perf_budget_report,
+    compare_artifact_summary_files, explain_latency_report,
 };
 use crate::core::preflight::{
     CloseOptions as PreflightCloseOptions, RunOptions as PreflightRunOptions,
@@ -5039,6 +5040,9 @@ pub struct PlaybookImportArgs {
 pub enum PerfCommand {
     /// Compare two normalized performance artifact summaries.
     Compare(PerfCompareArgs),
+    /// Explain latency stages for a normalized search/context perf artifact.
+    #[command(name = "explain-latency")]
+    ExplainLatency(PerfExplainLatencyArgs),
     /// Check performance budget posture for one normalized report.
     #[command(subcommand)]
     Budget(PerfBudgetCommand),
@@ -5061,6 +5065,22 @@ pub struct PerfCompareArgs {
     /// Candidate normalized artifact summary JSON.
     #[arg(long, value_name = "PATH")]
     pub candidate: PathBuf,
+}
+
+/// Arguments for `ee perf explain-latency`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct PerfExplainLatencyArgs {
+    /// Surface the normalized artifact was captured for.
+    #[arg(long, value_name = "search|context")]
+    pub surface: String,
+
+    /// Normalized performance artifact summary JSON.
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<PathBuf>,
+
+    /// Optional ee.test_event.v1 JSONL log with command_end timing events.
+    #[arg(long, value_name = "PATH")]
+    pub log: Option<PathBuf>,
 }
 
 /// Arguments for `ee perf budget check`.
@@ -15458,6 +15478,7 @@ where
 {
     match command {
         PerfCommand::Compare(args) => handle_perf_compare(cli, args, stdout, stderr),
+        PerfCommand::ExplainLatency(args) => handle_perf_explain_latency(cli, args, stdout, stderr),
         PerfCommand::Budget(PerfBudgetCommand::Check(args)) => {
             handle_perf_budget_check(cli, args, stdout, stderr)
         }
@@ -15476,6 +15497,43 @@ where
 {
     match compare_artifact_summary_files(&args.baseline, &args.candidate) {
         Ok(report) => write_perf_compare_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_perf_explain_latency<W, E>(
+    cli: &Cli,
+    args: &PerfExplainLatencyArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let Some(surface) = PerfLatencySurface::parse(&args.surface) else {
+        let error = DomainError::Usage {
+            message: format!("Unknown perf explain-latency surface `{}`.", args.surface),
+            repair: Some("Use `--surface search` or `--surface context`.".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    };
+
+    if args.report.is_none() && args.log.is_none() {
+        let error = DomainError::Usage {
+            message:
+                "perf explain-latency requires --report <artifact.json> or --log <events.jsonl>."
+                    .to_owned(),
+            repair: Some(
+                "Pass a normalized ee.perf.artifact_summary.v1 JSON file, an ee.test_event.v1 JSONL log, or both."
+                    .to_owned(),
+            ),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    match explain_latency_report(surface, args.report.as_deref(), args.log.as_deref()) {
+        Ok(report) => write_perf_explain_latency_report(cli, &report, stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -15522,6 +15580,36 @@ where
         | output::Renderer::Hook => write_stdout(
             stdout,
             &(perf_response_json("perf compare", COMPARE_RESULT_SCHEMA_V1, report) + "\n"),
+        ),
+    }
+}
+
+fn write_perf_explain_latency_report<W>(
+    cli: &Cli,
+    report: &ExplainLatencyReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_perf_explain_latency_human(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&perf_response_json(
+                "perf explain-latency",
+                EXPLAIN_LATENCY_SCHEMA_V1,
+                report,
+            )) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(perf_response_json("perf explain-latency", EXPLAIN_LATENCY_SCHEMA_V1, report) + "\n"),
         ),
     }
 }
@@ -15654,6 +15742,47 @@ fn render_perf_budget_check_human(report: &BudgetCheckReport) -> String {
     out
 }
 
+fn render_perf_explain_latency_human(report: &ExplainLatencyReport) -> String {
+    let mut out = format!(
+        "Perf explain latency: surface={} cache={}\n  Artifact: {} kind={}\n  Profile: {}\n",
+        report.surface.as_str(),
+        report.cache_status.status.as_str(),
+        report.artifact.artifact_id,
+        report.artifact.artifact_kind.as_str(),
+        report.profile.as_deref().unwrap_or("missing")
+    );
+    if let Some(query_shape_hash) = report.query_shape_hash.as_deref() {
+        out.push_str(&format!("  Query shape: {query_shape_hash}\n"));
+    }
+    if report.workspace_generation.is_some() || report.index_generation.is_some() {
+        out.push_str(&format!(
+            "  Generations: workspace={} index={}\n",
+            report
+                .workspace_generation
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_owned()),
+            report
+                .index_generation
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_owned())
+        ));
+    }
+    if !report.stage_timings.is_empty() {
+        out.push_str("  Stages:\n");
+        for stage in report.stage_timings.iter().take(5) {
+            out.push_str(&format!(
+                "  - {}: {:.3} ms owner={}\n",
+                stage.stage,
+                stage.elapsed_ms,
+                stage.owner_hint.as_str()
+            ));
+        }
+    }
+    append_perf_latency_degradation_summary(&mut out, &report.degraded);
+    append_perf_next_commands(&mut out, &report.next_commands);
+    out
+}
+
 fn append_perf_degradation_summary(
     out: &mut String,
     degradations: &[crate::core::perf_forensics::CompareDegradation],
@@ -15678,6 +15807,27 @@ fn append_perf_degradation_summary(
 fn append_perf_budget_degradation_summary(
     out: &mut String,
     degradations: &[crate::core::perf_forensics::BudgetCheckDegradation],
+) {
+    if degradations.is_empty() {
+        return;
+    }
+    out.push_str("  Degraded:\n");
+    for degradation in degradations.iter().take(3) {
+        out.push_str(&format!(
+            "  - {} ({})",
+            degradation.code,
+            degradation.severity.as_str()
+        ));
+        if let Some(repair) = degradation.repair.as_deref() {
+            out.push_str(&format!(" repair={repair}"));
+        }
+        out.push('\n');
+    }
+}
+
+fn append_perf_latency_degradation_summary(
+    out: &mut String,
+    degradations: &[crate::core::perf_forensics::ExplainLatencyDegradation],
 ) {
     if degradations.is_empty() {
         return;
@@ -39076,6 +39226,7 @@ impl NormalizedInvocation {
                 },
                 Command::Perf(perf) => match perf {
                     PerfCommand::Compare(_) => "perf compare".to_string(),
+                    PerfCommand::ExplainLatency(_) => "perf explain-latency".to_string(),
                     PerfCommand::Budget(PerfBudgetCommand::Check(_)) => {
                         "perf budget check".to_string()
                     }

@@ -20,6 +20,7 @@ use crate::models::{self, DomainError};
 
 pub const COMPARE_RESULT_SCHEMA_V1: &str = "ee.perf.compare.v1";
 pub const BUDGET_CHECK_SCHEMA_V1: &str = "ee.perf.budget_check.v1";
+pub const EXPLAIN_LATENCY_SCHEMA_V1: &str = "ee.perf.explain_latency.v1";
 
 const ARTIFACT_SUMMARY_SCHEMA: &str = "ee.perf.artifact_summary.v1";
 
@@ -29,6 +30,37 @@ fn default_artifact_summary_schema() -> String {
 
 fn default_compare_result_schema() -> &'static str {
     COMPARE_RESULT_SCHEMA_V1
+}
+
+fn default_explain_latency_schema() -> &'static str {
+    EXPLAIN_LATENCY_SCHEMA_V1
+}
+
+/// User-facing surfaces supported by the latency explanation report.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PerfLatencySurface {
+    Search,
+    Context,
+}
+
+impl PerfLatencySurface {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Search => "search",
+            Self::Context => "context",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "search" => Some(Self::Search),
+            "context" => Some(Self::Context),
+            _ => None,
+        }
+    }
 }
 
 /// Artifact kinds supported by the perf forensics compare surface.
@@ -692,6 +724,116 @@ fn default_budget_check_schema() -> &'static str {
     BUDGET_CHECK_SCHEMA_V1
 }
 
+/// Read-only latency explanation for one normalized performance artifact.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainLatencyReport {
+    #[serde(skip_deserializing, default = "default_explain_latency_schema")]
+    pub schema: &'static str,
+    pub surface: PerfLatencySurface,
+    pub artifact: ExplainLatencyArtifact,
+    pub query_shape_hash: Option<String>,
+    pub workspace_generation: Option<u64>,
+    pub index_generation: Option<u64>,
+    pub profile: Option<String>,
+    pub stage_timings: Vec<LatencyStageTiming>,
+    pub cache_status: LatencyCacheStatus,
+    #[serde(serialize_with = "serialize_explain_latency_degraded")]
+    pub degraded: Vec<ExplainLatencyDegradation>,
+    pub next_commands: Vec<String>,
+}
+
+/// Redaction-safe artifact identity embedded in `ee perf explain-latency`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainLatencyArtifact {
+    pub artifact_id: String,
+    pub artifact_kind: ArtifactKind,
+    pub source_schema: String,
+    pub command_family: Option<String>,
+    pub fixture_tier: Option<String>,
+}
+
+/// Single deterministic timing stage extracted from a normalized artifact.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LatencyStageTiming {
+    pub stage: String,
+    pub elapsed_ms: f64,
+    pub source_metrics: Vec<String>,
+    pub owner_hint: SubsystemOwner,
+}
+
+/// Cache posture inferred from normalized cache metrics.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LatencyCacheStatus {
+    pub status: LatencyCacheStatusKind,
+    pub hit_rate: Option<f64>,
+    pub evidence_metrics: Vec<String>,
+}
+
+/// Coarse cache state for the latency report.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LatencyCacheStatusKind {
+    Hit,
+    Partial,
+    Miss,
+    Unknown,
+}
+
+impl LatencyCacheStatusKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Partial => "partial",
+            Self::Miss => "miss",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Degradation record for latency explanation output.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainLatencyDegradation {
+    pub code: String,
+    pub severity: Severity,
+    pub affected_field: Option<String>,
+    pub message: String,
+    pub repair: Option<String>,
+}
+
+impl ExplainLatencyDegradation {
+    #[must_use]
+    pub fn missing_timing_metrics() -> Self {
+        Self {
+            code: models::degradation::PERF_LATENCY_EVIDENCE_MISSING_CODE.to_owned(),
+            severity: Severity::Medium,
+            affected_field: Some("metrics".to_owned()),
+            message: "Artifact does not contain live J1 command_end timing evidence or fixture replay stage timings for latency explanation.".to_owned(),
+            repair: Some(
+                "Set EE_TEST_LOG_PATH=<path> or regenerate the artifact with stage timing metrics enabled, then retry.".to_owned(),
+            ),
+        }
+    }
+
+    #[must_use]
+    pub fn partial_evidence(malformed_lines: usize) -> Self {
+        Self {
+            code: models::degradation::PERF_LATENCY_EVIDENCE_PARTIAL_CODE.to_owned(),
+            severity: Severity::Low,
+            affected_field: Some("log".to_owned()),
+            message: format!(
+                "{malformed_lines} latency evidence log lines were not valid JSON events."
+            ),
+            repair: Some("Regenerate the J1 JSONL log and retry.".to_owned()),
+        }
+    }
+}
+
 /// Redaction-safe artifact identity for budget-check output.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -793,6 +935,16 @@ where
     aggregate_budget_check_degraded(degraded).serialize(serializer)
 }
 
+fn serialize_explain_latency_degraded<S>(
+    degraded: &[ExplainLatencyDegradation],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    aggregate_explain_latency_degraded(degraded).serialize(serializer)
+}
+
 fn aggregate_summary_degraded(degraded: &[SummaryDegradation]) -> Vec<AggregatedDegradation> {
     aggregate_degraded_entries(degraded.iter().map(|entry| {
         DegradationAggregationInput::new(
@@ -840,6 +992,23 @@ fn aggregate_budget_check_degraded(
     }))
 }
 
+fn aggregate_explain_latency_degraded(
+    degraded: &[ExplainLatencyDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "perf_explain_latency",
+            entry.code.clone(),
+            entry.severity.as_str(),
+            entry.message.clone(),
+            entry
+                .repair
+                .clone()
+                .unwrap_or_else(|| "Review the perf latency explanation input.".to_owned()),
+        )
+    }))
+}
+
 /// Load a normalized perf artifact summary from a JSON file.
 pub fn read_perf_artifact_summary(path: &Path) -> Result<models::ArtifactSummary, DomainError> {
     validate_perf_artifact_path(path)?;
@@ -854,6 +1023,153 @@ pub fn read_perf_artifact_summary(path: &Path) -> Result<models::ArtifactSummary
         message: format!("Malformed perf artifact summary JSON: {error}"),
         repair: Some("Re-run with an ee.perf.artifact_summary.v1 JSON file.".to_owned()),
     })
+}
+
+fn merge_j1_latency_log(
+    surface: PerfLatencySurface,
+    path: &Path,
+    artifact: &mut models::ArtifactSummary,
+) -> Result<Vec<ExplainLatencyDegradation>, DomainError> {
+    validate_perf_log_path(path)?;
+    let body = fs::read_to_string(path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Could not read perf latency log {}: {error}",
+            path.display()
+        ),
+        repair: Some("Verify the ee.test_event.v1 JSONL log is readable and retry.".to_owned()),
+    })?;
+    if artifact.content_hash.is_none() {
+        artifact.content_hash = Some(format!("j1:{}", blake3::hash(body.as_bytes()).to_hex()));
+    }
+
+    let mut malformed_lines = 0usize;
+    let mut matched_events = 0usize;
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            malformed_lines += 1;
+            continue;
+        };
+        if !j1_command_end_matches_surface(&value, surface) {
+            continue;
+        }
+        let Some(elapsed_ms) = value.get("elapsed_ms").and_then(serde_json::Value::as_f64) else {
+            continue;
+        };
+        if !elapsed_ms.is_finite() || elapsed_ms < 0.0 {
+            continue;
+        }
+        matched_events += 1;
+        artifact.add_metric(
+            format!(
+                "{}_command_end_elapsed_ms_{matched_events:04}",
+                surface.as_str()
+            ),
+            models::MetricValue::measured(elapsed_ms, "ms"),
+        );
+    }
+
+    let mut degraded = Vec::new();
+    if malformed_lines > 0 {
+        degraded.push(ExplainLatencyDegradation::partial_evidence(malformed_lines));
+    }
+    Ok(degraded)
+}
+
+fn validate_perf_log_path(path: &Path) -> Result<(), DomainError> {
+    if let Some(symlink_path) =
+        first_existing_symlink_component(path).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Could not inspect perf latency log path component {}: {}",
+                error.path.display(),
+                error.source
+            ),
+            repair: Some("Verify the log file is readable and retry.".to_owned()),
+        })?
+    {
+        return Err(DomainError::Usage {
+            message: format!(
+                "Unsupported perf latency log path {}: path traverses symlinked component {}",
+                path.display(),
+                symlink_path.display()
+            ),
+            repair: Some("Pass a regular JSONL log file, not a symlink.".to_owned()),
+        });
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|_| DomainError::NotFound {
+        resource: "perf latency log".to_owned(),
+        id: path.display().to_string(),
+        repair: Some("Pass a readable ee.test_event.v1 JSONL log file.".to_owned()),
+    })?;
+    if !metadata.is_file() {
+        return Err(DomainError::Usage {
+            message: format!("Unsupported perf latency log path: {}", path.display()),
+            repair: Some("Pass a JSONL file, not a directory or special file.".to_owned()),
+        });
+    }
+    if !matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("jsonl" | "json")
+    ) {
+        return Err(DomainError::Usage {
+            message: format!("Unsupported perf latency log extension: {}", path.display()),
+            repair: Some("Use a .jsonl ee.test_event.v1 log file.".to_owned()),
+        });
+    }
+    Ok(())
+}
+
+fn j1_command_end_matches_surface(value: &serde_json::Value, surface: PerfLatencySurface) -> bool {
+    if value.get("schema").and_then(serde_json::Value::as_str) != Some("ee.test_event.v1") {
+        return false;
+    }
+    if value.get("kind").and_then(serde_json::Value::as_str) != Some("command_end") {
+        return false;
+    }
+
+    let words = j1_event_words(value);
+    let command_phrase = format!("ee {}", surface.as_str());
+    words
+        .iter()
+        .any(|word| word == surface.as_str() || word == &command_phrase)
+}
+
+fn j1_event_words(value: &serde_json::Value) -> Vec<String> {
+    let mut words = Vec::new();
+    append_j1_words(
+        value.get("command").and_then(serde_json::Value::as_str),
+        &mut words,
+    );
+    if let Some(fields) = value.get("fields") {
+        append_j1_words(
+            fields.get("command").and_then(serde_json::Value::as_str),
+            &mut words,
+        );
+        append_j1_words(
+            fields
+                .get("command_label")
+                .and_then(serde_json::Value::as_str),
+            &mut words,
+        );
+    }
+    if let Some(args) = value.get("args").and_then(serde_json::Value::as_array) {
+        for arg in args {
+            append_j1_words(arg.as_str(), &mut words);
+        }
+    }
+    words.sort();
+    words.dedup();
+    words
+}
+
+fn append_j1_words(value: Option<&str>, words: &mut Vec<String>) {
+    let Some(value) = value else { return };
+    let lower = value.to_lowercase();
+    words.push(lower.clone());
+    words.extend(lower.split_whitespace().map(str::to_owned));
 }
 
 fn validate_perf_artifact_path(path: &Path) -> Result<(), DomainError> {
@@ -1060,6 +1376,100 @@ pub fn check_perf_budget_summary(
     }
 }
 
+/// Explain latency posture for a normalized artifact summary file.
+pub fn explain_latency_report(
+    surface: PerfLatencySurface,
+    report_path: Option<&Path>,
+    log_path: Option<&Path>,
+) -> Result<ExplainLatencyReport, DomainError> {
+    let mut artifact = match report_path {
+        Some(path) => read_perf_artifact_summary(path)?,
+        None => models::ArtifactSummary::new(
+            format!("j1-{}-latency", surface.as_str()),
+            models::ArtifactKind::ExplainPerformanceReport,
+            "ee.test_event.v1",
+        )
+        .with_command_family(surface.as_str()),
+    };
+    let mut extra_degraded = Vec::new();
+    if let Some(path) = log_path {
+        extra_degraded.extend(merge_j1_latency_log(surface, path, &mut artifact)?);
+    }
+    let mut report = explain_latency_summary(surface, &artifact);
+    report.degraded.extend(extra_degraded);
+    sort_explain_latency_degraded(&mut report.degraded);
+    Ok(report)
+}
+
+/// Explain latency posture from a canonical normalized artifact summary.
+#[must_use]
+pub fn explain_latency_summary(
+    surface: PerfLatencySurface,
+    artifact: &models::ArtifactSummary,
+) -> ExplainLatencyReport {
+    let normalized = normalize_artifact_summary(artifact);
+    let mut degraded: Vec<ExplainLatencyDegradation> = normalized
+        .degraded
+        .iter()
+        .map(summary_degradation_to_latency)
+        .collect();
+    let stage_timings = collect_latency_stage_timings(surface, &normalized.metrics);
+    if stage_timings.is_empty() {
+        degraded.push(ExplainLatencyDegradation::missing_timing_metrics());
+    }
+    sort_explain_latency_degraded(&mut degraded);
+
+    let cache_status = infer_latency_cache_status(&normalized.metrics);
+    let mut next_commands = Vec::new();
+    if stage_timings.is_empty() {
+        next_commands.push(
+            "Regenerate the artifact with stage timing metrics enabled, then rerun this command."
+                .to_owned(),
+        );
+    }
+    match cache_status.status {
+        LatencyCacheStatusKind::Miss | LatencyCacheStatusKind::Unknown => {
+            next_commands.push("ee index status --workspace . --json".to_owned());
+        }
+        LatencyCacheStatusKind::Hit | LatencyCacheStatusKind::Partial => {}
+    }
+    next_commands.push(
+        "ee perf compare --baseline <baseline.json> --candidate <candidate.json> --json".to_owned(),
+    );
+    next_commands.sort();
+    next_commands.dedup();
+
+    ExplainLatencyReport {
+        schema: EXPLAIN_LATENCY_SCHEMA_V1,
+        surface,
+        artifact: ExplainLatencyArtifact {
+            artifact_id: normalized.artifact_id,
+            artifact_kind: normalized.artifact_kind,
+            source_schema: normalized.source_schema.unwrap_or_default(),
+            command_family: normalized.command_family,
+            fixture_tier: normalized.fixture_tier,
+        },
+        query_shape_hash: normalized.content_hash,
+        workspace_generation: generation_metric(&normalized.metrics, "workspace_generation")
+            .or_else(|| generation_metric(&normalized.metrics, "db_generation")),
+        index_generation: generation_metric(&normalized.metrics, "index_generation"),
+        profile: normalized.profile,
+        stage_timings,
+        cache_status,
+        degraded,
+        next_commands,
+    }
+}
+
+fn sort_explain_latency_degraded(degraded: &mut [ExplainLatencyDegradation]) {
+    degraded.sort_by(|a, b| {
+        b.severity
+            .cmp(&a.severity)
+            .then_with(|| a.code.cmp(&b.code))
+            .then_with(|| a.affected_field.cmp(&b.affected_field))
+    });
+}
+
 fn normalize_artifact_summary(summary: &models::ArtifactSummary) -> ArtifactSummary {
     let mut redacted = false;
     let source_path = summary
@@ -1163,6 +1573,16 @@ fn summary_degradation_to_budget(degradation: &SummaryDegradation) -> BudgetChec
     }
 }
 
+fn summary_degradation_to_latency(degradation: &SummaryDegradation) -> ExplainLatencyDegradation {
+    ExplainLatencyDegradation {
+        code: degradation.code.clone(),
+        severity: degradation.severity,
+        affected_field: degradation.affected_field.clone(),
+        message: degradation.message.clone(),
+        repair: degradation.repair.clone(),
+    }
+}
+
 fn convert_artifact_severity(severity: models::ArtifactDegradationSeverity) -> Severity {
     match severity {
         models::ArtifactDegradationSeverity::Low => Severity::Low,
@@ -1258,6 +1678,152 @@ fn perf_public_source_path_starts_sensitive_segment(value: &str) -> bool {
 
 fn perf_public_source_path_boundary(ch: char) -> bool {
     ch.is_whitespace() || matches!(ch, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
+}
+
+fn generation_metric(metrics: &BTreeMap<String, MetricValue>, name: &str) -> Option<u64> {
+    let value = metrics.get(name)?.value;
+    if value.is_finite() && value >= 0.0 {
+        Some(value.trunc() as u64)
+    } else {
+        None
+    }
+}
+
+fn collect_latency_stage_timings(
+    surface: PerfLatencySurface,
+    metrics: &BTreeMap<String, MetricValue>,
+) -> Vec<LatencyStageTiming> {
+    let mut stages: BTreeMap<&'static str, (f64, Vec<String>, SubsystemOwner)> = BTreeMap::new();
+
+    for (metric_name, metric) in metrics {
+        if metric.volatility != Volatility::Timing || !metric.value.is_finite() {
+            continue;
+        }
+        let Some(stage) = latency_stage_for_metric(surface, metric_name) else {
+            continue;
+        };
+        let inferred_owner = SubsystemOwner::infer_from_metric(metric_name);
+        let owner_hint = latency_owner_for_stage(stage, inferred_owner);
+        let entry = stages
+            .entry(stage)
+            .or_insert_with(|| (0.0, Vec::new(), owner_hint));
+        entry.0 += metric.value.max(0.0);
+        entry.1.push(metric_name.clone());
+        if entry.2 == SubsystemOwner::Unknown {
+            entry.2 = owner_hint;
+        }
+    }
+
+    stages
+        .into_iter()
+        .map(|(stage, (elapsed_ms, mut source_metrics, owner_hint))| {
+            source_metrics.sort();
+            LatencyStageTiming {
+                stage: stage.to_owned(),
+                elapsed_ms,
+                source_metrics,
+                owner_hint,
+            }
+        })
+        .collect()
+}
+
+fn latency_stage_for_metric(
+    surface: PerfLatencySurface,
+    metric_name: &str,
+) -> Option<&'static str> {
+    let lower = metric_name.to_lowercase();
+    if lower.contains("cache") {
+        return Some("cache_lookup");
+    }
+    if lower.contains("db") || lower.contains("storage") || lower.contains("load") {
+        return Some("storage");
+    }
+    if lower.contains("embed") || lower.contains("semantic") || lower.contains("vector") {
+        return Some("semantic_retrieval");
+    }
+    if lower.contains("bm25") || lower.contains("lexical") || lower.contains("fts") {
+        return Some("lexical_retrieval");
+    }
+    if lower.contains("search")
+        || lower.contains("query")
+        || lower.contains("candidate")
+        || lower.contains("recall")
+    {
+        return Some("retrieval");
+    }
+    if lower.contains("pack") || lower.contains("token") || lower.contains("budget") {
+        return Some("pack_selection");
+    }
+    if lower.contains("rank") || lower.contains("score") || lower.contains("rerank") {
+        return Some("ranking");
+    }
+    if lower.contains("render") || lower.contains("format") || lower.contains("json") {
+        return Some("rendering");
+    }
+    match surface {
+        PerfLatencySurface::Context if lower.contains("context") => Some("pack_selection"),
+        PerfLatencySurface::Search if lower.contains("elapsed") || lower.contains("latency") => {
+            Some("retrieval")
+        }
+        PerfLatencySurface::Context if lower.contains("elapsed") || lower.contains("latency") => {
+            Some("pack_selection")
+        }
+        _ => None,
+    }
+}
+
+fn latency_owner_for_stage(stage: &str, inferred_owner: SubsystemOwner) -> SubsystemOwner {
+    match stage {
+        "cache_lookup" => SubsystemOwner::Cache,
+        "storage" => SubsystemOwner::Db,
+        "semantic_retrieval" | "lexical_retrieval" | "retrieval" | "ranking" => {
+            SubsystemOwner::Search
+        }
+        "pack_selection" | "rendering" => SubsystemOwner::Pack,
+        _ => inferred_owner,
+    }
+}
+
+fn infer_latency_cache_status(metrics: &BTreeMap<String, MetricValue>) -> LatencyCacheStatus {
+    let mut evidence_metrics = Vec::new();
+    let mut explicit_hit_rate = None;
+    let mut hit_count = 0.0_f64;
+    let mut miss_count = 0.0_f64;
+
+    for (metric_name, metric) in metrics {
+        let lower = metric_name.to_lowercase();
+        if !lower.contains("cache") || !metric.value.is_finite() {
+            continue;
+        }
+        evidence_metrics.push(metric_name.clone());
+        if lower.contains("hit_rate") || lower.contains("hit_ratio") {
+            explicit_hit_rate = Some(metric.value.clamp(0.0, 1.0));
+        } else if lower.contains("hit") {
+            hit_count += metric.value.max(0.0);
+        } else if lower.contains("miss") {
+            miss_count += metric.value.max(0.0);
+        }
+    }
+
+    evidence_metrics.sort();
+    let hit_rate = explicit_hit_rate.or_else(|| {
+        let total = hit_count + miss_count;
+        (total > 0.0).then_some(hit_count / total)
+    });
+    let status = match hit_rate {
+        Some(rate) if rate >= 0.95 => LatencyCacheStatusKind::Hit,
+        Some(rate) if rate > 0.0 => LatencyCacheStatusKind::Partial,
+        Some(_) => LatencyCacheStatusKind::Miss,
+        None if evidence_metrics.is_empty() => LatencyCacheStatusKind::Unknown,
+        None => LatencyCacheStatusKind::Unknown,
+    };
+
+    LatencyCacheStatus {
+        status,
+        hit_rate,
+        evidence_metrics,
+    }
 }
 
 fn infer_metric_volatility(name: &str, unit: Option<&str>) -> Volatility {
@@ -1659,6 +2225,138 @@ mod tests {
             SubsystemOwner::infer_from_metric("unknown_metric"),
             SubsystemOwner::Unknown
         );
+    }
+
+    #[test]
+    fn explain_latency_summary_extracts_context_stages_and_cache_posture() {
+        let mut artifact = models::ArtifactSummary::new(
+            "context-latency",
+            models::ArtifactKind::ExplainPerformanceReport,
+            "ee.perf.source.v1",
+        )
+        .with_content_hash("query-shape-hash")
+        .with_profile(models::ProfileReference {
+            profile_name: "balanced".to_owned(),
+            confidence: None,
+            override_source: None,
+        })
+        .with_command_family("context");
+        artifact.add_metric(
+            "context_search_elapsed_ms",
+            models::MetricValue::measured(12.0, "ms"),
+        );
+        artifact.add_metric(
+            "pack_score_elapsed_ms",
+            models::MetricValue::measured(5.0, "ms"),
+        );
+        artifact.add_metric(
+            "cache_hit_rate",
+            models::MetricValue::measured(0.5, "ratio"),
+        );
+        artifact.add_metric(
+            "workspace_generation",
+            models::MetricValue::measured(3.0, "count"),
+        );
+        artifact.add_metric(
+            "index_generation",
+            models::MetricValue::measured(7.0, "count"),
+        );
+
+        let report = explain_latency_summary(PerfLatencySurface::Context, &artifact);
+
+        assert_eq!(report.schema, EXPLAIN_LATENCY_SCHEMA_V1);
+        assert_eq!(report.surface, PerfLatencySurface::Context);
+        assert_eq!(report.query_shape_hash.as_deref(), Some("query-shape-hash"));
+        assert_eq!(report.profile.as_deref(), Some("balanced"));
+        assert_eq!(report.workspace_generation, Some(3));
+        assert_eq!(report.index_generation, Some(7));
+        assert_eq!(report.cache_status.status, LatencyCacheStatusKind::Partial);
+        assert_eq!(report.cache_status.hit_rate, Some(0.5));
+        assert!(report.degraded.is_empty());
+        assert!(report.stage_timings.iter().any(|stage| {
+            stage.stage == "retrieval"
+                && stage.owner_hint == SubsystemOwner::Search
+                && stage.source_metrics == vec!["context_search_elapsed_ms".to_owned()]
+        }));
+        assert!(report.stage_timings.iter().any(|stage| {
+            stage.stage == "pack_selection"
+                && stage.owner_hint == SubsystemOwner::Pack
+                && stage.source_metrics == vec!["pack_score_elapsed_ms".to_owned()]
+        }));
+    }
+
+    #[test]
+    fn explain_latency_summary_degrades_without_timing_metrics() {
+        let mut artifact = models::ArtifactSummary::new(
+            "search-latency",
+            models::ArtifactKind::CacheReport,
+            "ee.perf.source.v1",
+        )
+        .with_command_family("context");
+        artifact.add_metric(
+            "cache_hit_rate",
+            models::MetricValue::measured(0.0, "ratio"),
+        );
+
+        let report = explain_latency_summary(PerfLatencySurface::Search, &artifact);
+
+        assert!(report.stage_timings.is_empty());
+        assert_eq!(report.cache_status.status, LatencyCacheStatusKind::Miss);
+        assert!(report.degraded.iter().any(|degradation| {
+            degradation.code == models::degradation::PERF_LATENCY_EVIDENCE_MISSING_CODE
+                && degradation.severity == Severity::Medium
+        }));
+        assert!(report.next_commands.iter().any(|command| {
+            command.contains("Regenerate the artifact with stage timing metrics enabled")
+        }));
+    }
+
+    #[test]
+    fn explain_latency_report_extracts_matching_j1_command_end_timing() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let log_path = tempdir.path().join("j1.jsonl");
+        std::fs::write(
+            &log_path,
+            r#"{"schema":"ee.test_event.v1","kind":"command_end","command":"ee","args":["ee","search","latency"],"exit_code":0,"elapsed_ms":42.5}"#,
+        )
+        .expect("write log");
+
+        let report = explain_latency_report(PerfLatencySurface::Search, None, Some(&log_path))
+            .expect("latency report");
+
+        assert_eq!(report.artifact.source_schema, "ee.test_event.v1");
+        assert_eq!(
+            report.query_shape_hash.as_deref().map(|hash| &hash[..3]),
+            Some("j1:")
+        );
+        assert!(report.degraded.is_empty());
+        assert!(report.stage_timings.iter().any(|stage| {
+            stage.stage == "retrieval"
+                && stage.elapsed_ms == 42.5
+                && stage
+                    .source_metrics
+                    .contains(&"search_command_end_elapsed_ms_0001".to_owned())
+        }));
+    }
+
+    #[test]
+    fn explain_latency_report_degrades_on_partial_j1_log() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let log_path = tempdir.path().join("j1.jsonl");
+        std::fs::write(&log_path, "not-json\n").expect("write log");
+
+        let report = explain_latency_report(PerfLatencySurface::Context, None, Some(&log_path))
+            .expect("latency report");
+
+        assert!(report.stage_timings.is_empty());
+        assert!(report.degraded.iter().any(|degradation| {
+            degradation.code == models::degradation::PERF_LATENCY_EVIDENCE_PARTIAL_CODE
+                && degradation.severity == Severity::Low
+        }));
+        assert!(report.degraded.iter().any(|degradation| {
+            degradation.code == models::degradation::PERF_LATENCY_EVIDENCE_MISSING_CODE
+                && degradation.severity == Severity::Medium
+        }));
     }
 
     #[test]

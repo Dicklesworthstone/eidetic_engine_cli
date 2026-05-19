@@ -5427,23 +5427,23 @@ ee context "swarm task" --resource-profile lean --json
 
 **Introduced by:** bd-1zb7k.10.1 (epic O)
 
-**Trigger.** ee perf explain-latency is invoked without live J1 command_end timing evidence for the requested search or context surface. With no log configured, the report may use bounded fixture replay and still emits this degraded code so callers do not confuse fixture timing with live evidence.
+**Trigger.** ee perf explain-latency is invoked with a normalized search or context artifact that has neither live J1 command_end timing evidence nor fixture replay stage timings, so the report cannot attribute latency stages.
 
 **Setup.**
 
 ```bash
-# leave EE_TEST_LOG_PATH unset to exercise bounded fixture replay; pass --log pointing at a log without matching command_end events to exercise no-timing recovery
+printf '%s\n' '{"schema":"ee.perf.artifact_summary.v1","artifactId":"latency-missing","artifactKind":"cache_report","sourceSchema":"ee.perf.source.v1","commandFamily":"search","metrics":{},"degraded":[],"redaction":"clean","provenance":[]}' > /tmp/ee-perf-latency-missing.json
 ```
 
 **Invocation.**
 
 ```bash
-ee perf explain-latency --surface search --json
+ee perf explain-latency --surface search --report /tmp/ee-perf-latency-missing.json --json
 ```
 
-**Expected emission.** Message contains: `J1 command_end timing evidence ... fixture replay`
+**Expected emission.** Message contains: `J1 command_end timing evidence ... fixture replay stage timings`
 
-**Repair hint.** `EE_TEST_LOG_PATH=<path>`
+**Repair hint.** `stage timing metrics`
 
 **Fixture.** [`tests/fixtures/failure_modes/perf_latency_evidence_missing.json`](../tests/fixtures/failure_modes/perf_latency_evidence_missing.json)
 

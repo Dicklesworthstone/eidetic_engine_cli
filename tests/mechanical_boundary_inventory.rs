@@ -230,6 +230,7 @@ const README_WORKFLOW_ROWS: &[(&str, &str, &str, &[&str])] = &[
             "eval report",
             "perf compare",
             "perf budget check",
+            "perf explain-latency",
             "daemon",
             "analyze science-status",
         ],
@@ -388,6 +389,7 @@ const BASELINE_ACTUAL_COMMANDS: &[(&str, &[&str])] = &[
             "eval report",
             "perf compare",
             "perf budget check",
+            "perf explain-latency",
         ],
     ),
     (
@@ -468,7 +470,7 @@ fn mechanical_boundary_inventory_covers_all_cli_command_paths() -> Result<(), St
     let commands = command_paths_from_extract_function(CLI_SOURCE)?;
     assert_eq!(
         commands.len(),
-        202,
+        203,
         "unexpected CLI command count; update the mechanical boundary inventory"
     );
 

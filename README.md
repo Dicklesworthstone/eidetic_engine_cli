@@ -655,6 +655,9 @@ service, mail sender, Beads mutator, or agent loop.
 | `ee eval run` / `list` | Run or list retrieval-quality evaluation fixtures |
 | `ee eval report [fixture]` | Summarize fixture IDs, data hashes, aggregate retrieval metrics, and the first failing query |
 | `ee eval run <fixture> --pack-quality --json` | Check whether deterministic fixtures still select required context-pack evidence |
+| `ee perf compare --baseline <baseline.json> --candidate <candidate.json> --json` | Compare normalized performance artifact summaries without mutating state |
+| `ee perf budget check --profile <name> --report <artifact.json> --json` | Check one normalized performance artifact against a profile budget |
+| `ee perf explain-latency --surface search\|context --report <artifact.json> [--log <j1.jsonl>] --json` | Explain deterministic latency stages and cache posture from normalized search/context artifacts and optional J1 timing evidence |
 | `ee analyze science-status --json` | Report optional science analytics feature posture and degradations |
 | `ee capabilities` / `check` / `health` | Inspect feature availability and readiness |
 | `ee daemon --foreground` | Optional supervised maintenance daemon |
