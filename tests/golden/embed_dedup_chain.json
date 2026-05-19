@@ -1,0 +1,125 @@
+{
+  "schema": "ee.embed_dedup.chain_golden.v1",
+  "beadId": "bd-1iltv",
+  "workspaceId": "ws_embed_dedup_fixture",
+  "config": {
+    "enabled": true,
+    "hammingK": 12,
+    "cosineFloor": 0.97
+  },
+  "rememberResults": [
+    {
+      "case": "source_memory",
+      "memoryId": "mem_embed_dedup_source",
+      "content": "Agents must route Rust verification through RCH.",
+      "contentSimhash": "0x7db3b450e7d3bc9f1c04c9826e2a5a11",
+      "embeddingSource": "fresh_embed",
+      "dedupLink": null,
+      "dedupDecision": {
+        "decision": "new_embed",
+        "candidateMemoryId": null,
+        "hammingDistance": null,
+        "cosineSimilarity": null,
+        "reason": "no_prior_workspace_simhash_candidate"
+      }
+    },
+    {
+      "case": "exact_or_canonical_duplicate",
+      "memoryId": "mem_embed_dedup_exact",
+      "content": "  AGENTS must route Rust verification through RCH.  ",
+      "contentSimhash": "0x7db3b450e7d3bc9f1c04c9826e2a5a11",
+      "embeddingSource": "reused",
+      "dedupLink": {
+        "targetMemoryId": "mem_embed_dedup_source",
+        "relationship": "embedding_reuse",
+        "hammingDistance": 0,
+        "cosineSimilarity": 1.0,
+        "cosineFloor": 0.97,
+        "decision": "reuse"
+      },
+      "dedupDecision": {
+        "decision": "reuse",
+        "candidateMemoryId": "mem_embed_dedup_source",
+        "hammingDistance": 0,
+        "cosineSimilarity": 1.0,
+        "reason": "simhash_within_threshold_and_cosine_confirmed"
+      }
+    },
+    {
+      "case": "near_duplicate",
+      "memoryId": "mem_embed_dedup_near",
+      "content": "Agents should route Rust verification through RCH.",
+      "contentSimhash": "0x7db3b450e7d3bc9f1c04c9826e2a5a31",
+      "embeddingSource": "reused",
+      "dedupLink": {
+        "targetMemoryId": "mem_embed_dedup_source",
+        "relationship": "embedding_reuse",
+        "hammingDistance": 1,
+        "cosineSimilarity": 0.9921875,
+        "cosineFloor": 0.97,
+        "decision": "reuse"
+      },
+      "dedupDecision": {
+        "decision": "reuse",
+        "candidateMemoryId": "mem_embed_dedup_source",
+        "hammingDistance": 1,
+        "cosineSimilarity": 0.9921875,
+        "reason": "simhash_within_threshold_and_cosine_confirmed"
+      }
+    },
+    {
+      "case": "simhash_false_positive",
+      "memoryId": "mem_embed_dedup_false_positive",
+      "content": "Semantic models may be unavailable in offline test fixtures.",
+      "contentSimhash": "0x7db3b450e7d3bc9f1c04c9826e2a5a30",
+      "embeddingSource": "fresh_embed",
+      "dedupLink": null,
+      "dedupDecision": {
+        "decision": "new_embed",
+        "candidateMemoryId": "mem_embed_dedup_source",
+        "hammingDistance": 1,
+        "cosineSimilarity": 0.8125,
+        "reason": "cosine_under_floor"
+      }
+    }
+  ],
+  "whyResults": [
+    {
+      "memoryId": "mem_embed_dedup_exact",
+      "dedupLink": {
+        "targetMemoryId": "mem_embed_dedup_source",
+        "relationship": "embedding_reuse",
+        "hammingDistance": 0,
+        "cosineSimilarity": 1.0,
+        "cosineFloor": 0.97,
+        "decision": "reuse"
+      }
+    },
+    {
+      "memoryId": "mem_embed_dedup_false_positive",
+      "dedupLink": null
+    }
+  ],
+  "traceEvents": [
+    {
+      "surface": "embed_dedup",
+      "phase": "candidate_lookup",
+      "workspaceId": "ws_embed_dedup_fixture",
+      "memoryId": "mem_embed_dedup_near",
+      "candidateMemoryId": "mem_embed_dedup_source",
+      "hammingDistance": 1,
+      "decision": "candidate"
+    },
+    {
+      "surface": "embed_dedup",
+      "phase": "cosine_confirm",
+      "workspaceId": "ws_embed_dedup_fixture",
+      "memoryId": "mem_embed_dedup_false_positive",
+      "candidateMemoryId": "mem_embed_dedup_source",
+      "hammingDistance": 1,
+      "cosineSimilarity": 0.8125,
+      "decision": "new_embed"
+    }
+  ],
+  "degraded": []
+}
