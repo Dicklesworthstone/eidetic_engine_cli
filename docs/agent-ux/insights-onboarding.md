@@ -62,6 +62,7 @@ ee insights --section proximityHotspots --workspace . --json
 ee insights --section knowledgeSkyline --workspace . --json
 ee insights --section hubs --workspace . --json
 ee insights --section authorities --workspace . --json
+ee insights --section loadBearingMemories --workspace . --json
 ```
 
 Agent interpretation rules:
@@ -70,6 +71,8 @@ Agent interpretation rules:
   evidence that many navigation memories point toward.
 - `hubs`: use these memories as orientation anchors when a task needs a map of
   related authoritative facts.
+- `loadBearingMemories`: preserve or review these memories before curation,
+  decay, or handoff because many procedural rules cite them.
 - `bridges`: preserve or review load-bearing memories before decay or
   tombstone work.
 - `contradictionClusters`: curate the cluster before relying on any one memory
@@ -207,6 +210,35 @@ ee context "ground release evidence" --profile grounding --workspace . --json
 ee context "map release dependencies" --profile orientation --workspace . --json
 ee context "prepare release" --profile balanced --workspace . --json
 ```
+
+## Load-Bearing Memories
+
+Use load-bearing insights when a task may edit, tombstone, or consolidate
+memories that procedural rules depend on:
+
+```bash
+ee insights --section loadBearingMemories --workspace . --json \
+  | jq '.data.sections[] | select(.name == "loadBearingMemories") | .items[0]'
+```
+
+Items expose `loadBearingScore`, `citingRuleCount`, `interpretation`, and
+`evidence.algorithm`. `interpretation` is `"load_bearing"` and
+`evidence.algorithm` is `"bipartite_hits"`. The evidence is a rule-to-source
+provenance projection: memory nodes score as authorities when many rule nodes
+cite them.
+
+Follow with `ee why` before changing a listed memory:
+
+```bash
+ee why mem_load_bearing --workspace . --json \
+  | jq '.data.graph.loadBearing'
+```
+
+Inspect `isLoadBearing`, `loadBearingScore`, `authorityRank`,
+`citingRuleCount`, `citingRules`, `evidence.projection`, and `rationale`.
+`citingRules[]` should expose rule IDs and relations, not raw rule bodies, so
+agents can decide whether to preserve the memory or review the dependent rules
+without leaking source text into handoffs.
 
 ## Consumer Checklist
 

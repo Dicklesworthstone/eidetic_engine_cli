@@ -1031,6 +1031,44 @@ fn insights_onboarding_documents_hits_workflow_for_agents() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn insights_onboarding_documents_load_bearing_workflow_for_agents() -> TestResult {
+    let path = repo_root()
+        .join("docs")
+        .join("agent-ux")
+        .join("insights-onboarding.md");
+    let markdown =
+        fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+
+    for needle in [
+        "ee insights --section loadBearingMemories --workspace . --json",
+        "ee why mem_load_bearing --workspace . --json",
+        ".data.graph.loadBearing",
+        "`loadBearingScore`",
+        "`citingRuleCount`",
+        "`interpretation`",
+        "`\"load_bearing\"`",
+        "`evidence.algorithm`",
+        "`\"bipartite_hits\"`",
+        "`isLoadBearing`",
+        "`authorityRank`",
+        "`citingRules`",
+        "`evidence.projection`",
+        "`rationale`",
+        "rule-to-source provenance projection",
+        "rule IDs and relations",
+    ] {
+        if !markdown.contains(needle) {
+            return Err(format!(
+                "{} missing load-bearing onboarding needle: {needle}",
+                path.display()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn assert_hits_item_schema(
     schema: &Value,
     item_name: &str,
