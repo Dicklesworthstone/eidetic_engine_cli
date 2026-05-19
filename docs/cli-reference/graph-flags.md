@@ -335,10 +335,15 @@ ee diag graph-snapshot --workspace . --status stale \
 | `ee maintenance wal-checkpoint` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Reads WAL status and runs the checkpoint through the explicit writer path. |
 | `ee maintenance wal-checkpoint` | `--mode <MODE>` | `passive`, `truncate` | `passive` | Selects the SQLite checkpoint mode. |
 | `ee maintenance wal-checkpoint` | `--dry-run` | boolean | false | Reports WAL status without running a checkpoint. |
+| `ee maintenance status` | none | none | none | Reports maintenance job availability and the next suggested steward command. |
 | `ee job run <KIND>` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Runs a steward handler against an explicit DB. |
 | `ee job run <KIND>` | `--dry-run` | boolean | false | Reports planned work without mutating memory scores or job history. |
 | `ee job run <KIND>` | `--time-limit-ms <MS>` | integer | job default | Overrides per-job time budget. |
 | `ee job run <KIND>` | `--item-limit <N>` | integer | job default | Overrides per-job item budget. |
+| `ee job list` | `--kind <KIND>` | steward job kind | omitted | Filters durable job history rows to one maintenance job family. |
+| `ee job list` | `--since <RFC3339>` | timestamp | omitted | Filters durable job history rows to records at or after the timestamp. |
+| `ee job list` | `--limit`, `-n` | integer | `20` | Caps durable job history rows returned. |
+| `ee job show <JOB_ID>` | `JOB_ID` | job history row ID | required | Shows one durable job history row, or the latest match for a steward runner job ID. |
 
 Example:
 
@@ -354,6 +359,10 @@ ee maintenance graph-snapshot-prune --workspace . --dry-run \
 ee maintenance graph-witnesses-prune --workspace . --dry-run \
   --retention-days 30 --algorithm-ttl pagerank=14 --json
 ee maintenance wal-checkpoint --workspace . --mode truncate --dry-run --json
+ee maintenance status --workspace . --json
+ee job list --workspace . --kind centrality_refresh \
+  --since 2026-05-19T00:00:00Z --limit 10 --json
+ee job show job_release --workspace . --json
 ```
 
 ## Tracked But Not Yet In Current CLI

@@ -454,6 +454,13 @@ fn proximity_health_and_maintenance_flags_are_help_discoverable() -> TestResult 
         "ee maintenance run --help",
     )?;
 
+    let maintenance_status_help = help_for(&["ee", "maintenance", "status", "--help"])?;
+    assert_contains_all(
+        &maintenance_status_help,
+        &["Report maintenance job availability"],
+        "ee maintenance status --help",
+    )?;
+
     let prune_help = help_for(&["ee", "maintenance", "graph-snapshot-prune", "--help"])?;
     assert_contains_all(
         &prune_help,
@@ -491,7 +498,17 @@ fn proximity_health_and_maintenance_flags_are_help_discoverable() -> TestResult 
             "--item-limit",
         ],
         "ee job run --help",
-    )
+    )?;
+
+    let job_list_help = help_for(&["ee", "job", "list", "--help"])?;
+    assert_contains_all(
+        &job_list_help,
+        &["--kind", "--since", "--limit"],
+        "ee job list --help",
+    )?;
+
+    let job_show_help = help_for(&["ee", "job", "show", "--help"])?;
+    assert_contains_all(&job_show_help, &["JOB_ID"], "ee job show --help")
 }
 
 #[test]
@@ -953,6 +970,20 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "25",
             "--json",
         ][..],
+        &["ee", "maintenance", "status", "--json"][..],
+        &[
+            "ee",
+            "job",
+            "list",
+            "--kind",
+            "centrality_refresh",
+            "--since",
+            "2026-05-19T00:00:00Z",
+            "--limit",
+            "10",
+            "--json",
+        ][..],
+        &["ee", "job", "show", "job_release", "--json"][..],
         &[
             "ee",
             "maintenance",
