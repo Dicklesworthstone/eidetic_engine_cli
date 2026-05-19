@@ -296,6 +296,12 @@ mod tests {
         attrs
     }
 
+    fn non_string_partition_attrs() -> AttrMap {
+        let mut attrs = AttrMap::new();
+        attrs.insert(BIPARTITE_PARTITION_ATTR.to_owned(), CgseValue::Int(7));
+        attrs
+    }
+
     fn add_rule(graph: &mut Graph, rule: &str) {
         graph.add_node_with_attrs(rule, partition_attrs(BIPARTITE_PARTITION_RULE));
     }
@@ -435,6 +441,32 @@ mod tests {
     }
 
     #[test]
+    fn bipartite_hits_drops_unpartitioned_and_non_string_partition_nodes() -> TestResult {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        add_rule(&mut graph, "rule_good");
+        add_memory(&mut graph, "mem_good");
+        graph.add_node_with_attrs("node_unpartitioned", AttrMap::new());
+        graph.add_node_with_attrs("node_bad_partition", non_string_partition_attrs());
+        link(&mut graph, "rule_good", "mem_good");
+        link(&mut graph, "rule_good", "node_bad_partition");
+        link(&mut graph, "node_unpartitioned", "mem_good");
+
+        let result = graph_result(compute_bipartite_hits(&graph))?;
+
+        assert_eq!(
+            result.authorities.keys().cloned().collect::<Vec<_>>(),
+            vec!["mem_good".to_owned()],
+            "only memory-partition nodes may surface as authorities"
+        );
+        assert_eq!(
+            result.hubs.keys().cloned().collect::<Vec<_>>(),
+            vec!["rule_good".to_owned()],
+            "only rule-partition nodes may surface as hubs"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn rule_provenance_ego_unknown_rule_returns_rule_not_found() {
         let graph = Graph::new(CompatibilityMode::Strict);
 
@@ -457,6 +489,39 @@ mod tests {
         assert_eq!(ego.status, RuleProvenanceEgoStatus::NotARuleNode);
         assert!(ego.cited_memories.is_empty());
         assert!(ego.co_citing_rules.is_empty());
+    }
+
+    #[test]
+    fn rule_provenance_ego_ignores_unpartitioned_neighbors() {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        add_rule(&mut graph, "rule_main");
+        add_rule(&mut graph, "rule_peer");
+        add_memory(&mut graph, "mem_shared");
+        graph.add_node_with_attrs("rule_unpartitioned", AttrMap::new());
+        graph.add_node_with_attrs("mem_bad_partition", non_string_partition_attrs());
+        link(&mut graph, "rule_main", "mem_shared");
+        link(&mut graph, "rule_peer", "mem_shared");
+        link(&mut graph, "rule_unpartitioned", "mem_shared");
+        link(&mut graph, "rule_main", "mem_bad_partition");
+
+        let ego = compute_rule_provenance_ego(&graph, "rule_main");
+
+        let cited: Vec<_> = ego
+            .cited_memories
+            .iter()
+            .map(|memory| (memory.memory_id.as_str(), memory.other_rule_count))
+            .collect();
+        assert_eq!(
+            cited,
+            vec![("mem_shared", 1)],
+            "ego traversal must ignore non-memory neighbors and unpartitioned peer rules"
+        );
+        assert_eq!(ego.co_citing_rules.len(), 1);
+        assert_eq!(ego.co_citing_rules[0].rule_id, "rule_peer");
+        assert_eq!(
+            ego.co_citing_rules[0].shared_memory_ids,
+            vec!["mem_shared".to_owned()]
+        );
     }
 
     #[test]
