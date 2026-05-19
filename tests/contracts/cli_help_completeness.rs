@@ -45,6 +45,7 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
             "--ppr-weight",
             "--pack-profile",
             "--resource-profile",
+            "--explain-performance",
             "--explain",
             "--no-pack-dna",
             "--no-coverage-fill",
@@ -64,6 +65,7 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
             "--profile",
             "--pack-profile",
             "--resource-profile",
+            "--explain-performance",
             "--no-coverage-fill",
             "--no-rendered-text",
             "--no-skipped",
@@ -88,6 +90,7 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
             "--profile",
             "--pack-profile",
             "--resource-profile",
+            "--explain-performance",
             "--no-coverage-fill",
             "--no-rendered-text",
             "--no-skipped",
@@ -102,6 +105,9 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
         ],
         "ee pack build --help",
     )?;
+
+    let search_help = help_for(&["ee", "search", "--help"])?;
+    assert_contains_all(&search_help, &["--explain-performance"], "ee search --help")?;
 
     let insights_help = help_for(&["ee", "insights", "--help"])?;
     assert_contains_all(
@@ -485,6 +491,7 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "--ppr-weight",
             "0.5",
             "--explain",
+            "--explain-performance",
             "--no-pack-dna",
             "--json",
         ][..],
@@ -504,6 +511,7 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "verbose",
             "--resource-profile",
             "swarm_heavy",
+            "--explain-performance",
             "--no-coverage-fill=false",
             "--coordination-snapshot",
             "coordination.json",
@@ -511,6 +519,13 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "--as-of",
             "2026-05-19T00:00:00Z",
             "--include-stale",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "search",
+            "release blockers",
+            "--explain-performance",
             "--json",
         ][..],
         &[

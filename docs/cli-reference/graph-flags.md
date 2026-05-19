@@ -38,6 +38,7 @@ owns `--ppr-weight`, `--explain`, and `--no-pack-dna`.
 | `ee context`, `ee pack`, `ee pack build` | `--resource-profile <PROFILE>` | `lean`, `standard`, `swarm_heavy` | `standard` for `context`; query-file/default for `pack` | Selects pack assembly SLOs and resource assumptions. |
 | `ee context`, `ee pack`, `ee pack build` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Reads the source-of-truth memory and graph-link tables. |
 | `ee context`, `ee pack`, `ee pack build` | `--index-dir <PATH>` | filesystem path | `<workspace>/.ee/index/` | Reads derived search indexes before graph-aware packing. |
+| `ee context`, `ee pack`, `ee pack build`, `ee search` | `--explain-performance` | boolean | false | Emits a redaction-safe query or pack performance report instead of normal hits or pack output. |
 | `ee context` | `--explain` | boolean | false | Adds graph-derived Pack DNA metadata to JSON output. |
 | `ee context` | `--no-pack-dna` | boolean | false | Suppresses `data.pack.packDna` even when `--explain` is set. |
 | `ee context`, `ee pack`, `ee pack build` | `--no-coverage-fill[=BOOL]` | optional boolean | false | Disables the coverage-fill pass; pass `--no-coverage-fill=false` to override a lean profile. |
@@ -57,12 +58,15 @@ Example:
 ```bash
 ee context "prepare release" --workspace . --profile thorough \
   --ppr-weight 0.5 --explain --json
+ee context "prepare release" --workspace . --explain-performance --json
 ee pack build --workspace . --query-file release.eeq.json \
   --candidate-pool 150 --speed quality --profile thorough \
   --pack-profile verbose --resource-profile swarm_heavy \
+  --explain-performance \
   --coordination-snapshot coordination.json \
   --include-non-affecting-degradations --as-of 2026-05-19T00:00:00Z \
   --include-stale --json
+ee search "release blockers" --workspace . --explain-performance --json
 ```
 
 ## Insights And Narrow Graph Questions
