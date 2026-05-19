@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_audit_ledger_missing",
+  "introduced_by": {
+    "bead": "bd-112qm",
+    "epic_letter": "SRR6"
+  },
+  "surfaces": [
+    "mesh audit",
+    "support bundle"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A mesh command or support-bundle projection cannot find any mesh audit ledger rows for a workspace that has mesh export/import state.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee mesh export --workspace . --json"
+    ],
+    "invocation": "ee audit timeline --workspace . --surface mesh --json"
+  },
+  "expected_emission": {
+    "code": "mesh_audit_ledger_missing",
+    "severity": "high",
+    "message_contains": [
+      "mesh audit ledger",
+      "missing"
+    ],
+    "repair_contains": "ee audit verify --json",
+    "repair_string": "Inspect `ee audit verify --json` and retry the mesh operation after the audit ledger is healthy."
+  }
+}

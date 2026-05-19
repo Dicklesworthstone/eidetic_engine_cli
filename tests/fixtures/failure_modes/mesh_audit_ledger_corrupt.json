@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_audit_ledger_corrupt",
+  "introduced_by": {
+    "bead": "bd-112qm",
+    "epic_letter": "SRR6"
+  },
+  "surfaces": [
+    "mesh audit",
+    "support bundle"
+  ],
+  "severity": "critical",
+  "repair_present": true,
+  "trigger": {
+    "description": "A mesh audit event row is present but its canonical event hash or previous-event hash does not match the redaction-safe details payload.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee mesh import --workspace . --json"
+    ],
+    "invocation": "ee audit verify --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "mesh_audit_ledger_corrupt",
+    "severity": "critical",
+    "message_contains": [
+      "mesh audit ledger",
+      "corrupt"
+    ],
+    "repair_contains": "ee audit verify --json",
+    "repair_string": "Inspect `ee audit verify --json` and retry the mesh operation after the audit ledger is healthy."
+  }
+}
