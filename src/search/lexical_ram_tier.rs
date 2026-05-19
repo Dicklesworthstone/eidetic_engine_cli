@@ -608,9 +608,9 @@ mod tests {
     /// Helper: turn a literal `[(name, value)]` slice into the reader
     /// closure signature [`LexicalRamTierConfig::from_environment_with_reader`]
     /// expects so the tests stay readable.
-    fn env_reader_from(
-        entries: &[(&'static str, &'static str)],
-    ) -> impl Fn(&'static str) -> Option<String> + '_ {
+    fn env_reader_from<'a>(
+        entries: &'a [(&'static str, &'static str)],
+    ) -> impl Fn(&'static str) -> Option<String> + 'a {
         let map: HashMap<&'static str, &'static str> = entries.iter().copied().collect();
         move |name: &'static str| map.get(name).map(|v| (*v).to_owned())
     }
