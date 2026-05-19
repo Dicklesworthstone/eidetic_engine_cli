@@ -27,6 +27,8 @@ pub const SNAPSHOT_RELEASE_FAILED_CODE: &str = "snapshot_release_failed";
 pub const SNAPSHOT_PIN_FORCE_RELEASED_CODE: &str = "snapshot_pin_force_released";
 pub const READ_POOL_ACQUIRE_TIMEOUT_CODE: &str = "read_pool_acquire_timeout";
 pub const READ_POOL_UNDERSIZED_CODE: &str = "read_pool_undersized";
+pub const READ_POOL_UNDERSIZED_SAMPLE_FLOOR: usize = ACQUIRE_WAIT_SAMPLE_CAP;
+pub const READ_POOL_UNDERSIZED_P99_THRESHOLD: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PoolConfig {
@@ -2183,12 +2185,136 @@ mod tests {
     }
 
     #[test]
+    fn acquire_under_contention_waits_for_pooled_release_before_bypass() {
+        let pool = Arc::new(ReadConnectionPool::new(
+            DatabaseConfig::memory(),
+            PoolConfig::new(1, Duration::from_secs(30))
+                .with_acquire_timeout(Duration::from_millis(250)),
+        ));
+        let first = must(pool.acquire(), "first pooled connection opens");
+        let first_slot = first.slot_id();
+        let waiter_ready = Arc::new(Barrier::new(2));
+
+        let handle = {
+            let pool = Arc::clone(&pool);
+            let waiter_ready = Arc::clone(&waiter_ready);
+            thread::spawn(move || {
+                waiter_ready.wait();
+                let acquired = must(pool.acquire(), "waiter acquires released pooled connection");
+                (acquired.is_ad_hoc(), acquired.slot_id())
+            })
+        };
+
+        waiter_ready.wait();
+        thread::sleep(Duration::from_millis(20));
+        drop(first);
+
+        let (was_ad_hoc, slot_id) = match handle.join() {
+            Ok(result) => result,
+            Err(_) => panic!("waiter thread panicked"),
+        };
+        assert!(!was_ad_hoc);
+        assert_eq!(slot_id, first_slot);
+
+        let stats = pool.stats();
+        assert_eq!(stats.ad_hoc_bypass_count, 0);
+        assert!(stats.acquire_wait.samples >= 2);
+        assert!(stats.acquire_wait.p99_ns > 0);
+    }
+
+    #[test]
+    fn pool_grow_race_concurrent_acquire_at_empty_pool_respects_cap() {
+        let max_size = 3;
+        let readers = 8;
+        let pool = Arc::new(ReadConnectionPool::new(
+            DatabaseConfig::memory(),
+            PoolConfig::new(max_size, Duration::from_secs(30)).with_acquire_timeout(Duration::ZERO),
+        ));
+        let start = Arc::new(Barrier::new(readers + 1));
+        let release = Arc::new(Barrier::new(readers + 1));
+
+        let handles: Vec<_> = (0..readers)
+            .map(|_| {
+                let pool = Arc::clone(&pool);
+                let start = Arc::clone(&start);
+                let release = Arc::clone(&release);
+                thread::spawn(move || {
+                    start.wait();
+                    let acquired = must(pool.acquire(), "concurrent acquire succeeds");
+                    let result = (acquired.is_ad_hoc(), acquired.slot_id());
+                    release.wait();
+                    result
+                })
+            })
+            .collect();
+
+        start.wait();
+        release.wait();
+
+        let mut pooled_slots = BTreeSet::new();
+        let mut ad_hoc_count = 0usize;
+        for handle in handles {
+            let (is_ad_hoc, slot_id) = match handle.join() {
+                Ok(result) => result,
+                Err(_) => panic!("reader thread panicked"),
+            };
+            if is_ad_hoc {
+                ad_hoc_count = ad_hoc_count.saturating_add(1);
+                assert_eq!(slot_id, None);
+            } else {
+                pooled_slots.insert(must_some(slot_id, "pooled slot id present"));
+            }
+        }
+
+        assert_eq!(pooled_slots.len(), max_size);
+        assert_eq!(ad_hoc_count, readers - max_size);
+
+        let stats = pool.stats();
+        assert_eq!(stats.max_seen, max_size);
+        assert_eq!(stats.ad_hoc_bypass_count, (readers - max_size) as u64);
+        assert_eq!(stats.active, 0);
+        assert!(stats.idle <= max_size);
+    }
+
+    #[test]
     fn metrics_acquire_wait_histogram_records_p50_and_p99() {
         let samples = acquire_wait_stats(&[10, 30, 20, 50, 40]);
 
         assert_eq!(samples.samples, 5);
         assert_eq!(samples.p50_ns, 30);
         assert_eq!(samples.p99_ns, 50);
+    }
+
+    #[test]
+    fn metrics_acquire_wait_window_keeps_latest_1024_samples() {
+        let mut state = PoolState {
+            active: 0,
+            idle: Vec::new(),
+            acquire_wait_ns: Vec::with_capacity(ACQUIRE_WAIT_SAMPLE_CAP),
+            next_slot_id: 1,
+            next_pin_id: 1,
+            active_pins: BTreeMap::new(),
+            max_seen: 0,
+            drops: 0,
+            release_failures: 0,
+            ad_hoc_bypass_count: 0,
+        };
+
+        for sample in 0..=ACQUIRE_WAIT_SAMPLE_CAP {
+            record_acquire_wait(&mut state, Duration::from_nanos(sample as u64));
+        }
+
+        assert_eq!(state.acquire_wait_ns.len(), ACQUIRE_WAIT_SAMPLE_CAP);
+        assert_eq!(state.acquire_wait_ns.first().copied(), Some(1));
+        assert_eq!(
+            state.acquire_wait_ns.last().copied(),
+            Some(ACQUIRE_WAIT_SAMPLE_CAP as u128)
+        );
+
+        let stats = acquire_wait_stats(&state.acquire_wait_ns);
+        assert_eq!(stats.samples, ACQUIRE_WAIT_SAMPLE_CAP);
+        assert_eq!(stats.p50_ns, (ACQUIRE_WAIT_SAMPLE_CAP / 2) as u128 + 1);
+        assert_eq!(stats.p99_ns, 1014);
     }
 
     #[test]
