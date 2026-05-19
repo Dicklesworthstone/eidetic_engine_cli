@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::time::{Instant, SystemTime};
+use std::{env, fs};
 
 use rand::Rng;
 use uuid::Uuid;
@@ -45,6 +45,10 @@ fn ambient_env(_: &ee::runtime::determinism::Deterministic<Seed>) {
     let _ = std::env::var("EE_SEED");
     let _ = std::env::var_os("EE_SEED");
     let _ = std::env::vars();
+    let _ = env::var("EE_ALIAS_SEED");
+    let _ = env::var_os("EE_ALIAS_SEED");
+    let _ = env::vars();
+    let _ = env::vars_os();
 }
 
 #[determinism::required]
@@ -89,6 +93,10 @@ fn benign_documentation_mentions() {
     // std::env::var("EE_SEED");
     // std::env::var_os("EE_SEED");
     // std::env::vars();
+    // env::var("EE_SEED");
+    // env::var_os("EE_SEED");
+    // env::vars();
+    // env::vars_os();
     // fs::read_dir(".");
 }
 
@@ -101,6 +109,10 @@ fn benign_block_comment_and_raw_string_mentions() {
      * MemoryId::now();
      * std::fs::read_dir(".");
      * HashSet<String>::new().iter();
+     * env::var("EE_SEED");
+     * env::var_os("EE_SEED");
+     * env::vars();
+     * env::vars_os();
      */
     let _ = r#"std::env::var("EE_SEED") Instant::now() SystemTime::now() chrono::Local::now() RuleId::now()"#;
 }

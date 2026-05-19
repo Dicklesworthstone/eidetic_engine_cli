@@ -109,21 +109,25 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "use seeded ID helpers instead of ambient typed Id::now",
             });
         }
-        if line.contains("std::env::var(") {
+        if line.contains("std::env::var(") || contains_path_call(line, "env::var(") {
             findings.push(Finding {
                 line: line_no,
                 code: "ambient_env_var",
                 message: "read env through the registered config boundary",
             });
         }
-        if line.contains("std::env::var_os(") {
+        if line.contains("std::env::var_os(") || contains_path_call(line, "env::var_os(") {
             findings.push(Finding {
                 line: line_no,
                 code: "ambient_env_var_os",
                 message: "read optional env through the registered config boundary",
             });
         }
-        if line.contains("std::env::vars(") || line.contains("std::env::vars_os(") {
+        if line.contains("std::env::vars(")
+            || line.contains("std::env::vars_os(")
+            || contains_path_call(line, "env::vars(")
+            || contains_path_call(line, "env::vars_os(")
+        {
             findings.push(Finding {
                 line: line_no,
                 code: "ambient_env_iteration",
@@ -350,6 +354,20 @@ fn hash_collection_iteration_call(line: &str) -> bool {
         .any(|needle| line.contains(needle))
 }
 
+fn contains_path_call(line: &str, needle: &str) -> bool {
+    let mut search_start = 0;
+    while let Some(relative_index) = line[search_start..].find(needle) {
+        let index = search_start + relative_index;
+        let previous = line[..index].chars().next_back();
+        if !matches!(previous, Some(ch) if is_identifier_char(ch) || ch == ':') {
+            return true;
+        }
+        search_start = index + needle.len();
+    }
+
+    false
+}
+
 fn domain_id_now_call(line: &str) -> bool {
     let Some(now_index) = line.find("::now(") else {
         return false;
@@ -410,6 +428,10 @@ mod self_tests {
                 // std::env::var("EE_SEED");
                 // std::env::var_os("EE_SEED");
                 // std::env::vars();
+                // env::var("EE_SEED");
+                // env::var_os("EE_SEED");
+                // env::vars();
+                // env::vars_os();
                 // fs::read_dir(".");
             }
         "#;
@@ -425,6 +447,10 @@ mod self_tests {
              * std::env::var("EE_SEED");
              * std::env::var_os("EE_SEED");
              * std::env::vars();
+             * env::var("EE_SEED");
+             * env::var_os("EE_SEED");
+             * env::vars();
+             * env::vars_os();
              * chrono::Utc::now();
              * std::fs::read_dir(".");
              * fs::read_dir(".");
@@ -440,18 +466,23 @@ mod self_tests {
     #[test]
     fn env_and_read_dir_aliases_emit_known_violations() {
         let fixture = r#"
-            use std::fs;
+            use std::{env, fs};
 
             fn ambient() {
                 let _ = std::env::var_os("EE_SEED");
                 let _ = std::env::vars();
                 let _ = std::env::vars_os();
+                let _ = env::var("EE_ALIAS_SEED");
+                let _ = env::var_os("EE_ALIAS_SEED");
+                let _ = env::vars();
+                let _ = env::vars_os();
                 let _ = fs::read_dir(".");
             }
         "#;
         let report = render_report(&scan_fixture(fixture));
+        assert!(report.contains("ambient_env_var"));
         assert!(report.contains("ambient_env_var_os"));
-        assert!(report.contains("ambient_env_iteration"));
+        assert_eq!(report.matches(": ambient_env_iteration:").count(), 4);
         assert!(report.contains("unsorted_read_dir"));
     }
 
