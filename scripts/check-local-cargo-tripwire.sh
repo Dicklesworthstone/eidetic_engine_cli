@@ -25,6 +25,7 @@
 set -eu
 
 REPORT_SCHEMA="ee.rch_local_cargo_tripwire.v1"
+REQUIRED_REMOTE_WRAPPER="scripts/rch_verify.sh -- <cargo command>"
 JSON_OUTPUT=false
 SELF_TEST=false
 MODE="cmd_classify"
@@ -217,7 +218,7 @@ emit_human_cmd() {
     if [ "$detail" != "-" ] && [ -n "$detail" ]; then
         printf '  detail: %s\n' "$detail"
     fi
-    printf '  fix: prefix with `/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch exec -- env TMPDIR=/tmp <cargo command>`\n'
+    printf '  fix: prefix with %s\n' "$REQUIRED_REMOTE_WRAPPER"
 }
 
 emit_json_cmd() {
@@ -233,7 +234,49 @@ emit_json_cmd() {
             --arg reason "$reason" \
             --arg subcommand "$subcommand" \
             --arg detail "$detail" \
-            '{schema:$schema,mode:$mode,allowed:$allowed,reason:$reason,subcommand:$subcommand,detail:$detail}'
+            --arg required_remote_wrapper "$REQUIRED_REMOTE_WRAPPER" \
+            '{
+                schema:$schema,
+                mode:$mode,
+                allowed:$allowed,
+                reason:$reason,
+                subcommand:$subcommand,
+                detail:$detail,
+                localBuildPolicy:{
+                    policy:"rch_only",
+                    status:(if $allowed == "allowed" then "satisfied" else "blocked" end),
+                    commandScope:"planned_command",
+                    allowedReadOnlyCargoSubcommands:["metadata","locate-project","pkgid","tree"]
+                },
+                requiredRemoteWrapper:$required_remote_wrapper,
+                detectedLocalBuilds:(
+                    if $allowed == "denied" then
+                        [{
+                            policyStatus:"local_cargo_disallowed",
+                            commandKind:(if ($subcommand == "rustc" or $subcommand == "rustdoc") then $subcommand else "cargo" end),
+                            subcommand:$subcommand,
+                            reason:$reason,
+                            detail:$detail
+                        }]
+                    else [] end
+                ),
+                repairActions:(
+                    if $allowed == "denied" then
+                        [{
+                            priority:1,
+                            kind:"use_remote_wrapper",
+                            command:$required_remote_wrapper,
+                            message:"Run Rust verification through the repo RCH wrapper; do not retry local Cargo."
+                        }]
+                    else [] end
+                ),
+                evidence:[{
+                    kind:"planned_command_classification",
+                    result:$allowed,
+                    subcommand:$subcommand,
+                    reason:$reason
+                }]
+            }'
     else
         printf '{"schema":"%s","mode":"cmd_classify","allowed":"%s","reason":"%s","subcommand":"%s","detail":"%s"}\n' \
             "$REPORT_SCHEMA" "$allowed" "$reason" "$subcommand" "$detail"
@@ -330,10 +373,52 @@ emit_json_probe() {
             --arg schema "$REPORT_SCHEMA" \
             --arg mode "probe_processes" \
             --arg status "$status" \
+            --arg required_remote_wrapper "$REQUIRED_REMOTE_WRAPPER" \
             --argjson count "$count" \
             --argjson processes "$processes_json" \
             --argjson disk_context "$disk_context" \
-            '{schema:$schema,mode:$mode,status:$status,count:$count,processes:$processes,disk_pressure_context:$disk_context}'
+            '($processes | map({
+                policyStatus:"local_cargo_disallowed",
+                pid:.pid,
+                ppid:.ppid,
+                elapsed:.elapsed,
+                commandKind:.command_kind,
+                cwd:.cwd,
+                command:.command,
+                reason:.reason
+            })) as $detected |
+            {
+                schema:$schema,
+                mode:$mode,
+                status:$status,
+                count:$count,
+                processes:$processes,
+                disk_pressure_context:$disk_context,
+                localBuildPolicy:{
+                    policy:"rch_only",
+                    status:(if $count > 0 then "blocked" else "satisfied" end),
+                    commandScope:"active_process_scan",
+                    allowedReadOnlyCargoSubcommands:["metadata","locate-project","pkgid","tree"]
+                },
+                requiredRemoteWrapper:$required_remote_wrapper,
+                detectedLocalBuilds:$detected,
+                repairActions:(
+                    if $count > 0 then
+                        [{
+                            priority:1,
+                            kind:"inspect_shell_without_killing",
+                            command:null,
+                            message:"Inspect the reported process owner and command; this detector never kills or cleans up processes."
+                        }]
+                    else [] end
+                ),
+                evidence:[{
+                    kind:"active_process_scan",
+                    result:$status,
+                    processCount:$count,
+                    diskPressureContext:$disk_context
+                }]
+            }'
     else
         printf '{"schema":"%s","mode":"probe_processes","status":"%s","count":%d,"processes":[]}\n' \
             "$REPORT_SCHEMA" "$status" "$count"
