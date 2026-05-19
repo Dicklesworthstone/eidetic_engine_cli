@@ -6680,6 +6680,60 @@ mod tests {
     }
 
     #[test]
+    fn context_ppr_seed_map_uses_best_positive_candidate_score() -> Result<(), String> {
+        let seed = MemoryId::from_uuid(uuid::Uuid::from_u128(904));
+        let lexical_only = MemoryId::from_uuid(uuid::Uuid::from_u128(905));
+        let excluded = MemoryId::from_uuid(uuid::Uuid::from_u128(906));
+        let zero = MemoryId::from_uuid(uuid::Uuid::from_u128(907));
+        let candidates = vec![
+            ppr_candidate(seed, 0.80)?,
+            ppr_candidate(lexical_only, 0.30)?,
+            ppr_candidate(zero, 0.10)?,
+        ];
+        let invalid_hit = SearchHit {
+            doc_id: "not-a-memory-id".to_string(),
+            ..ppr_hit(seed, 1.0, Some(1.0))
+        };
+        let search_report = ppr_search_report(vec![
+            ppr_hit(seed, 0.10, Some(0.40)),
+            ppr_hit(seed, 0.75, Some(0.20)),
+            ppr_hit(lexical_only, -0.25, Some(0.30)),
+            ppr_hit(zero, 0.0, Some(0.0)),
+            ppr_hit(excluded, 0.95, Some(0.95)),
+            invalid_hit,
+        ]);
+
+        let seed_map = super::personalized_pagerank_seed_map(&search_report, &candidates);
+
+        assert_eq!(seed_map.len(), 2);
+        let seed_weight = seed_map
+            .get(&seed)
+            .copied()
+            .ok_or_else(|| "seed should be retained".to_string())?;
+        assert!(
+            (seed_weight - 0.75).abs() < 1.0e-6,
+            "duplicate seed hits should keep the best positive vector/lexical weight: {seed_map:?}"
+        );
+        let lexical_weight = seed_map
+            .get(&lexical_only)
+            .copied()
+            .ok_or_else(|| "lexical-only hit should be retained".to_string())?;
+        assert!(
+            (lexical_weight - 0.30).abs() < 1.0e-6,
+            "positive lexical score should seed PPR when vector score is invalid: {seed_map:?}"
+        );
+        assert!(
+            !seed_map.contains_key(&excluded),
+            "off-candidate hits must not seed PPR: {seed_map:?}"
+        );
+        assert!(
+            !seed_map.contains_key(&zero),
+            "non-positive scores must not seed PPR: {seed_map:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn context_ppr_rerank_fires_with_valid_snapshot() -> Result<(), String> {
         let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
         enable_context_ppr_feature(&fixture.workspace_path)?;
