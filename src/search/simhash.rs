@@ -21,7 +21,7 @@
 //! build configuration. The unit tests pin this with byte-stable known
 //! vectors.
 
-use std::fmt;
+use std::{cmp::Ordering, fmt};
 
 use blake3::Hasher as Blake3Hasher;
 use serde::{Deserialize, Serialize};
@@ -172,6 +172,22 @@ pub struct NearestSimHashCandidate<'a> {
     pub hamming_distance: u32,
 }
 
+fn compare_nearest_simhash_candidates(
+    left: &NearestSimHashCandidate<'_>,
+    right: &NearestSimHashCandidate<'_>,
+) -> Ordering {
+    left.hamming_distance
+        .cmp(&right.hamming_distance)
+        .then_with(|| left.candidate_id.cmp(right.candidate_id))
+}
+
+fn compare_ranked_simhash_candidate_entries(
+    left: &(usize, NearestSimHashCandidate<'_>),
+    right: &(usize, NearestSimHashCandidate<'_>),
+) -> Ordering {
+    compare_nearest_simhash_candidates(&left.1, &right.1).then_with(|| left.0.cmp(&right.0))
+}
+
 /// Rank candidates whose Hamming distance is within `max_hamming_distance`.
 ///
 /// Ties are broken by candidate id in ascending lexical order so callers get a
@@ -187,24 +203,26 @@ pub fn ranked_simhash_candidates<'a>(
         return Vec::new();
     }
     let mut ranked = Vec::new();
-    for (candidate_id, fingerprint) in candidates {
+    for (ordinal, (candidate_id, fingerprint)) in candidates.into_iter().enumerate() {
         let distance = hamming_distance(query, fingerprint);
         if distance > max_hamming_distance {
             continue;
         }
-        ranked.push(NearestSimHashCandidate {
-            candidate_id,
-            fingerprint,
-            hamming_distance: distance,
-        });
+        ranked.push((
+            ordinal,
+            NearestSimHashCandidate {
+                candidate_id,
+                fingerprint,
+                hamming_distance: distance,
+            },
+        ));
     }
-    ranked.sort_by(|left, right| {
-        left.hamming_distance
-            .cmp(&right.hamming_distance)
-            .then_with(|| left.candidate_id.cmp(right.candidate_id))
-    });
-    ranked.truncate(limit);
-    ranked
+    if ranked.len() > limit {
+        ranked.select_nth_unstable_by(limit - 1, compare_ranked_simhash_candidate_entries);
+        ranked.truncate(limit);
+    }
+    ranked.sort_by(compare_ranked_simhash_candidate_entries);
+    ranked.into_iter().map(|(_, candidate)| candidate).collect()
 }
 
 /// Select the nearest candidate whose Hamming distance is within
@@ -322,11 +340,7 @@ pub fn first_confirmed_simhash_candidate<'a>(
             embedding,
         ));
     }
-    ranked.sort_by(|(left, _), (right, _)| {
-        left.hamming_distance
-            .cmp(&right.hamming_distance)
-            .then_with(|| left.candidate_id.cmp(right.candidate_id))
-    });
+    ranked.sort_by(|(left, _), (right, _)| compare_nearest_simhash_candidates(left, right));
 
     for (candidate, embedding) in ranked {
         let Some(cosine) = confirm_cosine_similarity(query_embedding, embedding, cosine_floor)
@@ -601,6 +615,48 @@ mod tests {
         let ranked = ranked_simhash_candidates(query, candidates, SIMHASH_BITS as u32, 0);
 
         assert!(ranked.is_empty());
+    }
+
+    #[test]
+    fn ranked_candidates_limited_prefix_matches_full_ranking() {
+        let query = SimHash128::from_u128(0);
+        let candidates = [
+            ("mem_h", SimHash128::from_u128(0b1111_1111)),
+            ("mem_b", SimHash128::from_u128(0b0011)),
+            ("mem_e", SimHash128::from_u128(0b0001_1111)),
+            ("mem_a", SimHash128::from_u128(0b0101)),
+            ("mem_d", SimHash128::from_u128(0b0001)),
+            ("mem_c", SimHash128::from_u128(0b0111)),
+            ("mem_f", SimHash128::from_u128(0b0010)),
+            ("mem_g", SimHash128::from_u128(0b1111)),
+        ];
+
+        let full = ranked_simhash_candidates(query, candidates, SIMHASH_BITS as u32, usize::MAX);
+        let limited = ranked_simhash_candidates(query, candidates, SIMHASH_BITS as u32, 4);
+
+        assert_eq!(limited.as_slice(), &full[..4]);
+    }
+
+    #[test]
+    fn ranked_candidates_limited_selection_preserves_duplicate_key_order() {
+        let query = SimHash128::from_u128(0);
+        let candidates = [
+            ("mem_same", SimHash128::from_u128(0b0001)),
+            ("mem_same", SimHash128::from_u128(0b0010)),
+            ("mem_same", SimHash128::from_u128(0b0100)),
+            ("mem_same", SimHash128::from_u128(0b1000)),
+        ];
+
+        let ranked = ranked_simhash_candidates(query, candidates, SIMHASH_BITS as u32, 2);
+        let fingerprints: Vec<_> = ranked
+            .iter()
+            .map(|candidate| candidate.fingerprint)
+            .collect();
+
+        assert_eq!(
+            fingerprints,
+            vec![SimHash128::from_u128(0b0001), SimHash128::from_u128(0b0010)]
+        );
     }
 
     #[test]
