@@ -23638,9 +23638,8 @@ where
     };
 
     match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &report.human_output())
-        }
+        output::Renderer::Human => write_stdout(stdout, &report.human_output()),
+        output::Renderer::Markdown => write_stdout(stdout, &report.markdown_output()),
         output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
         output::Renderer::Json
         | output::Renderer::Jsonl
@@ -30949,7 +30948,23 @@ impl MemoryReviseReport {
     }
 
     #[must_use]
+    pub fn markdown_output(&self) -> String {
+        let mut output = self.human_output();
+        if let Some(impact_analysis) = self.impact_analysis_json_value() {
+            output.push('\n');
+            output.push_str(&output::render_memory_impact_analysis_markdown(
+                &impact_analysis,
+            ));
+        }
+        output
+    }
+
+    #[must_use]
     pub fn toon_output(&self) -> String {
+        if self.impact_analysis.is_some() {
+            return output::render_toon_from_json(&self.json_output());
+        }
+
         let status = if self.success {
             if self.dry_run { "DRY_RUN" } else { "REVISED" }
         } else {
@@ -30966,10 +30981,7 @@ impl MemoryReviseReport {
 
     #[must_use]
     pub fn json_output(&self) -> String {
-        let impact_analysis = self
-            .impact_analysis
-            .as_ref()
-            .and_then(|analysis| serde_json::to_value(analysis).ok());
+        let impact_analysis = self.impact_analysis_json_value();
         let json = serde_json::json!({
             "schema": "ee.response.v1",
             "success": self.success,
@@ -31008,6 +31020,12 @@ impl MemoryReviseReport {
         });
 
         json.to_string()
+    }
+
+    fn impact_analysis_json_value(&self) -> Option<serde_json::Value> {
+        self.impact_analysis
+            .as_ref()
+            .and_then(|analysis| serde_json::to_value(analysis).ok())
     }
 }
 
@@ -48671,6 +48689,120 @@ mod tests {
             }
             _ => Err("expected Memory Revise command".to_string()),
         }
+    }
+
+    fn memory_revise_impact_report_fixture() -> crate::graph::dominance::MemoryImpactAnalysisReport
+    {
+        crate::graph::dominance::MemoryImpactAnalysisReport {
+            schema: crate::graph::dominance::MEMORY_IMPACT_ANALYSIS_SCHEMA_V1,
+            memory_id: "mem_release_policy".to_owned(),
+            snapshot_version: 9,
+            revision_lineage: vec![crate::graph::dominance::RevisionLineageItem {
+                memory_id: "mem_release_policy".to_owned(),
+                logical_id: "release-policy".to_owned(),
+                depth: 0,
+                relation: "self".to_owned(),
+                valid_from: Some("2026-05-19T00:00:00Z".to_owned()),
+            }],
+            impact_analysis: crate::graph::dominance::RevisionImpactAnalysis {
+                immediate_dominator: Some("mem_root_policy".to_owned()),
+                dominance_frontier: vec!["mem_release_notes".to_owned()],
+                affected_memory_count: 2,
+                validation_status: "valid".to_owned(),
+            },
+            frontiers: vec![crate::graph::dominance::RevisionFrontierItem {
+                memory_id: "mem_release_notes".to_owned(),
+                dominance_frontier_size: 1,
+                affected_memory_ids: vec!["mem_install_docs".to_owned()],
+                evidence: crate::graph::dominance::RevisionFrontierEvidence {
+                    algorithm: "dominance_frontiers",
+                    snapshot_version: 9,
+                },
+            }],
+            degraded: vec![crate::graph::dominance::DominanceDegradation {
+                code: "graph.impact_fixture".to_owned(),
+                severity: "info".to_owned(),
+                message: "fixture impact degradation".to_owned(),
+                repair: Some("ee why mem_release_policy --workspace . --json".to_owned()),
+            }],
+        }
+    }
+
+    fn memory_revise_report_with_impact_analysis() -> crate::core::memory::MemoryReviseReport {
+        crate::core::memory::MemoryReviseReport::dry_run_preview(
+            "mem_release_policy".to_owned(),
+            crate::core::memory::ReviseReason::Correction,
+            vec!["content".to_owned()],
+        )
+        .with_impact_analysis(Some(memory_revise_impact_report_fixture()))
+    }
+
+    #[test]
+    fn memory_revise_markdown_output_preserves_impact_analysis() -> TestResult {
+        let markdown = memory_revise_report_with_impact_analysis().markdown_output();
+
+        ensure_contains(&markdown, "DRY RUN:", "markdown keeps revise summary")?;
+        ensure_contains(
+            &markdown,
+            "# Memory Impact Analysis",
+            "markdown impact title",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Memory: `mem_release_policy`",
+            "markdown impact memory id",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Affected memories: 2",
+            "markdown affected count",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Dominance frontier: mem_release_notes",
+            "markdown dominance frontier",
+        )
+    }
+
+    #[test]
+    fn memory_revise_toon_output_with_impact_matches_json_contract() -> TestResult {
+        let report = memory_revise_report_with_impact_analysis();
+        let json = report.json_output();
+        let toon = report.toon_output();
+
+        ensure_toon_matches_json(&json, &toon, "memory revise impact TOON")?;
+        ensure(
+            !toon.starts_with("DRY_RUN|"),
+            format!("impact TOON must not use legacy pipe summary: {toon:?}"),
+        )?;
+        let decoded = toon::try_decode(&toon, None)
+            .map_err(|error| format!("memory revise TOON should decode: {error}"))?;
+        let actual = serde_json::Value::from(decoded);
+        ensure_equal(
+            &actual["data"]["impactAnalysis"]["memoryId"],
+            &serde_json::json!("mem_release_policy"),
+            "TOON preserves impact memory id",
+        )?;
+        ensure_equal(
+            &actual["data"]["impactAnalysis"]["impactAnalysis"]["affectedMemoryCount"],
+            &serde_json::json!(2),
+            "TOON preserves impact affected count",
+        )
+    }
+
+    #[test]
+    fn memory_revise_toon_output_without_impact_keeps_legacy_summary() -> TestResult {
+        let report = crate::core::memory::MemoryReviseReport::dry_run_preview(
+            "mem_release_policy".to_owned(),
+            crate::core::memory::ReviseReason::Correction,
+            vec!["content".to_owned()],
+        );
+
+        ensure_equal(
+            &report.toon_output(),
+            &"DRY_RUN|mem_release_policy|correction|content".to_owned(),
+            "legacy no-impact TOON",
+        )
     }
 
     #[test]
