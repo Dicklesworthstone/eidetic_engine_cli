@@ -1340,3 +1340,239 @@ Inter-dependency edges within §48–§55:
 ---
 
 *End of Ambition Round 3. Round-3 beads from §48–§56 to be created in Phase 3a-redux. With 47 numbered sections and 8 ambition-tier math additions, this bridge plan now spans every reachable gap from release-readiness to PhD-level algorithm work, with explicit cost-of-omission for each.*
+
+---
+
+# PART III — 2026-05-19 Verification Pass
+
+> Written 2026-05-19, five days into the Part II execution cycle. Vision-coverage gap fell from **7.58 % (2026-05-14) → 4.29 % (2026-05-19)** — the swarm is consuming Part II as designed. This Part III does NOT redirect; it patches three gaps the swarm could not see from inside their assigned beads, refreshes the verification-pass scoreboard, and pins the criteria for triggering Part IV.
+>
+> **Non-negotiables (carry from Parts I + II):** No scope reduction. No new forbidden deps. No close-with-abstention as substitute for implementation. Determinism, provenance, audit on every new path. CLI first, MCP follows, daemon optional. **No new plan files; revise in-place.**
+
+---
+
+## 57. Verification-Pass Scoreboard (2026-05-19)
+
+Snapshot of every Wave 4 / Part II surface five days into execution. Source: live `beads.db` queries + code-grep of `src/cli/mod.rs` and `src/core/*` + `.vision-coverage-report.json` regenerated at audit time.
+
+| Surface (§ref) | Bead | Status 2026-05-14 | Status 2026-05-19 |
+|---|---|---|---|
+| `db_inspect` (§14.1) | `bd-3usjw.1` + .1.1–.1.4 | open P1 | **closed** (4 closeouts shipped) |
+| `graph_centrality_read` (§14.2) | `bd-3usjw.2` | open P1 | **closed** |
+| `mcp_top_level` (§14.3) | `bd-3usjw.3` | open P1 | **closed** |
+| `serve_localhost` v1 (§14.4) | `bd-3usjw.4` | open P1 | **defer-to-v2 carve-out satisfied** via ADR 0033 (`bd-3usjw.24` closed) |
+| `swarm_subcommand` doc (§14.5) | `bd-3usjw.5` | open P1 | closed (doc + scanner fix) |
+| `trauma_guard_preflight` (§15.1) | `bd-3usjw.6` + `bd-3usjw.21` | open P1 | **closed** — `src/core/preflight_guard.rs:1791` matches `risk\|anti-pattern\|failure` |
+| `first_signed_release` (§16.2) | `bd-3usjw.9` | blocked | still **blocked** by `bd-3usjw.72` (v0.1.0 tag points at a `chore(beads)` commit) |
+| `crate_name_resolution` (§16.3) | `bd-3usjw.10` | open P1 | **closed** (renamed to `eidetic-engine`; binary stays `ee`) |
+| `franken_dep_publishing` (§16.4) | `bd-3usjw.11` + .11.1.* | blocked | **mostly shipped** — 23 of 26 deps on crates.io. Residual blockers: `sqlmodel-frankensqlite` (`bd-3usjw.11.1.8`/`.11.1.32`), `fnx-runtime`/`fnx-algorithms`/`fnx-classes` (`bd-3usjw.11.1.4`–`.11.1.6`), `fnx-cgse`/`fnx-convert` (`.11.1.30`/`.31`) |
+| `publish_flip` (§16.5) | `bd-3usjw.12` | open P2 | still open P2 (depends on §16.2 + §16.4) |
+| `homebrew_tap` (§16.6) | `bd-3usjw.13` | open P3 | still open P3 (defers to v0.5) |
+| `plan_doc_sweep` (§17.1) | `bd-3usjw.14` | open P2 | still open P2 — **not yet started** |
+| `plan_doc_rename` (§17.2) | `bd-3usjw.15` | open P2 | still open P2; sibling `bd-3usjw.29` (permission to delete orphan) still unanswered |
+| `gemini_pane_archive` (§17.3) | `bd-3usjw.16` | open P3 | **closed** |
+| `cross_platform_determinism` (§29 / `bd-3usjw.25`) | open P1 | open P1, 1 of 4 children closed |
+| `readme_invariant_harness` (§25.1) | `bd-3usjw.22` | open | **closed** |
+| `bridge_staleness_gate` (§36.1) | `bd-3usjw.33` | open P3 | **closed** — `.bridge-staleness-report.json` regenerating |
+| `bead_file_surface_extractor` (§37.2) | `bd-3usjw.34` | open P2 | **closed** — `scripts/extract_bead_file_surfaces.sh` ships |
+| `agents_md_reality_check_cadence` (§38.1) | `bd-3usjw.35` | open P3 | **closed** — AGENTS.md L1167-1175 carries the cadence |
+| `bridge_execution_log_seed` (§39.1) | `bd-3usjw.36` | open P3 | **closed** — `docs/bridge_execution_log.md` |
+| `readme_cli_parity` (§41.1) | `bd-3usjw.38` | open P2 | **closed** |
+| `verify_time_budget` (§42.1) | `bd-3usjw.39` | open P2 | **closed** — `scripts/verify-budget.toml` |
+| Agent-UX P0 `bd-17c65.2` (Search honesty) | open P0 | **closed** with "60 assertions, zero failures" RCH evidence |
+| GraphAccretion infra `bd-bife.{1,2,3,4,6,7,8,9,12,21,25}` | mostly open | **all closed**; remaining `bd-bife` work is renderers/eval/fuzz/scale-fixtures |
+
+**Score:** of the ~40 Part II beads with an explicit `bd-3usjw.*` ID, ~26 closed / ~5 blocked-on-upstream / ~9 still open. Wave 4A is essentially done; Wave 4C is gated on three upstream-publish dependencies; Wave 4D (plan-doc sweep) has not started; Waves 4E + 4F + 5 are the live battlefronts.
+
+---
+
+## 58. Residual Gaps the Five-Day Audit Found
+
+Three findings the swarm could not see from inside their beads. Each gets a new bead in §59.
+
+### 58.1 `br` read commands race against concurrent JSONL rewrites
+
+**Symptom:** Intermittent `Configuration error: Invalid JSON at line N: invalid type: integer 7, expected struct Issue` from `br ready` / `br list` / `br stats`. The exact line number changes between runs.
+
+**Investigated 2026-05-19 with the `/fixing-beads-problems` skill.** Snapshot taken at 17:28:11. `br doctor --json` returns `"ok":true` across all 9 checks (`jsonl.parse`: 2311 records; `counts.db_vs_jsonl`: equal; `sqlite.integrity_check`: ok). Re-running the failing commands 41 seconds later — they all succeed (`br ready`: 20 ready issues; `br stats`: 2311 total / 278 open / 7 in_progress / 189 blocked / 1980 closed / 107 ready). `.beads/last-touched` showed `bd-1zb7k.10.2` had just touched the store between my two checks. Conclusion: the `issues.jsonl` projection is being rewritten by another agent's `br sync --flush-only` while my `br ready` is reading it — the JSONL parser sees a partial-write race.
+
+**Writes still work and are non-corrupting** — the failure is read-side only and self-heals once the concurrent writer's `fsync` completes. But the failure mode is **misleading**: every agent that hits it reasonably concludes "the JSONL is corrupt" and either (a) idles, (b) hand-edits the file, or (c) escalates to recovery, none of which is the right answer.
+
+**Cost of omission:** Wasted recovery cycles; agents distrust `br ready`; orchestrators escalate transient races to operators. Probability: **multiple agents per day** as the swarm grows.
+
+**The right fix is upstream in `beads_rust`** (atomic-rename JSONL writes + read-retry on parse error). Until that lands, this repo needs (a) a documented retry-once guidance for agents and (b) a thin wrapper that retries `br ready` / `br list` / `br stats` on transient parse errors.
+
+### 58.2 Root-clutter re-accumulation since `bd-3usjw.42` closed
+
+`bd-3usjw.42` (`untracked_work_audit_2026_05_14`) closed on 2026-05-14 with a one-shot pass over the dirty root. Five days later, the root has re-accumulated:
+
+- 13 `test_*` standalone binaries + their `.rs` sources (`test_capture`, `test_clamp`, `test_clamp2`, `test_drop`, `test_ln_1p`, `test_min`, `test_minmax`, `test_multibyte`, plus matching `.rs` files). Each binary is 450–510 KB.
+- 17 `ubs_*.txt` reports + `ubs.json` + `ubs_findings.jsonl` (≈ 350 KB).
+- `temp_signal.rs` (40 KB), `db_for_loops.txt` (25 KB), `findings.jsonl`, `pass1.jsonl`, `fix_unwrap_err.sh`, `find_async_sleep.sh`.
+
+All are gitignored or untracked — **functionally harmless** — but they are evidence that agents leave debris after one-shot probes and the `.gitignore` is still playing whack-a-mole instead of forbidding the patterns wholesale. The 2026-05-14 commit `ae20a6ba chore(gitignore): ignore test_capture scratchpads` addressed only one family.
+
+**Cost of omission:** Cargo's `cargo check --all-targets` resolves `test_*.rs` at root as bin targets if they ever get registered, surprising downstream agents. Existing `.gitignore` entries are reactive rather than rule-driven.
+
+### 58.3 `SITUATION_DECISIONING_UNAVAILABLE_CODE` survived its implements-surface close
+
+The implements-surface bead `bd-oofg` (closed) shipped real `ee situation classify/compare/link` with persisted edges. But the abstention sentinel `SITUATION_DECISIONING_UNAVAILABLE_CODE` at `src/core/situation.rs:21` was **not deleted in the closure PR**. This is exactly the closure-linter §1.2 failure mode — a stub constant outlives its implementation. The constant is currently dead code (no caller branches to it), but every future grep for honesty-only sentinels turns it up and re-litigates the question.
+
+`LAB_REPLAY_UNAVAILABLE_CODE` at `src/core/lab.rs:36` is the **legitimate** counterpart — tracked under the open `bd-17c65.14.15.{4,5,6}` N15 lab-replay family, which has not closed yet. No action needed there.
+
+**Cost of omission:** Closure-linter slowly loses meaning as residual sentinels accumulate. The audit-honesty contract drifts.
+
+### 58.4 Tracing-field violations on three open Part II beads
+
+`.tracing-field-report.json` (status=`fail`, 6 violations) flags **3 still-open beads** with missing structured tracing on their declared file surfaces:
+
+- `bd-3usjw.50` (radix_ulid_sort) — `src/util/radix_ulid_sort.rs` lacks `workspace_id / request_id / bead_id / surface / phase / elapsed_ms / degraded_codes` fields.
+- `bd-3usjw.56` (no_forbidden_suffixes_test) — `tests/no_forbidden_suffixes.rs` same.
+- `bd-3usjw.69` (mcp_serve_stdio_subcommand, blocked) — missing TRACING paragraph in bead description.
+
+These are blocking the `check-tracing-fields.sh` gate from going green. Not a new gap — already covered by the existing beads — but worth noting that those beads' descriptions need a TRACING paragraph before they can close cleanly.
+
+**Action:** add a TRACING paragraph and the standard field set as a closeout requirement on each. *(comment-only, no new bead)*
+
+---
+
+## 59. New Work Items (filed 2026-05-19)
+
+Filed via `br create --parent bd-3usjw` after the `/fixing-beads-problems` skill confirmed the beads store was healthy (the §58.1 symptom was a transient concurrent-writer race, not durable corruption).
+
+| Bead | Title | Priority |
+|---|---|---|
+| `bd-3usjw.73` | br read commands race against concurrent JSONL rewrites | P1 |
+| `bd-3usjw.74` | rule-based gitignore extension for re-accumulating root scratchpads | P2 |
+| `bd-3usjw.75` | delete dead `SITUATION_DECISIONING_UNAVAILABLE_CODE` sentinel | P2 |
+| `bd-3usjw.76` | TRACING paragraph closeout requirement for bd-3usjw.50/.56/.69 | P3 |
+
+### 59.1 `bd-3usjw.73: br read commands race against concurrent JSONL rewrites` (P1)
+
+```
+FILE SURFACE: AGENTS.md (agent guidance section), optionally
+              scripts/br_retry.sh (NEW thin wrapper if we decide to ship one),
+              upstream beads_rust report (out of this repo's tree).
+LABELS:       beads-infra, reality-check-2026-05-19
+PARENT:       bd-3usjw
+PRIORITY:     P1 (transient, self-healing, but misleading — wastes recovery
+                  cycles and erodes trust in `br ready`).
+COST OF OMISSION: agents who hit the symptom conclude the JSONL is corrupt
+                 and either idle or hand-edit (worst case). Probability:
+                 multiple agents per day as the swarm scales.
+ACCEPTANCE:
+  1. AGENTS.md (or docs/agent_integration.md) carries a "When `br ready`
+     returns CONFIG_ERROR: Invalid JSON at line N" note explaining the
+     race + the retry-once remedy.
+  2. Either (a) a thin `scripts/br_retry.sh` wrapper that retries on
+     transient parse errors lands and is documented as the canonical
+     work-selection entry point, OR (b) an upstream beads_rust issue is
+     filed with a minimal-reproducer (concurrent flusher + reader)
+     and linked here for follow-through. EITHER, not both — pick the
+     less-invasive option in the closeout comment.
+  3. A test in tests/br_ready_race_smoke.rs (or equivalent shell harness
+     under tests/contracts/) spawns N concurrent JSONL flushers + 1
+     reader and verifies the retry path stays robust.
+EVIDENCE OF DIAGNOSIS:
+  - .beads/recovery_20260519T212829Z_realitycheck/ snapshot at 17:28:11
+  - br doctor --json returned ok:true at 17:28:53
+  - issues.jsonl mtime moved 17:28:11 -> 17:28:52 (41-second window)
+  - last-touched showed bd-1zb7k.10.2 writer was active
+```
+
+### 59.2 `bd-3usjw.74: rule-based gitignore extension + scratchpad housekeeping` (P2)
+
+```
+FILE SURFACE: .gitignore, .rchignore, scripts/check-local-cargo-tripwire.sh
+LABELS:       reality-check-2026-05-19, repo-hygiene
+PARENT:       bd-3usjw (sibling of bd-3usjw.42)
+PRIORITY:     P2 (advisory; no functional impact)
+COST OF OMISSION: agents keep dropping debris on root; reactive .gitignore
+                 patches multiply over time; `git status -uall` becomes noisy
+                 (drowns real changes); occasional `cargo check --all-targets`
+                 picks up a `test_*.rs` as a bin target.
+ACCEPTANCE:
+  1. `.gitignore` adds rule-based patterns for `test_*` standalone scripts
+     and binaries at repo root (`test_*.rs`, `test_capture*`, `test_clamp*`,
+     `test_drop*`, `test_ln_1p*`, `test_min*`, `test_minmax*`,
+     `test_multibyte*`, `test_output*.log`).
+  2. `.gitignore` adds rule-based pattern for `ubs_*.{txt,json,jsonl}` ad-hoc
+     UBS scan output.
+  3. `.gitignore` adds rule-based pattern for `temp_*.rs`, `findings.jsonl`,
+     `pass*.jsonl`, `db_for_loops*`, `fix_*.sh`, `find_*.sh` agent scratchpads.
+  4. The existing files matching the new patterns are explicitly preserved
+     (no auto-delete; AGENTS.md Rule 1 — file deletion needs user permission).
+     A separate human-confirm step or `permission_request_*` bead handles
+     cleanup of the 30+ existing untracked files at root.
+  5. A test in `tests/repo_hygiene_gitignore.rs` walks `git status -uall`
+     output and asserts no `test_*.rs` / `ubs_*.txt` / `temp_*.rs` at repo
+     root (depth 1) is left untracked.
+```
+
+### 59.3 `bd-3usjw.75: delete dead SITUATION_DECISIONING_UNAVAILABLE_CODE sentinel` (P2)
+
+```
+FILE SURFACE: src/core/situation.rs (line 21 — delete the const + every
+              reference; verify cargo check still passes; bump closure-linter
+              snapshot if it tracks this constant).
+LABELS:       honesty-only-cleanup, reality-check-2026-05-19
+PARENT:       bd-3usjw (sibling of bd-oofg's closure)
+PRIORITY:     P2
+COST OF OMISSION: closure-linter slowly loses meaning as residual sentinels
+                 accumulate; future audits re-litigate "is situation
+                 decisioning real?" every time grep flags this constant.
+ACCEPTANCE:
+  1. `grep -r SITUATION_DECISIONING_UNAVAILABLE_CODE src/` returns zero hits.
+  2. `cargo check --all-targets` passes.
+  3. `cargo clippy --all-targets -- -D warnings` passes.
+  4. Closure-linter audit report unchanged or reduced (no new violations).
+  5. Per CLOSE_THE_GAP §11 standing instruction, deletion is in-place, no
+     user-permission bead required.
+NOTE: `LAB_REPLAY_UNAVAILABLE_CODE` at src/core/lab.rs:36 is the legitimate
+      counterpart — tracked under bd-17c65.14.15.{4,5,6} (open). Do NOT touch.
+```
+
+### 59.4 `bd-3usjw.76: tracing-paragraph closeout requirement on bd-3usjw.50/.56/.69` (P3)
+
+```
+FILE SURFACE: bead descriptions only (no code change).
+LABELS:       reality-check-2026-05-19, tracing-field-required
+PRIORITY:     P3 (process gate; advisory until those beads attempt closure)
+COST OF OMISSION: check-tracing-fields.sh stays red; future closures slip
+                 the gate; honesty-tracing contract degrades.
+ACCEPTANCE:
+  1. Each of bd-3usjw.50, .56, .69 carries a TRACING paragraph in its
+     description naming the required fields (workspace_id, request_id,
+     bead_id, surface, phase, elapsed_ms, degraded_codes) and the
+     standard phases (dependency_check, dispatch, input, persistence,
+     response).
+  2. The relevant code paths emit those fields when work resumes on each
+     bead; `.tracing-field-report.json` returns to status=`pass` after the
+     three beads close.
+```
+
+---
+
+## 60. Part III Closure Criteria
+
+Part III is "done" — implementation is the swarm's job, not the plan's — when:
+
+1. ✅ §59.1–§59.4 beads filed with the acceptance contracts verbatim, properly labeled, and parent-linked to `bd-3usjw` (filed 2026-05-19 as `bd-3usjw.73`, `.74`, `.75`, `.76`).
+2. `bd-3usjw.73` (br read race) closes: AGENTS.md guidance lands OR retry wrapper ships OR upstream beads_rust issue is filed.
+3. `bv --robot-triage` shows the four new beads with no cycles.
+4. `.vision-coverage-report.json` regenerates with `gap_percentage ≤ 4.29 %` (no regression from today's baseline).
+
+---
+
+## 61. When Does Part IV Trigger?
+
+Per AGENTS.md L1167-1175, the reality-check cadence fires on the **90-day clock OR vision-coverage gap > 5 %**.
+
+- 90-day clock: next bridge due **2026-08-13** (90 days from Part II baseline 2026-05-14).
+- Gap-threshold trigger: current gap = **4.29 %** (well under). The swarm is closing gap faster than it's opening new ones.
+
+**Indicator of premature Part IV need:** if `bd-3usjw.9` (first signed release) and `bd-3usjw.11` (franken_dep_publishing) both stay blocked through 2026-06-15, the release-readiness story has stalled enough to warrant an off-cycle bridge focused exclusively on the upstream-publishing coordination. Otherwise: stay the course, eat Part II, ride the 90-day clock.
+
+---
+
+*End of Part III. Part III adds 4 new beads (§59.1–§59.4) and consolidates the verification scoreboard. Total bridge plan now spans 60 numbered sections across Parts I, II, and III. Next reality check on 2026-08-13 unless gap > 5 % first.*
