@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.host_calibration.host_class.v1.json",
+  "title": "ee.host_calibration.host_class.v1",
+  "description": "Pure host-class classification derived from a caller-provided host profile probe and explicit calibration freshness evidence.",
+  "type": "object",
+  "required": [
+    "schema",
+    "sideEffectFree",
+    "hostClass",
+    "profileCeiling",
+    "confidence",
+    "calibrationFreshness",
+    "reasonCodes",
+    "repairActions"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.host_calibration.host_class.v1"
+    },
+    "sideEffectFree": {
+      "type": "boolean",
+      "const": true
+    },
+    "hostClass": {
+      "type": "string",
+      "enum": [
+        "constrained",
+        "portable",
+        "laptop",
+        "workstation",
+        "local_256gb",
+        "rch_only_topology"
+      ]
+    },
+    "profileCeiling": {
+      "type": "string",
+      "enum": ["constrained", "portable", "workstation", "swarm"]
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    },
+    "calibrationFreshness": {
+      "type": "string",
+      "enum": ["fresh", "stale", "missing", "unavailable"]
+    },
+    "reasonCodes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/reasonCode"},
+      "uniqueItems": true
+    },
+    "repairActions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/repairAction"}
+    }
+  },
+  "$defs": {
+    "reasonCode": {
+      "type": "string",
+      "enum": [
+        "cpu_logical_cores_constrained",
+        "cpu_logical_cores_portable",
+        "cpu_logical_cores_workstation",
+        "cpu_logical_cores_swarm",
+        "memory_available_constrained",
+        "memory_available_portable",
+        "memory_available_workstation",
+        "memory_available_swarm",
+        "disk_capacity_constrained",
+        "disk_capacity_sufficient",
+        "disk_capacity_swarm_ready",
+        "target_dir_shared",
+        "target_dir_isolated",
+        "target_dir_external",
+        "rch_topology_missing",
+        "rch_topology_available",
+        "calibration_fresh",
+        "calibration_stale",
+        "calibration_missing",
+        "calibration_unavailable",
+        "synthetic_fixture_constrained",
+        "synthetic_fixture_portable",
+        "synthetic_fixture_workstation",
+        "synthetic_fixture_swarm"
+      ]
+    },
+    "repairAction": {
+      "type": "object",
+      "required": ["priority", "kind", "command", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "priority": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["calibration", "host_profile_probe"]
+        },
+        "command": {
+          "type": ["string", "null"]
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.host_calibration.host_class.v1",
+      "sideEffectFree": true,
+      "hostClass": "local_256gb",
+      "profileCeiling": "swarm",
+      "confidence": "high",
+      "calibrationFreshness": "fresh",
+      "reasonCodes": [
+        "cpu_logical_cores_swarm",
+        "memory_available_swarm",
+        "disk_capacity_swarm_ready",
+        "target_dir_external",
+        "rch_topology_available",
+        "calibration_fresh",
+        "synthetic_fixture_swarm"
+      ],
+      "repairActions": []
+    }
+  ]
+}

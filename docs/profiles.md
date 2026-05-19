@@ -96,6 +96,53 @@ ee profile config apply --profile constrained
 
 Valid profiles: `constrained`, `portable`, `workstation`, `swarm`.
 
+## Calibrated Recommendation Contract
+
+H3 recommender output uses a standalone schema:
+`ee.host_calibration.recommendation.v1`. It is not a replacement for
+`ee.host_profile.v1` or `ee.profile.runtime.v1`:
+
+- `ee.host_profile.v1` is the read-only probe input.
+- `ee.host_calibration.recommendation.v1` explains the recommended profile and
+  budget deltas.
+- `ee.profile.runtime.v1` reports the effective profile a command actually
+  used.
+
+Status, doctor, and support-bundle surfaces should embed the recommendation
+report instead of copying its fields into surface-specific shapes. The report
+must include:
+
+| Field | Meaning |
+|-------|---------|
+| `configuredProfile` | Explicit config or CLI override, or `null` when absent |
+| `recommendedProfile` | Deterministic recommendation from host probe and calibration evidence |
+| `effectiveProfile` | Profile used after explicit overrides are applied |
+| `budgetDeltas[]` | Per-budget comparison from baseline to recommended/effective value |
+| `reasonCodes[]` | Stable explanation codes, sorted by deterministic implementation order |
+| `calibrationFreshness` | Fresh/stale/missing/unavailable evidence status with repair hint |
+| `topologyWarnings[]` | RCH, target-dir, and path-topology warnings that affect budgets |
+| `degraded[]` | Response-time degradations that changed the recommendation |
+
+The recommender is side-effect-free. It never writes `.ee/config.toml`, changes
+profile settings, starts RCH work, or mutates caches. Operators apply changes
+only through the existing `ee profile config plan/apply` workflow.
+
+### Reason-Code Taxonomy
+
+Reason codes are schema-pinned strings. New codes require a schema update and a
+fixture in the implementing bead.
+
+| Category | Codes |
+|----------|-------|
+| CPU | `cpu_logical_cores_constrained`, `cpu_logical_cores_portable`, `cpu_logical_cores_workstation`, `cpu_logical_cores_swarm` |
+| Memory | `memory_available_constrained`, `memory_available_portable`, `memory_available_workstation`, `memory_available_swarm` |
+| Disk | `disk_capacity_constrained`, `disk_capacity_sufficient`, `disk_capacity_swarm_ready` |
+| Target dir | `target_dir_shared`, `target_dir_isolated`, `target_dir_external` |
+| RCH topology | `rch_topology_missing`, `rch_topology_available`, `rch_topology_version_skew`, `rch_topology_workspace_metadata_blocked`, `rch_topology_remote_required` |
+| Calibration freshness | `calibration_fresh`, `calibration_stale`, `calibration_missing`, `calibration_unavailable` |
+| Synthetic fixtures | `synthetic_fixture_constrained`, `synthetic_fixture_portable`, `synthetic_fixture_workstation`, `synthetic_fixture_swarm` |
+| Overrides | `explicit_profile_override` |
+
 ## Profile Budgets
 
 Each profile sets default budgets for:
@@ -189,6 +236,8 @@ ee profile config plan --json | jq '{
 | Schema | Description |
 |--------|-------------|
 | `ee.host_profile.v1` | Host resource probe results |
+| `ee.host_calibration.host_class.v1` | Pure host-class classifier output for recommender internals |
+| `ee.host_calibration.recommendation.v1` | Calibrated profile recommendation and budget deltas |
 | `ee.profile.config.plan.v1` | Config plan/apply report |
 | `ee.profile.runtime.v1` | Runtime profile status |
 

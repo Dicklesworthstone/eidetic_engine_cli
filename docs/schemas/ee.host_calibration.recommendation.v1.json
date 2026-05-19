@@ -1,0 +1,309 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.host_calibration.recommendation.v1.json",
+  "title": "ee.host_calibration.recommendation.v1",
+  "description": "Deterministic, redaction-safe host calibration recommendation for operating profile and budget deltas.",
+  "type": "object",
+  "required": [
+    "schema",
+    "sideEffectFree",
+    "configMutation",
+    "hostProfileSchema",
+    "configuredProfile",
+    "recommendedProfile",
+    "effectiveProfile",
+    "confidence",
+    "budgetDeltas",
+    "reasonCodes",
+    "calibrationFreshness",
+    "topologyWarnings",
+    "degraded"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.host_calibration.recommendation.v1"
+    },
+    "sideEffectFree": {
+      "type": "boolean",
+      "const": true
+    },
+    "configMutation": {
+      "type": "string",
+      "const": "never"
+    },
+    "hostProfileSchema": {
+      "type": "string",
+      "const": "ee.host_profile.v1"
+    },
+    "configuredProfile": {
+      "description": "Profile selected in config or by CLI override. Null when no operator override is present.",
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/operatingProfile"}
+      ]
+    },
+    "recommendedProfile": {"$ref": "#/$defs/operatingProfile"},
+    "effectiveProfile": {"$ref": "#/$defs/operatingProfile"},
+    "confidence": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    },
+    "budgetDeltas": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/budgetDelta"}
+    },
+    "reasonCodes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/reasonCode"},
+      "uniqueItems": true
+    },
+    "calibrationFreshness": {"$ref": "#/$defs/calibrationFreshness"},
+    "topologyWarnings": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/topologyWarning"}
+    },
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradation"}
+    }
+  },
+  "$defs": {
+    "operatingProfile": {
+      "type": "string",
+      "enum": ["constrained", "portable", "workstation", "swarm"]
+    },
+    "reasonCode": {
+      "type": "string",
+      "enum": [
+        "cpu_logical_cores_constrained",
+        "cpu_logical_cores_portable",
+        "cpu_logical_cores_workstation",
+        "cpu_logical_cores_swarm",
+        "memory_available_constrained",
+        "memory_available_portable",
+        "memory_available_workstation",
+        "memory_available_swarm",
+        "disk_capacity_constrained",
+        "disk_capacity_sufficient",
+        "disk_capacity_swarm_ready",
+        "target_dir_shared",
+        "target_dir_isolated",
+        "target_dir_external",
+        "rch_topology_missing",
+        "rch_topology_available",
+        "rch_topology_version_skew",
+        "rch_topology_workspace_metadata_blocked",
+        "rch_topology_remote_required",
+        "calibration_fresh",
+        "calibration_stale",
+        "calibration_missing",
+        "calibration_unavailable",
+        "synthetic_fixture_constrained",
+        "synthetic_fixture_portable",
+        "synthetic_fixture_workstation",
+        "synthetic_fixture_swarm",
+        "explicit_profile_override"
+      ]
+    },
+    "budgetDelta": {
+      "type": "object",
+      "required": [
+        "surface",
+        "field",
+        "baselineProfile",
+        "recommendedValue",
+        "effectiveValue",
+        "configuredValue",
+        "direction",
+        "reasonCodes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "surface": {
+          "type": "string",
+          "enum": [
+            "search",
+            "pack",
+            "cache",
+            "writeSpool",
+            "steward",
+            "verification",
+            "diagnostics",
+            "graph",
+            "index",
+            "burstAdmission"
+          ]
+        },
+        "field": {
+          "type": "string",
+          "pattern": "^[a-z][A-Za-z0-9]*(\\.[a-z][A-Za-z0-9]*)*$"
+        },
+        "baselineProfile": {"$ref": "#/$defs/operatingProfile"},
+        "recommendedValue": {"$ref": "#/$defs/jsonValue"},
+        "effectiveValue": {"$ref": "#/$defs/jsonValue"},
+        "configuredValue": {"$ref": "#/$defs/jsonValueOrNull"},
+        "direction": {
+          "type": "string",
+          "enum": ["increase", "decrease", "unchanged", "override"]
+        },
+        "reasonCodes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/reasonCode"},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "repair": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "calibrationFreshness": {
+      "type": "object",
+      "required": [
+        "status",
+        "source",
+        "generatedAt",
+        "ageSeconds",
+        "staleAfterSeconds",
+        "reasonCodes",
+        "repair"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["fresh", "stale", "missing", "unavailable"]
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "host_profile_probe",
+            "synthetic_fixture",
+            "calibration_artifact",
+            "unavailable"
+          ]
+        },
+        "generatedAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "ageSeconds": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "staleAfterSeconds": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "reasonCodes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/reasonCode"},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "repair": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "topologyWarning": {
+      "type": "object",
+      "required": ["code", "severity", "sourceField", "message", "repair"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"$ref": "#/$defs/reasonCode"},
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "sourceField": {
+          "type": "string",
+          "pattern": "^[a-z][A-Za-z0-9]*(\\.[a-z][A-Za-z0-9]*)*$"
+        },
+        "message": {"type": "string"},
+        "repair": {"type": ["string", "null"]}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message", "repair"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {"type": "string"},
+        "repair": {"type": ["string", "null"]},
+        "details": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      }
+    },
+    "jsonValueOrNull": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/jsonValue"}
+      ]
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.host_calibration.recommendation.v1",
+      "sideEffectFree": true,
+      "configMutation": "never",
+      "hostProfileSchema": "ee.host_profile.v1",
+      "configuredProfile": null,
+      "recommendedProfile": "swarm",
+      "effectiveProfile": "swarm",
+      "confidence": "high",
+      "budgetDeltas": [
+        {
+          "surface": "pack",
+          "field": "budgets.pack.maxTokens",
+          "baselineProfile": "workstation",
+          "recommendedValue": 8000,
+          "effectiveValue": 8000,
+          "configuredValue": null,
+          "direction": "increase",
+          "reasonCodes": [
+            "cpu_logical_cores_swarm",
+            "memory_available_swarm",
+            "target_dir_external",
+            "rch_topology_available"
+          ],
+          "repair": null
+        }
+      ],
+      "reasonCodes": [
+        "cpu_logical_cores_swarm",
+        "memory_available_swarm",
+        "disk_capacity_swarm_ready",
+        "target_dir_external",
+        "rch_topology_available",
+        "calibration_fresh"
+      ],
+      "calibrationFreshness": {
+        "status": "fresh",
+        "source": "host_profile_probe",
+        "generatedAt": "2026-05-19T13:55:00Z",
+        "ageSeconds": 0,
+        "staleAfterSeconds": 86400,
+        "reasonCodes": ["calibration_fresh"],
+        "repair": null
+      },
+      "topologyWarnings": [],
+      "degraded": []
+    }
+  ]
+}

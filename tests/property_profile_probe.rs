@@ -6,10 +6,11 @@
 //! 3. Budget scaling is monotonic with profile tier
 
 use ee::core::profile::{
-    CpuProbe, EnvironmentProbe, HOST_PROFILE_PROBE_SCHEMA_V1, HostResourceProbeReport,
-    HostTopologyProbe, MemoryProbe, OperatingProfile, PROFILE_BUDGET_CONFORMANCE_SCHEMA_V1,
+    CpuProbe, EnvironmentProbe, HOST_PROFILE_PROBE_SCHEMA_V1, HostCalibrationFreshness, HostClass,
+    HostClassificationOptions, HostResourceProbeReport, HostTopologyProbe, MemoryProbe,
+    OperatingProfile, PROFILE_BUDGET_CONFORMANCE_SCHEMA_V1, PathCapacityProbe,
     ProfileBudgetConformanceStatus, ProfileBudgets, RchTopologyProbe, WorkspaceProbe,
-    check_profile_budget_artifact_conformance, recommend_operating_profile,
+    check_profile_budget_artifact_conformance, classify_host_profile, recommend_operating_profile,
 };
 use ee::models::{
     ArtifactKind, ArtifactSummary, MetricValue, ProfileReference, SummaryDegradation,
@@ -79,6 +80,60 @@ fn synthetic_probe(
             },
         },
         degraded: Vec::new(),
+    }
+}
+
+fn with_cargo_target_capacity(
+    mut probe: HostResourceProbeReport,
+    available_gib: u64,
+    same_filesystem_as_workspace: bool,
+    cargo_target_dir_configured: bool,
+) -> HostResourceProbeReport {
+    probe.environment.cargo_target_dir_configured = cargo_target_dir_configured;
+    probe.paths.push(PathCapacityProbe {
+        label: "cargo_target",
+        role: "build_cache_directory",
+        path: None,
+        exists: true,
+        nearest_existing_ancestor: false,
+        same_filesystem_as_workspace: Some(same_filesystem_as_workspace),
+        total_bytes: Some(available_gib.saturating_mul(2).saturating_mul(GIB)),
+        available_bytes: Some(available_gib.saturating_mul(GIB)),
+        redaction: "path_not_emitted",
+    });
+    probe
+}
+
+fn with_rch_available(
+    mut probe: HostResourceProbeReport,
+    available: bool,
+) -> HostResourceProbeReport {
+    probe.topology.rch = if available {
+        RchTopologyProbe {
+            available: true,
+            status: "available_not_queried",
+            posture: "ok",
+            source: "property_test",
+            message: "RCH available for synthetic property probe.".to_string(),
+            repair: None,
+        }
+    } else {
+        RchTopologyProbe {
+            available: false,
+            status: "missing",
+            posture: "degraded_recoverable",
+            source: "property_test",
+            message: "RCH unavailable for synthetic property probe.".to_string(),
+            repair: Some("Install rch before heavy Cargo verification."),
+        }
+    };
+    probe
+}
+
+fn fresh_classifier_options() -> HostClassificationOptions {
+    HostClassificationOptions {
+        calibration_freshness: HostCalibrationFreshness::Fresh,
+        synthetic_fixture_profile: None,
     }
 }
 
@@ -326,6 +381,100 @@ proptest! {
             "minimal resources should default to constrained"
         );
     }
+}
+
+#[test]
+fn host_classifier_distinguishes_required_classes() {
+    let portable = with_rch_available(
+        with_cargo_target_capacity(synthetic_probe(2, 8, 8), 64, true, false),
+        false,
+    );
+    let portable = classify_host_profile(&portable, &fresh_classifier_options());
+    assert_eq!(portable.host_class, HostClass::Portable);
+
+    let laptop = with_rch_available(
+        with_cargo_target_capacity(synthetic_probe(4, 16, 16), 64, false, true),
+        false,
+    );
+    let laptop = classify_host_profile(&laptop, &fresh_classifier_options());
+    assert_eq!(laptop.host_class, HostClass::Laptop);
+
+    let workstation = with_rch_available(
+        with_cargo_target_capacity(synthetic_probe(8, 32, 32), 64, true, false),
+        false,
+    );
+    let workstation = classify_host_profile(&workstation, &fresh_classifier_options());
+    assert_eq!(workstation.host_class, HostClass::Workstation);
+
+    let local_256gb = with_rch_available(
+        with_cargo_target_capacity(synthetic_probe(32, 256, 256), 512, false, true),
+        false,
+    );
+    let local_256gb = classify_host_profile(&local_256gb, &fresh_classifier_options());
+    assert_eq!(local_256gb.host_class, HostClass::Local256Gb);
+
+    let rch_only = with_rch_available(
+        with_cargo_target_capacity(synthetic_probe(2, 8, 8), 2, true, false),
+        true,
+    );
+    let rch_only = classify_host_profile(&rch_only, &fresh_classifier_options());
+    assert_eq!(rch_only.host_class, HostClass::RchOnlyTopology);
+}
+
+#[test]
+fn host_classifier_is_byte_stable_for_same_fixture() {
+    let probe = with_rch_available(
+        with_cargo_target_capacity(synthetic_probe(32, 256, 256), 512, false, true),
+        true,
+    );
+    let options = HostClassificationOptions {
+        calibration_freshness: HostCalibrationFreshness::Fresh,
+        synthetic_fixture_profile: Some(OperatingProfile::Swarm),
+    };
+
+    let first = classify_host_profile(&probe, &options);
+    let second = classify_host_profile(&probe, &options);
+
+    assert_eq!(first, second);
+    assert_eq!(
+        serde_json::to_string(&first).expect("serialize first host class report"),
+        serde_json::to_string(&second).expect("serialize second host class report")
+    );
+    assert!(first.reason_codes.contains(&"synthetic_fixture_swarm"));
+}
+
+#[test]
+fn host_classifier_caps_stale_or_missing_calibration_conservatively() {
+    let probe = with_rch_available(
+        with_cargo_target_capacity(synthetic_probe(32, 256, 256), 512, false, true),
+        false,
+    );
+    let missing = HostClassificationOptions {
+        calibration_freshness: HostCalibrationFreshness::Missing,
+        synthetic_fixture_profile: None,
+    };
+
+    let report = classify_host_profile(&probe, &missing);
+
+    assert_eq!(report.host_class, HostClass::Workstation);
+    assert_eq!(report.profile_ceiling, OperatingProfile::Workstation);
+    assert_eq!(report.confidence, "low");
+    assert!(report.reason_codes.contains(&"calibration_missing"));
+    assert_eq!(report.repair_actions.len(), 1);
+    assert_eq!(report.repair_actions[0].kind, "calibration");
+
+    let stale = HostClassificationOptions {
+        calibration_freshness: HostCalibrationFreshness::Stale,
+        synthetic_fixture_profile: None,
+    };
+    let report = classify_host_profile(&probe, &stale);
+
+    assert_eq!(report.host_class, HostClass::Workstation);
+    assert_eq!(report.profile_ceiling, OperatingProfile::Workstation);
+    assert_eq!(report.confidence, "medium");
+    assert!(report.reason_codes.contains(&"calibration_stale"));
+    assert_eq!(report.repair_actions.len(), 1);
+    assert_eq!(report.repair_actions[0].kind, "calibration");
 }
 
 #[test]

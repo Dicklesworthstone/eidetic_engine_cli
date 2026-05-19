@@ -23,6 +23,7 @@ pub const HOST_PROFILE_PROBE_SCHEMA_V1: &str = "ee.host_profile.v1";
 pub const PROFILE_CONFIG_PLAN_SCHEMA_V1: &str = "ee.profile.config.plan.v1";
 pub const RUNTIME_PROFILE_SCHEMA_V1: &str = "ee.profile.runtime.v1";
 pub const PROFILE_BUDGET_CONFORMANCE_SCHEMA_V1: &str = "ee.profile.budget_conformance.v1";
+pub const HOST_CLASSIFICATION_SCHEMA_V1: &str = "ee.host_calibration.host_class.v1";
 
 const TOOL_NAMES: [&str; 7] = ["cargo", "rustfmt", "clippy", "br", "bv", "rch", "gh"];
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -204,6 +205,117 @@ pub struct ProfileSelectionReport {
     pub effective: OperatingProfile,
     pub confidence: &'static str,
     pub reasons: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HostClass {
+    Constrained,
+    Portable,
+    Laptop,
+    Workstation,
+    Local256Gb,
+    RchOnlyTopology,
+}
+
+impl HostClass {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Constrained => "constrained",
+            Self::Portable => "portable",
+            Self::Laptop => "laptop",
+            Self::Workstation => "workstation",
+            Self::Local256Gb => "local_256gb",
+            Self::RchOnlyTopology => "rch_only_topology",
+        }
+    }
+}
+
+impl fmt::Display for HostClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for HostClass {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HostCalibrationFreshness {
+    Fresh,
+    Stale,
+    Missing,
+    Unavailable,
+}
+
+impl HostCalibrationFreshness {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Stale => "stale",
+            Self::Missing => "missing",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+impl Default for HostCalibrationFreshness {
+    fn default() -> Self {
+        Self::Missing
+    }
+}
+
+impl Serialize for HostCalibrationFreshness {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostClassificationOptions {
+    pub calibration_freshness: HostCalibrationFreshness,
+    pub synthetic_fixture_profile: Option<OperatingProfile>,
+}
+
+impl Default for HostClassificationOptions {
+    fn default() -> Self {
+        Self {
+            calibration_freshness: HostCalibrationFreshness::Missing,
+            synthetic_fixture_profile: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostClassReport {
+    pub schema: &'static str,
+    pub side_effect_free: bool,
+    pub host_class: HostClass,
+    pub profile_ceiling: OperatingProfile,
+    pub confidence: &'static str,
+    pub calibration_freshness: HostCalibrationFreshness,
+    pub reason_codes: Vec<&'static str>,
+    pub repair_actions: Vec<HostClassRepairAction>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostClassRepairAction {
+    pub priority: u8,
+    pub kind: &'static str,
+    pub command: Option<&'static str>,
+    pub message: &'static str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1495,6 +1607,248 @@ pub fn recommend_operating_profile(probe: &HostResourceProbeReport) -> ProfileSe
         confidence,
         reasons,
     }
+}
+
+#[must_use]
+pub fn classify_host_profile(
+    probe: &HostResourceProbeReport,
+    options: &HostClassificationOptions,
+) -> HostClassReport {
+    let mut reason_codes = Vec::new();
+    let logical_cores = probe.cpu.logical_cores.unwrap_or(1);
+    let available_memory = probe
+        .memory
+        .available_bytes
+        .or(probe.memory.total_bytes)
+        .unwrap_or(0);
+
+    reason_codes.push(cpu_reason_code(logical_cores));
+    reason_codes.push(memory_reason_code(available_memory));
+    reason_codes.push(disk_reason_code(probe));
+    reason_codes.push(target_dir_reason_code(probe));
+    reason_codes.push(rch_reason_code(probe));
+    reason_codes.push(calibration_reason_code(options.calibration_freshness));
+    if let Some(profile) = options.synthetic_fixture_profile {
+        reason_codes.push(synthetic_fixture_reason_code(profile));
+    }
+
+    let mut host_class = base_host_class(probe, logical_cores, available_memory);
+    let mut repair_actions = Vec::new();
+
+    if !probe.complete && host_class_requires_complete_probe(host_class) {
+        host_class = HostClass::Portable;
+        repair_actions.push(HostClassRepairAction {
+            priority: 10,
+            kind: "host_profile_probe",
+            command: Some("ee diag host-profile --workspace . --json"),
+            message: "Host profile probe was incomplete, so classification is capped at portable.",
+        });
+    }
+
+    if options.calibration_freshness != HostCalibrationFreshness::Fresh {
+        host_class = conservative_class_for_unfresh_calibration(host_class);
+        repair_actions.push(calibration_repair_action(options.calibration_freshness));
+    }
+
+    stable_reason_codes(&mut reason_codes);
+
+    HostClassReport {
+        schema: HOST_CLASSIFICATION_SCHEMA_V1,
+        side_effect_free: true,
+        host_class,
+        profile_ceiling: profile_ceiling_for_host_class(host_class),
+        confidence: host_class_confidence(probe, options.calibration_freshness),
+        calibration_freshness: options.calibration_freshness,
+        reason_codes,
+        repair_actions,
+    }
+}
+
+fn host_class_requires_complete_probe(host_class: HostClass) -> bool {
+    matches!(host_class, HostClass::Workstation | HostClass::Local256Gb)
+}
+
+fn base_host_class(
+    probe: &HostResourceProbeReport,
+    logical_cores: u32,
+    available_memory: u64,
+) -> HostClass {
+    let disk_constrained = disk_reason_code(probe) == "disk_capacity_constrained";
+    let target_shared = target_dir_reason_code(probe) == "target_dir_shared";
+    if probe.topology.rch.available && disk_constrained && target_shared {
+        return HostClass::RchOnlyTopology;
+    }
+    if logical_cores >= 32
+        && available_memory >= 256 * GIB
+        && target_dir_reason_code(probe) == "target_dir_external"
+    {
+        return HostClass::Local256Gb;
+    }
+    if logical_cores >= 8 && available_memory >= 32 * GIB {
+        return HostClass::Workstation;
+    }
+    if logical_cores >= 2 && available_memory >= 8 * GIB {
+        if target_dir_reason_code(probe) == "target_dir_external" {
+            HostClass::Laptop
+        } else {
+            HostClass::Portable
+        }
+    } else {
+        HostClass::Constrained
+    }
+}
+
+fn conservative_class_for_unfresh_calibration(host_class: HostClass) -> HostClass {
+    match host_class {
+        HostClass::Local256Gb => HostClass::Workstation,
+        HostClass::Workstation => HostClass::Portable,
+        HostClass::Laptop | HostClass::Portable => HostClass::Portable,
+        HostClass::RchOnlyTopology => HostClass::RchOnlyTopology,
+        HostClass::Constrained => HostClass::Constrained,
+    }
+}
+
+fn profile_ceiling_for_host_class(host_class: HostClass) -> OperatingProfile {
+    match host_class {
+        HostClass::Constrained => OperatingProfile::Constrained,
+        HostClass::Portable | HostClass::Laptop | HostClass::RchOnlyTopology => {
+            OperatingProfile::Portable
+        }
+        HostClass::Workstation => OperatingProfile::Workstation,
+        HostClass::Local256Gb => OperatingProfile::Swarm,
+    }
+}
+
+fn host_class_confidence(
+    probe: &HostResourceProbeReport,
+    calibration_freshness: HostCalibrationFreshness,
+) -> &'static str {
+    match calibration_freshness {
+        HostCalibrationFreshness::Fresh if probe.complete => "high",
+        HostCalibrationFreshness::Fresh | HostCalibrationFreshness::Stale => "medium",
+        HostCalibrationFreshness::Missing | HostCalibrationFreshness::Unavailable => "low",
+    }
+}
+
+fn cpu_reason_code(logical_cores: u32) -> &'static str {
+    if logical_cores >= 12 {
+        "cpu_logical_cores_swarm"
+    } else if logical_cores >= 6 {
+        "cpu_logical_cores_workstation"
+    } else if logical_cores >= 2 {
+        "cpu_logical_cores_portable"
+    } else {
+        "cpu_logical_cores_constrained"
+    }
+}
+
+fn memory_reason_code(available_memory: u64) -> &'static str {
+    if available_memory >= 32 * GIB {
+        "memory_available_swarm"
+    } else if available_memory >= 16 * GIB {
+        "memory_available_workstation"
+    } else if available_memory >= 8 * GIB {
+        "memory_available_portable"
+    } else {
+        "memory_available_constrained"
+    }
+}
+
+fn disk_reason_code(probe: &HostResourceProbeReport) -> &'static str {
+    let available_bytes = probe
+        .paths
+        .iter()
+        .find(|path| path.label == "cargo_target")
+        .and_then(|path| path.available_bytes)
+        .or_else(|| {
+            probe
+                .paths
+                .iter()
+                .find(|path| path.label == "workspace")
+                .and_then(|path| path.available_bytes)
+        });
+
+    match available_bytes {
+        Some(bytes) if bytes >= 256 * GIB => "disk_capacity_swarm_ready",
+        Some(bytes) if bytes >= 16 * GIB => "disk_capacity_sufficient",
+        _ => "disk_capacity_constrained",
+    }
+}
+
+fn target_dir_reason_code(probe: &HostResourceProbeReport) -> &'static str {
+    let cargo_target = probe.paths.iter().find(|path| path.label == "cargo_target");
+    match cargo_target.and_then(|path| path.same_filesystem_as_workspace) {
+        Some(false) if probe.environment.cargo_target_dir_configured => "target_dir_external",
+        Some(false) => "target_dir_isolated",
+        _ => "target_dir_shared",
+    }
+}
+
+fn rch_reason_code(probe: &HostResourceProbeReport) -> &'static str {
+    if probe.topology.rch.available {
+        "rch_topology_available"
+    } else {
+        "rch_topology_missing"
+    }
+}
+
+fn calibration_reason_code(freshness: HostCalibrationFreshness) -> &'static str {
+    match freshness {
+        HostCalibrationFreshness::Fresh => "calibration_fresh",
+        HostCalibrationFreshness::Stale => "calibration_stale",
+        HostCalibrationFreshness::Missing => "calibration_missing",
+        HostCalibrationFreshness::Unavailable => "calibration_unavailable",
+    }
+}
+
+fn synthetic_fixture_reason_code(profile: OperatingProfile) -> &'static str {
+    match profile {
+        OperatingProfile::Constrained => "synthetic_fixture_constrained",
+        OperatingProfile::Portable => "synthetic_fixture_portable",
+        OperatingProfile::Workstation => "synthetic_fixture_workstation",
+        OperatingProfile::Swarm => "synthetic_fixture_swarm",
+    }
+}
+
+fn calibration_repair_action(freshness: HostCalibrationFreshness) -> HostClassRepairAction {
+    match freshness {
+        HostCalibrationFreshness::Fresh => HostClassRepairAction {
+            priority: 0,
+            kind: "calibration",
+            command: None,
+            message: "Calibration evidence is fresh.",
+        },
+        HostCalibrationFreshness::Stale => HostClassRepairAction {
+            priority: 20,
+            kind: "calibration",
+            command: Some("scripts/e2e_overhaul/host_calibration.sh"),
+            message: "Refresh host calibration evidence before enabling higher-resource classes.",
+        },
+        HostCalibrationFreshness::Missing => HostClassRepairAction {
+            priority: 20,
+            kind: "calibration",
+            command: Some("scripts/e2e_overhaul/host_calibration.sh"),
+            message: "Collect host calibration evidence before enabling higher-resource classes.",
+        },
+        HostCalibrationFreshness::Unavailable => HostClassRepairAction {
+            priority: 20,
+            kind: "calibration",
+            command: None,
+            message: "Host calibration evidence is unavailable; keep conservative profile ceilings.",
+        },
+    }
+}
+
+fn stable_reason_codes(reason_codes: &mut Vec<&'static str>) {
+    let mut seen = Vec::new();
+    reason_codes.retain(|code| {
+        if seen.contains(code) {
+            false
+        } else {
+            seen.push(*code);
+            true
+        }
+    });
 }
 
 /// Build a side-effect-free config mutation report for a profile selection.
