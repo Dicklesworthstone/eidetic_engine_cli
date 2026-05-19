@@ -232,6 +232,17 @@ fn first_existing_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> 
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
+        #[cfg(windows)]
+        if matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        ) {
+            continue;
+        }
+        #[cfg(not(windows))]
+        if matches!(component, std::path::Component::RootDir) {
+            continue;
+        }
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
             Ok(_) => {}
@@ -321,6 +332,20 @@ mod tests {
         assert_eq!(
             line.trim_end(),
             r#"{"schema":"ee.audit.v1","ts":"2026-05-06T00:00:00.123456789Z","actor":"agent:SwiftCat","action":"remember","subject":"memory:mem_01","outcome":"success","fields":{"audit_id":"audit_01"}}"#
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn audit_append_symlink_scan_accepts_absolute_roots() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let audit_path = tempdir.path().join("audit.jsonl");
+        let symlink = super::first_existing_symlink_component(&audit_path)
+            .map_err(|error| error.to_string())?;
+
+        assert!(
+            symlink.is_none(),
+            "absolute audit paths should not fail during prefix/root preflight"
         );
         Ok(())
     }
