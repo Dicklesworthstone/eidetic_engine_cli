@@ -12,6 +12,7 @@ use crate::graph::health::detect_louvain_communities;
 use crate::graph::{GraphError, GraphResult, MemoryGraphProjection};
 use crate::models::MemoryId;
 use crate::models::degradation::GRAPH_PACK_DNA_NO_DOMINATOR_CODE;
+use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 pub const PACK_DNA_SCHEMA_V1: &str = "ee.context.pack_dna.v1";
 pub const DEFAULT_PACK_DNA_EGO_RADIUS: usize = 2;
@@ -281,10 +282,10 @@ fn dominant_voronoi_anchor(
         .map(ToString::to_string)
         .collect::<BTreeSet<_>>();
     let cells = fnx_algorithms::voronoi_cells(graph, &anchor_refs);
-    cells
+    let mut dominators = cells
         .into_iter()
         .filter_map(|(anchor, mut cell)| {
-            cell.sort();
+            sort_by_ulid_payload_or_lexical(&mut cell, String::as_str);
             let pack_member_count = cell
                 .iter()
                 .filter(|memory_id| pack_strings.contains(*memory_id))
@@ -295,13 +296,15 @@ fn dominant_voronoi_anchor(
                 pack_member_count,
             })
         })
-        .min_by(|left, right| {
-            right
-                .pack_member_count
-                .cmp(&left.pack_member_count)
-                .then_with(|| right.cell_size.cmp(&left.cell_size))
-                .then_with(|| left.memory_id.cmp(&right.memory_id))
-        })
+        .collect::<Vec<_>>();
+    sort_by_ulid_payload_or_lexical(&mut dominators, |dominator| dominator.memory_id.as_str());
+    dominators.sort_by(|left, right| {
+        right
+            .pack_member_count
+            .cmp(&left.pack_member_count)
+            .then_with(|| right.cell_size.cmp(&left.cell_size))
+    });
+    dominators.into_iter().next()
 }
 
 fn pack_community_of_mass(graph: &Graph, pack_ids: &[MemoryId]) -> Option<PackDnaCommunity> {
@@ -315,11 +318,13 @@ fn pack_community_of_mass(graph: &Graph, pack_ids: &[MemoryId]) -> Option<PackDn
     let mut communities = detect_louvain_communities(graph)
         .into_iter()
         .map(|mut community| {
-            community.sort();
+            sort_by_ulid_payload_or_lexical(&mut community, String::as_str);
             community
         })
         .collect::<Vec<_>>();
-    communities.sort();
+    sort_by_ulid_payload_or_lexical(&mut communities, |community| {
+        community.first().map_or("", String::as_str)
+    });
 
     communities
         .into_iter()
@@ -366,7 +371,7 @@ fn pack_dna_ego_subgraph(
         .filter(|memory_id| memory_id.parse::<MemoryId>().is_ok())
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
-    memory_ids.sort();
+    sort_by_ulid_payload_or_lexical(&mut memory_ids, String::as_str);
     PackDnaEgoSubgraph {
         center_memory_id: center_memory_id.to_string(),
         radius,
@@ -400,12 +405,8 @@ fn pack_dna_ppr_neighbors(
             score,
         })
         .collect::<Vec<_>>();
-    neighbors.sort_by(|left, right| {
-        right
-            .score
-            .total_cmp(&left.score)
-            .then_with(|| left.memory_id.cmp(&right.memory_id))
-    });
+    sort_by_ulid_payload_or_lexical(&mut neighbors, |neighbor| neighbor.memory_id.as_str());
+    neighbors.sort_by(|left, right| right.score.total_cmp(&left.score));
     neighbors.truncate(limit);
     Ok(neighbors)
 }
@@ -513,6 +514,34 @@ mod tests {
     }
 
     #[test]
+    fn pack_dna_voronoi_dominator_ties_use_memory_id_order() -> Result<(), String> {
+        let anchor_a = mem(1).to_string();
+        let anchor_b = mem(2).to_string();
+        let pack_c = mem(3).to_string();
+        let pack_d = mem(4).to_string();
+        let mut graph = DiGraph::strict();
+        add_weighted_edge(&mut graph, &anchor_b, &pack_d);
+        add_weighted_edge(&mut graph, &anchor_a, &pack_c);
+        let projection = MemoryGraphProjection {
+            node_count: graph.node_count(),
+            edge_count: graph.edge_count(),
+            graph,
+            build_ms: 1.0,
+            snapshot_version: 0,
+        };
+        let input = PackDnaInput::new(vec![mem(3), mem(4)], Vec::new(), vec![mem(2), mem(1)]);
+
+        let dna = compute_pack_dna(&projection, &input).map_err(|error| error.to_string())?;
+
+        let dominator = dna
+            .dominator
+            .ok_or_else(|| "expected tied dominator".to_owned())?;
+        assert_eq!(dominator.memory_id, anchor_a);
+        assert_eq!(dominator.pack_member_count, 1);
+        Ok(())
+    }
+
+    #[test]
     fn pack_dna_reports_louvain_community_of_mass() -> Result<(), String> {
         let projection = pack_dna_louvain_projection();
         let input = PackDnaInput::new(
@@ -530,6 +559,10 @@ mod tests {
         assert_eq!(community.pack_member_count, 2);
         assert!(community.exemplar_memory_ids.contains(&mem(2).to_string()));
         assert!(community.exemplar_memory_ids.contains(&mem(3).to_string()));
+        assert_eq!(
+            community.exemplar_memory_ids,
+            vec![mem(1).to_string(), mem(2).to_string(), mem(3).to_string()]
+        );
         Ok(())
     }
 
@@ -553,6 +586,10 @@ mod tests {
         assert!(ego.memory_ids.contains(&mem(2).to_string()));
         assert!(ego.memory_ids.contains(&mem(3).to_string()));
         assert!(!ego.memory_ids.contains(&mem(4).to_string()));
+        assert_eq!(
+            ego.memory_ids,
+            vec![mem(1).to_string(), mem(2).to_string(), mem(3).to_string()]
+        );
         Ok(())
     }
 
