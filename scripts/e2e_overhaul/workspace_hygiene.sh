@@ -560,7 +560,7 @@ run_scenario() {
                 first_failure="$(assert_jq "$stdout_artifact" '.data.dirtyPathCount == 0' "clean workspace should have zero dirty paths" || true)"
                 ;;
             source_and_test)
-                first_failure="$(assert_jq "$stdout_artifact" '([.data.stagingRecommendations[].name] | index("source")) and ([.data.stagingRecommendations[].name] | index("tests"))' "source_and_test should recommend source and tests groups" || true)"
+                first_failure="$(assert_jq "$stdout_artifact" '([.data.stagingRecommendations[].name] == ["source", "tests"]) and (.data.stagingRecommendations[0].paths == ["src/lib.rs"]) and (.data.stagingRecommendations[1].paths == ["tests/workspace_hygiene.rs"])' "source_and_test should recommend source and tests groups in deterministic order" || true)"
                 ;;
             human_source_and_test)
                 first_failure="$(assert_contains "$stdout_artifact" "Workspace hygiene:" "human output should include the workspace hygiene heading" || true)"
@@ -578,7 +578,7 @@ run_scenario() {
                 fi
                 ;;
             scratch_only)
-                first_failure="$(assert_jq "$stdout_artifact" '(.data.dirtyPathCount == 2) and (.data.stagingRecommendations | length == 0) and (.data.doNotCommit | index("drift-report.txt")) and (.data.doNotCommit | index("ubs.json")) and ([.data.bucketCounts[] | select(.name == "do_not_commit") | .count] == [2]) and ([.data.kindCounts[] | select(.name == "scratch") | .count] == [2]) and all(.data.pathClassifications[]; .bucket == "do_not_commit" and .kind == "scratch")' "scratch-only paths should stay doNotCommit and out of staging" || true)"
+                first_failure="$(assert_jq "$stdout_artifact" '(.data.dirtyPathCount == 2) and (.data.stagingRecommendations | length == 0) and (.data.doNotCommit == ["drift-report.txt", "ubs.json"]) and ([.data.pathClassifications[].path] == ["drift-report.txt", "ubs.json"]) and ([.data.bucketCounts[] | select(.name == "do_not_commit") | .count] == [2]) and ([.data.kindCounts[] | select(.name == "scratch") | .count] == [2]) and all(.data.pathClassifications[]; .bucket == "do_not_commit" and .kind == "scratch")' "scratch-only paths should stay doNotCommit in deterministic order and out of staging" || true)"
                 ;;
             generated_only)
                 first_failure="$(assert_jq "$stdout_artifact" '(.data.dirtyPathCount == 3) and (.data.stagingRecommendations | length == 0) and (.data.doNotCommit | index("Cargo.lock")) and (.data.doNotCommit | index("target/debug/ee")) and (.data.doNotCommit | index("target/release/deps/foo.rlib")) and ([.data.bucketCounts[] | select(.name == "do_not_commit") | .count] == [3]) and ([.data.kindCounts[] | select(.name == "generated") | .count] == [3]) and all(.data.pathClassifications[]; .bucket == "do_not_commit" and .kind == "generated")' "generated-only paths should stay doNotCommit and out of staging" || true)"
