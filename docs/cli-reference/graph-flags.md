@@ -60,6 +60,8 @@ owns `--ppr-weight`, `--explain`, and `--no-pack-dna`.
 | `ee pack`, `ee pack build` | `--include-expired` | boolean | false | Includes memories whose `valid_to` is before the reference time. |
 | `ee pack`, `ee pack build` | `--include-future` | boolean | false | Includes memories whose `valid_from` is after the reference time. |
 | `ee pack`, `ee pack build` | `--include-stale` | boolean | false | Includes memories marked with stale validity status in index metadata. |
+| `ee pack replay <PACK_ID>` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Replays a persisted pack selection ledger without rebuilding or reselecting context. |
+| `ee pack diff <PACK_A> <PACK_B>` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Compares two persisted pack ledgers and explains selection, freshness, or redaction drift. |
 
 Example:
 
@@ -75,6 +77,8 @@ ee pack build --workspace . --query-file release.eeq.json \
   --coordination-snapshot coordination.json \
   --include-non-affecting-degradations --as-of 2026-05-19T00:00:00Z \
   --include-stale --json
+ee pack replay pack_release_prev --workspace . --database .ee/ee.db --json
+ee pack diff pack_release_prev pack_release_next --workspace . --json
 ee search "release blockers" --workspace . --explain-performance --json
 ```
 

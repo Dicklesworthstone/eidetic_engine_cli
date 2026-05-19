@@ -217,6 +217,20 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
         "ee pack build --help",
     )?;
 
+    let pack_replay_help = help_for(&["ee", "pack", "replay", "--help"])?;
+    assert_contains_all(
+        &pack_replay_help,
+        &["PACK_ID", "--database"],
+        "ee pack replay --help",
+    )?;
+
+    let pack_diff_help = help_for(&["ee", "pack", "diff", "--help"])?;
+    assert_contains_all(
+        &pack_diff_help,
+        &["PACK_A", "PACK_B", "--database"],
+        "ee pack diff --help",
+    )?;
+
     let search_help = help_for(&["ee", "search", "--help"])?;
     assert_contains_all(&search_help, &["--explain-performance"], "ee search --help")?;
 
@@ -840,6 +854,23 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "--as-of",
             "2026-05-19T00:00:00Z",
             "--include-stale",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "pack",
+            "replay",
+            "pack_release_prev",
+            "--database",
+            ".ee/ee.db",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "pack",
+            "diff",
+            "pack_release_prev",
+            "pack_release_next",
             "--json",
         ][..],
         &[
