@@ -361,6 +361,7 @@ validate_event_log_contract() {
         and has_phase("schema_validation")
         and has_phase("redaction_check")
         and has_phase("stdout_stderr_isolation")
+        and has_phase("local_cargo_guard")
         and has_phase("mutation_check")
         and has_phase("teardown")
         and (
@@ -434,6 +435,12 @@ validate_event_log_negative_contracts() {
         failure_count=$((failure_count + 1))
     fi
 
+    local_cargo_command="$EVENT_ROOT/event_log_negative_local_cargo_command.jsonl"
+    jq -c 'if .phase == "scenario" and .scenario == "clean" then .command = "cargo test --lib workspace_hygiene -- --nocapture" else . end' "$EVENT_LOG" > "$local_cargo_command"
+    if ! expect_event_log_contract_rejected "local_cargo_command" "$local_cargo_command" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
     if [ "$failure_count" -ne 0 ]; then
         printf 'event log negative contract checks failed; diagnostics=%s\n' "$diagnostics"
         return 1
@@ -495,6 +502,23 @@ validate_stdout_stderr_isolation() {
 
     if [ "$failure_count" -ne 0 ]; then
         printf 'stdout/stderr isolation check failed; diagnostics=%s\n' "$diagnostics"
+        return 1
+    fi
+}
+
+validate_no_local_cargo_commands() {
+    local event_log="${1:-$EVENT_LOG}"
+    local diagnostics="${2:-$EVENT_ROOT/local_cargo_command_guard_diagnostics.txt}"
+    : > "$diagnostics"
+
+    if ! jq -s -e '
+        all(.[]; ((.command // "") | test("(^|[[:space:]\"\\x27])(cargo|rustc|rustdoc)([[:space:]\"\\x27]|$)") | not))
+    ' "$event_log" >/dev/null 2>"$diagnostics"; then
+        jq -r '
+            select((.command // "") | test("(^|[[:space:]\"\\x27])(cargo|rustc|rustdoc)([[:space:]\"\\x27]|$)"))
+            | "scenario=\(.scenario) phase=\(.phase) command=\(.command)"
+        ' "$event_log" >> "$diagnostics" 2>/dev/null || true
+        printf 'event log contains direct local Cargo/rustdoc/rustc command evidence; diagnostics=%s\n' "$diagnostics"
         return 1
     fi
 }
@@ -789,6 +813,14 @@ if [ -n "$STDIO_FAILURE" ]; then
     exit 1
 fi
 emit_event "stdout_stderr_isolation" "stdout_stderr_isolation" "pass" 0 "validate stdout/stderr artifact separation" "$REPO_ROOT" "$EVENT_ROOT/stdout_stderr_isolation_diagnostics.txt" "" "passed" "" "[]" "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
+
+LOCAL_CARGO_FAILURE="$(validate_no_local_cargo_commands || true)"
+if [ -n "$LOCAL_CARGO_FAILURE" ]; then
+    emit_event "local_cargo_guard" "local_cargo_guard" "failed" 1 "validate no direct local Cargo/rustc commands in event log" "$REPO_ROOT" "$EVENT_ROOT/local_cargo_command_guard_diagnostics.txt" "" "failed" "$LOCAL_CARGO_FAILURE" '["workspace_hygiene_local_cargo_command_logged"]' "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
+    printf '%s\n' "$LOCAL_CARGO_FAILURE" >&2
+    exit 1
+fi
+emit_event "local_cargo_guard" "local_cargo_guard" "pass" 0 "validate no direct local Cargo/rustc commands in event log" "$REPO_ROOT" "$EVENT_ROOT/local_cargo_command_guard_diagnostics.txt" "" "passed" "" "[]" "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
 
 read -r REPO_AFTER_HASH REPO_AFTER_ARTIFACT < <(capture_repo_state "after")
 if [ "$REPO_BEFORE_HASH" != "$REPO_AFTER_HASH" ]; then
