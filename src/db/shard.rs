@@ -3,6 +3,7 @@
 //! This module intentionally does not open or create databases. It only derives
 //! the catalog and shard paths that later migration/router beads can materialize.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
@@ -14,6 +15,7 @@ use serde::Serialize;
 use super::{DatabaseConfig, DbConnection};
 
 pub const SHARD_FANOUT_STATUS_SCHEMA_V1: &str = "ee.shard_fanout.status.v1";
+pub const SHARD_FANOUT_ATTACH_PLAN_SCHEMA_V1: &str = "ee.shard_fanout.attach_plan.v1";
 pub const SHARD_FANOUT_MIGRATION_PLAN_SCHEMA_V1: &str = "ee.shard_fanout.migration_plan.v1";
 pub const SHARD_FANOUT_MIGRATION_AUDIT_SCHEMA_V1: &str = "ee.shard_fanout.migration_audit.v1";
 pub const SHARD_FANOUT_CATALOG_SCHEMA_VERSION: u32 = 1;
@@ -27,6 +29,8 @@ pub const SHARD_FANOUT_WORKSPACE_UNAVAILABLE_CODE: &str = "shard_fanout_workspac
 pub const SHARD_FANOUT_WORKSPACE_ID_UNSAFE_CODE: &str = "shard_fanout_workspace_id_unsafe";
 pub const SHARD_FANOUT_CATALOG_MISSING_CODE: &str = "shard_fanout_catalog_missing";
 pub const SHARD_FANOUT_SHARD_MISSING_CODE: &str = "shard_fanout_shard_missing";
+pub const SHARD_ATTACH_FAILED_CODE: &str = "shard_attach_failed";
+pub const CROSS_SHARD_SKEW_DETECTED_CODE: &str = "cross_shard_skew_detected";
 
 const DEFAULT_DATA_DIR_SUFFIX: &str = ".local/share/ee";
 const DEFAULT_SHARDS_DIR_NAME: &str = "shards";
@@ -198,6 +202,42 @@ pub struct ShardFanoutMigrationPlan {
     pub workspaces: Vec<ShardFanoutMigrationWorkspacePlan>,
     pub expected_audit_rows: Vec<ShardFanoutMigrationAuditRowPlan>,
     pub blockers: Vec<ShardFanoutDegradation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerShardAttachPlanInput {
+    pub enabled: bool,
+    pub strict: bool,
+    pub local_workspace_id: String,
+    pub shards_dir_override: Option<PathBuf>,
+    pub peer_workspace_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerShardAttachTarget {
+    pub workspace_id: String,
+    pub shard_id: Option<String>,
+    pub attach_alias: String,
+    pub shard_path: Option<PathBuf>,
+    pub shard_exists: bool,
+    pub attachable: bool,
+    pub degraded: Vec<ShardFanoutDegradation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerShardAttachPlan {
+    pub schema: &'static str,
+    pub enabled: bool,
+    pub strict: bool,
+    pub local_workspace_id: String,
+    pub shard_root: Option<PathBuf>,
+    pub catalog_path: Option<PathBuf>,
+    pub targets: Vec<PeerShardAttachTarget>,
+    pub attachable_count: usize,
+    pub blocked: bool,
+    pub degraded: Vec<ShardFanoutDegradation>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -638,6 +678,108 @@ pub fn plan_shard_fanout_migration(
 }
 
 #[must_use]
+pub fn plan_peer_shard_attach(input: PeerShardAttachPlanInput) -> PeerShardAttachPlan {
+    let local_workspace_id = input.local_workspace_id.trim().to_owned();
+    let mut degraded = Vec::new();
+
+    if !input.enabled {
+        return PeerShardAttachPlan {
+            schema: SHARD_FANOUT_ATTACH_PLAN_SCHEMA_V1,
+            enabled: false,
+            strict: input.strict,
+            local_workspace_id,
+            shard_root: None,
+            catalog_path: None,
+            targets: Vec::new(),
+            attachable_count: 0,
+            blocked: false,
+            degraded,
+        };
+    }
+
+    let shard_root_result = input
+        .shards_dir_override
+        .as_deref()
+        .map_or_else(default_shards_dir_from_env, |path| Ok(PathBuf::from(path)))
+        .and_then(|path| normalize_shard_root(&path));
+    let (shard_root, catalog_path, root_degradation) = match shard_root_result {
+        Ok(root) => {
+            let catalog_path = catalog_path_for_shard_root(&root);
+            (Some(root), Some(catalog_path), None)
+        }
+        Err(error) => {
+            let degradation = error.degradation();
+            degraded.push(degradation.clone());
+            (None, None, Some(degradation))
+        }
+    };
+
+    let mut peers = BTreeSet::new();
+    for workspace_id in input.peer_workspace_ids {
+        let trimmed = workspace_id.trim().to_owned();
+        if trimmed.is_empty() || trimmed == local_workspace_id {
+            continue;
+        }
+        peers.insert(trimmed);
+    }
+
+    let mut targets = Vec::with_capacity(peers.len());
+    for (attach_index, workspace_id) in peers.into_iter().enumerate() {
+        let attach_alias = format!("peer_{attach_index:04}");
+        let mut target_degraded = Vec::new();
+        let (shard_id, shard_path) = match shard_id_for_workspace_id(&workspace_id) {
+            Ok(shard_id) => {
+                let shard_path = shard_root
+                    .as_deref()
+                    .map(|root| shard_file_path(root, &shard_id));
+                (Some(shard_id), shard_path)
+            }
+            Err(_) => {
+                target_degraded.push(unsafe_workspace_id_degradation());
+                (None, None)
+            }
+        };
+
+        if let Some(degradation) = &root_degradation {
+            target_degraded.push(degradation.clone());
+        }
+
+        let shard_exists = shard_path.as_ref().is_some_and(|path| path.exists());
+        if shard_id.is_some() && root_degradation.is_none() && !shard_exists {
+            target_degraded.push(shard_attach_failed_degradation());
+        }
+
+        let attachable = shard_exists && target_degraded.is_empty();
+        degraded.extend(target_degraded.iter().cloned());
+        targets.push(PeerShardAttachTarget {
+            workspace_id,
+            shard_id,
+            attach_alias,
+            shard_path,
+            shard_exists,
+            attachable,
+            degraded: target_degraded,
+        });
+    }
+
+    let attachable_count = targets.iter().filter(|target| target.attachable).count();
+    let blocked = input.strict && attachable_count != targets.len();
+
+    PeerShardAttachPlan {
+        schema: SHARD_FANOUT_ATTACH_PLAN_SCHEMA_V1,
+        enabled: true,
+        strict: input.strict,
+        local_workspace_id,
+        shard_root,
+        catalog_path,
+        targets,
+        attachable_count,
+        blocked,
+        degraded,
+    }
+}
+
+#[must_use]
 pub fn resolve_shard_fanout_status(input: ShardFanoutResolverInput) -> ShardFanoutStatusReport {
     let mut degraded = Vec::new();
     let mut recovery = Vec::new();
@@ -792,6 +934,15 @@ fn unsafe_workspace_id_degradation() -> ShardFanoutDegradation {
     )
 }
 
+fn shard_attach_failed_degradation() -> ShardFanoutDegradation {
+    ShardFanoutDegradation::new(
+        SHARD_ATTACH_FAILED_CODE,
+        "warning",
+        "A peer workspace shard could not be attached for read fan-out.",
+        "Verify the peer shard exists or run ee migrate shard-fanout --workspace . --dry-run --json.",
+    )
+}
+
 impl From<OsString> for ShardFanoutResolverInput {
     fn from(value: OsString) -> Self {
         Self {
@@ -830,12 +981,13 @@ fn trace_router_event(
 mod tests {
     use super::{
         DbShardRouter, DbShardRouterError, DbShardRoutingMode, PRE_SHARD_FANOUT_FILE_NAME,
-        SHARD_CATALOG_FILE_NAME, SHARD_FANOUT_CATALOG_MISSING_CODE,
+        PeerShardAttachPlanInput, SHARD_ATTACH_FAILED_CODE, SHARD_CATALOG_FILE_NAME,
+        SHARD_FANOUT_ATTACH_PLAN_SCHEMA_V1, SHARD_FANOUT_CATALOG_MISSING_CODE,
         SHARD_FANOUT_MIGRATION_PLAN_SCHEMA_V1, SHARD_FANOUT_STATUS_SCHEMA_V1,
         SHARD_FANOUT_WORKSPACE_ID_UNSAFE_CODE, ShardFanoutMigrationPlanInput,
         ShardFanoutMigrationWorkspaceInput, ShardFanoutPosture, ShardFanoutResolverInput,
-        default_shards_dir_from_values, normalize_shard_root, plan_shard_fanout_migration,
-        preserved_legacy_database_path, resolve_shard_fanout_status,
+        default_shards_dir_from_values, normalize_shard_root, plan_peer_shard_attach,
+        plan_shard_fanout_migration, preserved_legacy_database_path, resolve_shard_fanout_status,
         shard_fanout_enabled_from_env_value, shard_file_path,
     };
     use std::ffi::OsString;
@@ -1196,6 +1348,172 @@ mod tests {
             plan.expected_audit_rows[0].event,
             "preserve_legacy_database"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn peer_attach_plan_sorts_dedupes_and_skips_local_workspace() -> TestResult {
+        let temp = temp_root("ee-shard-peer-attach")?;
+        let shard_root = temp.path().join("data/shards");
+        std::fs::create_dir_all(&shard_root).map_err(|error| error.to_string())?;
+        std::fs::write(shard_file_path(&shard_root, "wsp_a"), b"a")
+            .map_err(|error| error.to_string())?;
+        std::fs::write(shard_file_path(&shard_root, "wsp_b"), b"b")
+            .map_err(|error| error.to_string())?;
+
+        let plan = plan_peer_shard_attach(PeerShardAttachPlanInput {
+            enabled: true,
+            strict: false,
+            local_workspace_id: "wsp_local".to_owned(),
+            shards_dir_override: Some(shard_root.clone()),
+            peer_workspace_ids: vec![
+                "wsp_b".to_owned(),
+                "wsp_local".to_owned(),
+                "wsp_a".to_owned(),
+                "wsp_b".to_owned(),
+            ],
+        });
+
+        assert_eq!(plan.schema, SHARD_FANOUT_ATTACH_PLAN_SCHEMA_V1);
+        assert!(!plan.blocked);
+        assert_eq!(plan.attachable_count, 2);
+        assert!(plan.degraded.is_empty());
+        assert_eq!(
+            plan.targets
+                .iter()
+                .map(|target| (target.workspace_id.as_str(), target.attach_alias.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("wsp_a", "peer_0000"), ("wsp_b", "peer_0001")]
+        );
+        let expected_a = shard_root.join("wsp_a.db");
+        let expected_b = shard_root.join("wsp_b.db");
+        assert_eq!(
+            plan.targets
+                .iter()
+                .map(|target| target.shard_path.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some(expected_a.as_path()), Some(expected_b.as_path())]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn peer_attach_plan_missing_peer_degrades_without_blocking_best_effort_reads() -> TestResult {
+        let temp = temp_root("ee-shard-peer-missing")?;
+        let shard_root = temp.path().join("data/shards");
+        std::fs::create_dir_all(&shard_root).map_err(|error| error.to_string())?;
+        std::fs::write(shard_file_path(&shard_root, "wsp_present"), b"present")
+            .map_err(|error| error.to_string())?;
+
+        let plan = plan_peer_shard_attach(PeerShardAttachPlanInput {
+            enabled: true,
+            strict: false,
+            local_workspace_id: "wsp_local".to_owned(),
+            shards_dir_override: Some(shard_root),
+            peer_workspace_ids: vec!["wsp_missing".to_owned(), "wsp_present".to_owned()],
+        });
+
+        assert!(!plan.blocked);
+        assert_eq!(plan.attachable_count, 1);
+        assert!(
+            plan.degraded
+                .iter()
+                .any(|entry| entry.code == SHARD_ATTACH_FAILED_CODE)
+        );
+        let missing = plan
+            .targets
+            .iter()
+            .find(|target| target.workspace_id == "wsp_missing")
+            .ok_or_else(|| "missing target not present".to_owned())?;
+        assert!(!missing.attachable);
+        assert!(!missing.shard_exists);
+        assert!(
+            missing
+                .degraded
+                .iter()
+                .any(|entry| entry.code == SHARD_ATTACH_FAILED_CODE)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn peer_attach_plan_strict_mode_blocks_when_any_peer_is_unattachable() -> TestResult {
+        let temp = temp_root("ee-shard-peer-strict")?;
+        let shard_root = temp.path().join("data/shards");
+        std::fs::create_dir_all(&shard_root).map_err(|error| error.to_string())?;
+
+        let plan = plan_peer_shard_attach(PeerShardAttachPlanInput {
+            enabled: true,
+            strict: true,
+            local_workspace_id: "wsp_local".to_owned(),
+            shards_dir_override: Some(shard_root),
+            peer_workspace_ids: vec!["wsp_missing".to_owned()],
+        });
+
+        assert!(plan.blocked);
+        assert_eq!(plan.attachable_count, 0);
+        assert_eq!(plan.targets.len(), 1);
+        assert!(
+            plan.degraded
+                .iter()
+                .any(|entry| entry.code == SHARD_ATTACH_FAILED_CODE)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn peer_attach_plan_rejects_unsafe_peer_workspace_id() -> TestResult {
+        let temp = temp_root("ee-shard-peer-unsafe")?;
+        let shard_root = temp.path().join("data/shards");
+        std::fs::create_dir_all(&shard_root).map_err(|error| error.to_string())?;
+
+        let plan = plan_peer_shard_attach(PeerShardAttachPlanInput {
+            enabled: true,
+            strict: false,
+            local_workspace_id: "wsp_local".to_owned(),
+            shards_dir_override: Some(shard_root),
+            peer_workspace_ids: vec!["../escape".to_owned()],
+        });
+
+        assert_eq!(plan.targets.len(), 1);
+        assert!(!plan.targets[0].attachable);
+        assert_eq!(plan.targets[0].shard_path, None);
+        assert!(
+            plan.degraded
+                .iter()
+                .any(|entry| entry.code == SHARD_FANOUT_WORKSPACE_ID_UNSAFE_CODE)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn peer_attach_plan_json_is_deterministic_for_peer_input_order() -> TestResult {
+        let temp = temp_root("ee-shard-peer-json")?;
+        let shard_root = temp.path().join("data/shards");
+        std::fs::create_dir_all(&shard_root).map_err(|error| error.to_string())?;
+        std::fs::write(shard_file_path(&shard_root, "wsp_a"), b"a")
+            .map_err(|error| error.to_string())?;
+        std::fs::write(shard_file_path(&shard_root, "wsp_b"), b"b")
+            .map_err(|error| error.to_string())?;
+
+        let first = plan_peer_shard_attach(PeerShardAttachPlanInput {
+            enabled: true,
+            strict: false,
+            local_workspace_id: "wsp_local".to_owned(),
+            shards_dir_override: Some(shard_root.clone()),
+            peer_workspace_ids: vec!["wsp_b".to_owned(), "wsp_a".to_owned()],
+        });
+        let second = plan_peer_shard_attach(PeerShardAttachPlanInput {
+            enabled: true,
+            strict: false,
+            local_workspace_id: "wsp_local".to_owned(),
+            shards_dir_override: Some(shard_root),
+            peer_workspace_ids: vec!["wsp_a".to_owned(), "wsp_b".to_owned()],
+        });
+
+        let first_json = serde_json::to_string(&first).map_err(|error| error.to_string())?;
+        let second_json = serde_json::to_string(&second).map_err(|error| error.to_string())?;
+        assert_eq!(first_json, second_json);
         Ok(())
     }
 
