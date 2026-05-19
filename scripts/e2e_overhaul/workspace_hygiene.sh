@@ -285,8 +285,31 @@ validate_event_log_contract() {
     if ! jq -s -e '
         . as $events
         | def has_phase($phase): any($events[]; .phase == $phase);
-        def has_scenario($scenario): any($events[]; .phase == "scenario" and .scenario == $scenario and .status == "pass");
-        def has_schema_validation($scenario): any($events[]; .phase == "schema_validation" and .scenario == $scenario and .status == "pass");
+        def expected_scenarios: [
+            "clean",
+            "source_and_test",
+            "human_source_and_test",
+            "human_secret_no_leak",
+            "scratch_only",
+            "generated_only",
+            "scratch_generated_secret",
+            "large_binary_scan_skip",
+            "active_reservation",
+            "agent_mail_empty_snapshot",
+            "agent_mail_unavailable",
+            "beads_pending_flush",
+            "beads_export_only",
+            "beads_parse_failure"
+        ];
+        def phase_event_count($phase; $scenario): [
+            $events[] | select(.phase == $phase and .scenario == $scenario)
+        ] | length;
+        def has_single_pass($phase; $scenario):
+            phase_event_count($phase; $scenario) == 1
+            and any($events[]; .phase == $phase and .scenario == $scenario and .status == "pass");
+        def only_expected_scenarios($phase): [
+            $events[] | select(.phase == $phase) | .scenario
+        ] | all(. as $scenario | expected_scenarios | index($scenario));
         all($events[];
             .schema == "ee.test_event.v1"
             and .beadId == "bd-1eq3l.8"
@@ -319,38 +342,10 @@ validate_event_log_contract() {
         and has_phase("stdout_stderr_isolation")
         and has_phase("mutation_check")
         and has_phase("teardown")
-        and ([
-            "clean",
-            "source_and_test",
-            "human_source_and_test",
-            "human_secret_no_leak",
-            "scratch_only",
-            "generated_only",
-            "scratch_generated_secret",
-            "large_binary_scan_skip",
-            "active_reservation",
-            "agent_mail_empty_snapshot",
-            "agent_mail_unavailable",
-            "beads_pending_flush",
-            "beads_export_only",
-            "beads_parse_failure"
-        ] | all(. as $scenario | has_scenario($scenario)))
-        and ([
-            "clean",
-            "source_and_test",
-            "human_source_and_test",
-            "human_secret_no_leak",
-            "scratch_only",
-            "generated_only",
-            "scratch_generated_secret",
-            "large_binary_scan_skip",
-            "active_reservation",
-            "agent_mail_empty_snapshot",
-            "agent_mail_unavailable",
-            "beads_pending_flush",
-            "beads_export_only",
-            "beads_parse_failure"
-        ] | all(. as $scenario | has_schema_validation($scenario)))
+        and (expected_scenarios | all(. as $scenario | has_single_pass("scenario"; $scenario)))
+        and (expected_scenarios | all(. as $scenario | has_single_pass("schema_validation"; $scenario)))
+        and only_expected_scenarios("scenario")
+        and only_expected_scenarios("schema_validation")
     ' "$EVENT_LOG" >/dev/null 2>"$diagnostics"; then
         printf 'event log contract check failed; diagnostics=%s\n' "$diagnostics"
         return 1
