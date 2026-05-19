@@ -2735,6 +2735,74 @@ mod tests {
     }
 
     #[test]
+    fn hygiene_report_truncates_commit_warning_lists_deterministically() {
+        let mut entries = (0..10_050)
+            .map(|index| untracked_status_entry(&format!("drift-report-{index:05}.txt")))
+            .collect::<Vec<_>>();
+        entries.extend(
+            (0..10_025)
+                .map(|index| status_entry(&format!("configs/{index:05}/secrets.toml"), ".", "M")),
+        );
+        let report = hygiene_report_from_parts(
+            hygiene_snapshot(entries),
+            &AgentMailCoordinationInput::Available {
+                reservations: Vec::new(),
+                active_agents: Vec::new(),
+            },
+            BeadsMetadataSignal::Unknown,
+            &[],
+        );
+
+        assert_eq!(report.dirty_path_count, 20_075);
+        assert_eq!(
+            report.do_not_commit.len(),
+            WORKSPACE_HYGIENE_MAX_PATHS_PER_LIST
+        );
+        assert_eq!(
+            report.needs_human_review.len(),
+            WORKSPACE_HYGIENE_MAX_PATHS_PER_LIST
+        );
+        assert_eq!(report.do_not_commit[0], "drift-report-00000.txt");
+        assert_eq!(
+            report.do_not_commit.last().map(String::as_str),
+            Some("drift-report-09999.txt")
+        );
+        assert_eq!(report.needs_human_review[0], "configs/00000/secrets.toml");
+        assert_eq!(
+            report.needs_human_review.last().map(String::as_str),
+            Some("configs/09999/secrets.toml")
+        );
+
+        assert!(report.output_truncation.truncated);
+        assert_eq!(report.output_truncation.omitted_do_not_commit, 50);
+        assert_eq!(report.output_truncation.omitted_needs_human_review, 25);
+        assert!(
+            report
+                .degraded_codes
+                .contains(&WORKSPACE_HYGIENE_OUTPUT_TRUNCATED_CODE)
+        );
+        assert!(
+            report
+                .next_actions
+                .iter()
+                .any(|action| action.contains("outputTruncation")),
+            "truncated warning lists should point agents at outputTruncation details"
+        );
+
+        let serialized = serde_json::to_string(&report).expect("workspace hygiene JSON");
+        assert!(serialized.contains("\"omittedDoNotCommit\":50"));
+        assert!(serialized.contains("\"omittedNeedsHumanReview\":25"));
+        assert!(
+            !serialized.contains("drift-report-10000.txt"),
+            "doNotCommit paths beyond the visible prefix must be omitted"
+        );
+        assert!(
+            !serialized.contains("configs/10000/secrets.toml"),
+            "needsHumanReview paths beyond the visible prefix must be omitted"
+        );
+    }
+
+    #[test]
     fn clean_workspace_hygiene_report_serializes_to_pinned_response_envelope_shape() {
         // bd-1eq3l.3: Pin the public `ee workspace hygiene --json` response envelope
         // for the canonical clean-workspace fixture so any drift in agent-visible
