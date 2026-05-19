@@ -30,6 +30,7 @@ use serde::Serialize;
 use crate::graph::Graph;
 use crate::graph::GraphResult;
 use crate::graph::algorithms::{DEFAULT_BACKGROUND_BUDGET, current_or_testing_cx, run_with_budget};
+use crate::graph::hits::HITS_REPORT_SCHEMA_V1;
 
 /// Node attribute key on the bipartite rule↔memory projection that
 /// tags each node with its partition (`rule` or `memory`). Mirrors the
@@ -51,6 +52,93 @@ pub struct BipartiteHits {
     /// they cite, weighted by the connecting memories' authority
     /// scores.
     pub hubs: BTreeMap<String, f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadBearingMemoryItem {
+    pub rank: usize,
+    pub memory_id: String,
+    pub load_bearing_score: f64,
+    pub citing_rule_count: usize,
+    pub interpretation: &'static str,
+    pub evidence: LoadBearingMemoryEvidence,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadBearingMemoryEvidence {
+    pub schema: &'static str,
+    pub algorithm: &'static str,
+    pub snapshot_version: u64,
+}
+
+/// Project bipartite authority scores into load-bearing memory items for
+/// the `loadBearingMemories` insights surface.
+///
+/// Items are sorted by descending authority score and then memory ID so
+/// equal scores remain deterministic across graph construction order.
+/// Non-finite and zero scores are omitted because they carry no
+/// actionable load-bearing signal for agents.
+#[must_use]
+pub fn load_bearing_memory_items(
+    graph: &Graph,
+    hits: &BipartiteHits,
+    snapshot_version: u64,
+) -> Vec<LoadBearingMemoryItem> {
+    let mut scored_memories = hits
+        .authorities
+        .iter()
+        .filter_map(|(memory_id, score)| {
+            if score.is_finite()
+                && *score > 0.0
+                && matches!(
+                    partition_for(graph, memory_id.as_str()),
+                    Some(BIPARTITE_PARTITION_MEMORY)
+                )
+            {
+                Some((memory_id.clone(), *score))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    scored_memories.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    scored_memories
+        .into_iter()
+        .enumerate()
+        .map(|(index, (memory_id, score))| LoadBearingMemoryItem {
+            rank: index + 1,
+            citing_rule_count: citing_rule_count(graph, &memory_id),
+            memory_id,
+            load_bearing_score: score,
+            interpretation: "load_bearing",
+            evidence: LoadBearingMemoryEvidence {
+                schema: HITS_REPORT_SCHEMA_V1,
+                algorithm: "bipartite_hits",
+                snapshot_version,
+            },
+        })
+        .collect()
+}
+
+fn citing_rule_count(graph: &Graph, memory_id: &str) -> usize {
+    graph
+        .neighbors_iter(memory_id)
+        .map(|neighbors| {
+            neighbors
+                .filter(|node| matches!(partition_for(graph, node), Some(BIPARTITE_PARTITION_RULE)))
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 /// Compute partitioned HITS scores for the rule↔memory bipartite
@@ -464,6 +552,74 @@ mod tests {
             "only rule-partition nodes may surface as hubs"
         );
         Ok(())
+    }
+
+    #[test]
+    fn load_bearing_memory_items_rank_shared_authorities_for_insights() -> TestResult {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        for rule in ["rule_cornerstone_a", "rule_cornerstone_b"] {
+            add_rule(&mut graph, rule);
+        }
+        add_memory(&mut graph, "mem_load_bearing");
+        add_memory(&mut graph, "mem_solo_source");
+        link(&mut graph, "rule_cornerstone_a", "mem_load_bearing");
+        link(&mut graph, "rule_cornerstone_a", "mem_solo_source");
+        link(&mut graph, "rule_cornerstone_b", "mem_load_bearing");
+
+        let hits = graph_result(compute_bipartite_hits(&graph))?;
+        let items = load_bearing_memory_items(&graph, &hits, 17);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].rank, 1);
+        assert_eq!(items[0].memory_id, "mem_load_bearing");
+        assert_eq!(items[0].citing_rule_count, 2);
+        assert_eq!(items[0].interpretation, "load_bearing");
+        assert_eq!(items[0].evidence.schema, HITS_REPORT_SCHEMA_V1);
+        assert_eq!(items[0].evidence.algorithm, "bipartite_hits");
+        assert_eq!(items[0].evidence.snapshot_version, 17);
+        assert!(
+            items[0].load_bearing_score > items[1].load_bearing_score,
+            "memory cited by two cornerstone rules should outrank solo memory"
+        );
+        assert_eq!(items[1].rank, 2);
+        assert_eq!(items[1].memory_id, "mem_solo_source");
+        assert_eq!(items[1].citing_rule_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn load_bearing_memory_items_filter_noise_and_tie_break_by_memory_id() {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        add_rule(&mut graph, "rule_a");
+        add_rule(&mut graph, "rule_b");
+        for memory in ["mem_a", "mem_b", "mem_zero", "mem_nan"] {
+            add_memory(&mut graph, memory);
+            link(&mut graph, "rule_a", memory);
+        }
+        graph.add_node_with_attrs("node_unpartitioned", AttrMap::new());
+        link(&mut graph, "rule_b", "mem_b");
+        link(&mut graph, "rule_b", "node_unpartitioned");
+
+        let hits = BipartiteHits {
+            authorities: BTreeMap::from([
+                ("mem_b".to_owned(), 0.5),
+                ("mem_a".to_owned(), 0.5),
+                ("mem_zero".to_owned(), 0.0),
+                ("mem_nan".to_owned(), f64::NAN),
+                ("node_unpartitioned".to_owned(), 0.9),
+            ]),
+            hubs: BTreeMap::new(),
+        };
+
+        let items = load_bearing_memory_items(&graph, &hits, 4);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].rank, 1);
+        assert_eq!(items[0].memory_id, "mem_a");
+        assert_eq!(items[0].citing_rule_count, 1);
+        assert_eq!(items[1].rank, 2);
+        assert_eq!(items[1].memory_id, "mem_b");
+        assert_eq!(items[1].citing_rule_count, 2);
     }
 
     #[test]

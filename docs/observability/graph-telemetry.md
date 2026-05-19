@@ -108,11 +108,10 @@ production call-site wiring:
   `ee.graph.cache.evict` with `reason = "snapshot_archived"` when a
   new graph snapshot evicts stale `graph_algorithm_results` rows tied
   to older snapshots.
-
-The `operator_request` eviction reason is reserved in the public enum
-and docs, but no production operator-request cache-eviction command is
-currently wired to emit it. That call site remains bd-2inbn follow-up
-work.
+- Durable `ee maintenance graph-snapshot-prune` emits
+  `ee.graph.cache.evict` with `reason = "operator_request"` when the
+  explicit maintenance command prunes archived graph snapshots that
+  still have cached `graph_algorithm_results` rows.
 
 ## Versioning
 

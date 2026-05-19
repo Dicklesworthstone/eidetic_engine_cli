@@ -3,16 +3,21 @@ use std::error::Error;
 use std::fmt;
 use std::time::Duration;
 
+use chrono::{SecondsFormat, Utc};
+
 use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
+};
+use crate::core::graph_audit::{
+    SnapshotArchivedInputs, SnapshotArchivedReason, build_snapshot_archived_payload,
 };
 use crate::core::graph_telemetry::{
     CacheEvictEvent, CacheEvictReason, SnapshotRefreshEvent, emit_cache_evict,
     emit_snapshot_refresh,
 };
 use crate::db::{
-    AcquireLockResult, AdvisoryLockId, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
-    DbOperation,
+    AcquireLockResult, AdvisoryLockId, CreateAuditInput, CreateGraphAlgorithmWitnessInput,
+    CreateGraphSnapshotInput, DbOperation, generate_audit_id,
 };
 use crate::db::{
     DbConnection, DbError, GraphSnapshotStatus, GraphSnapshotType, StoredGraphSnapshot,
@@ -2902,9 +2907,27 @@ fn persist_graph_snapshot_in_transaction(
 ) -> GraphResult<GraphRefreshSnapshot> {
     let snapshot_version = next_graph_snapshot_version(conn, workspace_id, input.graph_type)?;
     let snapshot_id = generate_graph_snapshot_id();
+    let snapshots_to_archive = conn
+        .list_graph_snapshots(workspace_id, Some(input.graph_type), u32::MAX)
+        .map_err(|error| GraphError::storage("list graph snapshots for archival audit", error))?
+        .into_iter()
+        .filter(|snapshot| snapshot.status == GraphSnapshotStatus::Valid)
+        .collect::<Vec<_>>();
+    let archived_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
-    conn.archive_valid_graph_snapshots(workspace_id, input.graph_type)
+    let archived_count = conn
+        .archive_valid_graph_snapshots(workspace_id, input.graph_type)
         .map_err(|error| GraphError::storage("archive previous graph snapshots", error))?;
+    let archived_audit_count = usize::try_from(archived_count)
+        .unwrap_or(usize::MAX)
+        .min(snapshots_to_archive.len());
+    insert_graph_snapshot_archived_audits(
+        conn,
+        workspace_id,
+        &snapshots_to_archive[..archived_audit_count],
+        &archived_at,
+        SnapshotArchivedReason::NewerSnapshot,
+    )?;
 
     conn.insert_graph_snapshot(
         &snapshot_id,
@@ -2941,6 +2964,35 @@ fn persist_graph_snapshot_in_transaction(
         content_hash: input.content_hash,
         status: GraphSnapshotStatus::Valid,
     })
+}
+
+fn insert_graph_snapshot_archived_audits(
+    conn: &DbConnection,
+    workspace_id: &str,
+    snapshots: &[StoredGraphSnapshot],
+    archived_at: &str,
+    reason: SnapshotArchivedReason,
+) -> GraphResult<()> {
+    for snapshot in snapshots {
+        let payload = build_snapshot_archived_payload(SnapshotArchivedInputs {
+            snapshot_id: snapshot.id.as_str(),
+            archived_at,
+            reason,
+        });
+        conn.insert_audit(
+            &generate_audit_id(),
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.to_owned()),
+                actor: Some(SUBSYSTEM.to_owned()),
+                action: payload.action.to_owned(),
+                target_type: Some(payload.target_type.to_owned()),
+                target_id: Some(payload.target_id),
+                details: Some(payload.details.to_string()),
+            },
+        )
+        .map_err(|error| GraphError::storage("insert graph snapshot archive audit", error))?;
+    }
+    Ok(())
 }
 
 /// Refresh centrality metrics for all memories in the graph.
@@ -5165,6 +5217,9 @@ fn compare_neighborhood_edges(
 
 #[cfg(test)]
 mod tests {
+    use crate::core::graph_audit::{
+        SNAPSHOT_ARCHIVED_ACTION, SNAPSHOT_TARGET_TYPE, SnapshotArchivedReason,
+    };
     use crate::db::{
         CreateCausalEvidenceInput, CreateGraphAlgorithmResultInput, CreateGraphSnapshotInput,
         CreateMemoryInput, CreateMemoryLinkInput, CreateProceduralRuleInput, CreateWorkspaceInput,
@@ -9339,6 +9394,45 @@ mod tests {
         );
         assert_eq!(snapshots[0].status, GraphSnapshotStatus::Valid);
         assert_eq!(snapshots[1].status, GraphSnapshotStatus::Archived);
+
+        let archive_audits = connection
+            .list_audit_by_target(
+                SNAPSHOT_TARGET_TYPE,
+                "gsnap_0000000000000000000000121",
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        assert_eq!(archive_audits.len(), 1);
+        let archive_audit = &archive_audits[0];
+        assert_eq!(archive_audit.workspace_id.as_deref(), Some(WORKSPACE_ID));
+        assert_eq!(archive_audit.actor.as_deref(), Some(super::SUBSYSTEM));
+        assert_eq!(archive_audit.action.as_str(), SNAPSHOT_ARCHIVED_ACTION);
+        assert_eq!(
+            archive_audit.target_type.as_deref(),
+            Some(SNAPSHOT_TARGET_TYPE)
+        );
+        assert_eq!(
+            archive_audit.target_id.as_deref(),
+            Some("gsnap_0000000000000000000000121")
+        );
+        let details: serde_json::Value = serde_json::from_str(
+            archive_audit
+                .details
+                .as_deref()
+                .ok_or_else(|| "archive audit details missing".to_owned())?,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            details.get("reason"),
+            Some(&serde_json::json!(
+                SnapshotArchivedReason::NewerSnapshot.as_str()
+            ))
+        );
+        let archived_at = details
+            .get("archived_at")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "archive audit archived_at missing".to_owned())?;
+        chrono::DateTime::parse_from_rfc3339(archived_at).map_err(|error| error.to_string())?;
 
         connection.close().map_err(|error| error.to_string())
     }
