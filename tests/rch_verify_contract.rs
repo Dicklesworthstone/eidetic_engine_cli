@@ -2888,6 +2888,148 @@ exit 2
 }
 
 #[test]
+fn known_blocker_verifier_mode_change_allows_new_remote_attempt() -> TestResult {
+    let workspace = seed_git_workspace("rch-known-blocker-verifier-mode")?;
+    let invocation_log = unique_tmp_path("rch-known-blocker-mode-invocations");
+    let store = unique_tmp_path("rch-known-blocker-mode-store").join("known_blockers.jsonl");
+    let fake_rch = write_fake_rch(
+        "fake-rch-known-blocker-mode.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+  printf 'rch 1.0.24\n'
+  exit 0
+fi
+if [ "${1:-}" = "status" ]; then
+  cat <<'JSON'
+{"data":{"daemon":{"version":"1.0.24","socket_path":"/tmp/rch.sock","workers":[],"recent_builds":[]}}}
+JSON
+  exit 0
+fi
+if [ "${1:-}" = "exec" ]; then
+  printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+  cat <<'TRANSCRIPT'
+error: failed to load manifest for dependency `frankensearch`
+
+Caused by:
+  failed to parse manifest at `/data/projects/frankensearch/frankensearch/Cargo.toml`
+
+Caused by:
+  error inheriting `license-file` from workspace root manifest's `workspace.package.license-file`
+
+Caused by:
+  `workspace.package.license-file` was not defined
+[RCH] remote vmi1227854 failed (exit 101)
+TRANSCRIPT
+  exit 101
+fi
+printf 'unexpected fake rch args: %s\n' "$*" >&2
+exit 2
+"#,
+    )?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path is not utf-8".to_owned())?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+    let store_arg = store
+        .to_str()
+        .ok_or_else(|| "store path is not utf-8".to_owned())?;
+    let live_args = [
+        "--skip-build-admission",
+        "--known-blocker-store",
+        store_arg,
+        "--rch-bin",
+        fake_rch_arg,
+        "--project-root",
+        workspace_arg,
+        "--",
+        "cargo",
+        "test",
+        "--lib",
+        "known_blocker_verifier_mode_smoke",
+    ];
+    let strict_args = [
+        "--skip-build-admission",
+        "--known-blocker-store",
+        store_arg,
+        "--rch-bin",
+        fake_rch_arg,
+        "--project-root",
+        workspace_arg,
+        "--require-clean-tree",
+        "--",
+        "cargo",
+        "test",
+        "--lib",
+        "known_blocker_verifier_mode_smoke",
+    ];
+    let envs = [
+        ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854"),
+    ];
+
+    let (first_status, first_stdout, _first_stderr) = run_script_with_env(&live_args, &envs)?;
+    if first_status.success() {
+        return Err("first verifier-mode fixture should fail remotely".to_owned());
+    }
+    let first: Value = serde_json::from_str(&first_stdout)
+        .map_err(|error| format!("parse first verifier-mode known-blocker run: {error}"))?;
+    if first["verification_attribution"] != "live_dirty_checkout"
+        || first["known_blocker"]["verifier_source_mode"] != "live_dirty_checkout"
+    {
+        return Err(format!(
+            "first run should record a live-checkout blocker: {first}"
+        ));
+    }
+
+    let (second_status, second_stdout, _second_stderr) = run_script_with_env(&strict_args, &envs)?;
+    if second_status.success() {
+        return Err("strict verifier-mode fixture should preserve remote failure".to_owned());
+    }
+    let second: Value = serde_json::from_str(&second_stdout)
+        .map_err(|error| format!("parse strict verifier-mode known-blocker run: {error}"))?;
+    if second["status"] == "known_blocker_refused" {
+        return Err(format!(
+            "strict clean mode should not reuse the live-checkout blocker: {second}"
+        ));
+    }
+    if second["verification_attribution"] != "strict_clean_tree"
+        || second["known_blocker"]["verifier_source_mode"] != "strict_clean_tree"
+    {
+        return Err(format!(
+            "strict run should record a strict-clean blocker: {second}"
+        ));
+    }
+
+    let (third_status, third_stdout, _third_stderr) = run_script_with_env(&strict_args, &envs)?;
+    if third_status.success() {
+        return Err("second strict verifier-mode fixture should fail fast".to_owned());
+    }
+    let third: Value = serde_json::from_str(&third_stdout)
+        .map_err(|error| format!("parse second strict verifier-mode run: {error}"))?;
+    if third["status"] != "known_blocker_refused"
+        || third["verification_attribution"] != "not_run_known_blocker"
+        || third["known_blocker"]["verifier_source_mode"] != "strict_clean_tree"
+    {
+        return Err(format!("second strict run should fail fast: {third}"));
+    }
+    let invocations = fs::read_to_string(&invocation_log)
+        .map_err(|error| format!("read verifier-mode invocations: {error}"))?;
+    if invocations.lines().count() != 2 {
+        return Err(format!(
+            "only the live and first strict modes should invoke fake RCH: {invocations:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn known_blocker_override_runs_rch_and_records_override_evidence() -> TestResult {
     let invocation_log = unique_tmp_path("rch-known-blocker-override-invocations");
     let store = unique_tmp_path("rch-known-blocker-override-store").join("known_blockers.jsonl");
