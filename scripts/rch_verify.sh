@@ -1229,6 +1229,32 @@ def error_codes(text):
         return []
     return sorted(set(re.findall(r"\bE\d{4}\b|RCH-E\d{3}\b", text)))
 
+def cargo_path_dependency_version_details(text):
+    if not text:
+        return None
+    requirement = re.search(
+        r"failed to select a version for the requirement `([^`=]+?)\s*=\s*\"([^\"]+)\"`",
+        text,
+    )
+    candidates = re.search(
+        r"candidate versions found which didn't match:\s*([^\n]+)",
+        text,
+    )
+    location = re.search(r"location searched:\s*([^\n]+)", text)
+    if not (requirement and candidates and location):
+        return None
+    candidate_versions = [
+        item.strip()
+        for item in candidates.group(1).split(",")
+        if item.strip()
+    ]
+    return {
+        "crate": requirement.group(1).strip(),
+        "required": requirement.group(2).strip(),
+        "candidate_versions": candidate_versions,
+        "location_searched": redact(location.group(1).strip()),
+    }
+
 raw_stdout_tail = proof.get("stdout_tail") or ""
 raw_stderr_tail = proof.get("stderr_tail") or ""
 combined_tail = "\n".join(part for part in [raw_stdout_tail, raw_stderr_tail] if part)
@@ -1236,6 +1262,9 @@ proof["stdout_tail"] = redact(raw_stdout_tail)
 proof["stderr_tail"] = redact(raw_stderr_tail)
 first_error_file, first_error_line = first_error_location(combined_tail)
 codes = error_codes(combined_tail)
+cargo_path_dependency_version = cargo_path_dependency_version_details(combined_tail)
+if cargo_path_dependency_version:
+    proof["cargo_path_dependency_version"] = cargo_path_dependency_version
 
 exit_code = proof.get("exit_code")
 degraded = list(proof.get("degraded_codes") or [])

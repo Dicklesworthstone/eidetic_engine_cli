@@ -2428,6 +2428,16 @@ required by package `eidetic-engine v0.1.0 (/data/projects/eidetic_engine_cli)`\
             "path dependency version code should be worker-state degraded: {report}"
         ));
     }
+    let details = &report["cargo_path_dependency_version"];
+    if details["crate"] != "franken-agent-detection"
+        || details["required"] != "^0.1.3"
+        || details["candidate_versions"] != serde_json::json!(["0.1.2"])
+        || details["location_searched"] != "/data/projects/franken_agent_detection"
+    {
+        return Err(format!(
+            "path dependency version details were not structured: {report}"
+        ));
+    }
     Ok(())
 }
 

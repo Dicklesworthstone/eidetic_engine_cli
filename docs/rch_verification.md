@@ -160,7 +160,11 @@ Consumers that need to route action should use the two narrower lists:
   `rch_verify_cargo_path_dependency_version_blocked` classifies Cargo
   path-dependency version-resolution failures where a remote
   `/data/projects/<dependency>` checkout is stale relative to the verifying
-  project.
+  project. When the Cargo transcript includes the dependency name, requested
+  version requirement, candidate versions, and searched path, the proof also
+  includes `cargo_path_dependency_version` with structured `crate`, `required`,
+  `candidate_versions`, and `location_searched` fields for routing the worker
+  refresh or dependency publication follow-up.
 - `build_admission.status`: local admission result before RCH. A denied result
   means no remote verifier ran; unavailable or skipped results mean proof
   quality is weaker than an admitted run.
