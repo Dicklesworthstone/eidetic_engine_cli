@@ -1,11 +1,12 @@
 //! Doc-consistency gate for `docs/redaction_levels.md` (K6 / bd-17c65.11.6).
 //!
 //! Asserts the redaction-level spec doc is well-formed and pins the
-//! canonical level enumeration. When the level vocabulary or per-surface
-//! defaults change, this gate fires until the doc is updated. The full
-//! level × surface implementation matrix lands in a sibling sub-bead;
-//! this test gates the docs contract independently so the spec doesn't
-//! drift away from the eventual implementation.
+//! canonical level enumeration. When the level vocabulary, per-surface
+//! defaults, or verification-surface pointers change, this gate fires
+//! until the doc is updated. The level × surface implementation matrix
+//! is spread across unit, contract, and e2e surfaces; this test gates
+//! the docs contract independently so the spec doesn't drift from the
+//! implementation.
 //!
 //! Bead: bd-17c65.11.6 (K6).
 
@@ -110,7 +111,7 @@ fn doc_declares_per_surface_defaults_in_canonical_table() -> TestResult {
 }
 
 #[test]
-fn doc_distinguishes_current_and_planned_redaction_flags() -> TestResult {
+fn doc_declares_current_redaction_flag_language() -> TestResult {
     let doc = read_doc()?;
 
     for required_phrase in [
@@ -123,9 +124,7 @@ fn doc_distinguishes_current_and_planned_redaction_flags() -> TestResult {
     ] {
         ensure(
             doc.contains(required_phrase),
-            format!(
-                "docs/redaction_levels.md missing current/planned flag language: `{required_phrase}`"
-            ),
+            format!("docs/redaction_levels.md missing current flag language: `{required_phrase}`"),
         )?;
     }
 

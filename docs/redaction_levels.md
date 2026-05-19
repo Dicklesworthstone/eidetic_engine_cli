@@ -174,9 +174,9 @@ Four failure-mode fixtures are pinned under
   is safe, such as performance-forensics comparisons over redacted or
   partially redacted artifacts.
 
-## Test plan (target — implementation lands in a sub-bead)
+## Test and Evidence Surfaces
 
-- **Unit:** `tests/redaction_levels_unit.rs` — 20-row matrix (5 levels
+- **Unit:** `tests/redaction_levels_unit.rs` — level matrix coverage
   × 4 surfaces) that asserts per-row output exactly matches the table
   above. Each row carries a `tests/fixtures/secrets/pre_redaction.jsonl`
   fixture pattern as the seed memory.
