@@ -29,6 +29,12 @@ if [ -n "${HITS_HUB_ID:-}" ] && [ -n "${HITS_AUTHORITY_ID:-}" ]; then
 fi
 e2e_log_note "g10_hits_seed_link hub=${HITS_HUB_ID:-missing} authority=${HITS_AUTHORITY_ID:-missing}"
 
+if ee_workspace graph centrality-refresh --json >/dev/null 2>&1; then
+    e2e_log_note "g10_hits_graph_snapshot_refreshed=true"
+else
+    todo_assert "g10_hits_graph_snapshot_refresh" "bd-jy4w.4" "ee graph centrality-refresh is not fully available for the HITS fixture yet."
+fi
+
 HUBS_JSON=$(ee_workspace insights --section hubs --json 2>/dev/null || true)
 AUTHORITIES_JSON=$(ee_workspace insights --section authorities --json 2>/dev/null || true)
 if printf '%s' "$HUBS_JSON" | jq . >/dev/null 2>&1 && printf '%s' "$AUTHORITIES_JSON" | jq . >/dev/null 2>&1; then
@@ -74,6 +80,36 @@ if printf '%s' "$HUBS_JSON" | jq . >/dev/null 2>&1 && printf '%s' "$AUTHORITIES_
 else
     todo_assert "g10_hits_surface_available" "bd-jy4w.4" "ee insights hubs/authorities sections are not fully available yet."
     SNAPSHOT_VERSION="unavailable"
+fi
+
+WHY_JSON=$(ee_workspace why "$HITS_AUTHORITY_ID" --json 2>/dev/null || true)
+if printf '%s' "$WHY_JSON" | jq . >/dev/null 2>&1; then
+    e2e_log_note "g10_hits_surface=why graph.hits"
+    assert_jq_nonempty "$WHY_JSON" '.schema // empty' "g10_hits_why_schema_present"
+    assert_jq "$WHY_JSON" '.data.command // empty' "why" "g10_hits_why_command"
+    assert_jq "$WHY_JSON" '.data.memoryId // empty' "$HITS_AUTHORITY_ID" "g10_hits_why_memory_id"
+    assert_jq "$WHY_JSON" '.data.graph.hits != null' "true" "g10_hits_why_hits_block_present"
+    assert_jq "$WHY_JSON" '(.data.graph.hits.authorityScore | type)' "number" "g10_hits_why_authority_score_number"
+    assert_jq "$WHY_JSON" '.data.graph.hits.authorityScore >= 0' "true" "g10_hits_why_authority_score_nonnegative"
+    assert_jq "$WHY_JSON" '(.data.graph.hits.hubScore | type)' "number" "g10_hits_why_hub_score_number"
+    assert_jq "$WHY_JSON" '.data.graph.hits.hubScore >= 0' "true" "g10_hits_why_hub_score_nonnegative"
+    assert_jq "$WHY_JSON" '.data.graph.hits.authorityRank >= 1' "true" "g10_hits_why_authority_rank_valid"
+    assert_jq "$WHY_JSON" '.data.graph.hits.hubRank >= 1' "true" "g10_hits_why_hub_rank_valid"
+    assert_jq "$WHY_JSON" '.data.graph.hits.dominantRole // empty' "authority" "g10_hits_why_dominant_role"
+    assert_jq "$WHY_JSON" '(.data.graph.hits.profileInfluence.groundingBoost | type)' "number" "g10_hits_why_grounding_boost_number"
+    assert_jq "$WHY_JSON" '(.data.graph.hits.profileInfluence.orientationBoost | type)' "number" "g10_hits_why_orientation_boost_number"
+    assert_jq "$WHY_JSON" '(.data.graph.hits.profileInfluence.balancedBoost | type)' "number" "g10_hits_why_balanced_boost_number"
+    assert_jq "$WHY_JSON" '.data.graph.hits.evidence.schema // empty' "ee.graph.hits.v1" "g10_hits_why_evidence_schema"
+    assert_jq "$WHY_JSON" '.data.graph.hits.evidence.algorithm // empty' "hits_centrality_directed" "g10_hits_why_evidence_algorithm"
+    assert_jq "$WHY_JSON" '.data.graph.hits.evidence.graphType // empty' "memory_links" "g10_hits_why_evidence_graph_type"
+    assert_jq "$WHY_JSON" '(.data.graph.hits.evidence.snapshotVersion | type)' "number" "g10_hits_why_evidence_snapshot_version_number"
+    assert_jq_nonempty "$WHY_JSON" '.data.graph.hits.rationale // empty' "g10_hits_why_rationale"
+    WHY_HITS_SNAPSHOT_VERSION=$(printf '%s' "$WHY_JSON" | jq -r '.data.graph.hits.evidence.snapshotVersion // empty' 2>/dev/null | head -n 1)
+    if [ -n "${WHY_HITS_SNAPSHOT_VERSION:-}" ]; then
+        SNAPSHOT_VERSION="$WHY_HITS_SNAPSHOT_VERSION"
+    fi
+else
+    todo_assert "g10_hits_why_surface_available" "bd-jy4w.4" "ee why --json HITS block is not fully available yet."
 fi
 
 if [ "${EE_GRAPH_E2E_INJECT_FAILURE:-0}" = "1" ]; then
