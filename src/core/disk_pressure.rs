@@ -1533,6 +1533,7 @@ fn nearest_existing_path(path: &Path) -> Option<PathBuf> {
     None
 }
 
+#[cfg(unix)]
 fn statvfs_capacity(path: &Path) -> Option<FsCapacity> {
     let stat = rustix::fs::statvfs(path).ok()?;
     let block_size = if stat.f_frsize == 0 {
@@ -1544,6 +1545,14 @@ fn statvfs_capacity(path: &Path) -> Option<FsCapacity> {
         total_bytes: stat.f_blocks.saturating_mul(block_size),
         available_bytes: stat.f_bavail.saturating_mul(block_size),
     })
+}
+
+#[cfg(not(unix))]
+fn statvfs_capacity(path: &Path) -> Option<FsCapacity> {
+    let _ = fs::metadata(path).ok()?;
+    // Rust std has no portable filesystem-capacity API; callers already
+    // surface capacity absence through the existing degraded path.
+    None
 }
 
 fn percent_used(total: u64, used: u64) -> f64 {
@@ -1599,6 +1608,248 @@ fn first_existing_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> 
         }
     }
     Ok(None)
+}
+
+// -----------------------------------------------------------------------------
+// bd-1zb7k.11.7 — Agent-harness runaway-log classifier (preservation-oriented)
+//
+// `ee diag disk-pressure --json` already detects `codex_log_root` as a path,
+// but does not classify individual oversized harness log files separately,
+// emit per-file repair plans, or distinguish actively-open logs (where naive
+// truncation would corrupt the writer's append offset) from closed oversized
+// logs (where rotation is safe with manifest evidence).
+//
+// This sub-module adds a *pure* per-entry classifier with no I/O and no
+// mutation. The walker that gathers `AgentHarnessLogEntry` inputs from
+// `~/.codex/log/*` and feeds them into the classifier is a follow-up slice
+// of bd-1zb7k.11.7 (the bead remains open until that lands).
+//
+// The classifier never returns a repair kind that deletes or truncates files
+// without explicit human approval: every recommended action is either
+// `preserve_tail_copy`, `rotate_with_manifest`, `move_preserve`, `ask_human`,
+// or `noop`, matching the AGENTS.md RULE 1 / RULE 2 / "no-file-deletion"
+// policy.
+// -----------------------------------------------------------------------------
+
+/// Stable schema tag for the per-entry classification result. Mirrors the
+/// `ee.disk_pressure.*` family used elsewhere in this module.
+pub const AGENT_HARNESS_LOG_CLASSIFIER_SCHEMA_V1: &str =
+    "ee.disk_pressure.agent_harness_log_classifier.v1";
+
+/// Activity state observed for a harness log file. Detected before
+/// classification by the gatherer (lsof / /proc inspection); the classifier
+/// itself never opens the file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentHarnessLogActivity {
+    /// One or more open file descriptors point at this log.
+    ActiveOpen,
+    /// No open handles are observable.
+    Closed,
+    /// The gatherer could not probe open-handle status (e.g., `lsof` is
+    /// unavailable on this host).
+    OpenHandleProbeUnavailable,
+}
+
+impl AgentHarnessLogActivity {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ActiveOpen => "active_open",
+            Self::Closed => "closed",
+            Self::OpenHandleProbeUnavailable => "open_handle_probe_unavailable",
+        }
+    }
+}
+
+/// Repair action kinds the classifier may recommend. Each kind preserves the
+/// AGENTS.md no-deletion policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentHarnessLogRepairKind {
+    /// Copy the trailing `tail_byte_target` bytes of an active log to a
+    /// dated preservation path so an operator can approve subsequent
+    /// rotation without losing recent context.
+    PreserveTailCopy,
+    /// Move the closed oversized log into a manifest-tracked archive
+    /// directory before any deletion is considered.
+    RotateWithManifest,
+    /// Move the log onto a different filesystem (e.g., external NVMe)
+    /// while preserving the original path via a symlink.
+    MovePreserve,
+    /// Stop and ask a human to approve a specific cleanup or relocation
+    /// plan. Always emitted when an active log is on the workspace
+    /// filesystem under blocked posture.
+    AskHuman,
+    /// No action recommended.
+    Noop,
+}
+
+impl AgentHarnessLogRepairKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PreserveTailCopy => "preserve_tail_copy",
+            Self::RotateWithManifest => "rotate_with_manifest",
+            Self::MovePreserve => "move_preserve",
+            Self::AskHuman => "ask_human",
+            Self::Noop => "noop",
+        }
+    }
+}
+
+/// One agent-harness log file as observed by the gatherer.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHarnessLogEntry {
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    pub filesystem_label: String,
+    pub on_workspace_filesystem: bool,
+    pub mtime_unix_seconds: Option<u64>,
+    pub activity: AgentHarnessLogActivity,
+    pub owning_process_summary: Option<String>,
+    pub tail_byte_target: u64,
+}
+
+/// Classification result, ready to drop into the existing
+/// `DiskPressureRecoveryAction` lane or rendered standalone.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHarnessLogClassification {
+    pub schema: &'static str,
+    pub entry: AgentHarnessLogEntry,
+    pub role: &'static str,
+    pub repair_kind: AgentHarnessLogRepairKind,
+    pub reason: String,
+    pub suggestion: String,
+    pub mutation_policy: &'static str,
+    pub side_effect_free: bool,
+}
+
+/// Threshold above which a harness log is considered oversized for the
+/// purpose of P7 classification. Matches the existing disk-pressure
+/// `WARNING_AVAILABLE_BYTES` family (1 GiB).
+pub const AGENT_HARNESS_LOG_WARNING_BYTES: u64 = GIB;
+
+/// Threshold above which a harness log triggers a stronger action even
+/// when activity is unknown.
+pub const AGENT_HARNESS_LOG_DEGRADED_BYTES: u64 = 10 * GIB;
+
+/// Default tail size to preserve before any rotation is recommended.
+/// 16 MiB is roughly the last few minutes of any reasonable agent log.
+pub const AGENT_HARNESS_LOG_DEFAULT_TAIL_BYTES: u64 = 16 * MIB;
+
+/// Pure classifier: given an [`AgentHarnessLogEntry`], decide on the
+/// preservation-oriented repair action. The function performs no I/O,
+/// makes no syscalls, and never returns a delete/truncate action.
+#[must_use]
+pub fn classify_agent_harness_log(entry: &AgentHarnessLogEntry) -> AgentHarnessLogClassification {
+    let (repair_kind, reason, suggestion) = recommend_repair(entry);
+    AgentHarnessLogClassification {
+        schema: AGENT_HARNESS_LOG_CLASSIFIER_SCHEMA_V1,
+        entry: entry.clone(),
+        role: "agent_harness_log",
+        repair_kind,
+        reason,
+        suggestion,
+        mutation_policy: "preservation_only",
+        side_effect_free: true,
+    }
+}
+
+fn recommend_repair(entry: &AgentHarnessLogEntry) -> (AgentHarnessLogRepairKind, String, String) {
+    let oversized_warning = entry.size_bytes >= AGENT_HARNESS_LOG_WARNING_BYTES;
+    let oversized_degraded = entry.size_bytes >= AGENT_HARNESS_LOG_DEGRADED_BYTES;
+
+    if !oversized_warning {
+        return (
+            AgentHarnessLogRepairKind::Noop,
+            format!(
+                "Harness log {} is {} bytes, under the {} byte warning threshold.",
+                entry.path.display(),
+                entry.size_bytes,
+                AGENT_HARNESS_LOG_WARNING_BYTES
+            ),
+            "No action recommended; keep using the external build/scratch drive.".to_owned(),
+        );
+    }
+
+    match entry.activity {
+        AgentHarnessLogActivity::ActiveOpen => {
+            if oversized_degraded && entry.on_workspace_filesystem {
+                (
+                    AgentHarnessLogRepairKind::AskHuman,
+                    format!(
+                        "Active harness log {} is {} bytes on the workspace filesystem; \
+truncation would corrupt the running agent and deletion is not allowed.",
+                        entry.path.display(),
+                        entry.size_bytes
+                    ),
+                    format!(
+                        "Stop and request explicit human approval before any cleanup. \
+Pre-stage a {}-byte tail copy under a dated preservation path first.",
+                        entry.tail_byte_target
+                    ),
+                )
+            } else {
+                (
+                    AgentHarnessLogRepairKind::PreserveTailCopy,
+                    format!(
+                        "Active harness log {} is {} bytes; the writer's append offset \
+must be preserved.",
+                        entry.path.display(),
+                        entry.size_bytes
+                    ),
+                    format!(
+                        "Copy the trailing {} bytes to a dated preservation path. \
+Do not truncate or rename the active file without explicit human approval.",
+                        entry.tail_byte_target
+                    ),
+                )
+            }
+        }
+        AgentHarnessLogActivity::Closed => {
+            if entry.on_workspace_filesystem && oversized_degraded {
+                (
+                    AgentHarnessLogRepairKind::MovePreserve,
+                    format!(
+                        "Closed harness log {} is {} bytes on the workspace filesystem.",
+                        entry.path.display(),
+                        entry.size_bytes
+                    ),
+                    "Move the log onto external scratch and symlink the original path; \
+no deletion until manifest is recorded."
+                        .to_owned(),
+                )
+            } else {
+                (
+                    AgentHarnessLogRepairKind::RotateWithManifest,
+                    format!(
+                        "Closed harness log {} is {} bytes; rotation is safe.",
+                        entry.path.display(),
+                        entry.size_bytes
+                    ),
+                    "Rotate into a manifest-tracked archive before any removal is considered."
+                        .to_owned(),
+                )
+            }
+        }
+        AgentHarnessLogActivity::OpenHandleProbeUnavailable => (
+            AgentHarnessLogRepairKind::AskHuman,
+            format!(
+                "Harness log {} is {} bytes but open-handle probe is unavailable; \
+cannot safely decide between active-log preservation and closed-log rotation.",
+                entry.path.display(),
+                entry.size_bytes
+            ),
+            format!(
+                "Install or grant `lsof` access, then re-run `ee diag disk-pressure --json`. \
+Until then, only preserve a {}-byte tail copy; never truncate.",
+                entry.tail_byte_target
+            ),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1982,5 +2233,176 @@ mod tests {
         } else {
             Err(format!("expected 66.67, got {value}"))
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // bd-1zb7k.11.7 — AgentHarnessLog classifier tests (5 cases per spec)
+    // -------------------------------------------------------------------------
+
+    fn harness_log_entry(
+        size_bytes: u64,
+        on_workspace_filesystem: bool,
+        activity: AgentHarnessLogActivity,
+    ) -> AgentHarnessLogEntry {
+        AgentHarnessLogEntry {
+            path: PathBuf::from("/home/agent/.codex/log/2026-05-19T04-00.log"),
+            size_bytes,
+            filesystem_label: "apfs".to_owned(),
+            on_workspace_filesystem,
+            mtime_unix_seconds: Some(1_779_167_000),
+            activity,
+            owning_process_summary: Some("codex pid=42 user=jemanuel".to_owned()),
+            tail_byte_target: AGENT_HARNESS_LOG_DEFAULT_TAIL_BYTES,
+        }
+    }
+
+    #[test]
+    fn classify_active_open_oversized_log_recommends_preserve_tail_copy() {
+        let entry = harness_log_entry(2 * GIB, false, AgentHarnessLogActivity::ActiveOpen);
+        let classification = classify_agent_harness_log(&entry);
+        assert_eq!(
+            classification.repair_kind,
+            AgentHarnessLogRepairKind::PreserveTailCopy
+        );
+        assert_eq!(classification.role, "agent_harness_log");
+        assert_eq!(classification.mutation_policy, "preservation_only");
+        assert!(classification.side_effect_free);
+        assert_eq!(
+            classification.schema,
+            AGENT_HARNESS_LOG_CLASSIFIER_SCHEMA_V1
+        );
+        assert!(
+            classification.suggestion.contains("16777216")
+                || classification
+                    .suggestion
+                    .contains(&AGENT_HARNESS_LOG_DEFAULT_TAIL_BYTES.to_string()),
+            "suggestion should mention the tail byte target: {}",
+            classification.suggestion
+        );
+    }
+
+    #[test]
+    fn classify_active_open_blocked_workspace_log_escalates_to_ask_human() {
+        let entry = harness_log_entry(20 * GIB, true, AgentHarnessLogActivity::ActiveOpen);
+        let classification = classify_agent_harness_log(&entry);
+        assert_eq!(
+            classification.repair_kind,
+            AgentHarnessLogRepairKind::AskHuman
+        );
+        assert!(
+            classification.reason.contains("workspace filesystem"),
+            "reason should explain workspace-filesystem escalation: {}",
+            classification.reason
+        );
+    }
+
+    #[test]
+    fn classify_closed_oversized_log_recommends_rotate_with_manifest() {
+        let entry = harness_log_entry(2 * GIB, false, AgentHarnessLogActivity::Closed);
+        let classification = classify_agent_harness_log(&entry);
+        assert_eq!(
+            classification.repair_kind,
+            AgentHarnessLogRepairKind::RotateWithManifest
+        );
+    }
+
+    #[test]
+    fn classify_closed_log_on_workspace_filesystem_recommends_move_preserve() {
+        let entry = harness_log_entry(20 * GIB, true, AgentHarnessLogActivity::Closed);
+        let classification = classify_agent_harness_log(&entry);
+        assert_eq!(
+            classification.repair_kind,
+            AgentHarnessLogRepairKind::MovePreserve
+        );
+    }
+
+    #[test]
+    fn classify_open_handle_probe_unavailable_escalates_to_ask_human() {
+        let entry = harness_log_entry(
+            5 * GIB,
+            false,
+            AgentHarnessLogActivity::OpenHandleProbeUnavailable,
+        );
+        let classification = classify_agent_harness_log(&entry);
+        assert_eq!(
+            classification.repair_kind,
+            AgentHarnessLogRepairKind::AskHuman
+        );
+        assert!(
+            classification.suggestion.contains("lsof"),
+            "suggestion should mention lsof availability: {}",
+            classification.suggestion
+        );
+    }
+
+    #[test]
+    fn classify_log_under_warning_threshold_is_noop() {
+        // Tiny log (10 MiB) should produce noop even with ActiveOpen activity.
+        let entry = harness_log_entry(10 * MIB, false, AgentHarnessLogActivity::ActiveOpen);
+        let classification = classify_agent_harness_log(&entry);
+        assert_eq!(classification.repair_kind, AgentHarnessLogRepairKind::Noop);
+    }
+
+    #[test]
+    fn agent_harness_log_repair_kind_strings_are_snake_case_and_stable() {
+        // Pin the strings the schema and human renderer rely on.
+        assert_eq!(
+            AgentHarnessLogRepairKind::PreserveTailCopy.as_str(),
+            "preserve_tail_copy"
+        );
+        assert_eq!(
+            AgentHarnessLogRepairKind::RotateWithManifest.as_str(),
+            "rotate_with_manifest"
+        );
+        assert_eq!(
+            AgentHarnessLogRepairKind::MovePreserve.as_str(),
+            "move_preserve"
+        );
+        assert_eq!(AgentHarnessLogRepairKind::AskHuman.as_str(), "ask_human");
+        assert_eq!(AgentHarnessLogRepairKind::Noop.as_str(), "noop");
+    }
+
+    #[test]
+    fn agent_harness_log_activity_strings_are_snake_case_and_stable() {
+        assert_eq!(AgentHarnessLogActivity::ActiveOpen.as_str(), "active_open");
+        assert_eq!(AgentHarnessLogActivity::Closed.as_str(), "closed");
+        assert_eq!(
+            AgentHarnessLogActivity::OpenHandleProbeUnavailable.as_str(),
+            "open_handle_probe_unavailable"
+        );
+    }
+
+    #[test]
+    fn classification_serializes_to_camel_case_with_no_secrets() {
+        let entry = harness_log_entry(2 * GIB, false, AgentHarnessLogActivity::ActiveOpen);
+        let classification = classify_agent_harness_log(&entry);
+        let json = serde_json::to_value(&classification).expect("serializes");
+        let object = json.as_object().expect("object");
+        for required in [
+            "schema",
+            "entry",
+            "role",
+            "repairKind",
+            "reason",
+            "suggestion",
+            "mutationPolicy",
+            "sideEffectFree",
+        ] {
+            assert!(
+                object.contains_key(required),
+                "missing camelCase field `{required}` in {json}"
+            );
+        }
+        // Defense-in-depth: no log content (only the trailing tail target
+        // value) is included in the classification; assert the suggestion
+        // text never echoes the owning process's full command-line.
+        let suggestion = object
+            .get("suggestion")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            !suggestion.contains("pid="),
+            "classification suggestion must not leak owning-process detail: {suggestion}"
+        );
     }
 }
