@@ -2292,6 +2292,7 @@ fn nearest_existing_path(path: &Path) -> Option<PathBuf> {
     None
 }
 
+#[cfg(unix)]
 fn statvfs_capacity(path: &Path) -> Option<FsCapacity> {
     let stat = rustix::fs::statvfs(path).ok()?;
     let block_size = if stat.f_frsize == 0 {
@@ -2304,6 +2305,14 @@ fn statvfs_capacity(path: &Path) -> Option<FsCapacity> {
         available_bytes: stat.f_bavail.saturating_mul(block_size),
         filesystem_id: stat.f_fsid,
     })
+}
+
+#[cfg(not(unix))]
+fn statvfs_capacity(path: &Path) -> Option<FsCapacity> {
+    let _ = fs::metadata(path).ok()?;
+    // Rust std has no portable filesystem-capacity API; callers already
+    // surface capacity absence through the existing degraded path.
+    None
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

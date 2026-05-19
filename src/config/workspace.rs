@@ -472,8 +472,6 @@ fn get_salt_path() -> PathBuf {
 }
 
 fn create_installation_salt(salt_path: &Path) -> Result<Vec<u8>, CanonicalizationError> {
-    use std::os::unix::fs::OpenOptionsExt;
-
     ensure_installation_salt_path_has_no_symlink_components(salt_path).map_err(|source| {
         CanonicalizationError::SaltCreateFailure {
             path: salt_path.to_path_buf(),
@@ -499,9 +497,7 @@ fn create_installation_salt(salt_path: &Path) -> Result<Vec<u8>, Canonicalizatio
         source,
     })?;
 
-    // Write with mode 0600 (owner read/write only)
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true).mode(0o600);
+    let options = installation_salt_open_options();
 
     let mut file =
         options
@@ -519,6 +515,22 @@ fn create_installation_salt(salt_path: &Path) -> Result<Vec<u8>, Canonicalizatio
     })?;
 
     Ok(salt.to_vec())
+}
+
+#[cfg(unix)]
+fn installation_salt_open_options() -> fs::OpenOptions {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    options
+}
+
+#[cfg(not(unix))]
+fn installation_salt_open_options() -> fs::OpenOptions {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    options
 }
 
 fn ensure_installation_salt_path_has_no_symlink_components(salt_path: &Path) -> io::Result<()> {
