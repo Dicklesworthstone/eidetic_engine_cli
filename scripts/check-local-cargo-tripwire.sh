@@ -104,7 +104,7 @@ classify_command() {
                 printf 'allowed\tcargo wrapped through remote-required rch exec\t-\t-\n'
                 return
             fi
-            printf 'denied\trch exec cargo command lacks RCH_REQUIRE_REMOTE=1\trch_exec_without_remote_required\tbare rch exec can fall back to local Cargo; use scripts/rch_verify.sh -- <cargo command> or prefix rch exec with RCH_REQUIRE_REMOTE=1\n'
+            printf 'denied\trch exec Rust verifier command lacks RCH_REQUIRE_REMOTE=1\trch_exec_without_remote_required\tbare rch exec can fall back to local Cargo/Rust execution; use scripts/rch_verify.sh -- <cargo command> or prefix rch exec with RCH_REQUIRE_REMOTE=1\n'
             return
         fi
         printf 'allowed\trch exec command without Rust verifier payload\t-\t-\n'
@@ -195,7 +195,12 @@ probe_processes() {
             *scripts/rch_verify.sh*) continue ;;
         esac
         local cwd="-"
-        if command -v lsof >/dev/null 2>&1; then
+        if command -v lsof >/dev/null 2>&1 && command -v perl >/dev/null 2>&1; then
+            # lsof can hang on busy or wedged processes. Keep process
+            # evidence bounded by letting SIGALRM terminate the lsof child.
+            cwd=$(perl -e 'alarm shift; exec @ARGV' 2 lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+            [ -n "$cwd" ] || cwd="-"
+        elif command -v lsof >/dev/null 2>&1; then
             cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
             [ -n "$cwd" ] || cwd="-"
         fi
@@ -274,7 +279,7 @@ emit_json_cmd() {
                     if $allowed == "denied" then
                         [{
                             policyStatus:"local_cargo_disallowed",
-                            commandKind:(if ($subcommand == "rustc" or $subcommand == "rustdoc") then $subcommand else "cargo" end),
+                            commandKind:(if ($subcommand == "rustc" or $subcommand == "rustdoc") then $subcommand elif $subcommand == "rch_exec_without_remote_required" then "rust_verifier" else "cargo" end),
                             subcommand:$subcommand,
                             reason:$reason,
                             detail:$detail
@@ -383,15 +388,21 @@ emit_json_probe() {
     local processes_json="[]"
     local disk_context="{}"
     if [ -n "$body" ] && command -v jq >/dev/null 2>&1; then
-        # Use BEGIN{FS="\t"} so the field separator is portable across
-        # dash (POSIX sh on Linux RCH workers) and bash — the `$'\t'`
-        # ANSI-C escape was bash-only and silently misparsed under dash.
+        # Let jq consume raw tab-separated lines so process commands with
+        # backslashes, quotes, or shell escapes are JSON-escaped correctly.
         processes_json=$(printf '%s' "$body" |
-            awk 'BEGIN{FS="\t"} NF>=7 {
-                for (i = 1; i <= 7; i++) { gsub(/"/, "\\\"", $i) }
-                printf "{\"pid\":\"%s\",\"ppid\":\"%s\",\"elapsed\":\"%s\",\"command_kind\":\"%s\",\"cwd\":\"%s\",\"command\":\"%s\",\"reason\":\"%s\"}\n", $1, $2, $3, $4, $5, $6, $7
-            }' |
-            jq -s '.')
+            jq -R -s '
+                split("\n")
+                | map(select(length > 0) | split("\t") | select(length >= 7) | {
+                    pid:.[0],
+                    ppid:.[1],
+                    elapsed:.[2],
+                    command_kind:.[3],
+                    cwd:.[4],
+                    command:.[5],
+                    reason:.[6]
+                })
+            ')
     fi
     if command -v jq >/dev/null 2>&1; then
         disk_context=$(disk_context_json)

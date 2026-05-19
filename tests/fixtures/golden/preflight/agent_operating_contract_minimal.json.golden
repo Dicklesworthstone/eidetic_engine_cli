@@ -13,13 +13,14 @@
     "hard_denial",
     "reporting_required"
   ],
-  "reporting_obligation_count": 6,
+  "reporting_obligation_count": 7,
   "reporting_obligation_ids": [
     "agent.report.coordination_evidence",
     "agent.report.destructive_command_audit",
     "agent.report.dirty_worktree",
     "agent.report.memory_citation",
     "agent.report.rch_proof",
+    "agent.report.shell_safe_command_evidence",
     "agent.report.static_only_work"
   ],
   "reporting_obligation_types": [

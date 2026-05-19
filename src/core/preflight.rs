@@ -1352,6 +1352,8 @@ pub struct AgentReportingObligationInput {
     pub destructive_command_refs: Vec<String>,
     pub destructive_approval_refs: Vec<String>,
     pub coordination_refs: Vec<String>,
+    pub command_bearing_evidence: bool,
+    pub shell_safe_command_evidence_refs: Vec<String>,
     pub static_only_work: bool,
     pub static_check_refs: Vec<String>,
 }
@@ -1480,6 +1482,19 @@ const REPORTING_OBLIGATION_TEMPLATES: &[ReportingObligationTemplate] = &[
         evidence_kinds: &["beads_comment", "agent_mail_message", "rch_proof_json"],
     },
     ReportingObligationTemplate {
+        id: "agent.report.shell_safe_command_evidence",
+        severity: "high",
+        obligation_type: "must_report",
+        trigger: "command_bearing_tracker_or_mail_evidence",
+        instruction: "Use file, stdin, direct MCP, or artifact-path transport for command-bearing Beads or Agent Mail evidence; never wrap evidence payloads in shell backticks or dollar-paren substitution.",
+        evidence_kinds: &[
+            "beads_comment",
+            "agent_mail_message",
+            "preflight_guard_json",
+            "artifact_path",
+        ],
+    },
+    ReportingObligationTemplate {
         id: "agent.report.static_only_work",
         severity: "low",
         obligation_type: "advisory",
@@ -1530,6 +1545,11 @@ fn reporting_obligation_from_template(
                 .then_some("memory_citation_required"),
         ),
         "agent.report.coordination_evidence" => (input.coordination_refs.clone(), None),
+        "agent.report.shell_safe_command_evidence" => (
+            input.shell_safe_command_evidence_refs.clone(),
+            (input.command_bearing_evidence && input.shell_safe_command_evidence_refs.is_empty())
+                .then_some("shell_safe_command_evidence_required"),
+        ),
         "agent.report.static_only_work" => (input.static_check_refs.clone(), None),
         _ => (Vec::new(), None),
     };
@@ -3206,6 +3226,63 @@ RULE NUMBER 2: NO WORKTREES. EVER.
             destructive.gap_code.clone(),
             Some("destructive_command_audit_required".to_owned()),
             "destructive command gap",
+        )
+    }
+
+    #[test]
+    fn agent_operating_contract_reporting_obligations_flag_shell_safe_command_evidence_gap()
+    -> TestResult {
+        let obligations =
+            agent_operating_contract_reporting_obligations(&AgentReportingObligationInput {
+                command_bearing_evidence: true,
+                ..AgentReportingObligationInput::default()
+            });
+        let shell_safe = obligations
+            .iter()
+            .find(|obligation| obligation.id == "agent.report.shell_safe_command_evidence")
+            .ok_or_else(|| "missing shell-safe command evidence obligation".to_owned())?;
+
+        ensure(
+            shell_safe.obligation_type.clone(),
+            "must_report".to_owned(),
+            "shell-safe command evidence obligation type",
+        )?;
+        ensure(
+            shell_safe.gap_code.clone(),
+            Some("shell_safe_command_evidence_required".to_owned()),
+            "shell-safe command evidence gap",
+        )
+    }
+
+    #[test]
+    fn agent_operating_contract_reporting_obligations_preserve_shell_safe_command_evidence()
+    -> TestResult {
+        let obligations =
+            agent_operating_contract_reporting_obligations(&AgentReportingObligationInput {
+                command_bearing_evidence: true,
+                shell_safe_command_evidence_refs: vec![
+                    "beads_comment:4188".to_owned(),
+                    "agent_mail_message:6002".to_owned(),
+                ],
+                ..AgentReportingObligationInput::default()
+            });
+        let shell_safe = obligations
+            .iter()
+            .find(|obligation| obligation.id == "agent.report.shell_safe_command_evidence")
+            .ok_or_else(|| "missing shell-safe command evidence obligation".to_owned())?;
+
+        ensure(
+            shell_safe.evidence_refs.clone(),
+            vec![
+                "beads_comment:4188".to_owned(),
+                "agent_mail_message:6002".to_owned(),
+            ],
+            "shell-safe evidence refs",
+        )?;
+        ensure(
+            shell_safe.gap_code.clone(),
+            None,
+            "shell-safe evidence gap cleared",
         )
     }
 
