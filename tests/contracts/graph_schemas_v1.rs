@@ -854,6 +854,144 @@ fn why_schema_documents_load_bearing_graph_block() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn why_schema_documents_hits_graph_block() -> TestResult {
+    let schema_path = repo_root()
+        .join("docs")
+        .join("schemas")
+        .join("ee.why.v1.json");
+    let schema = read_json(&schema_path)?;
+
+    ensure_eq(
+        schema
+            .pointer("/properties/graph/properties/hits/oneOf/1/$ref")
+            .and_then(Value::as_str),
+        Some("#/$defs/hitsWhy"),
+        "ee.why.v1 hits",
+        "graph.hits.$ref",
+    )?;
+
+    let block = schema
+        .pointer("/$defs/hitsWhy")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "ee.why.v1 missing $defs.hitsWhy".to_owned())?;
+    let required = block
+        .get("required")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "$defs.hitsWhy.required must be an array".to_owned())?;
+    for field in [
+        "authorityScore",
+        "authorityRank",
+        "hubScore",
+        "hubRank",
+        "dominantRole",
+        "profileInfluence",
+        "evidence",
+        "rationale",
+    ] {
+        if !required.iter().any(|value| value.as_str() == Some(field)) {
+            return Err(format!("hitsWhy.required missing {field}"));
+        }
+    }
+
+    for (field, minimum) in [
+        ("authorityScore", 0),
+        ("authorityRank", 1),
+        ("hubScore", 0),
+        ("hubRank", 1),
+    ] {
+        ensure_eq(
+            schema
+                .pointer(&format!("/$defs/hitsWhy/properties/{field}/minimum"))
+                .and_then(Value::as_u64),
+            Some(minimum),
+            "ee.why.v1 hitsWhy",
+            field,
+        )?;
+    }
+    ensure_eq(
+        schema
+            .pointer("/$defs/hitsEvidence/properties/schema/const")
+            .and_then(Value::as_str),
+        Some("ee.graph.hits.v1"),
+        "ee.why.v1 hitsEvidence",
+        "schema.const",
+    )?;
+    ensure_eq(
+        schema
+            .pointer("/$defs/hitsEvidence/properties/algorithm/const")
+            .and_then(Value::as_str),
+        Some("hits_centrality_directed"),
+        "ee.why.v1 hitsEvidence",
+        "algorithm.const",
+    )?;
+    ensure_eq(
+        schema
+            .pointer("/$defs/hitsEvidence/properties/graphType/const")
+            .and_then(Value::as_str),
+        Some("memory_links"),
+        "ee.why.v1 hitsEvidence",
+        "graphType.const",
+    )?;
+
+    let example = schema
+        .pointer("/examples/0")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "ee.why.v1 must include a HITS example".to_owned())?;
+    ensure_eq(
+        example
+            .pointer("/graph/hits/dominantRole")
+            .and_then(Value::as_str),
+        Some("authority"),
+        "ee.why.v1 example hits",
+        "dominantRole",
+    )?;
+    ensure_eq(
+        example
+            .pointer("/graph/hits/authorityRank")
+            .and_then(Value::as_u64),
+        Some(2),
+        "ee.why.v1 example hits",
+        "authorityRank",
+    )?;
+    ensure_eq(
+        example
+            .pointer("/graph/hits/hubRank")
+            .and_then(Value::as_u64),
+        Some(9),
+        "ee.why.v1 example hits",
+        "hubRank",
+    )?;
+    ensure_eq(
+        example
+            .pointer("/graph/hits/evidence/algorithm")
+            .and_then(Value::as_str),
+        Some("hits_centrality_directed"),
+        "ee.why.v1 example hits",
+        "evidence.algorithm",
+    )?;
+    ensure_eq(
+        example
+            .pointer("/graph/hits/profileInfluence/groundingBoost")
+            .and_then(Value::as_f64)
+            .map(|value| value > 0.0),
+        Some(true),
+        "ee.why.v1 example hits",
+        "profileInfluence.groundingBoost",
+    )?;
+    ensure_eq(
+        example
+            .pointer("/graph/hits/profileInfluence/orientationBoost")
+            .and_then(Value::as_f64)
+            .map(|value| value > 0.0),
+        Some(true),
+        "ee.why.v1 example hits",
+        "profileInfluence.orientationBoost",
+    )?;
+
+    Ok(())
+}
+
 fn assert_hits_item_schema(
     schema: &Value,
     item_name: &str,

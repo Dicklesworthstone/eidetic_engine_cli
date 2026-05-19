@@ -20,7 +20,12 @@
             {"$ref": "#/$defs/loadBearingWhy"}
           ]
         },
-        "hits": {"$ref": "#/$defs/jsonValue"},
+        "hits": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/hitsWhy"}
+          ]
+        },
         "revisionLineage": {"$ref": "#/$defs/jsonValue"}
       }
     }
@@ -49,7 +54,25 @@
           },
           "rationale": "This memory is cited by multiple procedural rules in the rule-provenance bipartite projection."
         },
-        "hits": null,
+        "hits": {
+          "authorityScore": 0.7811,
+          "authorityRank": 2,
+          "hubScore": 0.2145,
+          "hubRank": 9,
+          "dominantRole": "authority",
+          "profileInfluence": {
+            "groundingBoost": 0.7811,
+            "orientationBoost": 0.2145,
+            "balancedBoost": 0.4978
+          },
+          "evidence": {
+            "schema": "ee.graph.hits.v1",
+            "algorithm": "hits_centrality_directed",
+            "graphType": "memory_links",
+            "snapshotVersion": 42
+          },
+          "rationale": "This memory behaves more like an authority than a hub in the directed memory-link graph."
+        },
         "revisionLineage": null
       }
     }
@@ -105,6 +128,50 @@
         "schema": {"type": "string", "const": "ee.graph.hits.v1"},
         "algorithm": {"type": "string", "const": "bipartite_hits"},
         "projection": {"type": "string", "const": "rule_provenance_bipartite"},
+        "snapshotVersion": {"type": "integer", "minimum": 0}
+      }
+    },
+    "hitsWhy": {
+      "type": "object",
+      "required": [
+        "authorityScore",
+        "authorityRank",
+        "hubScore",
+        "hubRank",
+        "dominantRole",
+        "profileInfluence",
+        "evidence",
+        "rationale"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "authorityScore": {"type": ["number", "null"], "minimum": 0},
+        "authorityRank": {"type": ["integer", "null"], "minimum": 1},
+        "hubScore": {"type": ["number", "null"], "minimum": 0},
+        "hubRank": {"type": ["integer", "null"], "minimum": 1},
+        "dominantRole": {"type": "string", "enum": ["authority", "hub", "balanced", "unavailable"]},
+        "profileInfluence": {
+          "type": "object",
+          "required": ["groundingBoost", "orientationBoost", "balancedBoost"],
+          "additionalProperties": false,
+          "properties": {
+            "groundingBoost": {"type": "number", "minimum": 0},
+            "orientationBoost": {"type": "number", "minimum": 0},
+            "balancedBoost": {"type": "number", "minimum": 0}
+          }
+        },
+        "evidence": {"$ref": "#/$defs/hitsEvidence"},
+        "rationale": {"type": "string"}
+      }
+    },
+    "hitsEvidence": {
+      "type": "object",
+      "required": ["schema", "algorithm", "graphType", "snapshotVersion"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.graph.hits.v1"},
+        "algorithm": {"type": "string", "const": "hits_centrality_directed"},
+        "graphType": {"type": "string", "const": "memory_links"},
         "snapshotVersion": {"type": "integer", "minimum": 0}
       }
     },
