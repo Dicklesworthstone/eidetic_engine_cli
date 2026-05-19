@@ -63,6 +63,10 @@ fn finite_embedding_pair() -> impl Strategy<Value = (Vec<f32>, Vec<f32>)> {
     })
 }
 
+fn non_finite_f32() -> impl Strategy<Value = f32> {
+    prop_oneof![Just(f32::NAN), Just(f32::INFINITY), Just(f32::NEG_INFINITY)]
+}
+
 fn has_non_zero_norm(values: &[f32]) -> bool {
     values.iter().any(|value| *value != 0.0)
 }
@@ -399,5 +403,43 @@ proptest! {
 
         prop_assert_eq!(cosine_similarity(&left, &right), None);
         prop_assert_eq!(confirm_cosine_similarity(&left, &right, 0.0), None);
+    }
+
+    #[test]
+    fn prop_cosine_similarity_rejects_zero_vectors(
+        non_zero in finite_embedding_vector(),
+    ) {
+        prop_assume!(has_non_zero_norm(&non_zero));
+        let zero = vec![0.0; non_zero.len()];
+
+        prop_assert_eq!(cosine_similarity(&zero, &non_zero), None);
+        prop_assert_eq!(cosine_similarity(&non_zero, &zero), None);
+        prop_assert_eq!(confirm_cosine_similarity(&zero, &non_zero, 0.0), None);
+        prop_assert_eq!(confirm_cosine_similarity(&non_zero, &zero, 0.0), None);
+    }
+
+    #[test]
+    fn prop_cosine_similarity_rejects_non_finite_values(
+        finite in finite_embedding_vector(),
+        bad_value in non_finite_f32(),
+    ) {
+        let mut with_bad_value = finite.clone();
+        with_bad_value[0] = bad_value;
+
+        prop_assert_eq!(cosine_similarity(&with_bad_value, &finite), None);
+        prop_assert_eq!(cosine_similarity(&finite, &with_bad_value), None);
+        prop_assert_eq!(confirm_cosine_similarity(&with_bad_value, &finite, 0.0), None);
+        prop_assert_eq!(confirm_cosine_similarity(&finite, &with_bad_value, 0.0), None);
+    }
+
+    #[test]
+    fn prop_cosine_confirmation_rejects_non_finite_floor(
+        (left, right) in finite_embedding_pair(),
+        floor in non_finite_f32(),
+    ) {
+        prop_assume!(has_non_zero_norm(&left));
+        prop_assume!(has_non_zero_norm(&right));
+
+        prop_assert_eq!(confirm_cosine_similarity(&left, &right, floor), None);
     }
 }
