@@ -5720,6 +5720,84 @@ pub fn render_structural_health_human(report: &StructuralHealthReport) -> String
     output
 }
 
+/// Render the opt-in structural health surface as Markdown.
+#[must_use]
+pub fn render_structural_health_markdown(report: &StructuralHealthReport) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output, "# Structural Health");
+    let _ = writeln!(output);
+    let _ = writeln!(output, "- Schema: `{}`", report.schema);
+    let _ = writeln!(output, "- Snapshot version: {}", report.snapshot_version);
+    let _ = writeln!(output, "- Status: `{}`", report.summary.status);
+    let _ = writeln!(output, "- K-truss max k: {}", report.k_truss.max_k);
+    let _ = writeln!(
+        output,
+        "- Support memories: {}",
+        report.k_truss.support_subgraph_memory_count
+    );
+    let _ = writeln!(
+        output,
+        "- Contradiction clusters: {}",
+        report.contradiction_clusters.len()
+    );
+    let _ = writeln!(
+        output,
+        "- Recommended command: `{}`",
+        report.summary.recommended_command
+    );
+
+    if !report.k_truss.top_members.is_empty() {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## K-Truss Members");
+        for member in &report.k_truss.top_members {
+            let _ = writeln!(
+                output,
+                "- `{}` k={} triangleSupport={}",
+                member.memory_id, member.k, member.triangle_support
+            );
+        }
+    }
+
+    if !report.contradiction_clusters.is_empty() {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## Contradiction Clusters");
+        for cluster in &report.contradiction_clusters {
+            let examples = if cluster.example_memory_ids.is_empty() {
+                "none".to_string()
+            } else {
+                cluster.example_memory_ids.join(", ")
+            };
+            let _ = writeln!(
+                output,
+                "- `{}` memories={} density={:.6} severity=`{}` examples={} action=`{}`",
+                cluster.cluster_id,
+                cluster.memory_count,
+                cluster.contradiction_density,
+                cluster.severity,
+                examples,
+                cluster.suggested_action
+            );
+        }
+    }
+
+    let degraded = aggregate_structural_health_degradations(&report.degraded);
+    if !degraded.is_empty() {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## Degraded");
+        for degraded in &degraded {
+            let _ = writeln!(
+                output,
+                "- **{}** `{}`: {}",
+                degraded.severity, degraded.code, degraded.message
+            );
+            if !degraded.repair.is_empty() {
+                let _ = writeln!(output, "  - Repair: `{}`", degraded.repair);
+            }
+        }
+    }
+    output
+}
+
 /// Render the opt-in structural health surface as TOON.
 #[must_use]
 pub fn render_structural_health_toon(report: &StructuralHealthReport) -> String {
@@ -13176,7 +13254,7 @@ mod tests {
         render_shadow_run_human, render_shadow_run_json, render_shadow_run_toon,
         render_status_json, render_status_json_filtered, render_status_skyline_json,
         render_status_skyline_markdown, render_status_skyline_toon, render_status_toon,
-        render_version_json, status_response_json,
+        render_structural_health_markdown, render_version_json, status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::doctor::{
@@ -13189,7 +13267,11 @@ mod tests {
         CapsuleProfile, CreateReport as HandoffCreateReport, InspectReport as HandoffInspectReport,
         PreviewReport as HandoffPreviewReport, ResumeReport as HandoffResumeReport,
     };
-    use crate::core::health::HealthReport;
+    use crate::core::health::{
+        HealthReport, StructuralContradictionCluster, StructuralHealthDegradation,
+        StructuralHealthReport, StructuralHealthSummary, StructuralKTrussMember,
+        StructuralKTrussSummary,
+    };
     use crate::core::learn::{
         ExperimentBudget, ExperimentDecisionImpact, ExperimentProposal, ExperimentSafetyPlan,
         LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1, LearnClusterReport, LearnExperimentProposalReport,
@@ -13218,6 +13300,7 @@ mod tests {
     };
     use crate::db::{StoredMemory, StoredTrustQuarantine};
     use crate::graph::gomory_hu::{PROXIMITY_SCHEMA_V1, ProximityDegradation, ProximityReport};
+    use crate::graph::health::HEALTH_STRUCTURAL_SCHEMA_V1;
     use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
     use crate::models::{
         DomainError, ERROR_SCHEMA_V2, MemoryId, ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass,
@@ -15758,6 +15841,43 @@ mod tests {
         }
     }
 
+    fn sample_structural_health_report() -> StructuralHealthReport {
+        StructuralHealthReport {
+            schema: HEALTH_STRUCTURAL_SCHEMA_V1,
+            snapshot_version: 5,
+            k_truss: StructuralKTrussSummary {
+                max_k: 4,
+                support_subgraph_memory_count: 9,
+                top_members: vec![StructuralKTrussMember {
+                    memory_id: "mem_support".to_owned(),
+                    k: 4,
+                    triangle_support: 6,
+                }],
+            },
+            contradiction_clusters: vec![StructuralContradictionCluster {
+                cluster_id: "cluster_contradiction".to_owned(),
+                memory_count: 3,
+                contradiction_density: 0.625,
+                example_memory_ids: vec!["mem_a".to_owned(), "mem_b".to_owned()],
+                severity: "medium".to_owned(),
+                suggested_action: "ee curate review --cluster cluster_contradiction".to_owned(),
+            }],
+            summary: StructuralHealthSummary {
+                status: "degraded".to_owned(),
+                k_truss_max_k: 4,
+                support_subgraph_memory_count: 9,
+                contradiction_cluster_count: 1,
+                recommended_command: "ee health --robot-insights --json".to_owned(),
+            },
+            degraded: vec![StructuralHealthDegradation {
+                code: "graph.health_fixture".to_owned(),
+                severity: "warning".to_owned(),
+                message: "fixture structural health degradation".to_owned(),
+                repair: Some("ee graph centrality-refresh --workspace .".to_owned()),
+            }],
+        }
+    }
+
     #[test]
     fn status_skyline_markdown_renderer_preserves_summary_and_rows() -> TestResult {
         let markdown = render_status_skyline_markdown(&sample_status_skyline_report());
@@ -15868,6 +15988,52 @@ mod tests {
         let actual = serde_json::Value::from(decoded);
 
         ensure_equal(&actual, &expected, "decoded proximity TOON")
+    }
+
+    #[test]
+    fn structural_health_markdown_renderer_preserves_sections() -> TestResult {
+        let markdown = render_structural_health_markdown(&sample_structural_health_report());
+
+        ensure_contains(
+            &markdown,
+            "# Structural Health",
+            "structural markdown title",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Schema: `ee.health.structural.v1`",
+            "structural markdown schema",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Status: `degraded`",
+            "structural markdown status",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- K-truss max k: 4",
+            "structural markdown k-truss max",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- `mem_support` k=4 triangleSupport=6",
+            "structural markdown k-truss member",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- `cluster_contradiction` memories=3 density=0.625000 severity=`medium` examples=mem_a, mem_b action=`ee curate review --cluster cluster_contradiction`",
+            "structural markdown contradiction cluster",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- **warning** `graph.health_fixture`: fixture structural health degradation",
+            "structural markdown degradation",
+        )?;
+        ensure_contains(
+            &markdown,
+            "  - Repair: `ee graph centrality-refresh --workspace .`",
+            "structural markdown repair",
+        )
     }
 
     #[test]
