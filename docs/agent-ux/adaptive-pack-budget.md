@@ -23,9 +23,10 @@ computed budget.
 
 Current implementation note: core context assembly applies adaptive budgets
 only when the caller passes no explicit/request token budget
-(`ContextPackOptions.max_tokens = None`). The `ee context` CLI still needs a
-follow-up change to distinguish an omitted `--max-tokens` flag from its
-current default value before the opt-in affects that direct command path.
+(`ContextPackOptions.max_tokens = None`). The `ee context` and
+`ee pack "<task>"` command paths preserve an omitted `--max-tokens` as
+implicit, so the opt-in can affect those paths. Passing `--max-tokens` still
+bypasses adaptive computation.
 
 ## What To Read
 
@@ -110,7 +111,7 @@ computedTokens = clamp(ceil(baseTokens * multiplier), baseTokens, maxTokens)
 ## Rollout Expectations
 
 The current implementation provides the pure classifier, config key, response
-budget block, and a core assembly hook for implicit-budget callers. Public CLI
-default-vs-explicit handling, graph fanout input, status bucket reporting,
+budget block, a core assembly hook for implicit-budget callers, CLI
+default-vs-explicit handling, and status bucket reporting. Graph fanout input,
 golden fixtures, e2e logging, and RCH-only benchmark evidence still need to
 land before operators should rely on adaptive budgets in normal workflows.

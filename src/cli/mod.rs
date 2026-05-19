@@ -1911,9 +1911,9 @@ pub struct ContextArgs {
     #[arg(value_name = "QUERY")]
     pub query: String,
 
-    /// Maximum token budget for the context pack.
-    #[arg(long, short = 't', default_value_t = 4000)]
-    pub max_tokens: u32,
+    /// Explicit maximum token budget for the context pack.
+    #[arg(long, short = 't', value_name = "N")]
+    pub max_tokens: Option<u32>,
 
     /// Maximum candidate memories to retrieve before packing.
     #[arg(long, default_value_t = 100)]
@@ -21323,14 +21323,18 @@ where
             write_stdout(stdout, &proximity_human_output(report))
         }
         output::Renderer::Toon => {
-            let json = serde_json::to_string(report).unwrap_or_else(|_| r#"{"schema":"ee.error.v1","error":"serialization_failed"}"#.to_string());
+            let json = serde_json::to_string(report).unwrap_or_else(|_| {
+                r#"{"schema":"ee.error.v1","error":"serialization_failed"}"#.to_string()
+            });
             write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
         }
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
-            let json = serde_json::to_string(report).unwrap_or_else(|_| r#"{"schema":"ee.error.v1","error":"serialization_failed"}"#.to_string());
+            let json = serde_json::to_string(report).unwrap_or_else(|_| {
+                r#"{"schema":"ee.error.v1","error":"serialization_failed"}"#.to_string()
+            });
             write_stdout(stdout, &(json + "\n"))
         }
     }
@@ -24597,7 +24601,7 @@ where
         query: args.query.clone(),
         speed: args.speed,
         profile: Some(profile),
-        max_tokens: Some(args.max_tokens),
+        max_tokens: args.max_tokens,
         candidate_pool: Some(args.candidate_pool),
         max_results: None,
         include_tombstoned: args.include_tombstoned,
@@ -26926,7 +26930,7 @@ where
         }
         let context_args = ContextArgs {
             query: query.clone(),
-            max_tokens: args.max_tokens.unwrap_or(4000),
+            max_tokens: args.max_tokens,
             candidate_pool: args.candidate_pool.unwrap_or(100),
             speed: args.speed.unwrap_or(crate::search::SpeedMode::Default),
             stream: false,
@@ -46388,6 +46392,33 @@ mod tests {
             !super::args_contain_format_flag(&separator),
             "format-looking positional query after -- should not be detected",
         )
+    }
+
+    #[test]
+    fn context_command_preserves_omitted_max_tokens_for_adaptive_budget() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "context", "prepare release"])
+            .map_err(|error| format!("failed to parse context: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Context(ref args)) => {
+                ensure_equal(&args.max_tokens, &None, "omitted context max tokens")
+            }
+            _ => Err("expected Context command".to_string()),
+        }
+    }
+
+    #[test]
+    fn context_command_parses_explicit_max_tokens() -> TestResult {
+        let parsed =
+            Cli::try_parse_from(["ee", "context", "prepare release", "--max-tokens", "3000"])
+                .map_err(|error| format!("failed to parse context: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Context(ref args)) => {
+                ensure_equal(&args.max_tokens, &Some(3000), "explicit context max tokens")
+            }
+            _ => Err("expected Context command".to_string()),
+        }
     }
 
     #[test]
