@@ -299,6 +299,7 @@ validate_event_log_contract() {
             "source_and_test",
             "human_source_and_test",
             "scratch_only",
+            "generated_only",
             "scratch_generated_secret",
             "active_reservation",
             "agent_mail_unavailable",
@@ -410,6 +411,11 @@ run_scenario() {
             write_file "$workspace/drift-report.txt" "local diagnostic output\n"
             write_file "$workspace/ubs.json" "{\"status\":\"local-only\"}\n"
             ;;
+        generated_only)
+            write_file "$workspace/Cargo.lock" "generated lockfile placeholder\n"
+            write_file "$workspace/target/debug/ee" "generated debug binary placeholder\n"
+            write_file "$workspace/target/release/deps/foo.rlib" "generated rust library placeholder\n"
+            ;;
         scratch_generated_secret)
             write_file "$workspace/drift-report.txt" "local diagnostic output\n"
             write_file "$workspace/Cargo.lock" "generated lockfile placeholder\n"
@@ -515,6 +521,9 @@ run_scenario() {
         scratch_only)
             first_failure="$(assert_jq "$stdout_artifact" '(.data.dirtyPathCount == 2) and (.data.stagingRecommendations | length == 0) and (.data.doNotCommit | index("drift-report.txt")) and (.data.doNotCommit | index("ubs.json")) and ([.data.bucketCounts[] | select(.name == "do_not_commit") | .count] == [2]) and ([.data.kindCounts[] | select(.name == "scratch") | .count] == [2]) and all(.data.pathClassifications[]; .bucket == "do_not_commit" and .kind == "scratch")' "scratch-only paths should stay doNotCommit and out of staging" || true)"
             ;;
+        generated_only)
+            first_failure="$(assert_jq "$stdout_artifact" '(.data.dirtyPathCount == 3) and (.data.stagingRecommendations | length == 0) and (.data.doNotCommit | index("Cargo.lock")) and (.data.doNotCommit | index("target/debug/ee")) and (.data.doNotCommit | index("target/release/deps/foo.rlib")) and ([.data.bucketCounts[] | select(.name == "do_not_commit") | .count] == [3]) and ([.data.kindCounts[] | select(.name == "generated") | .count] == [3]) and all(.data.pathClassifications[]; .bucket == "do_not_commit" and .kind == "generated")' "generated-only paths should stay doNotCommit and out of staging" || true)"
+            ;;
         scratch_generated_secret)
             first_failure="$(assert_jq "$stdout_artifact" '(.data.doNotCommit | index(".env.local")) and (.data.doNotCommit | index("drift-report.txt")) and (.data.doNotCommit | index("Cargo.lock"))' "scratch/generated/secret paths should be doNotCommit" || true)"
             if [ -z "$first_failure" ]; then
@@ -567,6 +576,7 @@ SCENARIOS=(
     source_and_test
     human_source_and_test
     scratch_only
+    generated_only
     scratch_generated_secret
     active_reservation
     agent_mail_unavailable
