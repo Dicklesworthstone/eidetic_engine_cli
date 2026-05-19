@@ -57,7 +57,7 @@ GROUPS: dict[str, dict[str, Any]] = {
         "display_name": "frankensearch",
         "default_root": "/Users/jemanuel/projects/frankensearch",
         "crate_root": "crates",
-        "workflow": ".github/workflows/release.yml",
+        "workflow": ".github/workflows/ci.yml",
         "manifest_overrides": {"frankensearch": "frankensearch/Cargo.toml"},
         "crate_names": [
             "frankensearch-core",
@@ -92,12 +92,12 @@ GROUPS: dict[str, dict[str, Any]] = {
             "fsqlite-ext-json",
         ],
         "expected_publish_order": [
-            "fsqlite-core",
-            "fsqlite-types",
             "fsqlite-error",
-            "fsqlite",
-            "fsqlite-ext-fts5",
+            "fsqlite-types",
             "fsqlite-ext-json",
+            "fsqlite-ext-fts5",
+            "fsqlite-core",
+            "fsqlite",
         ],
     },
 }
