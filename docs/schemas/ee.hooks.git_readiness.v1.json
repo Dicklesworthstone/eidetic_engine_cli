@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.hooks.git_readiness.v1.json",
+  "title": "ee.hooks.git_readiness.v1",
+  "description": "Read-only diagnostic report for local Git hook-chain readiness before agent commits and pushes.",
+  "type": "object",
+  "required": [
+    "schema",
+    "command",
+    "readOnly",
+    "repositoryRoot",
+    "gitDir",
+    "hookDir",
+    "agentName",
+    "summary",
+    "hooks",
+    "findings",
+    "recommendations"
+  ],
+  "properties": {
+    "schema": { "const": "ee.hooks.git_readiness.v1" },
+    "command": { "const": "hook git-readiness" },
+    "readOnly": { "const": true },
+    "repositoryRoot": { "type": "string", "minLength": 1 },
+    "gitDir": { "type": ["string", "null"] },
+    "hookDir": { "type": "string", "minLength": 1 },
+    "agentName": { "type": ["string", "null"] },
+    "summary": {
+      "type": "object",
+      "required": [
+        "posture",
+        "inspectedHookCount",
+        "activeHookCount",
+        "findingCount",
+        "blockerCount",
+        "warningCount",
+        "beadsMetadataMutationRisk",
+        "agentNameReady",
+        "preflightGuardReachable",
+        "rchHookReachable"
+      ],
+      "properties": {
+        "posture": { "enum": ["ready", "needs_attention", "blocked"] },
+        "inspectedHookCount": { "type": "integer", "minimum": 0 },
+        "activeHookCount": { "type": "integer", "minimum": 0 },
+        "findingCount": { "type": "integer", "minimum": 0 },
+        "blockerCount": { "type": "integer", "minimum": 0 },
+        "warningCount": { "type": "integer", "minimum": 0 },
+        "beadsMetadataMutationRisk": { "type": "boolean" },
+        "agentNameReady": { "type": "boolean" },
+        "preflightGuardReachable": { "type": "boolean" },
+        "rchHookReachable": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "hooks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "path",
+          "exists",
+          "status",
+          "executable",
+          "managedByEe",
+          "chainTargets",
+          "requiresAgentName",
+          "mutatesBeadsMetadata",
+          "invokesPreflightGuard",
+          "invokesRch",
+          "invokesLocalRustToolchain"
+        ],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "path": { "type": "string", "minLength": 1 },
+          "exists": { "type": "boolean" },
+          "status": {
+            "enum": [
+              "not_found",
+              "managed_by_ee",
+              "external",
+              "unreadable",
+              "symlink"
+            ]
+          },
+          "executable": { "type": "boolean" },
+          "managedByEe": { "type": "boolean" },
+          "chainTargets": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "uniqueItems": true
+          },
+          "requiresAgentName": { "type": "boolean" },
+          "mutatesBeadsMetadata": { "type": "boolean" },
+          "invokesPreflightGuard": { "type": "boolean" },
+          "invokesRch": { "type": "boolean" },
+          "invokesLocalRustToolchain": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "severity", "hook", "message", "repair"],
+        "properties": {
+          "code": {
+            "enum": [
+              "agent_name_required",
+              "beads_metadata_mutation_risk",
+              "git_dir_missing",
+              "git_dir_not_directory",
+              "git_dir_pointer_unreadable",
+              "git_dir_unreadable",
+              "hook_untrusted_or_unreadable",
+              "preflight_guard_not_in_git_hooks",
+              "rch_hook_mismatch"
+            ]
+          },
+          "severity": {
+            "enum": ["info", "low", "warning", "medium", "high", "critical"]
+          },
+          "hook": { "type": ["string", "null"] },
+          "message": { "type": "string", "minLength": 1 },
+          "repair": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "recommendations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "priority", "action", "rationale"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "priority": { "type": "integer", "minimum": 1 },
+          "action": { "type": "string", "minLength": 1 },
+          "rationale": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

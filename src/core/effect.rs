@@ -1108,6 +1108,10 @@ impl EffectManifest {
                 "hook preflight-shell",
                 "Emit a shell snippet wiring ee preflight check into bash or zsh",
             ),
+            CommandEffect::read_only(
+                "hook git-readiness",
+                "Inspect local Git hook-chain readiness without mutation",
+            ),
             CommandEffect::read_only_db("index status", "Show index status"),
             CommandEffect::read_only(
                 "index vacuum",

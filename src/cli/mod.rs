@@ -7430,6 +7430,9 @@ pub enum HookCommand {
     /// as a pre-execution hook.
     #[command(name = "preflight-shell")]
     PreflightShell(PreflightShellArgs),
+    /// Inspect local Git hooks for Agent Mail identity and preflight readiness.
+    #[command(name = "git-readiness")]
+    GitReadiness(GitHookReadinessArgs),
 }
 
 /// Shell flavor selector for `ee hook preflight-shell`.
@@ -7467,6 +7470,17 @@ pub struct PreflightShellArgs {
     /// `$HOME/.local/share/ee/hooks`.
     #[arg(long = "install-dir", value_name = "PATH")]
     pub install_dir: Option<PathBuf>,
+}
+
+/// Arguments for `ee hook git-readiness`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct GitHookReadinessArgs {
+    /// Override the repository root whose .git/hooks chain should be inspected.
+    #[arg(long = "repository-root", value_name = "PATH")]
+    pub repository_root: Option<PathBuf>,
+    /// Agent Mail identity expected by pre-commit/pre-push guard hooks.
+    #[arg(long = "agent-name", value_name = "NAME")]
+    pub agent_name: Option<String>,
 }
 
 /// Subcommands for `ee model`.
@@ -9393,6 +9407,9 @@ where
         Some(Command::Hook(HookCommand::PreflightShell(ref args))) => {
             handle_hook_preflight_shell(&cli, args, stdout, stderr)
         }
+        Some(Command::Hook(HookCommand::GitReadiness(ref args))) => {
+            handle_hook_git_readiness(&cli, args, stdout, stderr)
+        }
         Some(Command::Model(ref model_cmd)) => {
             handle_model_command(&cli, model_cmd, stdout, stderr)
         }
@@ -9769,6 +9786,101 @@ where
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
     }
+}
+
+fn handle_hook_git_readiness<W, E>(
+    cli: &Cli,
+    args: &GitHookReadinessArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let repository_root = args
+        .repository_root
+        .clone()
+        .unwrap_or_else(|| cli.resolve_workspace());
+    let agent_name = args
+        .agent_name
+        .clone()
+        .or_else(|| std::env::var("AGENT_NAME").ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let options = crate::hooks::GitHookReadinessOptions {
+        repository_root,
+        agent_name,
+    };
+    let report = match crate::hooks::check_git_hook_readiness(&options) {
+        Ok(report) => report,
+        Err(error) => {
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_hook_git_readiness_human(&report))
+        }
+        output::Renderer::Toon => {
+            let json = hook_git_readiness_response_json(&report);
+            write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&json.to_string()) + "\n"),
+            )
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = hook_git_readiness_response_json(&report);
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn hook_git_readiness_response_json(
+    report: &crate::hooks::GitHookReadinessReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "ee.response.v2",
+        "success": true,
+        "data": {
+            "command": "hook git-readiness",
+            "report": report,
+        },
+        "degraded": [],
+    })
+}
+
+fn render_hook_git_readiness_human(report: &crate::hooks::GitHookReadinessReport) -> String {
+    let mut out = format!(
+        "Git hook readiness: {}\n  Hook dir: {}\n  Active hooks: {}\n  Findings: {} (blockers {}, warnings {})\n",
+        report.summary.posture,
+        report.hook_dir,
+        report.summary.active_hook_count,
+        report.summary.finding_count,
+        report.summary.blocker_count,
+        report.summary.warning_count,
+    );
+    for finding in report.findings.iter().take(5) {
+        let hook = finding
+            .hook
+            .as_deref()
+            .map_or_else(|| "repository".to_owned(), ToOwned::to_owned);
+        out.push_str(&format!(
+            "  - {} [{}] {}: {}\n",
+            finding.severity, finding.code, hook, finding.message
+        ));
+    }
+    for recommendation in report.recommendations.iter().take(3) {
+        out.push_str(&format!(
+            "  recommendation {}: {}\n",
+            recommendation.priority, recommendation.action
+        ));
+    }
+    out
 }
 
 fn handle_mcp_validate<W>(cli: &Cli, args: &McpValidateArgs, stdout: &mut W) -> ProcessExitCode
@@ -39308,6 +39420,7 @@ impl NormalizedInvocation {
                 },
                 Command::Hook(hook) => match hook {
                     HookCommand::PreflightShell(_) => "hook preflight-shell".to_string(),
+                    HookCommand::GitReadiness(_) => "hook git-readiness".to_string(),
                 },
                 Command::Model(model) => match model {
                     ModelCommand::Status(_) => "model status".to_string(),
@@ -45711,6 +45824,87 @@ mod tests {
             &response["degraded"][0]["code"],
             &serde_json::json!("plan_cache_not_yet_integrated"),
             "integration degraded code",
+        )
+    }
+
+    #[test]
+    fn hook_git_readiness_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "hook",
+            "git-readiness",
+            "--repository-root",
+            ".",
+            "--agent-name",
+            "LilacLake",
+        ])
+        .map_err(|e| format!("failed to parse hook git-readiness: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Hook(HookCommand::GitReadiness(ref args))) => {
+                ensure_equal(
+                    &args.repository_root,
+                    &Some(PathBuf::from(".")),
+                    "repository-root",
+                )?;
+                ensure_equal(
+                    &args.agent_name,
+                    &Some("LilacLake".to_owned()),
+                    "agent-name",
+                )
+            }
+            _ => Err("expected HookCommand::GitReadiness".to_string()),
+        }
+    }
+
+    #[test]
+    fn hook_git_readiness_json_contract() -> TestResult {
+        let report = crate::hooks::GitHookReadinessReport {
+            schema: crate::hooks::GIT_HOOK_READINESS_SCHEMA_V1.to_owned(),
+            command: "hook git-readiness".to_owned(),
+            read_only: true,
+            repository_root: "/repo".to_owned(),
+            git_dir: Some("/repo/.git".to_owned()),
+            hook_dir: "/repo/.git/hooks".to_owned(),
+            agent_name: Some("LilacLake".to_owned()),
+            summary: crate::hooks::GitHookReadinessSummary {
+                posture: "ready".to_owned(),
+                inspected_hook_count: 6,
+                active_hook_count: 1,
+                finding_count: 0,
+                blocker_count: 0,
+                warning_count: 0,
+                beads_metadata_mutation_risk: false,
+                agent_name_ready: true,
+                preflight_guard_reachable: true,
+                rch_hook_reachable: false,
+            },
+            hooks: Vec::new(),
+            findings: Vec::new(),
+            recommendations: Vec::new(),
+        };
+        let response = hook_git_readiness_response_json(&report);
+
+        ensure_equal(
+            &response["schema"],
+            &serde_json::json!("ee.response.v2"),
+            "response schema",
+        )?;
+        ensure_equal(&response["success"], &serde_json::json!(true), "success")?;
+        ensure_equal(
+            &response["data"]["command"],
+            &serde_json::json!("hook git-readiness"),
+            "command",
+        )?;
+        ensure_equal(
+            &response["data"]["report"]["schema"],
+            &serde_json::json!("ee.hooks.git_readiness.v1"),
+            "report schema",
+        )?;
+        ensure_equal(
+            &response["data"]["report"]["readOnly"],
+            &serde_json::json!(true),
+            "read-only report",
         )
     }
 

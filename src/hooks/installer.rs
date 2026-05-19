@@ -17,6 +17,9 @@ pub const HOOK_INSTALL_SCHEMA_V1: &str = "ee.hooks.install.v1";
 /// Schema for hook status report.
 pub const HOOK_STATUS_SCHEMA_V1: &str = "ee.hooks.status.v1";
 
+/// Schema for local Git hook-chain readiness diagnostics.
+pub const GIT_HOOK_READINESS_SCHEMA_V1: &str = "ee.hooks.git_readiness.v1";
+
 const TRAUMA_GUARD_HOOK_HELPER_SURFACE: &str = "trauma_guard_hook_helper";
 
 fn elapsed_ms_since(started: Instant) -> u64 {
@@ -922,6 +925,556 @@ pub fn check_hook_status(options: &HookStatusOptions) -> Result<HookStatusReport
 }
 
 // ============================================================================
+// Local Git Hook Readiness Diagnostic (bd-3d6ko.7)
+// ============================================================================
+
+const GIT_HOOK_READINESS_COMMAND: &str = "hook git-readiness";
+const HOOK_CONTENT_INSPECT_LIMIT: usize = 64 * 1024;
+const DEFAULT_GIT_HOOK_NAMES: &[&str] = &[
+    "pre-commit",
+    "prepare-commit-msg",
+    "commit-msg",
+    "post-commit",
+    "pre-push",
+    "post-merge",
+];
+
+/// Options for a read-only local Git hook-chain readiness diagnostic.
+#[derive(Clone, Debug, Default)]
+pub struct GitHookReadinessOptions {
+    /// Repository root whose `.git/hooks` directory should be inspected.
+    pub repository_root: PathBuf,
+    /// Agent identity expected by Agent Mail guard hooks.
+    pub agent_name: Option<String>,
+}
+
+/// Summary posture for local Git hook readiness.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHookReadinessSummary {
+    pub posture: String,
+    pub inspected_hook_count: usize,
+    pub active_hook_count: usize,
+    pub finding_count: usize,
+    pub blocker_count: usize,
+    pub warning_count: usize,
+    pub beads_metadata_mutation_risk: bool,
+    pub agent_name_ready: bool,
+    pub preflight_guard_reachable: bool,
+    pub rch_hook_reachable: bool,
+}
+
+/// One inspected Git hook or chained hook target.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHookReadinessHook {
+    pub name: String,
+    pub path: String,
+    pub exists: bool,
+    pub status: String,
+    pub executable: bool,
+    pub managed_by_ee: bool,
+    pub chain_targets: Vec<String>,
+    pub requires_agent_name: bool,
+    pub mutates_beads_metadata: bool,
+    pub invokes_preflight_guard: bool,
+    pub invokes_rch: bool,
+    pub invokes_local_rust_toolchain: bool,
+}
+
+/// One deterministic readiness finding.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHookReadinessFinding {
+    pub code: String,
+    pub severity: String,
+    pub hook: Option<String>,
+    pub message: String,
+    pub repair: String,
+}
+
+/// One operator recommendation. Recommendations are advisory and read-only.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHookReadinessRecommendation {
+    pub id: String,
+    pub priority: u8,
+    pub action: String,
+    pub rationale: String,
+}
+
+/// Read-only report for local Git hook readiness.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHookReadinessReport {
+    pub schema: String,
+    pub command: String,
+    pub read_only: bool,
+    pub repository_root: String,
+    pub git_dir: Option<String>,
+    pub hook_dir: String,
+    pub agent_name: Option<String>,
+    pub summary: GitHookReadinessSummary,
+    pub hooks: Vec<GitHookReadinessHook>,
+    pub findings: Vec<GitHookReadinessFinding>,
+    pub recommendations: Vec<GitHookReadinessRecommendation>,
+}
+
+impl GitHookReadinessReport {
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        serialize_hook_report(self, "GitHookReadinessReport")
+    }
+}
+
+/// Inspect the local Git hook chain without running hooks or mutating the repo.
+pub fn check_git_hook_readiness(
+    options: &GitHookReadinessOptions,
+) -> Result<GitHookReadinessReport, DomainError> {
+    let (git_dir, hook_dir, mut findings) = resolve_git_hook_dir(&options.repository_root);
+    let agent_name = normalize_agent_name(options.agent_name.as_deref());
+    let mut hooks = Vec::new();
+
+    for hook_name in DEFAULT_GIT_HOOK_NAMES {
+        hooks.push(inspect_git_hook(&hook_dir, hook_name));
+    }
+
+    findings.extend(git_hook_readiness_findings(&hooks, agent_name.as_deref()));
+    let recommendations = git_hook_readiness_recommendations(&findings);
+    let summary = git_hook_readiness_summary(&hooks, &findings, agent_name.is_some());
+
+    Ok(GitHookReadinessReport {
+        schema: GIT_HOOK_READINESS_SCHEMA_V1.to_owned(),
+        command: GIT_HOOK_READINESS_COMMAND.to_owned(),
+        read_only: true,
+        repository_root: options.repository_root.display().to_string(),
+        git_dir: git_dir.map(|path| path.display().to_string()),
+        hook_dir: hook_dir.display().to_string(),
+        agent_name,
+        summary,
+        hooks,
+        findings,
+        recommendations,
+    })
+}
+
+fn normalize_agent_name(agent_name: Option<&str>) -> Option<String> {
+    agent_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn resolve_git_hook_dir(
+    repository_root: &Path,
+) -> (Option<PathBuf>, PathBuf, Vec<GitHookReadinessFinding>) {
+    let git_path = repository_root.join(".git");
+    let mut findings = Vec::new();
+
+    match std::fs::symlink_metadata(&git_path) {
+        Ok(metadata) if metadata.is_dir() => {
+            let hook_dir = git_path.join("hooks");
+            (Some(git_path), hook_dir, findings)
+        }
+        Ok(metadata) if metadata.is_file() => {
+            match read_gitdir_pointer(repository_root, &git_path) {
+                Some(git_dir) => {
+                    let hook_dir = git_dir.join("hooks");
+                    (Some(git_dir), hook_dir, findings)
+                }
+                None => {
+                    findings.push(GitHookReadinessFinding {
+                        code: "git_dir_pointer_unreadable".to_owned(),
+                        severity: "warning".to_owned(),
+                        hook: None,
+                        message: format!(
+                            "Git directory pointer '{}' could not be read as a `gitdir:` file.",
+                            git_path.display()
+                        ),
+                        repair: "Run this diagnostic from the canonical repository checkout or repair the .git pointer.".to_owned(),
+                    });
+                    (None, git_path.join("hooks"), findings)
+                }
+            }
+        }
+        Ok(_) => {
+            findings.push(GitHookReadinessFinding {
+                code: "git_dir_not_directory".to_owned(),
+                severity: "warning".to_owned(),
+                hook: None,
+                message: format!(
+                    "Git metadata path '{}' is not a directory or gitdir pointer.",
+                    git_path.display()
+                ),
+                repair: "Run this diagnostic from a normal Git checkout.".to_owned(),
+            });
+            (None, git_path.join("hooks"), findings)
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            findings.push(GitHookReadinessFinding {
+                code: "git_dir_missing".to_owned(),
+                severity: "warning".to_owned(),
+                hook: None,
+                message: format!(
+                    "No .git directory was found under '{}'.",
+                    repository_root.display()
+                ),
+                repair: "Pass --repository-root pointing at the canonical Git checkout.".to_owned(),
+            });
+            (None, git_path.join("hooks"), findings)
+        }
+        Err(error) => {
+            findings.push(GitHookReadinessFinding {
+                code: "git_dir_unreadable".to_owned(),
+                severity: "warning".to_owned(),
+                hook: None,
+                message: format!(
+                    "Git metadata path '{}' could not be inspected: {error}",
+                    git_path.display()
+                ),
+                repair: "Fix permissions or pass a readable --repository-root.".to_owned(),
+            });
+            (None, git_path.join("hooks"), findings)
+        }
+    }
+}
+
+fn read_gitdir_pointer(repository_root: &Path, git_path: &Path) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(git_path).ok()?;
+    let raw = content.trim().strip_prefix("gitdir:")?.trim();
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        Some(repository_root.join(path))
+    }
+}
+
+fn inspect_git_hook(hook_dir: &Path, hook_name: &str) -> GitHookReadinessHook {
+    let path = hook_dir.join(hook_name);
+    let existing = check_existing_hook(&path);
+    let exists = !matches!(existing, ExistingHookStatus::NotFound);
+    let executable = hook_path_is_executable(&path, existing);
+    let content = read_bounded_hook_content(&path, existing);
+    let chain_targets = hook_chain_targets(hook_dir, hook_name, content.as_deref());
+    let mut combined_content = content.unwrap_or_default();
+    for target in &chain_targets {
+        if let Some(target_content) = read_plain_bounded_file(Path::new(target.as_str())) {
+            combined_content.push('\n');
+            combined_content.push_str(&target_content);
+        }
+    }
+
+    GitHookReadinessHook {
+        name: hook_name.to_owned(),
+        path: path.display().to_string(),
+        exists,
+        status: existing.as_str().to_owned(),
+        executable,
+        managed_by_ee: matches!(existing, ExistingHookStatus::ManagedByEe),
+        chain_targets,
+        requires_agent_name: hook_requires_agent_name(&combined_content),
+        mutates_beads_metadata: hook_mutates_beads_metadata(&combined_content),
+        invokes_preflight_guard: hook_invokes_preflight_guard(&combined_content),
+        invokes_rch: hook_invokes_rch(&combined_content),
+        invokes_local_rust_toolchain: hook_invokes_local_rust_toolchain(&combined_content),
+    }
+}
+
+fn read_bounded_hook_content(path: &Path, existing: ExistingHookStatus) -> Option<String> {
+    if !matches!(
+        existing,
+        ExistingHookStatus::ManagedByEe | ExistingHookStatus::External
+    ) {
+        return None;
+    }
+    let content = read_existing_hook_content(path).ok()?;
+    if content.len() <= HOOK_CONTENT_INSPECT_LIMIT {
+        Some(content)
+    } else {
+        Some(content.chars().take(HOOK_CONTENT_INSPECT_LIMIT).collect())
+    }
+}
+
+fn read_plain_bounded_file(path: &Path) -> Option<String> {
+    match first_existing_symlink_component(path) {
+        Ok(Some(_)) | Err(_) => return None,
+        Ok(None) => {}
+    }
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    let content = std::fs::read_to_string(path).ok()?;
+    if content.len() <= HOOK_CONTENT_INSPECT_LIMIT {
+        Some(content)
+    } else {
+        Some(content.chars().take(HOOK_CONTENT_INSPECT_LIMIT).collect())
+    }
+}
+
+fn hook_chain_targets(hook_dir: &Path, hook_name: &str, content: Option<&str>) -> Vec<String> {
+    let Some(content) = content else {
+        return Vec::new();
+    };
+    let mut targets = Vec::new();
+    let hooks_d = hook_dir.join("hooks.d").join(hook_name);
+    if content.contains("hooks.d") || content.contains("RUN_DIR") {
+        if let Ok(entries) = std::fs::read_dir(&hooks_d) {
+            let mut paths = entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.is_file())
+                .collect::<Vec<_>>();
+            paths.sort();
+            targets.extend(paths.into_iter().map(|path| path.display().to_string()));
+        }
+    }
+
+    for suffix in ["orig", "old"] {
+        let candidate = hook_dir.join(format!("{hook_name}.{suffix}"));
+        let marker = format!("{hook_name}.{suffix}");
+        if content.contains(&marker) && candidate.exists() {
+            targets.push(candidate.display().to_string());
+        }
+    }
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
+fn hook_requires_agent_name(content: &str) -> bool {
+    content.contains("AGENT_NAME")
+        && (content.contains("environment variable is required")
+            || content.contains("os.environ.get(\"AGENT_NAME\"")
+            || content.contains("os.environ.get('AGENT_NAME'"))
+}
+
+fn hook_mutates_beads_metadata(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    (lower.contains("bd sync --flush-only") || lower.contains("br sync --flush-only"))
+        && lower.contains("git add")
+        && (lower.contains(".beads/issues.jsonl") || lower.contains("$beads_dir/issues.jsonl"))
+}
+
+fn hook_invokes_preflight_guard(content: &str) -> bool {
+    content.contains("preflight check")
+        || content.contains("EE_PREFLIGHT_HOOK")
+        || content.contains("preflight guard")
+}
+
+fn hook_invokes_rch(content: &str) -> bool {
+    content.contains("RCH_")
+        || content.contains(" rch ")
+        || content.contains("/rch ")
+        || content.contains("rch_verify")
+}
+
+fn hook_invokes_local_rust_toolchain(content: &str) -> bool {
+    content.lines().any(|line| {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return false;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        lower.starts_with("cargo ")
+            || lower.starts_with("rustc ")
+            || lower.starts_with("rustdoc ")
+            || lower.contains(" cargo ")
+            || lower.contains(" rustc ")
+            || lower.contains(" rustdoc ")
+    })
+}
+
+fn git_hook_readiness_findings(
+    hooks: &[GitHookReadinessHook],
+    agent_name: Option<&str>,
+) -> Vec<GitHookReadinessFinding> {
+    let mut findings = Vec::new();
+    for hook in hooks {
+        if matches!(hook.status.as_str(), "symlink" | "unreadable") {
+            findings.push(GitHookReadinessFinding {
+                code: "hook_untrusted_or_unreadable".to_owned(),
+                severity: "warning".to_owned(),
+                hook: Some(hook.name.clone()),
+                message: format!(
+                    "Git hook `{}` has status `{}` and could not be fully inspected.",
+                    hook.name, hook.status
+                ),
+                repair: "Inspect the hook manually before relying on commit or push readiness."
+                    .to_owned(),
+            });
+        }
+        if hook.requires_agent_name && agent_name.is_none() {
+            findings.push(GitHookReadinessFinding {
+                code: "agent_name_required".to_owned(),
+                severity: "high".to_owned(),
+                hook: Some(hook.name.clone()),
+                message: format!(
+                    "Git hook `{}` appears to require AGENT_NAME, but no agent name is available.",
+                    hook.name
+                ),
+                repair: "Set AGENT_NAME to your registered Agent Mail identity before committing or pushing.".to_owned(),
+            });
+        }
+        if hook.mutates_beads_metadata {
+            findings.push(GitHookReadinessFinding {
+                code: "beads_metadata_mutation_risk".to_owned(),
+                severity: "high".to_owned(),
+                hook: Some(hook.name.clone()),
+                message: format!(
+                    "Git hook `{}` can flush and stage .beads/issues.jsonl during commit.",
+                    hook.name
+                ),
+                repair: "Use an explicit path-limited commit when Beads metadata is contested, and inspect staged .beads/issues.jsonl before committing.".to_owned(),
+            });
+        }
+        if hook.invokes_local_rust_toolchain && !hook.invokes_rch {
+            findings.push(GitHookReadinessFinding {
+                code: "rch_hook_mismatch".to_owned(),
+                severity: "high".to_owned(),
+                hook: Some(hook.name.clone()),
+                message: format!(
+                    "Git hook `{}` appears to run Cargo or Rust tooling without an RCH wrapper.",
+                    hook.name
+                ),
+                repair: "Route Rust verification through scripts/rch_verify.sh or rch exec; do not let shared-checkout Git hooks run local Cargo.".to_owned(),
+            });
+        }
+    }
+
+    if hooks
+        .iter()
+        .filter(|hook| hook.exists)
+        .all(|hook| !hook.invokes_preflight_guard)
+    {
+        findings.push(GitHookReadinessFinding {
+            code: "preflight_guard_not_in_git_hooks".to_owned(),
+            severity: "low".to_owned(),
+            hook: None,
+            message: "No inspected Git hook invokes `ee preflight check` or an ee preflight guard."
+                .to_owned(),
+            repair: "Use `ee hook preflight-shell --shell zsh --json` to generate a shell preflight snippet, or document why Git-hook preflight is intentionally absent.".to_owned(),
+        });
+    }
+
+    findings.sort_by(|left, right| {
+        (
+            severity_rank(&left.severity),
+            left.hook.as_deref().unwrap_or(""),
+            left.code.as_str(),
+        )
+            .cmp(&(
+                severity_rank(&right.severity),
+                right.hook.as_deref().unwrap_or(""),
+                right.code.as_str(),
+            ))
+    });
+    findings.reverse();
+    findings
+}
+
+fn severity_rank(severity: &str) -> u8 {
+    match severity {
+        "critical" => 5,
+        "high" => 4,
+        "medium" => 3,
+        "warning" => 2,
+        "low" => 1,
+        _ => 0,
+    }
+}
+
+fn git_hook_readiness_recommendations(
+    findings: &[GitHookReadinessFinding],
+) -> Vec<GitHookReadinessRecommendation> {
+    let mut recommendations = Vec::new();
+    if findings
+        .iter()
+        .any(|finding| finding.code == "agent_name_required")
+    {
+        recommendations.push(GitHookReadinessRecommendation {
+            id: "set_agent_name".to_owned(),
+            priority: 1,
+            action: "export AGENT_NAME=<registered-agent-name>".to_owned(),
+            rationale: "Agent Mail guard hooks fail closed when AGENT_NAME is absent.".to_owned(),
+        });
+    }
+    if findings
+        .iter()
+        .any(|finding| finding.code == "beads_metadata_mutation_risk")
+    {
+        recommendations.push(GitHookReadinessRecommendation {
+            id: "path_limited_commit".to_owned(),
+            priority: 2,
+            action: "git commit --only <intended-paths> ...".to_owned(),
+            rationale: "Path-limited commits prevent legacy Beads hook churn from being swept into source commits.".to_owned(),
+        });
+    }
+    if findings
+        .iter()
+        .any(|finding| finding.code == "rch_hook_mismatch")
+    {
+        recommendations.push(GitHookReadinessRecommendation {
+            id: "route_rust_hooks_through_rch".to_owned(),
+            priority: 3,
+            action: "scripts/rch_verify.sh <cargo-command>".to_owned(),
+            rationale: "This checkout requires remote-first Rust verification and must not run local Cargo from Git hooks.".to_owned(),
+        });
+    }
+    if findings
+        .iter()
+        .any(|finding| finding.code == "preflight_guard_not_in_git_hooks")
+    {
+        recommendations.push(GitHookReadinessRecommendation {
+            id: "generate_preflight_shell_hook".to_owned(),
+            priority: 4,
+            action: "ee hook preflight-shell --shell zsh --json".to_owned(),
+            rationale: "The destructive-command guard is most reliable when the shell pre-exec hook is active before commands run.".to_owned(),
+        });
+    }
+    recommendations.sort_by_key(|recommendation| recommendation.priority);
+    recommendations
+}
+
+fn git_hook_readiness_summary(
+    hooks: &[GitHookReadinessHook],
+    findings: &[GitHookReadinessFinding],
+    agent_name_ready: bool,
+) -> GitHookReadinessSummary {
+    let blocker_count = findings
+        .iter()
+        .filter(|finding| matches!(finding.severity.as_str(), "critical" | "high"))
+        .count();
+    let warning_count = findings.len().saturating_sub(blocker_count);
+    let posture = if blocker_count > 0 {
+        "blocked"
+    } else if warning_count > 0 {
+        "needs_attention"
+    } else {
+        "ready"
+    };
+
+    GitHookReadinessSummary {
+        posture: posture.to_owned(),
+        inspected_hook_count: hooks.len(),
+        active_hook_count: hooks.iter().filter(|hook| hook.exists).count(),
+        finding_count: findings.len(),
+        blocker_count,
+        warning_count,
+        beads_metadata_mutation_risk: hooks.iter().any(|hook| hook.mutates_beads_metadata),
+        agent_name_ready,
+        preflight_guard_reachable: hooks.iter().any(|hook| hook.invokes_preflight_guard),
+        rch_hook_reachable: hooks.iter().any(|hook| hook.invokes_rch),
+    }
+}
+
+// ============================================================================
 // Preflight Shell Hook Helper (bd-3usjw.7 — trauma_guard_hook_helper)
 // ============================================================================
 
@@ -1464,6 +2017,177 @@ mod tests {
 
         assert_eq!(hook.status, ExistingHookStatus::Symlink.as_str());
         assert!(!hook.executable, "symlink hooks must not be executable");
+
+        Ok(())
+    }
+
+    #[test]
+    fn git_readiness_flags_legacy_beads_hook_and_missing_agent_name() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_dir = temp.path().join(".git").join("hooks");
+        fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
+        fs::write(
+            hook_dir.join("pre-commit"),
+            r#"#!/usr/bin/env python3
+HOOK_DIR = Path(__file__).parent
+RUN_DIR = HOOK_DIR / 'hooks.d' / 'pre-commit'
+ORIG = HOOK_DIR / 'pre-commit.orig'
+"#,
+        )
+        .map_err(|e| e.to_string())?;
+        fs::write(
+            hook_dir.join("pre-commit.orig"),
+            r#"#!/bin/sh
+bd sync --flush-only
+git add "$BEADS_DIR/issues.jsonl"
+"#,
+        )
+        .map_err(|e| e.to_string())?;
+        fs::write(
+            hook_dir.join("pre-push"),
+            r#"#!/usr/bin/env python3
+AGENT_NAME = os.environ.get("AGENT_NAME", "").strip()
+if not AGENT_NAME:
+    print("mcp-agent-mail: AGENT_NAME environment variable is required.")
+"#,
+        )
+        .map_err(|e| e.to_string())?;
+
+        let report = check_git_hook_readiness(&GitHookReadinessOptions {
+            repository_root: temp.path().to_path_buf(),
+            agent_name: None,
+        })
+        .map_err(|e| e.message())?;
+
+        assert_eq!(report.schema, GIT_HOOK_READINESS_SCHEMA_V1);
+        assert!(report.read_only);
+        assert_eq!(report.summary.posture, "blocked");
+        assert!(report.summary.beads_metadata_mutation_risk);
+        assert!(!report.summary.agent_name_ready);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "beads_metadata_mutation_risk"),
+            "legacy Beads auto-stage hook must be detected"
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "agent_name_required"),
+            "Agent Mail guard identity requirement must be detected"
+        );
+        let pre_commit = report
+            .hooks
+            .iter()
+            .find(|hook| hook.name == "pre-commit")
+            .ok_or_else(|| "missing pre-commit hook row".to_owned())?;
+        assert!(
+            pre_commit
+                .chain_targets
+                .iter()
+                .any(|target| target.ends_with("pre-commit.orig")),
+            "pre-commit.orig chain target should be surfaced"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn git_readiness_reports_missing_hooks_without_mutation() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_dir = temp.path().join(".git").join("hooks");
+        fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
+
+        let report = check_git_hook_readiness(&GitHookReadinessOptions {
+            repository_root: temp.path().to_path_buf(),
+            agent_name: Some("LilacLake".to_owned()),
+        })
+        .map_err(|e| e.message())?;
+
+        assert_eq!(report.summary.inspected_hook_count, 6);
+        assert_eq!(report.summary.active_hook_count, 0);
+        assert!(!report.summary.beads_metadata_mutation_risk);
+        assert!(
+            report.hooks.iter().all(|hook| hook.status == "not_found"),
+            "missing hooks should be reported as not_found"
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "preflight_guard_not_in_git_hooks"),
+            "missing hook chain should explain that preflight is not reachable"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn git_readiness_flags_rch_hook_mismatch() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_dir = temp.path().join(".git").join("hooks");
+        fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
+        fs::write(
+            hook_dir.join("pre-commit"),
+            "#!/bin/sh\ncargo check --all-targets\n",
+        )
+        .map_err(|e| e.to_string())?;
+
+        let report = check_git_hook_readiness(&GitHookReadinessOptions {
+            repository_root: temp.path().to_path_buf(),
+            agent_name: Some("LilacLake".to_owned()),
+        })
+        .map_err(|e| e.message())?;
+
+        assert_eq!(report.summary.posture, "blocked");
+        let pre_commit = report
+            .hooks
+            .iter()
+            .find(|hook| hook.name == "pre-commit")
+            .ok_or_else(|| "missing pre-commit hook row".to_owned())?;
+        assert!(pre_commit.invokes_local_rust_toolchain);
+        assert!(!pre_commit.invokes_rch);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "rch_hook_mismatch"),
+            "local Cargo hook must be flagged when RCH is absent"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn git_readiness_clean_configured_chain_is_ready() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_dir = temp.path().join(".git").join("hooks");
+        fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
+        fs::write(
+            hook_dir.join("pre-commit"),
+            "#!/bin/sh\n/usr/local/bin/ee preflight check --cmd \"$*\" --json\n",
+        )
+        .map_err(|e| e.to_string())?;
+        fs::write(
+            hook_dir.join("pre-push"),
+            r#"#!/usr/bin/env python3
+AGENT_NAME = os.environ.get("AGENT_NAME", "").strip()
+"#,
+        )
+        .map_err(|e| e.to_string())?;
+
+        let report = check_git_hook_readiness(&GitHookReadinessOptions {
+            repository_root: temp.path().to_path_buf(),
+            agent_name: Some("LilacLake".to_owned()),
+        })
+        .map_err(|e| e.message())?;
+
+        assert_eq!(report.summary.posture, "ready");
+        assert!(report.summary.agent_name_ready);
+        assert!(report.summary.preflight_guard_reachable);
+        assert!(report.findings.is_empty(), "clean chain should not warn");
 
         Ok(())
     }

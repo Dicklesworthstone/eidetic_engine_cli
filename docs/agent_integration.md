@@ -18,6 +18,17 @@ For shared-checkout commit readiness, see
 workspace hygiene surface is read-only and explains dirty-path buckets,
 reason codes, and scratch-artifact examples for agent commits.
 
+Before committing or pushing from a shared checkout, run:
+
+```bash
+ee hook git-readiness --workspace . --agent-name <AgentName> --json
+```
+
+This read-only diagnostic reports schema `ee.hooks.git_readiness.v1` and
+checks local Git hooks for agent identity requirements, legacy Beads metadata
+mutation, local Cargo hooks that should route through RCH, unreadable hook-chain
+targets, and missing preflight-guard coverage.
+
 For remote Rust proof handoffs, see [`docs/rch_verification.md`](rch_verification.md)
 and [`docs/rch_runbook.md`](rch_runbook.md). Agent-to-agent messages should name
 the RCH proof status and source attribution explicitly:
