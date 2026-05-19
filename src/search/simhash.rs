@@ -225,10 +225,69 @@ pub fn nearest_simhash_candidate<'a>(
         .next()
 }
 
+/// Result of the cosine confirmation gate after a SimHash candidate passes the
+/// cheap Hamming-distance filter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CosineConfirmation {
+    pub similarity: f32,
+    pub floor: f32,
+    pub confirmed: bool,
+}
+
+/// Cosine similarity for stored embedding vectors.
+///
+/// Invalid inputs return `None`: dimension mismatch, empty vectors, zero
+/// vectors, or non-finite values mean the caller cannot safely confirm a
+/// SimHash candidate and should fall through to a fresh embedding.
+#[must_use]
+pub fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
+    if left.len() != right.len() || left.is_empty() {
+        return None;
+    }
+    let mut dot = 0.0_f64;
+    let mut left_norm_sq = 0.0_f64;
+    let mut right_norm_sq = 0.0_f64;
+    for (&left_value, &right_value) in left.iter().zip(right.iter()) {
+        if !left_value.is_finite() || !right_value.is_finite() {
+            return None;
+        }
+        let left_value = f64::from(left_value);
+        let right_value = f64::from(right_value);
+        dot += left_value * right_value;
+        left_norm_sq += left_value * left_value;
+        right_norm_sq += right_value * right_value;
+    }
+    if left_norm_sq == 0.0 || right_norm_sq == 0.0 {
+        return None;
+    }
+    let denominator = left_norm_sq.sqrt() * right_norm_sq.sqrt();
+    Some((dot / denominator).clamp(-1.0, 1.0) as f32)
+}
+
+/// Confirm whether two embeddings are similar enough to reuse the candidate's
+/// stored embedding for insert-time deduplication.
+#[must_use]
+pub fn confirm_cosine_similarity(
+    query_embedding: &[f32],
+    candidate_embedding: &[f32],
+    floor: f32,
+) -> Option<CosineConfirmation> {
+    if !floor.is_finite() {
+        return None;
+    }
+    let similarity = cosine_similarity(query_embedding, candidate_embedding)?;
+    Some(CosineConfirmation {
+        similarity,
+        floor,
+        confirmed: similarity >= floor,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        NearestSimHashCandidate, SIMHASH_BITS, SimHash128, canonicalize_content_for_simhash,
+        CosineConfirmation, NearestSimHashCandidate, SIMHASH_BITS, SimHash128,
+        canonicalize_content_for_simhash, confirm_cosine_similarity, cosine_similarity,
         hamming_distance, nearest_simhash_candidate, ranked_simhash_candidates, simhash_128,
     };
 
@@ -478,5 +537,62 @@ mod tests {
         let ranked = ranked_simhash_candidates(query, candidates, SIMHASH_BITS as u32, 0);
 
         assert!(ranked.is_empty());
+    }
+
+    #[test]
+    fn cosine_similarity_identical_vectors_confirm_reuse() {
+        let embedding = [1.0, 0.0, 0.0];
+
+        let confirmation = confirm_cosine_similarity(&embedding, &embedding, 0.97)
+            .expect("valid cosine comparison");
+
+        assert_eq!(
+            confirmation,
+            CosineConfirmation {
+                similarity: 1.0,
+                floor: 0.97,
+                confirmed: true,
+            }
+        );
+    }
+
+    #[test]
+    fn cosine_similarity_orthogonal_vectors_reject_reuse() {
+        let left = [1.0, 0.0, 0.0];
+        let right = [0.0, 1.0, 0.0];
+
+        let confirmation =
+            confirm_cosine_similarity(&left, &right, 0.97).expect("valid cosine comparison");
+
+        assert_eq!(
+            confirmation,
+            CosineConfirmation {
+                similarity: 0.0,
+                floor: 0.97,
+                confirmed: false,
+            }
+        );
+    }
+
+    #[test]
+    fn cosine_similarity_dimension_mismatch_is_not_confirmable() {
+        assert_eq!(cosine_similarity(&[1.0, 0.0], &[1.0]), None);
+    }
+
+    #[test]
+    fn cosine_similarity_zero_vector_is_not_confirmable() {
+        assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 0.0]), None);
+        assert_eq!(cosine_similarity(&[1.0, 0.0], &[0.0, 0.0]), None);
+    }
+
+    #[test]
+    fn cosine_similarity_non_finite_value_is_not_confirmable() {
+        assert_eq!(cosine_similarity(&[f32::NAN], &[1.0]), None);
+        assert_eq!(cosine_similarity(&[f32::INFINITY], &[1.0]), None);
+    }
+
+    #[test]
+    fn cosine_confirmation_non_finite_floor_is_not_confirmable() {
+        assert_eq!(confirm_cosine_similarity(&[1.0], &[1.0], f32::NAN), None);
     }
 }
