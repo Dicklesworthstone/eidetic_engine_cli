@@ -17,6 +17,17 @@ use serde_json::Value as JsonValue;
 
 type TestResult = Result<(), String>;
 const CONTEXT_QUERY: &str = "Always run cargo fmt --check before release";
+const JSONL_GRAPH_FIELDS: &[&str] = &[
+    "pagerank_score",
+    "betweenness_score",
+    "hits_authority",
+    "hits_hub",
+    "onion_layer",
+    "k_truss_max",
+    "articulation_point",
+    "bayes_alpha",
+    "bayes_beta",
+];
 
 fn trace_backup_restore_roundtrip(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
     tracing::info!(
@@ -381,6 +392,39 @@ fn records_with_schema(records: &[JsonValue], schema: &str) -> Vec<JsonValue> {
         .filter(|record| record.get("schema").and_then(JsonValue::as_str) == Some(schema))
         .cloned()
         .collect()
+}
+
+fn ensure_memory_records_include_graph_fields(records: &[JsonValue], context: &str) -> TestResult {
+    let memories = records_with_schema(records, "ee.export.memory.v1");
+    ensure(
+        !memories.is_empty(),
+        format!("{context}: no memory records"),
+    )?;
+    for record in &memories {
+        let memory_id = record
+            .get("memory_id")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("<missing-memory-id>");
+        for field in JSONL_GRAPH_FIELDS {
+            let Some(value) = record.get(*field) else {
+                return Err(format!(
+                    "{context}: memory {memory_id} missing graph-derived field {field}"
+                ));
+            };
+            let valid_type = if *field == "articulation_point" {
+                value.as_bool().is_some()
+            } else {
+                value.is_number()
+            };
+            ensure(
+                valid_type,
+                format!(
+                    "{context}: memory {memory_id} graph-derived field {field} has invalid type: {value}"
+                ),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn normalized_records_with_schema(
@@ -1200,6 +1244,7 @@ fn export_import_export_preserves_memory_and_tag_records() -> TestResult {
     let source_records = read_jsonl_records(&source_records_path)?;
     let source_records_json = JsonValue::Array(source_records.clone());
     persist_json_artifact("0n9b5_05_source_records", &source_records_json)?;
+    ensure_memory_records_include_graph_fields(&source_records, "source export")?;
 
     let source_link_records = records_with_schema(&source_records, "ee.export.link.v1");
     ensure(
@@ -1274,6 +1319,7 @@ fn export_import_export_preserves_memory_and_tag_records() -> TestResult {
     let imported_records = read_jsonl_records(&imported_records_path)?;
     let imported_records_json = JsonValue::Array(imported_records.clone());
     persist_json_artifact("0n9b5_09_imported_records", &imported_records_json)?;
+    ensure_memory_records_include_graph_fields(&imported_records, "imported export")?;
 
     let ignored_memory_fields = ["workspace_id", "created_at", "updated_at"];
     let source_memories = normalized_records_with_schema(
