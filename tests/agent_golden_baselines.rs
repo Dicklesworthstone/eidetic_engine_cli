@@ -710,6 +710,120 @@ fn contains_unredacted_secret(output: &str) -> bool {
         || output.contains("api_key")
 }
 
+fn read_golden_json(category: &str, name: &str) -> Result<Value, String> {
+    let path = golden_path(category, name);
+    let text = fs::read_to_string(&path)
+        .map_err(|error| format!("read golden {}: {error}", path.display()))?;
+    serde_json::from_str(&text).map_err(|error| format!("parse golden {}: {error}", path.display()))
+}
+
+fn ensure_singleflight_posture_redaction_safe(value: &Value, fixture_name: &str) -> TestResult {
+    let singleflight = value
+        .pointer("/data/singleFlight")
+        .ok_or_else(|| format!("{fixture_name}: missing /data/singleFlight"))?;
+    ensure_equal(
+        singleflight.get("schema").and_then(Value::as_str),
+        Some("ee.singleflight.posture.v1"),
+        &format!("{fixture_name} singleFlight schema"),
+    )?;
+
+    ensure_no_singleflight_raw_field_names(singleflight, fixture_name, "/data/singleFlight")?;
+    let rendered = serde_json::to_string(singleflight)
+        .map_err(|error| format!("{fixture_name}: render singleFlight JSON: {error}"))?;
+    for forbidden in [
+        "release token secret",
+        "BEGIN PRIVATE KEY",
+        "sk-",
+        "ghp_",
+        "raw memory body",
+        "mail body",
+        "/private/",
+    ] {
+        ensure(
+            !rendered.contains(forbidden),
+            format!("{fixture_name}: singleFlight leaked forbidden text {forbidden:?}"),
+        )?;
+    }
+
+    Ok(())
+}
+
+fn ensure_no_singleflight_raw_field_names(
+    value: &Value,
+    fixture_name: &str,
+    path: &str,
+) -> TestResult {
+    match value {
+        Value::Object(object) => {
+            for key in object.keys() {
+                ensure(
+                    !matches!(
+                        key.as_str(),
+                        "rawQuery"
+                            | "queryText"
+                            | "workspacePath"
+                            | "workspaceIdentity"
+                            | "memoryContent"
+                            | "memoryBody"
+                            | "mailBody"
+                            | "sourcePath"
+                            | "optionPairs"
+                            | "optionHashInput"
+                    ),
+                    format!("{fixture_name}: singleFlight exposed raw field {path}/{key}"),
+                )?;
+            }
+            if path.ends_with("/lastKey") {
+                let mut actual = object.keys().map(String::as_str).collect::<Vec<_>>();
+                actual.sort_unstable();
+                let expected = vec![
+                    "graphGeneration",
+                    "indexGeneration",
+                    "keyHash",
+                    "workspaceGeneration",
+                ];
+                ensure_equal(
+                    &actual,
+                    &expected,
+                    &format!("{fixture_name} singleFlight lastKey fields"),
+                )?;
+            }
+            for (key, child) in object {
+                ensure_no_singleflight_raw_field_names(
+                    child,
+                    fixture_name,
+                    &format!("{path}/{key}"),
+                )?;
+            }
+            Ok(())
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                ensure_no_singleflight_raw_field_names(
+                    item,
+                    fixture_name,
+                    &format!("{path}/{index}"),
+                )?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+#[test]
+fn singleflight_posture_goldens_are_redaction_safe() -> TestResult {
+    for (category, name) in [
+        ("doctor", "doctor_json"),
+        ("agent", "doctor.json"),
+        ("status", "status_json"),
+    ] {
+        let value = read_golden_json(category, name)?;
+        ensure_singleflight_posture_redaction_safe(&value, &format!("{category}/{name}"))?;
+    }
+    Ok(())
+}
+
 // =============================================================================
 // Check command (health posture)
 // =============================================================================
