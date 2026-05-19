@@ -280,10 +280,40 @@ assert_not_json() {
     fi
 }
 
+scenario_plan_json() {
+    printf '%s\n' "${SCENARIOS[@]}" | jq -R . | jq -s -c .
+}
+
+validate_scenario_plan() {
+    local plan_artifact="$EVENT_ROOT/scenario_plan.json"
+    local diagnostics="$EVENT_ROOT/scenario_plan_diagnostics.txt"
+    local scenario_count unique_count duplicates_artifact
+    : > "$diagnostics"
+
+    if [ "${#SCENARIOS[@]}" -eq 0 ]; then
+        printf 'scenario plan is empty\n' | tee -a "$diagnostics"
+        return 1
+    fi
+
+    if ! scenario_plan_json > "$plan_artifact" 2>"$diagnostics"; then
+        printf 'scenario plan failed to serialize as JSON\n' | tee -a "$diagnostics"
+        return 1
+    fi
+
+    scenario_count="$(jq 'length' "$plan_artifact")"
+    unique_count="$(jq 'unique | length' "$plan_artifact")"
+    if [ "$scenario_count" -ne "$unique_count" ]; then
+        duplicates_artifact="$EVENT_ROOT/scenario_plan_duplicates.txt"
+        jq -r 'group_by(.)[] | select(length > 1) | .[0]' "$plan_artifact" > "$duplicates_artifact"
+        printf 'scenario plan contains duplicate scenario names; duplicates=%s\n' "$duplicates_artifact" | tee -a "$diagnostics"
+        return 1
+    fi
+}
+
 validate_event_log_contract() {
     local diagnostics="$EVENT_ROOT/event_log_contract_diagnostics.txt"
     local expected_scenarios_json
-    expected_scenarios_json="$(printf '%s\n' "${SCENARIOS[@]}" | jq -R . | jq -s -c .)"
+    expected_scenarios_json="$(scenario_plan_json)"
     if ! jq -s -e --argjson expected_scenarios "$expected_scenarios_json" '
         . as $events
         | def has_phase($phase): any($events[]; .phase == $phase);
@@ -305,12 +335,14 @@ validate_event_log_contract() {
             and (.status | IN("pass", "failed", "blocked"))
             and (.exitCode | type == "number")
             and (.elapsedMs | type == "number")
-            and (.schemaValidationStatus | type == "string" and length > 0)
-            and (.degradedCodes | type == "array")
+            and (.schemaValidationStatus | IN("not_run", "passed", "failed", "human_output"))
+            and (.degradedCodes | type == "array" and all(.[]; type == "string" and length > 0))
             and (.sanitizedEnv | type == "object")
             and (
                 .phase != "scenario"
                 or (
+                    (.schemaValidationStatus | IN("passed", "human_output"))
+                    and
                     (.command | type == "string" and length > 0)
                     and (.workspace | type == "string" and length > 0)
                     and (.stdoutArtifact | type == "string" and length > 0)
@@ -323,11 +355,19 @@ validate_event_log_contract() {
             )
         )
         and has_phase("setup")
+        and has_phase("scenario_plan")
         and has_phase("schema_validation")
         and has_phase("redaction_check")
         and has_phase("stdout_stderr_isolation")
         and has_phase("mutation_check")
         and has_phase("teardown")
+        and any($events[];
+            .phase == "scenario_plan"
+            and .scenario == "scenario_plan"
+            and .status == "pass"
+            and .schemaValidationStatus == "passed"
+            and (.stdoutArtifact | type == "string" and length > 0)
+        )
         and ($expected_scenarios | all(. as $scenario | has_single_pass("scenario"; $scenario)))
         and ($expected_scenarios | all(. as $scenario | has_single_pass("schema_validation"; $scenario)))
         and only_expected_scenarios("scenario")
@@ -659,6 +699,14 @@ SCENARIOS=(
     beads_export_only
     beads_parse_failure
 )
+
+SCENARIO_PLAN_FAILURE="$(validate_scenario_plan || true)"
+if [ -n "$SCENARIO_PLAN_FAILURE" ]; then
+    emit_event "scenario_plan" "scenario_plan" "failed" 1 "validate workspace hygiene scenario plan" "$REPO_ROOT" "$EVENT_ROOT/scenario_plan.json" "$EVENT_ROOT/scenario_plan_diagnostics.txt" "failed" "$SCENARIO_PLAN_FAILURE" '["workspace_hygiene_scenario_plan_invalid"]' "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
+    printf '%s\n' "$SCENARIO_PLAN_FAILURE" >&2
+    exit 1
+fi
+emit_event "scenario_plan" "scenario_plan" "pass" 0 "validate workspace hygiene scenario plan" "$REPO_ROOT" "$EVENT_ROOT/scenario_plan.json" "$EVENT_ROOT/scenario_plan_diagnostics.txt" "passed" "" "[]" "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
 
 for scenario in "${SCENARIOS[@]}"; do
     run_scenario "$scenario"
