@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use ee::core::context::{ContextPackOptions, ContextPackOutputOptions, run_context_pack};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
@@ -7,7 +8,7 @@ use ee::db::{
     CreateMemoryLinkInput, DbConnection, GraphSnapshotType, MemoryLinkRelation, MemoryLinkSource,
 };
 use ee::graph::{CentralityRefreshOptions, CentralityRefreshStatus, refresh_graph_snapshot};
-use ee::models::{MemoryScope, WorkspaceId};
+use ee::models::{MemoryId, MemoryScope, WorkspaceId};
 use ee::pack::ContextResponse;
 use ee::search::SpeedMode;
 use serde_json::{Value, json};
@@ -174,6 +175,44 @@ fn ppr_snapshot_summary(response: &ContextResponse) -> Value {
     })
 }
 
+fn assert_pack_item_before(
+    response: &ContextResponse,
+    earlier_memory_id_raw: &str,
+    later_memory_id_raw: &str,
+    context: &str,
+) -> TestResult {
+    let earlier_memory_id = MemoryId::from_str(earlier_memory_id_raw)
+        .map_err(|error| format!("{context}: invalid earlier memory id: {error}"))?;
+    let later_memory_id = MemoryId::from_str(later_memory_id_raw)
+        .map_err(|error| format!("{context}: invalid later memory id: {error}"))?;
+    let rank = |memory_id: MemoryId| {
+        response
+            .data
+            .pack
+            .items
+            .iter()
+            .position(|item| item.memory_id == memory_id)
+    };
+    let earlier_rank = rank(earlier_memory_id).ok_or_else(|| {
+        format!(
+            "{context}: expected earlier memory {earlier_memory_id_raw} in pack items: {:?}",
+            response.data.pack.items
+        )
+    })?;
+    let later_rank = rank(later_memory_id).ok_or_else(|| {
+        format!(
+            "{context}: expected later memory {later_memory_id_raw} in pack items: {:?}",
+            response.data.pack.items
+        )
+    })?;
+    if earlier_rank >= later_rank {
+        return Err(format!(
+            "{context}: expected {earlier_memory_id_raw} rank {earlier_rank} before {later_memory_id_raw} rank {later_rank}"
+        ));
+    }
+    Ok(())
+}
+
 fn assert_context_ppr_witness(workspace_path: &Path, db_path: &Path) -> TestResult {
     let connection = DbConnection::open_file(db_path).map_err(|error| error.to_string())?;
     let workspace_id = stable_workspace_id(workspace_path);
@@ -235,6 +274,12 @@ fn context_pack_with_ppr_emits_score_breakdown_and_matches_golden() -> TestResul
             response.data.pack.items
         ));
     }
+    assert_pack_item_before(
+        &response,
+        &neighbor_id,
+        &seed_id,
+        "ppr_weight=1 should visibly promote the graph-linked neighbor",
+    )?;
     assert_context_ppr_witness(workspace_path, &db_path)?;
     let neighbor_proximity = response
         .data
@@ -264,6 +309,12 @@ fn context_pack_with_ppr_emits_score_breakdown_and_matches_golden() -> TestResul
     if ppr_breakdown_count(&base_response) != 0 {
         return Err("PPR score breakdown should be absent when ppr_weight=0".to_owned());
     }
+    assert_pack_item_before(
+        &base_response,
+        &seed_id,
+        &neighbor_id,
+        "ppr_weight=0 should preserve the textual seed ahead of its graph neighbor",
+    )?;
 
     Ok(())
 }
