@@ -7684,6 +7684,20 @@ impl DbConnection {
         rows.first().map(stored_mesh_peer_from_row).transpose()
     }
 
+    /// List optional mesh peers for one local workspace in deterministic order.
+    pub fn list_mesh_peers(&self, workspace_id: &str) -> Result<Vec<StoredMeshPeer>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, peer_id, origin_node_id, display_name,
+                    policy_summary_json, enabled, last_seen_at
+             FROM mesh_peers
+             WHERE workspace_id = ?1
+             ORDER BY peer_id ASC, origin_node_id ASC",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        rows.iter().map(stored_mesh_peer_from_row).collect()
+    }
+
     /// Insert or update a per-peer anti-entropy cursor.
     pub fn upsert_mesh_peer_cursor(
         &self,
@@ -7761,6 +7775,23 @@ impl DbConnection {
         rows.first()
             .map(stored_mesh_peer_cursor_from_row)
             .transpose()
+    }
+
+    /// List anti-entropy cursors for one local workspace in deterministic order.
+    pub fn list_mesh_peer_cursors(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredMeshPeerCursor>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, peer_id, origin_node_id, origin_workspace_id,
+                    last_seq, tip_event_hash, tip_audit_hash, status, updated_at
+             FROM mesh_peer_cursors
+             WHERE workspace_id = ?1
+             ORDER BY peer_id ASC, origin_node_id ASC, origin_workspace_id ASC",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        rows.iter().map(stored_mesh_peer_cursor_from_row).collect()
     }
 
     /// Insert one mesh event into the replay ledger idempotently.
@@ -7930,6 +7961,28 @@ impl DbConnection {
                 Value::Text(origin_node_id.to_owned()),
                 Value::Text(origin_workspace_id.to_owned()),
             ],
+        )?;
+        rows.iter()
+            .map(stored_mesh_import_ledger_event_from_row)
+            .collect()
+    }
+
+    /// List imported mesh events for one workspace in deterministic replay order.
+    pub fn list_mesh_import_ledger_events_for_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredMeshImportLedgerEvent>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, event_id, origin_node_id, origin_workspace_id,
+                    producer_peer_id, seq, prev_event_hash, event_hash, event_kind,
+                    logical_memory_id, content_hash, material_lane, redaction_class,
+                    trust_lane, import_decision, local_memory_id, body_cache_key,
+                    policy_failure_surface_json, policy_decision_json, event_json, imported_at
+             FROM mesh_import_ledger
+             WHERE workspace_id = ?1
+             ORDER BY origin_node_id ASC, origin_workspace_id ASC, seq ASC, event_hash ASC",
+            &[Value::Text(workspace_id.to_owned())],
         )?;
         rows.iter()
             .map(stored_mesh_import_ledger_event_from_row)
