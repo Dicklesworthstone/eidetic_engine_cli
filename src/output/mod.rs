@@ -3493,7 +3493,7 @@ fn render_read_pool_status_json(
                     field_optional_str(entry, "workflow_id", blocker.workflow_id.as_deref());
                     field_optional_str(entry, "request_id", blocker.request_id.as_deref());
                     field_optional_str(entry, "workspace_id", blocker.workspace_id.as_deref());
-                    entry.field_raw("pin_age_ms", &blocker.pin_age_ms.to_string());
+                    entry.field_raw("age_ms", &blocker.age_ms.to_string());
                     entry.field_raw(
                         "max_pin_duration_ms",
                         &blocker.max_pin_duration_ms.to_string(),

@@ -91,7 +91,7 @@
             {"type": "null"},
             {
               "type": "object",
-              "required": ["pin_id", "slot_id", "workflow_id", "request_id", "workspace_id", "pin_age_ms", "max_pin_duration_ms", "poisoned", "release_state"],
+              "required": ["pin_id", "slot_id", "workflow_id", "request_id", "workspace_id", "age_ms", "max_pin_duration_ms", "poisoned", "release_state"],
               "additionalProperties": false,
               "properties": {
                 "pin_id": {"type": "integer", "minimum": 0},
@@ -99,7 +99,7 @@
                 "workflow_id": {"type": ["string", "null"]},
                 "request_id": {"type": ["string", "null"]},
                 "workspace_id": {"type": ["string", "null"]},
-                "pin_age_ms": {"type": "integer", "minimum": 0},
+                "age_ms": {"type": "integer", "minimum": 0},
                 "max_pin_duration_ms": {"type": "integer", "minimum": 0},
                 "poisoned": {"type": "boolean"},
                 "release_state": {"type": "string", "enum": ["active", "expired", "poisoned"]}

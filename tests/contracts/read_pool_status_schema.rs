@@ -8,9 +8,11 @@ use std::fs;
 use std::path::PathBuf;
 
 use ee::core::doctor::DoctorReport;
-use ee::core::status::{ReadPoolStatusReport, StatusReport, WalStatusReport};
+use ee::core::status::{
+    CheckpointBlockerReport, ReadPoolStatusReport, StatusReport, WalStatusReport,
+};
 use ee::db::WalStatus;
-use ee::db::read_pool::{AcquireWaitStats, PoolStats};
+use ee::db::read_pool::{AcquireWaitStats, PoolStats, SnapshotPinReleaseState};
 use ee::output::{render_doctor_json, render_status_json};
 use serde_json::Value;
 
@@ -28,8 +30,20 @@ const READ_POOL_FIELDS: &[&str] = &[
     "release_failures",
     "ad_hoc_bypass_count",
     "acquire_wait",
+    "checkpoint_blocked_by",
 ];
 const ACQUIRE_WAIT_FIELDS: &[&str] = &["samples", "p50_ns", "p99_ns"];
+const CHECKPOINT_BLOCKER_FIELDS: &[&str] = &[
+    "pin_id",
+    "slot_id",
+    "workflow_id",
+    "request_id",
+    "workspace_id",
+    "age_ms",
+    "max_pin_duration_ms",
+    "poisoned",
+    "release_state",
+];
 const WAL_FIELDS: &[&str] = &["bytes", "frames", "page_size", "checkpoint_threshold_bytes"];
 const QOS_STATUS_FIELDS: &[&str] = &[
     "schema",
@@ -199,6 +213,20 @@ fn read_pool_status_schema_declares_counters_and_wait_summary() -> TestResult {
             format!("/$defs/readPoolStatus/properties/acquire_wait/properties/{counter}/minimum");
         ensure_str_eq(&schema, &type_pointer, "integer")?;
         ensure_u64_eq(&schema, &minimum_pointer, 0)?;
+    }
+    let checkpoint_blocker = schema
+        .pointer("/$defs/readPoolStatus/properties/checkpoint_blocked_by/oneOf/1")
+        .ok_or_else(|| "checkpoint_blocked_by object schema missing".to_string())?;
+    ensure_bool_eq(checkpoint_blocker, "/additionalProperties", false)?;
+    ensure_object_keys_eq(checkpoint_blocker, "/properties", CHECKPOINT_BLOCKER_FIELDS)?;
+    for field in CHECKPOINT_BLOCKER_FIELDS {
+        ensure_string_array_contains(checkpoint_blocker, "/required", field)?;
+    }
+    for counter in ["pin_id", "age_ms", "max_pin_duration_ms"] {
+        let type_pointer = format!("/properties/{counter}/type");
+        let minimum_pointer = format!("/properties/{counter}/minimum");
+        ensure_str_eq(checkpoint_blocker, &type_pointer, "integer")?;
+        ensure_u64_eq(checkpoint_blocker, &minimum_pointer, 0)?;
     }
 
     ensure_str_eq(&schema, "/$defs/walStatus/type", "object")?;
@@ -576,11 +604,84 @@ fn rendered_status_json_includes_read_pool_with_all_counters() -> TestResult {
     ensure_u64_eq(&parsed, "/data/read_pool/acquire_wait/samples", 13)?;
     ensure_u64_eq(&parsed, "/data/read_pool/acquire_wait/p50_ns", 17)?;
     ensure_u64_eq(&parsed, "/data/read_pool/acquire_wait/p99_ns", 19)?;
+    if !parsed
+        .pointer("/data/read_pool/checkpoint_blocked_by")
+        .is_some_and(Value::is_null)
+    {
+        return Err(format!(
+            "checkpoint_blocked_by should render null when no pin blocks checkpoints: {parsed}"
+        ));
+    }
     ensure_object_keys_eq(&parsed, "/data/wal", WAL_FIELDS)?;
     ensure_u64_eq(&parsed, "/data/wal/bytes", 4096)?;
     ensure_u64_eq(&parsed, "/data/wal/frames", 1)?;
     ensure_u64_eq(&parsed, "/data/wal/page_size", 1024)?;
     ensure_u64_eq(&parsed, "/data/wal/checkpoint_threshold_bytes", 2048)?;
+
+    Ok(())
+}
+
+#[test]
+fn rendered_status_json_includes_checkpoint_blocker_payload() -> TestResult {
+    let mut status = StatusReport::gather();
+    status.read_pool.checkpoint_blocked_by = Some(CheckpointBlockerReport {
+        pin_id: 42,
+        slot_id: Some(7),
+        workflow_id: Some("workflow-checkpoint".to_string()),
+        request_id: Some("request-checkpoint".to_string()),
+        workspace_id: Some("workspace-checkpoint".to_string()),
+        age_ms: 1234,
+        max_pin_duration_ms: 30000,
+        poisoned: false,
+        release_state: SnapshotPinReleaseState::Active,
+    });
+
+    let rendered = render_status_json(&status);
+    let parsed: Value = serde_json::from_str(&rendered)
+        .map_err(|error| format!("status JSON did not parse: {error}"))?;
+
+    ensure_object_keys_eq(
+        &parsed,
+        "/data/read_pool/checkpoint_blocked_by",
+        CHECKPOINT_BLOCKER_FIELDS,
+    )?;
+    ensure_u64_eq(&parsed, "/data/read_pool/checkpoint_blocked_by/pin_id", 42)?;
+    ensure_u64_eq(&parsed, "/data/read_pool/checkpoint_blocked_by/slot_id", 7)?;
+    ensure_str_eq(
+        &parsed,
+        "/data/read_pool/checkpoint_blocked_by/workflow_id",
+        "workflow-checkpoint",
+    )?;
+    ensure_str_eq(
+        &parsed,
+        "/data/read_pool/checkpoint_blocked_by/request_id",
+        "request-checkpoint",
+    )?;
+    ensure_str_eq(
+        &parsed,
+        "/data/read_pool/checkpoint_blocked_by/workspace_id",
+        "workspace-checkpoint",
+    )?;
+    ensure_u64_eq(
+        &parsed,
+        "/data/read_pool/checkpoint_blocked_by/age_ms",
+        1234,
+    )?;
+    ensure_u64_eq(
+        &parsed,
+        "/data/read_pool/checkpoint_blocked_by/max_pin_duration_ms",
+        30000,
+    )?;
+    ensure_bool_eq(
+        &parsed,
+        "/data/read_pool/checkpoint_blocked_by/poisoned",
+        false,
+    )?;
+    ensure_str_eq(
+        &parsed,
+        "/data/read_pool/checkpoint_blocked_by/release_state",
+        "active",
+    )?;
 
     Ok(())
 }

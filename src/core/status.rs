@@ -946,7 +946,7 @@ pub struct CheckpointBlockerReport {
     pub workflow_id: Option<String>,
     pub request_id: Option<String>,
     pub workspace_id: Option<String>,
-    pub pin_age_ms: u128,
+    pub age_ms: u128,
     pub max_pin_duration_ms: u128,
     pub poisoned: bool,
     pub release_state: SnapshotPinReleaseState,
@@ -960,7 +960,7 @@ impl From<CheckpointBlocker> for CheckpointBlockerReport {
             workflow_id: blocker.workflow_id,
             request_id: blocker.request_id,
             workspace_id: None,
-            pin_age_ms: blocker.pin_age_ms,
+            age_ms: blocker.pin_age_ms,
             max_pin_duration_ms: blocker.max_pin_duration_ms,
             poisoned: blocker.poisoned,
             release_state: blocker.release_state,
@@ -1015,7 +1015,9 @@ impl From<PoolStats> for ReadPoolStatusReport {
                 p50_ns: stats.acquire_wait.p50_ns,
                 p99_ns: stats.acquire_wait.p99_ns,
             },
-            checkpoint_blocked_by: stats.checkpoint_blocked_by.map(CheckpointBlockerReport::from),
+            checkpoint_blocked_by: stats
+                .checkpoint_blocked_by
+                .map(CheckpointBlockerReport::from),
         }
     }
 }
@@ -3599,7 +3601,10 @@ impl StatusBenchFixture {
         }
 
         let p50_ms = percentile_ms(&samples_ms, 0.50);
-        let max_ms = samples_ms.iter().copied().fold(0.0_f64, |a, b| if b.is_nan() { a } else { a.max(b) });
+        let max_ms = samples_ms
+            .iter()
+            .copied()
+            .fold(0.0_f64, |a, b| if b.is_nan() { a } else { a.max(b) });
 
         Ok(StatusBenchSample {
             scale_name: self.scale.name,
