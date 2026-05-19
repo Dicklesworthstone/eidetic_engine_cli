@@ -537,6 +537,17 @@ fn first_existing_symlink_component(
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
+        #[cfg(windows)]
+        if matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        ) {
+            continue;
+        }
+        #[cfg(not(windows))]
+        if matches!(component, std::path::Component::RootDir) {
+            continue;
+        }
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
             Ok(_) => {}
@@ -26178,6 +26189,19 @@ mod tests {
         ensure(
             lock_path.is_dir(),
             "non-regular lock path should remain a directory",
+        )
+    }
+
+    #[test]
+    fn database_write_lock_symlink_scan_accepts_absolute_roots() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let lock_path = tempdir.path().join("locks.write.lock");
+        let symlink = super::first_existing_symlink_component(&lock_path)
+            .map_err(|error| TestFailure::new(error.source.to_string()))?;
+
+        ensure(
+            symlink.is_none(),
+            "absolute lock paths should not fail during prefix/root preflight",
         )
     }
 
