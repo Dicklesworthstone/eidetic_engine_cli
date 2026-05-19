@@ -59,7 +59,7 @@ done
 # Cargo subcommands that trigger compilation. Plain `cargo metadata`,
 # `cargo locate-project`, etc. are NOT compile commands and don't trip
 # the wire.
-FORBIDDEN_CARGO_SUBCOMMANDS="build check test bench clippy run install rustc fix"
+FORBIDDEN_CARGO_SUBCOMMANDS="build check test bench clippy doc run install rustc fix"
 
 # Repo-specific path tokens that indicate the cargo command is
 # operating on this checkout (not some sibling crate). When detection
@@ -89,13 +89,28 @@ classify_command() {
         return
     fi
 
+    # Whitelist the repo-local verifier wrapper. It performs the RCH-only
+    # admission checks and is the expected agent-facing entrypoint.
+    if printf '%s' "$cmd" | grep -Eq '(^|[[:space:]/.])scripts/rch_verify\.sh([[:space:]]|$)'; then
+        printf 'allowed\tcargo wrapped through scripts/rch_verify.sh\t-\t-\n'
+        return
+    fi
+
+    for tool in rustc rustdoc; do
+        if printf '%s' "$cmd" | grep -Eq "(^|[[:space:]/])${tool}([[:space:]]|$)"; then
+            printf 'denied\tdirect %s invocation bypasses the RCH wrapper\t%s\t%s invocation has no rch exec wrapper in the command string\n' \
+                "$tool" "$tool" "$tool"
+            return
+        fi
+    done
+
     # Detect the bare `cargo <forbidden-subcommand>` shape with no rch
     # prefix anywhere.
     for sub in $FORBIDDEN_CARGO_SUBCOMMANDS; do
         # Match "cargo <sub>" at start of line, after whitespace, or
         # after env-prefix tokens like `FOO=bar`, but NOT inside a
         # path-component such as "/usr/local/bin/cargo-test".
-        if printf '%s' "$cmd" | grep -Eq "(^|[[:space:]]|^[A-Z_]+=[^[:space:]]+([[:space:]]+[A-Z_]+=[^[:space:]]+)*[[:space:]]+)cargo[[:space:]]+${sub}([[:space:]]|$)"; then
+        if printf '%s' "$cmd" | grep -Eq "(^|[[:space:]/]|^[A-Z_]+=[^[:space:]]+([[:space:]]+[A-Z_]+=[^[:space:]]+)*[[:space:]]+)cargo[[:space:]]+${sub}([[:space:]]|$)"; then
             subcommand="$sub"
             detail="cargo $sub invocation has no rch exec wrapper in the command string"
             break
@@ -124,29 +139,44 @@ probe_processes() {
     # their command lines. We rely on ps -eo command rather than the
     # process tree because ps -eo ppid is racy on macOS during fork.
     #
-    # Output rows: <pid>\t<short-command>\t<flagged-reason>
+    # Output rows:
+    # <pid>\t<ppid>\t<elapsed>\t<command-kind>\t<cwd>\t<short-command>\t<flagged-reason>
     local ps_output
-    ps_output=$(ps -eo pid=,command= 2>/dev/null || true)
+    ps_output=$(ps -eo pid=,ppid=,etime=,command= 2>/dev/null || true)
     if [ -z "$ps_output" ]; then
         return 0
     fi
     # `ps` on macOS prints PID with leading spaces; normalize.
     printf '%s\n' "$ps_output" | while IFS= read -r line; do
         local pid
+        local ppid
+        local elapsed
         local cmd
         pid=$(printf '%s' "$line" | awk '{print $1}')
-        cmd=$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//')
+        ppid=$(printf '%s' "$line" | awk '{print $2}')
+        elapsed=$(printf '%s' "$line" | awk '{print $3}')
+        cmd=$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+//')
         [ -n "$pid" ] || continue
         [ -n "$cmd" ] || continue
         # Skip lines that are not cargo/rustc invocations.
         case "$cmd" in
-            *cargo*|*rustc*) ;;
+            *cargo*|*rustc*|*rustdoc*) ;;
             *) continue ;;
         esac
         # Skip our own shell + the ps invocation above.
         case "$cmd" in
             *check-local-cargo-tripwire*|*ps[[:space:]]-eo*) continue ;;
         esac
+        # Skip the approved repo-local verifier wrapper. It may contain a
+        # cargo command string, but it is the policy-compliant front door.
+        case "$cmd" in
+            *scripts/rch_verify.sh*) continue ;;
+        esac
+        local cwd="-"
+        if command -v lsof >/dev/null 2>&1; then
+            cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+            [ -n "$cwd" ] || cwd="-"
+        fi
         # Only flag processes operating on this repo.
         local matches_repo=false
         for hint in $REPO_PATH_HINTS; do
@@ -154,14 +184,23 @@ probe_processes() {
                 *"$hint"*) matches_repo=true; break ;;
             esac
         done
+        case "$cwd" in
+            "$PWD"*) matches_repo=true ;;
+        esac
         [ "$matches_repo" = true ] || continue
         # Skip if rch exec appears anywhere in the command (this is the
         # remote-execution local launcher process).
         if printf '%s' "$cmd" | grep -Eq '(^|[[:space:]/])rch[[:space:]]+exec'; then
             continue
         fi
-        printf '%s\t%s\tlocal cargo/rustc process targeting this repo without rch exec\n' \
-            "$pid" "$(printf '%s' "$cmd" | cut -c1-200)"
+        local command_kind="cargo"
+        case "$cmd" in
+            *rustdoc*) command_kind="rustdoc" ;;
+            *rustc*) command_kind="rustc" ;;
+            *cargo*) command_kind="cargo" ;;
+        esac
+        printf '%s\t%s\t%s\t%s\t%s\t%s\tlocal cargo/rustc process targeting this repo without rch exec\n' \
+            "$pid" "$ppid" "$elapsed" "$command_kind" "$cwd" "$(printf '%s' "$cmd" | cut -c1-200)"
     done
 }
 
@@ -209,27 +248,80 @@ emit_human_probe() {
         return 0
     fi
     printf '[rch tripwire] %d local cargo/rustc process(es) running without rch exec wrapper:\n' "$count"
-    printf '%s' "$body" | while IFS=$(printf '\t') read -r pid short_cmd reason; do
+    printf '%s' "$body" | while IFS=$(printf '\t') read -r pid ppid elapsed command_kind cwd short_cmd reason; do
         [ -n "$pid" ] || continue
-        printf '  - pid=%s reason=%s\n      command: %s\n' "$pid" "$reason" "$short_cmd"
+        printf '  - pid=%s ppid=%s elapsed=%s kind=%s cwd=%s reason=%s\n      command: %s\n' \
+            "$pid" "$ppid" "$elapsed" "$command_kind" "$cwd" "$reason" "$short_cmd"
     done
     printf '  suggestion: investigate the offending shell; never automatically kill processes here.\n'
+}
+
+path_available_bytes() {
+    local path="$1"
+    if [ -z "$path" ] || [ ! -e "$path" ]; then
+        printf 'null'
+        return
+    fi
+    df -Pk "$path" 2>/dev/null | awk 'NR==2 {printf "%.0f", $4 * 1024}'
+}
+
+disk_context_json() {
+    local workspace_path="$PWD"
+    local cargo_target="${CARGO_TARGET_DIR:-}"
+    local tmpdir="${TMPDIR:-}"
+    local workspace_free_bytes
+    local cargo_target_free_bytes="null"
+    local tmpdir_free_bytes="null"
+    local external_drive_mounted=false
+
+    workspace_free_bytes=$(path_available_bytes "$workspace_path")
+    if [ -n "$cargo_target" ]; then
+        cargo_target_free_bytes=$(path_available_bytes "$cargo_target")
+    fi
+    if [ -n "$tmpdir" ]; then
+        tmpdir_free_bytes=$(path_available_bytes "$tmpdir")
+    fi
+    if [ -d /Volumes/USBNVME16TB ]; then
+        external_drive_mounted=true
+    fi
+
+    jq -cn \
+        --arg workspace_path "$workspace_path" \
+        --arg cargo_target_dir "$cargo_target" \
+        --arg tmpdir "$tmpdir" \
+        --argjson workspace_free_bytes "$workspace_free_bytes" \
+        --argjson cargo_target_free_bytes "$cargo_target_free_bytes" \
+        --argjson tmpdir_free_bytes "$tmpdir_free_bytes" \
+        --argjson external_drive_mounted "$external_drive_mounted" \
+        '{
+            workspace_path:$workspace_path,
+            workspace_free_bytes:$workspace_free_bytes,
+            cargo_target_dir:($cargo_target_dir | select(length > 0)),
+            cargo_target_free_bytes:$cargo_target_free_bytes,
+            tmpdir:($tmpdir | select(length > 0)),
+            tmpdir_free_bytes:$tmpdir_free_bytes,
+            external_drive_mounted:$external_drive_mounted
+        }'
 }
 
 emit_json_probe() {
     local body="$1"
     local count="$2"
     local processes_json="[]"
+    local disk_context="{}"
     if [ -n "$body" ] && command -v jq >/dev/null 2>&1; then
         # Use BEGIN{FS="\t"} so the field separator is portable across
         # dash (POSIX sh on Linux RCH workers) and bash — the `$'\t'`
         # ANSI-C escape was bash-only and silently misparsed under dash.
         processes_json=$(printf '%s' "$body" |
-            awk 'BEGIN{FS="\t"} NF>=3 {
-                gsub(/"/, "\\\"", $2); gsub(/"/, "\\\"", $3)
-                printf "{\"pid\":\"%s\",\"command\":\"%s\",\"reason\":\"%s\"}\n", $1, $2, $3
+            awk 'BEGIN{FS="\t"} NF>=7 {
+                for (i = 1; i <= 7; i++) { gsub(/"/, "\\\"", $i) }
+                printf "{\"pid\":\"%s\",\"ppid\":\"%s\",\"elapsed\":\"%s\",\"command_kind\":\"%s\",\"cwd\":\"%s\",\"command\":\"%s\",\"reason\":\"%s\"}\n", $1, $2, $3, $4, $5, $6, $7
             }' |
             jq -s '.')
+    fi
+    if command -v jq >/dev/null 2>&1; then
+        disk_context=$(disk_context_json)
     fi
     local status="ok"
     if [ "$count" -gt 0 ]; then status="bypass_detected"; fi
@@ -240,7 +332,8 @@ emit_json_probe() {
             --arg status "$status" \
             --argjson count "$count" \
             --argjson processes "$processes_json" \
-            '{schema:$schema,mode:$mode,status:$status,count:$count,processes:$processes}'
+            --argjson disk_context "$disk_context" \
+            '{schema:$schema,mode:$mode,status:$status,count:$count,processes:$processes,disk_pressure_context:$disk_context}'
     else
         printf '{"schema":"%s","mode":"probe_processes","status":"%s","count":%d,"processes":[]}\n' \
             "$REPORT_SCHEMA" "$status" "$count"
@@ -261,11 +354,47 @@ run_self_test() {
         denied*) ;;
         *) printf 'self-test FAILED: env-prefixed cargo build must be denied; got %s\n' "$result" >&2; exit 1 ;;
     esac
+    # Direct cargo doc → DENIED.
+    result=$(classify_command "cargo doc --no-deps")
+    case "$result" in
+        denied*) ;;
+        *) printf 'self-test FAILED: cargo doc must be denied; got %s\n' "$result" >&2; exit 1 ;;
+    esac
+    # Direct rustc → DENIED.
+    result=$(classify_command "rustc src/main.rs")
+    case "$result" in
+        denied*) ;;
+        *) printf 'self-test FAILED: direct rustc must be denied; got %s\n' "$result" >&2; exit 1 ;;
+    esac
+    # Direct rustdoc → DENIED.
+    result=$(classify_command "rustdoc --test src/lib.rs")
+    case "$result" in
+        denied*) ;;
+        *) printf 'self-test FAILED: direct rustdoc must be denied; got %s\n' "$result" >&2; exit 1 ;;
+    esac
+    # Absolute cargo binary path → DENIED.
+    result=$(classify_command "/Users/jemanuel/.cargo/bin/cargo test --lib")
+    case "$result" in
+        denied*) ;;
+        *) printf 'self-test FAILED: absolute cargo path must be denied; got %s\n' "$result" >&2; exit 1 ;;
+    esac
     # Wrapped through rch exec → ALLOWED.
     result=$(classify_command "rch exec -- env TMPDIR=/tmp cargo test --lib foo")
     case "$result" in
         allowed*) ;;
         *) printf 'self-test FAILED: rch exec wrapper must be allowed; got %s\n' "$result" >&2; exit 1 ;;
+    esac
+    # Wrapped through the repo verifier → ALLOWED.
+    result=$(classify_command "scripts/rch_verify.sh -- cargo test --lib foo")
+    case "$result" in
+        allowed*) ;;
+        *) printf 'self-test FAILED: scripts/rch_verify.sh wrapper must be allowed; got %s\n' "$result" >&2; exit 1 ;;
+    esac
+    # Env-prefixed repo verifier → ALLOWED.
+    result=$(classify_command "RCH_REQUIRE_REMOTE=1 ./scripts/rch_verify.sh -- cargo test --lib foo")
+    case "$result" in
+        allowed*) ;;
+        *) printf 'self-test FAILED: env-prefixed scripts/rch_verify.sh wrapper must be allowed; got %s\n' "$result" >&2; exit 1 ;;
     esac
     # cargo metadata is not a compile subcommand → ALLOWED.
     result=$(classify_command "cargo metadata --format-version 1")
@@ -285,7 +414,7 @@ run_self_test() {
         allowed*) ;;
         *) printf 'self-test FAILED: empty command must be allowed; got %s\n' "$result" >&2; exit 1 ;;
     esac
-    printf 'self-test PASSED: 6 classifier cases produced expected outcomes\n'
+    printf 'self-test PASSED: 12 classifier cases produced expected outcomes\n'
     exit 0
 }
 
