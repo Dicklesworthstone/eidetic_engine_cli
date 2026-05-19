@@ -317,6 +317,7 @@ validate_event_log_contract() {
             "clean",
             "source_and_test",
             "human_source_and_test",
+            "human_secret_no_leak",
             "scratch_only",
             "generated_only",
             "scratch_generated_secret",
@@ -332,6 +333,7 @@ validate_event_log_contract() {
             "clean",
             "source_and_test",
             "human_source_and_test",
+            "human_secret_no_leak",
             "scratch_only",
             "generated_only",
             "scratch_generated_secret",
@@ -443,6 +445,9 @@ run_scenario() {
             write_file "$workspace/src/lib.rs" "pub fn changed() -> bool { true }\n"
             write_file "$workspace/tests/workspace_hygiene.rs" "#[test]\nfn fixture() {}\n"
             ;;
+        human_secret_no_leak)
+            write_file "$workspace/.env.local" "OPENAI_""API_KEY=$SYNTHETIC_RAW_VALUE\n"
+            ;;
         scratch_only)
             write_file "$workspace/drift-report.txt" "local diagnostic output\n"
             write_file "$workspace/ubs.json" "{\"status\":\"local-only\"}\n"
@@ -528,7 +533,7 @@ run_scenario() {
     first_failure=""
     degraded_codes="[]"
 
-    if [ "$scenario" = "human_source_and_test" ]; then
+    if [[ "$scenario" == human_* ]]; then
         read -r exit_code stdout_artifact stderr_artifact command_text < <(run_hygiene_human "$scenario" "$workspace")
         schema_status="human_output"
     else
@@ -542,7 +547,7 @@ run_scenario() {
         return "$exit_code"
     fi
 
-    if [ "$scenario" != "human_source_and_test" ] && jq -e '.success == true and .data.schema == "ee.workspace_hygiene.v1" and .data.readOnly == true' "$stdout_artifact" >/dev/null; then
+    if [[ "$scenario" != human_* ]] && jq -e '.success == true and .data.schema == "ee.workspace_hygiene.v1" and .data.readOnly == true' "$stdout_artifact" >/dev/null; then
         schema_status="passed"
         degraded_codes="$(jq -c '(.data.degraded // [])' "$stdout_artifact")"
     fi
@@ -575,6 +580,24 @@ run_scenario() {
                 fi
                 if [ -z "$first_failure" ]; then
                     first_failure="$(assert_not_json "$stdout_artifact" "human output should not be a JSON envelope" || true)"
+                fi
+                ;;
+            human_secret_no_leak)
+                first_failure="$(assert_contains "$stdout_artifact" "Workspace hygiene:" "human secret output should include the workspace hygiene heading" || true)"
+                if [ -z "$first_failure" ]; then
+                    first_failure="$(assert_contains "$stdout_artifact" "Do not commit:" "human secret output should include do-not-commit summary" || true)"
+                fi
+                if [ -z "$first_failure" ]; then
+                    first_failure="$(assert_contains "$stdout_artifact" ".env.local" "human secret output should identify the risky path without its value" || true)"
+                fi
+                if [ -z "$first_failure" ]; then
+                    first_failure="$(assert_no_raw_value "$scenario human stdout" "$stdout_artifact" "$SYNTHETIC_RAW_VALUE" || true)"
+                fi
+                if [ -z "$first_failure" ]; then
+                    first_failure="$(assert_no_raw_value "$scenario human stderr" "$stderr_artifact" "$SYNTHETIC_RAW_VALUE" || true)"
+                fi
+                if [ -z "$first_failure" ]; then
+                    first_failure="$(assert_not_json "$stdout_artifact" "human secret output should not be a JSON envelope" || true)"
                 fi
                 ;;
             scratch_only)
@@ -637,6 +660,7 @@ SCENARIOS=(
     clean
     source_and_test
     human_source_and_test
+    human_secret_no_leak
     scratch_only
     generated_only
     scratch_generated_secret
