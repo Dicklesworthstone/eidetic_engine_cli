@@ -41,6 +41,7 @@ owns `--ppr-weight`, `--explain`, and `--no-pack-dna`.
 | `ee context`, `ee pack`, `ee pack build`, `ee search` | `--explain-performance` | boolean | false | Emits a redaction-safe query or pack performance report instead of normal hits or pack output. |
 | `ee context` | `--explain` | boolean | false | Adds graph-derived Pack DNA metadata to JSON output. |
 | `ee context` | `--no-pack-dna` | boolean | false | Suppresses `data.pack.packDna` even when `--explain` is set. |
+| `ee context` | `--stream` | boolean | false | Emits `ee.pack.stream.v1` NDJSON frames; requires `--json`, `--robot`, `--format json`, or `--format jsonl` and cannot be combined with `--explain-performance`. |
 | `ee context`, `ee pack`, `ee pack build` | `--no-coverage-fill[=BOOL]` | optional boolean | false | Disables the coverage-fill pass; pass `--no-coverage-fill=false` to override a lean profile. |
 | `ee context`, `ee pack`, `ee pack build` | `--no-rendered-text[=BOOL]` | optional boolean | false | Suppresses rendered pack text in JSON output. |
 | `ee context`, `ee pack`, `ee pack build` | `--no-skipped[=BOOL]` | optional boolean | false | Suppresses omitted/skipped item explanations. |
@@ -58,6 +59,7 @@ Example:
 ```bash
 ee context "prepare release" --workspace . --profile thorough \
   --ppr-weight 0.5 --explain --json
+ee context "prepare release" --workspace . --stream --format json
 ee context "prepare release" --workspace . --explain-performance --json
 ee pack build --workspace . --query-file release.eeq.json \
   --candidate-pool 150 --speed quality --profile thorough \

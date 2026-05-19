@@ -48,6 +48,7 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
             "--explain-performance",
             "--explain",
             "--no-pack-dna",
+            "--stream",
             "--no-coverage-fill",
             "--no-rendered-text",
             "--no-skipped",
@@ -494,6 +495,14 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "--explain-performance",
             "--no-pack-dna",
             "--json",
+        ][..],
+        &[
+            "ee",
+            "context",
+            "prepare release",
+            "--stream",
+            "--format",
+            "json",
         ][..],
         &[
             "ee",
