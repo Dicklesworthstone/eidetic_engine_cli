@@ -425,6 +425,10 @@ is_worker_disk_full_output() {
     grep -Eiq "No space left on device|disk full|ENOSPC"
 }
 
+is_cargo_workspace_inheritance_output() {
+    grep -Eiq "error inheriting .+ from workspace root manifest|workspace\.package\.[A-Za-z0-9_.-]+.*was not defined"
+}
+
 configured_workers() {
     CONFIGURED_WORKERS="${RCH_VERIFY_CONFIGURED_WORKERS:-}" \
     FAKE_OUTPUT_PRESENT="${RCH_VERIFY_FAKE_OUTPUT:+1}" \
@@ -1241,6 +1245,7 @@ worker_state_code_set = {
     "rch_verify_worker_disk_full",
     "rch_verify_worker_filter_ignored",
     "rch_verify_worker_quarantine_ignored",
+    "rch_verify_cargo_workspace_inheritance_blocked",
 }
 worker_state_degraded = [
     code
@@ -1265,6 +1270,7 @@ elif (
     status = "source_state_refused"
 elif (
     "rch_verify_topology_blocked" in degraded
+    or "rch_verify_cargo_workspace_inheritance_blocked" in degraded
     or "rch_verify_local_fallback_refused" in degraded
     or "rch_verify_worker_disk_full" in degraded
     or "rch_verify_worker_quarantine_ignored" in degraded
@@ -1633,6 +1639,9 @@ if [ "$exit_code" -ne 0 ]; then
 fi
 if [ -n "$disk_full_worker" ] || printf '%s' "$combined_output" | is_worker_disk_full_output; then
     degraded+=("rch_verify_worker_disk_full")
+fi
+if printf '%s' "$combined_output" | is_cargo_workspace_inheritance_output; then
+    degraded+=("rch_verify_cargo_workspace_inheritance_blocked")
 fi
 if [ "$retried_after_disk_full" -eq 1 ]; then
     degraded+=("rch_verify_retry_after_worker_disk_full")

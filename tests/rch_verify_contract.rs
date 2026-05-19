@@ -2042,6 +2042,57 @@ fn synthetic_compile_error_is_not_worker_disk_full() -> TestResult {
 }
 
 #[test]
+fn synthetic_cargo_workspace_inheritance_failure_is_worker_topology() -> TestResult {
+    let (status, stdout, _stderr) = run_script_with_env(
+        &[
+            "--",
+            "cargo",
+            "test",
+            "--test",
+            "rch_verify_contract",
+            "strict_clean_tree",
+            "--",
+            "--nocapture",
+        ],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "error: failed to load manifest for dependency `frankensearch`\n\nCaused by:\n  failed to parse manifest at `/data/projects/frankensearch/frankensearch/Cargo.toml`\n\nCaused by:\n  error inheriting `license-file` from workspace root manifest's `workspace.package.license-file`\n\nCaused by:\n  `workspace.package.license-file` was not defined\n[RCH] remote vmi1227854 failed (exit 101)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "2400"),
+        ],
+    )?;
+    if status.success() {
+        return Err("workspace inheritance transcript should preserve non-zero exit".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse workspace inheritance report: {error}"))?;
+    if report["status"] != "rch_environment_failure" {
+        return Err(format!(
+            "workspace inheritance should be routed as RCH environment failure: {report}"
+        ));
+    }
+    if report["worker_id"] != "vmi1227854" {
+        return Err(format!("worker id should be preserved: {report}"));
+    }
+    for expected in [
+        "rch_verify_remote_command_failed",
+        "rch_verify_cargo_workspace_inheritance_blocked",
+    ] {
+        if !degraded_contains(&report, expected)? {
+            return Err(format!("missing {expected} in degraded codes: {report}"));
+        }
+    }
+    if !worker_degraded_contains(&report, "rch_verify_cargo_workspace_inheritance_blocked")? {
+        return Err(format!(
+            "workspace inheritance code should be worker-state degraded: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn synthetic_e0583_for_tracked_module_is_remote_checkout_incomplete() -> TestResult {
     let (status, stdout, _stderr) = run_script_with_env(
         &["--", "cargo", "test", "--test", "context_stream"],

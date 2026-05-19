@@ -154,6 +154,9 @@ Consumers that need to route action should use the two narrower lists:
 - `worker_state_degraded_codes`: RCH worker, topology, capacity, remote-checkout,
   or local-fallback blockers. These mean the same source may verify after the
   worker fleet, root mapping, or queue state is fixed.
+  `rch_verify_cargo_workspace_inheritance_blocked` is the worker-topology
+  classifier for Cargo errors where a path dependency inherits
+  `workspace.package.*` fields from the wrong or incomplete workspace root.
 - `build_admission.status`: local admission result before RCH. A denied result
   means no remote verifier ran; unavailable or skipped results mean proof
   quality is weaker than an admitted run.
