@@ -992,6 +992,45 @@ fn why_schema_documents_hits_graph_block() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn insights_onboarding_documents_hits_workflow_for_agents() -> TestResult {
+    let path = repo_root()
+        .join("docs")
+        .join("agent-ux")
+        .join("insights-onboarding.md");
+    let markdown =
+        fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+
+    for needle in [
+        "ee insights --section hubs --workspace . --json",
+        "ee insights --section authorities --workspace . --json",
+        "ee why mem_authority --workspace . --json",
+        "ee context \"ground release evidence\" --profile grounding --workspace . --json",
+        "ee context \"map release dependencies\" --profile orientation --workspace . --json",
+        "`authorityScore`",
+        "`authorityRank`",
+        "`hubScore`",
+        "`hubRank`",
+        "`dominantRole`",
+        "`profileInfluence`",
+        "`rationale`",
+        "`hits_centrality_directed`",
+        "`evidence.schema: \"ee.graph.hits.v1\"`",
+        "`grounding`",
+        "`orientation`",
+        "`balanced`",
+    ] {
+        if !markdown.contains(needle) {
+            return Err(format!(
+                "{} missing HITS onboarding needle: {needle}",
+                path.display()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn assert_hits_item_schema(
     schema: &Value,
     item_name: &str,

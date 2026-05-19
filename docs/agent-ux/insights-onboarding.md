@@ -60,10 +60,16 @@ ee insights --section bridges --workspace . --json
 ee insights --section contradictionClusters --workspace . --json
 ee insights --section proximityHotspots --workspace . --json
 ee insights --section knowledgeSkyline --workspace . --json
+ee insights --section hubs --workspace . --json
+ee insights --section authorities --workspace . --json
 ```
 
 Agent interpretation rules:
 
+- `authorities`: prefer these memories when a task needs grounded claims and
+  evidence that many navigation memories point toward.
+- `hubs`: use these memories as orientation anchors when a task needs a map of
+  related authoritative facts.
 - `bridges`: preserve or review load-bearing memories before decay or
   tombstone work.
 - `contradictionClusters`: curate the cluster before relying on any one memory
@@ -162,6 +168,45 @@ Worked example:
 
 Use strong proximity as a packing and review hint, not as proof that the two
 memories are true.
+
+## HITS Profiles
+
+Use HITS sections when a task depends on the direction of memory links:
+
+```bash
+ee insights --section authorities --workspace . --json \
+  | jq '.data.sections[] | select(.name == "authorities") | .items[0]'
+ee insights --section hubs --workspace . --json \
+  | jq '.data.sections[] | select(.name == "hubs") | .items[0]'
+```
+
+Authority items expose `authorityScore`, `interpretation: "authority"`, and
+`evidence.schema: "ee.graph.hits.v1"`. Hub items expose `hubScore`,
+`interpretation: "hub"`, and the same HITS evidence schema. Both sections use
+`hits_centrality_directed` over the memory-link graph.
+
+When an authority or hub appears in a pack, follow with `ee why` to see the
+per-memory HITS explanation:
+
+```bash
+ee why mem_authority --workspace . --json \
+  | jq '.data.graph.hits'
+```
+
+Inspect `authorityScore`, `authorityRank`, `hubScore`, `hubRank`,
+`dominantRole`, `profileInfluence`, and `rationale`. `dominantRole` set to
+`"authority"` means the memory is more useful as grounded evidence;
+`dominantRole` set to `"hub"` means it is more useful as a navigation anchor.
+
+Context profiles consume the same scores. Use `grounding` when the pack should
+favor authoritative memories, `orientation` when it should favor hub memories,
+and `balanced` when neither direction should dominate:
+
+```bash
+ee context "ground release evidence" --profile grounding --workspace . --json
+ee context "map release dependencies" --profile orientation --workspace . --json
+ee context "prepare release" --profile balanced --workspace . --json
+```
 
 ## Consumer Checklist
 
