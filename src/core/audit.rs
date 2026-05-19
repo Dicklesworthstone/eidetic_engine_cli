@@ -12,6 +12,7 @@ use serde_json::{Value as JsonValue, json};
 
 use crate::db::{DbConnection, StoredAuditEntry, compute_audit_row_hash};
 use crate::models::{DomainError, ProducerMetadata};
+use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 /// Schema for audit timeline response.
 pub const AUDIT_TIMELINE_SCHEMA_V1: &str = "ee.audit.timeline.v1";
@@ -410,12 +411,9 @@ fn filter_entries(
     Ok(filtered)
 }
 
-fn sort_entries_chronological(entries: &mut [StoredAuditEntry]) {
-    entries.sort_by(|left, right| {
-        left.timestamp
-            .cmp(&right.timestamp)
-            .then_with(|| left.id.cmp(&right.id))
-    });
+fn sort_entries_chronological(entries: &mut Vec<StoredAuditEntry>) {
+    sort_by_ulid_payload_or_lexical(entries, |entry| entry.id.as_str());
+    entries.sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
 }
 
 fn linked_snapshot(
@@ -599,6 +597,45 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), String>;
+
+    fn audit_entry_for_sort(id: &str, timestamp: &str) -> StoredAuditEntry {
+        StoredAuditEntry {
+            id: id.to_owned(),
+            workspace_id: Some("wsp_01234567890123456789012345".to_owned()),
+            timestamp: timestamp.to_owned(),
+            actor: Some("agent-a".to_owned()),
+            action: "memory.create".to_owned(),
+            target_type: Some("memory".to_owned()),
+            target_id: Some("mem_00000000000000000000000001".to_owned()),
+            details: None,
+            surface: "memory".to_owned(),
+            mutation_kind: "memory.create".to_owned(),
+            before_hash: None,
+            after_hash: None,
+            prev_row_hash: None,
+            this_row_hash: None,
+        }
+    }
+
+    #[test]
+    fn audit_timeline_same_timestamp_ties_use_radix_audit_id_order() {
+        let lower = "audit_00000000000000000000000001";
+        let higher = "audit_00000000000000000000000002";
+        let later = "audit_00000000000000000000000000";
+        let mut entries = vec![
+            audit_entry_for_sort(higher, "2026-05-19T08:00:00Z"),
+            audit_entry_for_sort(later, "2026-05-19T08:00:01Z"),
+            audit_entry_for_sort(lower, "2026-05-19T08:00:00Z"),
+        ];
+
+        sort_entries_chronological(&mut entries);
+
+        let ids = entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![lower, higher, later]);
+    }
 
     fn fixture_workspace(name: &str) -> Result<PathBuf, String> {
         let root = std::env::var_os("CARGO_TARGET_DIR")
