@@ -252,6 +252,7 @@ use crate::steward::{
 };
 
 mod insights;
+mod mesh;
 mod share;
 
 /// Top-level `before_help` prelude rendered by clap above the standard
@@ -765,6 +766,9 @@ pub enum Command {
     /// Preview and consent-check outbound mesh sharing.
     #[command(subcommand)]
     Share(share::ShareCommand),
+    /// Foreground local mesh operations for peers, status, export/import, and sync-once.
+    #[command(subcommand)]
+    Mesh(mesh::MeshCommand),
     /// Classify, compare, link (dry-run), show, or explain task situations.
     #[command(subcommand)]
     Situation(SituationCommand),
@@ -9634,6 +9638,7 @@ where
         }
         Some(Command::Search(ref args)) => handle_search(&cli, args, stdout, stderr),
         Some(Command::Share(ref command)) => share::handle_share(&cli, command, stdout, stderr),
+        Some(Command::Mesh(ref command)) => mesh::handle_mesh(&cli, command, stdout, stderr),
         Some(Command::Situation(SituationCommand::Classify(ref args))) => {
             handle_situation_classify(&cli, args, stdout, stderr)
         }
@@ -39422,6 +39427,7 @@ const COMMAND_NAMES: &[&str] = &[
     "maintenance",
     "memory",
     "migrate",
+    "mesh",
     "mcp",
     "model",
     "outcome",
@@ -39550,6 +39556,7 @@ const MAINTENANCE_SUBCOMMANDS: &[&str] = &[
 ];
 const MEMORY_SUBCOMMANDS: &[&str] = &["expire", "list", "show", "history", "revise", "tags"];
 const MIGRATE_SUBCOMMANDS: &[&str] = &["status", "run"];
+const MESH_SUBCOMMANDS: &[&str] = &["init", "peers", "status", "export", "import", "sync"];
 const MCP_SUBCOMMANDS: &[&str] = &["manifest", "serve-stdio", "validate"];
 const MODEL_SUBCOMMANDS: &[&str] = &["status", "list"];
 const OUTCOME_QUARANTINE_SUBCOMMANDS: &[&str] = &["list", "release"];
@@ -40008,6 +40015,14 @@ impl NormalizedInvocation {
                 Command::Share(share) => match share {
                     share::ShareCommand::Preview(_) => "share preview".to_string(),
                 },
+                Command::Mesh(mesh_cmd) => match mesh_cmd {
+                    mesh::MeshCommand::Init(_) => "mesh init".to_string(),
+                    mesh::MeshCommand::Peers(_) => "mesh peers".to_string(),
+                    mesh::MeshCommand::Status(_) => "mesh status".to_string(),
+                    mesh::MeshCommand::Export(_) => "mesh export".to_string(),
+                    mesh::MeshCommand::Import(_) => "mesh import".to_string(),
+                    mesh::MeshCommand::Sync(_) => "mesh sync".to_string(),
+                },
                 Command::Situation(sit) => match sit {
                     SituationCommand::Classify(_) => "situation classify".to_string(),
                     SituationCommand::Compare(_) => "situation compare".to_string(),
@@ -40173,6 +40188,7 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "maintenance" => Some(MAINTENANCE_SUBCOMMANDS),
         "memory" => Some(MEMORY_SUBCOMMANDS),
         "migrate" => Some(MIGRATE_SUBCOMMANDS),
+        "mesh" => Some(MESH_SUBCOMMANDS),
         "mcp" => Some(MCP_SUBCOMMANDS),
         "model" => Some(MODEL_SUBCOMMANDS),
         "outcome-quarantine" => Some(OUTCOME_QUARANTINE_SUBCOMMANDS),
