@@ -5320,10 +5320,32 @@ memories_revised = 3
                 && rendered.contains("graph_generation=7"),
             "handoff summary includes redaction-safe key hash and generation details",
         )?;
-        ensure(
-            !rendered.contains("raw_query") && !rendered.contains("memory_body"),
-            "handoff summary omits raw query and memory body fields",
-        )
+        for forbidden in [
+            "raw_query",
+            "rawQuery",
+            "queryText",
+            "workspacePath",
+            "workspaceIdentity",
+            "memory_content",
+            "memoryContent",
+            "memory_body",
+            "memoryBody",
+            "mailBody",
+            "sourcePath",
+            "optionPairs",
+            "optionHashInput",
+            "release token secret",
+            "BEGIN PRIVATE KEY",
+            "sk-",
+            "ghp_",
+            "/private/",
+        ] {
+            ensure(
+                !rendered.contains(forbidden),
+                format!("handoff summary leaked forbidden single-flight text {forbidden:?}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
