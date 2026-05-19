@@ -42,6 +42,7 @@ use crate::models::{
 use crate::obs::{AuditEvent, AuditOutcome, now_rfc3339_nanos};
 use crate::runtime::determinism::{Deterministic, Seed};
 use crate::search::HashEmbedder;
+use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 /// A memory with its associated tags for display.
 #[derive(Clone, Debug, PartialEq)]
@@ -2882,11 +2883,8 @@ fn append_tag_overlap_neighbor_ids(
         }
     }
     let mut ranked = tag_matches.into_iter().collect::<Vec<_>>();
-    ranked.sort_by(|(left_id, left_count), (right_id, right_count)| {
-        right_count
-            .cmp(left_count)
-            .then_with(|| left_id.cmp(right_id))
-    });
+    sort_by_ulid_payload_or_lexical(&mut ranked, |(memory_id, _)| memory_id.as_str());
+    ranked.sort_by(|(_, left_count), (_, right_count)| right_count.cmp(left_count));
     for (memory_id, _) in ranked {
         if !member_ids.contains(&memory_id) {
             member_ids.push(memory_id);
@@ -2952,7 +2950,7 @@ fn remember_candidate_cluster(
             break;
         }
     }
-    cluster.sort_by(|left, right| left.id.cmp(&right.id));
+    sort_by_ulid_payload_or_lexical(&mut cluster, |memory| memory.id.as_str());
     Ok(cluster)
 }
 
@@ -3100,7 +3098,7 @@ fn remember_curation_embedding_snapshot_hash(
     config: ClusterCoherenceConfig,
 ) -> String {
     let mut sorted = points.iter().collect::<Vec<_>>();
-    sorted.sort_by(|left, right| left.memory_id.cmp(&right.memory_id));
+    sort_by_ulid_payload_or_lexical(&mut sorted, |point| point.memory_id.as_str());
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"ee.remember_curation_embedding_snapshot.v1\n");
     remember_curation_hash_field(
@@ -3231,9 +3229,10 @@ fn remember_curation_candidate_content(
     memory_input: &CreateMemoryInput,
     cluster: &[StoredMemory],
 ) -> String {
-    let exemplar = cluster
-        .iter()
-        .min_by(|left, right| left.id.cmp(&right.id))
+    let mut ordered = cluster.iter().collect::<Vec<_>>();
+    sort_by_ulid_payload_or_lexical(&mut ordered, |memory| memory.id.as_str());
+    let exemplar = ordered
+        .first()
         .map(|memory| memory.content.as_str())
         .unwrap_or(memory_input.content.as_str());
     format!(
@@ -3386,12 +3385,8 @@ fn build_suggested_links_from_matches(
         })
         .collect();
 
-    candidates.sort_by(|(left_id, left_tags), (right_id, right_tags)| {
-        right_tags
-            .len()
-            .cmp(&left_tags.len())
-            .then_with(|| left_id.cmp(right_id))
-    });
+    sort_by_ulid_payload_or_lexical(&mut candidates, |(memory_id, _)| memory_id.as_str());
+    candidates.sort_by(|(_, left_tags), (_, right_tags)| right_tags.len().cmp(&left_tags.len()));
 
     candidates
         .into_iter()
