@@ -608,7 +608,39 @@ fn verify_regression_fixture_replay(
             fixture.input_hash, fixture.expected_hash, replayed_hash
         ));
     }
+    validate_regression_fixture_diff_window(fixture, &replayed)?;
     Ok(replayed_hash)
+}
+
+fn validate_regression_fixture_diff_window(
+    fixture: &DeterminismRegressionFixture,
+    replayed_expected: &[u8],
+) -> Result<(), String> {
+    if fixture.first_diff_byte_offset > replayed_expected.len() {
+        return Err(format!(
+            "fixture {} first_diff_byte_offset {} is beyond replayed expected length {}",
+            fixture.input_hash,
+            fixture.first_diff_byte_offset,
+            replayed_expected.len()
+        ));
+    }
+
+    let expected_window = diff_window(replayed_expected, fixture.first_diff_byte_offset);
+    if fixture.first_diff_window.expected != expected_window {
+        return Err(format!(
+            "fixture {} first_diff_window.expected {:?} does not match replay window {:?}",
+            fixture.input_hash, fixture.first_diff_window.expected, expected_window
+        ));
+    }
+
+    if fixture.first_diff_window.expected == fixture.first_diff_window.observed {
+        return Err(format!(
+            "fixture {} first_diff_window observed bytes must differ from expected bytes",
+            fixture.input_hash
+        ));
+    }
+
+    Ok(())
 }
 
 fn verify_loaded_regression_fixture_replays(dir: &Path) -> Result<Vec<String>, String> {
@@ -1248,6 +1280,53 @@ fn determinism_regression_fixture_verifies_replayed_expected_hash() -> Result<()
 
     assert!(error.contains("expected_hash"));
     assert!(error.contains(&fixture.input_hash));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_replay_rejects_diff_window_drift() -> Result<(), String> {
+    let specs = vec![(8, 900, 700, 1), (13, 500, 950, 3), (5, 650, 875, 2)];
+    let input = regression_input_for_pack_case(
+        "diff window checked replay".to_string(),
+        TokenBudget::new(64).map_err(|error| format!("{error:?}"))?,
+        ContextPackProfile::Balanced,
+        PackAssemblyOptions {
+            include_coverage_fill: true,
+            output_redaction_enabled: true,
+            redaction_level: RedactionLevel::Strict,
+        },
+        42,
+        &specs,
+    )?;
+    let input_bytes = serde_json::to_vec(&input).map_err(|error| error.to_string())?;
+    let replayed = replay_pack_case_input_bytes(&input)?;
+    let mut fixture = regression_fixture_for_mismatch(
+        42,
+        &input_bytes,
+        &replayed,
+        b"synthetic nondeterministic output",
+    )
+    .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+
+    fixture.first_diff_window.expected = "stale expected window".to_string();
+    let expected_window_error = verify_regression_fixture_replay(&fixture)
+        .expect_err("stale expected diff window should reject regression replay");
+    assert!(expected_window_error.contains("first_diff_window.expected"));
+    assert!(expected_window_error.contains(&fixture.input_hash));
+
+    fixture.first_diff_window.expected = diff_window(&replayed, fixture.first_diff_byte_offset);
+    fixture.first_diff_window.observed = fixture.first_diff_window.expected.clone();
+    let observed_window_error = verify_regression_fixture_replay(&fixture)
+        .expect_err("identical expected/observed diff windows should be rejected");
+    assert!(observed_window_error.contains("observed bytes must differ"));
+    assert!(observed_window_error.contains(&fixture.input_hash));
+
+    fixture.first_diff_window.observed = "synthetic nondeterministic output".to_string();
+    fixture.first_diff_byte_offset = replayed.len() + 1;
+    let offset_error = verify_regression_fixture_replay(&fixture)
+        .expect_err("out-of-bounds diff offset should reject regression replay");
+    assert!(offset_error.contains("first_diff_byte_offset"));
+    assert!(offset_error.contains(&fixture.input_hash));
     Ok(())
 }
 
