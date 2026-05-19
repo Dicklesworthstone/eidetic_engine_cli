@@ -5804,6 +5804,340 @@ pub fn render_structural_health_toon(report: &StructuralHealthReport) -> String 
     render_toon_from_json(&render_structural_health_json(report))
 }
 
+fn render_schema_value_json(value: &serde_json::Value) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|_| r#"{"schema":"ee.error.v1","error":"serialization_failed"}"#.to_owned())
+}
+
+fn json_object_field<'a>(
+    value: &'a serde_json::Value,
+    field: &str,
+) -> Option<&'a serde_json::Value> {
+    value.as_object().and_then(|object| object.get(field))
+}
+
+fn json_field_string<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    json_object_field(value, field).and_then(serde_json::Value::as_str)
+}
+
+fn json_markdown_value(value: Option<&serde_json::Value>) -> String {
+    match value {
+        None | Some(serde_json::Value::Null) => "unavailable".to_owned(),
+        Some(serde_json::Value::String(value)) => value.clone(),
+        Some(serde_json::Value::Bool(value)) => value.to_string(),
+        Some(serde_json::Value::Number(value)) => value.to_string(),
+        Some(value) => render_schema_value_json(value),
+    }
+}
+
+fn json_string_list(value: Option<&serde_json::Value>) -> String {
+    value
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .map(ToOwned::to_owned)
+                        .unwrap_or_else(|| json_markdown_value(Some(item)))
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|items| !items.is_empty())
+        .unwrap_or_else(|| "none".to_owned())
+}
+
+fn render_json_degraded_markdown(output: &mut String, degraded: Option<&serde_json::Value>) {
+    let Some(degraded) = degraded.and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    if degraded.is_empty() {
+        return;
+    }
+
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## Degraded");
+    for entry in degraded {
+        let severity = json_field_string(entry, "severity").unwrap_or("unknown");
+        let code = json_field_string(entry, "code").unwrap_or("unknown");
+        let message = json_field_string(entry, "message").unwrap_or("degraded");
+        let _ = writeln!(output, "- **{severity}** `{code}`: {message}");
+        if let Some(repair) = json_field_string(entry, "repair").filter(|repair| !repair.is_empty())
+        {
+            let _ = writeln!(output, "  - Repair: `{repair}`");
+        }
+    }
+}
+
+/// Render a Pack DNA block as canonical JSON.
+#[must_use]
+pub fn render_pack_dna_json(pack_dna: &serde_json::Value) -> String {
+    render_schema_value_json(pack_dna)
+}
+
+/// Render a Pack DNA block as TOON.
+#[must_use]
+pub fn render_pack_dna_toon(pack_dna: &serde_json::Value) -> String {
+    render_toon_from_json(&render_pack_dna_json(pack_dna))
+}
+
+/// Render a Pack DNA block as Markdown.
+#[must_use]
+pub fn render_pack_dna_markdown(pack_dna: &serde_json::Value) -> String {
+    let dominator = json_object_field(pack_dna, "voronoiDominator");
+    let community = json_object_field(pack_dna, "communityOfMass");
+    let ego = json_object_field(pack_dna, "egoSubgraph");
+    let ppr_neighbors = json_object_field(pack_dna, "pprNeighbors")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let node_count = ego
+        .and_then(|value| json_object_field(value, "nodes"))
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let edge_count = ego
+        .and_then(|value| json_object_field(value, "edges"))
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+
+    let mut output = String::new();
+    let _ = writeln!(output, "# Pack DNA");
+    let _ = writeln!(output);
+    let _ = writeln!(
+        output,
+        "- Schema: `{}`",
+        json_field_string(pack_dna, "schema").unwrap_or("ee.context.pack_dna.v1")
+    );
+    let _ = writeln!(
+        output,
+        "- Snapshot version: {}",
+        json_markdown_value(json_object_field(pack_dna, "snapshotVersion"))
+    );
+    let _ = writeln!(
+        output,
+        "- Voronoi dominator: `{}` distance={} reason={}",
+        dominator
+            .and_then(|value| json_field_string(value, "memoryId"))
+            .unwrap_or("unavailable"),
+        json_markdown_value(dominator.and_then(|value| json_object_field(value, "distance"))),
+        json_markdown_value(dominator.and_then(|value| json_object_field(value, "reason")))
+    );
+    let _ = writeln!(
+        output,
+        "- Community of mass: `{}` mass={} topMemoryIds={}",
+        community
+            .and_then(|value| json_field_string(value, "communityId"))
+            .unwrap_or("unavailable"),
+        json_markdown_value(community.and_then(|value| json_object_field(value, "mass"))),
+        json_string_list(community.and_then(|value| json_object_field(value, "topMemoryIds")))
+    );
+    let _ = writeln!(
+        output,
+        "- Ego subgraph: nodes={} edges={}",
+        node_count, edge_count
+    );
+
+    if !ppr_neighbors.is_empty() {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## PPR Neighbors");
+        for neighbor in ppr_neighbors {
+            let _ = writeln!(
+                output,
+                "- rank={} `{}` score={}",
+                json_markdown_value(json_object_field(neighbor, "rank")),
+                json_field_string(neighbor, "memoryId").unwrap_or("unavailable"),
+                json_markdown_value(json_object_field(neighbor, "score"))
+            );
+        }
+    }
+
+    render_json_degraded_markdown(&mut output, json_object_field(pack_dna, "degraded"));
+    output
+}
+
+/// Render a causal `ee why` explanation block as canonical JSON.
+#[must_use]
+pub fn render_why_causal_json(causal: &serde_json::Value) -> String {
+    render_schema_value_json(causal)
+}
+
+/// Render a causal `ee why` explanation block as TOON.
+#[must_use]
+pub fn render_why_causal_toon(causal: &serde_json::Value) -> String {
+    render_toon_from_json(&render_why_causal_json(causal))
+}
+
+/// Render a causal `ee why` explanation block as Markdown.
+#[must_use]
+pub fn render_why_causal_markdown(causal: &serde_json::Value) -> String {
+    let paths = json_object_field(causal, "paths")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    let mut output = String::new();
+    let _ = writeln!(output, "# Why Causal");
+    let _ = writeln!(output);
+    let _ = writeln!(
+        output,
+        "- Schema: `{}`",
+        json_field_string(causal, "schema").unwrap_or("ee.why.causal.v1")
+    );
+    let _ = writeln!(
+        output,
+        "- Memory: `{}`",
+        json_field_string(causal, "memoryId").unwrap_or("unavailable")
+    );
+    let _ = writeln!(
+        output,
+        "- Snapshot version: {}",
+        json_markdown_value(json_object_field(causal, "snapshotVersion"))
+    );
+    let _ = writeln!(
+        output,
+        "- Min cut: {}",
+        json_markdown_value(json_object_field(causal, "minCut"))
+    );
+
+    if !paths.is_empty() {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## Paths");
+        for path in paths {
+            let _ = writeln!(
+                output,
+                "- rank={} `{}` -> `{}` edges={} totalContribution={}",
+                json_markdown_value(json_object_field(path, "rank")),
+                json_field_string(path, "sourceMemoryId").unwrap_or("unavailable"),
+                json_field_string(path, "targetMemoryId").unwrap_or("unavailable"),
+                json_markdown_value(json_object_field(path, "edgeCount")),
+                json_markdown_value(json_object_field(path, "totalContribution"))
+            );
+            if let Some(steps) = json_object_field(path, "steps")
+                .and_then(serde_json::Value::as_array)
+                .filter(|steps| !steps.is_empty())
+            {
+                for step in steps {
+                    let _ = writeln!(
+                        output,
+                        "  - `{}` -> `{}` relation=`{}` contribution={}",
+                        json_field_string(step, "source").unwrap_or("unavailable"),
+                        json_field_string(step, "target").unwrap_or("unavailable"),
+                        json_field_string(step, "relation").unwrap_or("unspecified"),
+                        json_markdown_value(json_object_field(step, "contributionScore"))
+                    );
+                }
+            }
+        }
+    }
+
+    render_json_degraded_markdown(&mut output, json_object_field(causal, "degraded"));
+    output
+}
+
+/// Render a memory impact analysis block as canonical JSON.
+#[must_use]
+pub fn render_memory_impact_analysis_json(impact: &serde_json::Value) -> String {
+    render_schema_value_json(impact)
+}
+
+/// Render a memory impact analysis block as TOON.
+#[must_use]
+pub fn render_memory_impact_analysis_toon(impact: &serde_json::Value) -> String {
+    render_toon_from_json(&render_memory_impact_analysis_json(impact))
+}
+
+/// Render a memory impact analysis block as Markdown.
+#[must_use]
+pub fn render_memory_impact_analysis_markdown(impact: &serde_json::Value) -> String {
+    let analysis = json_object_field(impact, "impactAnalysis");
+    let lineage = json_object_field(impact, "revisionLineage")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let frontiers = json_object_field(impact, "frontiers")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    let mut output = String::new();
+    let _ = writeln!(output, "# Memory Impact Analysis");
+    let _ = writeln!(output);
+    let _ = writeln!(
+        output,
+        "- Schema: `{}`",
+        json_field_string(impact, "schema").unwrap_or("ee.memory.impact_analysis.v1")
+    );
+    let _ = writeln!(
+        output,
+        "- Memory: `{}`",
+        json_field_string(impact, "memoryId").unwrap_or("unavailable")
+    );
+    let _ = writeln!(
+        output,
+        "- Snapshot version: {}",
+        json_markdown_value(json_object_field(impact, "snapshotVersion"))
+    );
+    let _ = writeln!(
+        output,
+        "- Affected memories: {}",
+        json_markdown_value(
+            analysis.and_then(|value| json_object_field(value, "affectedMemoryCount"))
+        )
+    );
+    let _ = writeln!(
+        output,
+        "- Immediate dominator: `{}`",
+        analysis
+            .and_then(|value| json_field_string(value, "immediateDominator"))
+            .unwrap_or("none")
+    );
+    let _ = writeln!(
+        output,
+        "- Validation status: `{}`",
+        analysis
+            .and_then(|value| json_field_string(value, "validationStatus"))
+            .unwrap_or("unavailable")
+    );
+    let _ = writeln!(
+        output,
+        "- Dominance frontier: {}",
+        json_string_list(analysis.and_then(|value| json_object_field(value, "dominanceFrontier")))
+    );
+
+    if !lineage.is_empty() {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## Revision Lineage");
+        for item in lineage {
+            let _ = writeln!(
+                output,
+                "- `{}` logical=`{}` depth={} relation=`{}`",
+                json_field_string(item, "memoryId").unwrap_or("unavailable"),
+                json_field_string(item, "logicalId").unwrap_or("unavailable"),
+                json_markdown_value(json_object_field(item, "depth")),
+                json_field_string(item, "relation").unwrap_or("unavailable")
+            );
+        }
+    }
+
+    if !frontiers.is_empty() {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## Frontiers");
+        for frontier in frontiers {
+            let _ = writeln!(
+                output,
+                "- `{}` size={} affected={}",
+                json_field_string(frontier, "memoryId").unwrap_or("unavailable"),
+                json_markdown_value(json_object_field(frontier, "dominanceFrontierSize")),
+                json_string_list(json_object_field(frontier, "affectedMemoryIds"))
+            );
+        }
+    }
+
+    render_json_degraded_markdown(&mut output, json_object_field(impact, "degraded"));
+    output
+}
+
 /// Render a proximity report as canonical JSON.
 #[must_use]
 pub fn render_proximity_json(report: &crate::graph::gomory_hu::ProximityReport) -> String {
@@ -13245,16 +13579,20 @@ mod tests {
         render_health_json, render_health_toon, render_integrity_diagnostics_json,
         render_learn_cluster_json, render_learn_experiment_proposal_human,
         render_learn_experiment_proposal_json, render_learn_experiment_proposal_toon,
-        render_memory_history_json, render_memory_history_toon, render_memory_list_json,
-        render_memory_show_human, render_memory_show_json, render_preflight_run_json,
-        render_preflight_show_json, render_proximity_json, render_proximity_markdown,
-        render_proximity_toon, render_quarantine_entry_human, render_quarantine_entry_json,
-        render_quarantine_entry_toon, render_quarantine_human, render_quarantine_json,
-        render_quarantine_json_filtered, render_quarantine_toon, render_schema_export_json,
-        render_shadow_run_human, render_shadow_run_json, render_shadow_run_toon,
-        render_status_json, render_status_json_filtered, render_status_skyline_json,
-        render_status_skyline_markdown, render_status_skyline_toon, render_status_toon,
-        render_structural_health_markdown, render_version_json, status_response_json,
+        render_memory_history_json, render_memory_history_toon, render_memory_impact_analysis_json,
+        render_memory_impact_analysis_markdown, render_memory_impact_analysis_toon,
+        render_memory_list_json, render_memory_show_human, render_memory_show_json,
+        render_pack_dna_json, render_pack_dna_markdown, render_pack_dna_toon,
+        render_preflight_run_json, render_preflight_show_json, render_proximity_json,
+        render_proximity_markdown, render_proximity_toon, render_quarantine_entry_human,
+        render_quarantine_entry_json, render_quarantine_entry_toon, render_quarantine_human,
+        render_quarantine_json, render_quarantine_json_filtered, render_quarantine_toon,
+        render_schema_export_json, render_shadow_run_human, render_shadow_run_json,
+        render_shadow_run_toon, render_status_json, render_status_json_filtered,
+        render_status_skyline_json, render_status_skyline_markdown, render_status_skyline_toon,
+        render_status_toon, render_structural_health_markdown, render_version_json,
+        render_why_causal_json, render_why_causal_markdown, render_why_causal_toon,
+        status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::doctor::{
@@ -15876,6 +16214,288 @@ mod tests {
                 repair: Some("ee graph centrality-refresh --workspace .".to_owned()),
             }],
         }
+    }
+
+    fn sample_pack_dna_value() -> serde_json::Value {
+        serde_json::json!({
+            "schema": "ee.context.pack_dna.v1",
+            "snapshotVersion": 42,
+            "voronoiDominator": {
+                "memoryId": "mem_release_policy",
+                "distance": 0.0,
+                "reason": "selected item dominates the local evidence neighborhood"
+            },
+            "communityOfMass": {
+                "communityId": "release-readiness",
+                "mass": 0.72,
+                "topMemoryIds": ["mem_release_policy", "mem_rch_remote_required"]
+            },
+            "egoSubgraph": {
+                "nodes": [
+                    {"id": "mem_release_policy", "kind": "memory"},
+                    {"id": "mem_rch_remote_required", "kind": "memory"}
+                ],
+                "edges": [
+                    {
+                        "source": "mem_release_policy",
+                        "target": "mem_rch_remote_required",
+                        "relation": "supports",
+                        "weight": 0.91
+                    }
+                ]
+            },
+            "pprNeighbors": [
+                {"memoryId": "mem_rch_remote_required", "score": 0.41, "rank": 1}
+            ],
+            "degraded": [
+                {
+                    "code": "graph.pack_dna_fixture",
+                    "severity": "warning",
+                    "message": "fixture pack DNA degradation",
+                    "repair": "ee graph centrality-refresh --workspace . --json"
+                }
+            ]
+        })
+    }
+
+    fn sample_why_causal_value() -> serde_json::Value {
+        serde_json::json!({
+            "schema": "ee.why.causal.v1",
+            "memoryId": "mem_release_failure",
+            "snapshotVersion": 42,
+            "paths": [
+                {
+                    "rank": 1,
+                    "sourceMemoryId": "mem_rch_topology_note",
+                    "targetMemoryId": "mem_release_failure",
+                    "edgeCount": 2,
+                    "totalContribution": 0.87,
+                    "steps": [
+                        {
+                            "source": "mem_rch_topology_note",
+                            "target": "mem_remote_check_blocked",
+                            "relation": "supports",
+                            "contributionScore": 0.48
+                        },
+                        {
+                            "source": "mem_remote_check_blocked",
+                            "target": "mem_release_failure",
+                            "relation": "caused",
+                            "contributionScore": 0.39
+                        }
+                    ]
+                }
+            ],
+            "minCut": {
+                "sourceMemoryId": "mem_rch_topology_note",
+                "targetMemoryId": "mem_release_failure",
+                "cutWeight": 0.31,
+                "cutMemoryIds": ["mem_remote_check_blocked"]
+            },
+            "degraded": [
+                {
+                    "code": "graph.causal_fixture",
+                    "severity": "low",
+                    "message": "fixture causal degradation",
+                    "repair": "ee causal trace --workspace . --json"
+                }
+            ]
+        })
+    }
+
+    fn sample_memory_impact_analysis_value() -> serde_json::Value {
+        serde_json::json!({
+            "schema": "ee.memory.impact_analysis.v1",
+            "memoryId": "mem_release_policy",
+            "snapshotVersion": 7,
+            "revisionLineage": [
+                {
+                    "memoryId": "mem_release_policy",
+                    "logicalId": "release-policy",
+                    "depth": 0,
+                    "relation": "self",
+                    "validFrom": "2026-05-19T00:00:00Z"
+                }
+            ],
+            "impactAnalysis": {
+                "immediateDominator": "mem_root_policy",
+                "dominanceFrontier": ["mem_ci_gate", "mem_release_notes"],
+                "affectedMemoryCount": 3,
+                "validationStatus": "valid"
+            },
+            "frontiers": [
+                {
+                    "memoryId": "mem_ci_gate",
+                    "dominanceFrontierSize": 2,
+                    "affectedMemoryIds": ["mem_release_notes", "mem_install_docs"],
+                    "evidence": {
+                        "algorithm": "dominance_frontiers",
+                        "snapshotVersion": 7
+                    }
+                }
+            ],
+            "degraded": [
+                {
+                    "code": "graph.impact_fixture",
+                    "severity": "info",
+                    "message": "fixture impact degradation",
+                    "repair": "ee why mem_release_policy --workspace . --json"
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn pack_dna_markdown_renderer_preserves_graph_summary() -> TestResult {
+        let markdown = render_pack_dna_markdown(&sample_pack_dna_value());
+
+        ensure_contains(&markdown, "# Pack DNA", "pack DNA markdown title")?;
+        ensure_contains(
+            &markdown,
+            "- Schema: `ee.context.pack_dna.v1`",
+            "pack DNA markdown schema",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Snapshot version: 42",
+            "pack DNA markdown snapshot",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Voronoi dominator: `mem_release_policy` distance=0.0 reason=selected item dominates the local evidence neighborhood",
+            "pack DNA markdown dominator",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Community of mass: `release-readiness` mass=0.72 topMemoryIds=mem_release_policy, mem_rch_remote_required",
+            "pack DNA markdown community",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Ego subgraph: nodes=2 edges=1",
+            "pack DNA markdown ego",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- rank=1 `mem_rch_remote_required` score=0.41",
+            "pack DNA markdown ppr",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- **warning** `graph.pack_dna_fixture`: fixture pack DNA degradation",
+            "pack DNA markdown degradation",
+        )
+    }
+
+    #[test]
+    fn pack_dna_toon_decodes_to_canonical_json() -> TestResult {
+        let value = sample_pack_dna_value();
+        let json = render_pack_dna_json(&value);
+        let toon = render_pack_dna_toon(&value);
+
+        ensure_toon_matches_json(&json, &toon, "decoded pack DNA TOON")
+    }
+
+    #[test]
+    fn why_causal_markdown_renderer_preserves_paths_and_degraded() -> TestResult {
+        let markdown = render_why_causal_markdown(&sample_why_causal_value());
+
+        ensure_contains(&markdown, "# Why Causal", "why causal markdown title")?;
+        ensure_contains(
+            &markdown,
+            "- Schema: `ee.why.causal.v1`",
+            "why causal markdown schema",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Memory: `mem_release_failure`",
+            "why causal markdown memory",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- rank=1 `mem_rch_topology_note` -> `mem_release_failure` edges=2 totalContribution=0.87",
+            "why causal markdown path",
+        )?;
+        ensure_contains(
+            &markdown,
+            "  - `mem_rch_topology_note` -> `mem_remote_check_blocked` relation=`supports` contribution=0.48",
+            "why causal markdown step",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- **low** `graph.causal_fixture`: fixture causal degradation",
+            "why causal markdown degradation",
+        )
+    }
+
+    #[test]
+    fn why_causal_toon_decodes_to_canonical_json() -> TestResult {
+        let value = sample_why_causal_value();
+        let json = render_why_causal_json(&value);
+        let toon = render_why_causal_toon(&value);
+
+        ensure_toon_matches_json(&json, &toon, "decoded why causal TOON")
+    }
+
+    #[test]
+    fn memory_impact_analysis_markdown_renderer_preserves_frontiers() -> TestResult {
+        let markdown =
+            render_memory_impact_analysis_markdown(&sample_memory_impact_analysis_value());
+
+        ensure_contains(
+            &markdown,
+            "# Memory Impact Analysis",
+            "impact markdown title",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Schema: `ee.memory.impact_analysis.v1`",
+            "impact markdown schema",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Memory: `mem_release_policy`",
+            "impact markdown memory",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Affected memories: 3",
+            "impact markdown affected count",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Immediate dominator: `mem_root_policy`",
+            "impact markdown dominator",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Dominance frontier: mem_ci_gate, mem_release_notes",
+            "impact markdown frontier",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- `mem_release_policy` logical=`release-policy` depth=0 relation=`self`",
+            "impact markdown lineage",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- `mem_ci_gate` size=2 affected=mem_release_notes, mem_install_docs",
+            "impact markdown frontier item",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- **info** `graph.impact_fixture`: fixture impact degradation",
+            "impact markdown degradation",
+        )
+    }
+
+    #[test]
+    fn memory_impact_analysis_toon_decodes_to_canonical_json() -> TestResult {
+        let value = sample_memory_impact_analysis_value();
+        let json = render_memory_impact_analysis_json(&value);
+        let toon = render_memory_impact_analysis_toon(&value);
+
+        ensure_toon_matches_json(&json, &toon, "decoded impact analysis TOON")
     }
 
     #[test]
