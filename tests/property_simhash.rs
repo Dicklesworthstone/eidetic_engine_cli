@@ -11,8 +11,8 @@
 
 use ee::search::simhash::{
     NearestSimHashCandidate, SimHash128, canonicalize_content_for_simhash,
-    confirm_cosine_similarity, cosine_similarity, hamming_distance, ranked_simhash_candidates,
-    simhash_128,
+    confirm_cosine_similarity, cosine_similarity, first_confirmed_simhash_candidate,
+    hamming_distance, ranked_simhash_candidates, simhash_128,
 };
 use proptest::prelude::*;
 use proptest::test_runner::Config as ProptestConfig;
@@ -107,6 +107,24 @@ fn ranked_fixture_candidates(raw: Vec<u128>) -> Vec<(String, SimHash128)> {
         .collect()
 }
 
+fn confirmed_fixture_candidates(raw: Vec<(u128, bool)>) -> Vec<(String, SimHash128, [f32; 2])> {
+    raw.into_iter()
+        .enumerate()
+        .map(|(index, (fingerprint, should_confirm))| {
+            let embedding = if should_confirm {
+                [1.0, 0.0]
+            } else {
+                [0.0, 1.0]
+            };
+            (
+                format!("mem_{index:03}"),
+                SimHash128::from_u128(fingerprint),
+                embedding,
+            )
+        })
+        .collect()
+}
+
 fn expected_ranked_candidates<'a>(
     query: SimHash128,
     candidates: &'a [(String, SimHash128)],
@@ -131,6 +149,26 @@ fn expected_ranked_candidates<'a>(
     });
     expected.truncate(limit);
     expected
+}
+
+fn expected_first_confirmed_candidate(
+    query: SimHash128,
+    candidates: &[(String, SimHash128, [f32; 2])],
+    max_hamming_distance: u32,
+) -> Option<(String, SimHash128, u32)> {
+    let mut expected: Vec<_> = candidates
+        .iter()
+        .filter_map(|(candidate_id, fingerprint, embedding)| {
+            let hamming_distance = hamming_distance(query, *fingerprint);
+            (hamming_distance <= max_hamming_distance && embedding[0] == 1.0).then_some((
+                candidate_id.clone(),
+                *fingerprint,
+                hamming_distance,
+            ))
+        })
+        .collect();
+    expected.sort_by(|left, right| left.2.cmp(&right.2).then_with(|| left.0.cmp(&right.0)));
+    expected.into_iter().next()
 }
 
 fn config() -> ProptestConfig {
@@ -336,6 +374,73 @@ proptest! {
                 .map(|(candidate_id, fingerprint)| (candidate_id.as_str(), *fingerprint)),
             max_hamming_distance,
             limit,
+        );
+
+        prop_assert_eq!(forward, reverse);
+    }
+
+    #[test]
+    fn prop_first_confirmed_candidate_matches_reference_model(
+        query in arbitrary_simhash(),
+        raw_candidates in proptest::collection::vec((any::<u128>(), any::<bool>()), 0..32),
+        max_hamming_distance in 0_u32..=128,
+    ) {
+        let query_embedding = [1.0, 0.0];
+        let candidates = confirmed_fixture_candidates(raw_candidates);
+        let actual = first_confirmed_simhash_candidate(
+            query,
+            &query_embedding,
+            candidates
+                .iter()
+                .map(|(candidate_id, fingerprint, embedding)| {
+                    (candidate_id.as_str(), *fingerprint, embedding.as_slice())
+                }),
+            max_hamming_distance,
+            0.97,
+        )
+        .map(|candidate| {
+            (
+                candidate.candidate_id.to_owned(),
+                candidate.fingerprint,
+                candidate.hamming_distance,
+            )
+        });
+        let expected =
+            expected_first_confirmed_candidate(query, &candidates, max_hamming_distance);
+
+        prop_assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn prop_first_confirmed_candidate_is_independent_of_iteration_order(
+        query in arbitrary_simhash(),
+        raw_candidates in proptest::collection::vec((any::<u128>(), any::<bool>()), 0..32),
+        max_hamming_distance in 0_u32..=128,
+    ) {
+        let query_embedding = [1.0, 0.0];
+        let candidates = confirmed_fixture_candidates(raw_candidates);
+        let forward = first_confirmed_simhash_candidate(
+            query,
+            &query_embedding,
+            candidates
+                .iter()
+                .map(|(candidate_id, fingerprint, embedding)| {
+                    (candidate_id.as_str(), *fingerprint, embedding.as_slice())
+                }),
+            max_hamming_distance,
+            0.97,
+        );
+        let reverse = first_confirmed_simhash_candidate(
+            query,
+            &query_embedding,
+            candidates
+                .iter()
+                .rev()
+                .map(|(candidate_id, fingerprint, embedding)| {
+                    (candidate_id.as_str(), *fingerprint, embedding.as_slice())
+                }),
+            max_hamming_distance,
+            0.97,
         );
 
         prop_assert_eq!(forward, reverse);
