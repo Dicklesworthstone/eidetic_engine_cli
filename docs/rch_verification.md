@@ -83,7 +83,13 @@ honest for the claim you need to make.
 | Committed tree export | `scripts/rch_verify.sh --committed-tree --treeish HEAD -- cargo test ...` | yes for safe trees | You need to verify committed source while the shared checkout is dirty. | Safe no-path-dependency trees run from a generated export with `verification_attribution=committed_tree`; unsupported refs/path dependencies refuse before RCH. |
 
 Strict clean mode is the closeout mode for "this exact checkout is clean and
-remote-verified." Committed-tree mode resolves the requested treeish, records
+remote-verified." Gitignored files (matched by `.gitignore` patterns and not
+under `git status --ignored=no`) are the explicit allowlist: local-machine
+artifacts such as `._mac_finder_metadata`, editor scratch files, and other
+patterns the repo's `.gitignore` already excludes do not count against the
+strict-clean check. Use `.gitignore` to declare "these local-only patterns are
+allowed to coexist with a strict-clean proof" rather than asking the wrapper for
+an ad-hoc allowlist flag. Committed-tree mode resolves the requested treeish, records
 `git_tree`, `resolved_commit`, `source_manifest_hash`,
 `source_manifest_file_count`, and `source_manifest_byte_count`, then
 materializes that committed tree into a generated source export when the tree is

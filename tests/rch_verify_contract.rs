@@ -662,6 +662,73 @@ fn strict_clean_tree_classifies_beads_scratch_and_secret_risk_paths() -> TestRes
 }
 
 #[test]
+fn strict_clean_tree_treats_gitignored_files_as_clean() -> TestResult {
+    let workspace = seed_git_workspace("rch-strict-clean-gitignored")?;
+    // The seed_git_workspace .gitignore patterns include `._*`, so these
+    // local-machine artifacts are gitignored and must not trip strict-clean
+    // refusal — gitignore is the explicit-allowlist mechanism for crowded
+    // shared checkouts (bd-9ygik acceptance: "clean checkout, and explicit
+    // allowlists").
+    fs::write(workspace.join("._mac_finder_metadata"), "binary\n")
+        .map_err(|error| format!("write gitignored metadata fixture: {error}"))?;
+    fs::write(workspace.join("._cache_scratch.txt"), "scratch\n")
+        .map_err(|error| format!("write gitignored cache fixture: {error}"))?;
+
+    let before_status = git_status_porcelain_v2(&workspace)?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--require-clean-tree",
+            "--dry-run",
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "strict_clean_tree_gitignored_allowlist",
+        ],
+        &[],
+        &workspace,
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "strict clean dry-run with gitignored files should pass (gitignore is the allowlist) but exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            status.code()
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse gitignored allowlist report: {error}"))?;
+    if report["verification_attribution"] != "strict_clean_tree" {
+        return Err(format!(
+            "gitignored files should still allow strict-clean attribution: {report}"
+        ));
+    }
+    if report["dirty_summary"]["total"] != 0
+        || report["dirty_summary"]["ignored"] != 0
+        || report["dirty_summary"]["untracked"] != 0
+        || report["dirty_paths_sample"] != serde_json::json!([])
+        || report["source_state_degraded_codes"] != serde_json::json!([])
+    {
+        return Err(format!(
+            "gitignored files must be omitted from dirty summary: {report}"
+        ));
+    }
+    if report["dirty_status_hash"]
+        != "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    {
+        return Err(format!(
+            "gitignored-only checkout must hash identically to a fully clean tree: {report}"
+        ));
+    }
+
+    assert_git_status_unchanged(
+        &workspace,
+        &before_status,
+        "gitignored allowlist strict-clean dry-run",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn strict_clean_tree_fake_rch_invokes_once_and_preserves_clean_checkout() -> TestResult {
     let workspace = seed_git_workspace("rch-strict-clean-fake-rch")?;
     let before_status = git_status_porcelain_v2(&workspace)?;
