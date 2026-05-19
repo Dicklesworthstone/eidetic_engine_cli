@@ -95,20 +95,41 @@ where
         payload_offsets.push(validate_payload_key(index, key(item))?);
     }
 
+    let mut rows = items.drain(..).zip(payload_offsets).collect::<Vec<_>>();
     for position in (0..ULID_PAYLOAD_LEN).rev() {
-        let mut buckets: [Vec<(T, usize)>; RADIX] = std::array::from_fn(|_| Vec::new());
-        for (item, offset) in items.drain(..).zip(payload_offsets.drain(..)) {
-            let digit = digit_value(key(&item).as_bytes()[offset + position]);
-            buckets[usize::from(digit)].push((item, offset));
+        let mut counts = [0_usize; RADIX];
+        for (item, offset) in &rows {
+            let digit = digit_value(key(item).as_bytes()[*offset + position]);
+            counts[usize::from(digit)] += 1;
         }
-        for bucket in buckets {
-            for (item, offset) in bucket {
-                payload_offsets.push(offset);
-                items.push(item);
+
+        let mut offsets = [0_usize; RADIX];
+        let mut next = 0_usize;
+        for (digit, count) in counts.into_iter().enumerate() {
+            offsets[digit] = next;
+            next += count;
+        }
+
+        let len = rows.len();
+        let mut distributed = Vec::with_capacity(len);
+        distributed.resize_with(len, || None);
+        for (item, offset) in rows {
+            let digit = usize::from(digit_value(key(&item).as_bytes()[offset + position]));
+            let slot = offsets[digit];
+            offsets[digit] += 1;
+            distributed[slot] = Some((item, offset));
+        }
+
+        rows = Vec::with_capacity(len);
+        for slot in distributed {
+            if let Some(row) = slot {
+                rows.push(row);
             }
         }
+        debug_assert_eq!(rows.len(), len);
     }
 
+    items.extend(rows.into_iter().map(|(item, _)| item));
     Ok(())
 }
 
