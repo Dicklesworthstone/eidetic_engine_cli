@@ -5,6 +5,7 @@ use fnx_classes::Graph;
 use serde::{Deserialize, Serialize};
 
 use crate::graph::{GraphResult, algorithms};
+use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 pub const DEFAULT_ONION_DECAY_MAX: f64 = 3.0;
 pub const DEFAULT_ARTICULATION_PROTECTION: f64 = 0.5;
@@ -180,7 +181,7 @@ pub fn try_compute_articulation_points(graph: &Graph) -> GraphResult<Articulatio
 
 fn compute_articulation_points_unbudgeted(graph: &Graph) -> ArticulationPointReport {
     let mut memory_ids = articulation_points(graph).nodes;
-    memory_ids.sort();
+    sort_by_ulid_payload_or_lexical(&mut memory_ids, String::as_str);
     ArticulationPointReport { memory_ids }
 }
 
@@ -309,6 +310,9 @@ mod tests {
     use super::*;
     use fnx_runtime::CompatibilityMode;
 
+    const PUBLIC_ID_EARLY: &str = "note_01J0000000000000000000000A";
+    const PUBLIC_ID_LATE: &str = "mem_01J0000000000000000000000C";
+
     #[test]
     fn articulation_points_are_sorted() {
         let mut graph = Graph::new(CompatibilityMode::Strict);
@@ -327,6 +331,21 @@ mod tests {
         let report = compute_articulation_points(&graph);
 
         assert_eq!(report.memory_ids, vec!["b", "y"]);
+    }
+
+    #[test]
+    fn articulation_points_use_radix_public_id_payload_order() {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        let _ = graph.extend_edges_unrecorded([
+            ("left_c", PUBLIC_ID_LATE),
+            (PUBLIC_ID_LATE, "right_c"),
+            ("left_a", PUBLIC_ID_EARLY),
+            (PUBLIC_ID_EARLY, "right_a"),
+        ]);
+
+        let report = compute_articulation_points(&graph);
+
+        assert_eq!(report.memory_ids, vec![PUBLIC_ID_EARLY, PUBLIC_ID_LATE]);
     }
 
     #[test]
