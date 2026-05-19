@@ -643,8 +643,11 @@ is via `ee mesh revoke <node-key>`.
   with `EE_E2E_NIGHTLY=1`.
 - The 500-peer scale workload is documented but advisory; budgets are
   calibrated on `mac-m3-pro` hardware class.
-- Steward periodic reconciliation (`bd-36bbk.1.14`) is opt-in via
-  `EE_MESH_AUTO_ENROLL_ON_DEMAND=1` and disabled by default.
+- Steward periodic reconciliation (`bd-36bbk.1.14`) currently has pure
+  decision logic and audit vocabulary only. The scheduler/CLI wiring and
+  opt-in env vars are follow-up surface; do not treat
+  `EE_MESH_AUTO_ENROLL_ON_DEMAND` as a registered v0.3.0 variable until
+  it appears in `src/config/env_registry.rs` and `docs/env_vars.md`.
 
 ### Related ADRs
 
