@@ -170,6 +170,17 @@ when the inner command uses the RCH wrapper. Use plain quoted prose, direct MCP
 tool calls, or an existing artifact path instead of shell expansion for evidence
 transport.
 
+The same rule is enforced by the command-facing preflight guard:
+
+```bash
+ee preflight check --cmd 'br comment bd-XXXX --message "$(cargo test --lib foo)"' --json
+```
+
+That command exits with policy-denied status and cites
+`builtin:rust_verifier_command_substitution`. Direct wrapper invocations like
+`scripts/rch_verify.sh --bead-id bd-XXXX -- cargo test --lib foo` remain allowed;
+only shell substitution used as evidence transport is blocked.
+
 Stable fields for automation:
 
 - `localBuildPolicy`: the policy name and status for the planned command or

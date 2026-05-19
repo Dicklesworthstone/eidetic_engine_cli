@@ -367,6 +367,54 @@ fn force_push_warns_but_exits_zero() {
 }
 
 #[test]
+fn rust_verifier_command_substitution_halts_before_tracker_or_mail_command() {
+    let registry = PreflightGuardRegistry::with_builtins();
+
+    for command in [
+        "br comment bd-123 --message \"$(cargo test --lib foo)\"",
+        "br comment bd-123 --message `cargo check --lib`",
+        "am send --body \"$(scripts/rch_verify.sh -- cargo test --lib foo)\"",
+        "bash -lc 'br comment bd-123 --message \"$(rustdoc src/lib.rs)\"'",
+    ] {
+        let report = run_preflight_guard(&registry, &opts(command));
+        assert_eq!(
+            report.exit_code, 7,
+            "command `{command}` should be denied before execution"
+        );
+        assert!(
+            report
+                .matches
+                .iter()
+                .any(|matched| matched.rule_id == "builtin:rust_verifier_command_substitution"),
+            "command `{command}` did not cite command-substitution guard: {:?}",
+            report.matches,
+        );
+    }
+}
+
+#[test]
+fn rust_verifier_command_substitution_allows_wrappers_and_literal_prose() {
+    let registry = PreflightGuardRegistry::with_builtins();
+
+    for command in [
+        "scripts/rch_verify.sh --bead-id bd-123 -- cargo test --lib foo",
+        "br comment bd-123 --message 'RCH command: `cargo test --lib foo`'",
+        "rg '$(cargo test --lib foo)' docs/rch_runbook.md",
+    ] {
+        let report = run_preflight_guard(&registry, &opts(command));
+        assert_eq!(report.exit_code, 0, "command `{command}` should pass");
+        assert!(
+            report
+                .matches
+                .iter()
+                .all(|matched| matched.rule_id != "builtin:rust_verifier_command_substitution"),
+            "command `{command}` unexpectedly matched command-substitution guard: {:?}",
+            report.matches,
+        );
+    }
+}
+
+#[test]
 fn workspace_toml_layered_after_builtins() {
     let toml = r#"
 [[rules]]

@@ -353,6 +353,9 @@ fn rule_matches_command(rule: &PreflightGuardRule, command: &str) -> bool {
             "local_cargo_target_dir_override" => {
                 return matches_local_cargo_target_dir_override(command);
             }
+            "rust_verifier_command_substitution" => {
+                return matches_rust_verifier_command_substitution(command);
+            }
             "git_checkout_off_main" => return matches_git_checkout_off_main(command),
             "git_clean_fd" => return matches_git_clean_destructive(command),
             "script_code_rewrite" => return matches_script_code_rewrite(command),
@@ -508,6 +511,148 @@ fn matches_local_cargo_target_dir_override(command: &str) -> bool {
     shell_command_segments(command)
         .iter()
         .any(|segment| local_cargo_target_dir_override_segment_matches(segment))
+}
+
+fn matches_rust_verifier_command_substitution(command: &str) -> bool {
+    command_contains_active_rust_verifier_command_substitution(command)
+        || shell_command_segments(command).iter().any(|segment| {
+            let Some(command_index) = shell_segment_command_index(segment) else {
+                return false;
+            };
+            shell_c_argument(segment, command_index)
+                .is_some_and(matches_rust_verifier_command_substitution)
+        })
+}
+
+fn command_contains_active_rust_verifier_command_substitution(command: &str) -> bool {
+    let chars = command.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if quote == Some('\'') {
+            if ch == '\'' {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if ch == '\'' && quote.is_none() {
+            quote = Some('\'');
+            index += 1;
+            continue;
+        }
+        if ch == '"' {
+            quote = if quote == Some('"') {
+                None
+            } else if quote.is_none() {
+                Some('"')
+            } else {
+                quote
+            };
+            index += 1;
+            continue;
+        }
+        if ch == '`' {
+            if let Some((body, close_index)) = backtick_command_substitution_body(&chars, index + 1)
+            {
+                if command_substitution_mentions_rust_verifier(&body) {
+                    return true;
+                }
+                index = close_index + 1;
+                continue;
+            }
+        }
+        if ch == '$' && chars.get(index + 1) == Some(&'(') {
+            if let Some((body, close_index)) =
+                dollar_paren_command_substitution_body(&chars, index + 2)
+            {
+                if command_substitution_mentions_rust_verifier(&body) {
+                    return true;
+                }
+                index = close_index + 1;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    false
+}
+
+fn backtick_command_substitution_body(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let mut body = String::new();
+    let mut index = start;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            body.push(ch);
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == '`' {
+            return Some((body, index));
+        }
+        body.push(ch);
+        index += 1;
+    }
+    None
+}
+
+fn dollar_paren_command_substitution_body(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let mut body = String::new();
+    let mut depth = 1usize;
+    let mut index = start;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '$' && chars.get(index + 1) == Some(&'(') {
+            depth += 1;
+            body.push(ch);
+            body.push('(');
+            index += 2;
+            continue;
+        }
+        if ch == ')' {
+            depth -= 1;
+            if depth == 0 {
+                return Some((body, index));
+            }
+        }
+        body.push(ch);
+        index += 1;
+    }
+    None
+}
+
+fn command_substitution_mentions_rust_verifier(body: &str) -> bool {
+    shell_command_segments(body)
+        .iter()
+        .any(|segment| segment.iter().any(|word| rust_verifier_command_token(word)))
+}
+
+fn rust_verifier_command_token(word: &str) -> bool {
+    matches!(
+        command_basename(word),
+        "cargo" | "cargo-clippy" | "rustc" | "rustdoc"
+    )
 }
 
 fn local_cargo_heavy_segment_matches(segment: &[String]) -> bool {
@@ -1236,6 +1381,13 @@ fn builtin_rules() -> Vec<PreflightGuardRule> {
             source: RuleSource::Builtin { name: "local_cargo_target_dir_override".to_owned() },
         },
         PreflightGuardRule {
+            id: "builtin:rust_verifier_command_substitution".to_owned(),
+            pattern: "*".to_owned(),
+            action: GuardAction::Halt,
+            message: "Shell command substitution containing Cargo, rustc, or rustdoc can execute Rust verification before the outer tracker or mail command receives the evidence.".to_owned(),
+            source: RuleSource::Builtin { name: "rust_verifier_command_substitution".to_owned() },
+        },
+        PreflightGuardRule {
             id: "builtin:script_code_rewrite".to_owned(),
             pattern: "*".to_owned(),
             action: GuardAction::Halt,
@@ -1451,6 +1603,9 @@ fn recovery_guidance_for_match(matched: &GuardMatch) -> &'static str {
     match matched.rule_id.as_str() {
         "builtin:local_cargo_heavy_verification" | "builtin:local_cargo_target_dir_override" => {
             "Route Cargo verification through RCH, for example scripts/rch_verify.sh or rch exec; do not run local Cargo."
+        }
+        "builtin:rust_verifier_command_substitution" => {
+            "Do not pass command-bearing evidence through shell substitution; use a file/stdin payload, a direct MCP Agent Mail call, or literal prose that the shell will not execute."
         }
         "builtin:script_code_rewrite" => {
             "Make source edits manually in the affected files; do not use script-based rewrites."
@@ -2343,6 +2498,45 @@ action = "explode"
             "expected target-dir override rule in {ids:?}",
         );
         assert_eq!(report.exit_code, 7);
+    }
+
+    #[test]
+    fn rust_verifier_command_substitution_halts_tracker_and_mail_evidence() {
+        let registry = PreflightGuardRegistry::with_builtins();
+
+        for command in [
+            "br comment bd-123 --message \"$(cargo test --lib foo)\"",
+            "br comment bd-123 --message `cargo check --lib`",
+            "am send --body \"$(scripts/rch_verify.sh -- cargo test --lib foo)\"",
+            "bash -lc 'br comment bd-123 --message \"$(rustdoc src/lib.rs)\"'",
+        ] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert!(
+                report.matches.iter().any(|matched| {
+                    matched.rule_id == "builtin:rust_verifier_command_substitution"
+                }),
+                "command `{command}` did not cite command-substitution guard: {:?}",
+                report.matches,
+            );
+        }
+    }
+
+    #[test]
+    fn rust_verifier_command_substitution_allows_rch_wrapper_and_literal_prose() {
+        let registry = PreflightGuardRegistry::with_builtins();
+
+        for command in [
+            "scripts/rch_verify.sh --bead-id bd-123 -- cargo test --lib foo",
+            "br comment bd-123 --message 'RCH command: `cargo test --lib foo`'",
+            "rg '$(cargo test --lib foo)' docs/rch_runbook.md",
+        ] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(report.exit_code, 0, "command `{command}` should pass");
+            assert!(report.matches.iter().all(|matched| {
+                matched.rule_id != "builtin:rust_verifier_command_substitution"
+            }));
+        }
     }
 
     #[test]
