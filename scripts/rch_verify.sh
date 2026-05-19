@@ -1255,6 +1255,38 @@ def cargo_path_dependency_version_details(text):
         "location_searched": redact(location.group(1).strip()),
     }
 
+def cargo_workspace_inheritance_details(text):
+    if not text:
+        return None
+    dependency = re.search(
+        r"failed to load manifest for dependency `([^`]+)`",
+        text,
+    )
+    manifest = re.search(
+        r"failed to parse manifest at `([^`]+)`",
+        text,
+    )
+    inherited = re.search(
+        r"error inheriting `([^`]+)` from workspace root manifest's `([^`]+)`",
+        text,
+    )
+    missing = re.search(
+        r"`(workspace\.package\.[^`]+)` was not defined",
+        text,
+    )
+    if not (inherited and missing):
+        return None
+    details = {
+        "inherited_field": inherited.group(1).strip(),
+        "workspace_field": inherited.group(2).strip(),
+        "missing_workspace_field": missing.group(1).strip(),
+    }
+    if dependency:
+        details["dependency"] = dependency.group(1).strip()
+    if manifest:
+        details["manifest_path"] = redact(manifest.group(1).strip())
+    return details
+
 raw_stdout_tail = proof.get("stdout_tail") or ""
 raw_stderr_tail = proof.get("stderr_tail") or ""
 combined_tail = "\n".join(part for part in [raw_stdout_tail, raw_stderr_tail] if part)
@@ -1262,7 +1294,10 @@ proof["stdout_tail"] = redact(raw_stdout_tail)
 proof["stderr_tail"] = redact(raw_stderr_tail)
 first_error_file, first_error_line = first_error_location(combined_tail)
 codes = error_codes(combined_tail)
+cargo_workspace_inheritance = cargo_workspace_inheritance_details(combined_tail)
 cargo_path_dependency_version = cargo_path_dependency_version_details(combined_tail)
+if cargo_workspace_inheritance:
+    proof["cargo_workspace_inheritance"] = cargo_workspace_inheritance
 if cargo_path_dependency_version:
     proof["cargo_path_dependency_version"] = cargo_path_dependency_version
 

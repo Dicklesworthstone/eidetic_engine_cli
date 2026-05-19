@@ -2373,6 +2373,17 @@ fn synthetic_cargo_workspace_inheritance_failure_is_worker_topology() -> TestRes
             "workspace inheritance code should be worker-state degraded: {report}"
         ));
     }
+    let details = &report["cargo_workspace_inheritance"];
+    if details["dependency"] != "frankensearch"
+        || details["manifest_path"] != "/data/projects/frankensearch/frankensearch/Cargo.toml"
+        || details["inherited_field"] != "license-file"
+        || details["workspace_field"] != "workspace.package.license-file"
+        || details["missing_workspace_field"] != "workspace.package.license-file"
+    {
+        return Err(format!(
+            "workspace inheritance details should route the topology fix: {report}"
+        ));
+    }
     Ok(())
 }
 

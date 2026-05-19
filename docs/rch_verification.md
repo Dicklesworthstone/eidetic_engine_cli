@@ -157,6 +157,12 @@ Consumers that need to route action should use the two narrower lists:
   `rch_verify_cargo_workspace_inheritance_blocked` is the worker-topology
   classifier for Cargo errors where a path dependency inherits
   `workspace.package.*` fields from the wrong or incomplete workspace root.
+  When the Cargo transcript includes the dependency name, parsed manifest path,
+  inherited package field, and missing `workspace.package.*` key, the proof also
+  includes `cargo_workspace_inheritance` with structured `dependency`,
+  `manifest_path`, `inherited_field`, `workspace_field`, and
+  `missing_workspace_field` fields for routing the topology or dependency
+  workspace sync follow-up.
   `rch_verify_cargo_path_dependency_version_blocked` classifies Cargo
   path-dependency version-resolution failures where a remote
   `/data/projects/<dependency>` checkout is stale relative to the verifying
