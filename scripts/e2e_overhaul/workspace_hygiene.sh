@@ -179,6 +179,23 @@ write_file() {
     printf '%b' "$body" > "$path"
 }
 
+write_large_text_file() {
+    local path="${1:?path required}"
+    local index
+    local chunk="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    mkdir -p "$(dirname "$path")"
+    : > "$path"
+    for ((index = 0; index < 600; index++)); do
+        printf '%s\n' "$chunk" >> "$path"
+    done
+}
+
+write_binary_file() {
+    local path="${1:?path required}"
+    mkdir -p "$(dirname "$path")"
+    printf '\377\376\375binary\000payload\n' > "$path"
+}
+
 init_git_workspace() {
     local scenario="${1:?scenario required}"
     local workspace
@@ -303,6 +320,7 @@ validate_event_log_contract() {
             "scratch_only",
             "generated_only",
             "scratch_generated_secret",
+            "large_binary_scan_skip",
             "active_reservation",
             "agent_mail_unavailable",
             "beads_pending_flush",
@@ -316,6 +334,7 @@ validate_event_log_contract() {
             "scratch_only",
             "generated_only",
             "scratch_generated_secret",
+            "large_binary_scan_skip",
             "active_reservation",
             "agent_mail_unavailable",
             "beads_pending_flush",
@@ -435,6 +454,10 @@ run_scenario() {
             write_file "$workspace/drift-report.txt" "local diagnostic output\n"
             write_file "$workspace/Cargo.lock" "generated lockfile placeholder\n"
             write_file "$workspace/.env.local" "OPENAI_""API_KEY=$SYNTHETIC_RAW_VALUE\n"
+            ;;
+        large_binary_scan_skip)
+            write_large_text_file "$workspace/logs/large-output.log"
+            write_binary_file "$workspace/blobs/capture.bin"
             ;;
         active_reservation)
             write_file "$workspace/src/lib.rs" "pub fn reserved() -> bool { true }\n"
@@ -556,6 +579,9 @@ run_scenario() {
                     first_failure="$(assert_no_raw_value "$scenario stderr" "$stderr_artifact" "$SYNTHETIC_RAW_VALUE" || true)"
                 fi
                 ;;
+            large_binary_scan_skip)
+                first_failure="$(assert_jq "$stdout_artifact" '(.data.dirtyPathCount == 2) and (.data.secretScan.readOnly == true) and (.data.secretScan.skippedContentScanCount >= 2) and (.data.secretScan.maxFileBytes == 65536) and (.data.degraded | index("workspace_hygiene_secret_scan_skipped"))' "large and binary dirty files should report skipped secret scans" || true)"
+                ;;
             active_reservation)
                 first_failure="$(assert_jq "$stdout_artifact" '.data.coordinationState.agentMailAvailable == true and (.data.coordinationState.blockedByCoordination[0].path == "src/lib.rs") and (.data.coordinationState.blockedByCoordination[0].holderAgent == "OtherAgent") and (.data.coordinationState.blockedByCoordination[0].pathPattern == "src/lib.rs") and (.data.coordinationState.blockedByCoordination[0].exclusive == true) and ([.data.stagingRecommendations[].paths[]?] | index("src/lib.rs") | not) and (.data.degraded | index("workspace_hygiene_agent_mail_unavailable") | not)' "active reservation should block src/lib.rs and keep it out of staging" || true)"
                 ;;
@@ -598,6 +624,7 @@ SCENARIOS=(
     scratch_only
     generated_only
     scratch_generated_secret
+    large_binary_scan_skip
     active_reservation
     agent_mail_unavailable
     beads_pending_flush
