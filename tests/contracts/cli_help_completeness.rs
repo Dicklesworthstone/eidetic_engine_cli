@@ -550,6 +550,15 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
         ][..],
         &[
             "ee",
+            "insights",
+            "--explain",
+            "mem_failed_release",
+            "--limit",
+            "5",
+            "--json",
+        ][..],
+        &[
+            "ee",
             "proximity",
             "mem_release_policy",
             "mem_rch_remote_required",

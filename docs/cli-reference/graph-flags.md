@@ -95,6 +95,7 @@ Example:
 
 ```bash
 ee insights --section proximityHotspots --workspace . --limit 5 --json
+ee insights --explain mem_failed_release --workspace . --limit 5 --json
 ee proximity mem_release_policy mem_rch_remote_required --workspace . --json
 ee proximity mem_release_policy mem_rch_remote_required --workspace . \
   --min-weight 0.4 --min-confidence 0.6 --link-limit 250 \
