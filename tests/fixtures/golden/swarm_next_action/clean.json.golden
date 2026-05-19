@@ -105,7 +105,11 @@
       "queuedRemoteBuildCount": null,
       "slotsAvailable": null,
       "queueHeadSlotsNeeded": null,
-      "queueStatus": null
+      "activeBuildMaxAgeSeconds": null,
+      "headOfLineBlocked": null,
+      "queueRecommendation": null,
+      "queueStatus": null,
+      "queueEvidence": []
     },
     "environment": {
       "cargoTargetExternalized": true,

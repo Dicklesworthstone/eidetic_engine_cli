@@ -170,7 +170,16 @@
           "queuedRemoteBuildCount": 0,
           "slotsAvailable": 0,
           "queueHeadSlotsNeeded": null,
-          "queueStatus": "saturated"
+          "activeBuildMaxAgeSeconds": null,
+          "headOfLineBlocked": null,
+          "queueRecommendation": "wait_for_remote_capacity",
+          "queueStatus": "saturated",
+          "queueEvidence": [
+            "active_remote_build_count:4",
+            "queued_remote_build_count:0",
+            "queue_status:saturated",
+            "slots_available:0"
+          ]
         },
         "environment": {
           "cargoTargetExternalized": true,
@@ -334,7 +343,7 @@
     },
     "verificationSummary": {
       "type": "object",
-      "required": ["rchSourceEnabled", "remoteOnlyRequired", "remoteOnlySafe", "healthyWorkerCount", "activeRemoteBuildCount", "queuedRemoteBuildCount", "slotsAvailable", "queueHeadSlotsNeeded", "queueStatus"],
+      "required": ["rchSourceEnabled", "remoteOnlyRequired", "remoteOnlySafe", "healthyWorkerCount", "activeRemoteBuildCount", "queuedRemoteBuildCount", "slotsAvailable", "queueHeadSlotsNeeded", "activeBuildMaxAgeSeconds", "headOfLineBlocked", "queueRecommendation", "queueStatus", "queueEvidence"],
       "additionalProperties": false,
       "properties": {
         "rchSourceEnabled": {"type": "boolean"},
@@ -345,7 +354,11 @@
         "queuedRemoteBuildCount": {"type": ["integer", "null"], "minimum": 0},
         "slotsAvailable": {"type": ["integer", "null"], "minimum": 0},
         "queueHeadSlotsNeeded": {"type": ["integer", "null"], "minimum": 0},
-        "queueStatus": {"type": ["string", "null"]}
+        "activeBuildMaxAgeSeconds": {"type": ["integer", "null"], "minimum": 0},
+        "headOfLineBlocked": {"type": ["boolean", "null"]},
+        "queueRecommendation": {"type": ["string", "null"]},
+        "queueStatus": {"type": ["string", "null"]},
+        "queueEvidence": {"type": "array", "items": {"type": "string"}}
       }
     },
     "environmentSummary": {

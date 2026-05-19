@@ -112,7 +112,16 @@
       "queuedRemoteBuildCount": 0,
       "slotsAvailable": 0,
       "queueHeadSlotsNeeded": null,
-      "queueStatus": "saturated"
+      "activeBuildMaxAgeSeconds": null,
+      "headOfLineBlocked": null,
+      "queueRecommendation": "wait_for_remote_capacity",
+      "queueStatus": "saturated",
+      "queueEvidence": [
+        "active_remote_build_count:4",
+        "queued_remote_build_count:0",
+        "queue_status:saturated",
+        "slots_available:0"
+      ]
     },
     "environment": {
       "cargoTargetExternalized": true,

@@ -167,8 +167,7 @@ pub struct SwarmNextActionRecentFirstError {
     pub degraded_codes: Vec<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SwarmNextActionVerificationSummary {
     pub rch_source_enabled: bool,
     pub remote_only_required: bool,
@@ -179,6 +178,82 @@ pub struct SwarmNextActionVerificationSummary {
     pub slots_available: Option<u64>,
     pub queue_head_slots_needed: Option<u64>,
     pub queue_status: Option<String>,
+}
+
+impl Serialize for SwarmNextActionVerificationSummary {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("SwarmNextActionVerificationSummary", 13)?;
+        state.serialize_field("rchSourceEnabled", &self.rch_source_enabled)?;
+        state.serialize_field("remoteOnlyRequired", &self.remote_only_required)?;
+        state.serialize_field("remoteOnlySafe", &self.remote_only_safe)?;
+        state.serialize_field("healthyWorkerCount", &self.healthy_worker_count)?;
+        state.serialize_field("activeRemoteBuildCount", &self.active_remote_build_count)?;
+        state.serialize_field("queuedRemoteBuildCount", &self.queued_remote_build_count)?;
+        state.serialize_field("slotsAvailable", &self.slots_available)?;
+        state.serialize_field("queueHeadSlotsNeeded", &self.queue_head_slots_needed)?;
+        state.serialize_field("activeBuildMaxAgeSeconds", &Option::<u64>::None)?;
+        state.serialize_field("headOfLineBlocked", &self.head_of_line_blocked())?;
+        state.serialize_field("queueRecommendation", &self.queue_recommendation())?;
+        state.serialize_field("queueStatus", &self.queue_status)?;
+        state.serialize_field("queueEvidence", &self.queue_evidence())?;
+        state.end()
+    }
+}
+
+impl SwarmNextActionVerificationSummary {
+    #[must_use]
+    pub fn head_of_line_blocked(&self) -> Option<bool> {
+        let queued = self.queued_remote_build_count?;
+        let slots_available = self.slots_available?;
+        let queue_head_slots_needed = self.queue_head_slots_needed?;
+
+        Some(queued > 0 && slots_available > 0 && slots_available < queue_head_slots_needed)
+    }
+
+    fn queue_evidence(&self) -> Vec<String> {
+        let mut evidence = BTreeSet::new();
+        if let Some(count) = self.active_remote_build_count {
+            evidence.insert(format!("active_remote_build_count:{count}"));
+        }
+        if let Some(count) = self.queued_remote_build_count {
+            evidence.insert(format!("queued_remote_build_count:{count}"));
+        }
+        if let Some(slots) = self.slots_available {
+            evidence.insert(format!("slots_available:{slots}"));
+        }
+        if let Some(slots) = self.queue_head_slots_needed {
+            evidence.insert(format!("queue_head_slots_needed:{slots}"));
+        }
+        if let Some(status) = &self.queue_status {
+            evidence.insert(format!("queue_status:{status}"));
+        }
+        if let Some(blocked) = self.head_of_line_blocked() {
+            evidence.insert(format!("head_of_line_blocked:{blocked}"));
+        }
+        evidence.into_iter().collect()
+    }
+
+    fn queue_recommendation(&self) -> Option<&'static str> {
+        if self.head_of_line_blocked() == Some(true) {
+            return Some("prefer_static_work_until_queue_head_fits");
+        }
+        if self.slots_available == Some(0)
+            && (self.active_remote_build_count.unwrap_or(0) > 0
+                || self.queued_remote_build_count.unwrap_or(0) > 0)
+        {
+            return Some("wait_for_remote_capacity");
+        }
+        if self.remote_only_required && self.remote_only_safe == Some(false) {
+            return Some("inspect_rch_status_before_launching_more_remote_work");
+        }
+        if self.remote_only_required && self.remote_only_safe == Some(true) {
+            return Some("remote_verification_can_launch_when_ready");
+        }
+        None
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -702,6 +777,9 @@ fn recommendation_evidence_caveats(snapshot: &SwarmNextActionSnapshot) -> Vec<St
     {
         caveats.insert("remote_only_rch_not_safe".to_owned());
     }
+    if snapshot.verification.head_of_line_blocked() == Some(true) {
+        caveats.insert("rch_head_of_line_blocked".to_owned());
+    }
     for degradation in &snapshot.degraded {
         caveats.insert(format!(
             "degraded:{}:{}",
@@ -1086,9 +1164,70 @@ mod tests {
         assert_eq!(snapshot.verification.queued_remote_build_count, Some(2));
         assert_eq!(snapshot.verification.slots_available, Some(0));
         assert_eq!(snapshot.verification.queue_head_slots_needed, Some(4));
+        assert_eq!(snapshot.verification.head_of_line_blocked(), Some(false));
         assert_eq!(
             snapshot.verification.queue_status.as_deref(),
             Some("saturated")
+        );
+    }
+
+    #[test]
+    fn next_action_verification_marks_head_of_line_convoy_with_evidence() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.beads.ready = vec![bead("bd-static", "Source-only work", 2)];
+        brief.rch_local_capability = Some(RchLocalCapabilityReport {
+            schema: "ee.rch.local_capability.v1",
+            cli_version: Some("1.0.24".to_owned()),
+            direct_exec_available: true,
+            codex_hook: RchCodexHookCapability {
+                installed: true,
+                status: "ready".to_owned(),
+            },
+            daemon_status_socket: None,
+            status_socket_consistent: None,
+            dry_run_would_offload: Some(true),
+            worker_probe_summary: RchWorkerProbeSummary {
+                healthy_count: 1,
+                failed_count: 0,
+                status: "healthy".to_owned(),
+            },
+            queue_health: Some(RchQueueHealth {
+                queued_count: 1,
+                active_count: 1,
+                slots_available: Some(2),
+                queue_head_slots_needed: Some(4),
+                status: "capacity_blocked".to_owned(),
+            }),
+            remote_only_required: true,
+            remote_only_safe: false,
+            degraded: Vec::new(),
+            recovery: Vec::new(),
+        });
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+
+        assert_eq!(snapshot.verification.head_of_line_blocked(), Some(true));
+        assert!(
+            recommendation_evidence_caveats(&snapshot)
+                .contains(&"rch_head_of_line_blocked".to_owned())
+        );
+        let json = serde_json::to_value(&snapshot.verification).expect("verification serializes");
+        assert_eq!(json["headOfLineBlocked"], true);
+        assert_eq!(
+            json["queueRecommendation"],
+            "prefer_static_work_until_queue_head_fits"
+        );
+        assert_eq!(json["activeBuildMaxAgeSeconds"], Value::Null);
+        assert_eq!(
+            json["queueEvidence"],
+            serde_json::json!([
+                "active_remote_build_count:1",
+                "head_of_line_blocked:true",
+                "queue_head_slots_needed:4",
+                "queue_status:capacity_blocked",
+                "queued_remote_build_count:1",
+                "slots_available:2"
+            ])
         );
     }
 

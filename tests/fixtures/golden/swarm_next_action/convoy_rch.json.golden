@@ -6,34 +6,34 @@
     "workspace": "/repo",
     "redactionStatus": "counts_ids_statuses_paths_redacted_no_mail_body_no_file_content",
     "inputs": {
-      "sourceCount": 4,
+      "sourceCount": 6,
       "readyBeadCount": 1,
-      "inProgressBeadCount": 0,
+      "inProgressBeadCount": 1,
       "blockedBeadCount": 0,
       "bvTopPickCount": 1
     },
     "candidates": [
       {
-        "id": "bd-3vwx0.9",
-        "title": "SWA9: recommendation provenance and overlap-decision cards for next-action",
-        "source": "beads_ready",
-        "scoreMilli": null,
+        "id": "bd-rch",
+        "title": "Source-only slice while RCH queue head is convoy-blocked",
+        "source": "bv_top_pick",
+        "scoreMilli": 700,
         "status": "open",
         "priority": 2,
         "assignee": null,
         "blockedBy": [],
         "blockedByCompileHealth": false,
-        "actionHint": "reserve_files_and_start_smallest_useful_slice"
+        "actionHint": "Pick source-only work until remote slots clear"
       }
     ],
     "recommendationCards": [
       {
-        "cardId": "refine_existing_bead:bd-3vwx0.9",
-        "candidateId": "bd-3vwx0.9",
-        "candidateSource": "beads_ready",
-        "candidateSummary": "SWA9: recommendation provenance and overlap-decision cards for next-action",
+        "cardId": "refine_existing_bead:bd-rch",
+        "candidateId": "bd-rch",
+        "candidateSource": "bv_top_pick",
+        "candidateSummary": "Source-only slice while RCH queue head is convoy-blocked",
         "decision": "refine_existing_bead",
-        "confidence": "high",
+        "confidence": "medium",
         "scoreInputs": [
           {
             "name": "blocked_by_compile_health",
@@ -44,12 +44,16 @@
             "value": "0"
           },
           {
+            "name": "bv_score_milli",
+            "value": "700"
+          },
+          {
             "name": "priority",
             "value": "2"
           },
           {
             "name": "source_rank",
-            "value": "1"
+            "value": "0"
           },
           {
             "name": "status",
@@ -59,28 +63,32 @@
         "overlap": {
           "decision": "refine_existing_bead",
           "queries": [
-            "bead_id:bd-3vwx0.9",
-            "source:beads_ready",
-            "title:SWA9: recommendation provenance and overlap-decision cards for next-action"
+            "bead_id:bd-rch",
+            "source:bv_top_pick",
+            "title:Source-only slice while RCH queue head is convoy-blocked"
           ],
           "matchedExistingBeads": [
-            "bd-3vwx0.9"
+            "bd-rch"
           ],
           "rejectedDuplicateReason": null,
           "selectedRelation": "existing_bead"
         },
         "proofObligations": [
+          "preserve_bv_reasoning_in_beads_comment",
           "record_overlap_decision_in_closeout",
           "reserve_files_before_editing",
           "use_rch_for_cargo_verification"
         ],
-        "evidenceCaveats": [],
+        "evidenceCaveats": [
+          "rch_head_of_line_blocked",
+          "remote_only_rch_not_safe"
+        ],
         "fallbackDecision": null
       }
     ],
     "coordination": {
-      "activeReservationCount": 0,
-      "reservationHolders": [],
+      "activeReservationCount": 1,
+      "reservationHolders": ["GoldenCompass"],
       "unreadInboxCount": 0,
       "ackRequiredCount": 0
     },
@@ -97,19 +105,26 @@
       ]
     },
     "verification": {
-      "rchSourceEnabled": false,
-      "remoteOnlyRequired": false,
-      "remoteOnlySafe": null,
-      "healthyWorkerCount": null,
-      "activeRemoteBuildCount": null,
-      "queuedRemoteBuildCount": null,
-      "slotsAvailable": null,
-      "queueHeadSlotsNeeded": null,
+      "rchSourceEnabled": true,
+      "remoteOnlyRequired": true,
+      "remoteOnlySafe": false,
+      "healthyWorkerCount": 1,
+      "activeRemoteBuildCount": 1,
+      "queuedRemoteBuildCount": 1,
+      "slotsAvailable": 2,
+      "queueHeadSlotsNeeded": 4,
       "activeBuildMaxAgeSeconds": null,
-      "headOfLineBlocked": null,
-      "queueRecommendation": null,
-      "queueStatus": null,
-      "queueEvidence": []
+      "headOfLineBlocked": true,
+      "queueRecommendation": "prefer_static_work_until_queue_head_fits",
+      "queueStatus": "capacity_blocked",
+      "queueEvidence": [
+        "active_remote_build_count:1",
+        "head_of_line_blocked:true",
+        "queue_head_slots_needed:4",
+        "queue_status:capacity_blocked",
+        "queued_remote_build_count:1",
+        "slots_available:2"
+      ]
     },
     "environment": {
       "cargoTargetExternalized": true,
