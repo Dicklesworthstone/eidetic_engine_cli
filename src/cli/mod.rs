@@ -8968,9 +8968,13 @@ where
                 }
             };
             match cli.renderer() {
-                output::Renderer::Human | output::Renderer::Markdown => {
+                output::Renderer::Human => {
                     write_stdout(stdout, &output::render_structural_health_human(&report))
                 }
+                output::Renderer::Markdown => write_stdout(
+                    stdout,
+                    &(output::render_structural_health_markdown(&report) + "\n"),
+                ),
                 output::Renderer::Toon => write_stdout(
                     stdout,
                     &(output::render_structural_health_toon(&report) + "\n"),
@@ -9577,14 +9581,16 @@ where
                 };
                 let report = StatusSkylineReport::gather_for_workspace(workspace_for_skyline);
                 return match cli.renderer() {
-                    output::Renderer::Human | output::Renderer::Markdown => {
+                    output::Renderer::Human => {
                         write_stdout(stdout, &output::render_status_skyline_human(&report))
                     }
+                    output::Renderer::Markdown => write_stdout(
+                        stdout,
+                        &(output::render_status_skyline_markdown(&report) + "\n"),
+                    ),
                     output::Renderer::Toon => write_stdout(
                         stdout,
-                        &(output::render_toon_from_json(&output::render_status_skyline_json(
-                            &report,
-                        )) + "\n"),
+                        &(output::render_status_skyline_toon(&report) + "\n"),
                     ),
                     output::Renderer::Json
                     | output::Renderer::Jsonl
