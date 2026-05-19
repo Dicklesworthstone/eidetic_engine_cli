@@ -140,7 +140,7 @@ pub const HANDOFF_SCHEMAS: &[SchemaEntry] = &[
     ),
     SchemaEntry::new(
         "completion_audit_report",
-        "ee.completion_audit.report.v1",
+        "ee.completion_audit.report.v2",
         SchemaCategory::Handoff,
     ),
 ];
@@ -1435,7 +1435,7 @@ mod tests {
             "handoff schemas must include resume",
         )?;
         ensure(
-            versions.contains(&"ee.completion_audit.report.v1"),
+            versions.contains(&"ee.completion_audit.report.v2"),
             "handoff schemas must include completion audit report",
         )
     }

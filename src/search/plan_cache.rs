@@ -23,6 +23,8 @@
 
 use std::collections::BTreeMap;
 
+use serde::Serialize;
+
 use crate::models::query::EqlQuery;
 
 /// Stable schema tag for plan-tree hashing.
@@ -423,6 +425,115 @@ fn truncate_to_u64(hash: &[u8; 32]) -> u64 {
     u64::from_le_bytes(buf)
 }
 
+/// Stable schema tag emitted by `ee diag plan-cache --json`. Matches the
+/// `schemaTag` const in `docs/schemas/ee.diag.plan_cache.v1.json`.
+pub const PLAN_CACHE_DIAG_SCHEMA_V1: &str = "ee.diag.plan_cache.v1";
+
+/// Stable name of the environment variable that controls cache capacity.
+/// Mirrored in `src/config/env_registry.rs`; declared here so the diag
+/// report payload stays self-contained.
+pub const PLAN_CACHE_ENV_VAR_NAME: &str = "EE_QUERY_PLAN_CACHE_ENTRIES";
+
+/// How the resolved capacity value was sourced. Renders as the
+/// `envVarValueSource` field in the diag JSON contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvVarValueSource {
+    /// Capacity came from the `EnvVar::default_value` registry entry.
+    RegistryDefault,
+    /// Capacity came from a workspace or user TOML config override.
+    OperatorOverride,
+    /// Capacity came from the `EE_QUERY_PLAN_CACHE_ENTRIES` process env var.
+    ProcessEnv,
+}
+
+/// Serializable cache key shape used by the diag report. Field names match
+/// the camelCase keys declared in `docs/schemas/ee.diag.plan_cache.v1.json`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanCacheDiagKey {
+    pub eql_hash: u64,
+    pub index_manifest_version: u64,
+    pub search_config_hash: u64,
+}
+
+impl From<PlanCacheKey> for PlanCacheDiagKey {
+    fn from(value: PlanCacheKey) -> Self {
+        Self {
+            eql_hash: value.eql_hash,
+            index_manifest_version: value.index_manifest_version,
+            search_config_hash: value.search_config_hash,
+        }
+    }
+}
+
+/// Serializable diagnostic report for the EQL plan cache. Designed to be
+/// dropped straight into the `data.report` slot of the
+/// `ee.diag.plan_cache.v1` response envelope.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanCacheDiagReport {
+    pub schema_tag: &'static str,
+    pub enabled: bool,
+    pub capacity: usize,
+    pub current_size: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub inserts: u64,
+    pub evictions: u64,
+    pub invalidations: u64,
+    pub hit_rate: Option<f64>,
+    pub env_var_name: &'static str,
+    pub env_var_value_source: EnvVarValueSource,
+    pub top_keys: Vec<PlanCacheDiagKey>,
+}
+
+impl PlanCache {
+    /// Build a [`PlanCacheDiagReport`] from the current cache state and the
+    /// declared configuration source.
+    ///
+    /// `top_keys_limit` caps the number of cached keys reported back. Pass
+    /// `usize::MAX` for "no limit". Keys are returned in the deterministic
+    /// sort order produced by [`PlanCache::cached_keys`].
+    #[must_use]
+    pub fn diag_report(
+        &self,
+        env_var_value_source: EnvVarValueSource,
+        top_keys_limit: usize,
+    ) -> PlanCacheDiagReport {
+        let stats = self.stats();
+        let hit_rate = compute_hit_rate(stats.hits, stats.misses);
+        let top_keys = self
+            .cached_keys()
+            .take(top_keys_limit)
+            .map(PlanCacheDiagKey::from)
+            .collect();
+        PlanCacheDiagReport {
+            schema_tag: PLAN_CACHE_DIAG_SCHEMA_V1,
+            enabled: stats.capacity > 0,
+            capacity: stats.capacity,
+            current_size: stats.current_size,
+            hits: stats.hits,
+            misses: stats.misses,
+            inserts: stats.inserts,
+            evictions: stats.evictions,
+            invalidations: stats.invalidations,
+            hit_rate,
+            env_var_name: PLAN_CACHE_ENV_VAR_NAME,
+            env_var_value_source,
+            top_keys,
+        }
+    }
+}
+
+fn compute_hit_rate(hits: u64, misses: u64) -> Option<f64> {
+    let total = hits.checked_add(misses)?;
+    if total == 0 {
+        return None;
+    }
+    Some((hits as f64) / (total as f64))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -646,5 +757,148 @@ mod tests {
         // exposed as a public constant so the env-registry default stays in
         // sync with this module's intent.
         assert_eq!(DEFAULT_PLAN_CACHE_ENTRIES, 1024);
+    }
+
+    #[test]
+    fn diag_report_reports_enabled_state_and_default_counters() {
+        let cache = PlanCache::new(4);
+        let report = cache.diag_report(EnvVarValueSource::RegistryDefault, 8);
+        assert_eq!(report.schema_tag, PLAN_CACHE_DIAG_SCHEMA_V1);
+        assert!(report.enabled);
+        assert_eq!(report.capacity, 4);
+        assert_eq!(report.current_size, 0);
+        assert_eq!(report.hits, 0);
+        assert_eq!(report.misses, 0);
+        assert_eq!(report.hit_rate, None);
+        assert_eq!(report.env_var_name, PLAN_CACHE_ENV_VAR_NAME);
+        assert_eq!(
+            report.env_var_value_source,
+            EnvVarValueSource::RegistryDefault
+        );
+        assert!(report.top_keys.is_empty());
+    }
+
+    #[test]
+    fn diag_report_reports_disabled_state_when_capacity_is_zero() {
+        let cache = PlanCache::new(0);
+        let report = cache.diag_report(EnvVarValueSource::OperatorOverride, 8);
+        assert!(!report.enabled);
+        assert_eq!(report.capacity, 0);
+        assert_eq!(
+            report.env_var_value_source,
+            EnvVarValueSource::OperatorOverride
+        );
+    }
+
+    #[test]
+    fn diag_report_computes_hit_rate_after_observed_lookups() {
+        let mut cache = PlanCache::new(4);
+        cache.insert(key(1, 10, 100), sample_plan("alpha"));
+        cache.insert(key(2, 10, 100), sample_plan("beta"));
+        // 2 hits, 1 miss
+        assert!(cache.get(&key(1, 10, 100)).is_some());
+        assert!(cache.get(&key(2, 10, 100)).is_some());
+        assert!(cache.get(&key(3, 10, 100)).is_none());
+
+        let report = cache.diag_report(EnvVarValueSource::ProcessEnv, 8);
+        assert_eq!(report.hits, 2);
+        assert_eq!(report.misses, 1);
+        let rate = report
+            .hit_rate
+            .expect("hit_rate present after observed lookups");
+        assert!((rate - (2.0 / 3.0)).abs() < 1e-12);
+        assert_eq!(report.current_size, 2);
+        assert_eq!(report.top_keys.len(), 2);
+        assert_eq!(
+            report.top_keys.first(),
+            Some(&PlanCacheDiagKey::from(key(1, 10, 100))),
+        );
+    }
+
+    #[test]
+    fn diag_report_caps_top_keys_at_caller_limit() {
+        let mut cache = PlanCache::new(8);
+        cache.insert(key(1, 10, 100), sample_plan("alpha"));
+        cache.insert(key(2, 10, 100), sample_plan("beta"));
+        cache.insert(key(3, 10, 100), sample_plan("gamma"));
+        let report = cache.diag_report(EnvVarValueSource::RegistryDefault, 2);
+        assert_eq!(report.top_keys.len(), 2);
+        // Confirm the first cap returns the two smallest keys in sort order:
+        assert_eq!(
+            report.top_keys,
+            vec![
+                PlanCacheDiagKey::from(key(1, 10, 100)),
+                PlanCacheDiagKey::from(key(2, 10, 100)),
+            ],
+        );
+    }
+
+    #[test]
+    fn diag_report_serializes_to_camel_case_json_matching_schema() {
+        let mut cache = PlanCache::new(2);
+        cache.insert(key(1, 10, 100), sample_plan("alpha"));
+        let report = cache.diag_report(EnvVarValueSource::RegistryDefault, 4);
+        let json = serde_json::to_value(&report).expect("report serializes");
+        let object = json.as_object().expect("report is a JSON object");
+        // Schema-required field names (all camelCase):
+        for required in [
+            "schemaTag",
+            "enabled",
+            "capacity",
+            "currentSize",
+            "hits",
+            "misses",
+            "inserts",
+            "evictions",
+            "invalidations",
+            "hitRate",
+            "envVarName",
+            "envVarValueSource",
+            "topKeys",
+        ] {
+            assert!(
+                object.contains_key(required),
+                "missing field {required} in {json}"
+            );
+        }
+        // Per-key camelCase fields:
+        let first_key = object
+            .get("topKeys")
+            .and_then(|value| value.as_array())
+            .and_then(|array| array.first())
+            .expect("topKeys has at least one entry");
+        for required in ["eqlHash", "indexManifestVersion", "searchConfigHash"] {
+            assert!(
+                first_key
+                    .as_object()
+                    .map(|inner| inner.contains_key(required))
+                    .unwrap_or(false),
+                "missing cache-key field {required} in {first_key}"
+            );
+        }
+        // env_var_value_source uses snake_case via serde rename:
+        assert_eq!(
+            object.get("envVarValueSource").and_then(|v| v.as_str()),
+            Some("registry_default")
+        );
+        assert_eq!(
+            object.get("schemaTag").and_then(|v| v.as_str()),
+            Some("ee.diag.plan_cache.v1"),
+        );
+    }
+
+    #[test]
+    fn compute_hit_rate_returns_none_when_no_observations() {
+        assert_eq!(compute_hit_rate(0, 0), None);
+    }
+
+    #[test]
+    fn compute_hit_rate_returns_zero_when_only_misses() {
+        assert_eq!(compute_hit_rate(0, 5), Some(0.0));
+    }
+
+    #[test]
+    fn compute_hit_rate_returns_one_when_only_hits() {
+        assert_eq!(compute_hit_rate(5, 0), Some(1.0));
     }
 }

@@ -7235,8 +7235,8 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: completion_audit_checklist_schema_definition,
         },
         SchemaEntry {
-            id: crate::core::completion_audit::COMPLETION_AUDIT_REPORT_SCHEMA_V1,
-            version: "1",
+            id: crate::core::completion_audit::COMPLETION_AUDIT_REPORT_SCHEMA_V2,
+            version: "2",
             description: "Completion audit report response envelope",
             category: "handoff",
             definition: completion_audit_report_schema_definition,
@@ -7576,7 +7576,7 @@ fn completion_audit_checklist_schema_definition() -> String {
 }
 
 fn completion_audit_report_schema_definition() -> String {
-    include_str!("../../docs/schemas/ee.completion_audit.report.v1.json").to_string()
+    include_str!("../../docs/schemas/ee.completion_audit.report.v2.json").to_string()
 }
 
 fn agent_operating_contract_schema_definition() -> String {
@@ -12521,6 +12521,10 @@ pub fn render_completion_audit_human(
     lines.push(format!(
         "Requirements: {}",
         report.checklist.summary.requirement_count
+    ));
+    lines.push(format!(
+        "Local build policy: {}",
+        report.local_build_policy.state.as_str()
     ));
     lines.push(format!("Gaps: {}", report.gaps.len()));
     lines.push(format!("Residual risks: {}", report.residual_risks.len()));

@@ -1656,12 +1656,22 @@ fn local_cargo_tripwire_json(workspace: &Path) -> String {
     } else {
         "remote_required_blocked"
     };
+    let policy_state = if !build_admission.admitted {
+        "remote_required_blocked"
+    } else if direct_status == "local_cargo_disallowed"
+        && wrapped_status == "remote_wrapper_required"
+    {
+        "remote_required_ready"
+    } else {
+        "needs_review"
+    };
 
     stable_json(&json!({
         "schema": "ee.support_bundle.local_cargo_tripwire.v1",
         "collectionStatus": "policy_summary_no_live_process_scan",
         "localBuildPolicy": {
             "policy": "rch_only",
+            "policyState": policy_state,
             "status": if direct_status == "local_cargo_disallowed" && wrapped_status == "remote_wrapper_required" {
                 "enforced"
             } else {
@@ -3600,6 +3610,13 @@ mod tests {
         assert_eq!(
             value.pointer("/localBuildPolicy/status"),
             Some(&json!("enforced"))
+        );
+        assert!(
+            value
+                .pointer("/localBuildPolicy/policyState")
+                .and_then(Value::as_str)
+                .is_some(),
+            "summary must expose a stable local build policy state"
         );
         assert_eq!(
             value.pointer("/requiredRemoteWrapper"),

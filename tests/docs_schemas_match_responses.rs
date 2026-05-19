@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use ee::cass::import::{CassImportReport, ImportSessionStatus, ImportedCassSession};
 use ee::core::completion_audit::{
-    COMPLETION_AUDIT_CHECKLIST_SCHEMA_V1, COMPLETION_AUDIT_REPORT_SCHEMA_V1,
+    COMPLETION_AUDIT_CHECKLIST_SCHEMA_V1, COMPLETION_AUDIT_REPORT_SCHEMA_V2,
     build_completion_audit_report_for_workspace, extract_completion_checklist,
 };
 use ee::core::curate::{
@@ -67,8 +67,8 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
         "ee.completion_audit.checklist.v1.json",
     ),
     (
-        COMPLETION_AUDIT_REPORT_SCHEMA_V1,
-        "ee.completion_audit.report.v1.json",
+        COMPLETION_AUDIT_REPORT_SCHEMA_V2,
+        "ee.completion_audit.report.v2.json",
     ),
     (
         ee::core::preflight::AGENT_OPERATING_CONTRACT_SCHEMA_V1,
@@ -501,7 +501,7 @@ fn canonical_response_fixtures_match_docs_schemas() -> TestResult {
             .map_err(|error| format!("completion audit sample invalid JSON: {error}"))?,
         ),
         (
-            COMPLETION_AUDIT_REPORT_SCHEMA_V1,
+            COMPLETION_AUDIT_REPORT_SCHEMA_V2,
             serde_json::from_str(&ee::output::render_completion_audit_json(
                 &build_completion_audit_report_for_workspace(
                     "schema-test-objective",

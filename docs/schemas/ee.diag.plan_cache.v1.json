@@ -1,0 +1,247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.diag.plan_cache.v1.json",
+  "title": "ee.diag.plan_cache.v1",
+  "description": "Diagnostic response envelope for `ee diag plan-cache --json`. Reports the EQL query plan cache (bd-2mey5) capacity, current size, monotonic hit/miss/insert/eviction/invalidation counters, top cached keys in deterministic order, and any active degraded codes. Surface is read-only and never mutates cache state.",
+  "type": "object",
+  "required": ["schema", "success", "data", "degraded"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v2"},
+    "success": {"type": "boolean"},
+    "data": {
+      "type": "object",
+      "required": ["command", "report"],
+      "additionalProperties": false,
+      "properties": {
+        "command": {"type": "string", "const": "diag plan-cache"},
+        "report": {"$ref": "#/$defs/planCacheReport"}
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradedEntry"}
+    }
+  },
+  "field_presets": {
+    "minimal": ["command", "report.enabled", "report.capacity", "report.currentSize"],
+    "summary": [
+      "command",
+      "report.enabled",
+      "report.capacity",
+      "report.currentSize",
+      "report.hits",
+      "report.misses",
+      "report.hitRate",
+      "report.envVarName",
+      "degraded"
+    ],
+    "standard": ["command", "report", "degraded"],
+    "full": ["*"]
+  },
+  "examples": [
+    {
+      "schema": "ee.response.v2",
+      "success": true,
+      "data": {
+        "command": "diag plan-cache",
+        "report": {
+          "schemaTag": "ee.diag.plan_cache.v1",
+          "enabled": true,
+          "capacity": 1024,
+          "currentSize": 12,
+          "hits": 31,
+          "misses": 14,
+          "inserts": 12,
+          "evictions": 0,
+          "invalidations": 0,
+          "hitRate": 0.6889,
+          "envVarName": "EE_QUERY_PLAN_CACHE_ENTRIES",
+          "envVarValueSource": "registry_default",
+          "topKeys": [
+            {
+              "eqlHash": 4234123456789012345,
+              "indexManifestVersion": 12,
+              "searchConfigHash": 9876543210987654321
+            }
+          ]
+        }
+      },
+      "degraded": []
+    },
+    {
+      "schema": "ee.response.v2",
+      "success": true,
+      "data": {
+        "command": "diag plan-cache",
+        "report": {
+          "schemaTag": "ee.diag.plan_cache.v1",
+          "enabled": false,
+          "capacity": 0,
+          "currentSize": 0,
+          "hits": 0,
+          "misses": 0,
+          "inserts": 0,
+          "evictions": 0,
+          "invalidations": 0,
+          "hitRate": null,
+          "envVarName": "EE_QUERY_PLAN_CACHE_ENTRIES",
+          "envVarValueSource": "operator_override",
+          "topKeys": []
+        }
+      },
+      "degraded": [
+        {
+          "code": "plan_cache_disabled",
+          "severity": "info",
+          "message": "EE_QUERY_PLAN_CACHE_ENTRIES is 0; plan caching is disabled by operator override.",
+          "repair": "Unset EE_QUERY_PLAN_CACHE_ENTRIES or set it to a positive integer to re-enable plan caching."
+        }
+      ]
+    },
+    {
+      "schema": "ee.response.v2",
+      "success": true,
+      "data": {
+        "command": "diag plan-cache",
+        "report": {
+          "schemaTag": "ee.diag.plan_cache.v1",
+          "enabled": true,
+          "capacity": 1024,
+          "currentSize": 0,
+          "hits": 0,
+          "misses": 0,
+          "inserts": 0,
+          "evictions": 0,
+          "invalidations": 0,
+          "hitRate": null,
+          "envVarName": "EE_QUERY_PLAN_CACHE_ENTRIES",
+          "envVarValueSource": "registry_default",
+          "topKeys": []
+        }
+      },
+      "degraded": [
+        {
+          "code": "plan_cache_not_yet_integrated",
+          "severity": "warning",
+          "message": "Plan cache module is present but search_sync does not consult it yet; counters will remain zero until the run_search_inner hook lands.",
+          "repair": "Tracked under bd-2mey5; pick up the run_search_inner integration slice or wait for it to land."
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "planCacheReport": {
+      "type": "object",
+      "required": [
+        "schemaTag",
+        "enabled",
+        "capacity",
+        "currentSize",
+        "hits",
+        "misses",
+        "inserts",
+        "evictions",
+        "invalidations",
+        "hitRate",
+        "envVarName",
+        "envVarValueSource",
+        "topKeys"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schemaTag": {"type": "string", "const": "ee.diag.plan_cache.v1"},
+        "enabled": {
+          "type": "boolean",
+          "description": "True when capacity > 0. False when EE_QUERY_PLAN_CACHE_ENTRIES is explicitly set to 0."
+        },
+        "capacity": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum entries the cache will hold before LRU eviction starts."
+        },
+        "currentSize": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of plans currently resident in the cache."
+        },
+        "hits": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Monotonic count of successful get() lookups."
+        },
+        "misses": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Monotonic count of get() lookups that returned no entry (including capacity-0 disabled calls and self-verification failures)."
+        },
+        "inserts": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Monotonic count of insert() calls."
+        },
+        "evictions": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Monotonic count of LRU eviction events triggered by an insert that exceeded capacity."
+        },
+        "invalidations": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Monotonic count of entries dropped because of self-verification failures, generation-mismatch invalidation, or explicit clear()."
+        },
+        "hitRate": {
+          "type": ["number", "null"],
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "hits / (hits + misses), or null when (hits + misses) is zero."
+        },
+        "envVarName": {
+          "type": "string",
+          "const": "EE_QUERY_PLAN_CACHE_ENTRIES"
+        },
+        "envVarValueSource": {
+          "type": "string",
+          "enum": ["registry_default", "operator_override", "process_env"],
+          "description": "Where the resolved capacity value came from."
+        },
+        "topKeys": {
+          "type": "array",
+          "description": "Cached keys in deterministic sorted order (sort by eqlHash, then indexManifestVersion, then searchConfigHash).",
+          "items": {"$ref": "#/$defs/cacheKey"}
+        }
+      }
+    },
+    "cacheKey": {
+      "type": "object",
+      "required": ["eqlHash", "indexManifestVersion", "searchConfigHash"],
+      "additionalProperties": false,
+      "properties": {
+        "eqlHash": {"type": "integer", "minimum": 0},
+        "indexManifestVersion": {"type": "integer", "minimum": 0},
+        "searchConfigHash": {"type": "integer", "minimum": 0}
+      }
+    },
+    "degradedEntry": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": true,
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "plan_cache_disabled",
+            "plan_cache_not_yet_integrated",
+            "plan_cache_full"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {"type": "string"},
+        "repair": {"type": "string"}
+      }
+    }
+  }
+}

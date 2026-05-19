@@ -8,7 +8,8 @@
 
 use ee::models::query::{EqlQuery, EqlSpeedMode, EqlTagsMode};
 use ee::search::plan_cache::{
-    CompiledPlan, DEFAULT_PLAN_CACHE_ENTRIES, MAX_PLAN_CACHE_ENTRIES, PlanCache, PlanCacheKey,
+    CompiledPlan, DEFAULT_PLAN_CACHE_ENTRIES, EnvVarValueSource, MAX_PLAN_CACHE_ENTRIES,
+    PLAN_CACHE_DIAG_SCHEMA_V1, PLAN_CACHE_ENV_VAR_NAME, PlanCache, PlanCacheDiagKey, PlanCacheKey,
     compute_eql_hash, compute_plan_tree_hash, compute_search_config_hash,
 };
 
@@ -115,4 +116,52 @@ fn invalidate_other_generations_drops_only_non_matching_entries() {
     assert!(cache.get(&PlanCacheKey::new(1, 10, 100)).is_some());
     assert!(cache.get(&PlanCacheKey::new(2, 11, 100)).is_none());
     assert!(cache.get(&PlanCacheKey::new(3, 10, 200)).is_none());
+}
+
+#[test]
+fn diag_report_public_constants_match_schema_contract() {
+    // These constants are what `ee diag plan-cache --json` will emit; they
+    // must stay byte-identical to the schema at
+    // docs/schemas/ee.diag.plan_cache.v1.json.
+    assert_eq!(PLAN_CACHE_DIAG_SCHEMA_V1, "ee.diag.plan_cache.v1");
+    assert_eq!(PLAN_CACHE_ENV_VAR_NAME, "EE_QUERY_PLAN_CACHE_ENTRIES");
+}
+
+#[test]
+fn diag_report_round_trips_through_serde_json_to_envelope_shape() {
+    let mut cache = PlanCache::new(DEFAULT_PLAN_CACHE_ENTRIES);
+    cache.insert(PlanCacheKey::new(7, 42, 17), sample_plan("release", 10));
+    let report = cache.diag_report(EnvVarValueSource::RegistryDefault, 4);
+    let json = serde_json::to_value(&report).expect("serialize");
+    let envelope = serde_json::json!({
+        "schema": "ee.response.v2",
+        "success": true,
+        "data": {
+            "command": "diag plan-cache",
+            "report": json,
+        },
+        "degraded": [],
+    });
+    let data = envelope
+        .get("data")
+        .and_then(|v| v.as_object())
+        .expect("envelope data is an object");
+    let report_value = data.get("report").expect("envelope.data.report set");
+    assert_eq!(
+        report_value.get("schemaTag").and_then(|v| v.as_str()),
+        Some("ee.diag.plan_cache.v1"),
+    );
+    assert_eq!(
+        report_value.get("envVarName").and_then(|v| v.as_str()),
+        Some("EE_QUERY_PLAN_CACHE_ENTRIES"),
+    );
+}
+
+#[test]
+fn diag_report_key_conversion_preserves_components() {
+    let from = PlanCacheKey::new(11, 22, 33);
+    let into: PlanCacheDiagKey = from.into();
+    assert_eq!(into.eql_hash, 11);
+    assert_eq!(into.index_manifest_version, 22);
+    assert_eq!(into.search_config_hash, 33);
 }

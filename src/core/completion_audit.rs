@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub const COMPLETION_AUDIT_CHECKLIST_SCHEMA_V1: &str = "ee.completion_audit.checklist.v1";
-pub const COMPLETION_AUDIT_REPORT_SCHEMA_V1: &str = "ee.completion_audit.report.v1";
+pub const COMPLETION_AUDIT_REPORT_SCHEMA_V2: &str = "ee.completion_audit.report.v2";
+const COMPLETION_AUDIT_REQUIRED_REMOTE_WRAPPER: &str = "scripts/rch_verify.sh -- <cargo command>";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -217,6 +218,39 @@ pub struct ResidualRisk {
     pub reason: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalBuildPolicyState {
+    LocalDisallowedAttempt,
+    RemoteRequiredBlocked,
+    RemoteVerified,
+    RemoteRequiredReady,
+    Unknown,
+}
+
+impl LocalBuildPolicyState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalDisallowedAttempt => "local_disallowed_attempt",
+            Self::RemoteRequiredBlocked => "remote_required_blocked",
+            Self::RemoteVerified => "remote_verified",
+            Self::RemoteRequiredReady => "remote_required_ready",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalBuildPolicyAudit {
+    pub policy: String,
+    pub state: LocalBuildPolicyState,
+    pub required_remote_wrapper: String,
+    pub evidence_records: Vec<EvidenceRecord>,
+    pub repair_actions: Vec<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompletionAuditReport {
@@ -226,6 +260,7 @@ pub struct CompletionAuditReport {
     pub gaps: Vec<CompletionGap>,
     pub residual_risks: Vec<ResidualRisk>,
     pub recommended_next_actions: Vec<String>,
+    pub local_build_policy: LocalBuildPolicyAudit,
     pub completion_verdict: CompletionVerdict,
 }
 
@@ -269,6 +304,7 @@ pub fn build_workspace_completion_evidence(
         "direct",
         "completion audit command evaluated explicit objective requirements",
     ));
+    records.extend(local_cargo_policy_workspace_evidence(workspace));
 
     for requirement in &checklist.requirements {
         for expectation in &requirement.evidence_expectations {
@@ -308,6 +344,88 @@ fn evidence_record(
         status,
         strength: strength.to_owned(),
         summary: summary.to_owned(),
+    }
+}
+
+fn local_cargo_policy_workspace_evidence(workspace: &Path) -> Vec<EvidenceRecord> {
+    let direct_status = local_cargo_preflight_policy_status(
+        workspace,
+        "cargo test --lib completion_audit_tripwire_probe",
+    );
+    let wrapped_status = local_cargo_preflight_policy_status(
+        workspace,
+        "scripts/rch_verify.sh -- cargo test --lib completion_audit_tripwire_probe",
+    );
+    let mut records = Vec::new();
+
+    if direct_status == "local_cargo_disallowed" && wrapped_status == "remote_wrapper_required" {
+        records.push(evidence_record(
+            "local_cargo_tripwire",
+            "cargo/build/test command",
+            "preflight guard planned-command probe",
+            EvidenceRecordStatus::Pass,
+            "supporting",
+            "local_cargo_policy_state=remote_required_ready; direct local Cargo verification is denied and the approved RCH wrapper is allowed",
+        ));
+    } else {
+        records.push(evidence_record(
+            "local_cargo_tripwire",
+            "cargo/build/test command",
+            "preflight guard planned-command probe",
+            EvidenceRecordStatus::Inconclusive,
+            "supporting",
+            "local_cargo_policy_state=unknown; planned-command guard did not prove local Cargo denial plus RCH wrapper allowance",
+        ));
+    }
+
+    let build_admission = super::disk_pressure::gather_build_admission_report(
+        &super::disk_pressure::BuildAdmissionOptions {
+            workspace: workspace.to_path_buf(),
+            workspace_source: "completion_audit",
+            min_free_bytes: 1024 * 1024 * 1024,
+            artifact_destinations: Vec::new(),
+        },
+    );
+    if !build_admission.admitted {
+        records.push(evidence_record(
+            "remote_rch",
+            "cargo/build/test command",
+            "build admission preflight",
+            EvidenceRecordStatus::CapacityBlocked,
+            "direct",
+            "local_cargo_policy_state=remote_required_blocked; build admission blocked RCH-only verification before any local fallback",
+        ));
+    }
+
+    records
+}
+
+fn local_cargo_preflight_policy_status(workspace: &Path, command: &str) -> String {
+    let registry = super::preflight_guard::PreflightGuardRegistry::with_builtins();
+    let report = super::preflight_guard::run_preflight_guard(
+        &registry,
+        &super::preflight_guard::PreflightGuardOptions {
+            command: command.to_owned(),
+            workspace: workspace.to_path_buf(),
+            bypass_tokens: Vec::new(),
+            bypass_secret: None,
+        },
+    );
+    let local_cargo_denied = report.matches.iter().any(|matched| {
+        matches!(
+            matched.rule_id.as_str(),
+            "builtin:local_cargo_heavy_verification" | "builtin:local_cargo_target_dir_override"
+        )
+    });
+
+    if local_cargo_denied {
+        "local_cargo_disallowed".to_owned()
+    } else if report.exit_code == 0 && command.contains("scripts/rch_verify.sh") {
+        "remote_wrapper_required".to_owned()
+    } else if report.exit_code == 0 {
+        "allowed".to_owned()
+    } else {
+        "blocked_by_other_policy".to_owned()
     }
 }
 
@@ -917,15 +1035,98 @@ pub fn build_completion_audit_report(
         completion_recommended_next_actions(checklist, &gaps, &contradictions);
     let completion_verdict =
         completion_verdict(checklist, &evidence_by_requirement, &contradictions);
+    let local_build_policy = local_build_policy_audit(bundle);
 
     CompletionAuditReport {
-        schema: COMPLETION_AUDIT_REPORT_SCHEMA_V1.to_owned(),
+        schema: COMPLETION_AUDIT_REPORT_SCHEMA_V2.to_owned(),
         checklist: checklist.clone(),
         evidence_by_requirement,
         gaps,
         residual_risks,
         recommended_next_actions,
+        local_build_policy,
         completion_verdict,
+    }
+}
+
+fn local_build_policy_audit(bundle: &EvidenceBundle) -> LocalBuildPolicyAudit {
+    let mut evidence_records = bundle
+        .records
+        .iter()
+        .filter(|record| local_build_policy_record(record))
+        .cloned()
+        .collect::<Vec<_>>();
+    evidence_records.sort();
+    evidence_records.dedup();
+
+    let state = if evidence_records.iter().any(local_disallowed_attempt_record) {
+        LocalBuildPolicyState::LocalDisallowedAttempt
+    } else if evidence_records.iter().any(remote_verified_record) {
+        LocalBuildPolicyState::RemoteVerified
+    } else if evidence_records.iter().any(remote_required_blocked_record) {
+        LocalBuildPolicyState::RemoteRequiredBlocked
+    } else if evidence_records.iter().any(|record| {
+        record.kind == "local_cargo_tripwire" && record.status == EvidenceRecordStatus::Pass
+    }) {
+        LocalBuildPolicyState::RemoteRequiredReady
+    } else {
+        LocalBuildPolicyState::Unknown
+    };
+
+    LocalBuildPolicyAudit {
+        policy: "rch_only".to_owned(),
+        state,
+        required_remote_wrapper: COMPLETION_AUDIT_REQUIRED_REMOTE_WRAPPER.to_owned(),
+        evidence_records,
+        repair_actions: local_build_policy_repair_actions(state),
+    }
+}
+
+fn local_build_policy_record(record: &EvidenceRecord) -> bool {
+    record.kind == "local_cargo_tripwire" || remote_verifier_record_kind(&record.kind)
+}
+
+fn local_disallowed_attempt_record(record: &EvidenceRecord) -> bool {
+    record.kind == "local_cargo_tripwire"
+        && record.status == EvidenceRecordStatus::Fail
+        && (record.summary.contains("local_disallowed_attempt")
+            || record.summary.contains("local_cargo_disallowed")
+            || record.source.contains("local_disallowed_attempt")
+            || record.source.contains("local_cargo_disallowed"))
+}
+
+fn remote_verified_record(record: &EvidenceRecord) -> bool {
+    remote_verifier_record_kind(&record.kind)
+        && record.status == EvidenceRecordStatus::Pass
+        && record.strength == "direct"
+}
+
+fn remote_required_blocked_record(record: &EvidenceRecord) -> bool {
+    (remote_verifier_record_kind(&record.kind)
+        && record.status == EvidenceRecordStatus::CapacityBlocked)
+        || (record.kind == "local_cargo_tripwire"
+            && (record.summary.contains("remote_required_blocked")
+                || record.source.contains("remote_required_blocked")))
+}
+
+fn remote_verifier_record_kind(kind: &str) -> bool {
+    matches!(kind, "rch" | "remote_rch")
+}
+
+fn local_build_policy_repair_actions(state: LocalBuildPolicyState) -> Vec<String> {
+    match state {
+        LocalBuildPolicyState::LocalDisallowedAttempt => vec![
+            "stop_local_cargo_attempt".to_owned(),
+            "rerun_required_verification_with_rch".to_owned(),
+        ],
+        LocalBuildPolicyState::RemoteRequiredBlocked => {
+            vec!["record_rch_blocker_and_retry_when_remote_path_is_healthy".to_owned()]
+        }
+        LocalBuildPolicyState::RemoteVerified => Vec::new(),
+        LocalBuildPolicyState::RemoteRequiredReady => {
+            vec!["run_required_verification_through_rch".to_owned()]
+        }
+        LocalBuildPolicyState::Unknown => vec!["collect_local_build_policy_evidence".to_owned()],
     }
 }
 
@@ -1842,6 +2043,17 @@ mod tests {
 
         let report = build_completion_audit_report(&checklist, &bundle);
 
+        assert_eq!(
+            report.local_build_policy.state,
+            LocalBuildPolicyState::LocalDisallowedAttempt
+        );
+        assert!(
+            report
+                .local_build_policy
+                .repair_actions
+                .iter()
+                .any(|action| action == "rerun_required_verification_with_rch")
+        );
         assert_eq!(report.completion_verdict, CompletionVerdict::Incomplete);
         assert!(report.gaps.iter().any(|gap| {
             gap.reason == "required_evidence_missing"
@@ -1855,6 +2067,101 @@ mod tests {
                 .recommended_next_actions
                 .iter()
                 .any(|action| action == "rerun_or_record_remote_verifier_result")
+        );
+    }
+
+    #[test]
+    fn completion_report_reports_remote_required_blocked_without_local_bypass() {
+        let checklist = extract_completion_checklist(
+            "objective",
+            "Run all cargo builds and tests through RCH.",
+        );
+        let bundle = EvidenceBundle {
+            records: vec![record(
+                "remote_rch",
+                "cargo/build/test command",
+                "rch topology blocked before compile",
+                EvidenceRecordStatus::CapacityBlocked,
+                "direct",
+            )],
+        };
+
+        let report = build_completion_audit_report(&checklist, &bundle);
+
+        assert_eq!(
+            report.local_build_policy.state,
+            LocalBuildPolicyState::RemoteRequiredBlocked
+        );
+        assert_eq!(report.completion_verdict, CompletionVerdict::Blocked);
+        assert!(
+            !report.residual_risks.iter().any(|risk| {
+                risk.kind == "verifier_inconclusive"
+                    && risk.reason == "rerun_or_record_remote_verifier_result"
+            }),
+            "remote capacity/topology blocks should not be reported as a local bypass"
+        );
+    }
+
+    #[test]
+    fn completion_report_reports_remote_verified_policy_state() {
+        let checklist = extract_completion_checklist(
+            "objective",
+            "Run all cargo builds and tests through RCH.",
+        );
+        let bundle = EvidenceBundle {
+            records: vec![
+                record(
+                    "rch",
+                    "remote build metadata",
+                    "rch job 162 on csd",
+                    EvidenceRecordStatus::Pass,
+                    "direct",
+                ),
+                record(
+                    "remote_rch",
+                    "cargo/build/test command",
+                    "cargo test --lib completion_audit",
+                    EvidenceRecordStatus::Pass,
+                    "direct",
+                ),
+            ],
+        };
+
+        let report = build_completion_audit_report(&checklist, &bundle);
+
+        assert_eq!(
+            report.local_build_policy.state,
+            LocalBuildPolicyState::RemoteVerified
+        );
+        assert!(report.local_build_policy.repair_actions.is_empty());
+        assert_eq!(report.completion_verdict, CompletionVerdict::Complete);
+    }
+
+    #[test]
+    fn workspace_completion_audit_includes_local_build_policy_probe() {
+        let report = build_completion_audit_report_for_workspace(
+            "objective",
+            "Run all cargo builds and tests through RCH.",
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            None,
+        );
+
+        assert!(
+            matches!(
+                report.local_build_policy.state,
+                LocalBuildPolicyState::RemoteRequiredReady
+                    | LocalBuildPolicyState::RemoteRequiredBlocked
+                    | LocalBuildPolicyState::LocalDisallowedAttempt
+            ),
+            "workspace audit should include a concrete local build policy state"
+        );
+        assert!(
+            report
+                .local_build_policy
+                .evidence_records
+                .iter()
+                .any(|record| record.kind == "local_cargo_tripwire"),
+            "workspace audit should surface the read-only preflight tripwire probe"
         );
     }
 
@@ -2110,7 +2417,7 @@ mod tests {
 
         let report = build_completion_audit_report(&checklist, &bundle);
 
-        assert_eq!(report.schema, COMPLETION_AUDIT_REPORT_SCHEMA_V1);
+        assert_eq!(report.schema, COMPLETION_AUDIT_REPORT_SCHEMA_V2);
         assert_eq!(report.completion_verdict, CompletionVerdict::Complete);
         assert!(report.gaps.is_empty());
         assert!(report.residual_risks.is_empty());
@@ -2267,7 +2574,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(report.schema, COMPLETION_AUDIT_REPORT_SCHEMA_V1);
+        assert_eq!(report.schema, COMPLETION_AUDIT_REPORT_SCHEMA_V2);
         assert_eq!(report.completion_verdict, CompletionVerdict::Incomplete);
         assert!(
             report

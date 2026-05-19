@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.completion_audit.report.v2.json",
+  "title": "ee.completion_audit.report.v2",
+  "description": "Completion audit response envelope for read-only objective-to-evidence checks.",
+  "type": "object",
+  "required": ["schema", "success", "data", "degraded"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.response.v1"},
+    "success": {"type": "boolean", "const": true},
+    "data": {
+      "type": "object",
+      "required": [
+        "schema",
+        "checklist",
+        "evidenceByRequirement",
+        "gaps",
+        "residualRisks",
+        "recommendedNextActions",
+        "localBuildPolicy",
+        "completionVerdict"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.completion_audit.report.v2"},
+        "checklist": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "evidenceByRequirement": {
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        },
+        "gaps": {
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        },
+        "residualRisks": {
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        },
+        "recommendedNextActions": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "localBuildPolicy": {
+          "type": "object",
+          "required": [
+            "policy",
+            "state",
+            "requiredRemoteWrapper",
+            "evidenceRecords",
+            "repairActions"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "policy": {"type": "string", "const": "rch_only"},
+            "state": {
+              "type": "string",
+              "enum": [
+                "local_disallowed_attempt",
+                "remote_required_blocked",
+                "remote_verified",
+                "remote_required_ready",
+                "unknown"
+              ]
+            },
+            "requiredRemoteWrapper": {"type": "string"},
+            "evidenceRecords": {
+              "type": "array",
+              "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+            },
+            "repairActions": {
+              "type": "array",
+              "items": {"type": "string"}
+            }
+          }
+        },
+        "completionVerdict": {
+          "type": "string",
+          "enum": ["complete", "incomplete", "blocked", "unknown"]
+        }
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+    }
+  },
+  "field_presets": {
+    "minimal": ["completionVerdict"],
+    "summary": ["completionVerdict", "gaps", "residualRisks", "recommendedNextActions"],
+    "standard": ["checklist", "evidenceByRequirement", "gaps", "residualRisks", "recommendedNextActions", "localBuildPolicy", "completionVerdict"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}
