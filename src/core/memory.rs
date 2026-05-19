@@ -2700,8 +2700,7 @@ fn propose_curation_candidate_for_remember(
         .iter()
         .map(|memory| memory.id.clone())
         .collect::<Vec<_>>();
-    member_memory_ids.sort();
-    member_memory_ids.dedup();
+    sort_and_dedup_memory_ids_by_ulid_payload(&mut member_memory_ids);
 
     let candidate_id = remember_curation_candidate_id(&prepared.workspace_id, &member_memory_ids);
     let already_exists = connection
@@ -3199,6 +3198,11 @@ const REMEMBER_CURATION_COVERING_RULE_STOPWORDS: &[&str] = &[
     "about", "after", "and", "before", "for", "from", "into", "memory", "rule", "that", "the",
     "this", "with",
 ];
+
+fn sort_and_dedup_memory_ids_by_ulid_payload(memory_ids: &mut Vec<String>) {
+    sort_by_ulid_payload_or_lexical(memory_ids, |memory_id| memory_id.as_str());
+    memory_ids.dedup();
+}
 
 fn remember_curation_candidate_id(workspace_id: &str, member_memory_ids: &[String]) -> String {
     let mut hasher = blake3::Hasher::new();
@@ -6173,6 +6177,17 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    #[test]
+    fn curation_member_memory_ids_use_radix_payload_order_and_dedup() -> TestResult {
+        let lower = MemoryId::from_uuid(uuid::Uuid::from_u128(7100)).to_string();
+        let higher = MemoryId::from_uuid(uuid::Uuid::from_u128(7200)).to_string();
+        let mut memory_ids = vec![higher.clone(), lower.clone(), higher.clone()];
+
+        sort_and_dedup_memory_ids_by_ulid_payload(&mut memory_ids);
+
+        ensure(memory_ids, vec![lower, higher], "curation member ID order")
     }
 
     #[test]
