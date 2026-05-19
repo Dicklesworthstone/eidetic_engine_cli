@@ -6,6 +6,15 @@ use std::time::{Duration, Instant};
 
 use super::{DatabaseConfig, DbConnection, DbError, DbOperation, Result};
 
+// SnapshotPin is intentionally a read transaction, not a write-owner transaction.
+// The local adapter path is `src/db/mod.rs`: `begin_read_snapshot()` executes
+// `BEGIN DEFERRED` through `execute_read_snapshot_raw()`, whose file-backed path
+// retries SQLite contention but does not take `lock_file_write_owner_gate()`.
+// The upstream SQLModel/FrankenSQLite path is
+// `/dp/sqlmodel_rust/crates/sqlmodel-frankensqlite/src/connection.rs`:
+// `FrankenConnection::execute_raw()` forwards the SQL batch to
+// `fsqlite::Connection::execute()`. This is the primitive that lets a
+// SnapshotPin hold a stable reader view while same-process writers commit.
 const DEFAULT_MAX_SIZE: usize = 1;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_PIN_DURATION: Duration = Duration::from_secs(30);
@@ -931,6 +940,7 @@ fn trace_checkpoint_blocked_by_pin(blocker: Option<&CheckpointBlocker>) {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+    use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Barrier};
     use std::thread;
@@ -1026,6 +1036,14 @@ mod tests {
         let mut sorted = values.to_vec();
         sorted.sort_unstable();
         sorted[sorted.len() / 2]
+    }
+
+    fn read_repo_file(relative: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        must(
+            fs::read_to_string(&path),
+            &format!("{} reads", path.display()),
+        )
     }
 
     fn pool_size_eight_batch_completion_latencies(
@@ -2035,6 +2053,109 @@ mod tests {
         drop(second);
         assert_eq!(pool.stats().active, 0);
         assert_eq!(pool.stats().idle, 1);
+    }
+
+    #[test]
+    fn snapshot_primitive__documented_source_paths_match_current_adapter() {
+        let read_pool = read_repo_file("src/db/read_pool.rs");
+        let db_mod = read_repo_file("src/db/mod.rs");
+        let storage_docs = read_repo_file("docs/configuration/storage.md");
+
+        assert!(read_pool.contains("src/db/mod.rs"));
+        assert!(
+            read_pool.contains("/dp/sqlmodel_rust/crates/sqlmodel-frankensqlite/src/connection.rs")
+        );
+        assert!(storage_docs.contains("src/db/mod.rs"));
+        assert!(storage_docs.contains("sqlmodel-frankensqlite/src/connection.rs"));
+        assert!(db_mod.contains("pub(crate) fn begin_read_snapshot(&self) -> Result<()>"));
+        assert!(db_mod.contains(
+            "self.execute_read_snapshot_raw(DbOperation::BeginTransaction, \"BEGIN DEFERRED\")"
+        ));
+
+        let read_snapshot_raw = db_mod
+            .split("fn execute_read_snapshot_raw")
+            .nth(1)
+            .and_then(|tail| tail.split("fn execute_for").next())
+            .expect("execute_read_snapshot_raw block is present");
+        assert!(
+            !read_snapshot_raw.contains("lock_file_write_owner_gate"),
+            "read snapshots must not acquire the write-owner gate"
+        );
+    }
+
+    #[test]
+    fn property_read_pool_determinism() {
+        for pool_size in [1, 2, 4, 8] {
+            for pin_snapshot in [true, false] {
+                let (_tempdir, database_path, pool) = file_pool(pool_size);
+                let snapshot = must(
+                    pool.acquire_snapshot(pin_snapshot),
+                    "configured snapshot acquisition succeeds",
+                );
+                assert_eq!(snapshot_item_count(&snapshot), 1);
+
+                insert_snapshot_item(&database_path, 2, "after");
+                let expected_count = if pin_snapshot { 1 } else { 2 };
+                assert_eq!(
+                    snapshot_item_count(&snapshot),
+                    expected_count,
+                    "pool_size={pool_size} pin_snapshot={pin_snapshot}"
+                );
+
+                drop(snapshot);
+                let fresh = must(pool.acquire(), "fresh read opens after snapshot release");
+                assert_eq!(snapshot_item_count(&fresh), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn property_read_pool_snapshot_isolation() {
+        let (_tempdir, database_path, pool) = file_pool(3);
+        let first = must(pool.pin_snapshot(), "first pin opens");
+        let second = must(pool.pin_snapshot(), "second pin opens");
+
+        assert_eq!(snapshot_item_count(&first), 1);
+        assert_eq!(snapshot_item_count(&second), 1);
+
+        insert_snapshot_item(&database_path, 2, "after_two_pins");
+
+        assert_eq!(snapshot_item_count(&first), 1);
+        assert_eq!(snapshot_item_count(&second), 1);
+
+        drop(first);
+        drop(second);
+
+        let later = must(pool.pin_snapshot(), "later pin opens");
+        assert_eq!(snapshot_item_count(&later), 2);
+        insert_snapshot_item(&database_path, 3, "after_later_pin");
+        assert_eq!(snapshot_item_count(&later), 2);
+    }
+
+    #[test]
+    fn concurrent_same_process_write_during_read_pin__write_commits_read_unaffected() {
+        let (_tempdir, database_path, pool) = file_pool(2);
+        let pin = must(pool.pin_snapshot(), "reader pin opens");
+        let writer_start = Arc::new(Barrier::new(2));
+        let writer_start_for_thread = Arc::clone(&writer_start);
+        let writer_path = database_path.clone();
+
+        assert_eq!(snapshot_item_count(&pin), 1);
+        let writer = thread::spawn(move || {
+            writer_start_for_thread.wait();
+            insert_snapshot_item(&writer_path, 2, "writer_committed");
+        });
+        writer_start.wait();
+        match writer.join() {
+            Ok(()) => {}
+            Err(_) => panic!("writer thread panicked"),
+        }
+
+        assert_eq!(snapshot_item_count(&pin), 1);
+        drop(pin);
+
+        let fresh = must(pool.acquire(), "fresh read opens after writer commit");
+        assert_eq!(snapshot_item_count(&fresh), 2);
     }
 
     #[test]

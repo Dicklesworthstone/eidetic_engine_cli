@@ -39,6 +39,32 @@ against `max_pin_duration_seconds`; expired or force-released pins surface
 through `snapshot_pin_expired` and `snapshot_pin_force_released` so they cannot
 grow the WAL without a visible repair path.
 
+## Snapshot Isolation Semantics
+
+The current `SnapshotPin` primitive is source-verified in the local adapter:
+`src/db/mod.rs` implements `DbConnection::begin_read_snapshot()` as
+`BEGIN DEFERRED` through `execute_read_snapshot_raw()`. The file-backed
+`execute_read_snapshot_raw()` path retries transient SQLite contention but does
+not take the process-local write-owner gate. Upstream,
+`/dp/sqlmodel_rust/crates/sqlmodel-frankensqlite/src/connection.rs` forwards
+`FrankenConnection::execute_raw()` to `fsqlite::Connection::execute()`, so the
+pin is a normal FrankenSQLite read transaction, not a special `ee` lock.
+
+With `pin_snapshot = true`, the first read after `BEGIN DEFERRED` fixes the
+reader's view until `SnapshotPin::commit`, `SnapshotPin::rollback`, or drop-time
+rollback releases it. Same-process writers may commit through separate
+connections while an older pin continues to see the pre-commit view; a later
+pin sees the committed state. With `pin_snapshot = false`, reads are unpinned
+autocommit queries: a later query on the same handle may observe newer committed
+rows. Use `false` only for surfaces whose contract is freshness-over-stability.
+
+Raise `storage.read_pool.size` deliberately. Start at `1`, then try `2`, `4`,
+and `8` while watching `data.read_pool.acquire_wait.p99_ns`,
+`data.read_pool.ad_hoc_bypass_count`, `data.wal.bytes`, and
+`data.read_pool.active_pins`. Higher pool sizes improve concurrent read fan-out
+only when pins are released promptly; long-lived pins can keep old WAL frames
+alive and should be treated as a lifecycle bug before increasing the pool again.
+
 ## Acquire Backpressure And Bypass
 
 When all pooled read connections are active, new acquirers yield cooperatively
