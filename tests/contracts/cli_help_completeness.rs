@@ -163,6 +163,7 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
             "--no-rendered-text",
             "--no-skipped",
             "--no-meta",
+            "--include-tombstoned",
         ],
         "ee context --help",
     )?;
@@ -829,6 +830,16 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "--stream",
             "--format",
             "json",
+        ][..],
+        &[
+            "ee",
+            "context",
+            "prepare release",
+            "--ppr-weight",
+            "0.4",
+            "--include-tombstoned",
+            "--explain",
+            "--json",
         ][..],
         &[
             "ee",
