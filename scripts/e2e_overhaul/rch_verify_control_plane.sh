@@ -117,6 +117,19 @@ assert_status_unchanged() {
     fi
 }
 
+assert_files_equal() {
+    local expected="${1:?expected path required}"
+    local actual="${2:?actual path required}"
+    local context="${3:?context required}"
+    if ! cmp -s "$expected" "$actual"; then
+        printf 'deterministic output changed for %s\nfirst:\n' "$context" >&2
+        sed -n '1,120p' "$expected" >&2
+        printf 'second:\n' >&2
+        sed -n '1,120p' "$actual" >&2
+        exit 1
+    fi
+}
+
 write_fake_rch() {
     local path="${1:?fake rch path required}"
     cat > "$path" <<'FAKERCH'
@@ -136,6 +149,81 @@ fi
 printf '[RCH] remote css (0.1s)\n'
 FAKERCH
     chmod +x "$path"
+}
+
+assert_event_log_json() {
+    local path="${1:?event log path required}"
+    local expected_status="${2:?expected status required}"
+    local expected_attribution="${3:?expected attribution required}"
+    local expected_fake_count="${4:?expected fake invocation count required}"
+    local expected_exit_code="${5:?expected exit code required}"
+    local expected_manifest="${6:?expected manifest mode required}"
+    python3 - "$path" "$expected_status" "$expected_attribution" "$expected_fake_count" "$expected_exit_code" "$expected_manifest" <<'PY'
+import json
+import sys
+
+path, expected_status, expected_attribution, expected_fake_count, expected_exit_code, expected_manifest = sys.argv[1:7]
+expected_fake_count = int(expected_fake_count)
+expected_exit_code = int(expected_exit_code)
+
+with open(path, encoding="utf-8") as handle:
+    events = [json.loads(line) for line in handle if line.strip()]
+if len(events) != 1:
+    raise SystemExit(f"expected exactly one event log row in {path}, got {len(events)}")
+event = events[0]
+fields = event.get("fields") or {}
+if event.get("schema") != "ee.test_event.v1":
+    raise SystemExit(f"unexpected event schema: {event}")
+if event.get("kind") != "command_end":
+    raise SystemExit(f"unexpected event kind: {event}")
+if event.get("command") != "scripts/rch_verify.sh":
+    raise SystemExit(f"unexpected event command: {event}")
+if event.get("exit_code") != expected_exit_code:
+    raise SystemExit(f"unexpected event exit code: {event}")
+if not str(event.get("stdout_hash") or "").startswith("sha256:"):
+    raise SystemExit(f"missing stdout hash: {event}")
+if fields.get("status") != expected_status:
+    raise SystemExit(f"unexpected event status: {event}")
+if fields.get("verification_attribution") != expected_attribution:
+    raise SystemExit(f"unexpected attribution: {event}")
+if fields.get("fake_rch_invoked") != (expected_fake_count > 0):
+    raise SystemExit(f"fake_rch_invoked mismatch: {event}")
+if fields.get("fake_rch_invocation_count") != expected_fake_count:
+    raise SystemExit(f"fake_rch_invocation_count mismatch: {event}")
+if not str(fields.get("command_hash") or ""):
+    raise SystemExit(f"missing command hash: {event}")
+if not str(fields.get("cwd") or ""):
+    raise SystemExit(f"missing cwd: {event}")
+if not str(fields.get("git_head") or ""):
+    raise SystemExit(f"missing git_head: {event}")
+if not str(fields.get("git_tree") or ""):
+    raise SystemExit(f"missing git_tree: {event}")
+if not str(fields.get("dirty_status_hash") or "").startswith("sha256:"):
+    raise SystemExit(f"missing dirty_status_hash: {event}")
+if fields.get("stdout_artifact_path", "__missing__") is not None:
+    raise SystemExit(f"stdout_artifact_path should be explicit null: {event}")
+if fields.get("stderr_artifact_path", "__missing__") is not None:
+    raise SystemExit(f"stderr_artifact_path should be explicit null: {event}")
+if fields.get("schema_validation_status") != "not_run":
+    raise SystemExit(f"unexpected schema validation status: {event}")
+if not str(fields.get("deterministic_rerun_hash") or "").startswith("sha256:"):
+    raise SystemExit(f"missing deterministic rerun hash: {event}")
+if fields.get("first_failure_diagnosis") != expected_status:
+    raise SystemExit(f"unexpected first_failure_diagnosis: {event}")
+manifest_hash = fields.get("source_manifest_hash")
+if expected_manifest == "present":
+    if not str(manifest_hash or "").startswith("sha256:"):
+        raise SystemExit(f"expected source manifest hash: {event}")
+elif expected_manifest == "absent":
+    if manifest_hash is not None:
+        raise SystemExit(f"did not expect source manifest hash: {event}")
+else:
+    raise SystemExit(f"unknown manifest expectation: {expected_manifest}")
+print(json.dumps({
+    "deterministic_rerun_hash": fields.get("deterministic_rerun_hash"),
+    "stdout_hash": event.get("stdout_hash"),
+}, sort_keys=True, separators=(",", ":")))
+PY
 }
 
 assert_source_refusal_json() {
@@ -393,6 +481,7 @@ if [ "$(wc -l < "$clean_invocations" | tr -d ' ')" != "1" ]; then
     exit 1
 fi
 clean_assert="$(assert_strict_clean_json "$clean_json")"
+assert_event_log_json "$clean_event_log" "remote_pass" "strict_clean_tree" 1 0 "absent" >/dev/null
 emit_event \
     "assert" \
     "clean_checkout_strict_mode_validated" \
@@ -412,6 +501,7 @@ git_status_v2 "$strict_repo" > "$strict_before"
 strict_fake_rch="$WORK_DIR/fake-rch-strict-dirty"
 strict_invocations="$WORK_DIR/strict-dirty-rch-invocations.txt"
 strict_json="$WORK_DIR/strict-dirty-refusal.json"
+strict_repeat_json="$WORK_DIR/strict-dirty-refusal-repeat.json"
 strict_event_log="$WORK_DIR/strict-dirty-events.jsonl"
 write_fake_rch "$strict_fake_rch"
 set +e
@@ -434,6 +524,26 @@ if [ "$strict_exit" -eq 0 ]; then
     printf 'strict dirty fixture unexpectedly passed\n' >&2
     exit 1
 fi
+set +e
+FAKE_RCH_INVOCATIONS="$strict_invocations" \
+RCH_VERIFY_NOW="2026-05-16T06:40:02.000000Z" \
+RCH_VERIFY_CONFIGURED_WORKERS="css" \
+RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
+bash "$RCH_VERIFY" \
+    --bead-id bd-9ygik.3 \
+    --require-clean-tree \
+    --project-root "$strict_repo" \
+    --rch-bin "$strict_fake_rch" \
+    -- \
+    cargo test --lib rch_verify_strict_dirty_e2e > "$strict_repeat_json"
+strict_repeat_exit=$?
+set -e
+if [ "$strict_repeat_exit" -ne "$strict_exit" ]; then
+    printf 'strict dirty deterministic rerun exit drifted: first=%s second=%s\n' "$strict_exit" "$strict_repeat_exit" >&2
+    exit 1
+fi
+assert_files_equal "$strict_json" "$strict_repeat_json" "strict-dirty-source-refusal"
 assert_status_unchanged "$strict_repo" "$strict_before" "strict-dirty"
 if [ -s "$strict_invocations" ]; then
     printf 'strict dirty refusal invoked fake RCH:\n' >&2
@@ -450,6 +560,7 @@ strict_assert="$(assert_source_refusal_json \
     0 \
     rch_verify_dirty_tracked_paths \
     rch_verify_dirty_unstaged_paths)"
+assert_event_log_json "$strict_event_log" "source_state_refused" "live_dirty_checkout" 0 1 "absent" >/dev/null
 emit_event \
     "assert" \
     "strict_dirty_refusal_validated" \
@@ -508,6 +619,7 @@ staged_assert="$(assert_source_refusal_json \
     0 \
     rch_verify_dirty_tracked_paths \
     rch_verify_dirty_staged_paths)"
+assert_event_log_json "$staged_event_log" "source_state_refused" "live_dirty_checkout" 0 1 "absent" >/dev/null
 emit_event \
     "assert" \
     "staged_dirty_refusal_validated" \
@@ -564,6 +676,7 @@ secret_assert="$(assert_source_refusal_json \
     0 \
     0 \
     rch_verify_dirty_untracked_paths)"
+assert_event_log_json "$secret_event_log" "source_state_refused" "live_dirty_checkout" 0 1 "absent" >/dev/null
 emit_event \
     "assert" \
     "secret_risk_refusal_validated" \
@@ -621,6 +734,7 @@ beads_assert="$(assert_source_refusal_json \
     1 \
     0 \
     rch_verify_dirty_beads_metadata)"
+assert_event_log_json "$beads_event_log" "source_state_refused" "live_dirty_checkout" 0 1 "absent" >/dev/null
 emit_event \
     "assert" \
     "beads_export_refusal_validated" \
@@ -678,6 +792,7 @@ scratch_assert="$(assert_source_refusal_json \
     0 \
     2 \
     rch_verify_dirty_untracked_scratch)"
+assert_event_log_json "$scratch_event_log" "source_state_refused" "live_dirty_checkout" 0 1 "absent" >/dev/null
 emit_event \
     "assert" \
     "scratch_artifacts_refusal_validated" \
@@ -723,6 +838,7 @@ if [ "$(wc -l < "$committed_invocations" | tr -d ' ')" != "1" ]; then
     exit 1
 fi
 committed_assert="$(assert_committed_tree_json "$committed_json")"
+assert_event_log_json "$committed_event_log" "remote_pass" "committed_tree" 1 0 "present" >/dev/null
 emit_event \
     "assert" \
     "committed_tree_export_validated" \
@@ -783,6 +899,7 @@ if [ -s "$path_dep_invocations" ]; then
     exit 1
 fi
 path_dep_assert="$(assert_committed_tree_unsupported_json "$path_dep_json")"
+assert_event_log_json "$path_dep_event_log" "committed_tree_unsupported" "committed_tree" 0 1 "present" >/dev/null
 emit_event \
     "assert" \
     "path_dependency_unsupported_validated" \
