@@ -29,6 +29,12 @@ const TARGET_TRIPLES: &[&str] = &[
     "x86_64-pc-windows-msvc",
 ];
 
+const ALGORITHM_SEEDS: &[(&str, &str)] = &[
+    ("personalized_pagerank", "weighted-cycle-v1"),
+    ("hits", "authority-star-v1"),
+    ("minhash_rank_centrality", "incoming-density-v1"),
+];
+
 const EXPECTED_HASHES: &[ExpectedHash] = &[
     ExpectedHash {
         target_triple: "x86_64-unknown-linux-gnu",
@@ -159,16 +165,45 @@ fn trace_cross_platform_determinism(phase: &'static str, elapsed_ms: u64, degrad
 
 #[test]
 fn all_supported_targets_have_hash_rows_for_each_algorithm_seed() -> TestResult {
+    let mut seen = BTreeSet::new();
+    for entry in EXPECTED_HASHES {
+        ensure(
+            TARGET_TRIPLES.contains(&entry.target_triple),
+            format!(
+                "expected hash target_triple is not supported: {}",
+                entry.target_triple
+            ),
+        )?;
+        ensure(
+            ALGORITHM_SEEDS.contains(&(entry.algorithm, entry.seed)),
+            format!(
+                "expected hash algorithm/seed is not supported: algorithm={} seed={}",
+                entry.algorithm, entry.seed
+            ),
+        )?;
+        ensure(
+            is_canonical_blake3_hash(entry.output_hash),
+            format!(
+                "expected output_hash must be canonical blake3:<64 lowercase hex>: target={} algorithm={} seed={} hash={}",
+                entry.target_triple, entry.algorithm, entry.seed, entry.output_hash
+            ),
+        )?;
+        let key = (entry.target_triple, entry.algorithm, entry.seed);
+        ensure(
+            seen.insert(key),
+            format!(
+                "duplicate expected hash row for target={} algorithm={} seed={}",
+                entry.target_triple, entry.algorithm, entry.seed
+            ),
+        )?;
+    }
+
     for target_triple in TARGET_TRIPLES {
-        for (algorithm, seed) in [
-            ("personalized_pagerank", "weighted-cycle-v1"),
-            ("hits", "authority-star-v1"),
-            ("minhash_rank_centrality", "incoming-density-v1"),
-        ] {
+        for (algorithm, seed) in ALGORITHM_SEEDS {
             let present = EXPECTED_HASHES.iter().any(|entry| {
                 entry.target_triple == *target_triple
-                    && entry.algorithm == algorithm
-                    && entry.seed == seed
+                    && entry.algorithm == *algorithm
+                    && entry.seed == *seed
             });
             ensure(
                 present,
@@ -176,6 +211,15 @@ fn all_supported_targets_have_hash_rows_for_each_algorithm_seed() -> TestResult 
             )?;
         }
     }
+    ensure(
+        seen.len() == TARGET_TRIPLES.len() * ALGORITHM_SEEDS.len(),
+        format!(
+            "expected hash table size mismatch: got {} rows for {} targets x {} algorithm seeds",
+            seen.len(),
+            TARGET_TRIPLES.len(),
+            ALGORITHM_SEEDS.len()
+        ),
+    )?;
     Ok(())
 }
 
@@ -202,10 +246,10 @@ fn divergence_manifest_entries_are_explicit_and_reviewed() -> TestResult {
             ));
         };
         ensure(
-            entry.observed_hash.starts_with("blake3:"),
+            is_canonical_blake3_hash(&entry.observed_hash),
             format!(
-                "divergence observed_hash must be a blake3 hash for target={} algorithm={} seed={}",
-                entry.target_triple, entry.algorithm, entry.seed
+                "divergence observed_hash must be canonical blake3:<64 lowercase hex> for target={} algorithm={} seed={} hash={}",
+                entry.target_triple, entry.algorithm, entry.seed, entry.observed_hash
             ),
         )?;
         ensure(
@@ -242,13 +286,24 @@ fn divergence_manifest_entries_are_explicit_and_reviewed() -> TestResult {
 #[test]
 fn current_target_matches_pinned_graph_algorithm_hashes() -> TestResult {
     let started = Instant::now();
-    trace_cross_platform_determinism("dependency_check", 0, &[]);
+    trace_cross_platform_determinism("input", 0, &[]);
     let target = current_target_triple();
-    ensure(
-        TARGET_TRIPLES.contains(&target),
-        format!("current target {target} is not listed in TARGET_TRIPLES"),
-    )?;
+    if !TARGET_TRIPLES.contains(&target) {
+        trace_cross_platform_determinism(
+            "response",
+            started.elapsed().as_millis() as u64,
+            &["unsupported_target"],
+        );
+        return Err(format!(
+            "current target {target} is not listed in TARGET_TRIPLES"
+        ));
+    }
     let manifest = divergence_manifest()?;
+    trace_cross_platform_determinism(
+        "dependency_check",
+        started.elapsed().as_millis() as u64,
+        &[],
+    );
     let observed = [
         observed_pagerank_hash()?,
         observed_hits_hash()?,
@@ -256,11 +311,17 @@ fn current_target_matches_pinned_graph_algorithm_hashes() -> TestResult {
     ];
 
     for observed in observed {
+        trace_cross_platform_determinism("dispatch", started.elapsed().as_millis() as u64, &[]);
         let Some(expected) = EXPECTED_HASHES.iter().find(|entry| {
             entry.target_triple == target
                 && entry.algorithm == observed.algorithm
                 && entry.seed == observed.seed
         }) else {
+            trace_cross_platform_determinism(
+                "response",
+                started.elapsed().as_millis() as u64,
+                &["missing_expected_hash"],
+            );
             return Err(format!(
                 "missing expected hash for target={target} algorithm={} seed={} observed={}",
                 observed.algorithm, observed.seed, observed.output_hash
@@ -275,13 +336,17 @@ fn current_target_matches_pinned_graph_algorithm_hashes() -> TestResult {
                     && entry.observed_hash == observed.output_hash
                     && !entry.reason.trim().is_empty()
             });
-            ensure(
-                approved_divergence,
-                format!(
+            if !approved_divergence {
+                trace_cross_platform_determinism(
+                    "response",
+                    started.elapsed().as_millis() as u64,
+                    &["hash_mismatch"],
+                );
+                return Err(format!(
                     "cross-platform determinism hash mismatch for target={target} algorithm={} seed={}: expected={} observed={}",
                     observed.algorithm, observed.seed, expected.output_hash, observed.output_hash
-                ),
-            )?;
+                ));
+            }
         }
     }
     trace_cross_platform_determinism("response", started.elapsed().as_millis() as u64, &[]);
@@ -454,6 +519,16 @@ fn hash_string(hasher: &mut blake3::Hasher, value: &str) {
 
 fn hash_f64(hasher: &mut blake3::Hasher, value: f64) {
     hasher.update(&value.to_bits().to_le_bytes());
+}
+
+fn is_canonical_blake3_hash(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("blake3:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn current_target_triple() -> &'static str {
