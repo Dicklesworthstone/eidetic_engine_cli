@@ -1,0 +1,14 @@
+{
+  "schema": "ee.knowledge_skyline.v1",
+  "nodeCount": 0,
+  "rowCount": 1,
+  "trustClassCount": 0,
+  "maxOnionLayer": 0,
+  "rows": [
+    {
+      "onionLayer": 0,
+      "cells": []
+    }
+  ],
+  "communities": []
+}

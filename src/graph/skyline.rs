@@ -110,10 +110,7 @@ pub fn compute_knowledge_skyline(input: &KnowledgeSkylineInput) -> KnowledgeSkyl
             .get(&memory.memory_id)
             .copied()
             .unwrap_or(0);
-        let k_truss_rank = k_truss_ranks
-            .get(&memory.memory_id)
-            .copied()
-            .unwrap_or(0);
+        let k_truss_rank = k_truss_ranks.get(&memory.memory_id).copied().unwrap_or(0);
         let age_days = age_days(memory.created_at, input.as_of);
         metrics_by_memory.insert(
             memory.memory_id.clone(),
@@ -173,10 +170,7 @@ pub fn compute_knowledge_skyline(input: &KnowledgeSkylineInput) -> KnowledgeSkyl
     }
 }
 
-fn skyline_cell(
-    matching: &[&MemoryMetrics],
-    trust_class: &str,
-) -> KnowledgeSkylineCell {
+fn skyline_cell(matching: &[&MemoryMetrics], trust_class: &str) -> KnowledgeSkylineCell {
     let count = matching.len();
     if count == 0 {
         return KnowledgeSkylineCell {
@@ -559,5 +553,21 @@ mod tests {
 
         assert!(populated.iter().any(|cell| cell.mean_age_decile > 0.0));
         assert!(populated.iter().any(|cell| cell.ppr_percentile > 0.0));
+    }
+
+    #[test]
+    fn skyline_empty_graph_matches_golden_contract() {
+        let input = KnowledgeSkylineInput {
+            graph: Graph::new(CompatibilityMode::Strict),
+            memories: Vec::new(),
+            ppr_scores: BTreeMap::new(),
+            as_of: ts(16),
+        };
+
+        let skyline = compute_knowledge_skyline(&input);
+        let actual = serde_json::to_string_pretty(&skyline).expect("serialize skyline");
+        let expected = include_str!("../../tests/golden/skyline.snap").trim_end();
+
+        assert_eq!(actual, expected);
     }
 }
