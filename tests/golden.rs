@@ -150,6 +150,7 @@ mod tests {
         CreateWorkspaceInput, DbConnection, MemoryLinkRelation, MemoryLinkSource,
     };
     use ee::models::{ProducerMetadata, WorkspaceId};
+    use ee::policy::{SharePreviewCandidate, SharePreviewInput, build_share_preview};
     use std::path::Path;
     use std::process::{Command, Output};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2569,6 +2570,72 @@ mod tests {
         )?;
 
         connection.close().map_err(|error| error.to_string())?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn share_preview_json_contracts_match_goldens() -> TestResult {
+        let metadata_only = [SharePreviewCandidate {
+            memory_id: "mem_sharepreview00000000000001",
+            level: "procedural",
+            kind: "rule",
+            trust_class: "agent_validated",
+            material_lane: "metadata",
+            redaction_class: "metadata_only",
+            policy_action: "allow",
+            content_preview: "Metadata lane only.",
+            estimated_bytes: 24,
+            body_bytes: 0,
+            embedding_bytes: 0,
+        }];
+        let body_allowed = [
+            metadata_only[0],
+            SharePreviewCandidate {
+                memory_id: "mem_sharepreview00000000000001",
+                level: "procedural",
+                kind: "rule",
+                trust_class: "agent_validated",
+                material_lane: "body",
+                redaction_class: "body_allowed",
+                policy_action: "allow",
+                content_preview: "Redacted body lane example.",
+                estimated_bytes: 64,
+                body_bytes: 64,
+                embedding_bytes: 0,
+            },
+        ];
+        let embedding_denied = [
+            metadata_only[0],
+            SharePreviewCandidate {
+                memory_id: "mem_sharepreview00000000000001",
+                level: "procedural",
+                kind: "rule",
+                trust_class: "agent_validated",
+                material_lane: "embedding",
+                redaction_class: "embedding_denied",
+                policy_action: "deny",
+                content_preview: "Embedding lane denied.",
+                estimated_bytes: 0,
+                body_bytes: 0,
+                embedding_bytes: 0,
+            },
+        ];
+
+        for (name, candidates) in [
+            ("preview_metadata_only", metadata_only.as_slice()),
+            ("preview_body_allowed", body_allowed.as_slice()),
+            ("preview_embedding_denied", embedding_denied.as_slice()),
+        ] {
+            let report = build_share_preview(&SharePreviewInput {
+                target_peer_id: "peer_alpha",
+                candidates,
+                consent_required: true,
+                max_examples: 0,
+            });
+            let json = serde_json::to_string(&report).map_err(|error| error.to_string())?;
+            assert_json_golden("share", name, &json)?;
+        }
 
         Ok(())
     }

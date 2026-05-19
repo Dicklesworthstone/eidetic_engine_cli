@@ -1444,6 +1444,12 @@ impl EffectManifest {
                 "pack hash",
                 "Persist a context pack keyed by deterministic pack hash",
             ),
+            CommandEffect::append_only_write(
+                "share preview",
+                vec!["audit_log"],
+                "target peer id plus preview hash plus actor",
+                "Preview outbound mesh sharing without exporting data; --record-consent appends consent audit evidence",
+            ),
         ]
     }
 

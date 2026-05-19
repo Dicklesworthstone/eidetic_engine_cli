@@ -252,6 +252,7 @@ use crate::steward::{
 };
 
 mod insights;
+mod share;
 
 /// Top-level `before_help` prelude rendered by clap above the standard
 /// USAGE / OPTIONS / COMMANDS sections. Bead bd-17c65.6.3 (F3): without
@@ -761,6 +762,9 @@ pub enum Command {
     Schema(SchemaCommand),
     /// Search indexed memories and sessions.
     Search(SearchArgs),
+    /// Preview and consent-check outbound mesh sharing.
+    #[command(subcommand)]
+    Share(share::ShareCommand),
     /// Classify, compare, link (dry-run), show, or explain task situations.
     #[command(subcommand)]
     Situation(SituationCommand),
@@ -9629,6 +9633,7 @@ where
             handle_review_workspace(&cli, args, stdout, stderr)
         }
         Some(Command::Search(ref args)) => handle_search(&cli, args, stdout, stderr),
+        Some(Command::Share(ref command)) => share::handle_share(&cli, command, stdout, stderr),
         Some(Command::Situation(SituationCommand::Classify(ref args))) => {
             handle_situation_classify(&cli, args, stdout, stderr)
         }
@@ -39436,6 +39441,7 @@ const COMMAND_NAMES: &[&str] = &[
     "rule",
     "schema",
     "search",
+    "share",
     "situation",
     "status",
     "support",
@@ -39572,6 +39578,7 @@ const REHEARSE_SUBCOMMANDS: &[&str] = &["plan", "run", "inspect", "promote-plan"
 const REVIEW_SUBCOMMANDS: &[&str] = &["session"];
 const RULE_SUBCOMMANDS: &[&str] = &["add", "list", "show", "mark", "protect", "update"];
 const SCHEMA_SUBCOMMANDS: &[&str] = &["list", "export"];
+const SHARE_SUBCOMMANDS: &[&str] = &["preview"];
 const SITUATION_SUBCOMMANDS: &[&str] = &["classify", "compare", "link", "show", "explain"];
 const SUPPORT_SUBCOMMANDS: &[&str] = &["bundle", "inspect"];
 const SWARM_SUBCOMMANDS: &[&str] = &["brief"];
@@ -39998,6 +40005,9 @@ impl NormalizedInvocation {
                     SchemaCommand::Export { .. } => "schema export".to_string(),
                 },
                 Command::Search(_) => "search".to_string(),
+                Command::Share(share) => match share {
+                    share::ShareCommand::Preview(_) => "share preview".to_string(),
+                },
                 Command::Situation(sit) => match sit {
                     SituationCommand::Classify(_) => "situation classify".to_string(),
                     SituationCommand::Compare(_) => "situation compare".to_string(),
@@ -40180,6 +40190,7 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "review" => Some(REVIEW_SUBCOMMANDS),
         "rule" => Some(RULE_SUBCOMMANDS),
         "schema" => Some(SCHEMA_SUBCOMMANDS),
+        "share" => Some(SHARE_SUBCOMMANDS),
         "situation" => Some(SITUATION_SUBCOMMANDS),
         "support" => Some(SUPPORT_SUBCOMMANDS),
         "swarm" => Some(SWARM_SUBCOMMANDS),
