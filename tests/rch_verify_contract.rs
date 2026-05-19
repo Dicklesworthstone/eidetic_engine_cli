@@ -818,6 +818,134 @@ printf '[RCH] remote trj (0.1s)\n'
 }
 
 #[test]
+fn event_log_records_source_refusal_without_fake_rch_invocation() -> TestResult {
+    let workspace = seed_git_workspace("rch-event-log-source-refusal")?;
+    fs::write(workspace.join("tracked.txt"), "dirty source state\n")
+        .map_err(|error| format!("dirty tracked fixture: {error}"))?;
+    let before_status = git_status_porcelain_v2(&workspace)?;
+    let invocation_log = unique_tmp_path("rch-event-log-refusal-invocations");
+    let event_log = unique_tmp_path("rch-event-log-refusal").join("events.jsonl");
+    let fake_rch = write_fake_rch(
+        "fake-rch-event-log-refusal-should-not-run.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+printf '[RCH] remote trj (0.1s)\n'
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+    let event_log_arg = event_log
+        .to_str()
+        .ok_or_else(|| "event log path is not utf-8".to_owned())?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--bead-id",
+            "bd-9ygik.3",
+            "--require-clean-tree",
+            "--event-log",
+            event_log_arg,
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "event_log_source_refusal_smoke",
+        ],
+        &[("FAKE_RCH_INVOCATIONS", invocation_log_arg)],
+        &workspace,
+    )?;
+    assert_git_status_unchanged(&workspace, &before_status, "event-log source refusal")?;
+    if status.success() {
+        return Err(format!(
+            "dirty strict-clean tree should refuse before RCH\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    if invocation_log.exists() {
+        let invocations = fs::read_to_string(&invocation_log)
+            .map_err(|error| format!("read refusal invocation log: {error}"))?;
+        if !invocations.is_empty() {
+            return Err(format!(
+                "source refusal should not invoke fake RCH: {invocations:?}"
+            ));
+        }
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse report: {error}"))?;
+    if report["status"] != "source_state_refused"
+        || report["verification_attribution"] != "live_dirty_checkout"
+        || report["exit_code"] != 1
+        || report["dirty_summary"]["tracked_unstaged"] != 1
+    {
+        return Err(format!("unexpected source-refusal proof report: {report}"));
+    }
+    for expected in [
+        "rch_verify_dirty_tree_refused",
+        "rch_verify_dirty_tracked_paths",
+        "rch_verify_dirty_unstaged_paths",
+    ] {
+        if !source_degraded_contains(&report, expected)? || !degraded_contains(&report, expected)? {
+            return Err(format!(
+                "missing {expected} in source-refusal report: {report}"
+            ));
+        }
+    }
+
+    let event_text =
+        fs::read_to_string(&event_log).map_err(|error| format!("read event log: {error}"))?;
+    let rows = event_text.lines().collect::<Vec<_>>();
+    if rows.len() != 1 {
+        return Err(format!(
+            "expected one source-refusal event row, got {}",
+            rows.len()
+        ));
+    }
+    let event: Value =
+        serde_json::from_str(rows[0]).map_err(|error| format!("parse event row: {error}"))?;
+    if event["schema"] != "ee.test_event.v1"
+        || event["kind"] != "command_end"
+        || event["test_id"] != "bd-9ygik.3"
+        || event["exit_code"] != 1
+    {
+        return Err(format!("event row does not record refusal basics: {event}"));
+    }
+    let fields = &event["fields"];
+    if fields["status"] != "source_state_refused"
+        || fields["bead_id"] != "bd-9ygik.3"
+        || fields["verification_attribution"] != "live_dirty_checkout"
+        || fields["fake_rch_invoked"] != false
+        || fields["fake_rch_invocation_count"] != 0
+        || fields["deterministic_rerun_hash"] != report["dirty_status_hash"]
+        || fields["first_failure_diagnosis"] != "source_state_refused"
+    {
+        return Err(format!(
+            "event row missing refusal/fake-RCH fields: {event}"
+        ));
+    }
+    for expected in [
+        "rch_verify_dirty_tree_refused",
+        "rch_verify_dirty_tracked_paths",
+        "rch_verify_dirty_unstaged_paths",
+    ] {
+        if !fields["source_state_degraded_codes"]
+            .as_array()
+            .ok_or_else(|| "missing event source-state degraded codes".to_owned())?
+            .iter()
+            .any(|code| code == expected)
+        {
+            return Err(format!("event row missing {expected}: {event}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn committed_tree_manifest_ignores_dirty_checkout_and_runs_from_export() -> TestResult {
     let workspace = seed_git_workspace("rch-committed-tree-dirty")?;
     fs::write(workspace.join("tracked.txt"), "dirty live checkout\n")
