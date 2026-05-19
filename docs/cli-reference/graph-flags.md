@@ -185,6 +185,8 @@ Example:
 ```bash
 ee maintenance run --workspace . --job decay_sweep \
   --no-structural-decay --dry-run --json
+ee curate disposition --workspace . --no-structural-decay \
+  --now 2026-05-19T00:00:00Z --json
 ee job run centrality_refresh --workspace . --dry-run \
   --time-limit-ms 500 --item-limit 25 --json
 ```

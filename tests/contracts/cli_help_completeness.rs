@@ -245,6 +245,19 @@ fn proximity_health_and_maintenance_flags_are_help_discoverable() -> TestResult 
     let status_help = help_for(&["ee", "status", "--help"])?;
     assert_contains_all(&status_help, &["--skyline"], "ee status --help")?;
 
+    let curate_disposition_help = help_for(&["ee", "curate", "disposition", "--help"])?;
+    assert_contains_all(
+        &curate_disposition_help,
+        &[
+            "--database",
+            "--actor",
+            "--apply",
+            "--no-structural-decay",
+            "--now",
+        ],
+        "ee curate disposition --help",
+    )?;
+
     let maintenance_help = help_for(&["ee", "maintenance", "run", "--help"])?;
     assert_contains_all(
         &maintenance_help,
@@ -388,6 +401,15 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "decay_sweep",
             "--no-structural-decay",
             "--dry-run",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "curate",
+            "disposition",
+            "--no-structural-decay",
+            "--now",
+            "2026-05-19T00:00:00Z",
             "--json",
         ][..],
         &[
