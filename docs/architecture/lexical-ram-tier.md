@@ -1,10 +1,11 @@
 # Lexical posting-list RAM-tier pinning
 
-> **Status:** scaffold (bd-1hvzh, sub-bead of bd-21xbi).
-> The public surface, configuration, schema, and degraded-code vocabulary
-> documented here are stable. The Linux `mmap` + `MAP_POPULATE` + `mlock` /
-> `MADV_HUGEPAGE` syscall path and the wiring into the Frankensearch
-> lexical index loader are tracked under follow-up slices of bd-21xbi.
+> **Status:** scaffold plus config/failure-fixture contract (bd-1hvzh and
+> follow-up slices under bd-21xbi). The public surface, configuration, schema,
+> and degraded-code vocabulary documented here are stable. The Linux `mmap` +
+> `MAP_POPULATE` + `mlock` / `MADV_HUGEPAGE` syscall path and the wiring into
+> the Frankensearch lexical index loader are still tracked under follow-up
+> slices of bd-21xbi.
 
 ## What this optimization does
 
@@ -57,12 +58,16 @@ populate_on_open   = true     # pre-fault all pages on load
 ```
 
 Environment variables (registered in `src/config/env_registry.rs` by
-the wiring slice — not the scaffold):
+the registry/docs slice):
 
 | Variable | Equivalent | Notes |
 |---|---|---|
 | `EE_LEXICAL_INDEX_PIN_RAM` | `[search.lexical_ram_tier] enabled` | Accepts `0` or `1`. |
 | `EE_LEXICAL_INDEX_HUGEPAGES` | `[search.lexical_ram_tier] request_hugepages` | Accepts `0` or `1`; ignored without `EE_LEXICAL_INDEX_PIN_RAM=1`. |
+
+These variables are already listed in `docs/env_vars.md` and registered in
+`src/config/env_registry.rs`. The remaining wiring is the runtime config read
+and loader/status integration, not the registry row itself.
 
 ## What `ee status --json` reports
 
@@ -92,8 +97,9 @@ can write parsers ahead of the wiring slice.
 }
 ```
 
-On any non-success path the loader populates `degradedCodes` with one
-of the codes documented in `tests/fixtures/failure_modes/`:
+On any non-success path the loader populates `degradedCodes` with one of the
+codes documented in `tests/fixtures/failure_modes/`. The fixture files for the
+current scaffold vocabulary have landed:
 
 - [`lexical_ram_tier_disabled`](../../tests/fixtures/failure_modes/lexical_ram_tier_disabled.json) — operator turned the optimization off.
 - [`lexical_hugepages_unavailable`](../../tests/fixtures/failure_modes/lexical_hugepages_unavailable.json) — hugepages requested but platform/kernel cannot honor them.
@@ -116,13 +122,26 @@ bd-21xbi acceptance evidence can prove pinning eliminated first-touch
 faults. The `bytesMmapped` field tallies the on-disk size of every
 lexical index file that was successfully pinned.
 
+## Current landed artifacts
+
+- `src/search/lexical_ram_tier.rs` defines the status shape, config data
+  structures, degraded-code constants, and reader-driven env parsing scaffold.
+- `docs/schemas/ee.status.search.lexical_ram_tier.v1.json` pins the status
+  block schema for future `ee status --json` output.
+- `src/config/env_registry.rs` and `docs/env_vars.md` register
+  `EE_LEXICAL_INDEX_PIN_RAM` and `EE_LEXICAL_INDEX_HUGEPAGES`.
+- `tests/fixtures/failure_modes/lexical_ram_tier_disabled.json`,
+  `tests/fixtures/failure_modes/lexical_hugepages_unavailable.json`, and
+  `tests/fixtures/failure_modes/lexical_ram_tier_not_implemented.json`
+  document the scaffold degraded vocabulary.
+
 ## What the scaffold does NOT do (yet)
 
 - Issue any `mmap`, `mlock`, `madvise`, or `munmap` syscalls.
 - Wire into the Frankensearch lexical index loader.
 - Surface the `lexicalRamTier` block in `ee status --json`.
 - Register the `[search.lexical_ram_tier]` config section in `src/config/mod.rs`.
-- Register `EE_LEXICAL_INDEX_*` env vars in `src/config/env_registry.rs`.
+- Read the lexical RAM-tier config through the production config loader.
 - Add a `ee doctor` lexical-ram-tier readiness check.
 - Land the bench at `benches/lexical_ram_tier.rs` proving the ≥30% p99 improvement.
 - Land the e2e script at `scripts/e2e_overhaul/lexical_ram_tier.sh` with strace-based first-touch proof.
