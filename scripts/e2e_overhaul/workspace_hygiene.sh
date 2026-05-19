@@ -9,9 +9,42 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-EVENT_ROOT="${EE_WORKSPACE_HYGIENE_EVENT_DIR:-${TMPDIR:-/tmp}/ee-workspace-hygiene-e2e}"
+EVENT_ROOT_DEFAULT="${TMPDIR:-/tmp}/ee-workspace-hygiene-e2e"
+if [ -n "${EE_WORKSPACE_HYGIENE_EVENT_DIR:-}" ]; then
+    EVENT_ROOT="$EE_WORKSPACE_HYGIENE_EVENT_DIR"
+else
+    case "$EVENT_ROOT_DEFAULT" in
+        /Volumes/*) EVENT_ROOT="/tmp/ee-workspace-hygiene-e2e" ;;
+        *) EVENT_ROOT="$EVENT_ROOT_DEFAULT" ;;
+    esac
+fi
 EVENT_LOG="$EVENT_ROOT/events.jsonl"
 SYNTHETIC_RAW_VALUE="$(printf 'sk-%s-%s' "proj" "$(printf 'B%.0s' {1..40})")"
+SELF_TEST_CONTRACTS=false
+
+case "${1:-}" in
+    --self-test-contracts)
+        SELF_TEST_CONTRACTS=true
+        shift
+        ;;
+    --help | -h)
+        printf 'usage: %s [--self-test-contracts]\n' "$0"
+        exit 0
+        ;;
+    "")
+        ;;
+    *)
+        printf 'workspace_hygiene: unknown argument: %s\n' "$1" >&2
+        printf 'usage: %s [--self-test-contracts]\n' "$0" >&2
+        exit 2
+        ;;
+esac
+
+if [ "$#" -ne 0 ]; then
+    printf 'workspace_hygiene: unexpected extra arguments: %s\n' "$*" >&2
+    printf 'usage: %s [--self-test-contracts]\n' "$0" >&2
+    exit 2
+fi
 
 now_ns() {
     local seconds
@@ -116,6 +149,221 @@ require_tool git
 require_tool shasum
 require_tool mktemp
 
+write_self_test_ee_binary() {
+    local fake_binary="$EVENT_ROOT/fake-ee-workspace-hygiene"
+
+    cat > "$fake_binary" <<'FAKE_EE'
+#!/usr/bin/env bash
+set -euo pipefail
+
+for arg in "$@"; do
+    if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
+        printf 'workspace hygiene --workspace <path>\n'
+        exit 0
+    fi
+done
+
+json=false
+if [ "${1:-}" = "--json" ]; then
+    json=true
+    shift
+fi
+
+if [ "${1:-}" != "workspace" ] || [ "${2:-}" != "hygiene" ]; then
+    printf 'fake ee: expected workspace hygiene command\n' >&2
+    exit 2
+fi
+shift 2
+
+workspace=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --workspace)
+            workspace="${2:-}"
+            shift 2
+            ;;
+        --agent-name | --agent-mail-snapshot)
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+if [ -z "$workspace" ]; then
+    printf 'fake ee: missing --workspace\n' >&2
+    exit 2
+fi
+
+scenario="$(basename "$workspace")"
+scenario="${scenario#ee-workspace-hygiene-}"
+scenario="${scenario%.*}"
+
+if [ "$json" != true ]; then
+    case "$scenario" in
+        human_source_and_test)
+            printf 'Workspace hygiene:\nStage candidates:\nsource: 1 paths\ntests: 1 paths\n'
+            ;;
+        human_secret_no_leak)
+            printf 'Workspace hygiene:\nDo not commit:\n.env.local\n'
+            ;;
+        *)
+            printf 'Workspace hygiene:\n'
+            ;;
+    esac
+    exit 0
+fi
+
+jq -cn --arg scenario "$scenario" '
+    def base:
+        {
+          schema: "ee.response.v2",
+          success: true,
+          data: {
+            schema: "ee.workspace_hygiene.v1",
+            readOnly: true,
+            dirtyPathCount: 0,
+            degraded: [],
+            stagingRecommendations: [],
+            doNotCommit: [],
+            pathClassifications: [],
+            bucketCounts: [],
+            kindCounts: [],
+            secretScan: {
+              readOnly: true,
+              skippedContentScanCount: 0,
+              maxFileBytes: 65536
+            },
+            coordinationState: {
+              agentMailAvailable: false,
+              blockedByCoordination: [],
+              activeAgents: []
+            },
+            beadsState: {
+              classification: "not_present",
+              metadataSignal: "none",
+              degradedCodes: [],
+              parseErrorLine: null,
+              conflictMarkersFound: false,
+              jsonlPosture: {untracked: false}
+            }
+          }
+        };
+    base
+    | if $scenario == "clean" then
+        (.data.dirtyPathCount = 0)
+      elif $scenario == "source_and_test" then
+        (.data.dirtyPathCount = 2)
+        | (.data.stagingRecommendations = [
+            {name: "source", paths: ["src/lib.rs"]},
+            {name: "tests", paths: ["tests/workspace_hygiene.rs"]}
+          ])
+      elif $scenario == "scratch_only" then
+        (.data.dirtyPathCount = 2)
+        | (.data.doNotCommit = ["drift-report.txt", "ubs.json"])
+        | (.data.pathClassifications = [
+            {path: "drift-report.txt", bucket: "do_not_commit", kind: "scratch"},
+            {path: "ubs.json", bucket: "do_not_commit", kind: "scratch"}
+          ])
+        | (.data.bucketCounts = [{name: "do_not_commit", count: 2}])
+        | (.data.kindCounts = [{name: "scratch", count: 2}])
+      elif $scenario == "generated_only" then
+        (.data.dirtyPathCount = 3)
+        | (.data.doNotCommit = ["Cargo.lock", "target/debug/ee", "target/release/deps/foo.rlib"])
+        | (.data.pathClassifications = [
+            {path: "Cargo.lock", bucket: "do_not_commit", kind: "generated"},
+            {path: "target/debug/ee", bucket: "do_not_commit", kind: "generated"},
+            {path: "target/release/deps/foo.rlib", bucket: "do_not_commit", kind: "generated"}
+          ])
+        | (.data.bucketCounts = [{name: "do_not_commit", count: 3}])
+        | (.data.kindCounts = [{name: "generated", count: 3}])
+      elif $scenario == "scratch_generated_secret" then
+        (.data.dirtyPathCount = 3)
+        | (.data.doNotCommit = [".env.local", "Cargo.lock", "drift-report.txt"])
+        | (.data.pathClassifications = [
+            {path: ".env.local", bucket: "do_not_commit", kind: "secret_risk"},
+            {path: "Cargo.lock", bucket: "do_not_commit", kind: "generated"},
+            {path: "drift-report.txt", bucket: "do_not_commit", kind: "scratch"}
+          ])
+        | (.data.bucketCounts = [{name: "do_not_commit", count: 3}])
+        | (.data.kindCounts = [
+            {name: "generated", count: 1},
+            {name: "scratch", count: 1},
+            {name: "secret_risk", count: 1}
+          ])
+      elif $scenario == "large_binary_scan_skip" then
+        (.data.dirtyPathCount = 2)
+        | (.data.secretScan = {
+            readOnly: true,
+            skippedContentScanCount: 2,
+            maxFileBytes: 65536
+          })
+        | (.data.degraded = ["workspace_hygiene_secret_scan_skipped"])
+      elif $scenario == "active_reservation" then
+        (.data.dirtyPathCount = 1)
+        | (.data.coordinationState = {
+            agentMailAvailable: true,
+            blockedByCoordination: [
+              {
+                path: "src/lib.rs",
+                holderAgent: "OtherAgent",
+                pathPattern: "src/lib.rs",
+                exclusive: true
+              }
+            ],
+            activeAgents: [{name: "OtherAgent"}]
+          })
+      elif $scenario == "agent_mail_empty_snapshot" then
+        (.data.dirtyPathCount = 1)
+        | (.data.stagingRecommendations = [
+            {name: "source", paths: ["src/lib.rs"]}
+          ])
+        | (.data.coordinationState = {
+            agentMailAvailable: true,
+            blockedByCoordination: [],
+            activeAgents: []
+          })
+      elif $scenario == "agent_mail_unavailable" then
+        (.data.dirtyPathCount = 1)
+        | (.data.coordinationState = {
+            agentMailAvailable: false,
+            blockedByCoordination: [],
+            activeAgents: []
+          })
+        | (.data.degraded = [
+            "workspace_hygiene_agent_mail_unavailable",
+            "workspace_hygiene_partial_metadata"
+          ])
+      elif $scenario == "beads_pending_flush" then
+        (.data.beadsState.classification = "beads_db_dirty_pending_flush")
+        | (.data.beadsState.metadataSignal = "db_dirty_pending_flush")
+      elif $scenario == "beads_export_only" then
+        (.data.beadsState.classification = "beads_export_only")
+        | (.data.beadsState.metadataSignal = "unknown")
+        | (.data.beadsState.degradedCodes = ["workspace_hygiene_beads_db_divergence_unknown"])
+        | (.data.degraded = ["workspace_hygiene_beads_db_divergence_unknown"])
+      elif $scenario == "beads_parse_failure" then
+        (.data.beadsState.classification = "beads_conflict_or_parse_error")
+        | (.data.beadsState.degradedCodes = ["workspace_hygiene_beads_parse_error"])
+        | (.data.beadsState.parseErrorLine = 2)
+        | (.data.beadsState.conflictMarkersFound = false)
+        | (.data.beadsState.jsonlPosture.untracked = true)
+        | (.data.degraded = ["workspace_hygiene_beads_parse_error"])
+      else
+        error("unknown self-test scenario: " + $scenario)
+      end
+'
+FAKE_EE
+    chmod +x "$fake_binary"
+    EE_BINARY="$fake_binary"
+    export EE_BINARY
+}
+
+if [ "$SELF_TEST_CONTRACTS" = true ]; then
+    write_self_test_ee_binary
+fi
+
 if [ -z "${EE_BINARY:-}" ]; then
     if [ -n "${EE_BIN:-}" ]; then
         EE_BINARY="$EE_BIN"
@@ -135,6 +383,31 @@ if [ -z "${EE_BINARY:-}" ] || [ ! -x "$EE_BINARY" ]; then
     exit 2
 fi
 
+validate_ee_binary_surface() {
+    local help_artifact="$EVENT_ROOT/ee_binary_workspace_hygiene_help.txt"
+    local help_error="$EVENT_ROOT/ee_binary_workspace_hygiene_help.stderr.log"
+    local exit_code first_failure
+
+    set +e
+    "$EE_BINARY" workspace hygiene --help >"$help_artifact" 2>"$help_error"
+    exit_code=$?
+    set -e
+
+    if [ "$exit_code" -ne 0 ] || ! grep -E '(workspace|hygiene|--workspace)' "$help_artifact" "$help_error" >/dev/null 2>&1; then
+        first_failure="$(
+            {
+                printf 'workspace hygiene help probe failed with exit=%s; ' "$exit_code"
+                tail -n 20 "$help_error" "$help_artifact" 2>/dev/null
+            } | tr '\n' ' ' | cut -c 1-500
+        )"
+        emit_event "preflight" "setup" "blocked" 2 "$EE_BINARY workspace hygiene --help" "$REPO_ROOT" "$help_artifact" "$help_error" "failed" "$first_failure" '["ee_binary_unusable"]'
+        printf 'workspace_hygiene: ee binary does not expose workspace hygiene help; events=%s\n' "$EVENT_LOG" >&2
+        exit 2
+    fi
+}
+
+validate_ee_binary_surface
+
 WORK_ROOT="${EE_WORKSPACE_HYGIENE_TMPROOT:-${TMPDIR:-/tmp}}"
 case "$WORK_ROOT" in
     /Volumes/*) WORK_ROOT="/tmp" ;;
@@ -143,6 +416,42 @@ mkdir -p "$WORK_ROOT"
 
 hash_file() {
     shasum -a 256 "$1" | awk '{ print $1 }'
+}
+
+file_size_bytes() {
+    local path="${1:?path required}"
+    wc -c < "$path" | tr -d '[:space:]'
+}
+
+file_mtime_seconds() {
+    local path="${1:?path required}"
+    local mtime
+    if mtime="$(stat -f '%m' "$path" 2>/dev/null)" && [[ "$mtime" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$mtime"
+        return 0
+    fi
+    if mtime="$(stat -c '%Y' "$path" 2>/dev/null)" && [[ "$mtime" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$mtime"
+        return 0
+    fi
+    printf 'unavailable\n'
+}
+
+emit_workspace_file_fingerprints() {
+    local workspace="${1:?workspace required}"
+    local relative fingerprint_path size_bytes mtime_seconds sha256
+    (
+        cd "$workspace"
+        find . -type f ! -path './.git/*' -print | sed 's#^\./##' | LC_ALL=C sort |
+            while IFS= read -r relative; do
+                [ -n "$relative" ] || continue
+                fingerprint_path="./$relative"
+                size_bytes="$(file_size_bytes "$fingerprint_path")"
+                mtime_seconds="$(file_mtime_seconds "$fingerprint_path")"
+                sha256="$(hash_file "$fingerprint_path")"
+                printf '%s\t%s\t%s\t%s\n' "$relative" "$size_bytes" "$mtime_seconds" "$sha256"
+            done
+    )
 }
 
 capture_repo_state() {
@@ -174,6 +483,8 @@ capture_workspace_state() {
         git ls-files --stage
         printf '\n## untracked files\n'
         git ls-files --others --exclude-standard
+        printf '\n## file fingerprints (path, size_bytes, mtime_seconds, sha256)\n'
+        emit_workspace_file_fingerprints "$workspace"
     ) > "$artifact"
     printf '%s\t%s\n' "$(hash_file "$artifact")" "$artifact"
 }
@@ -328,6 +639,14 @@ validate_event_log_contract() {
         def only_expected_scenarios($phase): [
             $events[] | select(.phase == $phase) | .scenario
         ] | all(. as $scenario | $expected_scenarios | index($scenario));
+        def optional_string($field): ($field == null or ($field | type == "string"));
+        def sanitized_env_ok:
+            (.sanitizedEnv | type == "object")
+            and (.sanitizedEnv | keys_unsorted | sort == ["cargoTargetDir", "eeBinary", "tmpRoot", "tmpdir"])
+            and (.sanitizedEnv.tmpRoot | type == "string" and length > 0)
+            and optional_string(.sanitizedEnv.tmpdir)
+            and optional_string(.sanitizedEnv.cargoTargetDir)
+            and optional_string(.sanitizedEnv.eeBinary);
         all($events[];
             .schema == "ee.test_event.v1"
             and .beadId == "bd-1eq3l.8"
@@ -336,10 +655,22 @@ validate_event_log_contract() {
             and (.phase | type == "string" and length > 0)
             and (.status | IN("pass", "failed", "blocked"))
             and (.exitCode | type == "number")
+            and (.exitCode >= 0)
+            and (.exitCode == (.exitCode | floor))
+            and (
+                (.status == "pass" and .exitCode == 0)
+                or (.status != "pass" and .exitCode != 0)
+            )
             and (.elapsedMs | type == "number")
+            and (.elapsedMs >= 0)
+            and (.elapsedMs == (.elapsedMs | floor))
             and (.schemaValidationStatus | IN("not_run", "passed", "failed", "human_output"))
             and (.degradedCodes | type == "array" and all(.[]; type == "string" and length > 0))
-            and (.sanitizedEnv | type == "object")
+            and sanitized_env_ok
+            and (
+                .status == "pass"
+                or (.firstFailureDiagnosis | type == "string" and length > 0)
+            )
             and (
                 .phase != "scenario"
                 or (
@@ -360,7 +691,10 @@ validate_event_log_contract() {
         and has_phase("scenario_plan")
         and has_phase("schema_validation")
         and has_phase("redaction_check")
+        and has_phase("artifact_redaction_check")
         and has_phase("stdout_stderr_isolation")
+        and has_phase("artifact_reference_contract")
+        and has_phase("mutation_artifact_contract")
         and has_phase("local_cargo_guard")
         and has_phase("mutation_check")
         and has_phase("teardown")
@@ -405,10 +739,61 @@ expect_event_log_contract_rejected() {
     fi
 }
 
+expect_mutation_artifact_contract_rejected() {
+    local label="${1:?label required}"
+    local event_log="${2:?event log required}"
+    local diagnostics="$EVENT_ROOT/${label}_diagnostics.txt"
+
+    if validate_mutation_artifact_contract "$event_log" "$diagnostics" >/dev/null 2>&1; then
+        printf '%s malformed mutation artifacts were accepted: %s\n' "$label" "$event_log"
+        return 1
+    fi
+}
+
+expect_local_cargo_guard_rejected() {
+    local label="${1:?label required}"
+    local event_log="${2:?event log required}"
+    local diagnostics="$EVENT_ROOT/${label}_diagnostics.txt"
+
+    if validate_no_local_cargo_commands "$event_log" "$diagnostics" >/dev/null 2>&1; then
+        printf '%s malformed local Cargo command evidence was accepted: %s\n' "$label" "$event_log"
+        return 1
+    fi
+}
+
+expect_event_artifact_references_rejected() {
+    local label="${1:?label required}"
+    local event_log="${2:?event log required}"
+    local diagnostics="$EVENT_ROOT/${label}_diagnostics.txt"
+
+    if validate_event_artifact_references "$event_log" "$diagnostics" >/dev/null 2>&1; then
+        printf '%s malformed event artifact references were accepted: %s\n' "$label" "$event_log"
+        return 1
+    fi
+}
+
+expect_event_artifact_redaction_rejected() {
+    local label="${1:?label required}"
+    local event_log="${2:?event log required}"
+    local diagnostics="$EVENT_ROOT/${label}_diagnostics.txt"
+
+    if validate_event_artifact_redaction "$event_log" "$diagnostics" >/dev/null 2>&1; then
+        printf '%s malformed event artifact redaction was accepted: %s\n' "$label" "$event_log"
+        return 1
+    fi
+}
+
 validate_event_log_negative_contracts() {
     local diagnostics="$EVENT_ROOT/event_log_negative_contracts_diagnostics.txt"
     local failure_count=0
-    local missing_plan bad_schema_status unexpected_scenario bad_degraded_code
+    local missing_plan bad_schema_status unexpected_scenario bad_degraded_code missing_failure_diagnosis
+    local bad_pass_exit_code bad_failed_exit_code negative_exit_code fractional_exit_code
+    local negative_elapsed_ms fractional_elapsed_ms
+    local missing_sanitized_env bad_sanitized_env_shape
+    local raw_secret_artifact raw_secret_artifact_path raw_secret_late_artifact raw_secret_late_artifact_path
+    local bad_artifact_reference missing_artifact_path external_artifact_reference external_artifact_path
+    local traversal_artifact_reference traversal_artifact_path symlink_artifact_reference symlink_target_path symlink_artifact_path
+    local missing_mutation_contract bad_before_artifact bad_before_hash missing_fingerprint_artifact local_cargo_command
     : > "$diagnostics"
 
     missing_plan="$EVENT_ROOT/event_log_negative_missing_scenario_plan.jsonl"
@@ -435,9 +820,132 @@ validate_event_log_negative_contracts() {
         failure_count=$((failure_count + 1))
     fi
 
+    missing_failure_diagnosis="$EVENT_ROOT/event_log_negative_missing_failure_diagnosis.jsonl"
+    jq -s -c '. + [(.[] | select(.phase == "setup") | .status = "failed" | .exitCode = 1 | .firstFailureDiagnosis = null)] | .[]' "$EVENT_LOG" > "$missing_failure_diagnosis"
+    if ! expect_event_log_contract_rejected "missing_failure_diagnosis" "$missing_failure_diagnosis" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    bad_pass_exit_code="$EVENT_ROOT/event_log_negative_bad_pass_exit_code.jsonl"
+    jq -c 'if .phase == "scenario_plan" then .exitCode = 7 else . end' "$EVENT_LOG" > "$bad_pass_exit_code"
+    if ! expect_event_log_contract_rejected "bad_pass_exit_code" "$bad_pass_exit_code" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    bad_failed_exit_code="$EVENT_ROOT/event_log_negative_bad_failed_exit_code.jsonl"
+    jq -s -c '. + [(.[] | select(.phase == "setup") | .status = "failed" | .exitCode = 0 | .firstFailureDiagnosis = "synthetic failed event with zero exit code")] | .[]' "$EVENT_LOG" > "$bad_failed_exit_code"
+    if ! expect_event_log_contract_rejected "bad_failed_exit_code" "$bad_failed_exit_code" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    negative_exit_code="$EVENT_ROOT/event_log_negative_negative_exit_code.jsonl"
+    jq -c 'if .phase == "scenario_plan" then .exitCode = -1 else . end' "$EVENT_LOG" > "$negative_exit_code"
+    if ! expect_event_log_contract_rejected "negative_exit_code" "$negative_exit_code" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    fractional_exit_code="$EVENT_ROOT/event_log_negative_fractional_exit_code.jsonl"
+    jq -c 'if .phase == "scenario_plan" then .exitCode = 1.5 else . end' "$EVENT_LOG" > "$fractional_exit_code"
+    if ! expect_event_log_contract_rejected "fractional_exit_code" "$fractional_exit_code" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    negative_elapsed_ms="$EVENT_ROOT/event_log_negative_negative_elapsed_ms.jsonl"
+    jq -c 'if .phase == "scenario_plan" then .elapsedMs = -1 else . end' "$EVENT_LOG" > "$negative_elapsed_ms"
+    if ! expect_event_log_contract_rejected "negative_elapsed_ms" "$negative_elapsed_ms" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    fractional_elapsed_ms="$EVENT_ROOT/event_log_negative_fractional_elapsed_ms.jsonl"
+    jq -c 'if .phase == "scenario_plan" then .elapsedMs = 1.5 else . end' "$EVENT_LOG" > "$fractional_elapsed_ms"
+    if ! expect_event_log_contract_rejected "fractional_elapsed_ms" "$fractional_elapsed_ms" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    missing_sanitized_env="$EVENT_ROOT/event_log_negative_missing_sanitized_env.jsonl"
+    jq -c 'if .phase == "scenario_plan" then del(.sanitizedEnv) else . end' "$EVENT_LOG" > "$missing_sanitized_env"
+    if ! expect_event_log_contract_rejected "missing_sanitized_env" "$missing_sanitized_env" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    bad_sanitized_env_shape="$EVENT_ROOT/event_log_negative_bad_sanitized_env_shape.jsonl"
+    jq -c 'if .phase == "scenario_plan" then .sanitizedEnv = {"PATH": "/tmp/bin", "tmpRoot": ""} else . end' "$EVENT_LOG" > "$bad_sanitized_env_shape"
+    if ! expect_event_log_contract_rejected "bad_sanitized_env_shape" "$bad_sanitized_env_shape" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    raw_secret_artifact="$EVENT_ROOT/event_log_negative_raw_secret_artifact.jsonl"
+    raw_secret_artifact_path="$EVENT_ROOT/event_log_negative_raw_secret_artifact.txt"
+    printf '%s\n' "$SYNTHETIC_RAW_VALUE" > "$raw_secret_artifact_path"
+    jq -c --arg artifact "$raw_secret_artifact_path" 'if .phase == "scenario" and .scenario == "clean" then .stdoutArtifact = $artifact else . end' "$EVENT_LOG" > "$raw_secret_artifact"
+    if ! expect_event_artifact_redaction_rejected "raw_secret_artifact" "$raw_secret_artifact" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    raw_secret_late_artifact="$EVENT_ROOT/event_log_negative_raw_secret_late_artifact.jsonl"
+    raw_secret_late_artifact_path="$EVENT_ROOT/event_log_negative_raw_secret_late_artifact.txt"
+    printf '%s\n' "$SYNTHETIC_RAW_VALUE" > "$raw_secret_late_artifact_path"
+    jq -c --arg artifact "$raw_secret_late_artifact_path" 'if .phase == "local_cargo_guard" then .stdoutArtifact = $artifact else . end' "$EVENT_LOG" > "$raw_secret_late_artifact"
+    if ! expect_event_artifact_redaction_rejected "raw_secret_late_artifact" "$raw_secret_late_artifact" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    bad_artifact_reference="$EVENT_ROOT/event_log_negative_missing_artifact_reference.jsonl"
+    missing_artifact_path="$EVENT_ROOT/event_log_negative_missing_artifact_reference.$$.missing"
+    jq -c --arg artifact "$missing_artifact_path" 'if .phase == "scenario_plan" then .stdoutArtifact = $artifact else . end' "$EVENT_LOG" > "$bad_artifact_reference"
+    if ! expect_event_artifact_references_rejected "missing_artifact_reference" "$bad_artifact_reference" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    external_artifact_reference="$EVENT_ROOT/event_log_negative_external_artifact_reference.jsonl"
+    external_artifact_path="$EVENT_ROOT.external_artifact_reference.$$.txt"
+    printf 'external artifact reference should be rejected\n' > "$external_artifact_path"
+    jq -c --arg artifact "$external_artifact_path" 'if .phase == "scenario_plan" then .stdoutArtifact = $artifact else . end' "$EVENT_LOG" > "$external_artifact_reference"
+    if ! expect_event_artifact_references_rejected "external_artifact_reference" "$external_artifact_reference" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    traversal_artifact_reference="$EVENT_ROOT/event_log_negative_traversal_artifact_reference.jsonl"
+    traversal_artifact_path="$EVENT_ROOT/../event_log_negative_traversal_artifact_reference.$$.txt"
+    printf 'traversal artifact reference should be rejected\n' > "$traversal_artifact_path"
+    jq -c --arg artifact "$traversal_artifact_path" 'if .phase == "scenario_plan" then .stdoutArtifact = $artifact else . end' "$EVENT_LOG" > "$traversal_artifact_reference"
+    if ! expect_event_artifact_references_rejected "traversal_artifact_reference" "$traversal_artifact_reference" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    symlink_artifact_reference="$EVENT_ROOT/event_log_negative_symlink_artifact_reference.jsonl"
+    symlink_target_path="$EVENT_ROOT.symlink_artifact_target.$$.txt"
+    symlink_artifact_path="$EVENT_ROOT/event_log_negative_symlink_artifact_reference.$$.txt"
+    printf 'symlink artifact target should be rejected\n' > "$symlink_target_path"
+    ln -s "$symlink_target_path" "$symlink_artifact_path"
+    jq -c --arg artifact "$symlink_artifact_path" 'if .phase == "scenario_plan" then .stdoutArtifact = $artifact else . end' "$EVENT_LOG" > "$symlink_artifact_reference"
+    if ! expect_event_artifact_references_rejected "symlink_artifact_reference" "$symlink_artifact_reference" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    missing_mutation_contract="$EVENT_ROOT/event_log_negative_missing_mutation_artifact_contract.jsonl"
+    jq -c 'select(.phase != "mutation_artifact_contract")' "$EVENT_LOG" > "$missing_mutation_contract"
+    if ! expect_event_log_contract_rejected "missing_mutation_artifact_contract" "$missing_mutation_contract" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    bad_before_artifact="$EVENT_ROOT/event_log_negative_bad_before_mutation_artifact.jsonl"
+    missing_fingerprint_artifact="$EVENT_ROOT/event_log_negative_missing_fingerprint_rows.txt"
+    printf '## git status --short\n' > "$missing_fingerprint_artifact"
+    jq -c --arg artifact "$missing_fingerprint_artifact" 'if .phase == "scenario" and .scenario == "clean" then .beforeMutationArtifact = $artifact else . end' "$EVENT_LOG" > "$bad_before_artifact"
+    if ! expect_mutation_artifact_contract_rejected "bad_before_mutation_artifact" "$bad_before_artifact" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
+    bad_before_hash="$EVENT_ROOT/event_log_negative_bad_before_mutation_hash.jsonl"
+    jq -c 'if .phase == "scenario" and .scenario == "clean" then .beforeMutationHash = "not-the-artifact-hash" else . end' "$EVENT_LOG" > "$bad_before_hash"
+    if ! expect_mutation_artifact_contract_rejected "bad_before_mutation_hash" "$bad_before_hash" >> "$diagnostics"; then
+        failure_count=$((failure_count + 1))
+    fi
+
     local_cargo_command="$EVENT_ROOT/event_log_negative_local_cargo_command.jsonl"
     jq -c 'if .phase == "scenario" and .scenario == "clean" then .command = "cargo test --lib workspace_hygiene -- --nocapture" else . end' "$EVENT_LOG" > "$local_cargo_command"
-    if ! expect_event_log_contract_rejected "local_cargo_command" "$local_cargo_command" >> "$diagnostics"; then
+    if ! expect_local_cargo_guard_rejected "local_cargo_command" "$local_cargo_command" >> "$diagnostics"; then
         failure_count=$((failure_count + 1))
     fi
 
@@ -502,6 +1010,185 @@ validate_stdout_stderr_isolation() {
 
     if [ "$failure_count" -ne 0 ]; then
         printf 'stdout/stderr isolation check failed; diagnostics=%s\n' "$diagnostics"
+        return 1
+    fi
+}
+
+validate_event_artifact_redaction() {
+    local event_log="${1:-$EVENT_LOG}"
+    local diagnostics="${2:-$EVENT_ROOT/event_artifact_redaction_diagnostics.txt}"
+    local artifact_count=0
+    local failure_count=0
+    : > "$diagnostics"
+
+    local scenario phase field artifact
+    while IFS=$'\t' read -r scenario phase field artifact; do
+        artifact_count=$((artifact_count + 1))
+        if [ -z "$artifact" ] || [ ! -f "$artifact" ]; then
+            printf '%s %s %s artifact missing before redaction scan: %s\n' "$scenario" "$phase" "$field" "$artifact" >> "$diagnostics"
+            failure_count=$((failure_count + 1))
+            continue
+        fi
+        if grep -F "$SYNTHETIC_RAW_VALUE" "$artifact" >/dev/null 2>&1; then
+            printf '%s %s %s artifact leaked raw synthetic secret: %s\n' "$scenario" "$phase" "$field" "$artifact" >> "$diagnostics"
+            failure_count=$((failure_count + 1))
+        fi
+    done < <(jq -r '
+        . as $event
+        | ["stdoutArtifact", "stderrArtifact", "beforeMutationArtifact", "afterMutationArtifact"][] as $field
+        | select($event[$field] != null)
+        | [$event.scenario, $event.phase, $field, $event[$field]]
+        | @tsv
+    ' "$event_log")
+
+    if [ "$artifact_count" -eq 0 ]; then
+        printf 'no event artifact references found in %s\n' "$event_log" >> "$diagnostics"
+        printf 'event artifact redaction check failed; diagnostics=%s\n' "$diagnostics"
+        return 1
+    fi
+
+    if [ "$failure_count" -ne 0 ]; then
+        printf 'event artifact redaction check failed; diagnostics=%s\n' "$diagnostics"
+        return 1
+    fi
+}
+
+validate_event_artifact_references() {
+    local event_log="${1:-$EVENT_LOG}"
+    local diagnostics="${2:-$EVENT_ROOT/event_artifact_reference_diagnostics.txt}"
+    local artifact_count=0
+    local failure_count=0
+    local event_root_physical
+    : > "$diagnostics"
+
+    if ! event_root_physical="$(cd -P "$EVENT_ROOT" 2>/dev/null && pwd -P)"; then
+        printf 'event root cannot be resolved: %s\n' "$EVENT_ROOT" >> "$diagnostics"
+        printf 'event artifact reference check failed; diagnostics=%s\n' "$diagnostics"
+        return 1
+    fi
+
+    local scenario phase field artifact artifact_dir artifact_name artifact_dir_physical artifact_physical
+    while IFS=$'\t' read -r scenario phase field artifact; do
+        artifact_count=$((artifact_count + 1))
+        if [ -z "$artifact" ]; then
+            printf '%s %s %s artifact reference is empty\n' "$scenario" "$phase" "$field" >> "$diagnostics"
+            failure_count=$((failure_count + 1))
+            continue
+        fi
+        case "$artifact" in
+            "$EVENT_ROOT"/*) ;;
+            *)
+                printf '%s %s %s artifact reference escapes event root: %s\n' "$scenario" "$phase" "$field" "$artifact" >> "$diagnostics"
+                failure_count=$((failure_count + 1))
+                continue
+                ;;
+        esac
+        artifact_dir="$(dirname "$artifact")"
+        artifact_name="$(basename "$artifact")"
+        if ! artifact_dir_physical="$(cd -P "$artifact_dir" 2>/dev/null && pwd -P)"; then
+            printf '%s %s %s artifact directory cannot be resolved: %s\n' "$scenario" "$phase" "$field" "$artifact_dir" >> "$diagnostics"
+            failure_count=$((failure_count + 1))
+            continue
+        fi
+        artifact_physical="$artifact_dir_physical/$artifact_name"
+        case "$artifact_physical" in
+            "$event_root_physical"/*) ;;
+            *)
+                printf '%s %s %s artifact physical path escapes event root: %s -> %s\n' "$scenario" "$phase" "$field" "$artifact" "$artifact_physical" >> "$diagnostics"
+                failure_count=$((failure_count + 1))
+                continue
+                ;;
+        esac
+        if [ ! -e "$artifact" ]; then
+            printf '%s %s %s artifact reference does not exist: %s\n' "$scenario" "$phase" "$field" "$artifact" >> "$diagnostics"
+            failure_count=$((failure_count + 1))
+            continue
+        fi
+        if [ -L "$artifact" ] || [ ! -f "$artifact" ]; then
+            printf '%s %s %s artifact reference is not a regular file: %s\n' "$scenario" "$phase" "$field" "$artifact" >> "$diagnostics"
+            failure_count=$((failure_count + 1))
+        fi
+    done < <(jq -r '
+        . as $event
+        | ["stdoutArtifact", "stderrArtifact", "beforeMutationArtifact", "afterMutationArtifact"][] as $field
+        | select($event[$field] != null)
+        | [$event.scenario, $event.phase, $field, $event[$field]]
+        | @tsv
+    ' "$event_log")
+
+    if [ "$artifact_count" -eq 0 ]; then
+        printf 'no event artifact references found in %s\n' "$event_log" >> "$diagnostics"
+        printf 'event artifact reference check failed; diagnostics=%s\n' "$diagnostics"
+        return 1
+    fi
+
+    if [ "$failure_count" -ne 0 ]; then
+        printf 'event artifact reference check failed; diagnostics=%s\n' "$diagnostics"
+        return 1
+    fi
+}
+
+fingerprint_artifact_has_rows() {
+    local artifact="${1:?artifact required}"
+    awk '
+        /^## file fingerprints \(path, size_bytes, mtime_seconds, sha256\)$/ {
+            seen_header = 1
+            next
+        }
+        seen_header && NF >= 4 {
+            row_count += 1
+        }
+        END {
+            exit(seen_header && row_count > 0 ? 0 : 1)
+        }
+    ' "$artifact"
+}
+
+validate_mutation_artifact_contract() {
+    local event_log="${1:-$EVENT_LOG}"
+    local diagnostics="${2:-$EVENT_ROOT/mutation_artifact_contract_diagnostics.txt}"
+    local scenario_count=0
+    local failure_count=0
+    : > "$diagnostics"
+
+    local scenario before_hash after_hash before_artifact after_artifact
+    while IFS=$'\t' read -r scenario before_hash after_hash before_artifact after_artifact; do
+        scenario_count=$((scenario_count + 1))
+        for artifact_label in before after; do
+            local artifact expected_hash actual_hash
+            if [ "$artifact_label" = "before" ]; then
+                artifact="$before_artifact"
+                expected_hash="$before_hash"
+            else
+                artifact="$after_artifact"
+                expected_hash="$after_hash"
+            fi
+
+            if [ ! -s "$artifact" ]; then
+                printf '%s %s mutation artifact missing or empty: %s\n' "$scenario" "$artifact_label" "$artifact" >> "$diagnostics"
+                failure_count=$((failure_count + 1))
+                continue
+            fi
+            if ! fingerprint_artifact_has_rows "$artifact"; then
+                printf '%s %s mutation artifact lacks file fingerprint rows: %s\n' "$scenario" "$artifact_label" "$artifact" >> "$diagnostics"
+                failure_count=$((failure_count + 1))
+            fi
+            actual_hash="$(hash_file "$artifact")"
+            if [ "$expected_hash" != "$actual_hash" ]; then
+                printf '%s %s mutation hash mismatch: expected=%s actual=%s artifact=%s\n' "$scenario" "$artifact_label" "$expected_hash" "$actual_hash" "$artifact" >> "$diagnostics"
+                failure_count=$((failure_count + 1))
+            fi
+        done
+    done < <(jq -r '. | select(.phase == "scenario") | [.scenario, .beforeMutationHash, .afterMutationHash, .beforeMutationArtifact, .afterMutationArtifact] | @tsv' "$event_log")
+
+    if [ "$scenario_count" -eq 0 ]; then
+        printf 'no scenario events found in %s\n' "$event_log" >> "$diagnostics"
+        printf 'mutation artifact contract check failed; diagnostics=%s\n' "$diagnostics"
+        return 1
+    fi
+
+    if [ "$failure_count" -ne 0 ]; then
+        printf 'mutation artifact contract check failed; diagnostics=%s\n' "$diagnostics"
         return 1
     fi
 }
@@ -806,6 +1493,14 @@ if [ -n "$EVENT_LOG_REDACTION_FAILURE" ]; then
 fi
 emit_event "event_log_redaction" "redaction_check" "pass" 0 "grep event log for raw synthetic secret" "$REPO_ROOT" "$EVENT_LOG" "" "passed" "" "[]" "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
 
+EVENT_ARTIFACT_REDACTION_FAILURE="$(validate_event_artifact_redaction || true)"
+if [ -n "$EVENT_ARTIFACT_REDACTION_FAILURE" ]; then
+    emit_event "event_artifact_redaction" "artifact_redaction_check" "failed" 1 "grep event artifacts for raw synthetic secret" "$REPO_ROOT" "$EVENT_ROOT/event_artifact_redaction_diagnostics.txt" "" "failed" "$EVENT_ARTIFACT_REDACTION_FAILURE" '["workspace_hygiene_redaction_check_failed"]' "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
+    printf '%s\n' "$EVENT_ARTIFACT_REDACTION_FAILURE" >&2
+    exit 1
+fi
+emit_event "event_artifact_redaction" "artifact_redaction_check" "pass" 0 "grep event artifacts for raw synthetic secret" "$REPO_ROOT" "$EVENT_ROOT/event_artifact_redaction_diagnostics.txt" "" "passed" "" "[]" "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
+
 STDIO_FAILURE="$(validate_stdout_stderr_isolation || true)"
 if [ -n "$STDIO_FAILURE" ]; then
     emit_event "stdout_stderr_isolation" "stdout_stderr_isolation" "failed" 1 "validate stdout/stderr artifact separation" "$REPO_ROOT" "$EVENT_ROOT/stdout_stderr_isolation_diagnostics.txt" "" "failed" "$STDIO_FAILURE" '["workspace_hygiene_stdout_stderr_isolation_failed"]' "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
@@ -813,6 +1508,22 @@ if [ -n "$STDIO_FAILURE" ]; then
     exit 1
 fi
 emit_event "stdout_stderr_isolation" "stdout_stderr_isolation" "pass" 0 "validate stdout/stderr artifact separation" "$REPO_ROOT" "$EVENT_ROOT/stdout_stderr_isolation_diagnostics.txt" "" "passed" "" "[]" "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
+
+ARTIFACT_REFERENCE_FAILURE="$(validate_event_artifact_references || true)"
+if [ -n "$ARTIFACT_REFERENCE_FAILURE" ]; then
+    emit_event "artifact_reference_contract" "artifact_reference_contract" "failed" 1 "validate event artifact references exist" "$REPO_ROOT" "$EVENT_ROOT/event_artifact_reference_diagnostics.txt" "" "failed" "$ARTIFACT_REFERENCE_FAILURE" '["workspace_hygiene_artifact_reference_contract_failed"]' "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
+    printf '%s\n' "$ARTIFACT_REFERENCE_FAILURE" >&2
+    exit 1
+fi
+emit_event "artifact_reference_contract" "artifact_reference_contract" "pass" 0 "validate event artifact references exist" "$REPO_ROOT" "$EVENT_ROOT/event_artifact_reference_diagnostics.txt" "" "passed" "" "[]" "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
+
+MUTATION_ARTIFACT_FAILURE="$(validate_mutation_artifact_contract || true)"
+if [ -n "$MUTATION_ARTIFACT_FAILURE" ]; then
+    emit_event "mutation_artifact_contract" "mutation_artifact_contract" "failed" 1 "validate scenario mutation artifacts include file fingerprints" "$REPO_ROOT" "$EVENT_ROOT/mutation_artifact_contract_diagnostics.txt" "" "failed" "$MUTATION_ARTIFACT_FAILURE" '["workspace_hygiene_mutation_artifact_contract_failed"]' "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
+    printf '%s\n' "$MUTATION_ARTIFACT_FAILURE" >&2
+    exit 1
+fi
+emit_event "mutation_artifact_contract" "mutation_artifact_contract" "pass" 0 "validate scenario mutation artifacts include file fingerprints" "$REPO_ROOT" "$EVENT_ROOT/mutation_artifact_contract_diagnostics.txt" "" "passed" "" "[]" "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
 
 LOCAL_CARGO_FAILURE="$(validate_no_local_cargo_commands || true)"
 if [ -n "$LOCAL_CARGO_FAILURE" ]; then
@@ -846,4 +1557,31 @@ if [ -n "$EVENT_LOG_FAILURE" ]; then
     exit 1
 fi
 emit_event "event_log_contract" "schema_check" "pass" 0 "jq validate ee.test_event.v1 events" "$REPO_ROOT" "$EVENT_LOG" "" "passed" "" "[]" "$REPO_BEFORE_HASH" "$REPO_AFTER_HASH" "$REPO_BEFORE_ARTIFACT" "$REPO_AFTER_ARTIFACT"
-printf 'workspace_hygiene: all scenarios passed; events=%s\n' "$EVENT_LOG" >&2
+
+FINAL_ARTIFACT_REDACTION_FAILURE="$(validate_event_artifact_redaction "$EVENT_LOG" "$EVENT_ROOT/final_event_artifact_redaction_diagnostics.txt" || true)"
+if [ -n "$FINAL_ARTIFACT_REDACTION_FAILURE" ]; then
+    emit_event "event_artifact_redaction_final" "artifact_redaction_check" "failed" 1 "grep complete event artifacts for raw synthetic secret" "$REPO_ROOT" "" "" "failed" "$FINAL_ARTIFACT_REDACTION_FAILURE" '["workspace_hygiene_redaction_check_failed"]' "" "" "" ""
+    printf '%s\n' "$FINAL_ARTIFACT_REDACTION_FAILURE" >&2
+    exit 1
+fi
+emit_event "event_artifact_redaction_final" "artifact_redaction_check" "pass" 0 "grep complete event artifacts for raw synthetic secret" "$REPO_ROOT" "" "" "passed" "" "[]" "" "" "" ""
+
+FINAL_ARTIFACT_REFERENCE_FAILURE="$(validate_event_artifact_references "$EVENT_LOG" "$EVENT_ROOT/final_event_artifact_reference_diagnostics.txt" || true)"
+if [ -n "$FINAL_ARTIFACT_REFERENCE_FAILURE" ]; then
+    emit_event "artifact_reference_contract_final" "artifact_reference_contract" "failed" 1 "validate complete event artifact references" "$REPO_ROOT" "" "" "failed" "$FINAL_ARTIFACT_REFERENCE_FAILURE" '["workspace_hygiene_artifact_reference_contract_failed"]' "" "" "" ""
+    printf '%s\n' "$FINAL_ARTIFACT_REFERENCE_FAILURE" >&2
+    exit 1
+fi
+emit_event "artifact_reference_contract_final" "artifact_reference_contract" "pass" 0 "validate complete event artifact references" "$REPO_ROOT" "" "" "passed" "" "[]" "" "" "" ""
+
+FINAL_EVENT_LOG_CONTRACT_FAILURE="$(validate_event_log_contract "$EVENT_LOG" "$EVENT_ROOT/final_event_log_contract_diagnostics.txt" || true)"
+if [ -n "$FINAL_EVENT_LOG_CONTRACT_FAILURE" ]; then
+    printf '%s\n' "$FINAL_EVENT_LOG_CONTRACT_FAILURE" >&2
+    exit 1
+fi
+
+if [ "$SELF_TEST_CONTRACTS" = true ]; then
+    printf 'workspace_hygiene: self-test contracts passed; events=%s\n' "$EVENT_LOG" >&2
+else
+    printf 'workspace_hygiene: all scenarios passed; events=%s\n' "$EVENT_LOG" >&2
+fi
