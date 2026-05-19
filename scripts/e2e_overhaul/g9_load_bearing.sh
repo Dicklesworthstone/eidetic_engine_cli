@@ -28,6 +28,16 @@ if printf '%s' "$INSIGHTS_JSON" | jq . >/dev/null 2>&1; then
     assert_jq "$INSIGHTS_JSON" '.data.sections[0].items | type' "array" "g9_load_bearing_items_array"
     LOAD_BEARING_ITEMS=$(printf '%s' "$INSIGHTS_JSON" | jq '(.data.sections[0].items // []) | length' 2>/dev/null || echo 0)
     e2e_log_assert_num "$LOAD_BEARING_ITEMS" -ge 1 "g9_load_bearing_item_present"
+    assert_jq "$INSIGHTS_JSON" '.data.sections[0].items[0].rank >= 1' "true" "g9_load_bearing_item_rank_valid"
+    assert_jq_nonempty "$INSIGHTS_JSON" '.data.sections[0].items[0].memoryId // empty' "g9_load_bearing_item_memory_id"
+    assert_jq "$INSIGHTS_JSON" '(.data.sections[0].items[0].loadBearingScore | type)' "number" "g9_load_bearing_score_number"
+    assert_jq "$INSIGHTS_JSON" '.data.sections[0].items[0].loadBearingScore >= 0' "true" "g9_load_bearing_score_nonnegative"
+    assert_jq "$INSIGHTS_JSON" '(.data.sections[0].items[0].citingRuleCount | type)' "number" "g9_load_bearing_citing_rule_count_number"
+    assert_jq "$INSIGHTS_JSON" '.data.sections[0].items[0].citingRuleCount >= 0' "true" "g9_load_bearing_citing_rule_count_nonnegative"
+    assert_jq "$INSIGHTS_JSON" '.data.sections[0].items[0].interpretation // empty' "load_bearing" "g9_load_bearing_interpretation"
+    assert_jq "$INSIGHTS_JSON" '.data.sections[0].items[0].evidence.schema // empty' "ee.graph.hits.v1" "g9_load_bearing_evidence_schema"
+    assert_jq "$INSIGHTS_JSON" '.data.sections[0].items[0].evidence.algorithm // empty' "bipartite_hits" "g9_load_bearing_evidence_algorithm"
+    assert_jq "$INSIGHTS_JSON" '(.data.sections[0].items[0].evidence.snapshotVersion | type)' "number" "g9_load_bearing_evidence_snapshot_version_number"
     SNAPSHOT_VERSION=$(printf '%s' "$INSIGHTS_JSON" | jq -r '.. | objects | .snapshotVersion? // .snapshot_version? // empty' 2>/dev/null | head -n 1)
 else
     todo_assert "g9_load_bearing_surface_available" "bd-2jl2.4" "ee insights --section loadBearingMemories is not fully available yet."
