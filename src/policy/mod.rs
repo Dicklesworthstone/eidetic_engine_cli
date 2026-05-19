@@ -8,6 +8,8 @@ pub mod memory_decay;
 pub mod security_profile;
 pub mod trust_decay;
 
+use std::collections::{BTreeMap, BTreeSet};
+
 pub use memory_decay::{
     DEFAULT_DECAY_DEMOTE_THRESHOLD, DEFAULT_DECAY_FORGET_THRESHOLD, MEMORY_DECAY_SOURCE,
     MemoryDecayAction, MemoryDecayEvaluation, MemoryDecayHalfLives, MemoryDecaySettings,
@@ -90,6 +92,215 @@ pub fn redaction_placeholder(scanner_name: &str) -> String {
     format!("[REDACTED:{scanner_name}]")
 }
 pub const TRUST_PROMOTION_EVIDENCE_REJECTED_CODE: &str = "trust_promotion_evidence_rejected";
+pub const SHARE_PREVIEW_SCHEMA_V1: &str = "ee.mesh.share_preview.v1";
+pub const SHARE_PREVIEW_CONSENT_AUDIT_SCHEMA_V1: &str = "ee.mesh.share_consent_audit.v1";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SharePreviewCandidate<'a> {
+    pub memory_id: &'a str,
+    pub level: &'a str,
+    pub kind: &'a str,
+    pub trust_class: &'a str,
+    pub material_lane: &'a str,
+    pub redaction_class: &'a str,
+    pub policy_action: &'a str,
+    pub content_preview: &'a str,
+    pub estimated_bytes: u64,
+    pub body_bytes: u64,
+    pub embedding_bytes: u64,
+}
+
+impl SharePreviewCandidate<'_> {
+    #[must_use]
+    pub fn would_export(self) -> bool {
+        self.policy_action == "allow"
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SharePreviewInput<'a> {
+    pub target_peer_id: &'a str,
+    pub candidates: &'a [SharePreviewCandidate<'a>],
+    pub consent_required: bool,
+    pub max_examples: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharePreviewReport {
+    pub schema: &'static str,
+    pub target_peer_id: String,
+    pub export_performed: bool,
+    pub consent_required: bool,
+    pub total_candidates: u64,
+    pub exportable_count: u64,
+    pub denied_count: u64,
+    pub estimated_bytes: u64,
+    pub estimated_body_bytes: u64,
+    pub estimated_embedding_bytes: u64,
+    pub counts_by_level: BTreeMap<String, u64>,
+    pub counts_by_kind: BTreeMap<String, u64>,
+    pub counts_by_trust_class: BTreeMap<String, u64>,
+    pub counts_by_material_lane: BTreeMap<String, u64>,
+    pub counts_by_redaction_class: BTreeMap<String, u64>,
+    pub counts_by_policy_action: BTreeMap<String, u64>,
+    pub denied_classes: Vec<String>,
+    pub examples: Vec<SharePreviewExample>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharePreviewExample {
+    pub memory_id: String,
+    pub level: String,
+    pub kind: String,
+    pub trust_class: String,
+    pub material_lane: String,
+    pub redaction_class: String,
+    pub policy_action: String,
+    pub preview_hash: String,
+    pub redacted_preview: String,
+    pub redaction_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharePreviewConsentAudit {
+    pub schema: &'static str,
+    pub target_peer_id: String,
+    pub preview_hash: String,
+    pub consent_recorded: bool,
+    pub export_after_consent: bool,
+    pub dry_run: bool,
+    pub reason: String,
+}
+
+#[must_use]
+pub fn build_share_preview(input: &SharePreviewInput<'_>) -> SharePreviewReport {
+    let mut candidates = input.candidates.iter().copied().collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.memory_id
+            .cmp(right.memory_id)
+            .then_with(|| left.material_lane.cmp(right.material_lane))
+            .then_with(|| left.policy_action.cmp(right.policy_action))
+            .then_with(|| left.redaction_class.cmp(right.redaction_class))
+    });
+
+    let mut report = SharePreviewReport {
+        schema: SHARE_PREVIEW_SCHEMA_V1,
+        target_peer_id: input.target_peer_id.to_owned(),
+        export_performed: false,
+        consent_required: input.consent_required,
+        total_candidates: candidates.len() as u64,
+        exportable_count: 0,
+        denied_count: 0,
+        estimated_bytes: 0,
+        estimated_body_bytes: 0,
+        estimated_embedding_bytes: 0,
+        counts_by_level: BTreeMap::new(),
+        counts_by_kind: BTreeMap::new(),
+        counts_by_trust_class: BTreeMap::new(),
+        counts_by_material_lane: BTreeMap::new(),
+        counts_by_redaction_class: BTreeMap::new(),
+        counts_by_policy_action: BTreeMap::new(),
+        denied_classes: Vec::new(),
+        examples: Vec::new(),
+    };
+    let mut denied_classes = BTreeSet::new();
+
+    for candidate in &candidates {
+        bump_share_preview_count(&mut report.counts_by_level, candidate.level);
+        bump_share_preview_count(&mut report.counts_by_kind, candidate.kind);
+        bump_share_preview_count(&mut report.counts_by_trust_class, candidate.trust_class);
+        bump_share_preview_count(&mut report.counts_by_material_lane, candidate.material_lane);
+        bump_share_preview_count(
+            &mut report.counts_by_redaction_class,
+            candidate.redaction_class,
+        );
+        bump_share_preview_count(&mut report.counts_by_policy_action, candidate.policy_action);
+
+        if candidate.would_export() {
+            report.exportable_count += 1;
+            report.estimated_bytes = report
+                .estimated_bytes
+                .saturating_add(candidate.estimated_bytes);
+            report.estimated_body_bytes = report
+                .estimated_body_bytes
+                .saturating_add(candidate.body_bytes);
+            report.estimated_embedding_bytes = report
+                .estimated_embedding_bytes
+                .saturating_add(candidate.embedding_bytes);
+        } else {
+            report.denied_count += 1;
+            denied_classes.insert(format!("policy_action:{}", candidate.policy_action));
+            denied_classes.insert(format!("material_lane:{}", candidate.material_lane));
+            denied_classes.insert(format!("redaction_class:{}", candidate.redaction_class));
+        }
+
+        if report.examples.len() < input.max_examples {
+            report.examples.push(share_preview_example(candidate));
+        }
+    }
+
+    report.denied_classes = denied_classes.into_iter().collect();
+    report
+}
+
+#[must_use]
+pub fn share_preview_hash(report: &SharePreviewReport) -> String {
+    match serde_json::to_vec(report) {
+        Ok(bytes) => format!("blake3:{}", blake3::hash(&bytes).to_hex()),
+        Err(error) => format!("serialization_error:{error}"),
+    }
+}
+
+#[must_use]
+pub fn share_preview_consent_audit(
+    report: &SharePreviewReport,
+    consent_recorded: bool,
+    export_after_consent: bool,
+    reason: impl Into<String>,
+) -> SharePreviewConsentAudit {
+    SharePreviewConsentAudit {
+        schema: SHARE_PREVIEW_CONSENT_AUDIT_SCHEMA_V1,
+        target_peer_id: report.target_peer_id.clone(),
+        preview_hash: share_preview_hash(report),
+        consent_recorded,
+        export_after_consent,
+        dry_run: !export_after_consent,
+        reason: reason.into(),
+    }
+}
+
+fn bump_share_preview_count(counts: &mut BTreeMap<String, u64>, key: &str) {
+    *counts.entry(key.to_owned()).or_insert(0) += 1;
+}
+
+fn share_preview_example(candidate: &SharePreviewCandidate<'_>) -> SharePreviewExample {
+    let redaction = redact_secret_like_content(candidate.content_preview);
+    SharePreviewExample {
+        memory_id: candidate.memory_id.to_owned(),
+        level: candidate.level.to_owned(),
+        kind: candidate.kind.to_owned(),
+        trust_class: candidate.trust_class.to_owned(),
+        material_lane: candidate.material_lane.to_owned(),
+        redaction_class: candidate.redaction_class.to_owned(),
+        policy_action: candidate.policy_action.to_owned(),
+        preview_hash: share_preview_content_hash(candidate.content_preview),
+        redacted_preview: redaction_placeholder("share_preview_content"),
+        redaction_reasons: redaction
+            .redacted_reasons
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+    }
+}
+
+fn share_preview_content_hash(content: &str) -> String {
+    let digest = blake3::hash(content.as_bytes());
+    let hex = digest.to_hex();
+    format!("blake3:{}", &hex[..16])
+}
 
 const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
     SecretKeyPattern {
@@ -1948,8 +2159,10 @@ mod tests {
 
     use super::{
         INSTRUCTION_LIKE_SCORE_THRESHOLD, InstructionRisk, InstructionSignalKind,
-        TRUST_PROMOTION_EVIDENCE_REJECTED_CODE, detect_instruction_like_content,
-        redact_secret_like_content, redaction_placeholder, subsystem_name,
+        SHARE_PREVIEW_CONSENT_AUDIT_SCHEMA_V1, SHARE_PREVIEW_SCHEMA_V1, SharePreviewCandidate,
+        SharePreviewInput, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE, build_share_preview,
+        detect_instruction_like_content, redact_secret_like_content, redaction_placeholder,
+        share_preview_consent_audit, share_preview_hash, subsystem_name,
         validate_trust_promotion_evidence, workspace_secret_risk_evidence,
         workspace_secret_risk_overrides_safe_classification,
     };
@@ -1957,6 +2170,112 @@ mod tests {
     #[test]
     fn subsystem_name_is_stable() {
         assert_eq!(subsystem_name(), "policy");
+    }
+
+    #[test]
+    fn share_preview_aggregates_counts_without_exporting() {
+        let candidates = [
+            SharePreviewCandidate {
+                memory_id: "mem_b",
+                level: "procedural",
+                kind: "rule",
+                trust_class: "agent_validated",
+                material_lane: "body",
+                redaction_class: "share",
+                policy_action: "allow",
+                content_preview: "Rotate API_KEY=sk-FAKEabc123def456ghi789 before release.",
+                estimated_bytes: 120,
+                body_bytes: 80,
+                embedding_bytes: 0,
+            },
+            SharePreviewCandidate {
+                memory_id: "mem_a",
+                level: "episodic",
+                kind: "decision",
+                trust_class: "agent_assertion",
+                material_lane: "embedding",
+                redaction_class: "deny",
+                policy_action: "deny",
+                content_preview: "Private project note that should not leave the node.",
+                estimated_bytes: 64,
+                body_bytes: 0,
+                embedding_bytes: 256,
+            },
+        ];
+
+        let report = build_share_preview(&SharePreviewInput {
+            target_peer_id: "peer_alpha",
+            candidates: &candidates,
+            consent_required: true,
+            max_examples: 4,
+        });
+
+        assert_eq!(report.schema, SHARE_PREVIEW_SCHEMA_V1);
+        assert!(!report.export_performed);
+        assert!(report.consent_required);
+        assert_eq!(report.total_candidates, 2);
+        assert_eq!(report.exportable_count, 1);
+        assert_eq!(report.denied_count, 1);
+        assert_eq!(report.estimated_bytes, 120);
+        assert_eq!(report.estimated_body_bytes, 80);
+        assert_eq!(report.estimated_embedding_bytes, 0);
+        assert_eq!(report.counts_by_level.get("procedural"), Some(&1));
+        assert_eq!(report.counts_by_level.get("episodic"), Some(&1));
+        assert_eq!(report.counts_by_policy_action.get("allow"), Some(&1));
+        assert_eq!(report.counts_by_policy_action.get("deny"), Some(&1));
+        assert!(
+            report
+                .denied_classes
+                .contains(&"redaction_class:deny".to_owned())
+        );
+        assert_eq!(report.examples[0].memory_id, "mem_a");
+        assert_eq!(
+            report.examples[0].redacted_preview,
+            redaction_placeholder("share_preview_content")
+        );
+        assert!(
+            !report.examples[0]
+                .redacted_preview
+                .contains("Private project")
+        );
+        assert!(!report.examples[1].redacted_preview.contains("sk-FAKE"));
+        assert!(
+            report.examples[1]
+                .redaction_reasons
+                .contains(&"api_key".to_owned())
+        );
+    }
+
+    #[test]
+    fn share_preview_consent_audit_is_stable_and_dry_run_safe() {
+        let candidates = [SharePreviewCandidate {
+            memory_id: "mem_a",
+            level: "procedural",
+            kind: "rule",
+            trust_class: "agent_validated",
+            material_lane: "metadata",
+            redaction_class: "redact",
+            policy_action: "allow",
+            content_preview: "Public shape only; no raw body.",
+            estimated_bytes: 42,
+            body_bytes: 0,
+            embedding_bytes: 0,
+        }];
+        let report = build_share_preview(&SharePreviewInput {
+            target_peer_id: "peer_alpha",
+            candidates: &candidates,
+            consent_required: true,
+            max_examples: 1,
+        });
+        let audit = share_preview_consent_audit(&report, true, false, "operator_preview_ack");
+
+        assert_eq!(audit.schema, SHARE_PREVIEW_CONSENT_AUDIT_SCHEMA_V1);
+        assert_eq!(audit.target_peer_id, "peer_alpha");
+        assert_eq!(audit.preview_hash, share_preview_hash(&report));
+        assert!(audit.consent_recorded);
+        assert!(audit.dry_run);
+        assert!(!audit.export_after_consent);
+        assert_eq!(audit.reason, "operator_preview_ack");
     }
 
     #[test]
