@@ -569,7 +569,7 @@ run_scenario() {
                 first_failure="$(assert_jq "$stdout_artifact" '.data.beadsState.classification == "beads_export_only" and .data.beadsState.metadataSignal == "unknown" and (.data.beadsState.degradedCodes | index("workspace_hygiene_beads_db_divergence_unknown")) and (.data.degraded | index("workspace_hygiene_beads_db_divergence_unknown"))' "dirty Beads JSONL without DB signal should report export-only with divergence-unknown degradation" || true)"
                 ;;
             beads_parse_failure)
-                first_failure="$(assert_jq "$stdout_artifact" '(.data.degraded | index("workspace_hygiene_beads_parse_error")) and .data.beadsState.parseErrorLine == 2' "invalid Beads JSONL should report parse line 2" || true)"
+                first_failure="$(assert_jq "$stdout_artifact" '(.data.degraded | index("workspace_hygiene_beads_parse_error")) and (.data.beadsState.degradedCodes | index("workspace_hygiene_beads_parse_error")) and .data.beadsState.classification == "beads_conflict_or_parse_error" and .data.beadsState.parseErrorLine == 2 and .data.beadsState.conflictMarkersFound == false and .data.beadsState.jsonlPosture.untracked == true' "invalid Beads JSONL should report parse-error classification and line 2" || true)"
                 ;;
         esac
     fi
