@@ -51,6 +51,22 @@ pub const NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE: &str = "numa_pin_linux_not_implem
 /// slice in bd-1prrl.3 surfaces it through `data.graph.numaPin.schema`.
 pub const STATUS_GRAPH_NUMA_PIN_SCHEMA_V1: &str = "ee.status.graph.numa_pin.v1";
 
+/// Stable schema id for the per-snapshot side-table row that later database
+/// wiring persists as `graph_snapshot_numa_hints`.
+pub const GRAPH_SNAPSHOT_NUMA_HINT_SCHEMA_V1: &str = "ee.graph.snapshot_numa_hint.v1";
+
+/// Operator env var that disables graph snapshot NUMA pinning without editing
+/// config. The parsed value is inverted into [`NumaPinConfig::enabled`].
+pub const NUMA_PIN_DISABLE_ENV: &str = "EE_GRAPH_NUMA_PIN_DISABLE";
+
+/// Operator env var that selects either `auto` or an explicit non-negative
+/// NUMA node id.
+pub const NUMA_PIN_NODE_ENV: &str = "EE_GRAPH_NUMA_PIN_NODE";
+
+/// Operator env var that controls whether the loader should pre-fault pages
+/// with MAP_POPULATE / the platform fallback.
+pub const NUMA_PIN_POPULATE_ENV: &str = "EE_GRAPH_NUMA_PIN_POPULATE";
+
 /// Default NUMA node preference key emitted in `preferredNode` JSON when the
 /// operator asked for automatic detection.
 pub const NUMA_PIN_PREFERRED_NODE_AUTO: &str = "auto";
@@ -155,6 +171,63 @@ impl NumaPinConfig {
         self.populate_on_load = populate;
         self
     }
+
+    /// Build a graph NUMA config from an arbitrary env-var reader.
+    ///
+    /// This lives in `src/graph` so the loader/status wiring can share one
+    /// parser once the global env registry grows `EE_GRAPH_NUMA_PIN_*`
+    /// variants. Missing values keep defaults. Invalid values keep defaults
+    /// and are reported through `on_unparseable` so callers can attach a
+    /// degraded code without making the parser nondeterministic.
+    #[must_use]
+    pub fn from_environment_with_reader<F, G>(reader: F, mut on_unparseable: G) -> Self
+    where
+        F: Fn(&'static str) -> Option<String>,
+        G: FnMut(&'static str, &str),
+    {
+        let mut config = Self::default();
+
+        if let Some(raw) = reader(NUMA_PIN_DISABLE_ENV) {
+            match parse_env_bool(&raw) {
+                Some(disabled) => config.enabled = !disabled,
+                None => on_unparseable(NUMA_PIN_DISABLE_ENV, &raw),
+            }
+        }
+
+        if let Some(raw) = reader(NUMA_PIN_NODE_ENV) {
+            match parse_env_preferred_node(&raw) {
+                Some(preference) => config.preferred_node = preference,
+                None => on_unparseable(NUMA_PIN_NODE_ENV, &raw),
+            }
+        }
+
+        if let Some(raw) = reader(NUMA_PIN_POPULATE_ENV) {
+            match parse_env_bool(&raw) {
+                Some(populate) => config.populate_on_load = populate,
+                None => on_unparseable(NUMA_PIN_POPULATE_ENV, &raw),
+            }
+        }
+
+        config
+    }
+}
+
+fn parse_env_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_env_preferred_node(raw: &str) -> Option<NumaPinPreference> {
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case(NUMA_PIN_PREFERRED_NODE_AUTO) {
+        return Some(NumaPinPreference::Auto);
+    }
+
+    let node = trimmed.parse::<i32>().ok()?;
+    (node >= 0).then_some(NumaPinPreference::Node(node))
 }
 
 /// Coarse fallback strategy the loader took when the NUMA optimization could
@@ -277,6 +350,69 @@ impl NumaPinPlan {
     }
 }
 
+/// Input for building the deterministic per-snapshot NUMA hint row. This is
+/// the graph-layer contract the database side-table can persist without
+/// learning any platform-specific syscall details.
+#[derive(Clone, Copy, Debug)]
+pub struct GraphSnapshotNumaHintInput<'a> {
+    pub snapshot_id: &'a str,
+    pub graph_type: &'a str,
+    pub snapshot_version: u64,
+    pub source_generation: u32,
+    pub content_hash: &'a str,
+    pub snapshot_path: &'a Path,
+    pub snapshot_bytes: u64,
+    pub config: NumaPinConfig,
+}
+
+/// Deterministic side-table row describing the NUMA posture requested for one
+/// graph snapshot generation. It records the file path, requested node, and
+/// MAP_POPULATE posture without mmap'ing or binding pages itself.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphSnapshotNumaHintRecord {
+    pub schema: &'static str,
+    pub snapshot_id: String,
+    pub graph_type: String,
+    pub snapshot_version: u64,
+    pub source_generation: u32,
+    pub content_hash: String,
+    pub snapshot_path: PathBuf,
+    pub snapshot_bytes: u64,
+    pub requested_node: String,
+    pub map_populate_requested: bool,
+    pub mapping_kind: NumaPinMappingKind,
+    pub bind_requested: bool,
+    pub fallback_path: NumaPinFallbackPath,
+    pub degraded_codes: Vec<String>,
+}
+
+/// Build the side-table hint row for one graph snapshot. The function is
+/// side-effect-free and derives every field from persisted snapshot metadata
+/// plus [`NumaPinConfig`], so it cannot perturb graph determinism.
+#[must_use]
+pub fn graph_snapshot_numa_hint(
+    input: GraphSnapshotNumaHintInput<'_>,
+) -> GraphSnapshotNumaHintRecord {
+    let plan = plan_snapshot_pin(input.snapshot_path, input.snapshot_bytes, &input.config);
+    GraphSnapshotNumaHintRecord {
+        schema: GRAPH_SNAPSHOT_NUMA_HINT_SCHEMA_V1,
+        snapshot_id: input.snapshot_id.to_owned(),
+        graph_type: input.graph_type.to_owned(),
+        snapshot_version: input.snapshot_version,
+        source_generation: input.source_generation,
+        content_hash: input.content_hash.to_owned(),
+        snapshot_path: input.snapshot_path.to_path_buf(),
+        snapshot_bytes: input.snapshot_bytes,
+        requested_node: plan.preferred_node,
+        map_populate_requested: plan.populate_requested,
+        mapping_kind: plan.mapping_kind,
+        bind_requested: plan.bind_requested,
+        fallback_path: plan.fallback_path,
+        degraded_codes: plan.degraded_codes,
+    }
+}
+
 /// Outcome of attempting to pin a snapshot blob. The shape is intentionally
 /// flat-and-Serialize so the wiring slice can drop it straight into the
 /// `data.graph.numaPin` block of `ee status --json`.
@@ -395,18 +531,29 @@ pub fn pin_snapshot_blob(snapshot_path: &Path, config: &NumaPinConfig) -> NumaPi
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::path::Path;
 
     use super::{
-        NUMA_PIN_DISABLED_CODE, NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE, NUMA_PIN_PREFERRED_NODE_AUTO,
-        NUMA_PIN_UNSUPPORTED_PLATFORM_CODE, NumaPinConfig, NumaPinFallbackPath, NumaPinMappingKind,
-        NumaPinPlan, NumaPinPlatform, NumaPinPreference, NumaPinResult,
-        STATUS_GRAPH_NUMA_PIN_SCHEMA_V1, detect_preferred_node, pin_snapshot_blob,
+        GRAPH_SNAPSHOT_NUMA_HINT_SCHEMA_V1, GraphSnapshotNumaHintInput, NUMA_PIN_DISABLE_ENV,
+        NUMA_PIN_DISABLED_CODE, NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE, NUMA_PIN_NODE_ENV,
+        NUMA_PIN_POPULATE_ENV, NUMA_PIN_PREFERRED_NODE_AUTO, NUMA_PIN_UNSUPPORTED_PLATFORM_CODE,
+        NumaPinConfig, NumaPinFallbackPath, NumaPinMappingKind, NumaPinPlan, NumaPinPlatform,
+        NumaPinPreference, NumaPinResult, STATUS_GRAPH_NUMA_PIN_SCHEMA_V1, detect_preferred_node,
+        graph_snapshot_numa_hint, parse_env_bool, parse_env_preferred_node, pin_snapshot_blob,
         plan_snapshot_pin, platform_support,
     };
 
     fn fake_snapshot_path() -> &'static Path {
         Path::new("/tmp/ee-numa-pin-fake-snapshot.bin")
+    }
+
+    fn env_reader_from<'a>(
+        entries: &'a [(&'static str, &'static str)],
+    ) -> impl Fn(&'static str) -> Option<String> + 'a {
+        let map: HashMap<&'static str, &'static str> = entries.iter().copied().collect();
+        move |name: &'static str| map.get(name).map(|value| (*value).to_owned())
     }
 
     fn assert_no_duplicate_codes(result: &NumaPinResult) {
@@ -479,6 +626,99 @@ mod tests {
         );
         assert_eq!(NumaPinPreference::Node(0).as_str(), "0");
         assert_eq!(NumaPinPreference::Node(7).as_str(), "7");
+    }
+
+    #[test]
+    fn parse_env_bool_accepts_operator_vocabulary() {
+        for raw in ["true", "TRUE", "1", "yes", "YES", "on", " ON "] {
+            assert_eq!(parse_env_bool(raw), Some(true));
+        }
+        for raw in ["false", "FALSE", "0", "no", "NO", "off", " OFF "] {
+            assert_eq!(parse_env_bool(raw), Some(false));
+        }
+        for raw in ["maybe", "2", "", "  "] {
+            assert_eq!(parse_env_bool(raw), None);
+        }
+    }
+
+    #[test]
+    fn parse_env_preferred_node_accepts_auto_and_non_negative_nodes() {
+        assert_eq!(
+            parse_env_preferred_node("auto"),
+            Some(NumaPinPreference::Auto)
+        );
+        assert_eq!(
+            parse_env_preferred_node(" AUTO "),
+            Some(NumaPinPreference::Auto)
+        );
+        assert_eq!(
+            parse_env_preferred_node("0"),
+            Some(NumaPinPreference::Node(0))
+        );
+        assert_eq!(
+            parse_env_preferred_node("7"),
+            Some(NumaPinPreference::Node(7))
+        );
+        assert_eq!(parse_env_preferred_node("-1"), None);
+        assert_eq!(parse_env_preferred_node("socket0"), None);
+    }
+
+    #[test]
+    fn from_environment_with_empty_reader_yields_default_config() {
+        let unparseable: RefCell<Vec<(&'static str, String)>> = RefCell::new(Vec::new());
+        let config = NumaPinConfig::from_environment_with_reader(
+            |_name| None,
+            |name, raw| unparseable.borrow_mut().push((name, raw.to_owned())),
+        );
+        assert_eq!(config, NumaPinConfig::default());
+        assert!(
+            unparseable.borrow().is_empty(),
+            "missing values must not trigger on_unparseable: {:?}",
+            unparseable.borrow()
+        );
+    }
+
+    #[test]
+    fn from_environment_parses_disable_node_and_populate_controls() {
+        let unparseable: RefCell<Vec<(&'static str, String)>> = RefCell::new(Vec::new());
+        let reader = env_reader_from(&[
+            (NUMA_PIN_DISABLE_ENV, "yes"),
+            (NUMA_PIN_NODE_ENV, "2"),
+            (NUMA_PIN_POPULATE_ENV, "false"),
+        ]);
+        let config = NumaPinConfig::from_environment_with_reader(reader, |name, raw| {
+            unparseable.borrow_mut().push((name, raw.to_owned()))
+        });
+        assert!(!config.enabled);
+        assert_eq!(config.preferred_node, NumaPinPreference::Node(2));
+        assert!(!config.populate_on_load);
+        assert!(unparseable.borrow().is_empty());
+    }
+
+    #[test]
+    fn from_environment_records_unparseable_values_without_changing_defaults() {
+        let unparseable: RefCell<Vec<(&'static str, String)>> = RefCell::new(Vec::new());
+        let reader = env_reader_from(&[
+            (NUMA_PIN_DISABLE_ENV, "maybe"),
+            (NUMA_PIN_NODE_ENV, "-4"),
+            (NUMA_PIN_POPULATE_ENV, "sometimes"),
+        ]);
+        let config = NumaPinConfig::from_environment_with_reader(reader, |name, raw| {
+            unparseable.borrow_mut().push((name, raw.to_owned()))
+        });
+        assert_eq!(config, NumaPinConfig::default());
+        let log = unparseable.borrow();
+        assert_eq!(log.len(), 3);
+        assert_eq!(log[0], (NUMA_PIN_DISABLE_ENV, "maybe".to_string()));
+        assert_eq!(log[1], (NUMA_PIN_NODE_ENV, "-4".to_string()));
+        assert_eq!(log[2], (NUMA_PIN_POPULATE_ENV, "sometimes".to_string()));
+    }
+
+    #[test]
+    fn from_environment_constants_match_swarmx4_spec() {
+        assert_eq!(NUMA_PIN_DISABLE_ENV, "EE_GRAPH_NUMA_PIN_DISABLE");
+        assert_eq!(NUMA_PIN_NODE_ENV, "EE_GRAPH_NUMA_PIN_NODE");
+        assert_eq!(NUMA_PIN_POPULATE_ENV, "EE_GRAPH_NUMA_PIN_POPULATE");
     }
 
     #[test]
@@ -627,6 +867,109 @@ mod tests {
         assert_eq!(config.preferred_node, NumaPinPreference::Node(3));
         assert!(!config.populate_on_load);
         assert!(config.enabled);
+    }
+
+    #[test]
+    fn graph_snapshot_numa_hint_records_side_table_fields_from_plan() {
+        let hint = graph_snapshot_numa_hint(GraphSnapshotNumaHintInput {
+            snapshot_id: "snap-01",
+            graph_type: "memory_links",
+            snapshot_version: 17,
+            source_generation: 42,
+            content_hash: "blake3:abc123",
+            snapshot_path: Path::new("/var/lib/ee/snapshots/graph.bin"),
+            snapshot_bytes: 128 * 1024 * 1024,
+            config: NumaPinConfig::default().with_preferred_node(NumaPinPreference::Node(1)),
+        });
+
+        assert_eq!(hint.schema, GRAPH_SNAPSHOT_NUMA_HINT_SCHEMA_V1);
+        assert_eq!(hint.snapshot_id, "snap-01");
+        assert_eq!(hint.graph_type, "memory_links");
+        assert_eq!(hint.snapshot_version, 17);
+        assert_eq!(hint.source_generation, 42);
+        assert_eq!(hint.content_hash, "blake3:abc123");
+        assert_eq!(
+            hint.snapshot_path.as_path(),
+            Path::new("/var/lib/ee/snapshots/graph.bin")
+        );
+        assert_eq!(hint.snapshot_bytes, 128 * 1024 * 1024);
+        assert_eq!(hint.requested_node, "1");
+        assert!(hint.map_populate_requested);
+        if cfg!(target_os = "linux") {
+            assert_eq!(hint.mapping_kind, NumaPinMappingKind::ReadOnlyMmap);
+            assert!(hint.bind_requested);
+        } else {
+            assert!(!hint.bind_requested);
+        }
+    }
+
+    #[test]
+    fn disabled_graph_snapshot_numa_hint_never_requests_mapping() {
+        let hint = graph_snapshot_numa_hint(GraphSnapshotNumaHintInput {
+            snapshot_id: "snap-disabled",
+            graph_type: "revision_dag",
+            snapshot_version: 1,
+            source_generation: 3,
+            content_hash: "blake3:def456",
+            snapshot_path: fake_snapshot_path(),
+            snapshot_bytes: 4096,
+            config: NumaPinConfig::disabled(),
+        });
+
+        assert_eq!(hint.schema, GRAPH_SNAPSHOT_NUMA_HINT_SCHEMA_V1);
+        assert_eq!(hint.mapping_kind, NumaPinMappingKind::None);
+        assert!(!hint.bind_requested);
+        assert_eq!(hint.fallback_path, NumaPinFallbackPath::DisabledByOperator);
+        assert_eq!(
+            hint.degraded_codes,
+            vec![NUMA_PIN_DISABLED_CODE.to_string()]
+        );
+    }
+
+    #[test]
+    fn graph_snapshot_numa_hint_serializes_camel_case_fields() {
+        let hint = graph_snapshot_numa_hint(GraphSnapshotNumaHintInput {
+            snapshot_id: "snap-json",
+            graph_type: "causal_evidence",
+            snapshot_version: 5,
+            source_generation: 8,
+            content_hash: "blake3:json",
+            snapshot_path: fake_snapshot_path(),
+            snapshot_bytes: 8192,
+            config: NumaPinConfig::disabled(),
+        });
+        let serialized = serde_json::to_value(&hint).expect("serialize hint");
+        for key in [
+            "schema",
+            "snapshotId",
+            "graphType",
+            "snapshotVersion",
+            "sourceGeneration",
+            "contentHash",
+            "snapshotPath",
+            "snapshotBytes",
+            "requestedNode",
+            "mapPopulateRequested",
+            "mappingKind",
+            "bindRequested",
+            "fallbackPath",
+            "degradedCodes",
+        ] {
+            assert!(
+                serialized.get(key).is_some(),
+                "expected field {key} in serialized hint {serialized}"
+            );
+        }
+        assert_eq!(
+            serialized.get("schema").and_then(|value| value.as_str()),
+            Some(GRAPH_SNAPSHOT_NUMA_HINT_SCHEMA_V1)
+        );
+        assert_eq!(
+            serialized
+                .get("fallbackPath")
+                .and_then(|value| value.as_str()),
+            Some("disabled_by_operator")
+        );
     }
 
     #[test]
