@@ -8,15 +8,107 @@
 use ee::search::simhash::{
     SimHash128, first_confirmed_simhash_candidate, hamming_distance, simhash_128,
 };
+use serde_json::Value;
 
 const DEFAULT_HAMMING_K: u32 = 12;
 const DEFAULT_COSINE_FLOOR: f32 = 0.97;
+const EMBED_DEDUP_CHAIN_GOLDEN: &str = include_str!("golden/embed_dedup_chain.json");
 
 fn assert_close(actual: f32, expected: f32) {
     let delta = (actual - expected).abs();
     assert!(
         delta <= f32::EPSILON,
         "expected {actual} to equal {expected} within f32 epsilon; delta={delta}"
+    );
+}
+
+#[test]
+fn golden_dedup_chain_pins_public_dedup_link_shape() {
+    let golden: Value = serde_json::from_str(EMBED_DEDUP_CHAIN_GOLDEN)
+        .expect("embed_dedup_chain golden must be valid JSON");
+    assert_eq!(
+        golden.get("schema").and_then(Value::as_str),
+        Some("ee.embed_dedup.chain_golden.v1")
+    );
+
+    let remember_results = golden
+        .get("rememberResults")
+        .and_then(Value::as_array)
+        .expect("golden must include rememberResults");
+    let exact_duplicate = remember_results
+        .iter()
+        .find(|case| {
+            case.get("case").and_then(Value::as_str) == Some("exact_or_canonical_duplicate")
+        })
+        .expect("golden must include exact duplicate case");
+    let exact_link = exact_duplicate
+        .get("dedupLink")
+        .and_then(Value::as_object)
+        .expect("exact duplicate case must include dedupLink");
+
+    for field in [
+        "targetMemoryId",
+        "relationship",
+        "hammingDistance",
+        "cosineSimilarity",
+        "cosineFloor",
+        "decision",
+    ] {
+        assert!(exact_link.contains_key(field), "dedupLink missing {field}");
+    }
+    assert_eq!(
+        exact_link.get("targetMemoryId").and_then(Value::as_str),
+        Some("mem_embed_dedup_source")
+    );
+    assert_eq!(
+        exact_link.get("relationship").and_then(Value::as_str),
+        Some("embedding_reuse")
+    );
+    assert_eq!(
+        exact_link.get("hammingDistance").and_then(Value::as_u64),
+        Some(0)
+    );
+    assert_eq!(
+        exact_link.get("cosineSimilarity").and_then(Value::as_f64),
+        Some(1.0)
+    );
+    assert_eq!(
+        exact_link.get("cosineFloor").and_then(Value::as_f64),
+        Some(0.97)
+    );
+    assert_eq!(
+        exact_link.get("decision").and_then(Value::as_str),
+        Some("reuse")
+    );
+
+    let false_positive = remember_results
+        .iter()
+        .find(|case| case.get("case").and_then(Value::as_str) == Some("simhash_false_positive"))
+        .expect("golden must include SimHash false-positive case");
+    assert!(
+        false_positive.get("dedupLink").is_some_and(Value::is_null),
+        "cosine rejection must not emit a dedupLink"
+    );
+    assert_eq!(
+        false_positive
+            .pointer("/dedupDecision/reason")
+            .and_then(Value::as_str),
+        Some("cosine_under_floor")
+    );
+
+    let why_results = golden
+        .get("whyResults")
+        .and_then(Value::as_array)
+        .expect("golden must include whyResults");
+    let why_exact = why_results
+        .iter()
+        .find(|case| case.get("memoryId").and_then(Value::as_str) == Some("mem_embed_dedup_exact"))
+        .expect("golden must include why output for reused embedding");
+    assert_eq!(
+        why_exact
+            .pointer("/dedupLink/targetMemoryId")
+            .and_then(Value::as_str),
+        Some("mem_embed_dedup_source")
     );
 }
 

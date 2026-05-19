@@ -141,8 +141,8 @@ and `decision`.
 Current evidence is limited to build-independent static review,
 `tests/property_simhash.rs`, `tests/embed_dedup_unit.rs`, and the intended
 chain fixture at `tests/golden/embed_dedup_chain.json`. The unit coverage
-proves the reusable SimHash/cosine decision scaffold, and the golden fixture
-pins the future `dedupLink` emission shape. Neither proves the persisted
+proves the reusable SimHash/cosine decision scaffold and parses the fixture to
+pin the future `dedupLink` emission shape. It does not prove the persisted
 remember-path feature yet. Full acceptance for `bd-1iltv` still requires:
 
 - Unit tests for env parsing and dedup-link selection after DB/write-path
@@ -150,8 +150,8 @@ remember-path feature yet. Full acceptance for `bd-1iltv` still requires:
 - E2E tests showing identical and near-identical memories reuse embeddings.
 - A semantic false-positive test showing SimHash proximity alone does not reuse
   embeddings when cosine is under the floor.
-- Runtime golden test wiring for the dedup chain and `ee why` `dedupLink`
-  output.
+- Runtime or E2E golden replay for the dedup chain and `ee why` `dedupLink`
+  output once the write path persists those fields.
 - RCH-backed `cargo check --all-targets`, `cargo clippy --all-targets`,
   `cargo fmt --check`, and targeted tests, with Clippy run under `-D warnings`.
 
