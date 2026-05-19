@@ -24,6 +24,11 @@ STARTED_NS="$(now_ns)"
 mkdir -p "$EVENT_ROOT"
 : > "$EVENT_LOG"
 
+redact_synthetic_value() {
+    local value="${1:-}"
+    printf '%s\n' "${value//$SYNTHETIC_RAW_VALUE/[redacted-synthetic-secret]}"
+}
+
 emit_event() {
     local scenario="${1:?scenario required}"
     local phase="${2:?phase required}"
@@ -41,6 +46,7 @@ emit_event() {
     local before_artifact="${14:-}"
     local after_artifact="${15:-}"
     local finished_ns elapsed_ms
+    first_failure="$(redact_synthetic_value "$first_failure")"
     finished_ns="$(now_ns)"
     elapsed_ms="$(( (finished_ns - STARTED_NS) / 1000000 ))"
 
