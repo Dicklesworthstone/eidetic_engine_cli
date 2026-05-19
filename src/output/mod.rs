@@ -16657,6 +16657,15 @@ mod tests {
     }
 
     #[test]
+    fn structural_health_toon_decodes_to_canonical_json() -> TestResult {
+        let report = sample_structural_health_report();
+        let json = render_structural_health_json(&report);
+        let toon = render_structural_health_toon(&report);
+
+        ensure_toon_matches_json(&json, &toon, "decoded structural health TOON")
+    }
+
+    #[test]
     fn toon_status_has_required_fields() -> TestResult {
         let report = StatusReport::gather();
         let toon = render_status_toon(&report);
