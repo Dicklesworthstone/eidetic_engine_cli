@@ -35,6 +35,15 @@ fn assert_contains_all(haystack: &str, needles: &[&str], context: &str) -> TestR
     }
 }
 
+fn read_graph_cli_reference() -> Result<String, String> {
+    let reference_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("docs")
+        .join("cli-reference")
+        .join("graph-flags.md");
+    std::fs::read_to_string(&reference_path)
+        .map_err(|error| format!("failed to read {}: {error}", reference_path.display()))
+}
+
 #[test]
 fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
     let context_help = help_for(&["ee", "context", "--help"])?;
@@ -134,12 +143,7 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
 
 #[test]
 fn graph_cli_reference_documents_hits_and_load_bearing_insights_examples() -> TestResult {
-    let reference_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("docs")
-        .join("cli-reference")
-        .join("graph-flags.md");
-    let reference = std::fs::read_to_string(&reference_path)
-        .map_err(|error| format!("failed to read {}: {error}", reference_path.display()))?;
+    let reference = read_graph_cli_reference()?;
 
     assert_contains_all(
         &reference,
@@ -151,6 +155,22 @@ fn graph_cli_reference_documents_hits_and_load_bearing_insights_examples() -> Te
             "graph.feature.load_bearing.enabled",
             "ee config set graph.feature.hits_profiles.enabled true",
             "ee config set graph.feature.load_bearing.enabled true",
+        ],
+        "docs/cli-reference/graph-flags.md",
+    )
+}
+
+#[test]
+fn graph_cli_reference_documents_hits_centrality_examples() -> TestResult {
+    let reference = read_graph_cli_reference()?;
+
+    assert_contains_all(
+        &reference,
+        &[
+            "`pagerank`, `betweenness`, `authority`, `hits-hubs`, `hits-authorities`",
+            "ee graph centrality --workspace . --algorithm hits-hubs --limit 10 --json",
+            "ee graph centrality --workspace . --algorithm hits-authorities",
+            "--memory-id mem_release_policy --require-fresh --json",
         ],
         "docs/cli-reference/graph-flags.md",
     )
@@ -793,6 +813,16 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "--limit",
             "10",
             "--require-fresh",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "graph",
+            "centrality",
+            "--algorithm",
+            "hits-hubs",
+            "--limit",
+            "10",
             "--json",
         ][..],
         &[

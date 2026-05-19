@@ -250,6 +250,7 @@ ee graph export --workspace . --graph-type memory_links \
 ee graph export --workspace . --type memory_links \
   --workspace-id ws_release --snapshot-id snap_release --format mermaid
 ee graph centrality --workspace . --algorithm pagerank --limit 10 --json
+ee graph centrality --workspace . --algorithm hits-hubs --limit 10 --json
 ee graph centrality --workspace . --algorithm hits-authorities \
   --memory-id mem_release_policy --require-fresh --json
 ee graph centrality-refresh --workspace . --dry-run --min-confidence 0.6 --json
