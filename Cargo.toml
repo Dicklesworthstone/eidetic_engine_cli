@@ -16,6 +16,7 @@
 exclude = [
     "fuzz",
     "tests/fixtures",
+    ".ci",
 ]
 
 [package]

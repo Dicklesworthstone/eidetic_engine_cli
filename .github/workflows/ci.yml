@@ -141,6 +141,55 @@ jobs:
         if: matrix.runner == 'cross'
         run: cargo install cross --git https://github.com/cross-rs/cross
 
+      - name: Verify Franken stack clone (bash)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          fnx_root="$GITHUB_WORKSPACE/.ci/franken-stack/projects/franken_networkx"
+          echo "::group::franken_networkx workspace manifest"
+          ls -la "$fnx_root" || true
+          if [ -f "$fnx_root/Cargo.toml" ]; then
+            echo "--- $fnx_root/Cargo.toml (first 25 lines) ---"
+            head -25 "$fnx_root/Cargo.toml"
+          else
+            echo "MISSING: $fnx_root/Cargo.toml"
+            exit 1
+          fi
+          echo "::endgroup::"
+          echo "::group::fnx-cgse manifest"
+          if [ -f "$fnx_root/crates/fnx-cgse/Cargo.toml" ]; then
+            head -10 "$fnx_root/crates/fnx-cgse/Cargo.toml"
+          else
+            echo "MISSING: $fnx_root/crates/fnx-cgse/Cargo.toml"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+      - name: Verify Franken stack clone (pwsh)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $fnxRoot = Join-Path $env:GITHUB_WORKSPACE ".ci\franken-stack\projects\franken_networkx"
+          Write-Host "::group::franken_networkx workspace manifest"
+          Get-ChildItem -Force $fnxRoot | Format-Table | Out-String | Write-Host
+          $rootManifest = Join-Path $fnxRoot "Cargo.toml"
+          if (-not (Test-Path $rootManifest)) {
+            Write-Error "MISSING: $rootManifest"
+            exit 1
+          }
+          Get-Content $rootManifest -TotalCount 25 | Write-Host
+          Write-Host "::endgroup::"
+          Write-Host "::group::fnx-cgse manifest"
+          $cgseManifest = Join-Path $fnxRoot "crates\fnx-cgse\Cargo.toml"
+          if (-not (Test-Path $cgseManifest)) {
+            Write-Error "MISSING: $cgseManifest"
+            exit 1
+          }
+          Get-Content $cgseManifest -TotalCount 10 | Write-Host
+          Write-Host "::endgroup::"
+
       - name: Cross-platform graph determinism
         if: matrix.runner != 'cross'
         run: cargo test --workspace --test cross_platform_determinism --target ${{ matrix.target }} -- --nocapture
