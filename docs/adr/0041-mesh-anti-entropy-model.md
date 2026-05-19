@@ -134,6 +134,14 @@ name the five reference scenarios this ADR commits to:
 Adding a scenario requires both an ADR amendment and a corresponding entry
 in that constant array, so the test list and the contract cannot drift.
 
+The focused executable harness is `tests/mesh_anti_entropy_model.rs`. It
+imports the model directly while the runtime `src/mesh/mod.rs` surface is in
+flight, replays the scenario tests, and prints
+`mesh_anti_entropy_model_scenario=<name> result=covered` lines in `--nocapture`
+mode. The e2e driver `scripts/e2e_mesh_anti_entropy_model.sh` emits matching
+`ee.test_event.v1` JSONL records before running the focused harness so replay
+logs can be correlated with the formal scenario catalog.
+
 ## Out of scope for this ADR
 
 - The transport (Tailscale or otherwise) — owned by `bd-1o1v5` (SRR6.9).
