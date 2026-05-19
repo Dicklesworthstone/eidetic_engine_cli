@@ -74,6 +74,7 @@ use crate::pack::{
     estimate_tokens_default, pack_item_provenance_json,
 };
 use crate::runtime::determinism::{Deterministic, Seed};
+use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 static PACK_HASH_LOG_RUN_INDEX: AtomicU64 = AtomicU64::new(0);
 static PACK_SLOT_PROCESS_GATES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
@@ -2108,11 +2109,7 @@ fn lexical_memory_fallback_hits(
             lexical_memory_score(&memory, &query_terms).map(|score| (memory, score))
         })
         .collect();
-    scored.sort_by(|(left_memory, left_score), (right_memory, right_score)| {
-        right_score
-            .total_cmp(left_score)
-            .then_with(|| left_memory.id.cmp(&right_memory.id))
-    });
+    sort_scored_memories_by_score_then_memory_id(&mut scored);
 
     let limit = usize::try_from(limit).unwrap_or(usize::MAX);
     scored
@@ -2130,6 +2127,11 @@ fn lexical_memory_fallback_hits(
             explanation: None,
         })
         .collect()
+}
+
+fn sort_scored_memories_by_score_then_memory_id(scored: &mut Vec<(StoredMemory, f32)>) {
+    sort_by_ulid_payload_or_lexical(scored, |(memory, _)| memory.id.as_str());
+    scored.sort_by(|(_, left_score), (_, right_score)| right_score.total_cmp(left_score));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7091,6 +7093,30 @@ mod tests {
             valid_from: valid_from.map(str::to_owned),
             valid_to: valid_to.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn lexical_fallback_score_ties_use_radix_memory_id_order() {
+        let lower_id = MemoryId::from_uuid(uuid::Uuid::from_u128(7010)).to_string();
+        let higher_id = MemoryId::from_uuid(uuid::Uuid::from_u128(7020)).to_string();
+        let top_score_id = MemoryId::from_uuid(uuid::Uuid::from_u128(7030)).to_string();
+
+        let mut lower =
+            stored_memory_with_time("2026-05-01T12:00:00Z", "2026-05-01T12:00:00Z", None, None);
+        lower.id = lower_id.clone();
+        let mut higher = lower.clone();
+        higher.id = higher_id.clone();
+        let mut top_score = lower.clone();
+        top_score.id = top_score_id.clone();
+
+        let mut scored = vec![(higher, 0.7), (top_score, 0.9), (lower, 0.7)];
+        super::sort_scored_memories_by_score_then_memory_id(&mut scored);
+
+        let ids = scored
+            .into_iter()
+            .map(|(memory, _)| memory.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![top_score_id, lower_id, higher_id]);
     }
 
     #[test]
