@@ -20,6 +20,7 @@ use crate::graph::{
     ComplexityWitnessCounters, GraphResult, emit_complexity_witness, graph_algorithm_params_hash,
 };
 use crate::models::MemoryId;
+use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 pub const DEFAULT_PERSONALIZED_PAGERANK_ALPHA: f64 = 0.85;
 pub const DEFAULT_PERSONALIZED_PAGERANK_MAX_ITERATIONS: usize = 50;
@@ -284,7 +285,7 @@ fn compute_personalized_pagerank_result_unbudgeted(
     policy: PersonalizedPageRankPolicy,
 ) -> PageRankResult {
     let mut nodes = graph.nodes_ordered();
-    nodes.sort_unstable();
+    sort_by_ulid_payload_or_lexical(&mut nodes, |node| *node);
     let node_count = nodes.len();
     if node_count == 0 {
         return personalized_pagerank_result(Vec::new(), true, 0, 0, 0, 0.0);
@@ -578,7 +579,7 @@ fn personalized_pagerank_decision_path_hash(
     hasher.update(&result.witness.queue_peak.to_le_bytes());
     hasher.update(&[u8::from(result.converged)]);
     let mut scores = result.scores.clone();
-    scores.sort_unstable_by(|left, right| left.node.cmp(&right.node));
+    sort_by_ulid_payload_or_lexical(&mut scores, |score| score.node.as_str());
     hasher.update(&(scores.len() as u64).to_le_bytes());
     for score in scores {
         update_hash_with_len_prefixed_str(&mut hasher, &score.node);
@@ -642,6 +643,9 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, String>;
     const WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
+    const PUBLIC_ID_EARLY: &str = "note_01J0000000000000000000000A";
+    const PUBLIC_ID_MIDDLE: &str = "rule_01J0000000000000000000000B";
+    const PUBLIC_ID_LATE: &str = "mem_01J0000000000000000000000C";
 
     fn graph_result<T>(result: GraphResult<T>) -> TestResult<T> {
         result.map_err(|error| error.to_string())
@@ -670,6 +674,30 @@ mod tests {
             assert_eq!(left_score.node, right_score.node);
             assert!((left_score.score - right_score.score).abs() < 1.0e-12);
         }
+    }
+
+    #[test]
+    fn personalized_pagerank_zero_seed_scores_use_radix_public_id_order() -> TestResult {
+        let mut graph = DiGraph::strict();
+        graph.add_node(PUBLIC_ID_LATE.to_owned());
+        graph.add_node(PUBLIC_ID_MIDDLE.to_owned());
+        graph.add_node(PUBLIC_ID_EARLY.to_owned());
+
+        let result = graph_result(compute_personalized_pagerank_result(
+            &graph,
+            &BTreeMap::new(),
+        ))?;
+
+        assert_eq!(
+            result
+                .scores
+                .iter()
+                .map(|score| score.node.as_str())
+                .collect::<Vec<_>>(),
+            vec![PUBLIC_ID_EARLY, PUBLIC_ID_MIDDLE, PUBLIC_ID_LATE]
+        );
+        assert!(result.scores.iter().all(|score| score.score == 0.0));
+        Ok(())
     }
 
     #[test]
