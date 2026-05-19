@@ -246,12 +246,16 @@ fuzz_target_audit() {
         echo "error: fuzz/README.md missing deliberate-panic proof instructions" >&2
         failures=1
     fi
+    if ! grep -Fq -- "-max_total_time=900" "$readme"; then
+        echo "error: fuzz/README.md missing 15-minute nightly cargo-fuzz sweep duration" >&2
+        failures=1
+    fi
 
     if [ "$failures" -ne 0 ]; then
         return 1
     fi
 
-    echo "ok: bd-bife.10 fuzz targets are registered, present, documented with 5-minute logged sweeps, and shaped as cargo-fuzz harnesses"
+    echo "ok: bd-bife.10 fuzz targets are registered, present, documented with 5-minute logged sweeps plus nightly duration, and shaped as cargo-fuzz harnesses"
 }
 
 test_trace_root() {
