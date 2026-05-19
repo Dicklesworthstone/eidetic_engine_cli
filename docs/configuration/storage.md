@@ -12,6 +12,7 @@ jsonl_export = false
 size = 1
 idle_timeout_seconds = 30
 max_pin_duration_seconds = 30
+acquire_timeout_ms = 5000
 pin_snapshot = true
 ```
 
@@ -26,8 +27,9 @@ snapshot may remain pinned before lifecycle checks report `snapshot_pin_expired`
 `pin_snapshot = true` keeps multi-step reads on a
 stable snapshot; set it to `false` only when a caller explicitly wants unpinned
 read visibility. The acquire timeout defaults to 5000 ms in the read-pool
-runtime and bounds how long a caller waits for a pooled read handle before `ee`
-opens a one-shot ad-hoc read connection outside the pool.
+runtime, is configured as `acquire_timeout_ms`, and bounds how long a caller
+waits for a pooled read handle before `ee` opens a one-shot ad-hoc read
+connection outside the pool.
 
 Snapshot pins are explicit read transactions over pooled FrankenSQLite
 connections. A clean pin release returns the connection to the LIFO idle pool.
@@ -82,9 +84,10 @@ surfaces responsive under bursts while making contention visible.
 - `data.read_pool.acquire_wait.p50_ns` and `p99_ns`: wait latency percentiles.
 
 Sustained ad-hoc bypasses or high p99 wait times mean the pool is undersized for
-the workload. Increase `storage.read_pool.size` explicitly; `ee` does not grow
-the pool automatically because automatic growth can hide writer starvation and
-WAL checkpoint pressure.
+the workload. A full 1024-sample acquire-wait window with p99 at or above 10 ms
+emits `read_pool_undersized`. Increase `storage.read_pool.size` explicitly;
+`ee` does not grow the pool automatically because automatic growth can hide
+writer starvation and WAL checkpoint pressure.
 
 ## WAL Growth Observability
 
@@ -132,6 +135,6 @@ Environment overrides:
 | `storage.read_pool.size` | `EE_READ_POOL_SIZE` |
 | `storage.read_pool.idle_timeout_seconds` | `EE_READ_POOL_IDLE_TIMEOUT_S` |
 | `storage.read_pool.max_pin_duration_seconds` | `EE_READ_POOL_MAX_PIN_SECONDS` |
+| `storage.read_pool.acquire_timeout_ms` | `EE_READ_POOL_ACQUIRE_TIMEOUT_MS` |
 | `storage.read_pool.pin_snapshot` | `EE_READ_POOL_DISABLE_PIN` inverts this value |
-| acquire timeout runtime override | `EE_READ_POOL_ACQUIRE_TIMEOUT_MS` |
 | WAL checkpoint warning threshold | `EE_WAL_CHECKPOINT_BYTES_THRESHOLD` |

@@ -55,7 +55,11 @@ use crate::core::search::{
     SearchOptions, SearchReport, SearchStatus, elapsed_timing_json, performance_redaction_json,
     query_observation_json, run_search_with_read_connection_seeded, search_degraded_data_json,
 };
-use crate::db::read_pool::{PoolConfig, ReadConnectionPool, SnapshotPin, SnapshotPinMetadata};
+use crate::db::read_pool::{
+    PoolConfig, PoolStats, READ_POOL_ACQUIRE_TIMEOUT_CODE, READ_POOL_UNDERSIZED_CODE,
+    READ_POOL_UNDERSIZED_P99_THRESHOLD, READ_POOL_UNDERSIZED_SAMPLE_FLOOR, ReadConnectionPool,
+    SnapshotPin, SnapshotPinMetadata,
+};
 use crate::db::{
     CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, DatabaseConfig,
     DbConnection, StoredAgentContextProfileForPack, StoredMemory,
@@ -1546,6 +1550,7 @@ fn run_context_pack_with_performance_inner(
         .count();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     push_selected_context_memory_drift_degradations(read_connection, &draft, &mut degraded);
+    push_context_read_pool_degradations(&mut degraded, &read_pool.stats());
     if options.include_tombstoned
         && tombstoned_item_count > 0
         && !degraded
@@ -4167,7 +4172,10 @@ fn context_read_pool_config_from_values(
         .max_pin_duration_seconds
         .or(read_pool.max_pin_duration_seconds)
         .unwrap_or(30);
-    let acquire_timeout_ms = env.acquire_timeout_ms.unwrap_or(5000);
+    let acquire_timeout_ms = env
+        .acquire_timeout_ms
+        .or(read_pool.acquire_timeout_ms)
+        .unwrap_or(5000);
     let pin_snapshot = env
         .disable_pin
         .map(|disabled| !disabled)
@@ -4209,6 +4217,51 @@ fn checked_context_read_snapshot<'snapshot>(
     read_snapshot
         .checked_connection()
         .map_err(|error| ContextPackError::Storage(format!("Read snapshot unavailable: {error}")))
+}
+
+fn push_context_read_pool_degradations(
+    degraded: &mut Vec<ContextResponseDegradation>,
+    stats: &PoolStats,
+) {
+    if stats.ad_hoc_bypass_count > 0
+        && !degraded
+            .iter()
+            .any(|entry| entry.code == READ_POOL_ACQUIRE_TIMEOUT_CODE)
+    {
+        push_degradation(
+            degraded,
+            READ_POOL_ACQUIRE_TIMEOUT_CODE,
+            ContextResponseSeverity::Medium,
+            format!(
+                "Read pool acquire timeout opened {} ad-hoc read connection{} for this request.",
+                stats.ad_hoc_bypass_count,
+                plural_suffix(stats.ad_hoc_bypass_count as usize)
+            ),
+            Some("increase storage.read_pool.size".to_string()),
+        );
+    }
+
+    if read_pool_stats_indicate_undersized(stats)
+        && !degraded
+            .iter()
+            .any(|entry| entry.code == READ_POOL_UNDERSIZED_CODE)
+    {
+        push_degradation(
+            degraded,
+            READ_POOL_UNDERSIZED_CODE,
+            ContextResponseSeverity::Low,
+            format!(
+                "Read pool appears undersized: acquire wait p99={}ns over {} samples.",
+                stats.acquire_wait.p99_ns, stats.acquire_wait.samples
+            ),
+            Some("increase storage.read_pool.size".to_string()),
+        );
+    }
+}
+
+fn read_pool_stats_indicate_undersized(stats: &PoolStats) -> bool {
+    stats.acquire_wait.samples >= READ_POOL_UNDERSIZED_SAMPLE_FLOOR
+        && stats.acquire_wait.p99_ns >= READ_POOL_UNDERSIZED_P99_THRESHOLD.as_nanos()
 }
 
 fn push_ppr_feature_disabled_degradation(degraded: &mut Vec<ContextResponseDegradation>) {
@@ -5958,7 +6011,10 @@ mod tests {
     use crate::core::search::{
         PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchHit, SearchReport, SearchStatus,
     };
-    use crate::db::read_pool::{PoolConfig, ReadConnectionPool};
+    use crate::db::read_pool::{
+        AcquireWaitStats, PoolConfig, PoolStats, READ_POOL_UNDERSIZED_P99_THRESHOLD,
+        READ_POOL_UNDERSIZED_SAMPLE_FLOOR, ReadConnectionPool,
+    };
     use crate::db::{
         CreateMemoryInput, CreateWorkspaceInput, DatabaseConfig, DbConnection,
         StoredAgentContextProfileForPack, StoredMemory,
@@ -8420,7 +8476,7 @@ mod tests {
         std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
         std::fs::write(
             ee_dir.join("config.toml"),
-            "[storage.read_pool]\nsize = 2\nidle_timeout_seconds = 11\nmax_pin_duration_seconds = 7\npin_snapshot = true\n",
+            "[storage.read_pool]\nsize = 2\nidle_timeout_seconds = 11\nmax_pin_duration_seconds = 7\nacquire_timeout_ms = 250\npin_snapshot = true\n",
         )
         .map_err(|error| error.to_string())?;
 
@@ -8432,6 +8488,7 @@ mod tests {
         assert_eq!(config.max_size(), 2);
         assert_eq!(config.idle_timeout(), Duration::from_secs(11));
         assert_eq!(config.max_pin_duration(), Duration::from_secs(7));
+        assert_eq!(config.acquire_timeout(), Duration::from_millis(250));
         Ok(())
     }
 
@@ -8490,6 +8547,7 @@ mod tests {
             size: Some(2),
             idle_timeout_seconds: Some(11),
             max_pin_duration_seconds: Some(7),
+            acquire_timeout_ms: Some(19),
             pin_snapshot: Some(true),
         };
         let env = super::ContextReadPoolEnv {
@@ -8507,6 +8565,76 @@ mod tests {
         assert_eq!(config.idle_timeout(), Duration::from_secs(13));
         assert_eq!(config.max_pin_duration(), Duration::from_secs(17));
         assert_eq!(config.acquire_timeout(), Duration::from_millis(23));
+        Ok(())
+    }
+
+    #[test]
+    fn context_read_pool_degradations_emit_acquire_timeout() -> Result<(), String> {
+        let mut degraded = Vec::new();
+        let stats = PoolStats {
+            ad_hoc_bypass_count: 2,
+            ..PoolStats::default()
+        };
+
+        super::push_context_read_pool_degradations(&mut degraded, &stats);
+
+        ensure_equal(&degraded.len(), &1, "degraded count")?;
+        ensure_equal(
+            &degraded[0].code,
+            &"read_pool_acquire_timeout".to_string(),
+            "degraded code",
+        )?;
+        ensure_equal(
+            &degraded[0].severity,
+            &ContextResponseSeverity::Medium,
+            "degraded severity",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn context_read_pool_degradations_emit_undersized_after_full_window() -> Result<(), String> {
+        let mut degraded = Vec::new();
+        let stats = PoolStats {
+            acquire_wait: AcquireWaitStats {
+                samples: READ_POOL_UNDERSIZED_SAMPLE_FLOOR,
+                p50_ns: 1,
+                p99_ns: READ_POOL_UNDERSIZED_P99_THRESHOLD.as_nanos(),
+            },
+            ..PoolStats::default()
+        };
+
+        super::push_context_read_pool_degradations(&mut degraded, &stats);
+
+        ensure_equal(&degraded.len(), &1, "degraded count")?;
+        ensure_equal(
+            &degraded[0].code,
+            &"read_pool_undersized".to_string(),
+            "degraded code",
+        )?;
+        ensure_equal(
+            &degraded[0].severity,
+            &ContextResponseSeverity::Low,
+            "degraded severity",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn context_read_pool_degradations_wait_for_full_sample_window() -> Result<(), String> {
+        let mut degraded = Vec::new();
+        let stats = PoolStats {
+            acquire_wait: AcquireWaitStats {
+                samples: READ_POOL_UNDERSIZED_SAMPLE_FLOOR - 1,
+                p50_ns: 1,
+                p99_ns: READ_POOL_UNDERSIZED_P99_THRESHOLD.as_nanos(),
+            },
+            ..PoolStats::default()
+        };
+
+        super::push_context_read_pool_degradations(&mut degraded, &stats);
+
+        ensure_equal(&degraded.len(), &0, "degraded count")?;
         Ok(())
     }
 

@@ -23,7 +23,11 @@ use crate::db::{
     PROVENANCE_STATUS_UNVERIFIED, StoredAuditEntry, StoredCurationCandidate,
     StoredCurationTtlPolicy, StoredMemory, StoredMemoryLink, WalStatus, audit_actions,
     default_curation_ttl_policy_id_for_review_state,
-    read_pool::{CheckpointBlocker, PoolStats, SnapshotPinReleaseState},
+    read_pool::{
+        CheckpointBlocker, PoolStats, READ_POOL_ACQUIRE_TIMEOUT_CODE, READ_POOL_UNDERSIZED_CODE,
+        READ_POOL_UNDERSIZED_P99_THRESHOLD, READ_POOL_UNDERSIZED_SAMPLE_FLOOR,
+        SnapshotPinReleaseState,
+    },
     shard::{
         ShardFanoutPosture, ShardFanoutResolverInput, ShardFanoutStatusReport,
         resolve_shard_fanout_status, shard_fanout_enabled_from_env_value,
@@ -1421,6 +1425,7 @@ impl StatusReport {
         push_skyline_degenerate_communities_degradation(&mut degradations, skyline_community_count);
         push_toon_output_capability_degradation(&mut degradations, capabilities.output_toon);
         push_wal_degradations(&mut degradations, &wal);
+        push_read_pool_degradations(&mut degradations, &read_pool);
         push_shard_fanout_degradations(&mut degradations, &shard_fanout);
 
         degradations.extend(memory_health_degradations);
@@ -3139,6 +3144,38 @@ fn push_wal_degradations(degradations: &mut Vec<DegradationReport>, wal: &WalSta
     });
 }
 
+fn push_read_pool_degradations(
+    degradations: &mut Vec<DegradationReport>,
+    read_pool: &ReadPoolStatusReport,
+) {
+    if read_pool.ad_hoc_bypass_count > 0
+        && !degradations
+            .iter()
+            .any(|entry| entry.code == READ_POOL_ACQUIRE_TIMEOUT_CODE)
+    {
+        degradations.push(DegradationReport {
+            code: READ_POOL_ACQUIRE_TIMEOUT_CODE,
+            severity: "medium",
+            message: "Read pool acquire timeout opened ad-hoc read connections in this process.",
+            repair: "increase storage.read_pool.size",
+        });
+    }
+
+    if read_pool.acquire_wait.samples >= READ_POOL_UNDERSIZED_SAMPLE_FLOOR
+        && read_pool.acquire_wait.p99_ns >= READ_POOL_UNDERSIZED_P99_THRESHOLD.as_nanos()
+        && !degradations
+            .iter()
+            .any(|entry| entry.code == READ_POOL_UNDERSIZED_CODE)
+    {
+        degradations.push(DegradationReport {
+            code: READ_POOL_UNDERSIZED_CODE,
+            severity: "low",
+            message: "Read pool appears undersized because acquire wait p99 exceeded the tuning threshold.",
+            repair: "increase storage.read_pool.size",
+        });
+    }
+}
+
 fn gather_memory_health(
     workspace_path: Option<&Path>,
 ) -> (MemoryHealthReport, Vec<DegradationReport>) {
@@ -4318,6 +4355,65 @@ mod tests {
             "derived assets should be reported",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn status_read_pool_degradations_emit_acquire_timeout() -> TestResult {
+        let mut degradations = Vec::new();
+        let read_pool = ReadPoolStatusReport {
+            ad_hoc_bypass_count: 1,
+            ..ReadPoolStatusReport::default()
+        };
+
+        push_read_pool_degradations(&mut degradations, &read_pool);
+
+        ensure(degradations.len(), 1, "degraded count")?;
+        ensure(
+            degradations[0].code,
+            READ_POOL_ACQUIRE_TIMEOUT_CODE,
+            "degraded code",
+        )?;
+        ensure(degradations[0].severity, "medium", "degraded severity")
+    }
+
+    #[test]
+    fn status_read_pool_degradations_emit_undersized_after_full_window() -> TestResult {
+        let mut degradations = Vec::new();
+        let read_pool = ReadPoolStatusReport {
+            acquire_wait: ReadPoolAcquireWaitReport {
+                samples: READ_POOL_UNDERSIZED_SAMPLE_FLOOR,
+                p50_ns: 1,
+                p99_ns: READ_POOL_UNDERSIZED_P99_THRESHOLD.as_nanos(),
+            },
+            ..ReadPoolStatusReport::default()
+        };
+
+        push_read_pool_degradations(&mut degradations, &read_pool);
+
+        ensure(degradations.len(), 1, "degraded count")?;
+        ensure(
+            degradations[0].code,
+            READ_POOL_UNDERSIZED_CODE,
+            "degraded code",
+        )?;
+        ensure(degradations[0].severity, "low", "degraded severity")
+    }
+
+    #[test]
+    fn status_read_pool_degradations_wait_for_full_sample_window() -> TestResult {
+        let mut degradations = Vec::new();
+        let read_pool = ReadPoolStatusReport {
+            acquire_wait: ReadPoolAcquireWaitReport {
+                samples: READ_POOL_UNDERSIZED_SAMPLE_FLOOR - 1,
+                p50_ns: 1,
+                p99_ns: READ_POOL_UNDERSIZED_P99_THRESHOLD.as_nanos(),
+            },
+            ..ReadPoolStatusReport::default()
+        };
+
+        push_read_pool_degradations(&mut degradations, &read_pool);
+
+        ensure(degradations.is_empty(), true, "degraded count")
     }
 
     #[test]

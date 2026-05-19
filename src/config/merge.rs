@@ -35,6 +35,7 @@ pub const STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY: &str =
     "storage.read_pool.idle_timeout_seconds";
 pub const STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY: &str =
     "storage.read_pool.max_pin_duration_seconds";
+pub const STORAGE_READ_POOL_ACQUIRE_TIMEOUT_MS_KEY: &str = "storage.read_pool.acquire_timeout_ms";
 pub const STORAGE_READ_POOL_PIN_SNAPSHOT_KEY: &str = "storage.read_pool.pin_snapshot";
 pub const RUNTIME_DAEMON_KEY: &str = "runtime.daemon";
 pub const RUNTIME_JOB_BUDGET_MS_KEY: &str = "runtime.job_budget_ms";
@@ -227,6 +228,13 @@ impl MergedConfig {
                 STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY,
                 seconds.to_string(),
                 self.source(STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY),
+            ));
+        }
+        if let Some(ms) = self.values.storage.read_pool.acquire_timeout_ms {
+            entries.push(ConfigShowEntry::new(
+                STORAGE_READ_POOL_ACQUIRE_TIMEOUT_MS_KEY,
+                ms.to_string(),
+                self.source(STORAGE_READ_POOL_ACQUIRE_TIMEOUT_MS_KEY),
             ));
         }
         if let Some(pin_snapshot) = self.values.storage.read_pool.pin_snapshot {
@@ -836,6 +844,7 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
                 size: Some(1),
                 idle_timeout_seconds: Some(30),
                 max_pin_duration_seconds: Some(30),
+                acquire_timeout_ms: Some(5000),
                 pin_snapshot: Some(true),
             },
         },
@@ -1011,6 +1020,7 @@ pub fn config_from_env(
                     env,
                     EnvVar::ReadPoolMaxPinSeconds.name(),
                 )?,
+                acquire_timeout_ms: optional_env_u64(env, EnvVar::ReadPoolAcquireTimeoutMs.name())?,
                 pin_snapshot: optional_env_bool(env, EnvVar::ReadPoolDisablePin.name())?
                     .map(|disabled| !disabled),
             },
@@ -1194,6 +1204,15 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                     &layers.project.storage.read_pool.max_pin_duration_seconds,
                     &layers.user.storage.read_pool.max_pin_duration_seconds,
                     &layers.defaults.storage.read_pool.max_pin_duration_seconds,
+                ),
+                acquire_timeout_ms: pick_field(
+                    &mut sources,
+                    STORAGE_READ_POOL_ACQUIRE_TIMEOUT_MS_KEY,
+                    &layers.cli.storage.read_pool.acquire_timeout_ms,
+                    &layers.environment.storage.read_pool.acquire_timeout_ms,
+                    &layers.project.storage.read_pool.acquire_timeout_ms,
+                    &layers.user.storage.read_pool.acquire_timeout_ms,
+                    &layers.defaults.storage.read_pool.acquire_timeout_ms,
                 ),
                 pin_snapshot: pick_field(
                     &mut sources,
@@ -2192,6 +2211,11 @@ mod tests {
             "read pool max pin duration",
         )?;
         ensure_equal(
+            &defaults.storage.read_pool.acquire_timeout_ms,
+            &Some(5000),
+            "read pool acquire timeout",
+        )?;
+        ensure_equal(
             &defaults.storage.read_pool.pin_snapshot,
             &Some(true),
             "read pool snapshot pinning",
@@ -2253,6 +2277,10 @@ mod tests {
             OsString::from("45"),
         );
         env.insert(
+            "EE_READ_POOL_ACQUIRE_TIMEOUT_MS".to_string(),
+            OsString::from("250"),
+        );
+        env.insert(
             "EE_READ_POOL_DISABLE_PIN".to_string(),
             OsString::from("true"),
         );
@@ -2310,6 +2338,11 @@ mod tests {
             &parsed.storage.read_pool.max_pin_duration_seconds,
             &Some(45),
             "env read pool max pin duration",
+        )?;
+        ensure_equal(
+            &parsed.storage.read_pool.acquire_timeout_ms,
+            &Some(250),
+            "env read pool acquire timeout",
         )?;
         ensure_equal(
             &parsed.storage.read_pool.pin_snapshot,
@@ -2472,6 +2505,7 @@ mod tests {
                 index_dir: Some(PathBuf::from("/env/index")),
                 read_pool: ReadPoolConfig {
                     size: Some(8),
+                    acquire_timeout_ms: Some(750),
                     ..ReadPoolConfig::default()
                 },
                 ..StorageConfig::default()
@@ -2559,6 +2593,16 @@ mod tests {
             &merged.source(STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY),
             &Some(ConfigValueSource::Default),
             "read pool max pin duration source",
+        )?;
+        ensure_equal(
+            &merged.values.storage.read_pool.acquire_timeout_ms,
+            &Some(750),
+            "env read pool acquire timeout",
+        )?;
+        ensure_equal(
+            &merged.source(STORAGE_READ_POOL_ACQUIRE_TIMEOUT_MS_KEY),
+            &Some(ConfigValueSource::Environment),
+            "read pool acquire timeout source",
         )?;
         ensure_equal(
             &merged.values.search.default_speed,

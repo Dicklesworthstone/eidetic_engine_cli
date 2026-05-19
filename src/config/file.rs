@@ -120,6 +120,7 @@ pub struct ReadPoolConfig {
     pub size: Option<u64>,
     pub idle_timeout_seconds: Option<u64>,
     pub max_pin_duration_seconds: Option<u64>,
+    pub acquire_timeout_ms: Option<u64>,
     pub pin_snapshot: Option<bool>,
 }
 
@@ -135,6 +136,7 @@ impl ReadPoolConfig {
                 SECTIONS,
                 "max_pin_duration_seconds",
             )?,
+            acquire_timeout_ms: optional_u64_path(document, SECTIONS, "acquire_timeout_ms")?,
             pin_snapshot: optional_bool_path(document, SECTIONS, "pin_snapshot")?,
         })
     }
@@ -2035,6 +2037,7 @@ jsonl_export = false
 size = 4
 idle_timeout_seconds = 120
 max_pin_duration_seconds = 45
+acquire_timeout_ms = 250
 pin_snapshot = true
 
 [runtime]
@@ -2220,6 +2223,11 @@ prompt_injection_guard = true
             &config.storage.read_pool.max_pin_duration_seconds,
             &Some(45),
             "read pool max pin duration",
+        )?;
+        ensure_equal(
+            &config.storage.read_pool.acquire_timeout_ms,
+            &Some(250),
+            "read pool acquire timeout",
         )?;
         ensure_equal(
             &config.storage.read_pool.pin_snapshot,
@@ -2514,6 +2522,11 @@ prompt_injection_guard = true
             &config.storage.read_pool.max_pin_duration_seconds,
             &None,
             "read pool max pin duration",
+        )?;
+        ensure_equal(
+            &config.storage.read_pool.acquire_timeout_ms,
+            &None,
+            "read pool acquire timeout",
         )?;
         ensure_equal(
             &config.storage.read_pool.pin_snapshot,
