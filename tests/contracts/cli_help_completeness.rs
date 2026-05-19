@@ -243,6 +243,81 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
 }
 
 #[test]
+fn swarm_profile_and_host_readiness_flags_are_help_discoverable() -> TestResult {
+    let swarm_brief_help = help_for(&["ee", "swarm", "brief", "--help"])?;
+    assert_contains_all(
+        &swarm_brief_help,
+        &[
+            "--sources",
+            "--include-rch",
+            "--agent-mail-snapshot",
+            "--agent-inventory-only",
+            "--max-recent-commits",
+            "--command-timeout-ms",
+            "--require-sources",
+        ],
+        "ee swarm brief --help",
+    )?;
+
+    let swarm_next_action_help = help_for(&["ee", "swarm", "next-action", "--help"])?;
+    assert_contains_all(
+        &swarm_next_action_help,
+        &[
+            "--sources",
+            "--include-rch",
+            "--agent-mail-snapshot",
+            "--verifier-evidence",
+            "--agent-inventory-only",
+            "--max-recent-commits",
+            "--command-timeout-ms",
+            "--require-sources",
+        ],
+        "ee swarm next-action --help",
+    )?;
+
+    let diag_host_profile_help = help_for(&["ee", "diag", "host-profile", "--help"])?;
+    assert_contains_all(
+        &diag_host_profile_help,
+        &["--full-paths"],
+        "ee diag host-profile --help",
+    )?;
+
+    let profile_config_plan_help = help_for(&["ee", "profile", "config", "plan", "--help"])?;
+    assert_contains_all(
+        &profile_config_plan_help,
+        &["--profile", "--config"],
+        "ee profile config plan --help",
+    )?;
+
+    let profile_config_apply_help = help_for(&["ee", "profile", "config", "apply", "--help"])?;
+    assert_contains_all(
+        &profile_config_apply_help,
+        &["--profile", "--config", "--dry-run"],
+        "ee profile config apply --help",
+    )
+}
+
+#[test]
+fn graph_cli_reference_documents_swarm_profile_readiness_examples() -> TestResult {
+    let reference = read_graph_cli_reference()?;
+
+    assert_contains_all(
+        &reference,
+        &[
+            "ee swarm brief --workspace .",
+            "--sources git,beads,bv,agent-mail --require-sources --json",
+            "ee swarm next-action --workspace . --sources default,host-profile",
+            "--verifier-evidence proof.json --include-rch --json",
+            "ee diag host-profile --workspace . --full-paths --json",
+            "ee profile config plan --workspace . --profile swarm",
+            "ee profile config apply --workspace . --profile portable",
+            "`constrained`, `portable`, `workstation`, `swarm`",
+        ],
+        "docs/cli-reference/graph-flags.md",
+    )
+}
+
+#[test]
 fn graph_cli_reference_documents_hits_and_load_bearing_insights_examples() -> TestResult {
     let reference = read_graph_cli_reference()?;
 
@@ -1254,6 +1329,58 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             ".ee/ee.db",
             "--mode",
             "truncate",
+            "--dry-run",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "swarm",
+            "brief",
+            "--sources",
+            "git,beads,bv,agent-mail",
+            "--agent-mail-snapshot",
+            "coordination.json",
+            "--agent-inventory-only",
+            "codex,claude",
+            "--max-recent-commits",
+            "4",
+            "--command-timeout-ms",
+            "750",
+            "--require-sources",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "swarm",
+            "next-action",
+            "--sources",
+            "default,host-profile",
+            "--include-rch",
+            "--verifier-evidence",
+            "proof.json",
+            "--json",
+        ][..],
+        &["ee", "diag", "host-profile", "--full-paths", "--json"][..],
+        &[
+            "ee",
+            "profile",
+            "config",
+            "plan",
+            "--profile",
+            "swarm",
+            "--config",
+            ".ee/config.toml",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "profile",
+            "config",
+            "apply",
+            "--profile",
+            "portable",
+            "--config",
+            ".ee/config.toml",
             "--dry-run",
             "--json",
         ][..],

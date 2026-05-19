@@ -321,6 +321,47 @@ ee diag graph-snapshot --workspace . --status stale \
   --metrics-json '{"pagerank":1}' --node-count 42 --edge-count 77 --json
 ```
 
+## Swarm And Host-Readiness Flags
+
+These commands are read-only readiness surfaces for agent swarms and host
+configuration. They are included here because graph-heavy work often depends on
+fresh coordination, host-capacity, and profile evidence before an agent picks a
+bead or runs an RCH-gated verification.
+
+| Command | Flag | Values | Default | Use |
+| --- | --- | --- | --- | --- |
+| `ee swarm brief` | `--sources <LIST>` | comma-separated: `default`, `all`, `none`, `git`, `beads`, `bv`, `agent-mail`, `rch`, `host-profile`, `agent-inventory` | `default` | Selects read-only inputs for the coordination brief. |
+| `ee swarm next-action` | `--sources <LIST>` | same as `ee swarm brief` | `default`; includes RCH for next-action | Selects read-only inputs for work allocation. |
+| `ee swarm brief`, `ee swarm next-action` | `--include-rch` | boolean | false | Adds the optional RCH status probe; equivalent to including `rch` in `--sources`. |
+| `ee swarm brief`, `ee swarm next-action` | `--agent-mail-snapshot <PATH>` | JSON file path | omitted | Includes a redacted Agent Mail snapshot without mutating live mail. |
+| `ee swarm next-action` | `--verifier-evidence <PATH>` | `ee.rch.verify.v1` proof JSON path | omitted | Includes recent compile-health evidence for work-allocation preflight. |
+| `ee swarm brief`, `ee swarm next-action` | `--agent-inventory-only <SLUGS>` | comma-separated connector slugs | omitted | Limits agent inventory inspection to selected connectors when inventory is enabled. |
+| `ee swarm brief`, `ee swarm next-action` | `--max-recent-commits <N>` | integer | `8` | Caps recent git commits included by the git source. |
+| `ee swarm brief`, `ee swarm next-action` | `--command-timeout-ms <MS>` | integer milliseconds | `1500` | Sets the timeout budget for each selected source probe. |
+| `ee swarm brief`, `ee swarm next-action` | `--require-sources` | boolean | false | Exits 6 when any selected source is unavailable, unconfigured, or skipped. |
+| `ee diag host-profile` | `--full-paths` | boolean | false | Includes absolute host paths in path probes; omit for redacted labels. |
+| `ee profile config plan` | `--profile <PROFILE>` | `constrained`, `portable`, `workstation`, `swarm` | host-adaptive recommendation | Plans exact `.ee/config.toml` profile changes without writing. |
+| `ee profile config plan`, `ee profile config apply` | `--config <PATH>` | filesystem path | `<workspace>/.ee/config.toml` | Selects the config file to inspect or update. |
+| `ee profile config apply` | `--profile <PROFILE>` | `constrained`, `portable`, `workstation`, `swarm` | host-adaptive recommendation | Selects the requested operating profile for the config write. |
+| `ee profile config apply` | `--dry-run` | boolean | false | Reports the planned write without mutating the config file. |
+
+Example:
+
+```bash
+ee swarm brief --workspace . \
+  --sources git,beads,bv,agent-mail --require-sources --json
+ee swarm brief --workspace . --sources host-profile,agent-inventory \
+  --agent-inventory-only codex,claude --max-recent-commits 4 \
+  --command-timeout-ms 750 --json
+ee swarm next-action --workspace . --sources default,host-profile \
+  --verifier-evidence proof.json --include-rch --json
+ee diag host-profile --workspace . --full-paths --json
+ee profile config plan --workspace . --profile swarm \
+  --config .ee/config.toml --json
+ee profile config apply --workspace . --profile portable \
+  --config .ee/config.toml --dry-run --json
+```
+
 ## Curation And Maintenance Flags
 
 | Command | Flag | Values | Default | Use |
