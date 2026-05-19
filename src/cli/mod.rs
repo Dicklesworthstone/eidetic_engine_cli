@@ -21713,23 +21713,18 @@ where
     W: Write,
 {
     match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &proximity_human_output(report))
+        output::Renderer::Human => write_stdout(stdout, &proximity_human_output(report)),
+        output::Renderer::Markdown => {
+            write_stdout(stdout, &(output::render_proximity_markdown(report) + "\n"))
         }
         output::Renderer::Toon => {
-            let json = serde_json::to_string(report).unwrap_or_else(|_| {
-                r#"{"schema":"ee.error.v1","error":"serialization_failed"}"#.to_string()
-            });
-            write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+            write_stdout(stdout, &(output::render_proximity_toon(report) + "\n"))
         }
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
-            let json = serde_json::to_string(report).unwrap_or_else(|_| {
-                r#"{"schema":"ee.error.v1","error":"serialization_failed"}"#.to_string()
-            });
-            write_stdout(stdout, &(json + "\n"))
+            write_stdout(stdout, &(output::render_proximity_json(report) + "\n"))
         }
     }
 }
