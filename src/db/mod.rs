@@ -2152,6 +2152,30 @@ fn required_text<'a>(
         })
 }
 
+fn required_content_simhash(
+    row: &Row,
+    index: usize,
+    operation: DbOperation,
+    column: &str,
+) -> Result<MemoryContentSimHash> {
+    let value = required_value(row, index, operation, column)?;
+    let Some(bytes) = value.as_bytes() else {
+        return Err(DbError::MalformedRow {
+            operation,
+            message: format!("{column} column at index {index} is not bytes"),
+        });
+    };
+    if bytes.len() != 16 {
+        return Err(DbError::MalformedRow {
+            operation,
+            message: format!("{column} column at index {index} must be a 16-byte SimHash"),
+        });
+    }
+    let mut fixed = [0_u8; 16];
+    fixed.copy_from_slice(bytes);
+    Ok(fixed)
+}
+
 #[must_use]
 pub const fn subsystem_name() -> &'static str {
     SUBSYSTEM
@@ -4610,6 +4634,24 @@ ALTER TABLE mesh_import_ledger
     "blake3:v055_mesh_import_ledger_policy_decision_2026_05_16",
 );
 
+/// V056: Persist nullable content SimHash fingerprints on memory rows.
+pub const V056_MEMORY_CONTENT_SIMHASH: Migration = Migration::new(
+    56,
+    "memory_content_simhash",
+    r#"
+ALTER TABLE memories
+    ADD COLUMN content_simhash BLOB
+    CHECK (content_simhash IS NULL OR length(content_simhash) = 16);
+
+CREATE INDEX idx_memories_workspace_content_simhash
+    ON memories(workspace_id, content_simhash)
+    WHERE content_simhash IS NOT NULL
+      AND tombstoned_at IS NULL
+      AND valid_to IS NULL;
+"#,
+    "blake3:v056_memory_content_simhash_2026_05_19",
+);
+
 /// V042: Allow every pack omission reason emitted by the packer.
 pub const V042_PACK_OMISSION_REASONS: Migration = Migration::new(
     42,
@@ -4781,6 +4823,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V053_MESH_IMPORT_LEDGER_POLICY_FAILURE,
     V054_MESH_IMPORT_LEDGER_REJECT_DECISION,
     V055_MESH_IMPORT_LEDGER_POLICY_DECISION,
+    V056_MEMORY_CONTENT_SIMHASH,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -9262,7 +9305,7 @@ fn validate_mesh_policy_decision_json(raw: &str, context: &str) -> Result<()> {
     let value = parse_mesh_policy_object(raw, context)?;
     ensure_json_string(&value, context, "schema", &["ee.mesh.policy_decision.v1"])?;
     let direction = ensure_json_string(&value, context, "direction", &["inbound", "outbound"])?;
-    ensure_json_string(
+    let action = ensure_json_string(
         &value,
         context,
         "action",
@@ -9296,6 +9339,16 @@ fn validate_mesh_policy_decision_json(raw: &str, context: &str) -> Result<()> {
             "untrusted",
         ],
     )?;
+    if action == "allow" {
+        match value.get("trustLane").and_then(serde_json::Value::as_str) {
+            Some("peerHumanViaPeer" | "peerAgent" | "peerDerived" | "untrusted") => {}
+            _ => {
+                return Err(mesh_policy_json_error(format!(
+                    "{context}.trustLane must be a peer-safe string for allowed policy decisions"
+                )));
+            }
+        }
+    }
 
     match direction {
         "inbound" => {
@@ -9303,8 +9356,21 @@ fn validate_mesh_policy_decision_json(raw: &str, context: &str) -> Result<()> {
                 &value,
                 context,
                 "importTrustClass",
-                &["human_explicit", "agent_assertion", "agent_validated"],
+                &["agent_assertion", "agent_validated"],
             )?;
+            if action == "allow" {
+                match value
+                    .get("importTrustClass")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    Some("agent_assertion" | "agent_validated") => {}
+                    _ => {
+                        return Err(mesh_policy_json_error(format!(
+                            "{context}.importTrustClass must be agent_assertion or agent_validated for allowed inbound decisions"
+                        )));
+                    }
+                }
+            }
             ensure_json_bool(&value, context, "bodyFetchAllowed")?;
             ensure_json_bool(&value, context, "localTruthSideEffectsAllowed")?;
             ensure_json_bool(&value, context, "searchOrGraphSideEffectsAllowed")?;
@@ -9920,6 +9986,36 @@ pub struct StoredMemory {
     pub valid_to: Option<String>,
 }
 
+/// Persisted 128-bit content SimHash bytes, stored big-endian.
+pub type MemoryContentSimHash = [u8; 16];
+
+/// Workspace-local memory row admitted by the persisted SimHash lookup.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MemorySimHashCandidate {
+    pub memory_id: String,
+    pub content_simhash: MemoryContentSimHash,
+    pub hamming_distance: u32,
+}
+
+fn memory_content_simhash_hamming_distance(
+    left: MemoryContentSimHash,
+    right: MemoryContentSimHash,
+) -> u32 {
+    left.into_iter()
+        .zip(right)
+        .map(|(left, right)| (left ^ right).count_ones())
+        .sum()
+}
+
+fn compare_memory_simhash_candidates(
+    left: &MemorySimHashCandidate,
+    right: &MemorySimHashCandidate,
+) -> std::cmp::Ordering {
+    left.hamming_distance
+        .cmp(&right.hamming_distance)
+        .then_with(|| left.memory_id.cmp(&right.memory_id))
+}
+
 struct MemoryProvenanceChainFields<'a> {
     id: &'a str,
     workspace_id: &'a str,
@@ -10004,6 +10100,25 @@ fn hash_text_field(hasher: &mut blake3::Hasher, field_name: &str, value: &str) {
 impl DbConnection {
     /// Insert a new memory and its tags.
     pub fn insert_memory(&self, id: &str, input: &CreateMemoryInput) -> Result<()> {
+        self.insert_memory_inner(id, input, None)
+    }
+
+    /// Insert a new memory with a precomputed content SimHash.
+    pub fn insert_memory_with_content_simhash(
+        &self,
+        id: &str,
+        input: &CreateMemoryInput,
+        content_simhash: MemoryContentSimHash,
+    ) -> Result<()> {
+        self.insert_memory_inner(id, input, Some(content_simhash))
+    }
+
+    fn insert_memory_inner(
+        &self,
+        id: &str,
+        input: &CreateMemoryInput,
+        content_simhash: Option<MemoryContentSimHash>,
+    ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let provenance_chain_hash =
             compute_memory_provenance_chain_hash_fields(&MemoryProvenanceChainFields {
@@ -10031,7 +10146,7 @@ impl DbConnection {
 
         self.execute_for(
             DbOperation::Execute,
-            "INSERT INTO memories (id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, created_at, updated_at, valid_from, valid_to, logical_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            "INSERT INTO memories (id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, created_at, updated_at, valid_from, valid_to, content_simhash, logical_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             &[
                 Value::Text(id.to_string()),
                 Value::Text(input.workspace_id.clone()),
@@ -10052,6 +10167,7 @@ impl DbConnection {
                 Value::Text(now),
                 Value::Text(valid_from),
                 input.valid_to.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
+                content_simhash.map_or(Value::Null, |simhash| Value::Bytes(simhash.to_vec())),
                 Value::Text(id.to_string()),
             ],
         )?;
@@ -10160,6 +10276,47 @@ impl DbConnection {
 
         let rows = self.query_for(DbOperation::Query, &sql, &params)?;
         rows.iter().map(stored_memory_from_row).collect()
+    }
+
+    /// List live memory rows in one workspace whose persisted SimHash is within a Hamming radius.
+    pub fn list_memory_simhash_candidates(
+        &self,
+        workspace_id: &str,
+        query: MemoryContentSimHash,
+        max_hamming_distance: u32,
+        limit: usize,
+    ) -> Result<Vec<MemorySimHashCandidate>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, content_simhash FROM memories WHERE workspace_id = ?1 AND content_simhash IS NOT NULL AND tombstoned_at IS NULL AND valid_to IS NULL ORDER BY id ASC",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+        let mut candidates: Vec<MemorySimHashCandidate> = rows
+            .iter()
+            .map(|row| {
+                let memory_id = required_text(row, 0, DbOperation::Query, "id")?.to_string();
+                let content_simhash =
+                    required_content_simhash(row, 1, DbOperation::Query, "content_simhash")?;
+                let hamming_distance =
+                    memory_content_simhash_hamming_distance(query, content_simhash);
+                Ok(MemorySimHashCandidate {
+                    memory_id,
+                    content_simhash,
+                    hamming_distance,
+                })
+            })
+            .collect::<Result<_>>()?;
+        candidates.retain(|candidate| candidate.hamming_distance <= max_hamming_distance);
+        if candidates.len() > limit {
+            candidates.select_nth_unstable_by(limit - 1, compare_memory_simhash_candidates);
+            candidates.truncate(limit);
+        }
+        candidates.sort_by(compare_memory_simhash_candidates);
+        Ok(candidates)
     }
 
     /// List recent non-tombstoned memories in the same workflow, excluding one memory.
@@ -14046,6 +14203,30 @@ impl DbConnection {
             })
             .collect()
     }
+
+    /// List the most recent pack item selections for a workspace.
+    pub fn list_recent_pack_items_for_workspace(
+        &self,
+        workspace_id: &str,
+        limit: u32,
+    ) -> Result<Vec<(StoredPackRecord, StoredPackItem)>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT pr.id, pr.workspace_id, pr.query, pr.profile, pr.max_tokens, pr.used_tokens, pr.item_count, pr.omitted_count, pr.pack_hash, pr.degraded_json, pr.ledger_json, pr.ledger_hash, pr.created_at, pr.created_by, pi.pack_id, pi.memory_id, pi.rank, pi.section, pi.estimated_tokens, pi.relevance, pi.utility, pi.why, pi.diversity_key, pi.provenance_json, pi.trust_class, pi.trust_subclass FROM pack_items pi JOIN pack_records pr ON pi.pack_id = pr.id WHERE pr.workspace_id = ?1 ORDER BY pr.created_at DESC, pr.id DESC, pi.rank ASC, pi.memory_id ASC LIMIT ?2",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::BigInt(i64::from(limit)),
+            ],
+        )?;
+
+        rows.iter()
+            .map(|row| {
+                let record = stored_pack_record_from_row(row)?;
+                let item = stored_pack_item_from_joined_row(row, 14)?;
+                Ok((record, item))
+            })
+            .collect()
+    }
 }
 
 fn build_pack_selection_ledger(
@@ -16541,7 +16722,8 @@ mod tests {
         CreateWorkspaceInput, DatabaseConfig, DatabaseLocation, DatabaseOpenMode, DbConnection,
         DbError, DbOperation, GraphSnapshotStatus, GraphSnapshotType, MIGRATION_TABLE_NAME,
         Migration, MigrationRecord, MigrationTableColumn, StoredEpisodeAction, WalCheckpointMode,
-        subsystem_name,
+        file_write_owner_depth_for_test, file_write_owner_gate_address_for_test,
+        lock_file_write_owner_gate, subsystem_name,
     };
     use crate::models::{
         AgentContextProfileCounts, EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider,
@@ -18831,6 +19013,41 @@ mod tests {
         Ok(())
     }
 
+    fn simhash_test_memory_input(workspace_id: &str, content: &str) -> super::CreateMemoryInput {
+        super::CreateMemoryInput {
+            workspace_id: workspace_id.to_string(),
+            level: "procedural".to_string(),
+            kind: "rule".to_string(),
+            content: content.to_string(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.7,
+            importance: 0.8,
+            provenance_uri: Some("test://simhash".to_string()),
+            trust_class: "agent_validated".to_string(),
+            trust_subclass: None,
+            tags: vec![],
+            valid_from: None,
+            valid_to: None,
+        }
+    }
+
+    fn override_memory_simhash_for_test(
+        connection: &DbConnection,
+        memory_id: &str,
+        content_simhash: super::MemoryContentSimHash,
+    ) -> TestResult {
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET content_simhash = ?1 WHERE id = ?2",
+            &[
+                Value::Bytes(content_simhash.to_vec()),
+                Value::Text(memory_id.to_string()),
+            ],
+        )?;
+        Ok(())
+    }
+
     fn audit_input(workspace_id: &str, action: &str, target_id: &str) -> super::CreateAuditInput {
         super::CreateAuditInput {
             workspace_id: Some(workspace_id.to_owned()),
@@ -20786,6 +21003,80 @@ mod tests {
     }
 
     #[test]
+    fn mesh_import_ledger_rejects_local_only_import_trust_policy_decisions() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        for import_trust_class in ["human_explicit", "cass_evidence", "legacy_import"] {
+            let decision = format!(
+                r#"{{"schema":"ee.mesh.policy_decision.v1","direction":"inbound","action":"allow","reason":"peer_policy_lane_allowed","policyRef":"mesh_pol_7d4b19e22c","materialLane":"metadata","redaction":"share","trustLane":"peerAgent","importTrustClass":"{import_trust_class}","bodyFetchAllowed":false,"localTruthSideEffectsAllowed":true,"searchOrGraphSideEffectsAllowed":true,"failure":null}}"#
+            );
+            let input = super::InsertMeshImportLedgerEventInput {
+                policy_decision_json: Some(decision),
+                ..mesh_import_event_input(4, hash('9'), hash('a'))
+            };
+
+            let error = connection
+                .insert_mesh_import_ledger_event(&input)
+                .expect_err("local-only peer import trust class should reject");
+            ensure(
+                error
+                    .to_string()
+                    .contains("policy_decision_json.importTrustClass"),
+                "error should mention importTrustClass",
+            )?;
+            ensure(
+                error.to_string().contains(import_trust_class),
+                format!("error should mention rejected class {import_trust_class}"),
+            )?;
+        }
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_import_ledger_rejects_allowed_policy_decisions_without_peer_safe_lanes() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let cases = [
+            (
+                r#"{"schema":"ee.mesh.policy_decision.v1","direction":"inbound","action":"allow","reason":"peer_policy_lane_allowed","policyRef":"mesh_pol_7d4b19e22c","materialLane":"metadata","redaction":"share","trustLane":"localHuman","importTrustClass":"agent_validated","bodyFetchAllowed":false,"localTruthSideEffectsAllowed":true,"searchOrGraphSideEffectsAllowed":true,"failure":null}"#,
+                "policy_decision_json.trustLane",
+            ),
+            (
+                r#"{"schema":"ee.mesh.policy_decision.v1","direction":"inbound","action":"allow","reason":"peer_policy_lane_allowed","policyRef":"mesh_pol_7d4b19e22c","materialLane":"metadata","redaction":"share","trustLane":null,"importTrustClass":"agent_validated","bodyFetchAllowed":false,"localTruthSideEffectsAllowed":true,"searchOrGraphSideEffectsAllowed":true,"failure":null}"#,
+                "policy_decision_json.trustLane",
+            ),
+            (
+                r#"{"schema":"ee.mesh.policy_decision.v1","direction":"inbound","action":"allow","reason":"peer_policy_lane_allowed","policyRef":"mesh_pol_7d4b19e22c","materialLane":"metadata","redaction":"share","trustLane":"peerAgent","importTrustClass":null,"bodyFetchAllowed":false,"localTruthSideEffectsAllowed":true,"searchOrGraphSideEffectsAllowed":true,"failure":null}"#,
+                "policy_decision_json.importTrustClass",
+            ),
+        ];
+
+        for (decision, field) in cases {
+            let input = super::InsertMeshImportLedgerEventInput {
+                policy_decision_json: Some(decision.to_string()),
+                ..mesh_import_event_input(4, hash('9'), hash('a'))
+            };
+
+            let error = connection
+                .insert_mesh_import_ledger_event(&input)
+                .expect_err("allowed peer policy decision should reject unsafe lanes");
+            ensure(
+                error.to_string().contains(field),
+                format!("error should mention {field}: {error}"),
+            )?;
+        }
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn mesh_import_ledger_accepts_retained_rejected_policy_failure_surface() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
@@ -21224,6 +21515,202 @@ mod tests {
             &tags,
             &vec!["cargo".to_string(), "formatting".to_string()],
             "tags",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_memory_with_content_simhash_populates_candidate_lookup() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let content = "Always run cargo fmt before commit.";
+        let expected = crate::search::simhash::simhash_128(content).to_be_bytes();
+        connection.insert_memory_with_content_simhash(
+            "mem_10000000000000000000000001",
+            &simhash_test_memory_input("wsp_01234567890123456789012345", content),
+            expected,
+        )?;
+
+        let candidates = connection.list_memory_simhash_candidates(
+            "wsp_01234567890123456789012345",
+            expected,
+            0,
+            10,
+        )?;
+
+        ensure_equal(&candidates.len(), &1_usize, "one exact SimHash candidate")?;
+        let candidate = &candidates[0];
+        ensure_equal(
+            &candidate.memory_id.as_str(),
+            &"mem_10000000000000000000000001",
+            "candidate memory_id",
+        )?;
+        ensure_equal(
+            &candidate.content_simhash,
+            &expected,
+            "candidate content_simhash",
+        )?;
+        ensure_equal(&candidate.hamming_distance, &0_u32, "candidate distance")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn memory_simhash_nullable_rows_are_ignored_and_length_checked() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let workspace_id = "wsp_01234567890123456789012345";
+        let memory_id = "mem_11000000000000000000000001";
+        connection.insert_memory(
+            memory_id,
+            &simhash_test_memory_input(workspace_id, "memory without computed simhash"),
+        )?;
+
+        let stored = connection.query(
+            "SELECT content_simhash FROM memories WHERE id = ?1",
+            &[Value::Text(memory_id.to_string())],
+        )?;
+        ensure(
+            matches!(
+                first_value(&stored, 0, "nullable content_simhash")?,
+                Value::Null
+            ),
+            "plain memory inserts must initialize content_simhash as NULL",
+        )?;
+
+        let query = [0_u8; 16];
+        let candidates = connection.list_memory_simhash_candidates(workspace_id, query, 128, 10)?;
+        ensure(
+            candidates.is_empty(),
+            "NULL content_simhash rows must be ignored by lookup",
+        )?;
+
+        let invalid = connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET content_simhash = ?1 WHERE id = ?2",
+            &[
+                Value::Bytes(vec![0_u8; 15]),
+                Value::Text(memory_id.to_string()),
+            ],
+        );
+        ensure(
+            matches!(
+                invalid,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::Execute,
+                    ..
+                })
+            ),
+            "content_simhash CHECK must reject non-16-byte blobs",
+        )?;
+
+        let valid = [7_u8; 16];
+        override_memory_simhash_for_test(&connection, memory_id, valid)?;
+        let candidates = connection.list_memory_simhash_candidates(workspace_id, valid, 0, 10)?;
+        ensure_equal(
+            &candidates
+                .iter()
+                .map(|candidate| candidate.memory_id.as_str())
+                .collect::<Vec<_>>(),
+            &vec![memory_id],
+            "16-byte content_simhash rows are queryable after migration",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn memory_simhash_lookup_is_workspace_scoped_and_hamming_bounded() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        connection.execute_raw(
+            "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_99999999999999999999999999', '/tmp/other', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )?;
+
+        let workspace_id = "wsp_01234567890123456789012345";
+        let other_workspace_id = "wsp_99999999999999999999999999";
+        connection.insert_memory(
+            "mem_20000000000000000000000001",
+            &simhash_test_memory_input(workspace_id, "exact candidate"),
+        )?;
+        connection.insert_memory(
+            "mem_20000000000000000000000002",
+            &simhash_test_memory_input(workspace_id, "threshold candidate"),
+        )?;
+        connection.insert_memory(
+            "mem_20000000000000000000000003",
+            &simhash_test_memory_input(workspace_id, "outside candidate"),
+        )?;
+        connection.insert_memory(
+            "mem_90000000000000000000000001",
+            &simhash_test_memory_input(other_workspace_id, "cross workspace exact"),
+        )?;
+
+        let query = [0_u8; 16];
+        let mut threshold = [0_u8; 16];
+        threshold[15] = 0b0011;
+        let mut outside = [0_u8; 16];
+        outside[15] = 0b0111;
+        override_memory_simhash_for_test(&connection, "mem_20000000000000000000000001", query)?;
+        override_memory_simhash_for_test(&connection, "mem_20000000000000000000000002", threshold)?;
+        override_memory_simhash_for_test(&connection, "mem_20000000000000000000000003", outside)?;
+        override_memory_simhash_for_test(&connection, "mem_90000000000000000000000001", query)?;
+
+        let bounded = connection.list_memory_simhash_candidates(workspace_id, query, 2, 10)?;
+        let ids: Vec<&str> = bounded
+            .iter()
+            .map(|candidate| candidate.memory_id.as_str())
+            .collect();
+        let distances: Vec<u32> = bounded
+            .iter()
+            .map(|candidate| candidate.hamming_distance)
+            .collect();
+
+        ensure_equal(
+            &ids,
+            &vec![
+                "mem_20000000000000000000000001",
+                "mem_20000000000000000000000002",
+            ],
+            "workspace-scoped bounded candidate ids",
+        )?;
+        ensure_equal(
+            &distances,
+            &vec![0_u32, 2_u32],
+            "workspace-scoped bounded distances",
+        )?;
+
+        let exact_only = connection.list_memory_simhash_candidates(workspace_id, query, 0, 10)?;
+        ensure_equal(
+            &exact_only
+                .iter()
+                .map(|candidate| candidate.memory_id.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["mem_20000000000000000000000001"],
+            "radius zero returns only exact match in the same workspace",
+        )?;
+
+        let limited = connection.list_memory_simhash_candidates(workspace_id, query, 2, 1)?;
+        ensure_equal(&limited.len(), &1_usize, "limit caps ranked candidates")?;
+        ensure_equal(
+            &limited[0].memory_id.as_str(),
+            &"mem_20000000000000000000000001",
+            "limit keeps nearest candidate",
+        )?;
+
+        let empty = connection.list_memory_simhash_candidates(workspace_id, query, 2, 0)?;
+        ensure(
+            empty.is_empty(),
+            "limit zero returns an empty candidate set",
         )?;
 
         connection.close()?;

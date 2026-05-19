@@ -10,11 +10,12 @@ use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
 use chrono::Utc;
+use fnx_runtime::CompatibilityMode;
 use serde_json::{Value as JsonValue, json};
 
 use crate::config::WORKSPACE_MARKER;
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
-use crate::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
+use crate::core::jsonl_import::{IMPORT_ACTION, JsonlImportOptions, import_jsonl_records};
 use crate::db::{
     CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
     DatabaseConfig, DbConnection, GraphSnapshotType, StoredAuditEntry, StoredGraphAlgorithmResult,
@@ -640,6 +641,78 @@ struct BackupExportData {
     tags_by_memory: BTreeMap<String, Vec<String>>,
     links: Vec<StoredMemoryLink>,
     audits: Vec<StoredAuditEntry>,
+    graph_fields_by_memory: BTreeMap<String, BackupMemoryGraphFields>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct BackupMemoryGraphFields {
+    pagerank_score: Option<f64>,
+    betweenness_score: Option<f64>,
+    hits_authority: Option<f64>,
+    hits_hub: Option<f64>,
+    onion_layer: Option<u32>,
+    k_truss_max: Option<u32>,
+    articulation_point: Option<bool>,
+    bayes_alpha: Option<f64>,
+    bayes_beta: Option<f64>,
+}
+
+impl BackupMemoryGraphFields {
+    fn export_baseline() -> Self {
+        Self {
+            pagerank_score: Some(0.0),
+            betweenness_score: Some(0.0),
+            hits_authority: Some(0.0),
+            hits_hub: Some(0.0),
+            onion_layer: Some(0),
+            k_truss_max: Some(0),
+            articulation_point: Some(false),
+            bayes_alpha: Some(0.5),
+            bayes_beta: Some(0.5),
+        }
+    }
+
+    fn overlay_present(&mut self, imported: Self) {
+        if imported.pagerank_score.is_some() {
+            self.pagerank_score = imported.pagerank_score;
+        }
+        if imported.betweenness_score.is_some() {
+            self.betweenness_score = imported.betweenness_score;
+        }
+        if imported.hits_authority.is_some() {
+            self.hits_authority = imported.hits_authority;
+        }
+        if imported.hits_hub.is_some() {
+            self.hits_hub = imported.hits_hub;
+        }
+        if imported.onion_layer.is_some() {
+            self.onion_layer = imported.onion_layer;
+        }
+        if imported.k_truss_max.is_some() {
+            self.k_truss_max = imported.k_truss_max;
+        }
+        if imported.articulation_point.is_some() {
+            self.articulation_point = imported.articulation_point;
+        }
+        if imported.bayes_alpha.is_some() {
+            self.bayes_alpha = imported.bayes_alpha;
+        }
+        if imported.bayes_beta.is_some() {
+            self.bayes_beta = imported.bayes_beta;
+        }
+    }
+
+    fn has_any_field(&self) -> bool {
+        self.pagerank_score.is_some()
+            || self.betweenness_score.is_some()
+            || self.hits_authority.is_some()
+            || self.hits_hub.is_some()
+            || self.onion_layer.is_some()
+            || self.k_truss_max.is_some()
+            || self.articulation_point.is_some()
+            || self.bayes_alpha.is_some()
+            || self.bayes_beta.is_some()
+    }
 }
 
 struct BackupDerivedPayload {
@@ -2269,6 +2342,8 @@ fn load_export_data(
             message: error.to_string(),
             repair: Some("ee db check --workspace .".to_owned()),
         })?;
+    let graph_fields_by_memory =
+        export_memory_graph_fields_by_id(connection, &workspace.id, &memories, &links, &audits)?;
 
     let mut workspace_builder = ExportWorkspaceRecord::builder()
         .workspace_id(workspace.id)
@@ -2287,6 +2362,7 @@ fn load_export_data(
         tags_by_memory,
         links,
         audits,
+        graph_fields_by_memory,
     })
 }
 
@@ -2326,6 +2402,7 @@ fn render_records(
                     memory_record(
                         memory,
                         tombstone_reasons.get(&memory.id).map(String::as_str),
+                        data.graph_fields_by_memory.get(&memory.id),
                     )
                     .map_err(export_build_error("build backup memory record"))?,
                 )
@@ -2371,6 +2448,7 @@ fn render_records(
 fn memory_record(
     memory: &StoredMemory,
     tombstoned_reason: Option<&str>,
+    graph_fields: Option<&BackupMemoryGraphFields>,
 ) -> Result<ExportMemoryRecord, ExportRecordBuildError> {
     let mut builder = ExportMemoryRecord::builder()
         .memory_id(memory.id.clone())
@@ -2405,7 +2483,236 @@ fn memory_record(
             .valid_to(valid_to.clone())
             .expires_at(valid_to.clone());
     }
+    if let Some(fields) = graph_fields {
+        builder = apply_backup_memory_graph_fields(builder, fields);
+    }
     builder.build()
+}
+
+fn apply_backup_memory_graph_fields(
+    mut builder: crate::models::ExportMemoryRecordBuilder,
+    fields: &BackupMemoryGraphFields,
+) -> crate::models::ExportMemoryRecordBuilder {
+    if let Some(value) = fields.pagerank_score {
+        builder = builder.pagerank_score(value);
+    }
+    if let Some(value) = fields.betweenness_score {
+        builder = builder.betweenness_score(value);
+    }
+    if let Some(value) = fields.hits_authority {
+        builder = builder.hits_authority(value);
+    }
+    if let Some(value) = fields.hits_hub {
+        builder = builder.hits_hub(value);
+    }
+    if let Some(value) = fields.onion_layer {
+        builder = builder.onion_layer(value);
+    }
+    if let Some(value) = fields.k_truss_max {
+        builder = builder.k_truss_max(value);
+    }
+    if let Some(value) = fields.articulation_point {
+        builder = builder.articulation_point(value);
+    }
+    if let Some(value) = fields.bayes_alpha {
+        builder = builder.bayes_alpha(value);
+    }
+    if let Some(value) = fields.bayes_beta {
+        builder = builder.bayes_beta(value);
+    }
+    builder
+}
+
+fn export_memory_graph_fields_by_id(
+    connection: &DbConnection,
+    workspace_id: &str,
+    memories: &[StoredMemory],
+    links: &[StoredMemoryLink],
+    audits: &[StoredAuditEntry],
+) -> Result<BTreeMap<String, BackupMemoryGraphFields>, DomainError> {
+    let mut fields_by_memory = BTreeMap::new();
+    for memory in memories {
+        fields_by_memory
+            .entry(memory.id.clone())
+            .or_insert_with(BackupMemoryGraphFields::export_baseline);
+    }
+    apply_imported_memory_graph_fields(&mut fields_by_memory, memories, audits);
+
+    for memory in memories {
+        let fields = fields_by_memory
+            .entry(memory.id.clone())
+            .or_insert_with(BackupMemoryGraphFields::export_baseline);
+        if let Some((alpha, beta)) =
+            connection
+                .get_memory_bayes_posterior(&memory.id)
+                .map_err(|error| DomainError::Storage {
+                    message: error.to_string(),
+                    repair: Some("ee db check --workspace .".to_owned()),
+                })?
+        {
+            fields.bayes_alpha = finite_f64(alpha);
+            fields.bayes_beta = finite_f64(beta);
+        }
+    }
+
+    if let Some(snapshot) = connection
+        .get_latest_graph_snapshot(workspace_id, GraphSnapshotType::MemoryLinks)
+        .map_err(|error| DomainError::Storage {
+            message: error.to_string(),
+            repair: Some("ee graph centrality-refresh --workspace .".to_owned()),
+        })?
+    {
+        if let Ok(centrality) = crate::graph::graph_snapshot_centrality_report(&snapshot) {
+            for score in centrality.scores {
+                let fields = fields_by_memory
+                    .entry(score.memory_id)
+                    .or_insert_with(BackupMemoryGraphFields::export_baseline);
+                fields.pagerank_score = finite_f64(score.pagerank);
+                fields.betweenness_score = finite_f64(score.betweenness);
+                fields.hits_authority = finite_f64(score.authority);
+                fields.hits_hub = finite_f64(score.hub);
+            }
+        }
+    }
+
+    if !links.is_empty() {
+        add_structural_graph_fields(&mut fields_by_memory, memories, links);
+    }
+    Ok(fields_by_memory)
+}
+
+fn apply_imported_memory_graph_fields(
+    fields_by_memory: &mut BTreeMap<String, BackupMemoryGraphFields>,
+    memories: &[StoredMemory],
+    audits: &[StoredAuditEntry],
+) {
+    let known_memory_ids = memories
+        .iter()
+        .map(|memory| memory.id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut applied_memory_ids = BTreeSet::new();
+
+    for audit in audits {
+        if audit.action != IMPORT_ACTION || audit.target_type.as_deref() != Some("memory") {
+            continue;
+        }
+        let Some(memory_id) = audit.target_id.as_deref() else {
+            continue;
+        };
+        if !known_memory_ids.contains(memory_id) {
+            continue;
+        }
+        let Some(imported_fields) =
+            imported_memory_graph_fields_from_audit(audit.details.as_deref())
+        else {
+            continue;
+        };
+        if !applied_memory_ids.insert(memory_id.to_owned()) {
+            continue;
+        }
+        fields_by_memory
+            .entry(memory_id.to_owned())
+            .or_insert_with(BackupMemoryGraphFields::export_baseline)
+            .overlay_present(imported_fields);
+    }
+}
+
+fn imported_memory_graph_fields_from_audit(
+    details: Option<&str>,
+) -> Option<BackupMemoryGraphFields> {
+    let value = serde_json::from_str::<JsonValue>(details?).ok()?;
+    let fields = value.get("sourceGraphFields")?.as_object()?;
+    let imported = BackupMemoryGraphFields {
+        pagerank_score: fields
+            .get("pagerank_score")
+            .and_then(JsonValue::as_f64)
+            .and_then(finite_f64),
+        betweenness_score: fields
+            .get("betweenness_score")
+            .and_then(JsonValue::as_f64)
+            .and_then(finite_f64),
+        hits_authority: fields
+            .get("hits_authority")
+            .and_then(JsonValue::as_f64)
+            .and_then(finite_f64),
+        hits_hub: fields
+            .get("hits_hub")
+            .and_then(JsonValue::as_f64)
+            .and_then(finite_f64),
+        onion_layer: fields.get("onion_layer").and_then(json_u32),
+        k_truss_max: fields.get("k_truss_max").and_then(json_u32),
+        articulation_point: fields
+            .get("articulation_point")
+            .and_then(JsonValue::as_bool),
+        bayes_alpha: fields
+            .get("bayes_alpha")
+            .and_then(JsonValue::as_f64)
+            .and_then(finite_f64),
+        bayes_beta: fields
+            .get("bayes_beta")
+            .and_then(JsonValue::as_f64)
+            .and_then(finite_f64),
+    };
+    imported.has_any_field().then_some(imported)
+}
+
+fn json_u32(value: &JsonValue) -> Option<u32> {
+    u32::try_from(value.as_u64()?).ok()
+}
+
+fn add_structural_graph_fields(
+    fields_by_memory: &mut BTreeMap<String, BackupMemoryGraphFields>,
+    memories: &[StoredMemory],
+    links: &[StoredMemoryLink],
+) {
+    let mut graph = crate::graph::Graph::new(CompatibilityMode::Strict);
+    for memory in memories {
+        graph.add_node(&memory.id);
+    }
+    for link in links {
+        let _ = graph.extend_edges_unrecorded(std::iter::once((
+            link.src_memory_id.as_str(),
+            link.dst_memory_id.as_str(),
+        )));
+    }
+
+    let onion = crate::graph::decay::compute_onion_layers(&graph);
+    for (memory_id, layer) in onion.layers_by_memory {
+        if let Some(layer) = usize_to_u32(layer) {
+            fields_by_memory
+                .entry(memory_id)
+                .or_insert_with(BackupMemoryGraphFields::export_baseline)
+                .onion_layer = Some(layer);
+        }
+    }
+
+    let articulation_points = crate::graph::decay::compute_articulation_points(&graph)
+        .memory_ids
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    for memory in memories {
+        fields_by_memory
+            .entry(memory.id.clone())
+            .or_insert_with(BackupMemoryGraphFields::export_baseline)
+            .articulation_point = Some(articulation_points.contains(&memory.id));
+    }
+
+    for member in crate::graph::health::compute_k_truss(&graph).top_memories_at_k {
+        if let Some(max_k) = usize_to_u32(member.max_k) {
+            fields_by_memory
+                .entry(member.memory_id)
+                .or_insert_with(BackupMemoryGraphFields::export_baseline)
+                .k_truss_max = Some(max_k);
+        }
+    }
+}
+
+fn finite_f64(value: f64) -> Option<f64> {
+    value.is_finite().then_some(value)
+}
+
+fn usize_to_u32(value: usize) -> Option<u32> {
+    u32::try_from(value).ok()
 }
 
 fn tombstone_reasons_by_memory(audits: &[StoredAuditEntry]) -> BTreeMap<String, String> {
@@ -3678,6 +3985,33 @@ mod tests {
         }
     }
 
+    fn stored_memory_fixture(id: &str) -> StoredMemory {
+        StoredMemory {
+            id: id.to_owned(),
+            workspace_id: "ws_00000000000000000000000001".to_owned(),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            content: "Run release checks before shipping.".to_owned(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.7,
+            importance: 0.8,
+            provenance_uri: Some("ee-test://lifecycle".to_owned()),
+            trust_class: "agent_validated".to_owned(),
+            trust_subclass: Some("fixture".to_owned()),
+            provenance_chain_hash: None,
+            provenance_chain_hash_version: "v1".to_owned(),
+            provenance_verification_status: "unverified".to_owned(),
+            provenance_verified_at: None,
+            provenance_verification_note: None,
+            created_at: "2026-05-01T00:00:00Z".to_owned(),
+            updated_at: "2026-05-02T00:00:00Z".to_owned(),
+            tombstoned_at: Some("2026-05-03T00:00:00Z".to_owned()),
+            valid_from: Some("2026-04-01T00:00:00Z".to_owned()),
+            valid_to: Some("2026-06-01T00:00:00Z".to_owned()),
+        }
+    }
+
     fn fixture() -> Result<(TempDir, PathBuf, PathBuf), DomainError> {
         let tempdir = tempfile::tempdir().map_err(|error| DomainError::Storage {
             message: error.to_string(),
@@ -3780,6 +4114,16 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    fn sample_import_jsonl_with_graph_fields() -> String {
+        [
+            r#"{"schema":"ee.export.header.v1","format_version":1,"created_at":"2026-04-30T00:00:00Z","workspace_id":"wsp_01234567890123456789012345","workspace_path":"/source","export_scope":"memories","redaction_level":"none","record_count":3,"ee_version":"0.1.0","hostname":null,"export_id":"exp-001","import_source":"native","trust_level":"validated","checksum":null,"signature":null,"source_schema_version":null}"#,
+            r#"{"schema":"ee.export.memory.v1","memory_id":"mem_01234567890123456789012345","workspace_id":"wsp_01234567890123456789012345","level":"procedural","kind":"rule","content":"Run cargo fmt --check before release.","importance":0.8,"confidence":0.9,"utility":0.7,"pagerank_score":0.12,"betweenness_score":0.34,"hits_authority":0.56,"hits_hub":0.78,"onion_layer":3,"k_truss_max":4,"articulation_point":true,"bayes_alpha":2.5,"bayes_beta":1.5,"created_at":"2026-04-30T00:00:00Z","updated_at":null,"expires_at":null,"source_agent":"MistySalmon","provenance_uri":"ee-export://fixture","superseded_by":null,"supersedes":null,"redacted":false,"redaction_reason":null}"#,
+            r#"{"schema":"ee.export.tag.v1","memory_id":"mem_01234567890123456789012345","tag":"Release","created_at":"2026-04-30T00:00:00Z"}"#,
+            r#"{"schema":"ee.export.footer.v1","export_id":"exp-001","completed_at":"2026-04-30T00:01:00Z","total_records":3,"memory_count":1,"link_count":0,"tag_count":1,"audit_count":0,"checksum":null,"success":true,"error_message":null}"#,
+        ]
+        .join("\n")
     }
 
     #[test]
@@ -3890,6 +4234,7 @@ mod tests {
                 valid_to: Some("2026-06-01T00:00:00Z".to_owned()),
             },
             Some("outdated rule"),
+            None,
         )
         .map_err(|error| error.to_string())?;
 
@@ -3918,6 +4263,36 @@ mod tests {
             Some("2026-06-01T00:00:00Z"),
             "expires_at",
         )
+    }
+
+    #[test]
+    fn memory_record_preserves_export_graph_fields() -> TestResult {
+        let record = memory_record(
+            &stored_memory_fixture("mem_00000000000000000000000002"),
+            None,
+            Some(&BackupMemoryGraphFields {
+                pagerank_score: Some(0.12),
+                betweenness_score: Some(0.34),
+                hits_authority: Some(0.56),
+                hits_hub: Some(0.78),
+                onion_layer: Some(3),
+                k_truss_max: Some(4),
+                articulation_point: Some(true),
+                bayes_alpha: Some(2.5),
+                bayes_beta: Some(1.5),
+            }),
+        )
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(record.pagerank_score, Some(0.12), "pagerank_score")?;
+        ensure_equal(record.betweenness_score, Some(0.34), "betweenness_score")?;
+        ensure_equal(record.hits_authority, Some(0.56), "hits_authority")?;
+        ensure_equal(record.hits_hub, Some(0.78), "hits_hub")?;
+        ensure_equal(record.onion_layer, Some(3), "onion_layer")?;
+        ensure_equal(record.k_truss_max, Some(4), "k_truss_max")?;
+        ensure_equal(record.articulation_point, Some(true), "articulation_point")?;
+        ensure_equal(record.bayes_alpha, Some(2.5), "bayes_alpha")?;
+        ensure_equal(record.bayes_beta, Some(1.5), "bayes_beta")
     }
 
     #[test]
@@ -3964,6 +4339,184 @@ mod tests {
         ensure(
             manifest.contains(BACKUP_MANIFEST_SCHEMA_V1),
             "manifest schema must be present",
+        )
+    }
+
+    #[test]
+    fn backup_create_exports_all_graph_fields_with_baselines() -> TestResult {
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let out = workspace.join("baseline-graph-field-backups");
+        let report = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(out),
+            label: Some("baseline-graph-fields".to_owned()),
+            redaction_level: RedactionLevel::None,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let records =
+            fs::read_to_string(&report.records_path).map_err(|error| error.to_string())?;
+        let memory_record = records
+            .lines()
+            .find(|line| line.contains(r#""schema":"ee.export.memory.v1""#))
+            .ok_or_else(|| "backup JSONL memory record missing".to_owned())?;
+
+        for expected in [
+            r#""pagerank_score":0.0"#,
+            r#""betweenness_score":0.0"#,
+            r#""hits_authority":0.0"#,
+            r#""hits_hub":0.0"#,
+            r#""onion_layer":0"#,
+            r#""k_truss_max":0"#,
+            r#""articulation_point":false"#,
+            r#""bayes_alpha":0.5"#,
+            r#""bayes_beta":0.5"#,
+        ] {
+            ensure(
+                memory_record.contains(expected),
+                format!("memory export record must include {expected}: {memory_record}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn backup_create_preserves_imported_graph_fields_without_snapshot() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("imported-workspace");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let source_path = tempdir.path().join("source-with-graph-fields.jsonl");
+        fs::write(&source_path, sample_import_jsonl_with_graph_fields())
+            .map_err(|error| error.to_string())?;
+
+        let import_report = import_jsonl_records(&JsonlImportOptions {
+            workspace_path: workspace.clone(),
+            database_path: None,
+            source_path,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure_equal(import_report.status.as_str(), "completed", "import status")?;
+
+        let out = workspace.join("imported-graph-field-backups");
+        let backup_report = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: None,
+            output_dir: Some(out),
+            label: Some("imported-graph-fields".to_owned()),
+            redaction_level: RedactionLevel::None,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let records =
+            fs::read_to_string(&backup_report.records_path).map_err(|error| error.to_string())?;
+        let memory_record = records
+            .lines()
+            .find(|line| line.contains(r#""schema":"ee.export.memory.v1""#))
+            .ok_or_else(|| "backup JSONL memory record missing".to_owned())?;
+
+        for expected in [
+            r#""pagerank_score":0.12"#,
+            r#""betweenness_score":0.34"#,
+            r#""hits_authority":0.56"#,
+            r#""hits_hub":0.78"#,
+            r#""onion_layer":3"#,
+            r#""k_truss_max":4"#,
+            r#""articulation_point":true"#,
+            r#""bayes_alpha":2.5"#,
+            r#""bayes_beta":1.5"#,
+        ] {
+            ensure(
+                memory_record.contains(expected),
+                format!("memory export record must preserve {expected}: {memory_record}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn backup_create_exports_bayes_and_persisted_centrality_fields() -> TestResult {
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let workspace_record =
+            load_workspace(&connection, &workspace).map_err(|error| error.message())?;
+        let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+        connection
+            .update_memory_bayes_posterior(&memory_id, 2.5, 1.5)
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_graph_snapshot(
+                "gsnap_0000000000000000000009100",
+                &CreateGraphSnapshotInput {
+                    workspace_id: workspace_record.id,
+                    snapshot_version: 1,
+                    schema_version: "ee.graph.snapshot.metrics.v1".to_owned(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 1,
+                    edge_count: 0,
+                    metrics_json: json!({
+                        "nodes": [{
+                            "id": memory_id,
+                            "pagerank": 0.42,
+                            "betweenness": 0.24,
+                            "hub": 0.66,
+                            "authority": 0.88
+                        }],
+                        "edges": []
+                    })
+                    .to_string(),
+                    content_hash: "blake3:backup-centrality-fields".to_owned(),
+                    source_generation: 0,
+                    expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let out = workspace.join("backups-with-graph-fields");
+        let report = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(out),
+            label: Some("graph-fields".to_owned()),
+            redaction_level: RedactionLevel::None,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let records =
+            fs::read_to_string(&report.records_path).map_err(|error| error.to_string())?;
+        ensure(
+            records.contains(r#""pagerank_score":0.42"#),
+            "backup JSONL must include pagerank_score",
+        )?;
+        ensure(
+            records.contains(r#""betweenness_score":0.24"#),
+            "backup JSONL must include betweenness_score",
+        )?;
+        ensure(
+            records.contains(r#""hits_hub":0.66"#),
+            "backup JSONL must include hits_hub",
+        )?;
+        ensure(
+            records.contains(r#""hits_authority":0.88"#),
+            "backup JSONL must include hits_authority",
+        )?;
+        ensure(
+            records.contains(r#""bayes_alpha":2.5"#),
+            "backup JSONL must include bayes_alpha",
+        )?;
+        ensure(
+            records.contains(r#""bayes_beta":1.5"#),
+            "backup JSONL must include bayes_beta",
         )
     }
 

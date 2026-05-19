@@ -2437,10 +2437,39 @@ fn add_swarm_brief_summary_to_resume(report: &mut ResumeReport, summary: &serde_
         .get("resourcePressurePosture")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown");
+    let memory_drift = summary
+        .get("memoryDrift")
+        .unwrap_or(&serde_json::Value::Null);
+    let memory_drift_status = memory_drift
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let memory_drift_affected = memory_drift
+        .get("affectedCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let memory_drift_changed = memory_drift
+        .get("changedCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let memory_drift_missing = memory_drift
+        .get("missingSourceCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let memory_drift_unverifiable = memory_drift
+        .get("unverifiableCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
     let evidence_id = swarm_brief_summary_evidence_id(summary);
-    let posture = format!(
+    let mut posture = format!(
         "Embedded swarm brief summary: ready={ready}, blocked={blocked}, active_conflicts={conflicts}, resource_pressure={pressure}, degraded_sources={degraded}; diagnostic_not_live=true."
     );
+    if memory_drift_status != "unknown" && memory_drift_affected > 0 {
+        posture.push('\n');
+        posture.push_str(&format!(
+            "Embedded memory drift posture: status={memory_drift_status}, affected={memory_drift_affected}, changed={memory_drift_changed}, missing_source={memory_drift_missing}, unverifiable={memory_drift_unverifiable}; source=swarm_brief_summary; raw_sources_included=false."
+        ));
+    }
     report.status_summary = Some(match report.status_summary.take() {
         Some(existing) => format!("{existing}\n{posture}"),
         None => posture,
@@ -2456,6 +2485,18 @@ fn add_swarm_brief_summary_to_resume(report: &mut ResumeReport, summary: &serde_
             .with_reason("Embedded swarm brief summaries are diagnostic handoff context only.")
             .with_command("ee swarm brief --json"),
     );
+    if memory_drift_status != "unknown" && memory_drift_affected > 0 {
+        report.next_actions.push(
+            NextAction::new(
+                2,
+                "Revalidate memory drift before trusting stale source-grounded memories.",
+            )
+            .with_reason(
+                "Embedded drift posture is redacted handoff context, not a live source check.",
+            )
+            .with_command("ee memory drift --mode recent-pack-items --json"),
+        );
+    }
 
     if let Some(codes) = summary
         .get("degradedCodes")
@@ -5343,6 +5384,78 @@ memories_revised = 3
             ensure(
                 !rendered.contains(forbidden),
                 format!("handoff summary leaked forbidden single-flight text {forbidden:?}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resume_handoff_surfaces_memory_drift_posture_from_swarm_brief() -> TestResult {
+        let summary = serde_json::json!({
+            "schema": "ee.support_bundle.swarm_brief_summary.v1",
+            "reportHash": "blake3:abcdef1234567890",
+            "resourcePressurePosture": "low",
+            "counts": {
+                "readyWorkCount": 3,
+                "blockedWorkCount": 1,
+                "activeConflictCount": 0,
+                "degradedCount": 0
+            },
+            "degradedCodes": [],
+            "memoryDrift": {
+                "status": "attention_required",
+                "affectedCount": 2,
+                "changedCount": 1,
+                "missingSourceCount": 1,
+                "staleAnchorCount": 0,
+                "unverifiableCount": 0,
+                "topAffectedMemoryIds": ["mem_changed", "mem_missing"],
+                "rawSnippetsIncluded": false,
+                "rawCommandBodiesIncluded": false
+            }
+        });
+        let mut report = ResumeReport::new(
+            "hcap_memory_drift".to_owned(),
+            PathBuf::from("handoff.json"),
+        );
+
+        add_swarm_brief_summary_to_resume(&mut report, &summary);
+
+        let status = report
+            .status_summary
+            .as_deref()
+            .ok_or_else(|| "resume status summary missing".to_owned())?;
+        ensure(
+            status.contains("Embedded memory drift posture: status=attention_required"),
+            "resume status includes memory drift posture",
+        )?;
+        ensure(
+            status.contains("affected=2")
+                && status.contains("changed=1")
+                && status.contains("missing_source=1")
+                && status.contains("raw_sources_included=false"),
+            "resume status includes compact redaction-safe drift counts",
+        )?;
+        ensure(
+            report.next_actions.iter().any(|action| {
+                action.suggested_command.as_deref()
+                    == Some("ee memory drift --mode recent-pack-items --json")
+            }),
+            "resume next actions include memory drift revalidation command",
+        )?;
+        for forbidden in [
+            "raw source body",
+            "BEGIN PRIVATE KEY",
+            "sk-",
+            "ghp_",
+            "/private/",
+            "sourcePath",
+            "rawSnippet",
+            "commandOutputBody",
+        ] {
+            ensure(
+                !status.contains(forbidden),
+                format!("memory drift handoff status leaked forbidden text {forbidden:?}"),
             )?;
         }
         Ok(())

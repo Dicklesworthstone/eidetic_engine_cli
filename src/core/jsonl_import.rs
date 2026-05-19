@@ -28,7 +28,7 @@ use crate::models::{
 };
 
 const DEFAULT_DB_FILE: &str = "ee.db";
-const IMPORT_ACTION: &str = "memory.import.jsonl";
+pub(crate) const IMPORT_ACTION: &str = "memory.import.jsonl";
 
 /// Options for one `ee import jsonl` run.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -425,6 +425,7 @@ struct PreparedMemory {
     input: CreateMemoryInput,
     tombstoned_at: Option<String>,
     tombstoned_reason: Option<String>,
+    bayes_posterior: Option<(f64, f64)>,
     details: String,
     tag_count: u32,
 }
@@ -486,6 +487,9 @@ pub fn import_jsonl_records(
     connection.with_transaction(|| {
         for memory in &to_insert {
             connection.insert_memory(&memory.id, &memory.input)?;
+            if let Some((alpha, beta)) = memory.bayes_posterior {
+                connection.update_memory_bayes_posterior(&memory.id, alpha, beta)?;
+            }
             if let Some(tombstoned_at) = memory.tombstoned_at.as_deref() {
                 connection.restore_imported_memory_tombstone(&memory.id, tombstoned_at)?;
                 connection.insert_audit(
@@ -1014,6 +1018,7 @@ fn prepare_memory(
             format!("memory `{}` {message}", memory.memory_id),
         )
     })?;
+    let bayes_posterior = exported_bayes_posterior(memory)?;
     let tags = parsed
         .tags_by_memory
         .get(&memory.memory_id)
@@ -1049,6 +1054,7 @@ fn prepare_memory(
         },
         tombstoned_at: memory.tombstoned_at.clone(),
         tombstoned_reason: memory.tombstoned_reason.clone(),
+        bayes_posterior,
         details: json!({
             "schema": IMPORT_JSONL_SCHEMA_V1,
             "sourceMemoryId": memory.memory_id,
@@ -1061,10 +1067,72 @@ fn prepare_memory(
             "sourceValidTo": memory.valid_to.clone().or_else(|| memory.expires_at.clone()),
             "redacted": memory.redacted,
             "redactionReason": memory.redaction_reason,
+            "sourceGraphFields": source_graph_fields_json(memory),
         })
         .to_string(),
         tag_count,
     })
+}
+
+fn exported_bayes_posterior(
+    memory: &ExportMemoryRecord,
+) -> Result<Option<(f64, f64)>, JsonlImportIssue> {
+    match (memory.bayes_alpha, memory.bayes_beta) {
+        (Some(alpha), Some(beta)) => {
+            if !positive_finite(alpha) || !positive_finite(beta) {
+                return Err(JsonlImportIssue::error(
+                    None,
+                    "invalid_memory_bayes_posterior",
+                    format!(
+                        "memory `{}` bayes_alpha and bayes_beta must be positive finite values",
+                        memory.memory_id
+                    ),
+                ));
+            }
+            Ok(Some((alpha, beta)))
+        }
+        (None, None) => Ok(None),
+        _ => Err(JsonlImportIssue::error(
+            None,
+            "invalid_memory_bayes_posterior",
+            format!(
+                "memory `{}` must include both bayes_alpha and bayes_beta when importing an exported posterior",
+                memory.memory_id
+            ),
+        )),
+    }
+}
+
+fn positive_finite(value: f64) -> bool {
+    value.is_finite() && value > 0.0
+}
+
+fn source_graph_fields_json(memory: &ExportMemoryRecord) -> JsonValue {
+    let mut fields = serde_json::Map::new();
+    insert_optional_json(&mut fields, "pagerank_score", memory.pagerank_score);
+    insert_optional_json(&mut fields, "betweenness_score", memory.betweenness_score);
+    insert_optional_json(&mut fields, "hits_authority", memory.hits_authority);
+    insert_optional_json(&mut fields, "hits_hub", memory.hits_hub);
+    insert_optional_json(&mut fields, "onion_layer", memory.onion_layer);
+    insert_optional_json(&mut fields, "k_truss_max", memory.k_truss_max);
+    insert_optional_json(&mut fields, "articulation_point", memory.articulation_point);
+    insert_optional_json(&mut fields, "bayes_alpha", memory.bayes_alpha);
+    insert_optional_json(&mut fields, "bayes_beta", memory.bayes_beta);
+    JsonValue::Object(fields)
+}
+
+fn insert_optional_json<T>(
+    fields: &mut serde_json::Map<String, JsonValue>,
+    key: &str,
+    value: Option<T>,
+) where
+    T: serde::Serialize,
+{
+    if let Some(value) = value
+        && let Ok(json_value) = serde_json::to_value(value)
+    {
+        fields.insert(key.to_owned(), json_value);
+    }
 }
 
 fn import_memory_id(
@@ -1378,6 +1446,13 @@ mod tests {
             r#"{"schema":"ee.export.footer.v1","export_id":"exp-001","completed_at":"2026-04-30T00:01:00Z","total_records":3,"memory_count":1,"link_count":0,"tag_count":1,"audit_count":0,"checksum":null,"success":true,"error_message":null}"#,
         ]
         .join("\n")
+    }
+
+    fn sample_jsonl_with_graph_fields() -> String {
+        sample_jsonl().replace(
+            r#""utility":0.7,"created_at""#,
+            r#""utility":0.7,"pagerank_score":0.12,"betweenness_score":0.34,"hits_authority":0.56,"hits_hub":0.78,"onion_layer":3,"k_truss_max":4,"articulation_point":true,"bayes_alpha":2.5,"bayes_beta":1.5,"created_at""#,
+        )
     }
 
     fn import_report_fixture(source_path: &str, source_id: &str) -> JsonlImportReport {
@@ -1816,6 +1891,120 @@ mod tests {
             Some("2026-06-01T00:00:00Z"),
             "valid_to fallback from expires_at",
         )
+    }
+
+    #[test]
+    fn prepare_memories_preserves_export_graph_fields_in_audit_details() -> TestResult {
+        let input = sample_jsonl_with_graph_fields();
+        let parsed = parse_jsonl_source(&input);
+        let prepared = prepare_memories(&parsed, "wsp_01234567890123456789012345");
+        ensure(prepared.has_errors(), false, "prepared has no errors")?;
+        let memory = prepared
+            .memories
+            .first()
+            .ok_or_else(|| "prepared memory missing".to_string())?;
+        ensure(memory.bayes_posterior, Some((2.5, 1.5)), "bayes posterior")?;
+
+        let details: JsonValue =
+            serde_json::from_str(&memory.details).map_err(|error| error.to_string())?;
+        let graph_fields = details
+            .get("sourceGraphFields")
+            .ok_or_else(|| format!("missing sourceGraphFields: {details}"))?;
+        ensure(
+            graph_fields
+                .get("pagerank_score")
+                .and_then(JsonValue::as_f64),
+            Some(0.12),
+            "pagerank_score",
+        )?;
+        ensure(
+            graph_fields
+                .get("betweenness_score")
+                .and_then(JsonValue::as_f64),
+            Some(0.34),
+            "betweenness_score",
+        )?;
+        ensure(
+            graph_fields
+                .get("hits_authority")
+                .and_then(JsonValue::as_f64),
+            Some(0.56),
+            "hits_authority",
+        )?;
+        ensure(
+            graph_fields.get("hits_hub").and_then(JsonValue::as_f64),
+            Some(0.78),
+            "hits_hub",
+        )?;
+        ensure(
+            graph_fields.get("onion_layer").and_then(JsonValue::as_u64),
+            Some(3),
+            "onion_layer",
+        )?;
+        ensure(
+            graph_fields.get("k_truss_max").and_then(JsonValue::as_u64),
+            Some(4),
+            "k_truss_max",
+        )?;
+        ensure(
+            graph_fields
+                .get("articulation_point")
+                .and_then(JsonValue::as_bool),
+            Some(true),
+            "articulation_point",
+        )
+    }
+
+    #[test]
+    fn prepare_memories_rejects_partial_bayes_posterior() -> TestResult {
+        let input = sample_jsonl().replace(
+            r#""utility":0.7,"created_at""#,
+            r#""utility":0.7,"bayes_alpha":2.5,"created_at""#,
+        );
+        let parsed = parse_jsonl_source(&input);
+        let prepared = prepare_memories(&parsed, "wsp_01234567890123456789012345");
+
+        ensure(prepared.has_errors(), true, "prepared has errors")?;
+        ensure(
+            prepared
+                .issues
+                .iter()
+                .any(|issue| issue.code == "invalid_memory_bayes_posterior"),
+            true,
+            "partial bayes posterior issue",
+        )
+    }
+
+    #[test]
+    fn import_jsonl_restores_exported_bayes_posterior() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let source = tempdir.path().join("source.jsonl");
+        fs::write(&source, sample_jsonl_with_graph_fields()).map_err(|error| error.to_string())?;
+
+        let report = import_jsonl_records(&JsonlImportOptions {
+            workspace_path: workspace.clone(),
+            database_path: None,
+            source_path: source,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(report.status.as_str(), "completed", "import status")?;
+        ensure(report.memories_imported, 1, "memories imported")?;
+
+        let connection =
+            DbConnection::open(DatabaseConfig::file(database_path(&JsonlImportOptions {
+                workspace_path: workspace,
+                database_path: None,
+                source_path: PathBuf::new(),
+                dry_run: false,
+            })))
+            .map_err(|error| error.to_string())?;
+        let posterior = connection
+            .get_memory_bayes_posterior("mem_01234567890123456789012345")
+            .map_err(|error| error.to_string())?;
+        ensure(posterior, Some((2.5, 1.5)), "restored posterior")
     }
 
     #[cfg(unix)]
