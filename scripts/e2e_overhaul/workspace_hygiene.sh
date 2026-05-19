@@ -322,6 +322,7 @@ validate_event_log_contract() {
             "scratch_generated_secret",
             "large_binary_scan_skip",
             "active_reservation",
+            "agent_mail_empty_snapshot",
             "agent_mail_unavailable",
             "beads_pending_flush",
             "beads_export_only",
@@ -336,6 +337,7 @@ validate_event_log_contract() {
             "scratch_generated_secret",
             "large_binary_scan_skip",
             "active_reservation",
+            "agent_mail_empty_snapshot",
             "agent_mail_unavailable",
             "beads_pending_flush",
             "beads_export_only",
@@ -479,6 +481,17 @@ run_scenario() {
 }
 '
             ;;
+        agent_mail_empty_snapshot)
+            write_file "$workspace/src/lib.rs" "pub fn changed() -> bool { true }\n"
+            snapshot="$workspace/agent-mail-empty.json"
+            write_file "$snapshot" '{
+  "file_reservations": [],
+  "active_agents": [],
+  "inbox": [],
+  "threads": []
+}
+'
+            ;;
         agent_mail_unavailable)
             write_file "$workspace/src/lib.rs" "pub fn changed() -> bool { true }\n"
             ;;
@@ -585,6 +598,9 @@ run_scenario() {
             active_reservation)
                 first_failure="$(assert_jq "$stdout_artifact" '.data.coordinationState.agentMailAvailable == true and (.data.coordinationState.blockedByCoordination[0].path == "src/lib.rs") and (.data.coordinationState.blockedByCoordination[0].holderAgent == "OtherAgent") and (.data.coordinationState.blockedByCoordination[0].pathPattern == "src/lib.rs") and (.data.coordinationState.blockedByCoordination[0].exclusive == true) and ([.data.stagingRecommendations[].paths[]?] | index("src/lib.rs") | not) and (.data.degraded | index("workspace_hygiene_agent_mail_unavailable") | not)' "active reservation should block src/lib.rs and keep it out of staging" || true)"
                 ;;
+            agent_mail_empty_snapshot)
+                first_failure="$(assert_jq "$stdout_artifact" '.data.coordinationState.agentMailAvailable == true and (.data.coordinationState.blockedByCoordination | length == 0) and (.data.coordinationState.activeAgents | length == 0) and ([.data.stagingRecommendations[].paths[]?] | index("src/lib.rs")) and (.data.degraded | index("workspace_hygiene_agent_mail_unavailable") | not)' "empty Agent Mail snapshot should be available and leave src/lib.rs stageable" || true)"
+                ;;
             agent_mail_unavailable)
                 first_failure="$(assert_jq "$stdout_artifact" '(.data.coordinationState.agentMailAvailable == false) and (.data.coordinationState.blockedByCoordination | length == 0) and (.data.coordinationState.activeAgents | length == 0) and (.data.degraded | index("workspace_hygiene_agent_mail_unavailable")) and (.data.degraded | index("workspace_hygiene_partial_metadata"))' "missing snapshot should emit Agent Mail unavailable posture and degraded codes" || true)"
                 ;;
@@ -626,6 +642,7 @@ SCENARIOS=(
     scratch_generated_secret
     large_binary_scan_skip
     active_reservation
+    agent_mail_empty_snapshot
     agent_mail_unavailable
     beads_pending_flush
     beads_export_only
