@@ -278,12 +278,22 @@ impl MemoryDocumentBuilder {
                 .with_metadata_entry("content", content)
                 .with_metadata_entry("content_truncated", content_truncated.to_string())
                 .with_metadata_entry(
+                    "provenanceVerificationStatus",
+                    &memory.provenance_verification_status,
+                )
+                .with_metadata_entry(
                     "validity_window_kind",
                     memory_validity_window_kind(
                         memory.valid_from.as_deref(),
                         memory.valid_to.as_deref(),
                     ),
                 );
+        if let Some(hash) = &memory.provenance_chain_hash {
+            doc = doc.with_metadata_entry("provenanceChainHash", hash.as_str());
+        }
+        if let Some(verified_at) = &memory.provenance_verified_at {
+            doc = doc.with_metadata_entry("provenanceVerifiedAt", verified_at.as_str());
+        }
 
         if let Some(workspace) = self.workspace_path {
             doc = doc.with_workspace(workspace);
