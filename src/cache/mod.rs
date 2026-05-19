@@ -3,6 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 
+pub mod hotset;
 pub mod pack_l2;
 
 /// Cache statistics for comparison.

@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "cache_hotset_stale",
+  "introduced_by": {"bead": "bd-1zb7k.10.2", "epic_letter": "O"},
+  "surfaces": ["cache hotset"],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee.cache.hotset.v1 manifest is built from captured search/pack hotset entries whose generation is older than the current workspace and index generation. The manifest rejects them instead of admitting silently stale candidates, and surfaces this degraded code so an operator chooses to recapture.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'rule example' --workspace . --level procedural --kind rule",
+      "ee index rebuild --workspace ."
+    ],
+    "invocation": "Build a HotsetManifest via HotsetManifestBuilder against a GenerationGate whose generations exceed the supplied entries' generations."
+  },
+  "expected_emission": {
+    "code": "cache_hotset_stale",
+    "severity": "medium",
+    "message_contains": [
+      "Hotset rejected",
+      "entries older than the current generation"
+    ],
+    "repair_contains": "Recapture the hotset against the current",
+    "repair_string": "Recapture the hotset against the current workspace and index generation."
+  }
+}

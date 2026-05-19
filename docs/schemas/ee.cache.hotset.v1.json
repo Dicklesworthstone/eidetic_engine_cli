@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.cache.hotset.v1.json",
+  "title": "ee.cache.hotset.v1",
+  "description": "Redaction-safe hotset manifest capturing frequent search and pack cache shapes for prewarm. Entries store hashes, kind tags, generations, estimated bytes, and hit counts only. Raw query text, memory content, and rendered pack bodies are never persisted; the manifest carries a stable redaction marker so support bundles can ship the artifact without leaking content.",
+  "type": "object",
+  "required": [
+    "schema",
+    "workspaceId",
+    "workspaceGeneration",
+    "indexGeneration",
+    "admissionThreshold",
+    "redactionStatus",
+    "candidateCount",
+    "admittedCount",
+    "rejectedStaleCount",
+    "memoryBudget",
+    "searchEntries",
+    "packEntries",
+    "rejectedStaleSearchEntries",
+    "rejectedStalePackEntries",
+    "degraded"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.cache.hotset.v1"},
+    "workspaceId": {"type": "string", "minLength": 1},
+    "workspaceGeneration": {"type": "integer", "minimum": 0},
+    "indexGeneration": {"type": "integer", "minimum": 0},
+    "admissionThreshold": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Highest of workspaceGeneration and indexGeneration. Entries whose own generation is strictly below this threshold are routed into rejectedStale*."
+    },
+    "profileTier": {
+      "type": "string",
+      "description": "Optional context-pack profile that produced the captured shapes (e.g. balanced, thorough)."
+    },
+    "capturedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Optional capture timestamp. Caller controls inclusion so determinism tests can omit volatile fields."
+    },
+    "redactionStatus": {
+      "type": "string",
+      "const": "content_not_stored",
+      "description": "Manifest-wide redaction posture. Construction refuses to admit any entry carrying a different marker."
+    },
+    "candidateCount": {"type": "integer", "minimum": 0},
+    "admittedCount": {"type": "integer", "minimum": 0},
+    "rejectedStaleCount": {"type": "integer", "minimum": 0},
+    "memoryBudget": {"$ref": "#/$defs/memoryBudget"},
+    "searchEntries": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/searchEntry"}
+    },
+    "packEntries": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/packEntry"}
+    },
+    "rejectedStaleSearchEntries": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/searchEntry"}
+    },
+    "rejectedStalePackEntries": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/packEntry"}
+    },
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradation"}
+    }
+  },
+  "$defs": {
+    "memoryBudget": {
+      "type": "object",
+      "required": ["maxEntries", "maxBytes", "currentEntries", "currentBytes"],
+      "additionalProperties": false,
+      "properties": {
+        "maxEntries": {"type": "integer", "minimum": 0},
+        "maxBytes": {"type": "integer", "minimum": 0},
+        "currentEntries": {"type": "integer", "minimum": 0},
+        "currentBytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "searchEntry": {
+      "type": "object",
+      "required": [
+        "key",
+        "kind",
+        "generation",
+        "estimatedBytes",
+        "hitCount",
+        "redactionStatus"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "key": {"type": "string", "minLength": 1},
+        "kind": {
+          "type": "string",
+          "enum": ["memory", "query_shape", "search_document", "graph_neighborhood"]
+        },
+        "generation": {"type": "integer", "minimum": 0},
+        "estimatedBytes": {"type": "integer", "minimum": 0},
+        "hitCount": {"type": "integer", "minimum": 0},
+        "redactionStatus": {"type": "string", "const": "content_not_stored"}
+      }
+    },
+    "packEntry": {
+      "type": "object",
+      "required": [
+        "key",
+        "kind",
+        "section",
+        "generation",
+        "estimatedBytes",
+        "hitCount",
+        "redactionStatus"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "key": {"type": "string", "minLength": 1},
+        "kind": {
+          "type": "string",
+          "enum": ["pack_section", "selection_audit"]
+        },
+        "section": {"type": ["string", "null"]},
+        "generation": {"type": "integer", "minimum": 0},
+        "estimatedBytes": {"type": "integer", "minimum": 0},
+        "hitCount": {"type": "integer", "minimum": 0},
+        "redactionStatus": {"type": "string", "const": "content_not_stored"}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": true,
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {"type": "string", "minLength": 1},
+        "repair": {"type": ["string", "null"]},
+        "details": {"type": "object"}
+      }
+    }
+  }
+}
