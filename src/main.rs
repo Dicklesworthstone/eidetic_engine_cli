@@ -9,6 +9,9 @@ use ee::obs::{LogEnvelope, LogLevel, now_rfc3339_nanos};
 use serde_json::Value;
 use tracing_subscriber::EnvFilter;
 
+#[cfg(windows)]
+const WINDOWS_CLI_STACK_SIZE: usize = 8 * 1024 * 1024;
+
 fn env_flag_truthy(value: Option<String>) -> bool {
     value.is_some_and(|raw| {
         let trimmed = raw.trim();
@@ -119,7 +122,7 @@ fn init_tracing_subscriber() {
         .try_init();
 }
 
-fn main() -> ExitCode {
+fn cli_main() -> ExitCode {
     init_tracing_subscriber();
     let mut args: Vec<OsString> = std::env::args_os().collect();
     if should_inject_json_flag(&args) {
@@ -129,6 +132,27 @@ fn main() -> ExitCode {
     let mut stderr = io::stderr();
     write_start_log(&args, &mut stderr);
     ee::cli::run(args, &mut stdout, &mut stderr).into()
+}
+
+#[cfg(windows)]
+fn main() -> ExitCode {
+    match std::thread::Builder::new()
+        .name("ee-cli-main".to_owned())
+        .stack_size(WINDOWS_CLI_STACK_SIZE)
+        .spawn(cli_main)
+    {
+        Ok(handle) => handle.join().unwrap_or_else(|_| ExitCode::from(101)),
+        Err(error) => {
+            let mut stderr = io::stderr();
+            let _ = writeln!(stderr, "failed to start ee CLI thread: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn main() -> ExitCode {
+    cli_main()
 }
 
 #[cfg(test)]
