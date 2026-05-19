@@ -461,6 +461,23 @@ impl ReadConnectionPool {
             .map(CheckpointBlocker::from)
     }
 
+    /// Record the outcome of a real WAL checkpoint attempt.
+    ///
+    /// When SQLite reports a checkpoint as BUSY, the oldest active SnapshotPin
+    /// is the strongest process-local attribution candidate. This helper keeps
+    /// the "actual checkpoint was blocked" signal distinct from the
+    /// forward-looking [`PoolStats::checkpoint_blocked_by`] status field.
+    #[must_use]
+    pub fn note_checkpoint_outcome(&self, busy: bool) -> Option<CheckpointBlocker> {
+        if !busy {
+            return None;
+        }
+
+        let blocker = self.oldest_active_pin_for_checkpoint_blocker();
+        trace_checkpoint_blocked_by_pin(blocker.as_ref());
+        blocker
+    }
+
     fn release(&self, slot_id: u64, connection: DbConnection) {
         let mut to_close = None;
         {
@@ -880,6 +897,33 @@ fn active_snapshot_pin_from_record(
 fn drop_idle_connections(connections: Vec<DbConnection>) {
     for connection in connections {
         let _ = connection.close();
+    }
+}
+
+fn trace_checkpoint_blocked_by_pin(blocker: Option<&CheckpointBlocker>) {
+    match blocker {
+        Some(blocker) => tracing::warn!(
+            event = "read_pool.checkpoint_blocked_by_pin",
+            surface = "read_pool",
+            phase = "checkpoint_blocked_by_pin",
+            blocker_present = true,
+            pin_id = blocker.pin_id,
+            slot_id = ?blocker.slot_id,
+            workflow_id = blocker.workflow_id.as_deref().unwrap_or(""),
+            request_id = blocker.request_id.as_deref().unwrap_or(""),
+            age_ms = blocker.pin_age_ms,
+            max_pin_duration_ms = blocker.max_pin_duration_ms,
+            poisoned = blocker.poisoned,
+            release_state = ?blocker.release_state,
+            "WAL checkpoint reported BUSY while a read-pool SnapshotPin is active"
+        ),
+        None => tracing::warn!(
+            event = "read_pool.checkpoint_blocked_by_pin",
+            surface = "read_pool",
+            phase = "checkpoint_blocked_by_pin",
+            blocker_present = false,
+            "WAL checkpoint reported BUSY but no process-local SnapshotPin was active"
+        ),
     }
 }
 
@@ -1610,6 +1654,41 @@ mod tests {
         drop(second);
         drop(third);
         assert!(pool.oldest_active_pin_for_checkpoint_blocker().is_none());
+    }
+
+    #[test]
+    fn checkpoint_outcome_notes_only_busy_attempts() {
+        let (_tempdir, _database_path, pool) = file_pool(1);
+        let _pin = must(
+            pool.pin_snapshot_with_metadata(SnapshotPinMetadata {
+                workflow_id: Some("workflow-checkpoint".to_owned()),
+                request_id: Some("request-checkpoint".to_owned()),
+            }),
+            "snapshot pin opens",
+        );
+
+        assert!(
+            pool.note_checkpoint_outcome(false).is_none(),
+            "non-busy checkpoints should not report a blocker"
+        );
+
+        let blocker = must_some(
+            pool.note_checkpoint_outcome(true),
+            "busy checkpoint reports active pin blocker",
+        );
+        assert_eq!(blocker.workflow_id.as_deref(), Some("workflow-checkpoint"));
+        assert_eq!(blocker.request_id.as_deref(), Some("request-checkpoint"));
+        assert_eq!(blocker.release_state, SnapshotPinReleaseState::Active);
+    }
+
+    #[test]
+    fn checkpoint_outcome_handles_busy_without_process_local_pin() {
+        let (_tempdir, _database_path, pool) = file_pool(1);
+
+        assert!(
+            pool.note_checkpoint_outcome(true).is_none(),
+            "busy checkpoint without a process-local pin reports no blocker"
+        );
     }
 
     #[test]
