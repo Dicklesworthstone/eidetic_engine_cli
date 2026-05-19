@@ -134,6 +134,29 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
 
 #[test]
 fn graph_command_flags_are_help_discoverable() -> TestResult {
+    let graph_help = help_for(&["ee", "graph", "--help"])?;
+    assert_contains_all(
+        &graph_help,
+        &[
+            "pagerank",
+            "betweenness",
+            "hits",
+            "louvain",
+            "communities",
+            "k-core",
+            "articulation",
+            "path",
+            "explain-link",
+            "export",
+            "snapshot",
+            "centrality",
+            "centrality-refresh",
+            "feature-enrichment",
+            "neighborhood",
+        ],
+        "ee graph --help",
+    )?;
+
     for command in [
         "pagerank",
         "betweenness",
