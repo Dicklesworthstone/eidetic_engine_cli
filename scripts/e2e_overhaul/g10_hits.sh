@@ -54,12 +54,22 @@ if printf '%s' "$HUBS_JSON" | jq . >/dev/null 2>&1 && printf '%s' "$AUTHORITIES_
     AUTHORITY_SCORE_PRESENT=$(printf '%s' "$AUTHORITIES_JSON" | jq '[.data.sections[0].items[]? | select(has("authorityScore"))] | length' 2>/dev/null || echo 0)
     e2e_log_assert_num "$HUB_SCORE_PRESENT" -ge 1 "g10_hits_hub_score_present"
     e2e_log_assert_num "$AUTHORITY_SCORE_PRESENT" -ge 1 "g10_hits_authority_score_present"
+    assert_jq "$HUBS_JSON" '.data.sections[0].items[0].rank >= 1' "true" "g10_hits_hub_item_rank_valid"
+    assert_jq "$AUTHORITIES_JSON" '.data.sections[0].items[0].rank >= 1' "true" "g10_hits_authority_item_rank_valid"
     assert_jq "$HUBS_JSON" '.data.sections[0].items[0].memoryId // empty' "$HITS_HUB_ID" "g10_hits_seed_hub_ranked"
     assert_jq "$AUTHORITIES_JSON" '.data.sections[0].items[0].memoryId // empty' "$HITS_AUTHORITY_ID" "g10_hits_seed_authority_ranked"
+    assert_jq "$HUBS_JSON" '(.data.sections[0].items[0].hubScore | type)' "number" "g10_hits_hub_score_number"
+    assert_jq "$AUTHORITIES_JSON" '(.data.sections[0].items[0].authorityScore | type)' "number" "g10_hits_authority_score_number"
+    assert_jq "$HUBS_JSON" '.data.sections[0].items[0].hubScore >= 0' "true" "g10_hits_hub_score_nonnegative"
+    assert_jq "$AUTHORITIES_JSON" '.data.sections[0].items[0].authorityScore >= 0' "true" "g10_hits_authority_score_nonnegative"
+    assert_jq "$HUBS_JSON" '.data.sections[0].items[0].interpretation // empty' "hub" "g10_hits_hub_interpretation"
+    assert_jq "$AUTHORITIES_JSON" '.data.sections[0].items[0].interpretation // empty' "authority" "g10_hits_authority_interpretation"
     assert_jq "$HUBS_JSON" '.data.sections[0].items[0].evidence.schema // empty' "ee.graph.hits.v1" "g10_hits_hubs_evidence_schema"
     assert_jq "$AUTHORITIES_JSON" '.data.sections[0].items[0].evidence.schema // empty' "ee.graph.hits.v1" "g10_hits_authorities_evidence_schema"
     assert_jq "$HUBS_JSON" '.data.sections[0].items[0].evidence.algorithm // empty' "hits_centrality_directed" "g10_hits_hubs_evidence_algorithm"
     assert_jq "$AUTHORITIES_JSON" '.data.sections[0].items[0].evidence.algorithm // empty' "hits_centrality_directed" "g10_hits_authorities_evidence_algorithm"
+    assert_jq "$HUBS_JSON" '(.data.sections[0].items[0].evidence.snapshotVersion | type)' "number" "g10_hits_hub_evidence_snapshot_version_number"
+    assert_jq "$AUTHORITIES_JSON" '(.data.sections[0].items[0].evidence.snapshotVersion | type)' "number" "g10_hits_authority_evidence_snapshot_version_number"
     SNAPSHOT_VERSION=$(printf '%s\n%s' "$HUBS_JSON" "$AUTHORITIES_JSON" | jq -r '.. | objects | .snapshotVersion? // .snapshot_version? // empty' 2>/dev/null | head -n 1)
 else
     todo_assert "g10_hits_surface_available" "bd-jy4w.4" "ee insights hubs/authorities sections are not fully available yet."
