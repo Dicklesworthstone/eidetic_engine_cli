@@ -107,6 +107,25 @@ CLI flag → workspace config → built-in default. No `EE_REDACTION_*`
 redaction-level override is currently registered; adding one must update
 both `src/config/env_registry.rs` and `docs/env_vars.md` in the same change.
 
+### CLI examples
+
+Use explicit levels when the artifact will cross an agent or workspace
+boundary, or when a verifier needs to prove that a surface honors the canonical
+five-level vocabulary:
+
+```bash
+ee export --workspace . --redaction standard \
+  --output-dir ./redacted-export --dry-run --json
+ee backup create --workspace . --label pre-share \
+  --redaction paranoid --dry-run --json
+ee context "prepare release handoff" --workspace . \
+  --redaction minimal --json
+ee handoff create --workspace . --out handoff.ee-handoff.json \
+  --since HEAD --profile handoff --redaction strict --dry-run --json
+ee support bundle --workspace . --dry-run \
+  --redaction paranoid --json
+```
+
 ### Response metadata status
 
 Current JSON surfaces expose the effective level with existing fields such as

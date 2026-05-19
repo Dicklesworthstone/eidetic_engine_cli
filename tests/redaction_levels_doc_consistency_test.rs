@@ -12,6 +12,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use clap::Parser;
+use clap::error::ErrorKind;
+use ee::cli::Cli;
 use std::path::{Path, PathBuf};
 
 type TestResult = Result<(), String>;
@@ -34,6 +37,18 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
         Ok(())
     } else {
         Err(message.into())
+    }
+}
+
+fn help_for(args: &[&str]) -> Result<String, String> {
+    match Cli::try_parse_from(args) {
+        Ok(_) => Err(format!("{} did not request help", args.join(" "))),
+        Err(error) if error.kind() == ErrorKind::DisplayHelp => Ok(error.to_string()),
+        Err(error) => Err(format!(
+            "{} returned {:?} instead of help",
+            args.join(" "),
+            error.kind()
+        )),
     }
 }
 
@@ -116,6 +131,12 @@ fn doc_declares_current_redaction_flag_language() -> TestResult {
 
     for required_phrase in [
         "current `--redaction <level>`",
+        "### CLI examples",
+        "ee export --workspace . --redaction standard",
+        "ee backup create --workspace . --label pre-share",
+        "ee context \"prepare release handoff\" --workspace .",
+        "ee handoff create --workspace . --out handoff.ee-handoff.json",
+        "ee support bundle --workspace . --dry-run",
         "`none`/`--include-raw` keeps collected diagnostics raw",
         "`minimal` applies only the secret detector",
         "`standard`/`strict`/`paranoid`",
@@ -126,6 +147,108 @@ fn doc_declares_current_redaction_flag_language() -> TestResult {
             doc.contains(required_phrase),
             format!("docs/redaction_levels.md missing current flag language: `{required_phrase}`"),
         )?;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn redaction_flags_are_help_discoverable_on_current_surfaces() -> TestResult {
+    for (args, context) in [
+        (&["ee", "export", "--help"][..], "ee export --help"),
+        (
+            &["ee", "backup", "create", "--help"][..],
+            "ee backup create --help",
+        ),
+        (&["ee", "context", "--help"][..], "ee context --help"),
+        (
+            &["ee", "handoff", "create", "--help"][..],
+            "ee handoff create --help",
+        ),
+        (
+            &["ee", "support", "bundle", "--help"][..],
+            "ee support bundle --help",
+        ),
+    ] {
+        let help = help_for(args)?;
+        ensure(
+            help.contains("--redaction"),
+            format!("{context} must expose --redaction in help"),
+        )?;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn documented_redaction_cli_examples_parse() -> TestResult {
+    for args in [
+        &[
+            "ee",
+            "export",
+            "--workspace",
+            ".",
+            "--redaction",
+            "standard",
+            "--output-dir",
+            "./redacted-export",
+            "--dry-run",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "backup",
+            "create",
+            "--workspace",
+            ".",
+            "--label",
+            "pre-share",
+            "--redaction",
+            "paranoid",
+            "--dry-run",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "context",
+            "prepare release handoff",
+            "--workspace",
+            ".",
+            "--redaction",
+            "minimal",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "handoff",
+            "create",
+            "--workspace",
+            ".",
+            "--out",
+            "handoff.ee-handoff.json",
+            "--since",
+            "HEAD",
+            "--profile",
+            "handoff",
+            "--redaction",
+            "strict",
+            "--dry-run",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "support",
+            "bundle",
+            "--workspace",
+            ".",
+            "--dry-run",
+            "--redaction",
+            "paranoid",
+            "--json",
+        ][..],
+    ] {
+        Cli::try_parse_from(args)
+            .map_err(|error| format!("{} failed to parse: {:?}", args.join(" "), error.kind()))?;
     }
 
     Ok(())
