@@ -2377,6 +2377,61 @@ fn synthetic_cargo_workspace_inheritance_failure_is_worker_topology() -> TestRes
 }
 
 #[test]
+fn synthetic_cargo_path_dependency_version_failure_is_worker_topology() -> TestResult {
+    let (status, stdout, _stderr) = run_script_with_env(
+        &[
+            "--",
+            "cargo",
+            "test",
+            "--test",
+            "rch_verify_contract",
+            "strict_clean_tree",
+            "--",
+            "--nocapture",
+        ],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "error: failed to select a version for the requirement `franken-agent-detection = \"^0.1.3\"`\n\
+candidate versions found which didn't match: 0.1.2\n\
+location searched: /data/projects/franken_agent_detection\n\
+required by package `eidetic-engine v0.1.0 (/data/projects/eidetic_engine_cli)`\n\
+[RCH] remote vmi1149989 failed (exit 101)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "2100"),
+        ],
+    )?;
+    if status.success() {
+        return Err("path dependency version transcript should preserve non-zero exit".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse path dependency version report: {error}"))?;
+    if report["status"] != "rch_environment_failure" {
+        return Err(format!(
+            "path dependency version mismatch should route as RCH environment failure: {report}"
+        ));
+    }
+    if report["worker_id"] != "vmi1149989" {
+        return Err(format!("worker id should be preserved: {report}"));
+    }
+    for expected in [
+        "rch_verify_remote_command_failed",
+        "rch_verify_cargo_path_dependency_version_blocked",
+    ] {
+        if !degraded_contains(&report, expected)? {
+            return Err(format!("missing {expected} in degraded codes: {report}"));
+        }
+    }
+    if !worker_degraded_contains(&report, "rch_verify_cargo_path_dependency_version_blocked")? {
+        return Err(format!(
+            "path dependency version code should be worker-state degraded: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn synthetic_e0583_for_tracked_module_is_remote_checkout_incomplete() -> TestResult {
     let (status, stdout, _stderr) = run_script_with_env(
         &["--", "cargo", "test", "--test", "context_stream"],

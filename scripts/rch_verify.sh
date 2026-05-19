@@ -429,6 +429,14 @@ is_cargo_workspace_inheritance_output() {
     grep -Eiq "error inheriting .+ from workspace root manifest|workspace\.package\.[A-Za-z0-9_.-]+.*was not defined"
 }
 
+is_cargo_path_dependency_version_output() {
+    local text
+    text="$(cat)"
+    printf '%s' "$text" | grep -Eiq "failed to select a version for the requirement" &&
+        printf '%s' "$text" | grep -Eiq "candidate versions found which didn't match:" &&
+        printf '%s' "$text" | grep -Eiq "location searched: /data/projects/"
+}
+
 configured_workers() {
     CONFIGURED_WORKERS="${RCH_VERIFY_CONFIGURED_WORKERS:-}" \
     FAKE_OUTPUT_PRESENT="${RCH_VERIFY_FAKE_OUTPUT:+1}" \
@@ -1246,6 +1254,7 @@ worker_state_code_set = {
     "rch_verify_worker_filter_ignored",
     "rch_verify_worker_quarantine_ignored",
     "rch_verify_cargo_workspace_inheritance_blocked",
+    "rch_verify_cargo_path_dependency_version_blocked",
 }
 worker_state_degraded = [
     code
@@ -1271,6 +1280,7 @@ elif (
 elif (
     "rch_verify_topology_blocked" in degraded
     or "rch_verify_cargo_workspace_inheritance_blocked" in degraded
+    or "rch_verify_cargo_path_dependency_version_blocked" in degraded
     or "rch_verify_local_fallback_refused" in degraded
     or "rch_verify_worker_disk_full" in degraded
     or "rch_verify_worker_quarantine_ignored" in degraded
@@ -1642,6 +1652,9 @@ if [ -n "$disk_full_worker" ] || printf '%s' "$combined_output" | is_worker_disk
 fi
 if printf '%s' "$combined_output" | is_cargo_workspace_inheritance_output; then
     degraded+=("rch_verify_cargo_workspace_inheritance_blocked")
+fi
+if printf '%s' "$combined_output" | is_cargo_path_dependency_version_output; then
+    degraded+=("rch_verify_cargo_path_dependency_version_blocked")
 fi
 if [ "$retried_after_disk_full" -eq 1 ]; then
     degraded+=("rch_verify_retry_after_worker_disk_full")
