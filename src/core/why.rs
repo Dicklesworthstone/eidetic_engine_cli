@@ -10,6 +10,8 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs::File,
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -379,6 +381,31 @@ impl RationaleTraceSummary {
     }
 }
 
+/// Redaction-safe coordination fallback evidence linked to a why report.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoordinationFallbackEvidenceSummary {
+    /// Source ledger schema for the summarized record.
+    pub source_schema: &'static str,
+    /// Stable evidence identifier from the fallback record.
+    pub evidence_id: String,
+    /// Coordination substrate status: available, unavailable, stale, blocked, or unknown.
+    pub status: String,
+    /// Source substrate kind such as agent_mail, beads, file_reservation, rch, bv, git, or other.
+    pub source_kind: String,
+    /// Stable machine-readable reason code.
+    pub reason_code: String,
+    /// Capture timestamp from the evidence record.
+    pub captured_at: String,
+    /// Ledger content hash for the canonical redacted evidence record.
+    pub content_hash: String,
+    /// Bead ids linked by the fallback evidence.
+    pub linked_bead_ids: Vec<String>,
+    /// Verification ids linked by the fallback evidence.
+    pub linked_verification_ids: Vec<String>,
+    /// Support bundle ids linked by the fallback evidence.
+    pub linked_support_bundle_ids: Vec<String>,
+}
+
 /// Non-fatal limitations in the why explanation.
 /// Bayesian (alpha, beta) posterior summary for `ee why <memory-id>`
 /// output (N7.1 / ADR 0032).
@@ -479,6 +506,8 @@ pub struct WhyReport {
     pub rationale_traces: Vec<RationaleTraceSummary>,
     /// Verification evidence linked by the caller or future ledger lookup.
     pub verification_evidence: Vec<VerificationEvidenceRecord>,
+    /// Redaction-safe coordination fallback evidence linked to this memory.
+    pub coordination_fallback_evidence: Vec<CoordinationFallbackEvidenceSummary>,
     /// Non-fatal degradation notices.
     pub degraded: Vec<WhyDegradation>,
     /// Error message if query failed.
@@ -513,6 +542,7 @@ impl WhyReport {
             history: None,
             rationale_traces: Vec::new(),
             verification_evidence: Vec::new(),
+            coordination_fallback_evidence: Vec::new(),
             degraded: Vec::new(),
             error: None,
         }
@@ -548,6 +578,7 @@ impl WhyReport {
             history: None,
             rationale_traces: Vec::new(),
             verification_evidence: Vec::new(),
+            coordination_fallback_evidence: Vec::new(),
             degraded: Vec::new(),
             error: None,
         }
@@ -575,6 +606,7 @@ impl WhyReport {
             history: None,
             rationale_traces: Vec::new(),
             verification_evidence: Vec::new(),
+            coordination_fallback_evidence: Vec::new(),
             degraded: Vec::new(),
             error: Some(message),
         }
@@ -728,6 +760,24 @@ impl WhyReport {
             .sort_by(|left, right| left.verification_id.cmp(&right.verification_id));
         verification_evidence.dedup_by(|left, right| left.verification_id == right.verification_id);
         self.verification_evidence = verification_evidence;
+        self
+    }
+
+    /// Add redaction-safe coordination fallback evidence linked to this memory.
+    #[must_use]
+    pub fn with_coordination_fallback_evidence(
+        mut self,
+        mut evidence: Vec<CoordinationFallbackEvidenceSummary>,
+    ) -> Self {
+        evidence.sort_by(|left, right| {
+            left.evidence_id
+                .cmp(&right.evidence_id)
+                .then_with(|| left.content_hash.cmp(&right.content_hash))
+        });
+        evidence.dedup_by(|left, right| {
+            left.evidence_id == right.evidence_id && left.content_hash == right.content_hash
+        });
+        self.coordination_fallback_evidence = evidence;
         self
     }
 }
@@ -891,6 +941,12 @@ fn explain_memory_inner(
     // Fetch rationale traces (EE-RATIONALE-TRACE-001)
     let rationale_trace_fetch = fetch_rationale_traces(&conn, &memory.workspace_id, memory_id);
     let verification_fetch = fetch_verification_evidence(&conn, "memory", memory_id);
+    let coordination_fallback_fetch = fetch_coordination_fallback_evidence(
+        options.database_path,
+        &memory,
+        &tags,
+        &verification_fetch.items,
+    );
     let mut evidence_degradations = Vec::new();
     if let Some(degradation) = contradiction_fetch.degradation {
         evidence_degradations.push(degradation);
@@ -905,6 +961,9 @@ fn explain_memory_inner(
         evidence_degradations.push(degradation);
     }
     if let Some(degradation) = verification_fetch.degradation {
+        evidence_degradations.push(degradation);
+    }
+    if let Some(degradation) = coordination_fallback_fetch.degradation {
         evidence_degradations.push(degradation);
     }
     if verification_fetch.items.is_empty()
@@ -934,6 +993,7 @@ fn explain_memory_inner(
     let lifecycle = lifecycle_for_memory(&memory, history.as_ref());
     let rationale_traces = rationale_trace_fetch.items;
     let verification_evidence = verification_fetch.items;
+    let coordination_fallback_evidence = coordination_fallback_fetch.items;
 
     let validity = memory_validity(&memory.valid_from, &memory.valid_to);
     let graph_retrieval = build_graph_retrieval_explanation(
@@ -994,6 +1054,7 @@ fn explain_memory_inner(
                     history,
                     rationale_traces,
                     verification_evidence: Vec::new(),
+                    coordination_fallback_evidence,
                     graph_retrieval,
                     degraded: evidence_degradations,
                     agent_profile,
@@ -1031,6 +1092,7 @@ fn explain_memory_inner(
             history,
             rationale_traces,
             verification_evidence,
+            coordination_fallback_evidence,
             graph_retrieval,
             degraded: evidence_degradations,
             agent_profile,
@@ -1477,10 +1539,7 @@ fn redact_why_absolute_path_like_segments(input: &str) -> String {
             output.push_str(REDACTED_PATH);
             cursor += prefix.len();
             while cursor < input.len() {
-                let next = input[cursor..]
-                    .chars()
-                    .next()
-                    .unwrap_or('\0');
+                let next = input[cursor..].chars().next().unwrap_or('\0');
                 if next.is_whitespace()
                     || matches!(
                         next,
@@ -1494,10 +1553,7 @@ fn redact_why_absolute_path_like_segments(input: &str) -> String {
             continue;
         }
 
-        let next = remaining
-            .chars()
-            .next()
-            .unwrap_or('\0');
+        let next = remaining.chars().next().unwrap_or('\0');
         output.push(next);
         cursor += next.len_utf8();
     }
@@ -1552,6 +1608,7 @@ struct ReportSelectionInputs {
     history: Option<MemoryHistorySummary>,
     rationale_traces: Vec<RationaleTraceSummary>,
     verification_evidence: Vec<VerificationEvidenceRecord>,
+    coordination_fallback_evidence: Vec<CoordinationFallbackEvidenceSummary>,
     graph_retrieval: GraphRetrievalExplanation,
     degraded: Vec<WhyDegradation>,
     agent_profile: Option<AgentProfileSelectionExplanation>,
@@ -1586,6 +1643,7 @@ fn build_report(
         .with_graph_retrieval(selection_inputs.graph_retrieval)
         .with_rationale_traces(selection_inputs.rationale_traces)
         .with_verification_evidence(selection_inputs.verification_evidence)
+        .with_coordination_fallback_evidence(selection_inputs.coordination_fallback_evidence)
         .with_degradations(selection_inputs.degraded)
 }
 
@@ -2099,6 +2157,11 @@ fn fetch_links(conn: &DbConnection, memory_id: &str) -> WhyEvidenceFetch<MemoryL
 }
 
 const WHY_HISTORY_LIMIT: usize = 50;
+const WHY_COORDINATION_FALLBACK_LIMIT: usize = 20;
+const COORDINATION_FALLBACK_EVIDENCE_SCHEMA_V1: &str = "ee.coordination_fallback_evidence.v1";
+const COORDINATION_FALLBACK_LEDGER_RECORD_SCHEMA_V1: &str =
+    "ee.coordination_fallback_ledger_record.v1";
+const COORDINATION_FALLBACK_LEDGER_FILE: &str = "coordination-fallback-evidence.jsonl";
 
 fn fetch_history(conn: &DbConnection, memory_id: &str) -> WhyEvidenceFetch<MemoryHistorySummary> {
     let stored_entries = match conn.list_audit_by_target("memory", memory_id, None) {
@@ -2183,6 +2246,207 @@ fn fetch_verification_evidence(
             error,
         ),
     }
+}
+
+fn fetch_coordination_fallback_evidence(
+    database_path: &Path,
+    memory: &crate::db::StoredMemory,
+    tags: &[String],
+    verification_evidence: &[VerificationEvidenceRecord],
+) -> WhyEvidenceFetch<CoordinationFallbackEvidenceSummary> {
+    let Some(workspace_root) = workspace_root_from_database_path(database_path) else {
+        return WhyEvidenceFetch::available(Vec::new());
+    };
+    let ledger_path = workspace_root
+        .join(".ee")
+        .join(COORDINATION_FALLBACK_LEDGER_FILE);
+    let file = match File::open(&ledger_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return WhyEvidenceFetch::available(Vec::new());
+        }
+        Err(error) => {
+            return WhyEvidenceFetch::unavailable(
+                "why_coordination_fallback_evidence_unavailable",
+                "coordination fallback evidence",
+                error,
+            );
+        }
+    };
+
+    let memory_link_ids = why_memory_coordination_link_ids(memory, tags);
+    let verification_ids = verification_evidence
+        .iter()
+        .map(|evidence| evidence.verification_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut malformed_count = 0_u32;
+    let mut items = Vec::new();
+
+    for line in BufReader::new(file).lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                return WhyEvidenceFetch::unavailable(
+                    "why_coordination_fallback_evidence_unavailable",
+                    "coordination fallback evidence",
+                    error,
+                );
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Some(summary) = serde_json::from_str::<serde_json::Value>(&line)
+            .ok()
+            .and_then(|record| coordination_fallback_summary_from_record(&record))
+        else {
+            malformed_count = malformed_count.saturating_add(1);
+            continue;
+        };
+        if coordination_fallback_matches_memory(&summary, &memory_link_ids, &verification_ids)
+            && items.len() < WHY_COORDINATION_FALLBACK_LIMIT
+        {
+            items.push(summary);
+        }
+    }
+
+    items.sort_by(|left, right| {
+        left.evidence_id
+            .cmp(&right.evidence_id)
+            .then_with(|| left.content_hash.cmp(&right.content_hash))
+    });
+    items.dedup_by(|left, right| {
+        left.evidence_id == right.evidence_id && left.content_hash == right.content_hash
+    });
+
+    let degradation = (malformed_count > 0).then(|| WhyDegradation {
+        code: "why_coordination_fallback_evidence_malformed",
+        severity: "low",
+        message: format!(
+            "Skipped {malformed_count} malformed coordination fallback ledger record(s) while explaining this memory."
+        ),
+        repair: Some("Repair or regenerate .ee/coordination-fallback-evidence.jsonl with `ee coordination evidence ingest`.".to_owned()),
+    });
+
+    WhyEvidenceFetch { items, degradation }
+}
+
+fn why_memory_coordination_link_ids(
+    memory: &crate::db::StoredMemory,
+    tags: &[String],
+) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    if let Some(workflow_id) = memory.workflow_id.as_deref().map(str::trim)
+        && !workflow_id.is_empty()
+    {
+        ids.insert(workflow_id.to_owned());
+    }
+    for tag in tags {
+        if let Some(bead_id) = coordination_bead_id_from_tag(tag) {
+            ids.insert(bead_id);
+        }
+    }
+    ids
+}
+
+fn coordination_bead_id_from_tag(tag: &str) -> Option<String> {
+    let trimmed = tag.trim();
+    let candidate = trimmed
+        .strip_prefix("bead:")
+        .or_else(|| trimmed.strip_prefix("bead="))
+        .or_else(|| trimmed.strip_prefix("issue:"))
+        .or_else(|| trimmed.strip_prefix("issue="))
+        .unwrap_or(trimmed)
+        .trim();
+    candidate.starts_with("bd-").then(|| candidate.to_owned())
+}
+
+fn coordination_fallback_matches_memory(
+    summary: &CoordinationFallbackEvidenceSummary,
+    memory_link_ids: &BTreeSet<String>,
+    verification_ids: &BTreeSet<String>,
+) -> bool {
+    summary
+        .linked_bead_ids
+        .iter()
+        .any(|id| memory_link_ids.contains(id))
+        || summary
+            .linked_verification_ids
+            .iter()
+            .any(|id| verification_ids.contains(id))
+}
+
+fn coordination_fallback_summary_from_record(
+    record: &serde_json::Value,
+) -> Option<CoordinationFallbackEvidenceSummary> {
+    if record.get("schema").and_then(serde_json::Value::as_str)
+        != Some(COORDINATION_FALLBACK_LEDGER_RECORD_SCHEMA_V1)
+    {
+        return None;
+    }
+    let content_hash = coordination_fallback_string(record, "/contentHash")?;
+    let evidence = record.get("evidence")?;
+    if evidence.get("schema").and_then(serde_json::Value::as_str)
+        != Some(COORDINATION_FALLBACK_EVIDENCE_SCHEMA_V1)
+    {
+        return None;
+    }
+    if evidence.pointer("/summary/redacted") != Some(&serde_json::Value::Bool(true))
+        || evidence.pointer("/redaction/rawInboxIncluded") != Some(&serde_json::Value::Bool(false))
+        || evidence.pointer("/redaction/rawLogIncluded") != Some(&serde_json::Value::Bool(false))
+        || evidence.pointer("/redaction/secretScanApplied") != Some(&serde_json::Value::Bool(true))
+    {
+        return None;
+    }
+    if !matches!(
+        evidence
+            .pointer("/redaction/pathPolicy")
+            .and_then(serde_json::Value::as_str),
+        Some("redact_home" | "hash_paths" | "labels_only")
+    ) {
+        return None;
+    }
+
+    Some(CoordinationFallbackEvidenceSummary {
+        source_schema: COORDINATION_FALLBACK_EVIDENCE_SCHEMA_V1,
+        evidence_id: coordination_fallback_string(evidence, "/evidenceId")?,
+        status: coordination_fallback_string(evidence, "/status")?,
+        source_kind: coordination_fallback_string(evidence, "/source/kind")?,
+        reason_code: coordination_fallback_string(evidence, "/reasonCode")?,
+        captured_at: coordination_fallback_string(evidence, "/capturedAt")?,
+        content_hash,
+        linked_bead_ids: coordination_fallback_string_array(evidence.pointer("/links/beadIds")),
+        linked_verification_ids: coordination_fallback_string_array(
+            evidence.pointer("/links/verificationIds"),
+        ),
+        linked_support_bundle_ids: coordination_fallback_string_array(
+            evidence.pointer("/links/supportBundleIds"),
+        ),
+    })
+}
+
+fn coordination_fallback_string(value: &serde_json::Value, pointer: &str) -> Option<String> {
+    value
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
+fn coordination_fallback_string_array(value: Option<&serde_json::Value>) -> Vec<String> {
+    let mut values = value
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    values
 }
 
 /// Fetch rationale traces linked to a memory (EE-RATIONALE-TRACE-001).
@@ -2404,6 +2668,7 @@ mod tests {
                 history: None,
                 rationale_traces: Vec::new(),
                 verification_evidence: Vec::new(),
+                coordination_fallback_evidence: Vec::new(),
                 graph_retrieval: graph_retrieval_unavailable(
                     "wsp_01234567890123456789012345",
                     "graph_snapshot_missing",
@@ -2496,6 +2761,148 @@ mod tests {
             report.verification_evidence[0].verification_id.as_str(),
             evidence.verification_id.as_str(),
             "verification id",
+        )
+    }
+
+    #[test]
+    fn explain_memory_includes_linked_coordination_fallback_evidence() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        let ledger_dir = database_path
+            .parent()
+            .ok_or("database path should have parent")?;
+        std::fs::create_dir_all(ledger_dir).map_err(|error| error.to_string())?;
+        let conn = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        conn.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_coordfallbackwhy000000001";
+        let memory_id = "mem_coordfallbackwhy000000001";
+        conn.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: temp.path().display().to_string(),
+                name: Some("coordination-fallback-why".to_string()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        conn.insert_memory(
+            memory_id,
+            &crate::db::CreateMemoryInput {
+                workspace_id: workspace_id.to_string(),
+                level: "procedural".to_string(),
+                kind: "rule".to_string(),
+                content: "Preserve coordination fallback evidence for handoff.".to_string(),
+                workflow_id: Some("bd-1zb7k.13.2".to_string()),
+                confidence: 0.8,
+                utility: 0.7,
+                importance: 0.6,
+                provenance_uri: None,
+                trust_class: "agent_assertion".to_string(),
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        let matched = serde_json::json!({
+            "schema": COORDINATION_FALLBACK_LEDGER_RECORD_SCHEMA_V1,
+            "contentHash": "blake3:matched",
+            "evidence": {
+                "schema": COORDINATION_FALLBACK_EVIDENCE_SCHEMA_V1,
+                "evidenceId": "coord_fallback_why_01",
+                "capturedAt": "2026-05-16T21:06:00Z",
+                "status": "blocked",
+                "source": {
+                    "kind": "agent_mail",
+                    "sourceId": "file:///Users/alice/private/agent-mail.jsonl?api_key=redaction-fixture"
+                },
+                "reasonCode": "agent_mail_transport_unavailable",
+                "summary": {
+                    "text": "raw summary text must not enter why",
+                    "contentHash": "blake3:summary",
+                    "redacted": true
+                },
+                "links": {
+                    "beadIds": ["bd-1zb7k.13.2"],
+                    "verificationIds": ["rch_cmd_test"],
+                    "supportBundleIds": ["bundle_01"]
+                },
+                "fallbackAction": {
+                    "kind": "record_only",
+                    "summary": "Preserve redacted fallback evidence.",
+                    "command": null,
+                    "manualStep": null
+                },
+                "redaction": {
+                    "rawInboxIncluded": false,
+                    "rawLogIncluded": false,
+                    "secretScanApplied": true,
+                    "pathPolicy": "labels_only"
+                },
+                "producer": {
+                    "schema": "ee.producer.metadata.v1",
+                    "sourceSystem": "coordination_fallback",
+                    "identity": {"status": "unknown", "agentName": null, "harness": null, "model": null},
+                    "run": {"runId": "coord-fallback-test", "sessionId": null, "workspaceFingerprint": "repo:test"},
+                    "observedAt": "2026-05-16T21:06:00Z"
+                }
+            }
+        });
+        let unmatched = serde_json::json!({
+            "schema": COORDINATION_FALLBACK_LEDGER_RECORD_SCHEMA_V1,
+            "contentHash": "blake3:unmatched",
+            "evidence": {
+                "schema": COORDINATION_FALLBACK_EVIDENCE_SCHEMA_V1,
+                "evidenceId": "coord_fallback_why_02",
+                "capturedAt": "2026-05-16T21:07:00Z",
+                "status": "unavailable",
+                "source": {"kind": "beads", "sourceId": "beads-local"},
+                "reasonCode": "beads_snapshot_stale",
+                "summary": {"text": "unmatched", "contentHash": "blake3:summary2", "redacted": true},
+                "links": {"beadIds": ["bd-unrelated"], "verificationIds": [], "supportBundleIds": []},
+                "fallbackAction": {"kind": "record_only", "summary": "Preserve.", "command": null, "manualStep": null},
+                "redaction": {
+                    "rawInboxIncluded": false,
+                    "rawLogIncluded": false,
+                    "secretScanApplied": true,
+                    "pathPolicy": "labels_only"
+                }
+            }
+        });
+        std::fs::write(
+            ledger_dir.join(COORDINATION_FALLBACK_LEDGER_FILE),
+            format!("{matched}\n{unmatched}\n"),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report = explain_memory(&WhyOptions {
+            database_path: &database_path,
+            memory_id,
+            confidence_threshold: WhyOptions::DEFAULT_CONFIDENCE_THRESHOLD,
+        });
+
+        ensure(report.found, true, "why found memory")?;
+        ensure(
+            report.coordination_fallback_evidence.len(),
+            1_usize,
+            "coordination fallback evidence count",
+        )?;
+        let fallback = &report.coordination_fallback_evidence[0];
+        ensure(
+            fallback.evidence_id.as_str(),
+            "coord_fallback_why_01",
+            "linked evidence id",
+        )?;
+        ensure(
+            fallback.linked_bead_ids.clone(),
+            vec!["bd-1zb7k.13.2".to_string()],
+            "linked bead ids",
+        )?;
+        ensure(
+            fallback.content_hash.as_str(),
+            "blake3:matched",
+            "content hash",
         )
     }
 

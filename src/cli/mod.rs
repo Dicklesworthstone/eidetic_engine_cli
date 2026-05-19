@@ -30139,6 +30139,38 @@ fn format_why_human(report: &crate::core::why::WhyReport) -> String {
         }
     }
 
+    if !report.coordination_fallback_evidence.is_empty() {
+        output.push_str("\nCoordination fallback evidence:\n");
+        for evidence in &report.coordination_fallback_evidence {
+            output.push_str(&format!(
+                "  {} [{} / {}]\n",
+                evidence.evidence_id, evidence.source_kind, evidence.status
+            ));
+            output.push_str(&format!(
+                "    reason: {}, contentHash: {}\n",
+                evidence.reason_code, evidence.content_hash
+            ));
+            if !evidence.linked_bead_ids.is_empty() {
+                output.push_str(&format!(
+                    "    beads: {}\n",
+                    evidence.linked_bead_ids.join(", ")
+                ));
+            }
+            if !evidence.linked_verification_ids.is_empty() {
+                output.push_str(&format!(
+                    "    verification: {}\n",
+                    evidence.linked_verification_ids.join(", ")
+                ));
+            }
+            if !evidence.linked_support_bundle_ids.is_empty() {
+                output.push_str(&format!(
+                    "    support bundles: {}\n",
+                    evidence.linked_support_bundle_ids.join(", ")
+                ));
+            }
+        }
+    }
+
     if !report.degraded.is_empty() {
         output.push_str("\nDegraded:\n");
         for degraded in &report.degraded {
@@ -30346,6 +30378,24 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
 
     let verification_evidence = serde_json::to_value(&report.verification_evidence)
         .unwrap_or_else(|_| serde_json::json!([]));
+    let coordination_fallback_evidence: Vec<serde_json::Value> = report
+        .coordination_fallback_evidence
+        .iter()
+        .map(|evidence| {
+            serde_json::json!({
+                "sourceSchema": evidence.source_schema,
+                "evidenceId": &evidence.evidence_id,
+                "status": &evidence.status,
+                "sourceKind": &evidence.source_kind,
+                "reasonCode": &evidence.reason_code,
+                "capturedAt": &evidence.captured_at,
+                "contentHash": &evidence.content_hash,
+                "linkedBeadIds": &evidence.linked_bead_ids,
+                "linkedVerificationIds": &evidence.linked_verification_ids,
+                "linkedSupportBundleIds": &evidence.linked_support_bundle_ids,
+            })
+        })
+        .collect();
 
     let mut json = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V1,
@@ -30366,6 +30416,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "links": links,
             "history": history,
             "verificationEvidence": verification_evidence,
+            "coordinationFallbackEvidence": coordination_fallback_evidence,
             "degraded": degraded,
         }
     });
@@ -39791,9 +39842,10 @@ mod tests {
         SearchStatus,
     };
     use crate::core::why::{
-        AgentProfileSelectionExplanation, GraphMetricExplanation, GraphRetrievalExplanation,
-        GraphRetrievalSourceExplanation, PackSelectionExplanation, RationaleTraceSummary,
-        RetrievalExplanation, SelectionExplanation, StorageExplanation, WhyDegradation, WhyReport,
+        AgentProfileSelectionExplanation, CoordinationFallbackEvidenceSummary,
+        GraphMetricExplanation, GraphRetrievalExplanation, GraphRetrievalSourceExplanation,
+        PackSelectionExplanation, RationaleTraceSummary, RetrievalExplanation,
+        SelectionExplanation, StorageExplanation, WhyDegradation, WhyReport,
     };
     use crate::models::error_codes::ALL_ERROR_CODES;
     use crate::models::{
@@ -41082,6 +41134,23 @@ mod tests {
         })
     }
 
+    fn why_coordination_fallback_fixture() -> WhyReport {
+        why_found_fixture().with_coordination_fallback_evidence(vec![
+            CoordinationFallbackEvidenceSummary {
+                source_schema: "ee.coordination_fallback_evidence.v1",
+                evidence_id: "coord_fallback_release".to_string(),
+                status: "blocked".to_string(),
+                source_kind: "agent_mail".to_string(),
+                reason_code: "agent_mail_transport_unavailable".to_string(),
+                captured_at: "2026-05-16T21:06:00Z".to_string(),
+                content_hash: "blake3:coordfallback".to_string(),
+                linked_bead_ids: vec!["bd-1zb7k.13.2".to_string()],
+                linked_verification_ids: vec!["rch_cmd_release".to_string()],
+                linked_support_bundle_ids: vec!["bundle_release".to_string()],
+            },
+        ])
+    }
+
     #[test]
     fn search_toon_matches_json_contract() -> TestResult {
         let report = search_report_fixture();
@@ -41250,6 +41319,58 @@ mod tests {
             "human agent profile counts",
         )?;
         ensure_contains(&output, "Bias: 0.0312", "human agent profile bias")
+    }
+
+    #[test]
+    fn why_json_includes_coordination_fallback_evidence() -> TestResult {
+        let value: serde_json::Value =
+            serde_json::from_str(&super::format_why_json(&why_coordination_fallback_fixture()))
+                .map_err(|error| error.to_string())?;
+        let evidence = value["data"]["coordinationFallbackEvidence"]
+            .as_array()
+            .ok_or_else(|| "coordination fallback evidence should be an array".to_string())?;
+        ensure_equal(&evidence.len(), &1, "coordination fallback evidence count")?;
+        ensure_equal(
+            &evidence[0]["evidenceId"],
+            &serde_json::json!("coord_fallback_release"),
+            "coordination fallback evidence id",
+        )?;
+        ensure_equal(
+            &evidence[0]["linkedBeadIds"],
+            &serde_json::json!(["bd-1zb7k.13.2"]),
+            "coordination fallback linked bead ids",
+        )?;
+        ensure_equal(
+            &evidence[0]["linkedVerificationIds"],
+            &serde_json::json!(["rch_cmd_release"]),
+            "coordination fallback linked verification ids",
+        )
+    }
+
+    #[test]
+    fn why_human_includes_coordination_fallback_evidence() -> TestResult {
+        let output = super::format_why_human(&why_coordination_fallback_fixture());
+
+        ensure_contains(
+            &output,
+            "Coordination fallback evidence:",
+            "human coordination fallback heading",
+        )?;
+        ensure_contains(
+            &output,
+            "coord_fallback_release [agent_mail / blocked]",
+            "human coordination fallback evidence id",
+        )?;
+        ensure_contains(
+            &output,
+            "reason: agent_mail_transport_unavailable",
+            "human coordination fallback reason",
+        )?;
+        ensure_contains(
+            &output,
+            "verification: rch_cmd_release",
+            "human coordination fallback verification link",
+        )
     }
 
     #[test]

@@ -22,8 +22,9 @@ handled. The intended default is labels and counts only.
 
 - `ee coordination evidence ingest --file/--stdin --json` or an equivalent
   agreed CLI should ingest records idempotently by `summary.contentHash`.
-- `ee why` may cite linked coordination evidence when explaining why an agent
-  trusted, skipped, or could not verify a source.
+- `ee why` reports redaction-safe linked coordination evidence. The collector
+  reads `.ee/coordination-fallback-evidence.jsonl` and links records by memory
+  workflow/bead IDs or by verification IDs already linked to the memory.
 - Support bundles include `coordination_fallback_summary.json`, a redacted
   summary of the local `.ee/coordination-fallback-evidence.jsonl` ledger. It
   carries status/source counts, reason codes, evidence IDs, linked IDs, and
