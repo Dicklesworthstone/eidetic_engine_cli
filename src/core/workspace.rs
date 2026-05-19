@@ -2733,4 +2733,260 @@ mod tests {
             "paths beyond the deterministic visible prefix must be omitted"
         );
     }
+
+    #[test]
+    fn clean_workspace_hygiene_report_serializes_to_pinned_response_envelope_shape() {
+        // bd-1eq3l.3: Pin the public `ee workspace hygiene --json` response envelope
+        // for the canonical clean-workspace fixture so any drift in agent-visible
+        // keys, empty-array invariants, schema constants, or budgets gets caught
+        // before it ships. The existing recommendation/coordination tests pin
+        // *fragments* of the report; this one pins the envelope as a whole.
+        let agent_mail_input = AgentMailCoordinationInput::Available {
+            reservations: Vec::new(),
+            active_agents: Vec::new(),
+        };
+        let report = build_workspace_hygiene_report_from_inputs(WorkspaceHygieneReportInputs {
+            workspace_path: Path::new("/repo"),
+            snapshot: hygiene_snapshot(Vec::new()),
+            classifier_config: &HygieneClassifierConfig::default(),
+            jsonl_content: None,
+            self_agent_name: None,
+            beads_metadata_signal: BeadsMetadataSignal::Unknown,
+            beads_reservations: &[],
+            agent_mail_input: &agent_mail_input,
+            now: DateTime::parse_from_rfc3339("2026-05-18T08:00:00Z")
+                .expect("valid test timestamp")
+                .with_timezone(&Utc),
+        });
+
+        // Typed invariants on the public report struct.
+        assert_eq!(report.schema, WORKSPACE_HYGIENE_SCHEMA_V1);
+        assert_eq!(report.command, "workspace hygiene");
+        assert!(
+            report.read_only,
+            "clean envelope must self-declare read-only"
+        );
+        assert_eq!(report.workspace_path, "/repo");
+        assert_eq!(report.repository_root, "/repo");
+        assert_eq!(report.dirty_path_count, 0);
+        assert!(report.bucket_counts.is_empty());
+        assert!(report.kind_counts.is_empty());
+        assert!(report.staging_groups.is_empty());
+        assert!(report.classifications.is_empty());
+        assert!(report.do_not_commit.is_empty());
+        assert!(report.needs_human_review.is_empty());
+        assert!(
+            report.next_actions.is_empty(),
+            "clean fixture must produce no nextActions noise: {:?}",
+            report.next_actions
+        );
+        assert!(
+            !report.output_truncation.truncated,
+            "clean fixture must not report truncation"
+        );
+        assert_eq!(
+            report.output_truncation.max_path_classifications,
+            WORKSPACE_HYGIENE_MAX_PATH_CLASSIFICATIONS
+        );
+        assert_eq!(
+            report.output_truncation.max_paths_per_list,
+            WORKSPACE_HYGIENE_MAX_PATHS_PER_LIST
+        );
+        assert_eq!(
+            report.output_truncation.max_paths_per_staging_group,
+            WORKSPACE_HYGIENE_MAX_PATHS_PER_STAGING_GROUP
+        );
+        assert_eq!(report.output_truncation.omitted_path_classifications, 0);
+        assert_eq!(report.output_truncation.omitted_do_not_commit, 0);
+        assert_eq!(report.output_truncation.omitted_needs_human_review, 0);
+        assert!(report.output_truncation.omitted_by_bucket.is_empty());
+        assert!(report.output_truncation.omitted_by_kind.is_empty());
+        assert!(report.output_truncation.staging_groups.is_empty());
+        assert!(
+            report.secret_scan.read_only,
+            "secret scan reports must self-declare read-only"
+        );
+        assert_eq!(report.secret_scan.scanned_file_count, 0);
+        assert_eq!(report.secret_scan.scanned_byte_count, 0);
+        assert_eq!(report.secret_scan.skipped_content_scan_count, 0);
+        assert_eq!(
+            report.secret_scan.max_file_bytes,
+            WORKSPACE_SECRET_RISK_DEFAULT_MAX_SCAN_BYTES
+        );
+        // Top-level degraded codes for the clean fixture: only the always-on
+        // workspace_hygiene_partial_metadata caveat fires. Truncation,
+        // agent-mail-unavailable, and secret-scan-skipped triggers must NOT
+        // appear because all of their inputs are empty/satisfied.
+        assert_eq!(
+            report.degraded_codes.as_slice(),
+            &[WORKSPACE_HYGIENE_PARTIAL_METADATA_CODE],
+            "clean fixture must only carry the always-on partial-metadata caveat"
+        );
+        assert!(
+            !report
+                .degraded_codes
+                .contains(&WORKSPACE_HYGIENE_AGENT_MAIL_UNAVAILABLE_CODE),
+            "Available agent_mail input must not raise agent_mail_unavailable"
+        );
+        assert!(
+            !report
+                .degraded_codes
+                .contains(&WORKSPACE_HYGIENE_OUTPUT_TRUNCATED_CODE),
+            "clean fixture must not raise output_truncated"
+        );
+        assert!(
+            !report
+                .degraded_codes
+                .contains(&WORKSPACE_HYGIENE_SECRET_SCAN_SKIPPED_CODE),
+            "clean fixture must not raise secret_scan_skipped"
+        );
+
+        // Serialize through the same response envelope `ee workspace hygiene --json`
+        // emits in cli/mod.rs::workspace_response_json and pin agent-visible keys
+        // (camelCase JSON pointers) for the structures listed in the bead's
+        // "JSON Contract" section.
+        let envelope = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": true,
+            "data": report,
+        });
+
+        assert_eq!(
+            envelope.pointer("/schema").and_then(Value::as_str),
+            Some(crate::models::RESPONSE_SCHEMA_V1),
+            "top-level envelope schema must match the response v1 contract"
+        );
+        assert_eq!(
+            envelope.pointer("/success").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            envelope.pointer("/data/schema").and_then(Value::as_str),
+            Some(WORKSPACE_HYGIENE_SCHEMA_V1)
+        );
+        assert_eq!(
+            envelope.pointer("/data/command").and_then(Value::as_str),
+            Some("workspace hygiene")
+        );
+        assert_eq!(
+            envelope.pointer("/data/readOnly").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            envelope.pointer("/data/workspace").and_then(Value::as_str),
+            Some("/repo")
+        );
+        assert_eq!(
+            envelope
+                .pointer("/data/repositoryRoot")
+                .and_then(Value::as_str),
+            Some("/repo")
+        );
+        assert_eq!(
+            envelope
+                .pointer("/data/dirtyPathCount")
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+        for key in [
+            "/data/bucketCounts",
+            "/data/kindCounts",
+            "/data/stagingRecommendations",
+            "/data/pathClassifications",
+            "/data/doNotCommit",
+            "/data/needsHumanReview",
+            "/data/nextActions",
+        ] {
+            let array = envelope.pointer(key).and_then(Value::as_array);
+            let array = array.unwrap_or_else(|| {
+                panic!("{key} must serialize as a JSON array in the clean envelope")
+            });
+            assert!(
+                array.is_empty(),
+                "{key} must be empty for a clean workspace, got {array:?}"
+            );
+        }
+        // Pin the degraded array shape and contents — always emits the
+        // partial-metadata caveat, never the unavailable / timeout / truncated
+        // / secret-scan-skipped variants for this clean fixture.
+        let degraded_codes = envelope
+            .pointer("/data/degraded")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("/data/degraded must serialize as a JSON array"));
+        let codes: Vec<&str> = degraded_codes.iter().filter_map(Value::as_str).collect();
+        assert_eq!(
+            codes.as_slice(),
+            &[WORKSPACE_HYGIENE_PARTIAL_METADATA_CODE],
+            "clean envelope must carry exactly the partial-metadata caveat"
+        );
+        assert_eq!(
+            envelope
+                .pointer("/data/gitSummary/repositoryRoot")
+                .and_then(Value::as_str),
+            Some("/repo")
+        );
+        assert_eq!(
+            envelope
+                .pointer("/data/gitSummary/dirtyPathCount")
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+        assert!(
+            envelope
+                .pointer("/data/gitSummary/bucketCounts")
+                .and_then(Value::as_array)
+                .map(Vec::is_empty)
+                .unwrap_or(false),
+            "gitSummary.bucketCounts must be an empty array for a clean workspace"
+        );
+        assert_eq!(
+            envelope
+                .pointer("/data/outputTruncation/truncated")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            envelope
+                .pointer("/data/outputTruncation/maxPathClassifications")
+                .and_then(Value::as_u64),
+            Some(WORKSPACE_HYGIENE_MAX_PATH_CLASSIFICATIONS as u64)
+        );
+        assert_eq!(
+            envelope
+                .pointer("/data/secretScan/readOnly")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            envelope
+                .pointer("/data/secretScan/scannedFileCount")
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            envelope
+                .pointer("/data/coordinationState/agentMailAvailable")
+                .and_then(Value::as_bool),
+            Some(true),
+            "coordinationState must reflect the Available agent-mail input"
+        );
+        assert!(
+            envelope.pointer("/data/beadsState").is_some(),
+            "beadsState must serialize even when jsonl_content is absent"
+        );
+
+        // Re-render through to_string_pretty so this test also guards against
+        // serializer panics on the clean fixture and gives downstream agents a
+        // human-readable canonical envelope to diff in failure messages.
+        let pretty = serde_json::to_string_pretty(&envelope)
+            .expect("clean envelope must serialize to pretty JSON without panic");
+        assert!(
+            pretty.contains("\"command\": \"workspace hygiene\""),
+            "pretty envelope must include the canonical command identifier"
+        );
+        assert!(
+            !pretty.contains("\"truncated\": true"),
+            "clean fixture must not flip any truncated=true flag: {pretty}"
+        );
+    }
 }
