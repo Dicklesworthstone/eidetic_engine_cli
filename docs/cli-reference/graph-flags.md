@@ -5,6 +5,9 @@ to combine across context packing, insights, maintenance, and graph inspection.
 It is derived from the current Clap surfaces in `src/cli/mod.rs` and
 `src/cli/insights/mod.rs`.
 
+For precedence rules when these flags are combined, see
+[`flag-precedence.md`](./flag-precedence.md).
+
 ## Global Flags
 
 These flags are accepted by every command:
