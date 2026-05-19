@@ -1,13 +1,13 @@
 {
   "schema": "ee.closure_quality_report.v1",
-  "generatedAt": "2026-05-18T19:44:59Z",
+  "generatedAt": "2026-05-18T20:39:32Z",
   "advisory": true,
   "thresholds": {
     "prematureClosureDays": 14,
     "trendWindowDays": 90
   },
   "summary": {
-    "closedBeadsAudited": 1957,
+    "closedBeadsAudited": 1958,
     "reopenedBeads": 32,
     "prematureClosures": 32,
     "recentPrematureClosures": 32
