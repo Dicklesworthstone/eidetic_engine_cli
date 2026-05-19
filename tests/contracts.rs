@@ -216,3 +216,6 @@ mod workspace_secret_risk_no_leak;
 
 #[path = "contracts/hygiene_reason_code_vocabulary.rs"]
 mod hygiene_reason_code_vocabulary;
+
+#[path = "contracts/mesh_surrogate_schema.rs"]
+mod mesh_surrogate_schema;

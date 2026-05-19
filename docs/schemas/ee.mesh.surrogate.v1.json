@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.surrogate.v1.json",
+  "title": "ee.mesh.surrogate.v1",
+  "description": "Compatibility, privacy, and rebuild metadata for a single search surrogate (embedding, summary, minhash, lexical metadata, or query fingerprint) attached to a memory that may cross a mesh peer boundary. The surrogate metadata is the contract that lets a peer decide whether the surrogate can be locally indexed, whether it must be recomputed against the local model, or whether the local node must fall back to lexical-only search. Default-deny applies: a surrogate is unavailable for export unless the peer policy explicitly allows the matching `surrogateType` lane.",
+  "type": "object",
+  "required": [
+    "schema",
+    "surrogateId",
+    "surrogateType",
+    "modelFingerprint",
+    "contentHash",
+    "policy"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.surrogate.v1"
+    },
+    "surrogateId": {
+      "$ref": "#/$defs/surrogateId"
+    },
+    "memoryId": {
+      "description": "Optional reference to the memory whose body or query produced this surrogate. Required for memory-attached surrogates; omitted for ephemeral query fingerprints.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "originWorkspaceId": {
+      "$ref": "#/$defs/workspaceId"
+    },
+    "surrogateType": {
+      "$ref": "#/$defs/surrogateType"
+    },
+    "modelFingerprint": {
+      "$ref": "#/$defs/modelFingerprint"
+    },
+    "contentHash": {
+      "description": "Hash of the source content that produced this surrogate. Used by `surrogate_recomputed` decisions to detect that the local content already matches and a remote surrogate is safe to attach without recomputation.",
+      "type": "string",
+      "pattern": "^(?:blake3|sha256):[A-Fa-f0-9]{32,128}$"
+    },
+    "computedAt": {
+      "$ref": "#/$defs/rfc3339"
+    },
+    "validUntil": {
+      "description": "Optional staleness boundary. When absent the surrogate is treated as fresh until the model fingerprint or content hash changes.",
+      "$ref": "#/$defs/rfc3339"
+    },
+    "policy": {
+      "$ref": "#/$defs/policy"
+    },
+    "degradedCode": {
+      "description": "When the surrogate is rendered into a structured-log or status surface as a degradation, the emitted code must be one of these documented values. See `repair_present` fixtures under `tests/fixtures/failure_modes/` once the matching Rust constants land.",
+      "$ref": "#/$defs/degradedCode"
+    }
+  },
+  "$defs": {
+    "surrogateId": {
+      "type": "string",
+      "pattern": "^surr_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "workspaceId": {
+      "type": "string",
+      "pattern": "^wsp_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "surrogateType": {
+      "description": "The shape of the surrogate. Each type is treated as an independent lane by mesh peer policy: a peer may allow `lexical_metadata` while denying `embedding`, for example.",
+      "type": "string",
+      "enum": [
+        "embedding",
+        "summary",
+        "minhash",
+        "lexical_metadata",
+        "query_fingerprint"
+      ]
+    },
+    "modelFingerprint": {
+      "description": "Identifies the producer of the surrogate so the receiver can run a compatibility check. Two surrogates are compatible iff `modelId` and `modelVersion` match exactly; `featureFlags` capture optional model-side configuration (quantization mode, normalization, tokenizer revision) that callers must also match before reusing a remote surrogate without recomputation.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modelId", "modelVersion"],
+      "properties": {
+        "modelId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "modelVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "featureFlags": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        }
+      }
+    },
+    "policy": {
+      "description": "Surrogate-level privacy and rebuild rules. `exportAllowed=false` is the project-wide default; the field must be present explicitly so that an absent value cannot accidentally widen the export surface. `requiresLocalRecompute=true` instructs the receiver to drop the surrogate payload, fetch the source content (subject to mesh body-fetch policy), and recompute under the local model — emitting `surrogate_recomputed`. `requiresCompatibilityCheck=true` instructs the receiver to compare `modelFingerprint` against its local model; if they differ the receiver must emit `surrogate_incompatible` and fall back to `lexical_fallback_used`. When the policy itself denies the lane, the receiver emits `surrogate_denied`.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exportAllowed",
+        "requiresLocalRecompute",
+        "requiresCompatibilityCheck"
+      ],
+      "properties": {
+        "exportAllowed": {
+          "type": "boolean"
+        },
+        "requiresLocalRecompute": {
+          "type": "boolean"
+        },
+        "requiresCompatibilityCheck": {
+          "type": "boolean"
+        },
+        "lexicalFallback": {
+          "description": "When the surrogate cannot be served (denied, incompatible, or stale), should the receiver fall back to lexical metadata? Default true; set false to fail closed instead.",
+          "type": "boolean"
+        }
+      }
+    },
+    "degradedCode": {
+      "type": "string",
+      "enum": [
+        "surrogate_denied",
+        "surrogate_incompatible",
+        "surrogate_recomputed",
+        "lexical_fallback_used"
+      ]
+    },
+    "rfc3339": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
