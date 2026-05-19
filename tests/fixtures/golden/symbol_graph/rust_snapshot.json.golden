@@ -1,0 +1,210 @@
+{
+  "schema": "ee.symbol_snapshot.v1",
+  "workspaceRoot": null,
+  "generatedBy": "ee.symbol_graph.rust_lexical_scanner.v1",
+  "files": [
+    {
+      "path": "src/sample.rs",
+      "language": "rust",
+      "parser": "rust_lexical_scanner",
+      "sourceHash": "<sourceHash>",
+      "byteLen": "<byteLen>",
+      "symbolCount": 10
+    }
+  ],
+  "symbols": [
+    {
+      "id": "<symbolId>",
+      "kind": "module",
+      "canonicalName": "outer",
+      "namespace": [],
+      "path": "src/sample.rs",
+      "range": {
+        "startLine": "<startLine>",
+        "startColumn": "<startColumn>",
+        "endLine": "<endLine>",
+        "endColumn": "<endColumn>"
+      },
+      "visibility": "public",
+      "declarationHash": "<declarationHash>",
+      "renameFingerprint": "<renameFingerprint>",
+      "parser": "rust_lexical_scanner"
+    },
+    {
+      "id": "<symbolId>",
+      "kind": "json_schema_constant",
+      "canonicalName": "outer::SEARCH_SCHEMA_V1",
+      "namespace": [
+        "outer"
+      ],
+      "path": "src/sample.rs",
+      "range": {
+        "startLine": "<startLine>",
+        "startColumn": "<startColumn>",
+        "endLine": "<endLine>",
+        "endColumn": "<endColumn>"
+      },
+      "visibility": "public",
+      "declarationHash": "<declarationHash>",
+      "renameFingerprint": "<renameFingerprint>",
+      "parser": "rust_lexical_scanner"
+    },
+    {
+      "id": "<symbolId>",
+      "kind": "struct",
+      "canonicalName": "outer::Engine",
+      "namespace": [
+        "outer"
+      ],
+      "path": "src/sample.rs",
+      "range": {
+        "startLine": "<startLine>",
+        "startColumn": "<startColumn>",
+        "endLine": "<endLine>",
+        "endColumn": "<endColumn>"
+      },
+      "visibility": "public",
+      "declarationHash": "<declarationHash>",
+      "renameFingerprint": "<renameFingerprint>",
+      "parser": "rust_lexical_scanner"
+    },
+    {
+      "id": "<symbolId>",
+      "kind": "enum",
+      "canonicalName": "outer::Mode",
+      "namespace": [
+        "outer"
+      ],
+      "path": "src/sample.rs",
+      "range": {
+        "startLine": "<startLine>",
+        "startColumn": "<startColumn>",
+        "endLine": "<endLine>",
+        "endColumn": "<endColumn>"
+      },
+      "visibility": "public",
+      "declarationHash": "<declarationHash>",
+      "renameFingerprint": "<renameFingerprint>",
+      "parser": "rust_lexical_scanner"
+    },
+    {
+      "id": "<symbolId>",
+      "kind": "trait",
+      "canonicalName": "outer::Searcher",
+      "namespace": [
+        "outer"
+      ],
+      "path": "src/sample.rs",
+      "range": {
+        "startLine": "<startLine>",
+        "startColumn": "<startColumn>",
+        "endLine": "<endLine>",
+        "endColumn": "<endColumn>"
+      },
+      "visibility": "public",
+      "declarationHash": "<declarationHash>",
+      "renameFingerprint": "<renameFingerprint>",
+      "parser": "rust_lexical_scanner"
+    },
+    {
+      "id": "<symbolId>",
+      "kind": "method",
+      "canonicalName": "outer::Searcher::search",
+      "namespace": [
+        "outer",
+        "Searcher"
+      ],
+      "path": "src/sample.rs",
+      "range": {
+        "startLine": "<startLine>",
+        "startColumn": "<startColumn>",
+        "endLine": "<endLine>",
+        "endColumn": "<endColumn>"
+      },
+      "visibility": "public",
+      "declarationHash": "<declarationHash>",
+      "renameFingerprint": "<renameFingerprint>",
+      "parser": "rust_lexical_scanner"
+    },
+    {
+      "id": "<symbolId>",
+      "kind": "impl",
+      "canonicalName": "outer::impl Engine",
+      "namespace": [
+        "outer"
+      ],
+      "path": "src/sample.rs",
+      "range": {
+        "startLine": "<startLine>",
+        "startColumn": "<startColumn>",
+        "endLine": "<endLine>",
+        "endColumn": "<endColumn>"
+      },
+      "visibility": "private",
+      "declarationHash": "<declarationHash>",
+      "renameFingerprint": "<renameFingerprint>",
+      "parser": "rust_lexical_scanner"
+    },
+    {
+      "id": "<symbolId>",
+      "kind": "method",
+      "canonicalName": "outer::impl Engine::new",
+      "namespace": [
+        "outer",
+        "impl Engine"
+      ],
+      "path": "src/sample.rs",
+      "range": {
+        "startLine": "<startLine>",
+        "startColumn": "<startColumn>",
+        "endLine": "<endLine>",
+        "endColumn": "<endColumn>"
+      },
+      "visibility": "public",
+      "declarationHash": "<declarationHash>",
+      "renameFingerprint": "<renameFingerprint>",
+      "parser": "rust_lexical_scanner"
+    },
+    {
+      "id": "<symbolId>",
+      "kind": "method",
+      "canonicalName": "outer::impl Engine::helper",
+      "namespace": [
+        "outer",
+        "impl Engine"
+      ],
+      "path": "src/sample.rs",
+      "range": {
+        "startLine": "<startLine>",
+        "startColumn": "<startColumn>",
+        "endLine": "<endLine>",
+        "endColumn": "<endColumn>"
+      },
+      "visibility": "private",
+      "declarationHash": "<declarationHash>",
+      "renameFingerprint": "<renameFingerprint>",
+      "parser": "rust_lexical_scanner"
+    },
+    {
+      "id": "<symbolId>",
+      "kind": "cli_command_handler",
+      "canonicalName": "outer::run_search_command",
+      "namespace": [
+        "outer"
+      ],
+      "path": "src/sample.rs",
+      "range": {
+        "startLine": "<startLine>",
+        "startColumn": "<startColumn>",
+        "endLine": "<endLine>",
+        "endColumn": "<endColumn>"
+      },
+      "visibility": "public",
+      "declarationHash": "<declarationHash>",
+      "renameFingerprint": "<renameFingerprint>",
+      "parser": "rust_lexical_scanner"
+    }
+  ],
+  "degraded": [],
+  "snapshotHash": "<snapshotHash>"
+}

@@ -1,0 +1,257 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.symbol_snapshot.v1.json",
+  "title": "ee.symbol_snapshot.v1",
+  "description": "Read-only derived symbol snapshot for Rust source files. The snapshot records symbol metadata, stable identifiers, ranges, and hashes without storing source bodies.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "workspaceRoot",
+    "generatedBy",
+    "files",
+    "symbols",
+    "degraded",
+    "snapshotHash"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ee.symbol_snapshot.v1"
+    },
+    "workspaceRoot": {
+      "description": "Normalized workspace root when the snapshot came from filesystem paths; null for direct source fixtures.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "generatedBy": {
+      "description": "Extractor implementation identifier.",
+      "type": "string",
+      "minLength": 1
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/sourceFile"
+      }
+    },
+    "symbols": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/symbol"
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/degradation"
+      }
+    },
+    "snapshotHash": {
+      "$ref": "#/$defs/blake3Hex"
+    }
+  },
+  "$defs": {
+    "sourceFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "language",
+        "parser",
+        "sourceHash",
+        "byteLen",
+        "symbolCount"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/normalizedPath"
+        },
+        "language": {
+          "const": "rust"
+        },
+        "parser": {
+          "$ref": "#/$defs/parser"
+        },
+        "sourceHash": {
+          "$ref": "#/$defs/blake3Hex"
+        },
+        "byteLen": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "symbolCount": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "symbol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "canonicalName",
+        "namespace",
+        "path",
+        "range",
+        "visibility",
+        "declarationHash",
+        "renameFingerprint",
+        "parser"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^sym_v1_[0-9a-f]{24}$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "module",
+            "function",
+            "method",
+            "struct",
+            "enum",
+            "trait",
+            "impl",
+            "macro_invocation",
+            "json_schema_constant",
+            "cli_command_handler"
+          ]
+        },
+        "canonicalName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "namespace": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "path": {
+          "$ref": "#/$defs/normalizedPath"
+        },
+        "range": {
+          "$ref": "#/$defs/sourceRange"
+        },
+        "visibility": {
+          "type": "string",
+          "enum": [
+            "public",
+            "restricted",
+            "private"
+          ]
+        },
+        "declarationHash": {
+          "$ref": "#/$defs/blake3Hex"
+        },
+        "renameFingerprint": {
+          "$ref": "#/$defs/blake3Hex"
+        },
+        "parser": {
+          "$ref": "#/$defs/parser"
+        }
+      }
+    },
+    "sourceRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "startLine",
+        "startColumn",
+        "endLine",
+        "endColumn"
+      ],
+      "properties": {
+        "startLine": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "startColumn": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "endLine": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "endColumn": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "severity",
+        "path",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "source_missing",
+            "source_non_regular",
+            "source_too_large",
+            "source_unreadable",
+            "source_unparsable"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "warning",
+            "medium"
+          ]
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "parser": {
+      "type": "string",
+      "enum": [
+        "rust_lexical_scanner"
+      ]
+    },
+    "normalizedPath": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "pattern": "\\\\"
+      }
+    },
+    "blake3Hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "field_presets": {
+    "compact": [
+      "schema",
+      "files",
+      "symbols",
+      "degraded"
+    ],
+    "full": [
+      "*"
+    ]
+  }
+}
