@@ -105,6 +105,79 @@ The policy should deny bodies and embeddings until a later explicit review.
 See `docs/mesh/peer_policy.md` for the `[[mesh.peer_policies]]` fields and the
 `tests/fixtures/mesh/peer_policy_metadata_only.json` fixture.
 
+## Machine-Readable Examples
+
+These examples show the fields an operator should inspect before widening a
+lane. They are safe to paste into runbooks because they use redaction-safe peer,
+workspace, and policy aliases instead of raw host paths or memory bodies.
+
+Metadata-only grant preview should look like this shape:
+
+```jsonc
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "schema": "ee.mesh.grant_preview.v1",
+    "preview": {
+      "action": "allow",
+      "reason": "metadata lane allowed for this peer group",
+      "policyRef": "mesh_pol_metadata_only_001",
+      "workspaceAlias": "local-release",
+      "peerAlias": "builder-host",
+      "materialLane": "metadata",
+      "redaction": "share",
+      "trustLane": "peerHumanViaPeer",
+      "importTrustClass": "agent_assertion",
+      "bodyFetchAllowed": false,
+      "localTruthSideEffectsAllowed": false,
+      "searchOrGraphSideEffectsAllowed": false,
+      "failure": null
+    }
+  },
+  "degraded": []
+}
+```
+
+A body preview under the same starter profile should fail closed:
+
+```jsonc
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "schema": "ee.mesh.grant_preview.v1",
+    "preview": {
+      "action": "deny",
+      "reason": "body lane is denied by the metadata-only profile",
+      "policyRef": "mesh_pol_metadata_only_001",
+      "workspaceAlias": "local-release",
+      "peerAlias": "builder-host",
+      "materialLane": "body",
+      "redaction": "deny",
+      "trustLane": "peerHumanViaPeer",
+      "importTrustClass": "agent_assertion",
+      "bodyFetchAllowed": false,
+      "localTruthSideEffectsAllowed": false,
+      "searchOrGraphSideEffectsAllowed": false,
+      "failure": {
+        "schema": "ee.mesh.policy_failure_surface.v1",
+        "code": "mesh_peer_policy_denied",
+        "severity": "medium",
+        "action": "deny",
+        "repair": "Preview and approve a narrower redacted-body grant before requesting bodies."
+      }
+    }
+  },
+  "degraded": []
+}
+```
+
+Do not treat a policy denial as a broken mesh. A denial is usually the expected
+result of a safe starter profile. The important properties are that the body
+was not fetched, the peer and policy references are aliases, and local truth was
+not mutated.
+
 ## Revisable Pack Flow
 
 Use revisable mode when a caller wants an immediate local answer but also wants
@@ -126,6 +199,38 @@ Expected behavior:
 If a command silently waits on peers or changes an already emitted pack without
 a revision token, it violates the command-mode contract in
 `docs/mesh/command_modes.md`.
+
+A revisable response should make peer freshness explicit without blocking local
+use of the pack:
+
+```jsonc
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "pack": {
+      "schema": "ee.pack.v2",
+      "hash": "pack_...",
+      "mesh": {
+        "mode": "revisable",
+        "tier1Usable": true,
+        "revisionToken": "mesh_rev_2026_05_19_001",
+        "peerFreshness": {
+          "status": "stale",
+          "peerAlias": "builder-host",
+          "materialLane": "revisionNotice",
+          "bodyFetchAllowed": false
+        }
+      }
+    }
+  },
+  "degraded": []
+}
+```
+
+This means the caller has a valid local pack and a redaction-safe reason to
+re-query later. It does not mean peer bodies, embeddings, or raw artifact paths
+were exported.
 
 ## Trust And Redaction Rules
 
@@ -172,6 +277,23 @@ Interpret common outcomes this way:
 No troubleshooting step should suggest deleting cache directories, resetting
 Git state, stashing, checking out another ref, creating a worktree, or running
 local Cargo as proof.
+
+## Degraded And Policy Codes
+
+Mesh has two related but different code surfaces:
+
+| Surface | Example code | Meaning | Operator response |
+| --- | --- | --- | --- |
+| `degraded[]` | `discovery_policy_no_ee_mesh_tag` | Status or discovery could not fully satisfy an optional mesh condition. | Follow the repair action or keep the command in local-only mode. |
+| `degraded[]` | `tailscale_shields_up` | Transport is reachable enough to diagnose, but inbound mesh traffic is blocked. | Decide whether this node should accept mesh traffic before changing Tailscale settings. |
+| Policy failure surface | `mesh_peer_policy_denied` | Inbound peer material was denied by local policy. | Keep the denial unless a human approves a narrower grant. |
+| Policy failure surface | `mesh_peer_policy_quarantined` | Inbound material was retained only as quarantined evidence. | Inspect the audit and quarantine reason before using it in packs. |
+| Policy failure surface | `mesh_outbound_policy_denied` | Local policy refused to export a requested payload. | Do not bypass redaction; preview a safer lane or leave sharing disabled. |
+
+When adding Beads or Agent Mail notes, cite only these code names, safe aliases,
+fixture names, and schema names. Do not paste raw peer stderr, memory bodies,
+embeddings, raw workspace paths, policy file paths, or secret-scan excerpts into
+coordination channels.
 
 ## Agent Closeout Language
 
