@@ -358,6 +358,13 @@ fn causal_command_flags_are_help_discoverable() -> TestResult {
 
 #[test]
 fn diagnostic_graph_fixture_flags_are_help_discoverable() -> TestResult {
+    let diag_graph_help = help_for(&["ee", "diag", "graph", "--help"])?;
+    assert_contains_all(
+        &diag_graph_help,
+        &["Report graph module readiness"],
+        "ee diag graph --help",
+    )?;
+
     let causal_edge_help = help_for(&["ee", "diag", "causal-edge", "--help"])?;
     assert_contains_all(
         &causal_edge_help,
@@ -1018,6 +1025,7 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "--dry-run",
             "--json",
         ][..],
+        &["ee", "diag", "graph", "--json"][..],
         &[
             "ee",
             "diag",

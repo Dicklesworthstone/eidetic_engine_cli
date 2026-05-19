@@ -275,12 +275,14 @@ ee backup restore bk_release --workspace . --side-path ./restore-check \
 
 ## Diagnostic Graph Fixtures
 
-These commands seed deterministic graph-related diagnostic rows for contract and
+`ee diag graph` is the read-only graph module readiness check. The fixture
+commands seed deterministic graph-related diagnostic rows for contract and
 failure-mode replay. They are fixture surfaces, not ordinary user workflows, and
 should be run against disposable or explicitly selected databases.
 
 | Command | Flag | Values | Default | Use |
 | --- | --- | --- | --- | --- |
+| `ee diag graph` | none | none | none | Reports graph module readiness, capabilities, and metrics without seeding fixtures. |
 | `ee diag causal-edge` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Writes the fixture causal edge to an explicit diagnostic database. |
 | `ee diag causal-edge` | `--workspace-id <WORKSPACE_ID>` | workspace ID | current workspace stable ID | Stores the fixture edge under a deterministic workspace namespace. |
 | `ee diag causal-edge` | `--edge-id <EDGE_ID>` | edge ID | required | Sets the causal evidence edge ID. |
@@ -300,6 +302,7 @@ should be run against disposable or explicitly selected databases.
 Example:
 
 ```bash
+ee diag graph --workspace . --json
 ee diag causal-edge --workspace . --edge-id edge_release_failure \
   --failure-id mem_failed_release --candidate-cause-id mem_missing_rch_proof \
   --contribution-score 0.8 --evidence-uri file://proof.json --json
