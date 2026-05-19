@@ -110,6 +110,7 @@ Command-specific graph flags:
 | `ee graph louvain` | `--threshold <FLOAT>` | float | `1.0e-7` | Sets the Louvain improvement threshold. |
 | `ee graph louvain` | `--max-level <COUNT>` | integer | omitted | Stops after a bounded number of Louvain levels. |
 | `ee graph louvain` | `--seed <SEED>` | integer | omitted | Selects deterministic Louvain seed. |
+| `ee graph k-core` | `--database`, `--min-weight`, `--min-confidence`, `--link-limit` | see above | see above | Filters the undirected memory-link graph before extracting cores. |
 | `ee graph k-core` | `--k <K>` | integer | main core | Extracts a specific core number. |
 | `ee graph path <SRC> <DST>` | `--database`, `--min-weight`, `--min-confidence`, `--link-limit` | see above | see above | Finds a shortest path between two memories. |
 | `ee graph explain-link <SRC> <DST>` | `--database`, `--min-weight`, `--min-confidence`, `--link-limit` | see above | see above | Explains direct and path-based evidence between two memories. |
@@ -143,6 +144,9 @@ Example:
 ```bash
 ee graph snapshot refresh --workspace . --graph memory_links --dry-run --json
 ee graph centrality --workspace . --algorithm pagerank --limit 10 --json
+ee graph k-core --workspace . --k 3 --min-confidence 0.6 --json
+ee graph path mem_source mem_target --workspace . --min-weight 0.4 --json
+ee graph explain-link mem_source mem_target --workspace . --link-limit 250 --json
 ```
 
 ## Curation And Maintenance Flags

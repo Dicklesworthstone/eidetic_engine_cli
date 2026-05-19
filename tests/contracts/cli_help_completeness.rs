@@ -121,6 +121,33 @@ fn graph_command_flags_are_help_discoverable() -> TestResult {
         "ee graph louvain --help",
     )?;
 
+    let k_core_help = help_for(&["ee", "graph", "k-core", "--help"])?;
+    assert_contains_all(
+        &k_core_help,
+        &[
+            "--database",
+            "--min-weight",
+            "--min-confidence",
+            "--link-limit",
+            "--k",
+        ],
+        "ee graph k-core --help",
+    )?;
+
+    for command in ["path", "explain-link"] {
+        let help = help_for(&["ee", "graph", command, "--help"])?;
+        assert_contains_all(
+            &help,
+            &[
+                "--database",
+                "--min-weight",
+                "--min-confidence",
+                "--link-limit",
+            ],
+            &format!("ee graph {command} --help"),
+        )?;
+    }
+
     let export_help = help_for(&["ee", "graph", "export", "--help"])?;
     assert_contains_all(
         &export_help,
@@ -286,6 +313,36 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "--graph",
             "memory_links",
             "--dry-run",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "graph",
+            "k-core",
+            "--k",
+            "3",
+            "--min-confidence",
+            "0.6",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "graph",
+            "path",
+            "mem_source",
+            "mem_target",
+            "--min-weight",
+            "0.4",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "graph",
+            "explain-link",
+            "mem_source",
+            "mem_target",
+            "--link-limit",
+            "250",
             "--json",
         ][..],
         &[
