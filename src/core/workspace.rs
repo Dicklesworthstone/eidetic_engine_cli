@@ -2575,6 +2575,71 @@ mod tests {
     }
 
     #[test]
+    fn hygiene_report_records_10k_path_perf_contract_size_proxy() {
+        let entries = (0..10_000)
+            .map(|index| status_entry(&format!("src/perf/file_{index:05}.rs"), ".", "M"))
+            .collect::<Vec<_>>();
+        let started = std::time::Instant::now();
+        let report = hygiene_report_from_parts(
+            hygiene_snapshot(entries),
+            &AgentMailCoordinationInput::Available {
+                reservations: Vec::new(),
+                active_agents: Vec::new(),
+            },
+            BeadsMetadataSignal::Unknown,
+            &[],
+        );
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let serialized = serde_json::to_string(&report).expect("workspace hygiene JSON");
+
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "schema": "ee.test_event.v1",
+                "beadId": "bd-1eq3l.13",
+                "surface": "workspace_hygiene",
+                "phase": "perf_contract",
+                "pathCount": 10_000,
+                "elapsedMs": elapsed_ms,
+                "serializedBytes": serialized.len(),
+                "pathClassificationCount": report.classifications.len(),
+                "stagingGroupCount": report.staging_groups.len(),
+                "truncated": report.output_truncation.truncated,
+            })
+        );
+
+        assert_eq!(report.dirty_path_count, 10_000);
+        assert_eq!(report.git_summary.dirty_path_count, 10_000);
+        assert_eq!(report.classifications.len(), 10_000);
+        assert!(
+            !report.output_truncation.truncated,
+            "10k fixture sits exactly at the default visible cap and must not truncate"
+        );
+        assert!(
+            !report
+                .degraded_codes
+                .contains(&WORKSPACE_HYGIENE_OUTPUT_TRUNCATED_CODE)
+        );
+        assert_eq!(report.staging_groups.len(), 1);
+        let source_group = &report.staging_groups[0];
+        assert_eq!(source_group.name, "source");
+        assert_eq!(source_group.path_count, 10_000);
+        assert_eq!(source_group.paths.len(), 10_000);
+        assert!(!source_group.paths_truncated);
+        assert_eq!(source_group.omitted_path_count, 0);
+        assert_eq!(source_group.paths[0], "src/perf/file_00000.rs");
+        assert_eq!(
+            source_group.paths.last().map(String::as_str),
+            Some("src/perf/file_09999.rs")
+        );
+        assert!(
+            serialized.len() < 5_000_000,
+            "10k workspace hygiene report should stay within the perf-contract size proxy, got {} bytes",
+            serialized.len()
+        );
+    }
+
+    #[test]
     fn hygiene_report_truncates_large_path_arrays_deterministically() {
         let entries = (0..100_050)
             .map(|index| status_entry(&format!("src/generated/file_{index:06}.rs"), ".", "M"))
