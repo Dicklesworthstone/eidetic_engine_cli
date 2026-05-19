@@ -209,6 +209,16 @@ Initial fixtures live under `tests/fixtures/mesh/`:
 - `peer_policy_decision_inbound_redacted_body_allowed.json` pins the allowed
   inbound redacted body-fetch decision without ever promoting peer material to a
   local-only import trust class.
+- `peer_policy_decision_inbound_shared_body_allowed.json` pins the allowed
+  inbound raw body-fetch decision for trusted peer-agent material when the
+  policy permits sharing without redaction, while still using a peer-safe
+  importTrustClass.
+- `peer_policy_decision_inbound_redacted_embedding_allowed.json` pins the
+  allowed inbound redacted embedding decision with body fetch disabled and
+  search/graph side effects permitted under a peer-safe importTrustClass.
+- `peer_policy_decision_inbound_revision_notice_allowed.json` pins the allowed
+  inbound revision-notice decision for freshness signaling without body fetch
+  while still permitting local-truth and search/graph side effects.
 - `peer_policy_decision_inbound_denied.json` pins a denied inbound body decision
   with a nested redaction-safe `ee.mesh.policy_failure_surface.v1` failure.
 - `peer_policy_decision_inbound_quarantined.json` pins an inbound

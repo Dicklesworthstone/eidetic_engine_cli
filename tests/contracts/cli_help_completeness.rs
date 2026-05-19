@@ -800,7 +800,21 @@ fn proximity_health_and_maintenance_flags_are_help_discoverable() -> TestResult 
     )?;
 
     let job_show_help = help_for(&["ee", "job", "show", "--help"])?;
-    assert_contains_all(&job_show_help, &["JOB_ID"], "ee job show --help")
+    assert_contains_all(&job_show_help, &["JOB_ID"], "ee job show --help")?;
+
+    let migrate_help = help_for(&["ee", "migrate", "--help"])?;
+    assert_contains_all(
+        &migrate_help,
+        &["status", "run", "shard-fanout"],
+        "ee migrate --help",
+    )?;
+
+    let migrate_shard_fanout_help = help_for(&["ee", "migrate", "shard-fanout", "--help"])?;
+    assert_contains_all(
+        &migrate_shard_fanout_help,
+        &["--database", "--shards-dir", "--dry-run"],
+        "ee migrate shard-fanout --help",
+    )
 }
 
 #[test]
@@ -1467,6 +1481,17 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "77",
             "--source-generation",
             "3",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "migrate",
+            "shard-fanout",
+            "--database",
+            ".ee/ee.db",
+            "--shards-dir",
+            "/tmp/ee-shards",
+            "--dry-run",
             "--json",
         ][..],
     ] {

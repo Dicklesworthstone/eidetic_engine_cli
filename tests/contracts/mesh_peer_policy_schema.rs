@@ -31,6 +31,9 @@ const FAILURE_SURFACE_FIXTURES: &[&str] = &[
 const DECISION_FIXTURES: &[&str] = &[
     "tests/fixtures/mesh/peer_policy_decision_inbound_allowed.json",
     "tests/fixtures/mesh/peer_policy_decision_inbound_redacted_body_allowed.json",
+    "tests/fixtures/mesh/peer_policy_decision_inbound_shared_body_allowed.json",
+    "tests/fixtures/mesh/peer_policy_decision_inbound_redacted_embedding_allowed.json",
+    "tests/fixtures/mesh/peer_policy_decision_inbound_revision_notice_allowed.json",
     "tests/fixtures/mesh/peer_policy_decision_inbound_denied.json",
     "tests/fixtures/mesh/peer_policy_decision_inbound_quarantined.json",
     "tests/fixtures/mesh/peer_policy_decision_inbound_rejected.json",
@@ -2003,6 +2006,85 @@ fn peer_policy_decision_fixtures_pin_outbound_shared_payload_allow() -> TestResu
                 .and_then(Value::as_bool),
             &Some(false),
             fixture,
+        )?;
+        ensure_equal(&value.pointer("/failure"), &Some(&Value::Null), fixture)?;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn peer_policy_decision_fixtures_pin_inbound_allowed_payload_variants() -> TestResult {
+    let cases = [
+        (
+            "tests/fixtures/mesh/peer_policy_decision_inbound_shared_body_allowed.json",
+            "body",
+            "share",
+            true,
+        ),
+        (
+            "tests/fixtures/mesh/peer_policy_decision_inbound_redacted_embedding_allowed.json",
+            "embedding",
+            "redact",
+            false,
+        ),
+        (
+            "tests/fixtures/mesh/peer_policy_decision_inbound_revision_notice_allowed.json",
+            "revisionNotice",
+            "share",
+            false,
+        ),
+    ];
+
+    for (fixture, material_lane, redaction, expected_body_fetch_allowed) in cases {
+        let value = read_json(fixture)?;
+        ensure_equal(
+            &value.pointer("/schema").and_then(Value::as_str),
+            &Some(MESH_POLICY_DECISION_SCHEMA_V1),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/direction").and_then(Value::as_str),
+            &Some("inbound"),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/action").and_then(Value::as_str),
+            &Some("allow"),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/materialLane").and_then(Value::as_str),
+            &Some(material_lane),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/redaction").and_then(Value::as_str),
+            &Some(redaction),
+            fixture,
+        )?;
+        ensure_not_disallowed_peer_import_trust_class(
+            value.pointer("/importTrustClass").and_then(Value::as_str),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/bodyFetchAllowed").and_then(Value::as_bool),
+            &Some(expected_body_fetch_allowed),
+            &format!("{fixture} bodyFetchAllowed"),
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/localTruthSideEffectsAllowed")
+                .and_then(Value::as_bool),
+            &Some(true),
+            &format!("{fixture} localTruthSideEffectsAllowed"),
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/searchOrGraphSideEffectsAllowed")
+                .and_then(Value::as_bool),
+            &Some(true),
+            &format!("{fixture} searchOrGraphSideEffectsAllowed"),
         )?;
         ensure_equal(&value.pointer("/failure"), &Some(&Value::Null), fixture)?;
     }

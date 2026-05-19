@@ -1511,6 +1511,8 @@ pub enum MigrateCommand {
     Status(MigrateStatusArgs),
     /// Apply any pending workspace database migrations.
     Run(MigrateRunArgs),
+    /// Plan the per-workspace fsqlite shard fan-out migration. Dry-run only in this slice.
+    ShardFanout(MigrateShardFanoutArgs),
 }
 
 /// Arguments for `ee migrate status`.
@@ -1529,6 +1531,23 @@ pub struct MigrateRunArgs {
     pub database: Option<PathBuf>,
 
     /// Report what would be applied without mutating the database.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee migrate shard-fanout`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct MigrateShardFanoutArgs {
+    /// Source database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Override the shard root directory (otherwise resolved from EE_SHARDS_DIR / default).
+    #[arg(long, value_name = "PATH")]
+    pub shards_dir: Option<PathBuf>,
+
+    /// Plan the migration without writing shard databases or mutating the source DB.
+    /// Required in this slice; apply mode is owned by a follow-up bead.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
 }
@@ -8633,6 +8652,9 @@ where
         Some(Command::Migrate(ref migrate_cmd)) => match migrate_cmd {
             MigrateCommand::Status(args) => handle_migrate_status(&cli, args, stdout, stderr),
             MigrateCommand::Run(args) => handle_migrate_run(&cli, args, stdout, stderr),
+            MigrateCommand::ShardFanout(args) => {
+                handle_migrate_shard_fanout(&cli, args, stdout, stderr)
+            }
         },
         Some(Command::Diag(ref diag_cmd)) => match diag_cmd {
             DiagCommand::AdvisoryLock(args) => {
@@ -27295,6 +27317,117 @@ where
     ProcessExitCode::Success
 }
 
+fn handle_migrate_shard_fanout<W, E>(
+    cli: &Cli,
+    args: &MigrateShardFanoutArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::db::shard::{
+        ShardFanoutMigrationPlanInput, ShardFanoutMigrationWorkspaceInput,
+        plan_shard_fanout_migration,
+    };
+
+    if !args.dry_run {
+        let domain_error = DomainError::Storage {
+            message:
+                "ee migrate shard-fanout currently supports --dry-run only; apply mode is owned by a follow-up bead."
+                    .to_string(),
+            repair: Some("ee migrate shard-fanout --dry-run --json".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+
+    let workspaces = if database_path.exists() {
+        match DbConnection::open_file(&database_path) {
+            Ok(conn) => match conn.list_workspaces() {
+                Ok(rows) => rows
+                    .into_iter()
+                    .map(|w| ShardFanoutMigrationWorkspaceInput {
+                        workspace_id: w.id,
+                        workspace_root: PathBuf::from(w.path),
+                    })
+                    .collect::<Vec<_>>(),
+                Err(error) => {
+                    let domain_error = DomainError::Storage {
+                        message: format!("Failed to enumerate workspaces: {error}"),
+                        repair: Some("ee doctor".to_string()),
+                    };
+                    return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                }
+            },
+            Err(error) => {
+                let domain_error = DomainError::Storage {
+                    message: format!("Failed to open source database: {error}"),
+                    repair: Some("ee doctor".to_string()),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    let plan = plan_shard_fanout_migration(ShardFanoutMigrationPlanInput {
+        source_database_path: database_path.clone(),
+        shards_dir_override: args.shards_dir.clone(),
+        workspaces,
+    });
+
+    let plan_value = serde_json::to_value(&plan).unwrap_or_else(|_| serde_json::json!({}));
+    let response = serde_json::json!({
+        "schema": "ee.response.v1",
+        "success": true,
+        "data": {
+            "command": "migrate shard-fanout",
+            "databasePath": database_path.display().to_string(),
+            "plan": plan_value,
+        },
+        "degraded": [],
+    });
+
+    match cli.renderer() {
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let _ = write_stdout(
+                stdout,
+                &(serde_json::to_string(&response).unwrap_or_default() + "\n"),
+            );
+        }
+        _ => {
+            let mut out = String::new();
+            out.push_str(&format!("Source database: {}\n", database_path.display()));
+            out.push_str(&format!(
+                "Preserved source path: {}\n",
+                plan.preserved_source_database_path.display()
+            ));
+            if let Some(root) = &plan.shard_root {
+                out.push_str(&format!("Shard root: {}\n", root.display()));
+            }
+            out.push_str(&format!("Planned workspaces: {}\n", plan.workspaces.len()));
+            out.push_str(&format!("Top-level blockers: {}\n", plan.blockers.len()));
+            out.push_str(
+                "\nThis is a dry-run plan only. Apply mode is owned by a follow-up bead.\n",
+            );
+            let _ = write_stdout(stdout, &out);
+        }
+    }
+
+    ProcessExitCode::Success
+}
+
 fn compiled_pending_summaries() -> Vec<DbPendingMigration> {
     crate::db::MIGRATIONS
         .iter()
@@ -39592,6 +39725,7 @@ impl NormalizedInvocation {
                 Command::Migrate(migrate) => match migrate {
                     MigrateCommand::Status(_) => "migrate status".to_string(),
                     MigrateCommand::Run(_) => "migrate run".to_string(),
+                    MigrateCommand::ShardFanout(_) => "migrate shard-fanout".to_string(),
                 },
                 Command::Curate(curate) => match curate {
                     CurateCommand::Candidates(_) => "curate candidates".to_string(),
