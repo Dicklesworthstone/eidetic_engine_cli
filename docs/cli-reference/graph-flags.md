@@ -208,6 +208,10 @@ ee graph centrality-refresh --workspace . --dry-run --min-confidence 0.6 --json
 ee graph k-core --workspace . --k 3 --min-confidence 0.6 --json
 ee graph path mem_source mem_target --workspace . --min-weight 0.4 --json
 ee graph explain-link mem_source mem_target --workspace . --link-limit 250 --json
+ee graph feature-enrichment --workspace . --dry-run --max-features 25 \
+  --min-combined-score 0.2 --max-selection-boost 0.4 --json
+ee graph neighborhood mem_release_policy --workspace . --direction incoming \
+  --relation supports --limit 20 --json
 ```
 
 ## Diagnostic Graph Fixtures
