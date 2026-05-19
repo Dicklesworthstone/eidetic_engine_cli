@@ -263,6 +263,7 @@ validate_event_log_contract() {
         . as $events
         | def has_phase($phase): any($events[]; .phase == $phase);
         def has_scenario($scenario): any($events[]; .phase == "scenario" and .scenario == $scenario and .status == "pass");
+        def has_schema_validation($scenario): any($events[]; .phase == "schema_validation" and .scenario == $scenario and .status == "pass");
         all($events[];
             .schema == "ee.test_event.v1"
             and .beadId == "bd-1eq3l.8"
@@ -290,6 +291,7 @@ validate_event_log_contract() {
             )
         )
         and has_phase("setup")
+        and has_phase("schema_validation")
         and has_phase("redaction_check")
         and has_phase("stdout_stderr_isolation")
         and has_phase("mutation_check")
@@ -307,6 +309,19 @@ validate_event_log_contract() {
             "beads_export_only",
             "beads_parse_failure"
         ] | all(. as $scenario | has_scenario($scenario)))
+        and ([
+            "clean",
+            "source_and_test",
+            "human_source_and_test",
+            "scratch_only",
+            "generated_only",
+            "scratch_generated_secret",
+            "active_reservation",
+            "agent_mail_unavailable",
+            "beads_pending_flush",
+            "beads_export_only",
+            "beads_parse_failure"
+        ] | all(. as $scenario | has_schema_validation($scenario)))
     ' "$EVENT_LOG" >/dev/null 2>"$diagnostics"; then
         printf 'event log contract check failed; diagnostics=%s\n' "$diagnostics"
         return 1
@@ -496,67 +511,72 @@ run_scenario() {
         degraded_codes="$(jq -c '(.data.degraded // [])' "$stdout_artifact")"
     fi
 
-    case "$scenario" in
-        clean)
-            first_failure="$(assert_jq "$stdout_artifact" '.data.dirtyPathCount == 0' "clean workspace should have zero dirty paths" || true)"
-            ;;
-        source_and_test)
-            first_failure="$(assert_jq "$stdout_artifact" '([.data.stagingRecommendations[].name] | index("source")) and ([.data.stagingRecommendations[].name] | index("tests"))' "source_and_test should recommend source and tests groups" || true)"
-            ;;
-        human_source_and_test)
-            first_failure="$(assert_contains "$stdout_artifact" "Workspace hygiene:" "human output should include the workspace hygiene heading" || true)"
-            if [ -z "$first_failure" ]; then
-                first_failure="$(assert_contains "$stdout_artifact" "Stage candidates:" "human output should include stage candidate summary" || true)"
-            fi
-            if [ -z "$first_failure" ]; then
-                first_failure="$(assert_contains "$stdout_artifact" "source: 1 paths" "human output should summarize the source staging group" || true)"
-            fi
-            if [ -z "$first_failure" ]; then
-                first_failure="$(assert_contains "$stdout_artifact" "tests: 1 paths" "human output should summarize the tests staging group" || true)"
-            fi
-            if [ -z "$first_failure" ]; then
-                first_failure="$(assert_not_json "$stdout_artifact" "human output should not be a JSON envelope" || true)"
-            fi
-            ;;
-        scratch_only)
-            first_failure="$(assert_jq "$stdout_artifact" '(.data.dirtyPathCount == 2) and (.data.stagingRecommendations | length == 0) and (.data.doNotCommit | index("drift-report.txt")) and (.data.doNotCommit | index("ubs.json")) and ([.data.bucketCounts[] | select(.name == "do_not_commit") | .count] == [2]) and ([.data.kindCounts[] | select(.name == "scratch") | .count] == [2]) and all(.data.pathClassifications[]; .bucket == "do_not_commit" and .kind == "scratch")' "scratch-only paths should stay doNotCommit and out of staging" || true)"
-            ;;
-        generated_only)
-            first_failure="$(assert_jq "$stdout_artifact" '(.data.dirtyPathCount == 3) and (.data.stagingRecommendations | length == 0) and (.data.doNotCommit | index("Cargo.lock")) and (.data.doNotCommit | index("target/debug/ee")) and (.data.doNotCommit | index("target/release/deps/foo.rlib")) and ([.data.bucketCounts[] | select(.name == "do_not_commit") | .count] == [3]) and ([.data.kindCounts[] | select(.name == "generated") | .count] == [3]) and all(.data.pathClassifications[]; .bucket == "do_not_commit" and .kind == "generated")' "generated-only paths should stay doNotCommit and out of staging" || true)"
-            ;;
-        scratch_generated_secret)
-            first_failure="$(assert_jq "$stdout_artifact" '(.data.doNotCommit | index(".env.local")) and (.data.doNotCommit | index("drift-report.txt")) and (.data.doNotCommit | index("Cargo.lock"))' "scratch/generated/secret paths should be doNotCommit" || true)"
-            if [ -z "$first_failure" ]; then
-                first_failure="$(assert_no_raw_value "$scenario JSON" "$stdout_artifact" "$SYNTHETIC_RAW_VALUE" || true)"
-            fi
-            if [ -z "$first_failure" ]; then
-                first_failure="$(assert_no_raw_value "$scenario stderr" "$stderr_artifact" "$SYNTHETIC_RAW_VALUE" || true)"
-            fi
-            ;;
-        active_reservation)
-            first_failure="$(assert_jq "$stdout_artifact" '.data.coordinationState.agentMailAvailable == true and (.data.coordinationState.blockedByCoordination[0].path == "src/lib.rs")' "active reservation should block src/lib.rs" || true)"
-            ;;
-        agent_mail_unavailable)
-            first_failure="$(assert_jq "$stdout_artifact" '(.data.degraded | index("workspace_hygiene_agent_mail_unavailable")) and (.data.degraded | index("workspace_hygiene_partial_metadata"))' "missing snapshot should emit Agent Mail unavailable degraded codes" || true)"
-            ;;
-        beads_pending_flush)
-            first_failure="$(assert_jq "$stdout_artifact" '.data.beadsState.classification == "beads_db_dirty_pending_flush" and .data.beadsState.metadataSignal == "db_dirty_pending_flush"' "beads DB marker should report pending flush" || true)"
-            ;;
-        beads_export_only)
-            first_failure="$(assert_jq "$stdout_artifact" '.data.beadsState.classification == "beads_export_only" and .data.beadsState.metadataSignal == "unknown" and (.data.beadsState.degradedCodes | index("workspace_hygiene_beads_db_divergence_unknown")) and (.data.degraded | index("workspace_hygiene_beads_db_divergence_unknown"))' "dirty Beads JSONL without DB signal should report export-only with divergence-unknown degradation" || true)"
-            ;;
-        beads_parse_failure)
-            first_failure="$(assert_jq "$stdout_artifact" '(.data.degraded | index("workspace_hygiene_beads_parse_error")) and .data.beadsState.parseErrorLine == 2' "invalid Beads JSONL should report parse line 2" || true)"
-            ;;
-    esac
+    if [ "$schema_status" = "passed" ] || [ "$schema_status" = "human_output" ]; then
+        emit_event "$scenario" "schema_validation" "pass" 0 "$command_text" "$workspace" "$stdout_artifact" "$stderr_artifact" "$schema_status" "" "$degraded_codes" "$before_hash" "" "$before_artifact" ""
+    else
+        first_failure="workspace hygiene response failed the envelope/schema smoke check"
+        emit_event "$scenario" "schema_validation" "failed" 1 "$command_text" "$workspace" "$stdout_artifact" "$stderr_artifact" "$schema_status" "$first_failure" "$degraded_codes" "$before_hash" "" "$before_artifact" ""
+    fi
+
+    if [ -z "$first_failure" ]; then
+        case "$scenario" in
+            clean)
+                first_failure="$(assert_jq "$stdout_artifact" '.data.dirtyPathCount == 0' "clean workspace should have zero dirty paths" || true)"
+                ;;
+            source_and_test)
+                first_failure="$(assert_jq "$stdout_artifact" '([.data.stagingRecommendations[].name] | index("source")) and ([.data.stagingRecommendations[].name] | index("tests"))' "source_and_test should recommend source and tests groups" || true)"
+                ;;
+            human_source_and_test)
+                first_failure="$(assert_contains "$stdout_artifact" "Workspace hygiene:" "human output should include the workspace hygiene heading" || true)"
+                if [ -z "$first_failure" ]; then
+                    first_failure="$(assert_contains "$stdout_artifact" "Stage candidates:" "human output should include stage candidate summary" || true)"
+                fi
+                if [ -z "$first_failure" ]; then
+                    first_failure="$(assert_contains "$stdout_artifact" "source: 1 paths" "human output should summarize the source staging group" || true)"
+                fi
+                if [ -z "$first_failure" ]; then
+                    first_failure="$(assert_contains "$stdout_artifact" "tests: 1 paths" "human output should summarize the tests staging group" || true)"
+                fi
+                if [ -z "$first_failure" ]; then
+                    first_failure="$(assert_not_json "$stdout_artifact" "human output should not be a JSON envelope" || true)"
+                fi
+                ;;
+            scratch_only)
+                first_failure="$(assert_jq "$stdout_artifact" '(.data.dirtyPathCount == 2) and (.data.stagingRecommendations | length == 0) and (.data.doNotCommit | index("drift-report.txt")) and (.data.doNotCommit | index("ubs.json")) and ([.data.bucketCounts[] | select(.name == "do_not_commit") | .count] == [2]) and ([.data.kindCounts[] | select(.name == "scratch") | .count] == [2]) and all(.data.pathClassifications[]; .bucket == "do_not_commit" and .kind == "scratch")' "scratch-only paths should stay doNotCommit and out of staging" || true)"
+                ;;
+            generated_only)
+                first_failure="$(assert_jq "$stdout_artifact" '(.data.dirtyPathCount == 3) and (.data.stagingRecommendations | length == 0) and (.data.doNotCommit | index("Cargo.lock")) and (.data.doNotCommit | index("target/debug/ee")) and (.data.doNotCommit | index("target/release/deps/foo.rlib")) and ([.data.bucketCounts[] | select(.name == "do_not_commit") | .count] == [3]) and ([.data.kindCounts[] | select(.name == "generated") | .count] == [3]) and all(.data.pathClassifications[]; .bucket == "do_not_commit" and .kind == "generated")' "generated-only paths should stay doNotCommit and out of staging" || true)"
+                ;;
+            scratch_generated_secret)
+                first_failure="$(assert_jq "$stdout_artifact" '(.data.doNotCommit | index(".env.local")) and (.data.doNotCommit | index("drift-report.txt")) and (.data.doNotCommit | index("Cargo.lock"))' "scratch/generated/secret paths should be doNotCommit" || true)"
+                if [ -z "$first_failure" ]; then
+                    first_failure="$(assert_no_raw_value "$scenario JSON" "$stdout_artifact" "$SYNTHETIC_RAW_VALUE" || true)"
+                fi
+                if [ -z "$first_failure" ]; then
+                    first_failure="$(assert_no_raw_value "$scenario stderr" "$stderr_artifact" "$SYNTHETIC_RAW_VALUE" || true)"
+                fi
+                ;;
+            active_reservation)
+                first_failure="$(assert_jq "$stdout_artifact" '.data.coordinationState.agentMailAvailable == true and (.data.coordinationState.blockedByCoordination[0].path == "src/lib.rs")' "active reservation should block src/lib.rs" || true)"
+                ;;
+            agent_mail_unavailable)
+                first_failure="$(assert_jq "$stdout_artifact" '(.data.degraded | index("workspace_hygiene_agent_mail_unavailable")) and (.data.degraded | index("workspace_hygiene_partial_metadata"))' "missing snapshot should emit Agent Mail unavailable degraded codes" || true)"
+                ;;
+            beads_pending_flush)
+                first_failure="$(assert_jq "$stdout_artifact" '.data.beadsState.classification == "beads_db_dirty_pending_flush" and .data.beadsState.metadataSignal == "db_dirty_pending_flush"' "beads DB marker should report pending flush" || true)"
+                ;;
+            beads_export_only)
+                first_failure="$(assert_jq "$stdout_artifact" '.data.beadsState.classification == "beads_export_only" and .data.beadsState.metadataSignal == "unknown" and (.data.beadsState.degradedCodes | index("workspace_hygiene_beads_db_divergence_unknown")) and (.data.degraded | index("workspace_hygiene_beads_db_divergence_unknown"))' "dirty Beads JSONL without DB signal should report export-only with divergence-unknown degradation" || true)"
+                ;;
+            beads_parse_failure)
+                first_failure="$(assert_jq "$stdout_artifact" '(.data.degraded | index("workspace_hygiene_beads_parse_error")) and .data.beadsState.parseErrorLine == 2' "invalid Beads JSONL should report parse line 2" || true)"
+                ;;
+        esac
+    fi
 
     read -r after_hash after_artifact < <(capture_workspace_state "$workspace" "${scenario}_after")
     if [ "$before_hash" != "$after_hash" ] && [ -z "$first_failure" ]; then
         first_failure="workspace hygiene mutated git-visible state for $scenario"
-    fi
-
-    if [ "$schema_status" != "passed" ] && [ "$schema_status" != "human_output" ] && [ -z "$first_failure" ]; then
-        first_failure="workspace hygiene response failed the envelope/schema smoke check"
     fi
 
     if [ -n "$first_failure" ]; then
