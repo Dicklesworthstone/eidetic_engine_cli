@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "lexical_hugepages_unavailable",
+  "introduced_by": {
+    "bead": "bd-1hvzh",
+    "epic_letter": "bd-21xbi"
+  },
+  "surfaces": [
+    "status",
+    "doctor"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Operator set `[search.lexical_ram_tier] request_hugepages = true` (or equivalent env var) on a host whose platform does not expose `MADV_HUGEPAGE` for file-backed mmaps. The loader continues with the regular page-size pinning fallback and surfaces this code so the operator knows the hugepage advice was silently dropped rather than honored.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "lexical_hugepages_unavailable",
+    "severity": "info",
+    "message_contains": [
+      "hugepage",
+      "unavailable"
+    ],
+    "repair_contains": "Linux host with transparent hugepages",
+    "repair_string": "Move the workspace to a Linux host with transparent hugepages enabled, or set [search.lexical_ram_tier] request_hugepages = false; lexical RAM-tier pinning continues to work with regular page-size mappings."
+  }
+}

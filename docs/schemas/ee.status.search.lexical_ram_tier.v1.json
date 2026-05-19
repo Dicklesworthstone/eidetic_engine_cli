@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.status.search.lexical_ram_tier.v1.json",
+  "title": "ee.status.search.lexical_ram_tier.v1",
+  "description": "Lexical posting-list RAM-tier pinning posture surfaced under `ee status --json` at `data.search.lexicalRamTier`. Scaffold contract for bd-1hvzh / bd-21xbi; the wiring slice consumes this schema verbatim.",
+  "type": "object",
+  "required": [
+    "schema",
+    "platform",
+    "supported",
+    "enabled",
+    "attempted",
+    "succeeded",
+    "hugepagesRequested",
+    "hugepagesGranted",
+    "populateRequested",
+    "bytesMmapped",
+    "pageFaultsPre",
+    "pageFaultsPost",
+    "fallbackPath",
+    "degradedCodes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.status.search.lexical_ram_tier.v1"
+    },
+    "platform": {
+      "type": "string",
+      "description": "Coarse host classification for the lexical RAM-tier optimization.",
+      "enum": [
+        "linux",
+        "macos_limited",
+        "windows_limited",
+        "other_unsupported"
+      ]
+    },
+    "supported": {
+      "type": "boolean",
+      "description": "True iff the platform supports the full `mmap + mlock + MADV_HUGEPAGE` triple. Linux only."
+    },
+    "enabled": {
+      "type": "boolean",
+      "description": "True iff the operator left `[search.lexical_ram_tier] enabled = true`."
+    },
+    "attempted": {
+      "type": "boolean",
+      "description": "True iff the loader actually invoked the pinning path. Must be false when `enabled=false`."
+    },
+    "succeeded": {
+      "type": "boolean",
+      "description": "True iff the lexical index files are now RAM-pinned with the requested posture. The scaffold never sets this to true; only the syscall slice does."
+    },
+    "hugepagesRequested": {
+      "type": "boolean",
+      "description": "True iff the operator asked for `MADV_HUGEPAGE`."
+    },
+    "hugepagesGranted": {
+      "type": "boolean",
+      "description": "True iff the kernel accepted the `MADV_HUGEPAGE` advice for at least one mapping. Always false in the scaffold."
+    },
+    "populateRequested": {
+      "type": "boolean",
+      "description": "True iff the operator asked for MAP_POPULATE / madvise(WILLNEED) at load time."
+    },
+    "bytesMmapped": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total bytes mapped into RAM across all lexical index files. Always 0 in the scaffold."
+    },
+    "pageFaultsPre": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Process page-fault counter before the pinning attempt. 0 until the wiring slice reads `/proc/self/stat`."
+    },
+    "pageFaultsPost": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Process page-fault counter after the pinning attempt; the delta vs `pageFaultsPre` is the bd-21xbi acceptance signal that pinning eliminated first-touch faults."
+    },
+    "fallbackPath": {
+      "type": "string",
+      "description": "Coarse strategy the loader took when the optimization could not be fully applied. `none` is reserved for a successful full pin.",
+      "enum": [
+        "none",
+        "software_not_implemented",
+        "madvise_willneed",
+        "heap_only",
+        "disabled_by_operator"
+      ]
+    },
+    "indexPath": {
+      "type": ["string", "null"],
+      "description": "Filesystem path of the lexical index directory the loader operated on, when known."
+    },
+    "degradedCodes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true,
+      "description": "Stable degraded[] codes documented in tests/fixtures/failure_modes/. Empty only when the optimization succeeded fully."
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"enabled": {"const": false}}, "required": ["enabled"]},
+      "then": {
+        "properties": {
+          "attempted": {"const": false},
+          "succeeded": {"const": false},
+          "fallbackPath": {"const": "disabled_by_operator"}
+        },
+        "required": ["attempted", "succeeded", "fallbackPath"]
+      }
+    },
+    {
+      "if": {"properties": {"succeeded": {"const": false}}, "required": ["succeeded"]},
+      "then": {
+        "properties": {
+          "hugepagesGranted": {"const": false}
+        },
+        "required": ["hugepagesGranted"]
+      }
+    }
+  ]
+}

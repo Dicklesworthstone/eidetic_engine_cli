@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "lexical_ram_tier_not_implemented",
+  "introduced_by": {
+    "bead": "bd-1hvzh",
+    "epic_letter": "bd-21xbi"
+  },
+  "surfaces": [
+    "status",
+    "doctor"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Running `ee status --json` or `ee doctor --json` on any platform while the bd-21xbi scaffold ships without the real `mmap` + `MAP_POPULATE` + `mlock` syscall path. The scaffold reports the lexical index was not actually pinned and surfaces this code so an operator knows the optimization is announced but not yet wired. The wiring slice under bd-21xbi retires this code and replaces it with a true success path; until then this is the honest signal.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "lexical_ram_tier_not_implemented",
+    "severity": "info",
+    "message_contains": [
+      "lexical",
+      "not implemented"
+    ],
+    "repair_contains": "bd-21xbi",
+    "repair_string": "Track the mmap + MAP_POPULATE + mlock syscall slice under bd-21xbi follow-ups; until that ships the scaffold reports the lexical index as not pinned and the loader falls back to plain page-cache deserialization with no functional regression."
+  }
+}

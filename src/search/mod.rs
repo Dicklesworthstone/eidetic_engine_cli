@@ -5,6 +5,7 @@ use crate::models::{
     CapabilityStatus, INDEX_MANIFEST_SCHEMA_V1, SEARCH_DOCUMENT_SCHEMA_V1, SEARCH_MODULE_SCHEMA_V1,
 };
 
+pub mod lexical_ram_tier;
 pub mod plan_cache;
 pub mod query;
 pub mod scoring;

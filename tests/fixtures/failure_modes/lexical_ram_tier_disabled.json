@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "lexical_ram_tier_disabled",
+  "introduced_by": {
+    "bead": "bd-1hvzh",
+    "epic_letter": "bd-21xbi"
+  },
+  "surfaces": [
+    "status",
+    "doctor"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Operator has set `[search.lexical_ram_tier] enabled = false` (or `EE_LEXICAL_INDEX_PIN_RAM=0`) and a lexical index load runs. The loader short-circuits the pinning path, returns the operator-disabled fallback, and surfaces this code so `ee status --json` does not silently look identical to the unsupported-platform case.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "printf '%s\\n' '[search.lexical_ram_tier]' 'enabled = false' >> .ee/config.toml"
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "lexical_ram_tier_disabled",
+    "severity": "info",
+    "message_contains": [
+      "lexical RAM-tier",
+      "disabled"
+    ],
+    "repair_contains": "[search.lexical_ram_tier] enabled = true",
+    "repair_string": "Set [search.lexical_ram_tier] enabled = true (or unset EE_LEXICAL_INDEX_PIN_RAM=0) and re-run to opt back into lexical posting-list RAM-tier pinning on supported Linux hosts."
+  }
+}
