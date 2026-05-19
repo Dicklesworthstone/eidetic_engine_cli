@@ -272,6 +272,19 @@ validate_event_log_contract() {
             and (.schemaValidationStatus | type == "string" and length > 0)
             and (.degradedCodes | type == "array")
             and (.sanitizedEnv | type == "object")
+            and (
+                .phase != "scenario"
+                or (
+                    (.command | type == "string" and length > 0)
+                    and (.workspace | type == "string" and length > 0)
+                    and (.stdoutArtifact | type == "string" and length > 0)
+                    and (.stderrArtifact | type == "string" and length > 0)
+                    and (.beforeMutationHash | type == "string" and length > 0)
+                    and (.afterMutationHash | type == "string" and length > 0)
+                    and (.beforeMutationArtifact | type == "string" and length > 0)
+                    and (.afterMutationArtifact | type == "string" and length > 0)
+                )
+            )
         )
     ' "$EVENT_LOG" >/dev/null 2>"$diagnostics"; then
         printf 'event log contract check failed; diagnostics=%s\n' "$diagnostics"
