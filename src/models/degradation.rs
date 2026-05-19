@@ -450,6 +450,9 @@ pub const WORKSPACE_HYGIENE_AGENT_MAIL_UNAVAILABLE_CODE: &str =
 pub const WORKSPACE_HYGIENE_AGENT_MAIL_TIMEOUT_CODE: &str = "workspace_hygiene_agent_mail_timeout";
 /// Response degraded code when workspace hygiene cannot read Beads state.
 pub const WORKSPACE_HYGIENE_BEADS_UNAVAILABLE_CODE: &str = "workspace_hygiene_beads_unavailable";
+/// Degraded code for transient Beads JSONL partial-write read races.
+pub const BEADS_JSONL_PARTIAL_WRITE_TRANSIENT_CODE: &str =
+    "beads_jsonl_partial_write_transient";
 /// Response degraded code when workspace hygiene cannot parse Beads metadata.
 pub const WORKSPACE_HYGIENE_BEADS_PARSE_ERROR_CODE: &str = "workspace_hygiene_beads_parse_error";
 /// Response degraded code when workspace hygiene sees active Beads reservations.

@@ -859,6 +859,27 @@ Beads provides a lightweight, dependency-aware issue database and CLI (`br` - be
 
 **Important:** `br` is non-invasive—it NEVER runs git commands automatically. You must manually commit changes after `br sync --flush-only`.
 
+### Transient JSONL Read Races
+
+If `br ready --json`, `br list --json`, or `br stats --json` fails with a
+configuration/parse error like `Invalid JSON at line N` or
+`invalid type: integer ..., expected struct Issue`, assume a concurrent
+`br sync --flush-only` rewrite is the first suspect, not durable corruption.
+Wait briefly and retry once before escalating. The canonical wrapper for agent
+work selection is:
+
+```bash
+scripts/br_retry.sh ready --json
+scripts/br_retry.sh list --status open --json
+scripts/br_retry.sh stats --json
+```
+
+The wrapper retries only the transient partial-write signatures, backs off for
+50ms, 200ms, then 500ms, and emits an `ee.beads_retry.v1` diagnostic envelope
+to stderr. The degraded code for this condition is
+`beads_jsonl_partial_write_transient` with low severity. Permanent JSONL
+corruption, missing workspaces, and ordinary `br` usage errors are not retried.
+
 ### Conventions
 
 - **Single source of truth:** Beads for task status/priority/dependencies; Agent Mail for conversation and audit

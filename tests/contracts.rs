@@ -202,6 +202,9 @@ mod failure_mode_fixtures;
 #[path = "contracts/failure_mode_repair_string.rs"]
 mod failure_mode_repair_string;
 
+#[path = "contracts/br_concurrent_read_race.rs"]
+mod br_concurrent_read_race;
+
 #[path = "contracts/read_pool_status_schema.rs"]
 mod read_pool_status_schema;
 
