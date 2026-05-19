@@ -214,6 +214,7 @@ fuzz_target_audit() {
     do
         local target_path="fuzz_targets/${target}.rs"
         local target_file="${REPO_ROOT}/fuzz/${target_path}"
+        local sweep_command="cargo fuzz run ${target} -- -max_total_time=300 -print_final_stats=1"
         if ! grep -Fq "name = \"${target}\"" "$manifest"; then
             echo "error: fuzz/Cargo.toml missing bin registration for ${target}" >&2
             failures=1
@@ -235,8 +236,8 @@ fuzz_target_audit() {
                 failures=1
             fi
         fi
-        if ! grep -Fq "cargo fuzz run ${target}" "$readme"; then
-            echo "error: fuzz/README.md missing cargo-fuzz command for ${target}" >&2
+        if ! grep -Fq "$sweep_command" "$readme"; then
+            echo "error: fuzz/README.md missing 5-minute logged cargo-fuzz sweep command for ${target}" >&2
             failures=1
         fi
     done
@@ -250,7 +251,7 @@ fuzz_target_audit() {
         return 1
     fi
 
-    echo "ok: bd-bife.10 fuzz targets are registered, present, documented, and shaped as cargo-fuzz harnesses"
+    echo "ok: bd-bife.10 fuzz targets are registered, present, documented with 5-minute logged sweeps, and shaped as cargo-fuzz harnesses"
 }
 
 test_trace_root() {
