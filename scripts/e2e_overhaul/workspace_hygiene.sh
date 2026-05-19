@@ -428,6 +428,9 @@ run_scenario() {
             if [ -z "$first_failure" ]; then
                 first_failure="$(assert_no_raw_value "$scenario JSON" "$stdout_artifact" "$SYNTHETIC_RAW_VALUE" || true)"
             fi
+            if [ -z "$first_failure" ]; then
+                first_failure="$(assert_no_raw_value "$scenario stderr" "$stderr_artifact" "$SYNTHETIC_RAW_VALUE" || true)"
+            fi
             ;;
         active_reservation)
             first_failure="$(assert_jq "$stdout_artifact" '.data.coordinationState.agentMailAvailable == true and (.data.coordinationState.blockedByCoordination[0].path == "src/lib.rs")' "active reservation should block src/lib.rs" || true)"
@@ -483,6 +486,14 @@ SCENARIOS=(
 for scenario in "${SCENARIOS[@]}"; do
     run_scenario "$scenario"
 done
+
+EVENT_LOG_REDACTION_FAILURE="$(assert_no_raw_value "event log" "$EVENT_LOG" "$SYNTHETIC_RAW_VALUE" || true)"
+if [ -n "$EVENT_LOG_REDACTION_FAILURE" ]; then
+    emit_event "event_log_redaction" "redaction_check" "failed" 1 "grep event log for raw synthetic secret" "$REPO_ROOT" "$EVENT_LOG" "" "failed" "$EVENT_LOG_REDACTION_FAILURE" '["workspace_hygiene_redaction_check_failed"]' "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
+    printf '%s\n' "$EVENT_LOG_REDACTION_FAILURE" >&2
+    exit 1
+fi
+emit_event "event_log_redaction" "redaction_check" "pass" 0 "grep event log for raw synthetic secret" "$REPO_ROOT" "$EVENT_LOG" "" "passed" "" "[]" "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
 
 EVENT_LOG_FAILURE="$(validate_event_log_contract || true)"
 if [ -n "$EVENT_LOG_FAILURE" ]; then
