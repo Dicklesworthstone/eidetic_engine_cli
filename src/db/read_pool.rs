@@ -147,6 +147,12 @@ pub struct ReadConnectionPool {
     state: Mutex<PoolState>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ReadConnectionPoolBuilder {
+    database: DatabaseConfig,
+    config: PoolConfig,
+}
+
 struct PoolState {
     active: usize,
     idle: Vec<IdleConnection>,
@@ -265,6 +271,11 @@ impl From<ActiveSnapshotPin> for CheckpointBlocker {
 
 impl ReadConnectionPool {
     #[must_use]
+    pub fn builder(database: DatabaseConfig) -> ReadConnectionPoolBuilder {
+        ReadConnectionPoolBuilder::new(database)
+    }
+
+    #[must_use]
     pub fn new(database: DatabaseConfig, config: PoolConfig) -> Self {
         Self {
             database,
@@ -282,6 +293,26 @@ impl ReadConnectionPool {
                 ad_hoc_bypass_count: 0,
             }),
         }
+    }
+
+    #[must_use]
+    pub fn config(&self) -> &PoolConfig {
+        &self.config
+    }
+
+    pub fn warm(&self, count: usize) -> Result<usize> {
+        let target = count.min(self.config.max_size());
+        let mut warmed = Vec::with_capacity(target);
+        for _ in 0..target {
+            let connection = self.acquire()?;
+            if connection.is_ad_hoc() {
+                break;
+            }
+            warmed.push(connection);
+        }
+        let warmed_count = warmed.len();
+        drop(warmed);
+        Ok(warmed_count)
     }
 
     pub fn acquire(&self) -> Result<PooledReadConnection<'_>> {
@@ -626,6 +657,45 @@ impl ReadConnectionPool {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl ReadConnectionPoolBuilder {
+    #[must_use]
+    pub fn new(database: DatabaseConfig) -> Self {
+        Self {
+            database,
+            config: PoolConfig::default_single(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_size(mut self, max_size: usize) -> Self {
+        self.config.max_size = max_size;
+        self
+    }
+
+    #[must_use]
+    pub fn with_idle_timeout(mut self, idle_timeout: Duration) -> Self {
+        self.config.idle_timeout = idle_timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_pin_duration(mut self, max_pin_duration: Duration) -> Self {
+        self.config.max_pin_duration = max_pin_duration;
+        self
+    }
+
+    #[must_use]
+    pub fn with_acquire_timeout(mut self, acquire_timeout: Duration) -> Self {
+        self.config.acquire_timeout = acquire_timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn build(self) -> ReadConnectionPool {
+        ReadConnectionPool::new(self.database, self.config)
     }
 }
 
@@ -1176,6 +1246,60 @@ mod tests {
         let reacquired = must(pool.acquire(), "idle connection reacquired");
         assert_eq!(reacquired.slot_id(), second_slot);
         assert_ne!(reacquired.slot_id(), first_slot);
+    }
+
+    #[test]
+    fn builder_overrides_config_for_test_construction() {
+        let pool = ReadConnectionPool::builder(DatabaseConfig::memory())
+            .with_size(4)
+            .with_idle_timeout(Duration::from_millis(7))
+            .with_max_pin_duration(Duration::from_millis(11))
+            .with_acquire_timeout(Duration::from_millis(13))
+            .build();
+
+        assert_eq!(pool.config().requested_max_size(), 4);
+        assert_eq!(pool.config().max_size(), 4);
+        assert_eq!(pool.config().idle_timeout(), Duration::from_millis(7));
+        assert_eq!(pool.config().max_pin_duration(), Duration::from_millis(11));
+        assert_eq!(pool.config().acquire_timeout(), Duration::from_millis(13));
+    }
+
+    #[test]
+    fn warm_creates_n_connections_synchronously() {
+        let pool = ReadConnectionPool::builder(DatabaseConfig::memory())
+            .with_size(3)
+            .build();
+
+        let warmed = must(pool.warm(2), "pool warm succeeds");
+
+        assert_eq!(warmed, 2);
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 2);
+        assert_eq!(stats.max_seen, 2);
+
+        let first = must(pool.acquire(), "first warmed connection reacquires");
+        let second = must(pool.acquire(), "second warmed connection reacquires");
+        assert!(!first.is_ad_hoc());
+        assert!(!second.is_ad_hoc());
+        assert_ne!(first.slot_id(), second.slot_id());
+    }
+
+    #[test]
+    fn warm_caps_at_pool_size_without_ad_hoc_bypass() {
+        let pool = ReadConnectionPool::builder(DatabaseConfig::memory())
+            .with_size(2)
+            .with_acquire_timeout(Duration::ZERO)
+            .build();
+
+        let warmed = must(pool.warm(8), "pool warm succeeds");
+
+        assert_eq!(warmed, 2);
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 2);
+        assert_eq!(stats.max_seen, 2);
+        assert_eq!(stats.ad_hoc_bypass_count, 0);
     }
 
     #[test]
