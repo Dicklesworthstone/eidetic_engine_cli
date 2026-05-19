@@ -26,6 +26,12 @@ fn ambient_getrandom_fill(_: &ee::runtime::determinism::Deterministic<Seed>) {
 }
 
 #[determinism::required]
+fn ambient_ring_system_random(_: &ee::runtime::determinism::Deterministic<Seed>) {
+    let _ = ring::rand::SystemRandom::new();
+    let _ = SystemRandom::new();
+}
+
+#[determinism::required]
 fn ambient_uuid_v4(_: &ee::runtime::determinism::Deterministic<Seed>) {
     let _ = Uuid::new_v4();
 }
@@ -94,9 +100,11 @@ fn ambient_domain_id(_: &ee::runtime::determinism::Deterministic<Seed>) {
 }
 
 fn benign_documentation_mentions() {
-    let _ = "rand::random::<u64>() getrandom::fill(&mut bytes) Instant::now() SystemTime::now() chrono::Utc::now() MemoryId::now() std::fs::read_dir(.) HashSet";
+    let _ = "rand::random::<u64>() getrandom::fill(&mut bytes) SystemRandom::new() Instant::now() SystemTime::now() chrono::Utc::now() MemoryId::now() std::fs::read_dir(.) HashSet";
     // rand::thread_rng();
     // getrandom::fill(&mut bytes);
+    // ring::rand::SystemRandom::new();
+    // SystemRandom::new();
     // chrono::Local::now();
     // RuleId::now();
     // std::env::var("EE_SEED");
@@ -113,6 +121,8 @@ fn benign_block_comment_and_raw_string_mentions() {
     /*
      * rand::thread_rng();
      * getrandom::fill(&mut bytes);
+     * ring::rand::SystemRandom::new();
+     * SystemRandom::new();
      * Uuid::new_v4();
      * Uuid::now_v7();
      * chrono::Utc::now();
@@ -124,5 +134,5 @@ fn benign_block_comment_and_raw_string_mentions() {
      * env::vars();
      * env::vars_os();
      */
-    let _ = r#"std::env::var("EE_SEED") Instant::now() SystemTime::now() chrono::Local::now() RuleId::now()"#;
+    let _ = r#"std::env::var("EE_SEED") SystemRandom::new() Instant::now() SystemTime::now() chrono::Local::now() RuleId::now()"#;
 }

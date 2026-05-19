@@ -76,6 +76,15 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "use Deterministic<Seed> instead of direct OS entropy",
             });
         }
+        if line.contains("ring::rand::SystemRandom::new(")
+            || contains_path_call(line, "SystemRandom::new(")
+        {
+            findings.push(Finding {
+                line: line_no,
+                code: "ambient_ring_system_random",
+                message: "use Deterministic<Seed> instead of ring::rand::SystemRandom",
+            });
+        }
         if line.contains("Uuid::new_v4(") || line.contains("uuid::Uuid::new_v4(") {
             findings.push(Finding {
                 line: line_no,
@@ -575,9 +584,12 @@ mod self_tests {
             fn ambient() {
                 let mut bytes = [0u8; 32];
                 getrandom::fill(&mut bytes).unwrap();
+                let _ = ring::rand::SystemRandom::new();
+                let _ = SystemRandom::new();
             }
         "#;
         let report = render_report(&scan_fixture(fixture));
         assert_eq!(report.matches("ambient_getrandom_fill").count(), 1);
+        assert_eq!(report.matches("ambient_ring_system_random").count(), 2);
     }
 }

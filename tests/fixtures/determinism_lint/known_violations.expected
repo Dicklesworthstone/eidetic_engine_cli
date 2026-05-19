@@ -3,29 +3,31 @@ line 8: missing_seed_param: #[determinism::required] requires a Deterministic<Se
 line 13: ambient_thread_rng: use Deterministic<Seed> instead of rand::thread_rng
 line 19: ambient_rand_random: use Deterministic<Seed> instead of rand::random
 line 25: ambient_getrandom_fill: use Deterministic<Seed> instead of direct OS entropy
-line 30: ambient_uuid_v4: use DeterministicClock/seeded ID helpers instead of Uuid::new_v4
-line 35: ambient_uuid_v7_now: use DeterministicClock/seeded ID helpers instead of Uuid::now_v7
-line 36: ambient_uuid_v7_now: use DeterministicClock/seeded ID helpers instead of Uuid::now_v7
-line 41: ambient_instant_now: inject timing at the boundary instead of calling Instant::now
-line 46: ambient_system_time_now: inject wall-clock time at the boundary instead of calling SystemTime::now
-line 51: ambient_env_var: read env through the registered config boundary
-line 52: ambient_env_var_os: read optional env through the registered config boundary
-line 53: ambient_env_iteration: iterate env only through a deterministic registered boundary
-line 54: ambient_env_var: read env through the registered config boundary
-line 55: ambient_env_var_os: read optional env through the registered config boundary
-line 56: ambient_env_iteration: iterate env only through a deterministic registered boundary
-line 57: ambient_env_iteration: iterate env only through a deterministic registered boundary
-line 63: hashmap_iteration: sort HashMap entries before deterministic output
-line 64: hashmap_iteration: sort HashMap entries before deterministic output
-line 65: hashmap_iteration: sort HashMap entries before deterministic output
-line 66: hashmap_iteration: sort HashMap entries before deterministic output
-line 67: hashmap_iteration: sort HashMap entries before deterministic output
-line 73: hashset_iteration: sort HashSet entries before deterministic output
-line 74: hashset_iteration: sort HashSet entries before deterministic output
-line 75: hashset_iteration: sort HashSet entries before deterministic output
-line 80: unsorted_read_dir: sort read_dir entries before deterministic output
-line 81: unsorted_read_dir: sort read_dir entries before deterministic output
-line 86: ambient_chrono_utc_now: inject UTC timestamps at the boundary instead of calling Utc::now
-line 87: ambient_chrono_local_now: inject local timestamps at the boundary instead of calling Local::now
-line 92: ambient_domain_id_now: use seeded ID helpers instead of ambient typed Id::now
-line 93: ambient_domain_id_now: use seeded ID helpers instead of ambient typed Id::now
+line 30: ambient_ring_system_random: use Deterministic<Seed> instead of ring::rand::SystemRandom
+line 31: ambient_ring_system_random: use Deterministic<Seed> instead of ring::rand::SystemRandom
+line 36: ambient_uuid_v4: use DeterministicClock/seeded ID helpers instead of Uuid::new_v4
+line 41: ambient_uuid_v7_now: use DeterministicClock/seeded ID helpers instead of Uuid::now_v7
+line 42: ambient_uuid_v7_now: use DeterministicClock/seeded ID helpers instead of Uuid::now_v7
+line 47: ambient_instant_now: inject timing at the boundary instead of calling Instant::now
+line 52: ambient_system_time_now: inject wall-clock time at the boundary instead of calling SystemTime::now
+line 57: ambient_env_var: read env through the registered config boundary
+line 58: ambient_env_var_os: read optional env through the registered config boundary
+line 59: ambient_env_iteration: iterate env only through a deterministic registered boundary
+line 60: ambient_env_var: read env through the registered config boundary
+line 61: ambient_env_var_os: read optional env through the registered config boundary
+line 62: ambient_env_iteration: iterate env only through a deterministic registered boundary
+line 63: ambient_env_iteration: iterate env only through a deterministic registered boundary
+line 69: hashmap_iteration: sort HashMap entries before deterministic output
+line 70: hashmap_iteration: sort HashMap entries before deterministic output
+line 71: hashmap_iteration: sort HashMap entries before deterministic output
+line 72: hashmap_iteration: sort HashMap entries before deterministic output
+line 73: hashmap_iteration: sort HashMap entries before deterministic output
+line 79: hashset_iteration: sort HashSet entries before deterministic output
+line 80: hashset_iteration: sort HashSet entries before deterministic output
+line 81: hashset_iteration: sort HashSet entries before deterministic output
+line 86: unsorted_read_dir: sort read_dir entries before deterministic output
+line 87: unsorted_read_dir: sort read_dir entries before deterministic output
+line 92: ambient_chrono_utc_now: inject UTC timestamps at the boundary instead of calling Utc::now
+line 93: ambient_chrono_local_now: inject local timestamps at the boundary instead of calling Local::now
+line 98: ambient_domain_id_now: use seeded ID helpers instead of ambient typed Id::now
+line 99: ambient_domain_id_now: use seeded ID helpers instead of ambient typed Id::now
