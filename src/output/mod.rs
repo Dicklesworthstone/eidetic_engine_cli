@@ -6380,6 +6380,68 @@ pub fn render_memory_list_json(report: &MemoryListReport) -> String {
     b.finish()
 }
 
+#[must_use]
+pub fn render_memory_drift_report_json(
+    report: &crate::core::memory_drift::MemoryDriftReport,
+) -> String {
+    let data = serde_json::to_value(report).unwrap_or_else(|_| serde_json::json!({}));
+    let degraded = serde_json::to_value(&report.degraded).unwrap_or_else(|_| serde_json::json!([]));
+    serde_json::json!({
+        "schema": "ee.response.v2",
+        "success": true,
+        "data": data,
+        "degraded": degraded,
+    })
+    .to_string()
+}
+
+#[must_use]
+pub fn render_memory_drift_report_human(
+    report: &crate::core::memory_drift::MemoryDriftReport,
+) -> String {
+    let mut output = format!("Memory drift report: {}\n", report.mode.as_str());
+    output.push_str(&format!(
+        "Total: {} current={} changed={} missing={} unverifiable={}\n",
+        report.summary.total_memories,
+        report.summary.current,
+        report.summary.changed,
+        report.summary.missing_source,
+        report.summary.unverifiable
+    ));
+    for item in report.items.iter().take(20) {
+        output.push_str(&format!(
+            "  {}  {}  {}  {}\n",
+            item.memory_id,
+            item.drift_status.as_str(),
+            item.severity,
+            item.top_reason
+        ));
+    }
+    if report.items.len() > 20 {
+        output.push_str(&format!(
+            "  ... {} additional item(s) omitted from human output\n",
+            report.items.len() - 20
+        ));
+    }
+    if !report.degraded.is_empty() {
+        output.push_str("Degraded:\n");
+        for degraded in &report.degraded {
+            output.push_str(&format!(
+                "  {} [{}] {}\n",
+                degraded.code, degraded.severity, degraded.message
+            ));
+        }
+    }
+    output
+}
+
+#[must_use]
+pub fn render_memory_drift_report_toon(
+    report: &crate::core::memory_drift::MemoryDriftReport,
+) -> String {
+    render_toon_from_json(&render_memory_drift_report_json(report))
+}
+
 fn redact_memory_output_provenance_uri(value: &str) -> String {
     let redacted_paths = redact_memory_output_path_like_segments(value);
     redact_memory_output_secret_like_segments(&redacted_paths)
@@ -7726,6 +7788,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: swarm_next_action_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::memory_drift::MEMORY_DRIFT_REPORT_SCHEMA_V1,
+            version: "1",
+            description: "Read-only memory provenance drift report and compact selection hints",
+            category: "memory",
+            definition: memory_drift_report_schema_definition,
+        },
+        SchemaEntry {
             id: crate::models::IMPORT_CASS_SCHEMA_V1,
             version: "1",
             description: "CASS import response envelope",
@@ -8091,6 +8160,10 @@ fn host_profile_schema_definition() -> String {
 
 fn swarm_next_action_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.swarm_next_action.v1.json").to_string()
+}
+
+fn memory_drift_report_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.memory_drift.report.v1.json").to_string()
 }
 
 fn import_cass_response_schema_definition() -> String {
@@ -15261,6 +15334,61 @@ mod tests {
             .finish();
         ensure_contains(&json, "\"degraded\":[{", "degraded array start")?;
         ensure_contains(&json, "\"code\":\"code1\"", "degradation code")
+    }
+
+    #[test]
+    fn memory_drift_report_json_uses_v2_envelope_and_mirrors_degraded() -> TestResult {
+        let report = crate::core::memory_drift::MemoryDriftReport::new(
+            crate::core::memory_drift::MemoryDriftReportMode::OneMemory,
+            Some("2026-05-19T11:10:00Z"),
+            vec![crate::core::memory_drift::MemoryDriftSelectionHint::new(
+                "mem_changed",
+                crate::core::memory_drift::MemoryDriftStatus::Changed,
+                "provenance_chain_mismatch",
+                1,
+            )],
+        )
+        .with_degraded(vec![
+            crate::core::memory_drift::MemoryDriftDegradation::new(
+                "memory_drift_source_changed",
+                "medium",
+                "The selected memory provenance changed.",
+            ),
+        ]);
+
+        let json = super::render_memory_drift_report_json(&report);
+        let parsed = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("memory drift report JSON should parse: {error}; {json}"))?;
+
+        ensure_equal(
+            &parsed.get("schema").and_then(serde_json::Value::as_str),
+            &Some("ee.response.v2"),
+            "memory drift envelope schema",
+        )?;
+        ensure_equal(
+            &parsed.get("success").and_then(serde_json::Value::as_bool),
+            &Some(true),
+            "memory drift envelope success",
+        )?;
+        ensure_equal(
+            &parsed
+                .get("data")
+                .and_then(|data| data.get("schema"))
+                .and_then(serde_json::Value::as_str),
+            &Some(crate::core::memory_drift::MEMORY_DRIFT_REPORT_SCHEMA_V1),
+            "memory drift data schema",
+        )?;
+        let top_degraded = parsed
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("top-level degraded array missing: {parsed:?}"))?;
+        let data_degraded = parsed
+            .get("data")
+            .and_then(|data| data.get("degraded"))
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("data degraded array missing: {parsed:?}"))?;
+        ensure_equal(&top_degraded.len(), &1usize, "top-level degraded count")?;
+        ensure_equal(top_degraded, data_degraded, "mirrored degraded entries")
     }
 
     #[test]

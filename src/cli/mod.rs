@@ -55,7 +55,10 @@ use crate::core::causal::{
     trace_causal_chains_from_store,
 };
 use crate::core::check::CheckReport;
-use crate::core::completion_audit::{EvidenceBundle, build_completion_audit_report_for_workspace};
+use crate::core::completion_audit::{
+    EvidenceBundle, build_completion_audit_report_for_workspace,
+    evidence_bundle_from_verification_records,
+};
 use crate::core::config_surface::{
     ConfigGetReport, ConfigSetReport, ConfigSurfaceError, ConfigSurfaceOptions, get_config,
     set_config, show_config,
@@ -7572,6 +7575,8 @@ pub struct ReviewWorkspaceArgs {
 pub enum MemoryCommand {
     /// Expire a memory by writing an audited tombstone.
     Expire(MemoryExpireArgs),
+    /// Report read-only provenance drift for memories.
+    Drift(MemoryDriftArgs),
     /// Apply a canonical manual memory-level transition.
     Level(MemoryLevelArgs),
     /// List or create durable links between memories.
@@ -7608,6 +7613,53 @@ pub struct MemoryExpireArgs {
     pub dry_run: bool,
 
     /// Allow already-tombstoned memories for idempotency reporting.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_tombstoned: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum MemoryDriftCliMode {
+    AllMemories,
+    OneMemory,
+    RecentPackItems,
+}
+
+impl MemoryDriftCliMode {
+    const fn core_mode(self) -> crate::core::memory_drift::MemoryDriftReportMode {
+        match self {
+            Self::AllMemories => crate::core::memory_drift::MemoryDriftReportMode::AllMemories,
+            Self::OneMemory => crate::core::memory_drift::MemoryDriftReportMode::OneMemory,
+            Self::RecentPackItems => {
+                crate::core::memory_drift::MemoryDriftReportMode::RecentPackItems
+            }
+        }
+    }
+}
+
+/// Arguments for `ee memory drift`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MemoryDriftArgs {
+    /// Optional memory ID. When present, defaults to one-memory mode.
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: Option<String>,
+
+    /// Report mode. Defaults to all memories, or one memory when MEMORY_ID is provided.
+    #[arg(long, value_enum, value_name = "MODE")]
+    pub mode: Option<MemoryDriftCliMode>,
+
+    /// Shortcut for `--mode recent-pack-items`.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub recent_pack_items: bool,
+
+    /// Maximum number of memories or recent pack items to inspect.
+    #[arg(long, short = 'n', default_value_t = 50)]
+    pub limit: u32,
+
+    /// Include tombstoned memories in all/one-memory reports.
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_tombstoned: bool,
 
@@ -9137,6 +9189,9 @@ where
         },
         Some(Command::Memory(MemoryCommand::Expire(ref args))) => {
             handle_memory_expire(&cli, args, stdout, stderr)
+        }
+        Some(Command::Memory(MemoryCommand::Drift(ref args))) => {
+            handle_memory_drift(&cli, args, stdout, stderr)
         }
         Some(Command::Memory(MemoryCommand::Level(ref args))) => {
             handle_memory_level(&cli, args, stdout, stderr)
@@ -23648,6 +23703,109 @@ where
     }
 }
 
+fn handle_memory_drift<W, E>(
+    cli: &Cli,
+    args: &MemoryDriftArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let mode = match memory_drift_mode_from_args(args) {
+        Ok(mode) => mode,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let options = crate::core::memory_drift::MemoryDriftReportOptions {
+        database_path: &database_path,
+        workspace_path: &workspace,
+        mode,
+        memory_id: args.memory_id.as_deref(),
+        limit: args.limit,
+        include_tombstoned: args.include_tombstoned,
+    };
+    let report = match crate::core::memory_drift::build_memory_drift_report(&options) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_memory_drift_report_human(&report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_memory_drift_report_toon(&report) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(output::render_memory_drift_report_json(&report) + "\n"),
+        ),
+    }
+}
+
+fn memory_drift_mode_from_args(
+    args: &MemoryDriftArgs,
+) -> Result<crate::core::memory_drift::MemoryDriftReportMode, DomainError> {
+    if args.recent_pack_items {
+        if args.mode.is_some() || args.memory_id.is_some() {
+            return Err(DomainError::Usage {
+                message: "--recent-pack-items cannot be combined with MEMORY_ID or --mode"
+                    .to_owned(),
+                repair: Some("Use `ee memory drift --mode recent-pack-items --json`.".to_owned()),
+            });
+        }
+        return Ok(crate::core::memory_drift::MemoryDriftReportMode::RecentPackItems);
+    }
+
+    let mode = args.mode.map_or_else(
+        || {
+            if args.memory_id.is_some() {
+                crate::core::memory_drift::MemoryDriftReportMode::OneMemory
+            } else {
+                crate::core::memory_drift::MemoryDriftReportMode::AllMemories
+            }
+        },
+        MemoryDriftCliMode::core_mode,
+    );
+
+    match (mode, args.memory_id.is_some()) {
+        (crate::core::memory_drift::MemoryDriftReportMode::OneMemory, false) => {
+            Err(DomainError::Usage {
+                message: "--mode one-memory requires MEMORY_ID".to_owned(),
+                repair: Some("Use `ee memory drift <MEMORY_ID> --json`.".to_owned()),
+            })
+        }
+        (
+            crate::core::memory_drift::MemoryDriftReportMode::AllMemories
+            | crate::core::memory_drift::MemoryDriftReportMode::RecentPackItems,
+            true,
+        ) => Err(DomainError::Usage {
+            message: "MEMORY_ID can only be used with one-memory mode".to_owned(),
+            repair: Some("Drop MEMORY_ID or use `--mode one-memory`.".to_owned()),
+        }),
+        _ => Ok(mode),
+    }
+}
+
 fn handle_memory_level<W, E>(
     cli: &Cli,
     args: &MemoryLevelArgs,
@@ -29682,12 +29840,15 @@ where
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
     };
-    let evidence = match serde_json::from_str::<crate::models::VerificationEvidenceRecord>(&input) {
+    let evidence = match parse_verification_evidence_record_input(&input) {
         Ok(evidence) => evidence,
         Err(error) => {
             let domain_error = DomainError::Usage {
                 message: format!("Invalid verification evidence JSON: {error}"),
-                repair: Some("provide an ee.verification.evidence.v1 JSON record".to_owned()),
+                repair: Some(
+                    "provide an ee.verification.evidence.v1 record, ee.verification.run.v1 record, ee.rch.verify.v1 proof, or ee.github_actions.check_run.v1 proof"
+                        .to_owned(),
+                ),
             };
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
@@ -29743,6 +29904,82 @@ fn read_verification_evidence_input(args: &VerifyIngestArgs) -> Result<String, S
         ),
         (Some(_), true) => Err("pass only one of --file or --stdin".to_owned()),
     }
+}
+
+fn parse_verification_evidence_record_input(
+    input: &str,
+) -> Result<crate::models::VerificationEvidenceRecord, String> {
+    let value = serde_json::from_str::<serde_json::Value>(input)
+        .map_err(|error| format!("input is not valid JSON: {error}"))?;
+    verification_evidence_record_from_json_value(value)
+}
+
+fn verification_evidence_record_from_json_value(
+    value: serde_json::Value,
+) -> Result<crate::models::VerificationEvidenceRecord, String> {
+    if value.get("schema").and_then(serde_json::Value::as_str)
+        == Some(crate::models::VERIFICATION_RUN_SCHEMA_V1)
+    {
+        let record = serde_json::from_value::<crate::models::VerificationRunRecord>(value)
+            .map_err(|error| format!("invalid ee.verification.run.v1 record: {error}"))?;
+        return Ok(crate::models::verification_evidence_record_from_run_record(
+            &record,
+        ));
+    }
+
+    if value.get("schema").and_then(serde_json::Value::as_str)
+        == Some(crate::models::RCH_VERIFY_SCHEMA_V1)
+    {
+        return crate::models::verification_evidence_record_from_rch_verify(&value)
+            .map_err(|error| format!("invalid ee.rch.verify.v1 proof: {error}"));
+    }
+
+    if value.get("schema").and_then(serde_json::Value::as_str)
+        == Some(crate::models::GITHUB_ACTIONS_CHECK_RUN_SCHEMA_V1)
+        || github_actions_check_run_like(&value)
+    {
+        return crate::models::verification_evidence_record_from_github_actions_check_run(&value)
+            .map_err(|error| format!("invalid GitHub Actions check-run proof: {error}"));
+    }
+
+    let record = serde_json::from_value::<crate::models::VerificationEvidenceRecord>(value)
+        .map_err(|error| {
+            format!(
+                "expected {} record, {} run record, {} proof, or {} proof: {error}",
+                crate::models::VERIFICATION_EVIDENCE_SCHEMA_V1,
+                crate::models::VERIFICATION_RUN_SCHEMA_V1,
+                crate::models::RCH_VERIFY_SCHEMA_V1,
+                crate::models::GITHUB_ACTIONS_CHECK_RUN_SCHEMA_V1
+            )
+        })?;
+    if record.schema != crate::models::VERIFICATION_EVIDENCE_SCHEMA_V1 {
+        return Err(format!(
+            "verification evidence schema must be {}, got {}",
+            crate::models::VERIFICATION_EVIDENCE_SCHEMA_V1,
+            record.schema
+        ));
+    }
+    Ok(record)
+}
+
+fn github_actions_check_run_like(value: &serde_json::Value) -> bool {
+    value.is_object()
+        && value
+            .get("html_url")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        && value
+            .get("conclusion")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        && (value
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+            || value
+                .get("job_name")
+                .and_then(serde_json::Value::as_str)
+                .is_some())
 }
 
 fn handle_verify_proofs<W, E>(
@@ -30882,18 +31119,45 @@ fn read_completion_audit_evidence_bundle(
                 .to_owned(),
         ),
     })?;
-    serde_json::from_str::<EvidenceBundle>(&text).map(Some).map_err(|error| {
-        DomainError::Configuration {
+    parse_completion_audit_evidence_input(&text)
+        .map(Some)
+        .map_err(|error| DomainError::Configuration {
             message: format!(
                 "Failed to parse completion-audit evidence file {}: {error}",
                 path.display()
             ),
             repair: Some(
-                "Use the EvidenceBundle JSON shape: {\"records\":[{\"kind\":\"...\",\"target\":\"...\",\"source\":\"...\",\"status\":\"pass\",\"strength\":\"direct\",\"summary\":\"...\"}]}."
+                "Use an EvidenceBundle JSON file, an ee.verification.evidence.v1 record array, an ee.verification.run.v1 record array, an ee.rch.verify.v1 proof array, or an ee.github_actions.check_run.v1 proof array."
                     .to_owned(),
             ),
+        })
+}
+
+fn parse_completion_audit_evidence_input(input: &str) -> Result<EvidenceBundle, String> {
+    let value = serde_json::from_str::<serde_json::Value>(input)
+        .map_err(|error| format!("input is not valid JSON: {error}"))?;
+
+    if let Ok(bundle) = serde_json::from_value::<EvidenceBundle>(value.clone()) {
+        return Ok(bundle);
+    }
+
+    let records = match value {
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .map(verification_evidence_record_from_json_value)
+            .collect::<Result<Vec<_>, _>>()?,
+        value @ serde_json::Value::Object(_) => {
+            vec![verification_evidence_record_from_json_value(value)?]
         }
-    })
+        _ => {
+            return Err(
+                "expected EvidenceBundle, verification evidence record, verification run record, RCH proof, GitHub Actions check-run proof, or an array of records/proofs"
+                    .to_owned(),
+            );
+        }
+    };
+
+    Ok(evidence_bundle_from_verification_records(&records))
 }
 
 fn write_domain_error<W, E>(
@@ -39461,6 +39725,7 @@ impl NormalizedInvocation {
                 },
                 Command::Memory(mem) => match mem {
                     MemoryCommand::Expire(_) => "memory expire".to_string(),
+                    MemoryCommand::Drift(_) => "memory drift".to_string(),
                     MemoryCommand::Level(_) => "memory level".to_string(),
                     MemoryCommand::Link(_) => "memory link".to_string(),
                     MemoryCommand::List(_) => "memory list".to_string(),
@@ -40250,16 +40515,18 @@ mod tests {
         CurateCommand, DaemonCommand, DiagCommand, DiagQuarantineCommand, DomainError,
         EconomyCommand, EffectiveRedactionLevel, FieldsLevel, FocusCommand,
         GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY,
-        GraphCommand, GraphSnapshotCommand, HandoffCommand, HealthArgs, ImportCommand, JobCommand,
-        LearnCommand, LearnExperimentCommand, MaintenanceCommand,
+        GraphCommand, GraphSnapshotCommand, HandoffCommand, HealthArgs, HookCommand, ImportCommand,
+        JobCommand, LearnCommand, LearnExperimentCommand, MaintenanceCommand,
         MaintenanceGraphWitnessesPruneArgs, MaintenanceWalCheckpointArgs,
         MaintenanceWalCheckpointMode, McpCommand, MemoryCommand, OutcomeQuarantineCommand,
         OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand, RedactionLevelSource,
         RuleCommand, ShadowMode, SituationCommand, StatusArgs, SupportCommand, SwarmBriefArgs,
         SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand, VerifyCommand, WorkflowCommand,
         WorkspaceCommand, WorkspaceHygieneArgs, db_inspect_redact_source_uri,
-        decay_settings_from_config, load_maintenance_decay_settings, load_witness_retention_policy,
-        run, write_index_rebuild_error,
+        decay_settings_from_config, hook_git_readiness_response_json,
+        load_maintenance_decay_settings, load_witness_retention_policy,
+        parse_completion_audit_evidence_input, parse_verification_evidence_record_input,
+        plan_cache_diag_degraded, plan_cache_diag_response_json, run, write_index_rebuild_error,
     };
     use crate::config::MeshCommandMode;
     use crate::core::index::IndexRebuildError;
@@ -40280,6 +40547,7 @@ mod tests {
     };
     use crate::output;
     use crate::pack::PackResourceProfile;
+    use crate::search::plan_cache::{DEFAULT_PLAN_CACHE_ENTRIES, EnvVarValueSource, PlanCache};
     use crate::steward::JobType;
 
     type TestResult = Result<(), String>;
@@ -43079,6 +43347,252 @@ mod tests {
             }
             other => Err(format!("expected verification ingest stdin, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn verification_ingest_input_accepts_rch_verify_proof_json() -> TestResult {
+        let input = serde_json::json!({
+            "schema": crate::models::RCH_VERIFY_SCHEMA_V1,
+            "command_text": "cargo test --lib models::verification",
+            "command_hash": "sha256:cli-rch-proof",
+            "command_kind": "cargo_test",
+            "status": "remote_pass",
+            "exit_code": 0,
+            "worker_id": "vmi123",
+            "remote_required": true
+        })
+        .to_string();
+
+        let record = parse_verification_evidence_record_input(&input)
+            .map_err(|error| format!("parse rch proof: {error}"))?;
+
+        ensure_equal(
+            &record.schema,
+            &crate::models::VERIFICATION_EVIDENCE_SCHEMA_V1.to_owned(),
+            "canonical schema",
+        )?;
+        ensure_equal(
+            &record.command_hash,
+            &"sha256:cli-rch-proof".to_owned(),
+            "command hash",
+        )?;
+        ensure(record.is_authoritative_pass(), "RCH proof is authoritative")
+    }
+
+    #[test]
+    fn verification_ingest_input_accepts_verification_run_record_json() -> TestResult {
+        let run =
+            crate::models::VerificationRunRecord::from_input(crate::models::VerificationRunInput {
+                run_id: Some("vrun_cli_bridge"),
+                bead_id: Some("bd-1nxz4.5"),
+                agent_name: Some("ChartreuseHawk"),
+                source_hash: Some("git_tree:cli"),
+                command_hash: Some("sha256:cli-run"),
+                command_argv: &["cargo", "test", "--lib", "rch_verify"],
+                cargo_target_dir: Some("/Volumes/USBNVME16TB/temp_agent_space/cargo-target"),
+                execution_substrate: "rch",
+                worker_host: Some("vmi123"),
+                started_at: Some("2026-05-19T05:00:00Z"),
+                finished_at: Some("2026-05-19T05:00:42Z"),
+                exit_code: Some(0),
+                stdout_hash: Some("blake3:stdout"),
+                stderr_excerpt: Some("worker output"),
+                artifact_manifest_hash: Some("blake3:manifest"),
+                retained_log_path: Some("/tmp/verify-log.jsonl"),
+                provenance: Vec::new(),
+            });
+        let input =
+            serde_json::to_string(&run).map_err(|error| format!("serialize run: {error}"))?;
+
+        let record = parse_verification_evidence_record_input(&input)
+            .map_err(|error| format!("parse run record: {error}"))?;
+
+        ensure_equal(
+            &record.schema,
+            &crate::models::VERIFICATION_EVIDENCE_SCHEMA_V1.to_owned(),
+            "canonical schema",
+        )?;
+        ensure_equal(
+            &record.command_hash,
+            &"sha256:cli-run".to_owned(),
+            "command hash",
+        )?;
+        ensure_equal(
+            &record.gate_name,
+            &"rch verification run".to_owned(),
+            "gate name",
+        )?;
+        ensure(
+            record.is_authoritative_pass(),
+            "run record is authoritative",
+        )
+    }
+
+    #[test]
+    fn verification_ingest_input_accepts_github_actions_check_run_json() -> TestResult {
+        let input = serde_json::json!({
+            "schema": crate::models::GITHUB_ACTIONS_CHECK_RUN_SCHEMA_V1,
+            "name": "verify",
+            "workflow_name": "CI",
+            "run_id": 26077398253_u64,
+            "head_sha": "9e02dd424891623d2b5049525b2762a9376e41f9",
+            "status": "completed",
+            "conclusion": "success",
+            "completed_at": "2026-05-19T06:10:00Z",
+            "html_url": "https://github.example/checks/123"
+        })
+        .to_string();
+
+        let record = parse_verification_evidence_record_input(&input)
+            .map_err(|error| format!("parse GitHub Actions proof: {error}"))?;
+
+        ensure_equal(
+            &record.schema,
+            &crate::models::VERIFICATION_EVIDENCE_SCHEMA_V1.to_owned(),
+            "canonical schema",
+        )?;
+        ensure_equal(
+            &record.gate_name,
+            &"github_actions:CI:verify".to_owned(),
+            "gate name",
+        )?;
+        ensure_equal(
+            &record.offload.offload_tool,
+            &Some("github_actions".to_owned()),
+            "offload tool",
+        )?;
+        ensure(record.is_authoritative_pass(), "CI pass is authoritative")
+    }
+
+    #[test]
+    fn completion_audit_evidence_input_accepts_rch_verify_array() -> TestResult {
+        let input = serde_json::json!([
+            {
+                "schema": crate::models::RCH_VERIFY_SCHEMA_V1,
+                "command_text": "cargo test --lib completion_audit",
+                "command_hash": "sha256:completion-rch-pass",
+                "command_kind": "cargo_test",
+                "status": "remote_pass",
+                "exit_code": 0,
+                "worker_id": "vmi123",
+                "remote_required": true
+            },
+            {
+                "schema": crate::models::RCH_VERIFY_SCHEMA_V1,
+                "command_text": "cargo clippy --all-targets -- -D warnings",
+                "command_hash": "sha256:completion-rch-blocked",
+                "command_kind": "cargo_clippy",
+                "status": "rch_environment_failure",
+                "exit_code": 1,
+                "degraded_codes": ["rch_verify_client_daemon_version_skew"],
+                "remote_required": true
+            }
+        ])
+        .to_string();
+
+        let bundle = parse_completion_audit_evidence_input(&input)
+            .map_err(|error| format!("parse completion audit evidence: {error}"))?;
+
+        ensure_equal(&bundle.records.len(), &2, "converted record count")?;
+        ensure(
+            bundle.records.iter().any(|record| {
+                record.kind == "rch"
+                    && record.status == crate::core::completion_audit::EvidenceRecordStatus::Pass
+                    && record
+                        .summary
+                        .contains("command_hash=sha256:completion-rch-pass")
+                    && !record.summary.contains("cargo test")
+            }),
+            "remote pass record converted without raw command summary",
+        )?;
+        ensure(
+            bundle.records.iter().any(|record| {
+                record.kind == "rch"
+                    && record.status
+                        == crate::core::completion_audit::EvidenceRecordStatus::CapacityBlocked
+            }),
+            "blocked RCH proof converted",
+        )
+    }
+
+    #[test]
+    fn completion_audit_evidence_input_accepts_github_actions_check_run_array() -> TestResult {
+        let input = serde_json::json!([
+            {
+                "schema": crate::models::GITHUB_ACTIONS_CHECK_RUN_SCHEMA_V1,
+                "name": "verify",
+                "workflow_name": "CI",
+                "run_id": 26077398253_u64,
+                "head_sha": "9e02dd424891623d2b5049525b2762a9376e41f9",
+                "status": "completed",
+                "conclusion": "success",
+                "completed_at": "2026-05-19T06:10:00Z",
+                "html_url": "https://github.example/checks/123"
+            }
+        ])
+        .to_string();
+
+        let bundle = parse_completion_audit_evidence_input(&input)
+            .map_err(|error| format!("parse completion audit evidence: {error}"))?;
+
+        ensure_equal(&bundle.records.len(), &1, "converted record count")?;
+        ensure_equal(&bundle.records[0].kind, &"ci".to_owned(), "record kind")?;
+        ensure_equal(
+            &bundle.records[0].status,
+            &crate::core::completion_audit::EvidenceRecordStatus::Pass,
+            "record status",
+        )?;
+        ensure(
+            bundle.records[0].summary.contains("status=passed"),
+            "summary carries canonical status",
+        )
+    }
+
+    #[test]
+    fn completion_audit_evidence_input_accepts_verification_run_record_array() -> TestResult {
+        let run =
+            crate::models::VerificationRunRecord::from_input(crate::models::VerificationRunInput {
+                run_id: Some("vrun_completion_bridge"),
+                bead_id: Some("bd-1nxz4.5"),
+                agent_name: Some("ChartreuseHawk"),
+                source_hash: Some("git_tree:completion"),
+                command_hash: Some("sha256:completion-run"),
+                command_argv: &["cargo", "test", "--lib", "completion_audit"],
+                cargo_target_dir: Some("/Volumes/USBNVME16TB/temp_agent_space/cargo-target"),
+                execution_substrate: "rch",
+                worker_host: Some("vmi123"),
+                started_at: Some("2026-05-19T05:00:00Z"),
+                finished_at: Some("2026-05-19T05:00:42Z"),
+                exit_code: Some(0),
+                stdout_hash: Some("blake3:stdout"),
+                stderr_excerpt: Some("worker output"),
+                artifact_manifest_hash: Some("blake3:manifest"),
+                retained_log_path: Some("/tmp/verify-log.jsonl"),
+                provenance: Vec::new(),
+            });
+        let input = serde_json::to_string(&vec![run])
+            .map_err(|error| format!("serialize run array: {error}"))?;
+
+        let bundle = parse_completion_audit_evidence_input(&input)
+            .map_err(|error| format!("parse completion audit evidence: {error}"))?;
+
+        ensure_equal(&bundle.records.len(), &1, "converted record count")?;
+        ensure_equal(&bundle.records[0].kind, &"rch".to_owned(), "record kind")?;
+        ensure_equal(
+            &bundle.records[0].status,
+            &crate::core::completion_audit::EvidenceRecordStatus::Pass,
+            "record status",
+        )?;
+        ensure(
+            bundle.records[0]
+                .summary
+                .contains("command_hash=sha256:completion-run"),
+            "summary carries command hash",
+        )?;
+        ensure(
+            !bundle.records[0].summary.contains("cargo test"),
+            "summary omits raw command text",
+        )
     }
 
     #[test]
@@ -48590,6 +49104,163 @@ mod tests {
                 ensure_equal(&args.no_tombstoned, &true, "no_tombstoned")
             }
             _ => Err("expected Memory List command".to_string()),
+        }
+    }
+
+    #[test]
+    fn memory_drift_command_defaults_to_all_memories() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "memory", "drift"])
+            .map_err(|e| format!("failed to parse memory drift defaults: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Memory(MemoryCommand::Drift(ref args))) => {
+                ensure_equal(&args.memory_id, &None, "memory drift memory id")?;
+                ensure_equal(&args.mode, &None, "memory drift explicit mode")?;
+                ensure_equal(&args.limit, &50, "memory drift default limit")?;
+                ensure_equal(
+                    &super::memory_drift_mode_from_args(args).map_err(|error| error.to_string())?,
+                    &crate::core::memory_drift::MemoryDriftReportMode::AllMemories,
+                    "memory drift default mode",
+                )
+            }
+            _ => Err("expected Memory Drift command".to_string()),
+        }
+    }
+
+    #[test]
+    fn memory_drift_command_with_id_defaults_to_one_memory() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "memory",
+            "drift",
+            "mem_test123",
+            "-n",
+            "7",
+            "--include-tombstoned",
+            "--database",
+            "/tmp/ee.db",
+        ])
+        .map_err(|e| format!("failed to parse memory drift one memory: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Memory(MemoryCommand::Drift(ref args))) => {
+                ensure_equal(
+                    &args.memory_id,
+                    &Some("mem_test123".to_string()),
+                    "memory drift memory id",
+                )?;
+                ensure_equal(&args.limit, &7, "memory drift short limit")?;
+                ensure_equal(&args.include_tombstoned, &true, "memory drift tombstones")?;
+                ensure_equal(
+                    &args.database,
+                    &Some(std::path::PathBuf::from("/tmp/ee.db")),
+                    "memory drift database",
+                )?;
+                ensure_equal(
+                    &super::memory_drift_mode_from_args(args).map_err(|error| error.to_string())?,
+                    &crate::core::memory_drift::MemoryDriftReportMode::OneMemory,
+                    "memory drift default one-memory mode",
+                )
+            }
+            _ => Err("expected Memory Drift command".to_string()),
+        }
+    }
+
+    #[test]
+    fn memory_drift_command_accepts_recent_pack_items_modes() -> TestResult {
+        let explicit = Cli::try_parse_from([
+            "ee",
+            "memory",
+            "drift",
+            "--mode",
+            "recent-pack-items",
+            "-n",
+            "3",
+        ])
+        .map_err(|e| {
+            format!(
+                "failed to parse memory drift recent pack explicit mode: {:?}",
+                e.kind()
+            )
+        })?;
+
+        match explicit.command {
+            Some(Command::Memory(MemoryCommand::Drift(ref args))) => {
+                ensure_equal(
+                    &args.mode,
+                    &Some(super::MemoryDriftCliMode::RecentPackItems),
+                    "memory drift explicit recent-pack-items mode",
+                )?;
+                ensure_equal(&args.limit, &3, "memory drift recent pack limit")?;
+                ensure_equal(
+                    &super::memory_drift_mode_from_args(args).map_err(|error| error.to_string())?,
+                    &crate::core::memory_drift::MemoryDriftReportMode::RecentPackItems,
+                    "memory drift recent-pack-items core mode",
+                )?;
+            }
+            _ => return Err("expected Memory Drift command".to_string()),
+        }
+
+        let shortcut = Cli::try_parse_from(["ee", "memory", "drift", "--recent-pack-items"])
+            .map_err(|e| format!("failed to parse memory drift shortcut: {:?}", e.kind()))?;
+        match shortcut.command {
+            Some(Command::Memory(MemoryCommand::Drift(ref args))) => ensure_equal(
+                &super::memory_drift_mode_from_args(args).map_err(|error| error.to_string())?,
+                &crate::core::memory_drift::MemoryDriftReportMode::RecentPackItems,
+                "memory drift recent-pack-items shortcut core mode",
+            ),
+            _ => Err("expected Memory Drift command".to_string()),
+        }
+    }
+
+    #[test]
+    fn memory_drift_command_rejects_incompatible_modes() -> TestResult {
+        let shortcut_with_id = Cli::try_parse_from([
+            "ee",
+            "memory",
+            "drift",
+            "mem_test123",
+            "--recent-pack-items",
+        ])
+        .map_err(|e| {
+            format!(
+                "failed to parse memory drift shortcut conflict fixture: {:?}",
+                e.kind()
+            )
+        })?;
+        match shortcut_with_id.command {
+            Some(Command::Memory(MemoryCommand::Drift(ref args))) => {
+                let error = super::memory_drift_mode_from_args(args)
+                    .expect_err("shortcut with memory id should be rejected");
+                ensure_contains(
+                    &error.to_string(),
+                    "--recent-pack-items cannot be combined",
+                    "memory drift shortcut conflict",
+                )?;
+            }
+            _ => return Err("expected Memory Drift command".to_string()),
+        }
+
+        let one_memory_without_id =
+            Cli::try_parse_from(["ee", "memory", "drift", "--mode", "one-memory"]).map_err(
+                |e| {
+                    format!(
+                        "failed to parse memory drift missing id fixture: {:?}",
+                        e.kind()
+                    )
+                },
+            )?;
+        match one_memory_without_id.command {
+            Some(Command::Memory(MemoryCommand::Drift(ref args))) => {
+                let error = super::memory_drift_mode_from_args(args)
+                    .expect_err("one-memory mode without id should be rejected");
+                ensure_contains(
+                    &error.to_string(),
+                    "--mode one-memory requires MEMORY_ID",
+                    "memory drift missing id conflict",
+                )
+            }
+            _ => Err("expected Memory Drift command".to_string()),
         }
     }
 
