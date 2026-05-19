@@ -60,6 +60,12 @@ in the same commit, keeping the catalog complete by construction.
 | `storage_degraded` | status, health | medium | bd-17c65.10.6 (J6) |
 | `storage_not_ready` | health | medium | bd-17c65.10.6 (J6) |
 | `storage_unimplemented` | status | high | bd-17c65.10.6 (J6) |
+| `shard_fanout_catalog_missing` | status | warning | bd-f6jfs.2 |
+| `shard_fanout_home_unavailable` | status | warning | bd-f6jfs.2 |
+| `shard_fanout_root_unsafe` | status | high | bd-f6jfs.2 |
+| `shard_fanout_shard_missing` | status | warning | bd-f6jfs.2 |
+| `shard_fanout_workspace_id_unsafe` | status | high | bd-f6jfs.2 |
+| `shard_fanout_workspace_unavailable` | status | warning | bd-f6jfs.2 |
 | `snapshot_pin_expired` | context, status | medium | bd-2caru.6 |
 | `snapshot_release_failed` | context, status | medium | bd-2caru.6 |
 | `snapshot_pin_force_released` | status, workspace close | medium | bd-2caru.6 |

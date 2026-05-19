@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "shard_fanout_workspace_id_unsafe",
+  "introduced_by": {
+    "bead": "bd-f6jfs.2",
+    "epic_letter": "SHARD_FANOUT"
+  },
+  "surfaces": [
+    "status"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "Shard fan-out path derivation receives an unsafe workspace identifier. Public CLI status normally derives safe workspace IDs; this fixture documents the fail-closed resolver branch for corrupted or future injected identifiers.",
+    "setup_commands": [
+      "# resolver/unit fixture: workspace_id = '../unsafe'"
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "shard_fanout_workspace_id_unsafe",
+    "severity": "high",
+    "message_contains": [
+      "unsafe workspace ID"
+    ],
+    "repair_contains": "ee workspace status",
+    "repair_string": "Re-resolve the workspace through ee workspace status before enabling shard fan-out.",
+    "repair_command_regex": "(?<cmd>ee workspace status)"
+  }
+}

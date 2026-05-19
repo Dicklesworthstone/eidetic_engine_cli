@@ -3205,6 +3205,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
         });
         render_read_pool_status_json(d, &report.read_pool);
         render_wal_status_json(d, &report.wal);
+        render_shard_fanout_status_json(d, &report.shard_fanout);
         render_pack_budget_buckets_json(d, &report.pack_budget_buckets);
         render_qos_status_json(d, &report.qos_posture, false);
         render_memory_health_json(d, &report.memory_health);
@@ -3532,6 +3533,60 @@ fn render_wal_status_json(parent: &mut JsonBuilder, report: &crate::core::status
             "checkpoint_threshold_bytes",
             &report.checkpoint_threshold_bytes.to_string(),
         );
+    });
+}
+
+fn render_shard_fanout_status_json(
+    parent: &mut JsonBuilder,
+    report: &crate::db::shard::ShardFanoutStatusReport,
+) {
+    parent.field_object("shardFanout", |shard| {
+        shard.field_str("schema", report.schema);
+        shard.field_bool("enabled", report.enabled);
+        shard.field_str("posture", report.posture.as_str());
+        field_optional_str(shard, "workspaceId", report.workspace_id.as_deref());
+        field_optional_path(shard, "workspaceRoot", report.workspace_root.as_deref());
+        field_optional_path(
+            shard,
+            "legacyDatabasePath",
+            report.legacy_database_path.as_deref(),
+        );
+        shard.field_str("dataRoot", &report.data_root.to_string_lossy());
+        shard.field_str("shardRoot", &report.shard_root.to_string_lossy());
+        shard.field_str("catalogPath", &report.catalog_path.to_string_lossy());
+        field_optional_path(shard, "shardPath", report.shard_path.as_deref());
+        field_optional_str(shard, "shardId", report.shard_id.as_deref());
+        shard.field_bool("catalogExists", report.catalog_exists);
+        shard.field_bool("shardExists", report.shard_exists);
+        shard.field_object("catalogContract", |contract| {
+            contract.field_raw(
+                "schemaVersion",
+                &report.catalog_contract.schema_version.to_string(),
+            );
+            contract
+                .field_array_of_strs("requiredFields", &report.catalog_contract.required_fields);
+        });
+        field_optional_u64(shard, "shardGeneration", report.shard_generation);
+        shard.field_str("migrationState", report.migration_state);
+        shard.field_array_of_objects(
+            "lastVerifiedHashes",
+            &report.last_verified_hashes,
+            |obj, hash| {
+                obj.field_str("name", hash.name);
+                field_optional_str(obj, "value", hash.value.as_deref());
+            },
+        );
+        shard.field_array_of_objects("recovery", &report.recovery, |obj, action| {
+            obj.field_raw("priority", &action.priority.to_string());
+            obj.field_str("kind", action.kind);
+            obj.field_str("command", action.command);
+        });
+        shard.field_array_of_objects("degraded", &report.degraded, |obj, entry| {
+            obj.field_str("code", entry.code);
+            obj.field_str("severity", entry.severity);
+            obj.field_str("message", entry.message);
+            obj.field_str("repair", entry.repair);
+        });
     });
 }
 
@@ -3988,6 +4043,7 @@ pub fn render_status_json_with_meta(
         });
         render_read_pool_status_json(d, &report.read_pool);
         render_wal_status_json(d, &report.wal);
+        render_shard_fanout_status_json(d, &report.shard_fanout);
         render_pack_budget_buckets_json(d, &report.pack_budget_buckets);
         render_memory_health_json(d, &report.memory_health);
         render_graph_compute_json(d, &report.graph_compute);
@@ -4035,9 +4091,10 @@ pub fn render_status_human(report: &StatusReport) -> String {
             )
         });
     format!(
-        "ee status\n\n{}storage: {}\nsearch: {}\nmesh: {}\nagent detection: {}\nruntime: {} ({} {})\n\nNext:\n  ee status --json\n",
+        "ee status\n\n{}storage: {}\nshard fanout: {}\nsearch: {}\nmesh: {}\nagent detection: {}\nruntime: {} ({} {})\n\nNext:\n  ee status --json\n",
         workspace_line,
         report.capabilities.storage.as_str(),
+        report.shard_fanout.posture.as_str(),
         report.capabilities.search.as_str(),
         report.capabilities.mesh.as_str(),
         report.capabilities.agent_detection.as_str(),
@@ -6450,6 +6507,13 @@ pub fn render_install_plan_toon(report: &InstallPlanReport) -> String {
 fn field_optional_str(builder: &mut JsonBuilder, key: &str, value: Option<&str>) {
     match value {
         Some(value) => builder.field_str(key, value),
+        None => builder.field_raw(key, "null"),
+    };
+}
+
+fn field_optional_path(builder: &mut JsonBuilder, key: &str, value: Option<&std::path::Path>) {
+    match value {
+        Some(value) => builder.field_str(key, value.to_string_lossy().as_ref()),
         None => builder.field_raw(key, "null"),
     };
 }
@@ -9423,6 +9487,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
             });
             render_read_pool_status_json(d, &report.read_pool);
             render_wal_status_json(d, &report.wal);
+            render_shard_fanout_status_json(d, &report.shard_fanout);
             render_pack_budget_buckets_json(d, &report.pack_budget_buckets);
             render_memory_health_json(d, &report.memory_health);
             render_curation_health_json(d, &report.curation_health);
@@ -13937,6 +14002,12 @@ mod tests {
         // degradation codes (degraded/missing) instead of not_inspected.
         ensure_contains(&json, "\"degraded\":[", "status degraded array")?;
         ensure_contains(&json, "\"derivedAssets\":[", "derived assets")?;
+        ensure_contains(&json, "\"shardFanout\":{", "shard fanout status")?;
+        ensure_contains(
+            &json,
+            "\"schema\":\"ee.shard_fanout.status.v1\"",
+            "shard fanout schema",
+        )?;
         ensure_contains(&json, "\"name\":\"search_index\"", "search index asset")
     }
 

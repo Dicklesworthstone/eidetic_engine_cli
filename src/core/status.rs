@@ -15,7 +15,7 @@ use crate::config::{
     EnvVar, GRAPH_FEATURE_SKYLINE_ENABLED_KEY, WorkspaceDiagnostic, WorkspaceDiagnosticSeverity,
     WorkspaceResolution, WorkspaceResolutionMode, WorkspaceResolutionRequest,
     WorkspaceResolutionSource, diagnose_workspace_resolution, read_env_var,
-    read_env_var_or_default, resolve_workspace,
+    read_env_var_or_default, read_env_var_os, resolve_workspace,
 };
 use crate::db::{
     CreateWorkspaceInput, DbConnection, FeedbackSourceHarmfulCount, GraphSnapshotStatus,
@@ -24,6 +24,10 @@ use crate::db::{
     StoredCurationTtlPolicy, StoredMemory, StoredMemoryLink, WalStatus, audit_actions,
     default_curation_ttl_policy_id_for_review_state,
     read_pool::{CheckpointBlocker, PoolStats, SnapshotPinReleaseState},
+    shard::{
+        ShardFanoutPosture, ShardFanoutResolverInput, ShardFanoutStatusReport,
+        resolve_shard_fanout_status, shard_fanout_enabled_from_env_value,
+    },
 };
 use crate::models::degradation::GRAPH_SKYLINE_DEGENERATE_COMMUNITIES_CODE;
 use crate::models::posture::{
@@ -1282,6 +1286,7 @@ pub struct StatusReport {
     pub runtime: RuntimeReport,
     pub read_pool: ReadPoolStatusReport,
     pub wal: WalStatusReport,
+    pub shard_fanout: ShardFanoutStatusReport,
     pub pack_budget_buckets: PackBudgetBucketReport,
     pub qos_posture: super::qos::QosLaneSummary,
     pub memory_health: MemoryHealthReport,
@@ -1356,6 +1361,7 @@ impl StatusReport {
         let runtime = RuntimeReport::gather();
         let read_pool = ReadPoolStatusReport::gather();
         let wal = WalStatusReport::gather(options.workspace_path.as_deref());
+        let shard_fanout = gather_shard_fanout_status(options.workspace_path.as_deref());
         let pack_budget_buckets = gather_pack_budget_buckets(options.workspace_path.as_deref());
         let qos_posture = gather_qos_posture(options.workspace_path.as_deref());
         let (memory_health, memory_health_degradations) =
@@ -1403,6 +1409,7 @@ impl StatusReport {
         push_skyline_degenerate_communities_degradation(&mut degradations, skyline_community_count);
         push_toon_output_capability_degradation(&mut degradations, capabilities.output_toon);
         push_wal_degradations(&mut degradations, &wal);
+        push_shard_fanout_degradations(&mut degradations, &shard_fanout);
 
         degradations.extend(memory_health_degradations);
         degradations.extend(curation_degradations);
@@ -1419,6 +1426,7 @@ impl StatusReport {
             &feedback_health,
             &singleflight_posture,
             &graph_compute,
+            &shard_fanout,
             &derived_assets,
             &degradations,
         );
@@ -1431,6 +1439,7 @@ impl StatusReport {
             runtime,
             read_pool,
             wal,
+            shard_fanout,
             pack_budget_buckets,
             qos_posture,
             memory_health,
@@ -1468,6 +1477,24 @@ fn gather_mesh_storage_status_from_connection(
         report.add(&status);
     }
     Some(report)
+}
+
+fn gather_shard_fanout_status(workspace_path: Option<&Path>) -> ShardFanoutStatusReport {
+    let enabled =
+        shard_fanout_enabled_from_env_value(read_env_var(EnvVar::ShardFanoutEnabled).as_deref());
+    let shards_dir_override = read_env_var_os(EnvVar::ShardsDir).map(PathBuf::from);
+    let workspace_root = workspace_path.map(Path::to_path_buf);
+    let workspace_id = workspace_path.map(|path| {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        stable_workspace_id(&canonical)
+    });
+
+    resolve_shard_fanout_status(ShardFanoutResolverInput {
+        enabled,
+        workspace_id,
+        workspace_root,
+        shards_dir_override,
+    })
 }
 
 fn gather_pack_budget_buckets(workspace_path: Option<&Path>) -> PackBudgetBucketReport {
@@ -1635,6 +1662,20 @@ fn push_tailscale_local_degradations(
     }
 }
 
+fn push_shard_fanout_degradations(
+    degradations: &mut Vec<DegradationReport>,
+    report: &ShardFanoutStatusReport,
+) {
+    for degradation in &report.degraded {
+        degradations.push(DegradationReport {
+            code: degradation.code,
+            severity: degradation.severity,
+            message: degradation.message,
+            repair: degradation.repair,
+        });
+    }
+}
+
 fn tailscale_degradation_report(code: &'static str) -> DegradationReport {
     match code {
         TAILSCALE_NOT_INSTALLED_CODE => DegradationReport {
@@ -1691,6 +1732,7 @@ fn status_posture_report(
     feedback_health: &FeedbackHealthReport,
     singleflight_posture: &SingleFlightPostureReport,
     graph_compute: &GraphComputeReport,
+    shard_fanout: &ShardFanoutStatusReport,
     derived_assets: &[DerivedAssetReport],
     degradations: &[DegradationReport],
 ) -> WorkspacePostureReport {
@@ -1714,6 +1756,12 @@ fn status_posture_report(
             storage_status,
             storage_posture_reason(capabilities.storage, workspace_path, write_replay_required),
             storage_posture_fallback(capabilities.storage, workspace_path),
+        ),
+        posture_row(
+            "shard_fanout",
+            shard_fanout_posture_status(shard_fanout.posture),
+            shard_fanout_posture_reason(shard_fanout.posture),
+            shard_fanout_posture_fallback(shard_fanout.posture),
         ),
         posture_row(
             "search",
@@ -1775,6 +1823,7 @@ fn status_posture_report(
         subsystems_used: vec![
             "runtime",
             "storage",
+            "shard_fanout",
             "search",
             "memory",
             "graph_compute",
@@ -1895,6 +1944,36 @@ const fn storage_posture_fallback(
         CapabilityStatus::Pending => Some("ee init --workspace ."),
         CapabilityStatus::Degraded => Some("ee doctor --json"),
         CapabilityStatus::Unimplemented => Some("use a binary built with storage support"),
+    }
+}
+
+const fn shard_fanout_posture_status(posture: ShardFanoutPosture) -> SubsystemPostureStatus {
+    match posture {
+        ShardFanoutPosture::Disabled | ShardFanoutPosture::Enabled => SubsystemPostureStatus::Ok,
+        ShardFanoutPosture::MigrationRequired => SubsystemPostureStatus::DegradedRequired,
+        ShardFanoutPosture::Degraded => SubsystemPostureStatus::DegradedRequired,
+        ShardFanoutPosture::NotInspected => SubsystemPostureStatus::Initializing,
+    }
+}
+
+const fn shard_fanout_posture_reason(posture: ShardFanoutPosture) -> Option<&'static str> {
+    match posture {
+        ShardFanoutPosture::Disabled => Some("shard_fanout_disabled"),
+        ShardFanoutPosture::Enabled => None,
+        ShardFanoutPosture::MigrationRequired => Some("shard_fanout_migration_required"),
+        ShardFanoutPosture::Degraded => Some("shard_fanout_degraded"),
+        ShardFanoutPosture::NotInspected => Some("workspace_not_selected"),
+    }
+}
+
+const fn shard_fanout_posture_fallback(posture: ShardFanoutPosture) -> Option<&'static str> {
+    match posture {
+        ShardFanoutPosture::Disabled | ShardFanoutPosture::Enabled => None,
+        ShardFanoutPosture::MigrationRequired => {
+            Some("ee migrate shard-fanout --workspace . --dry-run --json")
+        }
+        ShardFanoutPosture::Degraded => Some("ee status --json"),
+        ShardFanoutPosture::NotInspected => Some("ee status --workspace . --json"),
     }
 }
 

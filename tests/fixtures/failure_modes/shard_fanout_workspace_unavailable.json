@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "shard_fanout_workspace_unavailable",
+  "introduced_by": {
+    "bead": "bd-f6jfs.2",
+    "epic_letter": "SHARD_FANOUT"
+  },
+  "surfaces": [
+    "status"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Shard fan-out is enabled, but status is gathered without a selected workspace.",
+    "setup_commands": [
+      "# run outside an initialized workspace or omit --workspace in a directory without .ee"
+    ],
+    "invocation": "EE_SHARD_FANOUT_ENABLED=1 ee status --json"
+  },
+  "expected_emission": {
+    "code": "shard_fanout_workspace_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "no workspace"
+    ],
+    "repair_contains": "--workspace",
+    "repair_string": "Pass --workspace or run ee init --workspace . before relying on shard routing.",
+    "repair_command_regex": "(?<cmd>ee init --workspace \\.)"
+  }
+}

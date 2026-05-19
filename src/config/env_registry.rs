@@ -92,6 +92,10 @@ pub enum EnvVar {
     SecurityProfile,
     /// `EE_SCIENCE_BACKEND_PATH`
     ScienceBackendPath,
+    /// `EE_SHARD_FANOUT_ENABLED`
+    ShardFanoutEnabled,
+    /// `EE_SHARDS_DIR`
+    ShardsDir,
     /// `EE_TEST_LOG_LEVEL`
     TestLogLevel,
     /// `EE_TEST_LOG_PATH`
@@ -172,6 +176,8 @@ impl EnvVar {
             Self::RememberCurationSyncBudgetMs,
             Self::SecurityProfile,
             Self::ScienceBackendPath,
+            Self::ShardFanoutEnabled,
+            Self::ShardsDir,
             Self::TestLogLevel,
             Self::TestLogPath,
             Self::TestLogTestId,
@@ -236,6 +242,8 @@ impl EnvVar {
             Self::RememberCurationSyncBudgetMs => "EE_REMEMBER_CURATION_SYNC_BUDGET_MS",
             Self::SecurityProfile => "EE_SECURITY_PROFILE",
             Self::ScienceBackendPath => "EE_SCIENCE_BACKEND_PATH",
+            Self::ShardFanoutEnabled => "EE_SHARD_FANOUT_ENABLED",
+            Self::ShardsDir => "EE_SHARDS_DIR",
             Self::TestLogLevel => "EE_TEST_LOG_LEVEL",
             Self::TestLogPath => "EE_TEST_LOG_PATH",
             Self::TestLogTestId => "EE_TEST_LOG_TEST_ID",
@@ -331,6 +339,12 @@ impl EnvVar {
             Self::ScienceBackendPath => {
                 "Configure an optional science analytics backend path; missing paths report backend-unavailable."
             }
+            Self::ShardFanoutEnabled => {
+                "Enable read-only shard fan-out planning and, after migration, per-workspace shard routing."
+            }
+            Self::ShardsDir => {
+                "Override the per-workspace shard directory used by shard fan-out planning."
+            }
             Self::TestLogLevel => "Control structured test-log verbosity.",
             Self::TestLogPath => "Enable structured test logging at this JSONL path.",
             Self::TestLogTestId => "Name the active structured test-log scenario.",
@@ -373,6 +387,7 @@ impl EnvVar {
         match self {
             Self::MeshMode => Some("off"),
             Self::MeshEnabled => Some("false"),
+            Self::ShardFanoutEnabled => Some("false"),
             Self::AuditLaneBatchMax => Some("64"),
             Self::AuditLaneCapacity => Some("1024"),
             Self::AuditLaneFlushMs => Some("5"),
@@ -406,6 +421,7 @@ impl EnvVar {
             | Self::DemoEvidenceRoot
             | Self::IndexDir
             | Self::L2PackCacheDir
+            | Self::ShardsDir
             | Self::Workspace
             | Self::WorkspaceRegistry => "paths",
             Self::DiagForceCapabilityGap => "diagnostics",
@@ -452,6 +468,7 @@ impl EnvVar {
             | Self::IndexPublishLockRetryAttempts
             | Self::RememberCurationSyncBudgetMs => "tuning",
             Self::ScienceBackendPath => "integration",
+            Self::ShardFanoutEnabled => "storage",
             Self::PreflightBypassSecret
             | Self::SecurityProfile
             | Self::WorkspaceHygieneAlwaysReviewPatterns
@@ -582,6 +599,23 @@ mod tests {
                 "unexpected remember curation budget default: {value}"
             ))
         }
+    }
+
+    #[test]
+    fn shard_fanout_env_vars_are_registered() -> TestResult {
+        if !EnvVar::all().contains(&EnvVar::ShardFanoutEnabled) {
+            return Err("EE_SHARD_FANOUT_ENABLED missing from registry order".to_owned());
+        }
+        if !EnvVar::all().contains(&EnvVar::ShardsDir) {
+            return Err("EE_SHARDS_DIR missing from registry order".to_owned());
+        }
+        if EnvVar::ShardFanoutEnabled.default_value() != Some("false") {
+            return Err("EE_SHARD_FANOUT_ENABLED must default to false".to_owned());
+        }
+        if EnvVar::ShardsDir.category() != "paths" {
+            return Err("EE_SHARDS_DIR must be categorized as a path override".to_owned());
+        }
+        Ok(())
     }
 
     #[test]

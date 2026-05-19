@@ -23,6 +23,9 @@ use ee::core::status::{
     MemoryHealthStatus, PackBudgetBucketReport, ReadPoolStatusReport, RuntimeReport, StatusReport,
     WalStatusReport, WorkspaceDiagnosticReport, WorkspaceStatusReport,
 };
+use ee::db::shard::{
+    ShardFanoutResolverInput, ShardFanoutStatusReport, resolve_shard_fanout_status,
+};
 use ee::models::posture::{
     OperationPostureReport, SubsystemPostureReport, SubsystemPostureStatus, WorkspacePostureReport,
 };
@@ -1131,6 +1134,9 @@ fn fixture_status_posture(
             SubsystemPostureReport::new("runtime", SubsystemPostureStatus::Ok)
                 .with_checks_passed(1),
             SubsystemPostureReport::new("storage", storage),
+            SubsystemPostureReport::new("shard_fanout", SubsystemPostureStatus::Ok)
+                .with_checks_passed(1)
+                .with_reason("shard_fanout_disabled"),
             SubsystemPostureReport::new("search", search),
             SubsystemPostureReport::new("memory", memory),
             SubsystemPostureReport::new("graph_compute", SubsystemPostureStatus::Ok)
@@ -1149,6 +1155,7 @@ fn fixture_status_posture(
         OperationPostureReport::ok([
             "runtime",
             "storage",
+            "shard_fanout",
             "search",
             "memory",
             "graph_compute",
@@ -1182,6 +1189,15 @@ fn fixture_capabilities(storage: CapabilityStatus, search: CapabilityStatus) -> 
     capabilities
 }
 
+fn fixture_shard_fanout() -> ShardFanoutStatusReport {
+    resolve_shard_fanout_status(ShardFanoutResolverInput {
+        enabled: false,
+        workspace_id: Some("wsp_golden_fixture".to_owned()),
+        workspace_root: Some(PathBuf::from("/fixture/workspace")),
+        shards_dir_override: Some(PathBuf::from("/fixture/ee/shards")),
+    })
+}
+
 fn status_missing_db_report() -> StatusReport {
     StatusReport {
         version: env!("CARGO_PKG_VERSION"),
@@ -1196,6 +1212,7 @@ fn status_missing_db_report() -> StatusReport {
         runtime: fixture_runtime_report(),
         read_pool: ReadPoolStatusReport::default(),
         wal: WalStatusReport::default(),
+        shard_fanout: fixture_shard_fanout(),
         pack_budget_buckets: PackBudgetBucketReport::default(),
         qos_posture: fixture_qos_posture(),
         memory_health: unavailable_memory_health(),
@@ -1259,6 +1276,7 @@ fn status_pending_migration_report() -> StatusReport {
         runtime: fixture_runtime_report(),
         read_pool: ReadPoolStatusReport::default(),
         wal: WalStatusReport::default(),
+        shard_fanout: fixture_shard_fanout(),
         pack_budget_buckets: PackBudgetBucketReport::default(),
         qos_posture: fixture_qos_posture(),
         memory_health: unavailable_memory_health(),
@@ -1322,6 +1340,7 @@ fn status_stale_index_lexical_only_report() -> StatusReport {
         runtime: fixture_runtime_report(),
         read_pool: ReadPoolStatusReport::default(),
         wal: WalStatusReport::default(),
+        shard_fanout: fixture_shard_fanout(),
         pack_budget_buckets: PackBudgetBucketReport::default(),
         qos_posture: fixture_qos_posture(),
         memory_health: healthy_memory_health(),
@@ -1374,6 +1393,7 @@ fn status_search_unimplemented_report() -> StatusReport {
         runtime: fixture_runtime_report(),
         read_pool: ReadPoolStatusReport::default(),
         wal: WalStatusReport::default(),
+        shard_fanout: fixture_shard_fanout(),
         pack_budget_buckets: PackBudgetBucketReport::default(),
         qos_posture: fixture_qos_posture(),
         memory_health: healthy_memory_health(),

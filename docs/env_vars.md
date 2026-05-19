@@ -51,6 +51,8 @@ must not expose their current value.
 | `EE_REMEMBER_CURATION_SYNC_BUDGET_MS` | tuning | integer milliseconds | `50` | Override remember-time curation sync budget in milliseconds. | Registry-defined default is used when unset. |
 | `EE_SECURITY_PROFILE` | policy | profile name | none | Select security profile. | Controls policy posture for security-sensitive operations. |
 | `EE_SCIENCE_BACKEND_PATH` | integration | path | none | Configure an optional science analytics backend path; missing paths report backend-unavailable. | Used by science-status and analytics commands to surface configured backend outages. |
+| `EE_SHARD_FANOUT_ENABLED` | storage | boolean flag | `false` | Enable read-only shard fan-out planning and, after migration, per-workspace shard routing. | Disabled keeps the legacy `<workspace>/.ee/ee.db` path authoritative. When enabled before migration, status/doctor report migration-required rather than creating files. |
+| `EE_SHARDS_DIR` | paths | path | none | Override the per-workspace shard directory used by shard fan-out planning. | Must be an absolute, non-symlinked directory. The catalog is planned as the sibling `catalog.db` next to this shard directory. |
 | `EE_TEST_LOG_LEVEL` | diagnostics | enum | none | Control structured test-log verbosity. | Used by the J1 structured E2E logging harness. |
 | `EE_TEST_LOG_PATH` | diagnostics | path | none | Enable structured test logging at this JSONL path. | Used by Rust and shell E2E logging helpers. |
 | `EE_TEST_LOG_TEST_ID` | diagnostics | string | none | Name the active structured test-log scenario. | Identifies events emitted by the test logging harness. |

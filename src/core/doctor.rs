@@ -10,15 +10,21 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 
+use crate::config::{EnvVar, read_env_var, read_env_var_os};
 use crate::core::agent_detect::{AgentInventoryReport, AgentInventoryStatus};
 use crate::db::{
     CreateMemoryInput, DbConnection, ForeignKeyCheckResult, IntegrityCheckResult,
     ProvenanceSampleVerificationReport, ReferenceIntegrityReport,
+    shard::{
+        ShardFanoutPosture, ShardFanoutResolverInput, resolve_shard_fanout_status,
+        shard_fanout_enabled_from_env_value,
+    },
 };
 use crate::models::error_codes::{self, ErrorCode};
 use crate::models::{SingleFlightPostureReport, TrustClass};
 
 use super::build_cli_runtime;
+use super::curate::stable_workspace_id;
 use super::index::{IndexHealth, IndexStatusOptions, get_index_status};
 use super::qos::{QosLaneSummary, summarize_qos_lane_registry};
 use super::singleflight::singleflight_posture_report;
@@ -230,6 +236,7 @@ impl DoctorReport {
             check_runtime(),
             check_workspace(workspace_path),
             check_database(workspace_path),
+            check_shard_fanout(workspace_path),
             check_search_index(workspace_path),
             check_cass(),
         ];
@@ -1446,6 +1453,54 @@ fn check_database(workspace_path: Option<&Path>) -> CheckResult {
             "database",
             format!("Database readiness check failed: {error}"),
             error_codes::DATABASE_CORRUPTED,
+        ),
+    }
+}
+
+fn check_shard_fanout(workspace_path: Option<&Path>) -> CheckResult {
+    let enabled =
+        shard_fanout_enabled_from_env_value(read_env_var(EnvVar::ShardFanoutEnabled).as_deref());
+    let workspace_root = workspace_path.map(Path::to_path_buf);
+    let workspace_id = workspace_path.map(|path| {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        stable_workspace_id(&canonical)
+    });
+    let report = resolve_shard_fanout_status(ShardFanoutResolverInput {
+        enabled,
+        workspace_id,
+        workspace_root,
+        shards_dir_override: read_env_var_os(EnvVar::ShardsDir).map(PathBuf::from),
+    });
+
+    match report.posture {
+        ShardFanoutPosture::Disabled => CheckResult::ok(
+            "shard_fanout",
+            "Shard fan-out is disabled; legacy workspace database routing remains authoritative.",
+        ),
+        ShardFanoutPosture::Enabled => CheckResult::ok(
+            "shard_fanout",
+            format!(
+                "Shard fan-out is enabled for {}.",
+                report
+                    .shard_path
+                    .as_ref()
+                    .map_or_else(|| "<unknown>".into(), |path| path.display().to_string())
+            ),
+        ),
+        ShardFanoutPosture::MigrationRequired => CheckResult::warning(
+            "shard_fanout",
+            "Shard fan-out is enabled but the catalog or workspace shard is not ready.",
+            error_codes::MIGRATION_REQUIRED,
+        ),
+        ShardFanoutPosture::Degraded => CheckResult::warning(
+            "shard_fanout",
+            "Shard fan-out configuration is unsafe and routing is blocked.",
+            error_codes::CONFIG_INVALID_VALUE,
+        ),
+        ShardFanoutPosture::NotInspected => CheckResult::warning(
+            "shard_fanout",
+            "Shard fan-out is enabled but no workspace was selected for inspection.",
+            error_codes::WORKSPACE_NOT_SPECIFIED,
         ),
     }
 }

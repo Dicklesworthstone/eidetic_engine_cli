@@ -25,6 +25,7 @@ use crate::models::{
 };
 
 pub mod read_pool;
+pub mod shard;
 
 pub const SUBSYSTEM: &str = "db";
 pub const MIGRATION_TABLE_NAME: &str = "ee_schema_migrations";

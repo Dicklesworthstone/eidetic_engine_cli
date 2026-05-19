@@ -21,6 +21,8 @@
         "runtime",
         "read_pool",
         "wal",
+        "shardFanout",
+        "packBudgetBuckets",
         "qos",
         "memoryHealth",
         "curationHealth",
@@ -42,6 +44,8 @@
         "runtime": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "read_pool": {"$ref": "#/$defs/readPoolStatus"},
         "wal": {"$ref": "#/$defs/walStatus"},
+        "shardFanout": {"$ref": "#/$defs/shardFanoutStatus"},
+        "packBudgetBuckets": {"$ref": "#/$defs/packBudgetBuckets"},
         "qos": {"$ref": "#/$defs/qosStatus"},
         "memoryHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "curationHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
@@ -58,7 +62,7 @@
   "field_presets": {
     "minimal": ["command", "version", "workspace"],
     "summary": ["command", "version", "workspace", "posture", "singleFlight", "qos", "capabilities"],
-    "standard": ["command", "version", "workspace", "posture", "capabilities", "runtime", "read_pool", "wal", "qos", "memoryHealth", "curationHealth", "feedbackHealth", "singleFlight", "graphCompute", "graphSnapshotArtifact", "derivedAssets", "agentInventory", "degraded"],
+    "standard": ["command", "version", "workspace", "posture", "capabilities", "runtime", "read_pool", "wal", "shardFanout", "packBudgetBuckets", "qos", "memoryHealth", "curationHealth", "feedbackHealth", "singleFlight", "graphCompute", "graphSnapshotArtifact", "derivedAssets", "agentInventory", "degraded"],
     "full": ["*"]
   },
   "$defs": {
@@ -118,6 +122,87 @@
         "frames": {"type": "integer", "minimum": 0},
         "page_size": {"type": "integer", "minimum": 0},
         "checkpoint_threshold_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "shardFanoutStatus": {
+      "type": "object",
+      "required": ["schema", "enabled", "posture", "workspaceId", "workspaceRoot", "legacyDatabasePath", "dataRoot", "shardRoot", "catalogPath", "shardPath", "shardId", "catalogExists", "shardExists", "catalogContract", "shardGeneration", "migrationState", "lastVerifiedHashes", "recovery", "degraded"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.shard_fanout.status.v1"},
+        "enabled": {"type": "boolean"},
+        "posture": {"type": "string", "enum": ["disabled", "enabled", "migration_required", "degraded", "not_inspected"]},
+        "workspaceId": {"type": ["string", "null"]},
+        "workspaceRoot": {"type": ["string", "null"]},
+        "legacyDatabasePath": {"type": ["string", "null"]},
+        "dataRoot": {"type": "string"},
+        "shardRoot": {"type": "string"},
+        "catalogPath": {"type": "string"},
+        "shardPath": {"type": ["string", "null"]},
+        "shardId": {"type": ["string", "null"]},
+        "catalogExists": {"type": "boolean"},
+        "shardExists": {"type": "boolean"},
+        "catalogContract": {
+          "type": "object",
+          "required": ["schemaVersion", "requiredFields"],
+          "additionalProperties": false,
+          "properties": {
+            "schemaVersion": {"type": "integer", "minimum": 1},
+            "requiredFields": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "shardGeneration": {"type": ["integer", "null"], "minimum": 0},
+        "migrationState": {"type": "string", "enum": ["legacy_active", "authoritative", "migration_required", "blocked", "not_inspected"]},
+        "lastVerifiedHashes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "value"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {"type": "string"},
+              "value": {"type": ["string", "null"]}
+            }
+          }
+        },
+        "recovery": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["priority", "kind", "command"],
+            "additionalProperties": false,
+            "properties": {
+              "priority": {"type": "integer", "minimum": 0},
+              "kind": {"type": "string"},
+              "command": {"type": "string"}
+            }
+          }
+        },
+        "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}}
+      }
+    },
+    "packBudgetBuckets": {
+      "type": "object",
+      "required": ["schema", "windowHours", "totalInvocations", "adaptiveInvocations", "nonAdaptiveInvocations", "buckets"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.status.pack_budget_buckets.v1"},
+        "windowHours": {"type": "integer", "minimum": 0},
+        "totalInvocations": {"type": "integer", "minimum": 0},
+        "adaptiveInvocations": {"type": "integer", "minimum": 0},
+        "nonAdaptiveInvocations": {"type": "integer", "minimum": 0},
+        "buckets": {
+          "type": "object",
+          "required": ["below1k", "oneTo2k", "twoTo4k", "fourTo8k", "eightKPlus"],
+          "additionalProperties": false,
+          "properties": {
+            "below1k": {"type": "integer", "minimum": 0},
+            "oneTo2k": {"type": "integer", "minimum": 0},
+            "twoTo4k": {"type": "integer", "minimum": 0},
+            "fourTo8k": {"type": "integer", "minimum": 0},
+            "eightKPlus": {"type": "integer", "minimum": 0}
+          }
+        }
       }
     },
     "qosStatus": {

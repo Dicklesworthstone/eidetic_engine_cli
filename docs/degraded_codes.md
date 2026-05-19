@@ -8278,6 +8278,189 @@ EE_WAL_CHECKPOINT_BYTES_THRESHOLD=1 ee status --workspace . --json
 
 ---
 
+## `shard_fanout_catalog_missing`
+
+**Severity:** warning
+
+**Surfaces:** status
+
+**Introduced by:** bd-f6jfs.2 (epic SHARD_FANOUT)
+
+**Trigger.** Shard fan-out is enabled for a workspace, but the planned catalog database does not exist yet.
+
+**Setup.**
+
+```bash
+ee init --workspace . --json
+mkdir -p /tmp/ee-shards
+```
+
+**Invocation.**
+
+```bash
+EE_SHARD_FANOUT_ENABLED=1 EE_SHARDS_DIR=/tmp/ee-shards ee status --workspace . --json
+```
+
+**Expected emission.** Message contains: `catalog database`, `missing`
+
+**Repair hint.** Run ee migrate shard-fanout --workspace . --dry-run --json.
+
+**Fixture.** [`tests/fixtures/failure_modes/shard_fanout_catalog_missing.json`](../tests/fixtures/failure_modes/shard_fanout_catalog_missing.json)
+
+---
+
+## `shard_fanout_home_unavailable`
+
+**Severity:** warning
+
+**Surfaces:** status
+
+**Introduced by:** bd-f6jfs.2 (epic SHARD_FANOUT)
+
+**Trigger.** Shard fan-out is enabled, no EE_SHARDS_DIR override is set, and neither XDG_DATA_HOME nor HOME is available for default path derivation.
+
+**Setup.**
+
+```bash
+ee init --workspace . --json
+```
+
+**Invocation.**
+
+```bash
+env -u XDG_DATA_HOME -u HOME EE_SHARD_FANOUT_ENABLED=1 ee status --workspace . --json
+```
+
+**Expected emission.** Message contains: `default data directory`
+
+**Repair hint.** Set XDG_DATA_HOME, HOME, or EE_SHARDS_DIR before enabling shard fan-out.
+
+**Fixture.** [`tests/fixtures/failure_modes/shard_fanout_home_unavailable.json`](../tests/fixtures/failure_modes/shard_fanout_home_unavailable.json)
+
+---
+
+## `shard_fanout_root_unsafe`
+
+**Severity:** high
+
+**Surfaces:** status
+
+**Introduced by:** bd-f6jfs.2 (epic SHARD_FANOUT)
+
+**Trigger.** Shard fan-out is enabled with an unsafe shard root such as a relative path, parent-component path, root directory, symlinked component, or unreadable component.
+
+**Setup.**
+
+```bash
+ee init --workspace . --json
+```
+
+**Invocation.**
+
+```bash
+EE_SHARD_FANOUT_ENABLED=1 EE_SHARDS_DIR=relative-shards ee status --workspace . --json
+```
+
+**Expected emission.** Message contains: `unsafe shard root`
+
+**Repair hint.** Set EE_SHARDS_DIR to an absolute, non-symlinked directory below an operator-owned data root.
+
+**Fixture.** [`tests/fixtures/failure_modes/shard_fanout_root_unsafe.json`](../tests/fixtures/failure_modes/shard_fanout_root_unsafe.json)
+
+---
+
+## `shard_fanout_shard_missing`
+
+**Severity:** warning
+
+**Surfaces:** status
+
+**Introduced by:** bd-f6jfs.2 (epic SHARD_FANOUT)
+
+**Trigger.** Shard fan-out is enabled and the catalog database exists, but the selected workspace shard file does not exist yet.
+
+**Setup.**
+
+```bash
+ee init --workspace . --json
+mkdir -p /tmp/ee-shard-root/shards
+touch /tmp/ee-shard-root/catalog.db
+```
+
+**Invocation.**
+
+```bash
+EE_SHARD_FANOUT_ENABLED=1 EE_SHARDS_DIR=/tmp/ee-shard-root/shards ee status --workspace . --json
+```
+
+**Expected emission.** Message contains: `workspace shard`, `missing`
+
+**Repair hint.** Run ee migrate shard-fanout --workspace . --dry-run --json.
+
+**Fixture.** [`tests/fixtures/failure_modes/shard_fanout_shard_missing.json`](../tests/fixtures/failure_modes/shard_fanout_shard_missing.json)
+
+---
+
+## `shard_fanout_workspace_id_unsafe`
+
+**Severity:** high
+
+**Surfaces:** status
+
+**Introduced by:** bd-f6jfs.2 (epic SHARD_FANOUT)
+
+**Trigger.** Shard fan-out path derivation receives an unsafe workspace identifier. Public CLI status normally derives safe workspace IDs; this fixture documents the fail-closed resolver branch for corrupted or future injected identifiers.
+
+**Setup.**
+
+```bash
+# resolver/unit fixture: workspace_id = '../unsafe'
+```
+
+**Invocation.**
+
+```bash
+ee status --workspace . --json
+```
+
+**Expected emission.** Message contains: `unsafe workspace ID`
+
+**Repair hint.** Re-resolve the workspace through ee workspace status before enabling shard fan-out.
+
+**Fixture.** [`tests/fixtures/failure_modes/shard_fanout_workspace_id_unsafe.json`](../tests/fixtures/failure_modes/shard_fanout_workspace_id_unsafe.json)
+
+---
+
+## `shard_fanout_workspace_unavailable`
+
+**Severity:** warning
+
+**Surfaces:** status
+
+**Introduced by:** bd-f6jfs.2 (epic SHARD_FANOUT)
+
+**Trigger.** Shard fan-out is enabled, but status is gathered without a selected workspace.
+
+**Setup.**
+
+```bash
+# run outside an initialized workspace or omit --workspace in a directory without .ee
+```
+
+**Invocation.**
+
+```bash
+EE_SHARD_FANOUT_ENABLED=1 ee status --json
+```
+
+**Expected emission.** Message contains: `no workspace`
+
+**Repair hint.** Pass --workspace or run ee init --workspace . before relying on shard routing.
+
+**Fixture.** [`tests/fixtures/failure_modes/shard_fanout_workspace_unavailable.json`](../tests/fixtures/failure_modes/shard_fanout_workspace_unavailable.json)
+
+---
+
 ## `wal_holds_orphaned`
 
 **Severity:** warning

@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.migration.shard_fanout.v1.json",
+  "title": "ee.migration.shard_fanout.v1",
+  "description": "Structured audit event for per-workspace shard fan-out migration planning, apply, rollback, and verification.",
+  "type": "object",
+  "required": [
+    "schema",
+    "workspace_id",
+    "shard_id",
+    "source_db_hash",
+    "target_db_hash",
+    "migration_phase",
+    "dry_run",
+    "actor",
+    "elapsed_ms",
+    "degraded_codes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.migration.shard_fanout.v1"
+    },
+    "workspace_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Deterministic workspace ID whose rows are planned for, copied to, verified in, or rolled back from this shard."
+    },
+    "workspace_path": {
+      "type": ["string", "null"],
+      "description": "Redaction-safe workspace path or null when the event is emitted from catalog-only recovery."
+    },
+    "shard_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Stable shard identifier. For v1 this is expected to derive from workspace_id."
+    },
+    "catalog_path": {
+      "type": ["string", "null"],
+      "description": "Catalog database path used by this migration event."
+    },
+    "source_db_path": {
+      "type": ["string", "null"],
+      "description": "Legacy source ee.db path, when known."
+    },
+    "target_db_path": {
+      "type": ["string", "null"],
+      "description": "Target shard path for this workspace, when known."
+    },
+    "preserved_source_path": {
+      "type": ["string", "null"],
+      "description": "No-delete preserved source database path, for example .pre-shard-fanout.db."
+    },
+    "source_db_hash": {
+      "type": ["string", "null"],
+      "pattern": "^(blake3:[0-9a-f]{64}|sha256:[0-9a-f]{64})$",
+      "description": "Hash of the source database or null for phases that run before source hashing is possible."
+    },
+    "target_db_hash": {
+      "type": ["string", "null"],
+      "pattern": "^(blake3:[0-9a-f]{64}|sha256:[0-9a-f]{64})$",
+      "description": "Hash of the target shard database or null for dry-run phases that do not materialize a target."
+    },
+    "migration_phase": {
+      "type": "string",
+      "enum": [
+        "dry_run",
+        "catalog_planned",
+        "catalog_created",
+        "shard_planned",
+        "shard_created",
+        "rows_copied",
+        "integrity_checked",
+        "source_preserved",
+        "audit_written",
+        "completed",
+        "rollback_planned",
+        "rollback_completed",
+        "failed"
+      ]
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "actor": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "elapsed_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "row_counts": {
+      "type": "object",
+      "description": "Per-table row counts observed or planned for this workspace shard.",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "rollback_available": {
+      "type": "boolean",
+      "description": "True when the event proves a preserved source DB or verified backup is available for rollback."
+    },
+    "degraded_codes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "shard_attach_failed",
+          "shard_chain_mismatch",
+          "cross_shard_skew_detected",
+          "shard_catalog_missing",
+          "shard_catalog_mismatch",
+          "shard_missing",
+          "shard_unsafe_path",
+          "shard_fanout_disabled_migrated_layout",
+          "cross_shard_write_unsupported"
+        ]
+      }
+    },
+    "recovery": {
+      "type": "array",
+      "description": "Structured recovery actions in the same spirit as error.details.recovery[].",
+      "items": {
+        "type": "object",
+        "required": ["priority", "kind", "command"],
+        "additionalProperties": false,
+        "properties": {
+          "priority": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1
+          },
+          "command": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "message": {
+      "type": ["string", "null"],
+      "description": "Short diagnostic message for human logs. Machine decisions must use structured fields."
+    }
+  }
+}

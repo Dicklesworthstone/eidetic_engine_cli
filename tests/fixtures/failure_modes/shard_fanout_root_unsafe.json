@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "shard_fanout_root_unsafe",
+  "introduced_by": {
+    "bead": "bd-f6jfs.2",
+    "epic_letter": "SHARD_FANOUT"
+  },
+  "surfaces": [
+    "status"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "Shard fan-out is enabled with an unsafe shard root such as a relative path, parent-component path, root directory, symlinked component, or unreadable component.",
+    "setup_commands": [
+      "ee init --workspace . --json"
+    ],
+    "invocation": "EE_SHARD_FANOUT_ENABLED=1 EE_SHARDS_DIR=relative-shards ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "shard_fanout_root_unsafe",
+    "severity": "high",
+    "message_contains": [
+      "unsafe shard root"
+    ],
+    "repair_contains": "EE_SHARDS_DIR",
+    "repair_string": "Set EE_SHARDS_DIR to an absolute, non-symlinked directory below an operator-owned data root."
+  }
+}

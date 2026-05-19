@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "shard_fanout_shard_missing",
+  "introduced_by": {
+    "bead": "bd-f6jfs.2",
+    "epic_letter": "SHARD_FANOUT"
+  },
+  "surfaces": [
+    "status"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Shard fan-out is enabled and the catalog database exists, but the selected workspace shard file does not exist yet.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "mkdir -p /tmp/ee-shard-root/shards",
+      "touch /tmp/ee-shard-root/catalog.db"
+    ],
+    "invocation": "EE_SHARD_FANOUT_ENABLED=1 EE_SHARDS_DIR=/tmp/ee-shard-root/shards ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "shard_fanout_shard_missing",
+    "severity": "warning",
+    "message_contains": [
+      "workspace shard",
+      "missing"
+    ],
+    "repair_contains": "ee migrate shard-fanout",
+    "repair_string": "Run ee migrate shard-fanout --workspace . --dry-run --json.",
+    "repair_command_regex": "(?<cmd>ee migrate shard-fanout --workspace \\. --dry-run --json)"
+  }
+}
