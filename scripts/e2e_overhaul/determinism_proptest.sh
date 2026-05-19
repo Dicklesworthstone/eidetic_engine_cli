@@ -2,8 +2,9 @@
 # N4.5 - Typed determinism proptest e2e driver.
 #
 # Runs the persisted-regression preflight, the 1024-case seeded pack property,
-# and a small copied-store context replay property. Agents can force remote
-# Cargo execution with EE_DETERMINISM_PROPTEST_USE_RCH=1.
+# and a small copied-store context replay property only when explicitly routed
+# through RCH. Default execution logs skipped gates and never falls back to
+# local Cargo.
 #
 # shellcheck disable=SC2329
 
@@ -23,19 +24,22 @@ BUDGET_SECONDS="${EE_DETERMINISM_PROPTEST_BUDGET_SECONDS:-60}"
 
 run_cargo_gate() {
     local label="$1"
-    shift
+    local sample_count="$2"
+    shift 2
 
-    if [ "${EE_DETERMINISM_PROPTEST_USE_RCH:-0}" = "1" ]; then
-        if "$REPO_ROOT/scripts/rch_verify.sh" \
-            --bead-id bd-17c65.14.4.5 \
-            --summary \
-            --no-write \
-            --project-root "$REPO_ROOT" \
-            -- "$@"; then
-            e2e_log_assert_eq "true" "true" "$label"
-            return 0
-        fi
-    elif (cd "$REPO_ROOT" && "$@"); then
+    if [ "${EE_DETERMINISM_PROPTEST_USE_RCH:-0}" != "1" ]; then
+        e2e_log_assert_eq "skipped" "skipped" "$label.remote_required"
+        return 0
+    fi
+
+    cases_sampled=$((cases_sampled + sample_count))
+
+    if RCH_REQUIRE_REMOTE=1 "$REPO_ROOT/scripts/rch_verify.sh" \
+        --bead-id bd-17c65.14.4.5 \
+        --summary \
+        --no-write \
+        --project-root "$REPO_ROOT" \
+        -- "$@"; then
         e2e_log_assert_eq "true" "true" "$label"
         return 0
     fi
@@ -87,20 +91,21 @@ fi
 
 run_cargo_gate \
     "determinism_proptest_regression_preflight" \
+    0 \
     cargo test --test property_query_and_pack \
         determinism_regression_fixtures_replay_before_sampling \
         -- --exact --nocapture || true
 
-cases_sampled=$((cases_sampled + 1024))
 run_cargo_gate \
     "determinism_proptest_seeded_pack_1024_cases" \
+    1024 \
     cargo test --test property_query_and_pack \
         seeded_pack_assembly_replays_byte_identical_output \
         -- --exact --nocapture || true
 
-cases_sampled=$((cases_sampled + 16))
 run_cargo_gate \
     "determinism_proptest_context_copied_store_16_cases" \
+    16 \
     cargo test --test property_query_and_pack \
         context_pack_json_replays_across_copied_store_tuple \
         -- --exact --nocapture || true
@@ -108,6 +113,7 @@ run_cargo_gate \
 if [ "${EE_PROPTEST_LONG:-0}" = "1" ]; then
     run_cargo_gate \
         "determinism_proptest_full_property_query_and_pack" \
+        0 \
         cargo test --test property_query_and_pack -- --nocapture || true
 fi
 
