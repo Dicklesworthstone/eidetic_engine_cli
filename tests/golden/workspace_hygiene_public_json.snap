@@ -1,0 +1,138 @@
+{
+  "data": {
+    "beadsState": {
+      "classification": "beads_clean",
+      "conflictMarkersFound": false,
+      "degradedCodes": [],
+      "jsonlPosture": {
+        "entryKind": null,
+        "presentInDirtySet": false,
+        "stagedChange": false,
+        "unstagedChange": false,
+        "untracked": false
+      },
+      "metadataSignal": "unknown",
+      "parseErrorLine": null,
+      "reservationHolders": [],
+      "schema": "ee.beads_hygiene_state.v1"
+    },
+    "bucketCounts": [
+      {
+        "count": 1,
+        "name": "stage_candidate"
+      }
+    ],
+    "command": "workspace hygiene",
+    "coordinationState": {
+      "activeAgentCount": 0,
+      "activeAgents": [],
+      "agentMailAvailable": false,
+      "blockedByCoordination": [],
+      "degradedCodes": [
+        "workspace_hygiene_agent_mail_unavailable"
+      ],
+      "ignoredReservations": [],
+      "observedSharedReservations": [],
+      "reservationCount": 0,
+      "schema": "ee.hygiene_coordination_overlay.v1"
+    },
+    "degraded": [
+      "workspace_hygiene_agent_mail_unavailable",
+      "workspace_hygiene_partial_metadata"
+    ],
+    "dirtyPathCount": 1,
+    "doNotCommit": [],
+    "gitSummary": {
+      "bucketCounts": [
+        {
+          "count": 1,
+          "name": "stage_candidate"
+        }
+      ],
+      "dirtyPathCount": 1,
+      "kindCounts": [
+        {
+          "count": 1,
+          "name": "docs"
+        }
+      ],
+      "repositoryRoot": "<workspace>"
+    },
+    "kindCounts": [
+      {
+        "count": 1,
+        "name": "docs"
+      }
+    ],
+    "needsHumanReview": [],
+    "nextActions": [
+      "Review stagingRecommendations and commit one logical group at a time.",
+      "Refresh Agent Mail reservations before committing coordination-sensitive paths."
+    ],
+    "outputTruncation": {
+      "maxPathClassifications": 10000,
+      "maxPathsPerList": 10000,
+      "maxPathsPerStagingGroup": 10000,
+      "omittedByBucket": [],
+      "omittedByKind": [],
+      "omittedDoNotCommit": 0,
+      "omittedNeedsHumanReview": 0,
+      "omittedPathClassifications": 0,
+      "stagingGroups": [],
+      "truncated": false
+    },
+    "pathClassifications": [
+      {
+        "bucket": "stage_candidate",
+        "confidence": 0.85,
+        "gitState": {
+          "entryKind": "untracked",
+          "staged": "?",
+          "unstaged": "?"
+        },
+        "kind": "docs",
+        "path": "notes.md",
+        "reasons": [
+          "docs_markdown_root"
+        ],
+        "redactedEvidence": [],
+        "schema": "ee.hygiene_classification_row.v1",
+        "suggestedGroup": "docs"
+      }
+    ],
+    "readOnly": true,
+    "repositoryRoot": "<workspace>",
+    "schema": "ee.workspace_hygiene.v1",
+    "secretScan": {
+      "maxFileBytes": 65536,
+      "maxFiles": 1000,
+      "maxTotalBytes": 1000000,
+      "readOnly": true,
+      "scannedByteCount": 26,
+      "scannedFileCount": 1,
+      "skippedContentScanCount": 0
+    },
+    "stagingRecommendations": [
+      {
+        "kinds": [
+          "docs"
+        ],
+        "name": "docs",
+        "omittedPathCount": 0,
+        "pathCount": 1,
+        "paths": [
+          "notes.md"
+        ],
+        "pathsTruncated": false,
+        "readOnly": true,
+        "reasons": [
+          "docs_markdown_root"
+        ],
+        "recommendation": "review_and_stage_as_one_logical_commit"
+      }
+    ],
+    "workspace": "<workspace>"
+  },
+  "schema": "ee.response.v1",
+  "success": true
+}

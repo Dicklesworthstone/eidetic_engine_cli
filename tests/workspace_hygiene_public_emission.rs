@@ -11,13 +11,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 type TestResult = Result<(), String>;
 
 const OVERSIZED_BEADS_JSONL_LEN: usize = 8 * 1024 * 1024 + 1024;
 const SYNTHETIC_RAW_SECRET: &str = "sk-proj-WORKSPACEHYGIENEPUBLICSYNTHETIC000000000000";
 const SYNTHETIC_BENIGN_LOOKALIKE: &str = "sk-proj-example-placeholder";
+const WORKSPACE_HYGIENE_PUBLIC_JSON_GOLDEN: &str =
+    include_str!("golden/workspace_hygiene_public_json.snap");
+const WORKSPACE_HYGIENE_PUBLIC_HUMAN_GOLDEN: &str =
+    include_str!("golden/workspace_hygiene_public_human.snap");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CoverageKind {
@@ -225,6 +229,69 @@ fn string_array_at<'a>(value: &'a Value, pointer: &str) -> Vec<&'a str> {
         .collect()
 }
 
+fn canonicalize_json(value: Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.into_iter().map(canonicalize_json).collect()),
+        Value::Object(map) => {
+            let mut entries = map.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            let mut sorted = Map::new();
+            for (key, value) in entries {
+                sorted.insert(key, canonicalize_json(value));
+            }
+            Value::Object(sorted)
+        }
+        other => other,
+    }
+}
+
+fn scrub_workspace_path(value: Value, workspace: &Path) -> Value {
+    let marker = workspace.display().to_string();
+    scrub_workspace_path_string(value, &marker)
+}
+
+fn scrub_workspace_path_string(value: Value, marker: &str) -> Value {
+    match value {
+        Value::String(text) => Value::String(text.replace(marker, "<workspace>")),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|item| scrub_workspace_path_string(item, marker))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, scrub_workspace_path_string(value, marker)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn normalized_json_snapshot(value: &Value, workspace: &Path) -> Result<String, String> {
+    let normalized = canonicalize_json(scrub_workspace_path(value.clone(), workspace));
+    serde_json::to_string_pretty(&normalized)
+        .map(|mut rendered| {
+            rendered.push('\n');
+            rendered
+        })
+        .map_err(|error| format!("serialize normalized workspace hygiene JSON: {error}"))
+}
+
+fn normalized_human_snapshot(stdout: &str, workspace: &Path) -> String {
+    stdout.replace(&workspace.display().to_string(), "<workspace>")
+}
+
+fn assert_golden(actual: &str, expected: &str, context: &str) -> TestResult {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "{context} golden mismatch\n--- expected\n{expected}+++ actual\n{actual}"
+        ))
+    }
+}
+
 #[test]
 fn workspace_hygiene_degraded_code_coverage_matrix_is_explicit() -> TestResult {
     let mut matrix_codes = std::collections::BTreeSet::new();
@@ -333,6 +400,12 @@ fn workspace_hygiene_json_public_surface_emits_degraded_codes() -> TestResult {
     )?;
     ensure_success(&output, "workspace hygiene json")?;
     let value = parse_json(&output, "workspace hygiene json")?;
+    let normalized = normalized_json_snapshot(&value, &workspace)?;
+    assert_golden(
+        &normalized,
+        WORKSPACE_HYGIENE_PUBLIC_JSON_GOLDEN,
+        "workspace hygiene public JSON",
+    )?;
 
     if value["schema"] != "ee.response.v1" {
         return Err(format!("unexpected response schema: {}", value["schema"]));
@@ -587,6 +660,12 @@ fn workspace_hygiene_human_public_surface_summarizes_degraded_state() -> TestRes
     ensure_success(&output, "workspace hygiene human")?;
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("workspace hygiene human stdout UTF-8: {error}"))?;
+    let normalized = normalized_human_snapshot(&stdout, &workspace);
+    assert_golden(
+        &normalized,
+        WORKSPACE_HYGIENE_PUBLIC_HUMAN_GOLDEN,
+        "workspace hygiene public human",
+    )?;
 
     for expected in [
         "Workspace hygiene:",

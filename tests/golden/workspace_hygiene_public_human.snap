@@ -1,0 +1,14 @@
+Workspace hygiene: 1 dirty paths
+Repository: <workspace>
+
+Buckets:
+  stage_candidate: 1
+
+Stage candidates:
+  docs: 1 paths
+
+Secret scan: 1 files, 26 bytes, 0 skipped
+
+Degraded:
+  workspace_hygiene_agent_mail_unavailable
+  workspace_hygiene_partial_metadata
