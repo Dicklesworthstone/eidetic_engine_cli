@@ -15,6 +15,7 @@
     "limits",
     "counts",
     "bv",
+    "memoryDrift",
     "sourceStatusCounts",
     "sourceStatuses",
     "resourcePressurePosture",
@@ -37,6 +38,7 @@
     "limits": {"type": "object"},
     "counts": {"type": "object"},
     "bv": {"type": "object"},
+    "memoryDrift": {"$ref": "#/definitions/memoryDriftSummary"},
     "sourceStatusCounts": {"type": "object"},
     "sourceStatuses": {
       "type": "array",
@@ -158,6 +160,42 @@
         "graphGeneration": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0}]}
       }
     },
+    "memoryDriftSummary": {
+      "type": "object",
+      "required": [
+        "status",
+        "available",
+        "affectedCount",
+        "topAffectedMemoryIds",
+        "degradedCodes",
+        "rawSnippetsIncluded",
+        "rawCommandBodiesIncluded",
+        "fullListingsIncluded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"type": "string"},
+        "available": {"type": "boolean"},
+        "reportMode": {"type": "string"},
+        "totalMemories": {"type": "integer", "minimum": 0},
+        "currentCount": {"type": "integer", "minimum": 0},
+        "changedCount": {"type": "integer", "minimum": 0},
+        "missingSourceCount": {"type": "integer", "minimum": 0},
+        "staleAnchorCount": {"type": "integer", "minimum": 0},
+        "unverifiableCount": {"type": "integer", "minimum": 0},
+        "suppressedCount": {"type": "integer", "minimum": 0},
+        "affectedCount": {"type": "integer", "minimum": 0},
+        "topAffectedMemoryIds": {"$ref": "#/definitions/stringArray"},
+        "degradedCodes": {"$ref": "#/definitions/stringArray"},
+        "sourceKindCounts": {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        },
+        "rawSnippetsIncluded": {"const": false},
+        "rawCommandBodiesIncluded": {"const": false},
+        "fullListingsIncluded": {"const": false}
+      }
+    },
     "topRisk": {
       "type": "object",
       "required": [
@@ -213,8 +251,33 @@
       "reportHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
       "workspaceHash": "blake3:2222222222222222222222222222222222222222222222222222222222222222",
       "limits": {"maxRecommendations": 5},
-      "counts": {"fileSurfaceRiskCount": 1, "activeReservationCount": 1, "dirtyFileCount": 1},
+      "counts": {
+        "fileSurfaceRiskCount": 1,
+        "activeReservationCount": 1,
+        "dirtyFileCount": 1,
+        "memoryDriftAffectedCount": 2,
+        "memoryDriftTopAffectedCount": 2
+      },
       "bv": {"topPickIds": []},
+      "memoryDrift": {
+        "status": "degraded",
+        "available": true,
+        "reportMode": "recent_pack_items",
+        "totalMemories": 3,
+        "currentCount": 1,
+        "changedCount": 1,
+        "missingSourceCount": 1,
+        "staleAnchorCount": 0,
+        "unverifiableCount": 0,
+        "suppressedCount": 0,
+        "affectedCount": 2,
+        "topAffectedMemoryIds": ["mem_changed", "mem_missing"],
+        "degradedCodes": ["memory_drift_source_changed", "memory_drift_source_missing"],
+        "sourceKindCounts": {"provenance_chain": 2, "pack_record": 1},
+        "rawSnippetsIncluded": false,
+        "rawCommandBodiesIncluded": false,
+        "fullListingsIncluded": false
+      },
       "sourceStatusCounts": {"ready": 1},
       "sourceStatuses": [],
       "resourcePressurePosture": "low",

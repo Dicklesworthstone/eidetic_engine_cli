@@ -23,11 +23,12 @@ use serde_json::{Value, json};
 use sqlmodel_core::{Row as SqlRow, Value as SqlValue};
 
 use crate::cache::CacheBudget;
-use crate::db::DbConnection;
+use crate::db::{DbConnection, StoredAuditEntry, audit_actions};
 use crate::models::{
     ArtifactDegradationSeverity, ArtifactKind, ArtifactSummary, DomainError, MetricValue,
     ProfileReference, ProvenanceEntry, RedactionLevel, RedactionPosture, SummaryDegradation,
-    SummaryDegradationCode,
+    SummaryDegradationCode, VERIFICATION_EVIDENCE_SCHEMA_V1, VerificationEvidenceRecord,
+    VerificationStatus, verification_evidence_beads_summary,
 };
 use crate::output;
 use crate::pack::{
@@ -53,6 +54,8 @@ const MANIFEST_FILE: &str = "manifest.json";
 const STATUS_FILE: &str = "status.json";
 const DOCTOR_FILE: &str = "doctor.json";
 const AUDIT_FILE: &str = "audit.jsonl";
+const VERIFICATION_EVIDENCE_SUMMARY_FILE: &str = "verification_evidence_summary.json";
+const MEMORY_DRIFT_SUMMARY_FILE: &str = "memory_drift_summary.json";
 const CAPABILITIES_FILE: &str = "capabilities.json";
 const SCHEMA_FILE: &str = "schema_version.json";
 const PROFILE_EVIDENCE_FILE: &str = "profile_evidence.json";
@@ -70,6 +73,7 @@ const SWARM_BRIEF_SUMMARY_FILE: &str = "swarm_brief_summary.json";
 const COORDINATION_FALLBACK_SUMMARY_FILE: &str = "coordination_fallback_summary.json";
 const COORDINATION_FALLBACK_LEDGER_FILE: &str = "coordination-fallback-evidence.jsonl";
 const MAX_COORDINATION_FALLBACK_SUMMARY_RECORDS: usize = 16;
+const MAX_VERIFICATION_EVIDENCE_SUMMARY_RECORDS: usize = 16;
 const SINGLEFLIGHT_POSTURE_FILE: &str = "singleflight_posture.json";
 const QOS_LANE_SUMMARY_FILE: &str = "qos_lane_summary.json";
 const TRIAGE_SUMMARY_FILE: &str = "scale_triage_summary.json";
@@ -254,6 +258,8 @@ struct CollectedDiagnostics {
     status_json: String,
     doctor_json: String,
     audit_json: String,
+    verification_evidence_summary_json: String,
+    memory_drift_summary_json: String,
     capabilities_json: String,
     schema_json: String,
     profile_evidence_json: String,
@@ -337,6 +343,14 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         (STATUS_FILE, &diagnostics.status_json),
         (DOCTOR_FILE, &diagnostics.doctor_json),
         (AUDIT_FILE, &diagnostics.audit_json),
+        (
+            VERIFICATION_EVIDENCE_SUMMARY_FILE,
+            &diagnostics.verification_evidence_summary_json,
+        ),
+        (
+            MEMORY_DRIFT_SUMMARY_FILE,
+            &diagnostics.memory_drift_summary_json,
+        ),
         (CAPABILITIES_FILE, &diagnostics.capabilities_json),
         (SCHEMA_FILE, &diagnostics.schema_json),
         (PROFILE_EVIDENCE_FILE, &diagnostics.profile_evidence_json),
@@ -820,6 +834,9 @@ fn collect_diagnostics(
     let doctor_json = output::render_doctor_json(&doctor);
 
     let audit_json = collect_audit_entries(workspace, audit_limit);
+    let verification_evidence_summary_json =
+        verification_evidence_summary_json(workspace, audit_limit);
+    let memory_drift_summary_json = memory_drift_summary_json(workspace, audit_limit);
 
     let capabilities_json = json!({
         "runtime": status.capabilities.runtime.as_str(),
@@ -855,6 +872,8 @@ fn collect_diagnostics(
         status_json,
         doctor_json,
         audit_json,
+        verification_evidence_summary_json,
+        memory_drift_summary_json,
         capabilities_json,
         schema_json,
         profile_evidence_json,
@@ -2584,6 +2603,233 @@ fn collect_audit_entries(workspace: &Path, limit: u32) -> String {
     lines.join("\n")
 }
 
+fn verification_evidence_summary_json(workspace: &Path, limit: u32) -> String {
+    stable_json(&collect_verification_evidence_summary(workspace, limit))
+}
+
+fn memory_drift_summary_json(workspace: &Path, limit: u32) -> String {
+    stable_json(&collect_memory_drift_support_summary(workspace, limit))
+}
+
+fn collect_memory_drift_support_summary(workspace: &Path, limit: u32) -> Value {
+    let database_path = workspace.join(".ee").join("ee.db");
+    if !support_bundle_database_path_is_regular(&database_path) {
+        return super::memory_drift::memory_drift_support_summary_unavailable(
+            "database_unavailable",
+            "memory_drift_source_unverifiable",
+            "Memory drift summary is unavailable because the workspace database is missing or unsafe to read.",
+        );
+    }
+
+    let options = super::memory_drift::MemoryDriftReportOptions {
+        database_path: &database_path,
+        workspace_path: workspace,
+        mode: super::memory_drift::MemoryDriftReportMode::RecentPackItems,
+        memory_id: None,
+        limit,
+        include_tombstoned: false,
+    };
+
+    match super::memory_drift::build_memory_drift_report_read_only(&options) {
+        Ok(report) => super::memory_drift::memory_drift_support_summary_from_report(&report),
+        Err(_) => super::memory_drift::memory_drift_support_summary_unavailable(
+            "report_unavailable",
+            "memory_drift_source_unverifiable",
+            "Memory drift summary is unavailable because the read-only report could not be built.",
+        ),
+    }
+}
+
+fn collect_verification_evidence_summary(workspace: &Path, limit: u32) -> Value {
+    let database_path = workspace.join(".ee").join("ee.db");
+    let mut database = json!({
+        "path": ".ee/ee.db",
+        "present": database_path.exists(),
+        "readable": false,
+        "workspaceMatched": false,
+        "queriedAuditRows": 0,
+        "workspaceAuditRows": 0,
+        "malformedCount": 0,
+        "summarizedRecordCount": 0,
+    });
+
+    if !support_bundle_database_path_is_regular(&database_path) {
+        return verification_evidence_summary_value("database_unavailable", database, Vec::new());
+    }
+
+    let Ok(connection) = DbConnection::open_file(&database_path) else {
+        return verification_evidence_summary_value("database_unreadable", database, Vec::new());
+    };
+    database["readable"] = json!(true);
+
+    let workspace_key = workspace.to_string_lossy();
+    let Ok(Some(workspace_row)) = connection.get_workspace_by_path(&workspace_key) else {
+        return verification_evidence_summary_value("workspace_missing", database, Vec::new());
+    };
+    database["workspaceMatched"] = json!(true);
+
+    let max_records = usize::try_from(limit)
+        .unwrap_or(usize::MAX)
+        .min(MAX_VERIFICATION_EVIDENCE_SUMMARY_RECORDS);
+    let query_limit = limit
+        .saturating_mul(4)
+        .max(limit)
+        .max(MAX_VERIFICATION_EVIDENCE_SUMMARY_RECORDS as u32);
+    let Ok(entries) =
+        connection.list_audit_by_action(audit_actions::VERIFICATION_INGEST, Some(query_limit))
+    else {
+        return verification_evidence_summary_value("audit_query_failed", database, Vec::new());
+    };
+    database["queriedAuditRows"] = json!(entries.len());
+
+    let mut records = Vec::new();
+    for entry in entries
+        .into_iter()
+        .filter(|entry| entry.workspace_id.as_deref() == Some(workspace_row.id.as_str()))
+    {
+        increment_json_count(&mut database, "workspaceAuditRows");
+        match summarize_verification_evidence_audit_entry(&entry) {
+            Some(summary) if records.len() < max_records => records.push(summary),
+            Some(_) => {}
+            None => increment_json_count(&mut database, "malformedCount"),
+        }
+    }
+
+    records.sort_by(|left, right| {
+        left.pointer("/auditId")
+            .and_then(Value::as_str)
+            .cmp(&right.pointer("/auditId").and_then(Value::as_str))
+            .then_with(|| {
+                left.pointer("/verificationId")
+                    .and_then(Value::as_str)
+                    .cmp(&right.pointer("/verificationId").and_then(Value::as_str))
+            })
+    });
+    database["summarizedRecordCount"] = json!(records.len());
+
+    verification_evidence_summary_value("available", database, records)
+}
+
+fn verification_evidence_summary_value(
+    status: &str,
+    database: Value,
+    records: Vec<Value>,
+) -> Value {
+    let status_counts = coordination_fallback_counts(&records, "/status");
+    let result_class_counts = coordination_fallback_counts(&records, "/resultClass");
+    let offload_tool_counts = coordination_fallback_counts(&records, "/offload/tool");
+
+    json!({
+        "schema": "ee.support_bundle.verification_evidence_summary.v1",
+        "sourceSchema": VERIFICATION_EVIDENCE_SCHEMA_V1,
+        "source": ".ee/ee.db audit_log action=verification.ingest details",
+        "status": status,
+        "redactionStatus": "ids_hashes_status_counts_only_no_raw_commands_no_raw_output_tails",
+        "limits": {
+            "maxRecords": MAX_VERIFICATION_EVIDENCE_SUMMARY_RECORDS,
+        },
+        "database": database,
+        "statusCounts": status_counts,
+        "resultClassCounts": result_class_counts,
+        "offloadToolCounts": offload_tool_counts,
+        "records": records,
+    })
+}
+
+fn summarize_verification_evidence_audit_entry(entry: &StoredAuditEntry) -> Option<Value> {
+    let details = serde_json::from_str::<Value>(entry.details.as_deref()?).ok()?;
+    let details_schema = details.get("schema").and_then(Value::as_str)?;
+    let (record_value, ledger_content_hash) = match details_schema {
+        super::verify::VERIFICATION_LEDGER_ENTRY_SCHEMA_V1 => (
+            details.get("evidence")?.clone(),
+            details
+                .get("contentHash")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        ),
+        VERIFICATION_EVIDENCE_SCHEMA_V1 => (details.clone(), None),
+        _ => return None,
+    };
+    let record = serde_json::from_value::<VerificationEvidenceRecord>(record_value).ok()?;
+    if record.schema != VERIFICATION_EVIDENCE_SCHEMA_V1 {
+        return None;
+    }
+    let content_hash = ledger_content_hash.or_else(|| {
+        serde_json::to_string(&record)
+            .ok()
+            .map(|serialized| blake3_text_hash(&serialized))
+    });
+
+    Some(json!({
+        "auditId": verification_summary_label(&entry.id),
+        "targetType": verification_optional_summary_label(entry.target_type.as_deref()),
+        "targetId": verification_optional_summary_label(entry.target_id.as_deref()),
+        "verificationId": verification_summary_label(&record.verification_id),
+        "beadId": verification_optional_summary_label(record.bead_id.as_deref()),
+        "gateName": verification_summary_label(&record.gate_name),
+        "status": record.status.as_str(),
+        "resultClass": verification_evidence_support_result_class(&record),
+        "commandHash": verification_summary_label(&record.command_hash),
+        "contentHash": content_hash,
+        "exitCode": record.exit_code,
+        "startedAt": record.started_at.as_deref(),
+        "finishedAt": record.finished_at.as_deref(),
+        "durationMs": record.duration_ms,
+        "offload": {
+            "tool": verification_optional_summary_label(record.offload.offload_tool.as_deref()),
+            "remoteRequired": record.offload.required_remote,
+            "worker": verification_optional_summary_label(record.offload.worker.as_deref()),
+            "fallbackDetected": record.offload.fallback_detected,
+            "fallbackReasonHash": record.offload.fallback_reason.as_deref().map(blake3_text_hash),
+        },
+        "workspaceFingerprint": verification_optional_summary_label(
+            record.environment.workspace_fingerprint.as_deref(),
+        ),
+        "artifactCount": record.artifacts.len(),
+        "beadsSummary": verification_evidence_beads_summary(&record),
+        "rawCommandIncluded": false,
+        "rawOutputIncluded": false,
+    }))
+}
+
+fn verification_evidence_support_result_class(record: &VerificationEvidenceRecord) -> &'static str {
+    match record.status {
+        VerificationStatus::Passed if record.is_authoritative_pass() => "authoritative_pass",
+        VerificationStatus::Passed => "non_authoritative_pass",
+        VerificationStatus::Failed => "code_failure",
+        VerificationStatus::Blocked => "environment_blocker",
+        VerificationStatus::FallbackDetected if record.offload.required_remote => {
+            "environment_blocker"
+        }
+        VerificationStatus::FallbackDetected => "fallback_detected",
+        VerificationStatus::Interrupted => "interrupted",
+        VerificationStatus::Unknown => "unknown",
+    }
+}
+
+fn verification_optional_summary_label(value: Option<&str>) -> Option<String> {
+    value.map(verification_summary_label)
+}
+
+fn verification_summary_label(value: &str) -> String {
+    let sanitized: String = value
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, ':' | '_' | '-' | '.' | '/' | '=' | ',') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "empty".to_owned()
+    } else {
+        sanitized
+    }
+}
+
 fn support_bundle_database_path_is_regular(database_path: &Path) -> bool {
     if reject_existing_symlink_component(database_path, "support bundle database").is_err() {
         return false;
@@ -2598,6 +2844,8 @@ fn planned_files() -> Vec<String> {
         STATUS_FILE.to_owned(),
         DOCTOR_FILE.to_owned(),
         AUDIT_FILE.to_owned(),
+        VERIFICATION_EVIDENCE_SUMMARY_FILE.to_owned(),
+        MEMORY_DRIFT_SUMMARY_FILE.to_owned(),
         CAPABILITIES_FILE.to_owned(),
         SCHEMA_FILE.to_owned(),
         PROFILE_EVIDENCE_FILE.to_owned(),
@@ -3582,12 +3830,127 @@ mod tests {
             TRIAGE_SUMMARY_FILE,
             QOS_LANE_SUMMARY_FILE,
             LOCAL_CARGO_TRIPWIRE_FILE,
+            VERIFICATION_EVIDENCE_SUMMARY_FILE,
+            MEMORY_DRIFT_SUMMARY_FILE,
         ] {
             assert!(
                 files.contains(&required.to_owned()),
                 "planned support-bundle files must include {required}"
             );
         }
+    }
+
+    #[test]
+    fn memory_drift_support_summary_degrades_without_database() {
+        let workspace = unique_test_path("memory-drift-summary-missing-db");
+        let summary = collect_memory_drift_support_summary(&workspace, 8);
+        let encoded = stable_json(&summary);
+
+        assert!(
+            encoded.contains("\"schema\":\"ee.support_bundle.memory_drift_summary.v1\""),
+            "memory drift support summary schema missing: {encoded}"
+        );
+        assert!(
+            encoded.contains("\"status\":\"database_unavailable\""),
+            "missing database must be explicit: {encoded}"
+        );
+        assert!(
+            encoded.contains("memory_drift_source_unverifiable"),
+            "missing database must carry a drift degraded code: {encoded}"
+        );
+        assert!(
+            encoded.contains("\"rawSnippetsIncluded\":false"),
+            "raw snippets must not be included: {encoded}"
+        );
+        assert!(
+            !encoded.contains(&workspace.to_string_lossy().to_string()),
+            "summary must not include raw workspace paths: {encoded}"
+        );
+    }
+
+    #[test]
+    fn verification_evidence_summary_redacts_raw_command_and_output() -> TestResult {
+        use crate::models::{
+            ProducerMetadata, ProducerSourceSystem, VerificationEnvironment,
+            VerificationEvidenceInput, VerificationOffload, VerificationOutputSummary,
+        };
+
+        let producer = ProducerMetadata::unknown_agent(
+            ProducerSourceSystem::Verification,
+            Some("run-danger"),
+            None,
+            Some("repo:abc$(oops)"),
+            Some("2026-05-19T07:10:00Z"),
+        );
+        let mut evidence = VerificationEvidenceRecord::from_input(VerificationEvidenceInput {
+            verification_id: "ver_$(touch pwned)",
+            bead_id: Some("bd-1nxz4.5`bad`"),
+            gate_name: "cargo test $(launch)",
+            command: "cargo test --lib $(cat secret)",
+            status: VerificationStatus::Blocked,
+            exit_code: None,
+            started_at: Some("2026-05-19T07:00:00Z"),
+            finished_at: None,
+            duration_ms: None,
+            environment: VerificationEnvironment::new(
+                Some("git_tree:abc$(oops)"),
+                Some("/repo"),
+                None,
+            ),
+            offload: VerificationOffload::rch_fallback(
+                Some("vmi`123`"),
+                Some("$(launch remote) && retry"),
+            ),
+            output_summary: VerificationOutputSummary::redacted(Some("stderr $(secret) tail")),
+            artifacts: Vec::new(),
+            producer,
+        });
+        evidence.command_hash = "sha256:$(unsafe)`hash`".to_owned();
+        let details = json!({
+            "schema": crate::core::verify::VERIFICATION_LEDGER_ENTRY_SCHEMA_V1,
+            "contentHash": "blake3:ledger",
+            "producer": evidence.producer.clone(),
+            "status": evidence.status,
+            "evidence": evidence,
+        });
+        let entry = StoredAuditEntry {
+            id: "audit_$(danger)".to_owned(),
+            workspace_id: Some("wsp_test".to_owned()),
+            timestamp: "2026-05-19T07:20:00Z".to_owned(),
+            actor: Some("ChartreuseHawk".to_owned()),
+            action: audit_actions::VERIFICATION_INGEST.to_owned(),
+            target_type: Some("verification".to_owned()),
+            target_id: Some("ver_$(touch pwned)".to_owned()),
+            details: Some(details.to_string()),
+            surface: "verification".to_owned(),
+            mutation_kind: audit_actions::VERIFICATION_INGEST.to_owned(),
+            before_hash: None,
+            after_hash: None,
+            prev_row_hash: None,
+            this_row_hash: Some("blake3:row".to_owned()),
+        };
+
+        let summary = summarize_verification_evidence_audit_entry(&entry)
+            .ok_or_else(|| "expected verification evidence audit summary".to_owned())?;
+        let bundle_value =
+            verification_evidence_summary_value("available", json!({}), vec![summary]);
+        let encoded = stable_json(&bundle_value);
+
+        assert!(
+            encoded.contains("\"schema\":\"ee.support_bundle.verification_evidence_summary.v1\"")
+        );
+        assert!(encoded.contains("\"sourceSchema\":\"ee.verification.evidence.v1\""));
+        assert!(encoded.contains("\"resultClass\":\"environment_blocker\""));
+        assert!(encoded.contains("\"rawCommandIncluded\":false"));
+        assert!(encoded.contains("\"rawOutputIncluded\":false"));
+        assert!(encoded.contains("raw_output_included=false"));
+        assert!(encoded.contains("blake3:ledger"));
+        assert!(!encoded.contains("cargo test --lib"));
+        assert!(!encoded.contains("cat secret"));
+        assert!(!encoded.contains("stderr"));
+        assert!(!encoded.contains('$'));
+        assert!(!encoded.contains('`'));
+        Ok(())
     }
 
     #[test]

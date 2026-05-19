@@ -11,6 +11,9 @@ redaction-safe `ee.singleflight.posture.v1` shape exposed by `ee status` and
 `ee doctor`, so handoff readers can see active leaders, follower waits,
 timeouts, failures, reused-result counts, surface names, and key hashes without
 raw queries or memory content.
+Memory drift posture appears under `memoryDrift` with recent-pack counts,
+affected memory IDs, source-kind counts, and degraded codes only. It does not
+include source snippets, command output bodies, or full file listings.
 
 Versioning: field renames or incompatible redaction semantics require a new
 schema version and a migration note. Additive counts may remain in
@@ -18,10 +21,11 @@ schema version and a migration note. Additive counts may remain in
 ignore them.
 
 Redaction rules: counts, severity labels, risk codes, reservation subjects,
-Bead IDs, path hashes, command hashes, single-flight key hashes, surface names,
-and generation counters are allowed. Raw paths in the top-risk summary, raw
-commands, mail bodies, raw logs, raw memory content, raw query text, env dumps,
-file contents, and secret-like tokens are not allowed.
+Bead IDs, affected memory IDs, drift status codes, path hashes, command hashes,
+single-flight key hashes, surface names, and generation counters are allowed.
+Raw paths in the top-risk summary, raw commands, mail bodies, raw logs, raw
+memory content, raw source snippets, raw query text, env dumps, file contents,
+and secret-like tokens are not allowed.
 
 Example:
 
@@ -39,4 +43,4 @@ Non-goals: support-bundle summaries do not expose full file listings, recover
 mail bodies, preserve raw query text, or replace the full swarm brief when local
 inspection is safe.
 
-Tracking Bead: `bd-1zb7k.16.4`
+Tracking Beads: `bd-1zb7k.16.4`, `bd-1z1fd.4`

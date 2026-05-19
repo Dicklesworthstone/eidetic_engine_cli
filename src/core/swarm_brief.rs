@@ -31,6 +31,7 @@ const BEADS_UNAVAILABLE_CODE: &str = "beads_unavailable";
 const BEADS_TRACKER_STALE_CODE: &str = "beads_tracker_stale";
 const BV_UNAVAILABLE_CODE: &str = "bv_unavailable";
 const AGENT_MAIL_UNAVAILABLE_CODE: &str = "agent_mail_unavailable";
+const MEMORY_DRIFT_UNAVAILABLE_CODE: &str = "memory_drift_source_unverifiable";
 const RCH_UNAVAILABLE_CODE: &str = "rch_unavailable";
 const RCH_WORKER_TOPOLOGY_BLOCKED_CODE: &str = "rch_worker_topology_blocked";
 const RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE: &str = "rch_remote_required_fallback_prevented";
@@ -39,6 +40,7 @@ const RCH_POSTURE_NO_REMOTE_WORKERS: &str = "no_remote_workers";
 const RCH_POSTURE_WORKER_UNREACHABLE: &str = "worker_unreachable";
 const AGENT_STATUS_UNAVAILABLE_CODE: &str = "agent_status_unavailable";
 const MAX_SWARM_BRIEF_SUMMARY_RECOMMENDATIONS: usize = 5;
+const MEMORY_DRIFT_SWARM_BRIEF_LIMIT: u32 = 16;
 
 /// Options used by the internal source collection layer.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -76,6 +78,7 @@ pub fn default_swarm_brief_sources() -> BTreeSet<SwarmBriefSourceKind> {
         SwarmBriefSourceKind::Bv,
         SwarmBriefSourceKind::Git,
         SwarmBriefSourceKind::HostProfile,
+        SwarmBriefSourceKind::MemoryDrift,
     ]
     .into_iter()
     .collect()
@@ -90,6 +93,7 @@ pub fn all_swarm_brief_sources() -> BTreeSet<SwarmBriefSourceKind> {
         SwarmBriefSourceKind::Bv,
         SwarmBriefSourceKind::Git,
         SwarmBriefSourceKind::HostProfile,
+        SwarmBriefSourceKind::MemoryDrift,
         SwarmBriefSourceKind::Rch,
     ]
     .into_iter()
@@ -119,6 +123,8 @@ pub struct SwarmBriefReport {
     pub rch_local_capability: Option<RchLocalCapabilityReport>,
     pub host_profile: Option<SwarmBriefHostProfileSummary>,
     pub agent_inventory: Option<SwarmBriefAgentInventorySummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_drift: Option<SwarmBriefMemoryDriftSummary>,
     pub recommendations: Vec<SwarmBriefRecommendation>,
     pub degraded: Vec<SwarmBriefDegradation>,
 }
@@ -144,6 +150,7 @@ impl SwarmBriefReport {
             rch_local_capability: None,
             host_profile: None,
             agent_inventory: None,
+            memory_drift: None,
             recommendations: Vec::new(),
             degraded: Vec::new(),
         }
@@ -204,6 +211,7 @@ pub enum SwarmBriefSourceKind {
     Bv,
     Git,
     HostProfile,
+    MemoryDrift,
     Qos,
     Rch,
 }
@@ -218,6 +226,7 @@ impl SwarmBriefSourceKind {
             Self::Bv => "bv",
             Self::Git => "git",
             Self::HostProfile => "host_profile",
+            Self::MemoryDrift => "memory_drift",
             Self::Qos => "qos",
             Self::Rch => "rch",
         }
@@ -549,6 +558,24 @@ pub struct SwarmBriefAgentInventorySummary {
     pub status: String,
     pub detected_count: usize,
     pub total_count: usize,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmBriefMemoryDriftSummary {
+    pub status: String,
+    pub report_mode: String,
+    pub total_memories: u32,
+    pub current_count: u32,
+    pub changed_count: u32,
+    pub missing_source_count: u32,
+    pub stale_anchor_count: u32,
+    pub unverifiable_count: u32,
+    pub suppressed_count: u32,
+    pub affected_count: u32,
+    pub top_affected_memory_ids: Vec<String>,
+    pub degraded_codes: Vec<String>,
+    pub source_kind_counts: BTreeMap<String, u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -924,6 +951,7 @@ pub enum SwarmBriefContribution {
     },
     HostProfile(SwarmBriefHostProfileSummary),
     AgentInventory(SwarmBriefAgentInventorySummary),
+    MemoryDrift(SwarmBriefMemoryDriftSummary),
 }
 
 /// Source adapter contract. Implementations must be read-only.
@@ -1596,6 +1624,219 @@ impl SwarmBriefSourceAdapter for AgentInventorySourceAdapter {
     }
 }
 
+pub struct MemoryDriftSourceAdapter;
+
+impl SwarmBriefSourceAdapter for MemoryDriftSourceAdapter {
+    fn collect(&self, options: &SwarmBriefCollectOptions) -> SwarmBriefSourceOutput {
+        let source = SwarmBriefSourceKind::MemoryDrift;
+        let provenance = SwarmBriefSourceProvenance::local_probe();
+        let database_path = memory_drift_database_path(&options.workspace);
+        if let Err(error) = validate_memory_drift_database_path(&database_path) {
+            let repair = if error.kind() == io::ErrorKind::NotFound {
+                "ee init --workspace ."
+            } else {
+                default_source_repair(source)
+            };
+            let degradation = SwarmBriefDegradation::warning(
+                source,
+                MEMORY_DRIFT_UNAVAILABLE_CODE,
+                memory_drift_unavailable_message(&error),
+                Some(repair.to_string()),
+            );
+            return SwarmBriefSourceOutput {
+                snapshot: SwarmBriefSourceSnapshot::unavailable(source, provenance, degradation),
+                contribution: SwarmBriefContribution::None,
+            };
+        }
+
+        let report_options = super::memory_drift::MemoryDriftReportOptions {
+            database_path: &database_path,
+            workspace_path: &options.workspace,
+            mode: super::memory_drift::MemoryDriftReportMode::RecentPackItems,
+            memory_id: None,
+            limit: MEMORY_DRIFT_SWARM_BRIEF_LIMIT,
+            include_tombstoned: false,
+        };
+        match super::memory_drift::build_memory_drift_report_read_only(&report_options) {
+            Ok(report) => {
+                let summary = swarm_brief_memory_drift_summary_from_report(&report);
+                let degraded = memory_drift_degradations_from_summary(&summary);
+                let item_count = usize::try_from(summary.affected_count).unwrap_or(usize::MAX);
+                SwarmBriefSourceOutput {
+                    snapshot: SwarmBriefSourceSnapshot::ready(source, provenance, item_count)
+                        .with_degraded(degraded),
+                    contribution: SwarmBriefContribution::MemoryDrift(summary),
+                }
+            }
+            Err(error) => {
+                let degradation = SwarmBriefDegradation::warning(
+                    source,
+                    MEMORY_DRIFT_UNAVAILABLE_CODE,
+                    format!("Memory drift posture could not be collected read-only: {error}"),
+                    Some("ee doctor --json".to_string()),
+                );
+                SwarmBriefSourceOutput {
+                    snapshot: SwarmBriefSourceSnapshot::unavailable(
+                        source,
+                        provenance,
+                        degradation,
+                    ),
+                    contribution: SwarmBriefContribution::None,
+                }
+            }
+        }
+    }
+}
+
+fn memory_drift_database_path(workspace: &Path) -> PathBuf {
+    workspace.join(".ee").join("ee.db")
+}
+
+fn validate_memory_drift_database_path(database_path: &Path) -> io::Result<()> {
+    if let Some(symlink) = first_existing_snapshot_symlink_component(database_path)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to inspect memory drift database through symlink '{}'",
+                redact_path_label(&symlink)
+            ),
+        ));
+    }
+    let metadata = fs::symlink_metadata(database_path)?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "memory drift database path '{}' is not a file",
+                redact_path_label(database_path)
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn memory_drift_unavailable_message(error: &io::Error) -> String {
+    match error.kind() {
+        io::ErrorKind::NotFound => {
+            "Memory drift database is missing, so recent pack memory drift posture is unknown."
+                .to_string()
+        }
+        io::ErrorKind::PermissionDenied => error.to_string(),
+        io::ErrorKind::InvalidInput => error.to_string(),
+        _ => format!("Memory drift database could not be inspected: {error}"),
+    }
+}
+
+fn swarm_brief_memory_drift_summary_from_report(
+    report: &super::memory_drift::MemoryDriftReport,
+) -> SwarmBriefMemoryDriftSummary {
+    let mut top_affected_memory_ids = report
+        .items
+        .iter()
+        .filter(|item| item.drift_status != super::memory_drift::MemoryDriftStatus::Current)
+        .take(super::memory_drift::MAX_MEMORY_DRIFT_SUPPORT_SUMMARY_ITEMS)
+        .map(|item| redact_brief_text(&item.memory_id))
+        .collect::<Vec<_>>();
+    top_affected_memory_ids.sort();
+    top_affected_memory_ids.dedup();
+
+    let degraded_codes = memory_drift_degraded_codes(report);
+    let source_kind_counts = memory_drift_source_kind_counts(report);
+    let affected_count = report
+        .summary
+        .changed
+        .saturating_add(report.summary.missing_source)
+        .saturating_add(report.summary.stale_anchor)
+        .saturating_add(report.summary.unverifiable);
+    let status = if !degraded_codes.is_empty() {
+        "degraded"
+    } else if affected_count == 0 {
+        "empty_queue"
+    } else {
+        "available"
+    }
+    .to_string();
+
+    SwarmBriefMemoryDriftSummary {
+        status,
+        report_mode: report.mode.as_str().to_string(),
+        total_memories: report.summary.total_memories,
+        current_count: report.summary.current,
+        changed_count: report.summary.changed,
+        missing_source_count: report.summary.missing_source,
+        stale_anchor_count: report.summary.stale_anchor,
+        unverifiable_count: report.summary.unverifiable,
+        suppressed_count: report.summary.suppressed,
+        affected_count,
+        top_affected_memory_ids,
+        degraded_codes,
+        source_kind_counts,
+    }
+}
+
+fn memory_drift_degraded_codes(report: &super::memory_drift::MemoryDriftReport) -> Vec<String> {
+    let mut codes = report
+        .degraded
+        .iter()
+        .map(|degradation| redact_brief_text(&degradation.code))
+        .chain(
+            report
+                .items
+                .iter()
+                .filter_map(|item| item.degraded_code.as_deref())
+                .map(redact_brief_text),
+        )
+        .collect::<Vec<_>>();
+    codes.sort();
+    codes.dedup();
+    codes
+}
+
+fn memory_drift_source_kind_counts(
+    report: &super::memory_drift::MemoryDriftReport,
+) -> BTreeMap<String, u32> {
+    let mut counts = BTreeMap::new();
+    for item in &report.items {
+        *counts
+            .entry(memory_drift_source_kind(item).to_string())
+            .or_default() += 1;
+    }
+    counts
+}
+
+fn memory_drift_source_kind(item: &super::memory_drift::MemoryDriftSelectionHint) -> &'static str {
+    let reason = item.top_reason.as_str();
+    if reason.starts_with("provenance_chain_") || reason.starts_with("provenance_") {
+        "provenance_chain"
+    } else if reason.starts_with("pack_item_") {
+        "pack_record"
+    } else if reason.contains("schema") {
+        "schema"
+    } else {
+        "memory_record"
+    }
+}
+
+fn memory_drift_degradations_from_summary(
+    summary: &SwarmBriefMemoryDriftSummary,
+) -> Vec<SwarmBriefDegradation> {
+    summary
+        .degraded_codes
+        .iter()
+        .map(|code| {
+            SwarmBriefDegradation::warning(
+                SwarmBriefSourceKind::MemoryDrift,
+                code.clone(),
+                format!(
+                    "Memory drift source reported {code}; affected recent pack item count is {}.",
+                    summary.affected_count
+                ),
+                Some(default_source_repair(SwarmBriefSourceKind::MemoryDrift).to_string()),
+            )
+        })
+        .collect()
+}
+
 /// Collect a complete internal brief using production source adapters.
 ///
 /// This is intentionally not wired to a public command yet.
@@ -1653,6 +1894,13 @@ pub fn collect_swarm_brief(
         SwarmBriefSourceKind::AgentInventory,
         SwarmBriefSourceProvenance::local_probe(),
         || AgentInventorySourceAdapter.collect(options),
+    );
+    collect_selected_source(
+        &mut report,
+        options,
+        SwarmBriefSourceKind::MemoryDrift,
+        SwarmBriefSourceProvenance::local_probe(),
+        || MemoryDriftSourceAdapter.collect(options),
     );
     attach_qos_resource_pressure(&mut report, &options.workspace);
     apply_swarm_brief_advice(&mut report);
@@ -1855,6 +2103,9 @@ fn apply_source_output(report: &mut SwarmBriefReport, output: SwarmBriefSourceOu
         SwarmBriefContribution::AgentInventory(summary) => {
             report.agent_inventory = Some(summary);
         }
+        SwarmBriefContribution::MemoryDrift(summary) => {
+            report.memory_drift = Some(summary);
+        }
     }
 }
 
@@ -1979,6 +2230,8 @@ pub fn summarize_swarm_brief_report(report: &SwarmBriefReport) -> Value {
             "ackRequiredCount": report.inbox.iter().map(|item| item.ack_required_count).sum::<u64>(),
             "threadCount": report.threads.len(),
             "resourcePressureHintCount": report.resource_pressure.len(),
+            "memoryDriftAffectedCount": report.memory_drift.as_ref().map_or(0, |summary| summary.affected_count),
+            "memoryDriftTopAffectedCount": report.memory_drift.as_ref().map_or(0, |summary| summary.top_affected_memory_ids.len() as u32),
             "degradedCount": report.degraded.len(),
             "recommendationCount": report.recommendations.len(),
         },
@@ -1991,6 +2244,7 @@ pub fn summarize_swarm_brief_report(report: &SwarmBriefReport) -> Value {
                 summary.top_picks.iter().take(5).map(|pick| pick.id.clone()).collect::<Vec<_>>()
             }).unwrap_or_default(),
         },
+        "memoryDrift": swarm_brief_memory_drift_summary(report),
         "sourceStatusCounts": source_status_counts,
         "sourceStatuses": swarm_brief_source_status_summaries(report),
         "resourcePressurePosture": swarm_brief_resource_pressure_posture(report),
@@ -2071,6 +2325,27 @@ pub fn render_swarm_brief_summary_for_handoff(summary: &Value) -> String {
         .get("reportHash")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
+    let memory_drift = summary.get("memoryDrift").unwrap_or(&Value::Null);
+    let memory_drift_status = memory_drift
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let memory_drift_affected = memory_drift
+        .get("affectedCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let memory_drift_changed = memory_drift
+        .get("changedCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let memory_drift_missing = memory_drift
+        .get("missingSourceCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let memory_drift_unverifiable = memory_drift
+        .get("unverifiableCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let top_recommendations = summary
         .get("topRecommendations")
         .and_then(Value::as_array)
@@ -2098,6 +2373,11 @@ pub fn render_swarm_brief_summary_for_handoff(summary: &Value) -> String {
         lines.push(format!(
             "Top recommendation ids: {}.",
             top_recommendations.join(", ")
+        ));
+    }
+    if memory_drift_status != "unknown" && memory_drift_affected > 0 {
+        lines.push(format!(
+            "Memory drift posture: status={memory_drift_status}, affected={memory_drift_affected}, changed={memory_drift_changed}, missing_source={memory_drift_missing}, unverifiable={memory_drift_unverifiable}."
         ));
     }
     lines.join("\n")
@@ -2181,6 +2461,38 @@ fn swarm_brief_source_provenance_summaries(report: &SwarmBriefReport) -> Vec<Val
             })
         })
         .collect()
+}
+
+fn swarm_brief_memory_drift_summary(report: &SwarmBriefReport) -> Value {
+    let Some(summary) = &report.memory_drift else {
+        return json!({
+            "status": "unknown",
+            "available": false,
+            "affectedCount": 0,
+            "topAffectedMemoryIds": [],
+            "degradedCodes": [],
+        });
+    };
+
+    json!({
+        "status": summary.status.clone(),
+        "available": true,
+        "reportMode": summary.report_mode.clone(),
+        "totalMemories": summary.total_memories,
+        "currentCount": summary.current_count,
+        "changedCount": summary.changed_count,
+        "missingSourceCount": summary.missing_source_count,
+        "staleAnchorCount": summary.stale_anchor_count,
+        "unverifiableCount": summary.unverifiable_count,
+        "suppressedCount": summary.suppressed_count,
+        "affectedCount": summary.affected_count,
+        "topAffectedMemoryIds": summary.top_affected_memory_ids.clone(),
+        "degradedCodes": summary.degraded_codes.clone(),
+        "sourceKindCounts": summary.source_kind_counts.clone(),
+        "rawSnippetsIncluded": false,
+        "rawCommandBodiesIncluded": false,
+        "fullListingsIncluded": false,
+    })
 }
 
 fn swarm_brief_resource_pressure_posture(report: &SwarmBriefReport) -> &'static str {
@@ -2588,6 +2900,7 @@ fn recommend_swarm_brief_actions(report: &SwarmBriefReport) -> Vec<SwarmBriefRec
     recommendations.extend(resource_pressure_recommendations(report));
     recommendations.extend(git_operation_state_recommendations(report));
     recommendations.extend(surface_conflict_recommendations(report));
+    recommendations.extend(memory_drift_recommendations(report));
 
     if matches!(
         source_status(report, SwarmBriefSourceKind::Beads),
@@ -2609,6 +2922,70 @@ fn recommend_swarm_brief_actions(report: &SwarmBriefReport) -> Vec<SwarmBriefRec
     recommendations.sort();
     recommendations.dedup_by(|left, right| left.id == right.id);
     recommendations
+}
+
+fn memory_drift_recommendations(report: &SwarmBriefReport) -> Vec<SwarmBriefRecommendation> {
+    let Some(summary) = &report.memory_drift else {
+        return Vec::new();
+    };
+    if summary.affected_count == 0 {
+        return Vec::new();
+    }
+
+    let mut reason_codes = BTreeSet::from(["memory_drift_queue_non_empty".to_string()]);
+    reason_codes.extend(summary.degraded_codes.iter().cloned());
+    if summary.changed_count > 0 {
+        reason_codes.insert("memory_drift_changed_sources_present".to_string());
+    }
+    if summary.missing_source_count > 0 {
+        reason_codes.insert("memory_drift_missing_sources_present".to_string());
+    }
+    if summary.stale_anchor_count > 0 {
+        reason_codes.insert("memory_drift_stale_anchors_present".to_string());
+    }
+    if summary.unverifiable_count > 0 {
+        reason_codes.insert("memory_drift_unverifiable_sources_present".to_string());
+    }
+
+    let mut evidence = BTreeSet::from([
+        format!("memory_drift_affected:{}", summary.affected_count),
+        format!("memory_drift_changed:{}", summary.changed_count),
+        format!(
+            "memory_drift_missing_source:{}",
+            summary.missing_source_count
+        ),
+        format!("memory_drift_stale_anchor:{}", summary.stale_anchor_count),
+        format!("memory_drift_unverifiable:{}", summary.unverifiable_count),
+    ]);
+    for memory_id in &summary.top_affected_memory_ids {
+        evidence.insert(format!("memory_drift_top_affected:{memory_id}"));
+    }
+
+    let severity = if summary.missing_source_count > 0 {
+        "high"
+    } else if summary.changed_count > 0 || summary.unverifiable_count > 0 {
+        "medium"
+    } else {
+        "low"
+    };
+
+    vec![SwarmBriefRecommendation {
+        id: "rec.memory_drift.revalidate_recent_pack_items".to_string(),
+        kind: "memory_drift_revalidation".to_string(),
+        confidence: coordination_confidence(report),
+        severity: severity.to_string(),
+        reason_codes: reason_codes.into_iter().collect(),
+        evidence: evidence.into_iter().collect(),
+        suggested_commands: vec![
+            default_source_repair(SwarmBriefSourceKind::MemoryDrift).to_string(),
+            "ee why <memory-id> --json".to_string(),
+        ],
+        must_not_do: vec![
+            "Do not rely on stale memory provenance without revalidation.".to_string(),
+            "Do not include raw source snippets or command output bodies in swarm brief summaries."
+                .to_string(),
+        ],
+    }]
 }
 
 fn git_operation_state_recommendations(report: &SwarmBriefReport) -> Vec<SwarmBriefRecommendation> {
@@ -3107,7 +3484,7 @@ fn severity_for_score(score: u16) -> &'static str {
     }
 }
 
-fn expected_sources() -> [SwarmBriefSourceKind; 7] {
+fn expected_sources() -> [SwarmBriefSourceKind; 8] {
     [
         SwarmBriefSourceKind::AgentInventory,
         SwarmBriefSourceKind::AgentMail,
@@ -3115,6 +3492,7 @@ fn expected_sources() -> [SwarmBriefSourceKind; 7] {
         SwarmBriefSourceKind::Bv,
         SwarmBriefSourceKind::Git,
         SwarmBriefSourceKind::HostProfile,
+        SwarmBriefSourceKind::MemoryDrift,
         SwarmBriefSourceKind::Rch,
     ]
 }
@@ -3140,6 +3518,7 @@ fn default_source_repair(source: SwarmBriefSourceKind) -> &'static str {
         SwarmBriefSourceKind::Bv => "bv --robot-triage --robot-triage-by-track",
         SwarmBriefSourceKind::Git => "git status --short --branch --untracked-files=all",
         SwarmBriefSourceKind::HostProfile => "ee profile probe --json",
+        SwarmBriefSourceKind::MemoryDrift => "ee memory drift --mode recent-pack-items --json",
         SwarmBriefSourceKind::Qos => "ee status --json | jq .data.qos",
         SwarmBriefSourceKind::Rch => "rch status --json",
     }
@@ -3153,6 +3532,7 @@ fn missing_source_knowledge(source: SwarmBriefSourceKind) -> &'static str {
         SwarmBriefSourceKind::Bv => "critical path and graph-aware priority",
         SwarmBriefSourceKind::Git => "dirty files and recent commit surfaces",
         SwarmBriefSourceKind::HostProfile => "local CPU, memory, and profile pressure",
+        SwarmBriefSourceKind::MemoryDrift => "recent pack memory drift posture",
         SwarmBriefSourceKind::Qos => "foreground/background active-lane pressure",
         SwarmBriefSourceKind::Rch => "remote build queue and active build pressure",
     }
@@ -5418,6 +5798,176 @@ mod tests {
         assert!(
             rec.suggested_commands
                 .contains(&"rch status --json".to_string())
+        );
+    }
+
+    #[test]
+    fn advisor_recommends_memory_drift_revalidation_without_raw_content() {
+        let mut report = report_with_ready_sources();
+        let mut source_kind_counts = BTreeMap::new();
+        source_kind_counts.insert("provenance_chain".to_string(), 2);
+        source_kind_counts.insert("pack_record".to_string(), 1);
+        report.memory_drift = Some(SwarmBriefMemoryDriftSummary {
+            status: "degraded".to_string(),
+            report_mode: "recent_pack_items".to_string(),
+            total_memories: 4,
+            current_count: 1,
+            changed_count: 1,
+            missing_source_count: 1,
+            stale_anchor_count: 1,
+            unverifiable_count: 0,
+            suppressed_count: 0,
+            affected_count: 3,
+            top_affected_memory_ids: vec![
+                "mem_changed".to_string(),
+                "mem_missing".to_string(),
+                "mem_stale".to_string(),
+            ],
+            degraded_codes: vec![
+                "memory_drift_source_changed".to_string(),
+                "memory_drift_source_missing".to_string(),
+            ],
+            source_kind_counts,
+        });
+        let degradation = SwarmBriefDegradation::warning(
+            SwarmBriefSourceKind::MemoryDrift,
+            "memory_drift_source_missing",
+            "missing provenance for recent pack item",
+            Some("ee memory drift --mode recent-pack-items --json".to_string()),
+        );
+        let source = require_some(
+            report
+                .sources
+                .iter_mut()
+                .find(|source| source.source == SwarmBriefSourceKind::MemoryDrift),
+            "memory drift source",
+        );
+        source.status = SwarmBriefSourceStatus::Degraded;
+        source.item_count = 3;
+        source.degraded = vec![degradation.clone()];
+        report.degraded.push(degradation);
+
+        apply_swarm_brief_advice(&mut report);
+        report.finalize();
+
+        let rec = recommendation(&report, "rec.memory_drift.revalidate_recent_pack_items");
+        assert_eq!(rec.kind, "memory_drift_revalidation");
+        assert_eq!(rec.severity, "high");
+        assert!(
+            rec.reason_codes
+                .contains(&"memory_drift_queue_non_empty".to_string())
+        );
+        assert!(
+            rec.reason_codes
+                .contains(&"memory_drift_source_missing".to_string())
+        );
+        assert!(
+            rec.evidence
+                .contains(&"memory_drift_affected:3".to_string())
+        );
+        assert!(
+            rec.suggested_commands
+                .contains(&"ee memory drift --mode recent-pack-items --json".to_string())
+        );
+        assert!(
+            rec.must_not_do
+                .iter()
+                .any(|item| item.contains("without revalidation"))
+        );
+
+        let summary = summarize_swarm_brief_report(&report);
+        assert_eq!(
+            summary.pointer("/memoryDrift/affectedCount"),
+            Some(&json!(3))
+        );
+        assert_eq!(
+            summary.pointer("/counts/memoryDriftAffectedCount"),
+            Some(&json!(3))
+        );
+        let rendered = stable_summary_json(&summary);
+        assert!(
+            !rendered.contains("missing provenance for recent pack item"),
+            "support-bundle swarm summary must not include raw degradation messages"
+        );
+        assert_eq!(
+            summary.pointer("/memoryDrift/rawSnippetsIncluded"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            summary.pointer("/memoryDrift/rawCommandBodiesIncluded"),
+            Some(&json!(false))
+        );
+    }
+
+    #[test]
+    fn advisor_reports_unavailable_memory_drift_source_as_unknown_evidence() {
+        let mut report = report_with_ready_sources();
+        let source = require_some(
+            report
+                .sources
+                .iter_mut()
+                .find(|source| source.source == SwarmBriefSourceKind::MemoryDrift),
+            "memory drift source",
+        );
+        source.status = SwarmBriefSourceStatus::Unavailable;
+        source.degraded = vec![SwarmBriefDegradation::warning(
+            SwarmBriefSourceKind::MemoryDrift,
+            "memory_drift_source_unverifiable",
+            "memory drift database missing",
+            Some("ee init --workspace .".to_string()),
+        )];
+
+        apply_swarm_brief_advice(&mut report);
+
+        let rec = recommendation(
+            &report,
+            "rec.degraded.memory_drift.memory_drift_source_unverifiable",
+        );
+        assert_eq!(rec.kind, "degraded_capability");
+        assert!(
+            rec.evidence.contains(
+                &"could_not_know:memory_drift:recent pack memory drift posture".to_string()
+            )
+        );
+        assert!(
+            rec.must_not_do
+                .iter()
+                .any(|item| item.contains("degraded memory_drift data"))
+        );
+    }
+
+    #[test]
+    fn memory_drift_adapter_reports_missing_database_without_raw_path() {
+        let tempdir = tempfile::tempdir().expect("temp workspace");
+        let options = SwarmBriefCollectOptions::for_workspace(tempdir.path());
+
+        let output = MemoryDriftSourceAdapter.collect(&options);
+
+        assert_eq!(output.snapshot.source, SwarmBriefSourceKind::MemoryDrift);
+        assert_eq!(output.snapshot.status, SwarmBriefSourceStatus::Unavailable);
+        assert_eq!(
+            output
+                .snapshot
+                .degraded
+                .first()
+                .map(|item| item.code.as_str()),
+            Some("memory_drift_source_unverifiable")
+        );
+        assert_eq!(
+            output
+                .snapshot
+                .degraded
+                .first()
+                .and_then(|item| item.repair.as_deref()),
+            Some("ee init --workspace .")
+        );
+        assert!(matches!(output.contribution, SwarmBriefContribution::None));
+        let rendered = stable_summary_json(
+            &serde_json::to_value(&output.snapshot).expect("snapshot should serialize"),
+        );
+        assert!(
+            !rendered.contains(tempdir.path().to_string_lossy().as_ref()),
+            "missing database degradation must not expose raw temporary workspace path"
         );
     }
 

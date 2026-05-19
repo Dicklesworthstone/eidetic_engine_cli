@@ -8,10 +8,10 @@ The shipped coordination schema is `ee.coordination_snapshot.v1`. Earlier plan
 notes used `ee.coordination.snapshot.v1`; the underscore form matches the Rust
 constant and emitted JSON.
 
-The planned fallback ledger schema is
-`ee.coordination_fallback_evidence.v1`. It is intentionally marked unshipped
-until `bd-1zb7k.13.2` adds an ingest path, idempotent storage, and redacted
-support-bundle or `ee why` inclusion.
+The shipped fallback ledger schema is
+`ee.coordination_fallback_evidence.v1`. `bd-1zb7k.13.2` added the ingest path,
+idempotent ledger storage, redacted support-bundle summaries, and `ee why`
+inclusion.
 
 The verification broker view schema is `ee.verification.broker_view.v1`.
 `ee verify broker lookup --json` emits it as the derived broker block over

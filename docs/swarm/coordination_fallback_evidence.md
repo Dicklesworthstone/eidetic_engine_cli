@@ -1,6 +1,6 @@
 # Coordination Fallback Evidence
 
-`ee.coordination_fallback_evidence.v1` is the planned record shape for
+`ee.coordination_fallback_evidence.v1` is the shipped record shape for
 `bd-1zb7k.13.2`. It captures coordination-substrate incidents that would
 otherwise survive only in chat: Agent Mail unavailable, Beads stale, file
 reservation uncertainty, or RCH remote verification blocked before Cargo can
@@ -20,8 +20,8 @@ handled. The intended default is labels and counts only.
 
 ## Intended Surfaces
 
-- `ee coordination evidence ingest --file/--stdin --json` or an equivalent
-  agreed CLI should ingest records idempotently by `summary.contentHash`.
+- `ee coordination evidence ingest --file/--stdin --json` ingests records
+  idempotently by canonical content hash.
 - `ee why` reports redaction-safe linked coordination evidence. The collector
   reads `.ee/coordination-fallback-evidence.jsonl` and links records by memory
   workflow/bead IDs or by verification IDs already linked to the memory.
@@ -36,7 +36,7 @@ handled. The intended default is labels and counts only.
 The canonical example is duplicated in
 `tests/fixtures/swarm/coordination_fallback_evidence.json` and
 `tests/fixtures/swarm_schemas/all_examples.json`. Keep both in lockstep with
-the first schema example until the ingest command has executable fixtures.
+the first schema example.
 
 ## Non-goals
 

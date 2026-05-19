@@ -91,7 +91,7 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         file_name: "ee.coordination_fallback_evidence.v1.json",
         doc_path: "docs/swarm/coordination_fallback_evidence.md",
         tracking_bead: "bd-1zb7k.13.2",
-        shipped: false,
+        shipped: true,
     },
     SchemaCase {
         id: "ee.resource.profile.v1",
