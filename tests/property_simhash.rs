@@ -10,8 +10,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use ee::search::simhash::{
-    NearestSimHashCandidate, SimHash128, canonicalize_content_for_simhash, hamming_distance,
-    ranked_simhash_candidates, simhash_128,
+    NearestSimHashCandidate, SimHash128, canonicalize_content_for_simhash,
+    confirm_cosine_similarity, cosine_similarity, hamming_distance, ranked_simhash_candidates,
+    simhash_128,
 };
 use proptest::prelude::*;
 use proptest::test_runner::Config as ProptestConfig;
@@ -20,6 +21,7 @@ use proptest::test_runner::Config as ProptestConfig;
 /// `cargo test` budget while still exploring meaningful structural
 /// variety.
 const MAX_CONTENT_LEN: usize = 256;
+const MAX_EMBEDDING_DIMENSIONS: usize = 32;
 
 /// Canonicalization treats punctuation and any Unicode whitespace as a
 /// token boundary plus a lowercase fold. Restrict the generator to a
@@ -46,6 +48,47 @@ fn arbitrary_simhash() -> impl Strategy<Value = SimHash128> {
         arr.copy_from_slice(&bytes);
         SimHash128::from_be_bytes(arr)
     })
+}
+
+fn finite_embedding_vector() -> impl Strategy<Value = Vec<f32>> {
+    proptest::collection::vec(-1000.0_f32..1000.0, 1..=MAX_EMBEDDING_DIMENSIONS)
+}
+
+fn finite_embedding_pair() -> impl Strategy<Value = (Vec<f32>, Vec<f32>)> {
+    (1_usize..=MAX_EMBEDDING_DIMENSIONS).prop_flat_map(|dimensions| {
+        (
+            proptest::collection::vec(-1000.0_f32..1000.0, dimensions),
+            proptest::collection::vec(-1000.0_f32..1000.0, dimensions),
+        )
+    })
+}
+
+fn has_non_zero_norm(values: &[f32]) -> bool {
+    values.iter().any(|value| *value != 0.0)
+}
+
+fn reference_cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
+    if left.len() != right.len() || left.is_empty() {
+        return None;
+    }
+    let mut dot = 0.0_f64;
+    let mut left_norm_sq = 0.0_f64;
+    let mut right_norm_sq = 0.0_f64;
+    for (&left_value, &right_value) in left.iter().zip(right.iter()) {
+        if !left_value.is_finite() || !right_value.is_finite() {
+            return None;
+        }
+        let left_value = f64::from(left_value);
+        let right_value = f64::from(right_value);
+        dot += left_value * right_value;
+        left_norm_sq += left_value * left_value;
+        right_norm_sq += right_value * right_value;
+    }
+    if left_norm_sq == 0.0 || right_norm_sq == 0.0 {
+        return None;
+    }
+    let denominator = left_norm_sq.sqrt() * right_norm_sq.sqrt();
+    Some((dot / denominator).clamp(-1.0, 1.0) as f32)
 }
 
 fn ranked_fixture_candidates(raw: Vec<u128>) -> Vec<(String, SimHash128)> {
@@ -292,5 +335,69 @@ proptest! {
         );
 
         prop_assert_eq!(forward, reverse);
+    }
+
+    #[test]
+    fn prop_cosine_similarity_matches_reference(
+        (left, right) in finite_embedding_pair(),
+    ) {
+        let actual = cosine_similarity(&left, &right);
+        let expected = reference_cosine_similarity(&left, &right);
+
+        prop_assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn prop_cosine_similarity_is_symmetric(
+        (left, right) in finite_embedding_pair(),
+    ) {
+        prop_assert_eq!(
+            cosine_similarity(&left, &right),
+            cosine_similarity(&right, &left),
+        );
+    }
+
+    #[test]
+    fn prop_cosine_similarity_is_bounded_for_non_zero_vectors(
+        (left, right) in finite_embedding_pair(),
+    ) {
+        prop_assume!(has_non_zero_norm(&left));
+        prop_assume!(has_non_zero_norm(&right));
+
+        let similarity = cosine_similarity(&left, &right)
+            .ok_or_else(|| TestCaseError::fail("non-zero finite vectors must be comparable"))?;
+
+        prop_assert!(
+            (-1.0..=1.0).contains(&similarity),
+            "cosine similarity must stay in [-1, 1], got {similarity}",
+        );
+    }
+
+    #[test]
+    fn prop_cosine_confirmation_matches_floor_decision(
+        (left, right) in finite_embedding_pair(),
+        floor in -1.0_f32..=1.0,
+    ) {
+        prop_assume!(has_non_zero_norm(&left));
+        prop_assume!(has_non_zero_norm(&right));
+
+        let confirmation = confirm_cosine_similarity(&left, &right, floor)
+            .ok_or_else(|| TestCaseError::fail("non-zero finite vectors must be confirmable"))?;
+
+        prop_assert_eq!(confirmation.floor, floor);
+        prop_assert_eq!(confirmation.confirmed, confirmation.similarity >= floor);
+        prop_assert_eq!(confirmation.similarity, cosine_similarity(&left, &right).expect("similarity"));
+    }
+
+    #[test]
+    fn prop_cosine_similarity_rejects_dimension_mismatches(
+        left in finite_embedding_vector(),
+        extra in -1000.0_f32..1000.0,
+    ) {
+        let mut right = left.clone();
+        right.push(extra);
+
+        prop_assert_eq!(cosine_similarity(&left, &right), None);
+        prop_assert_eq!(confirm_cosine_similarity(&left, &right, 0.0), None);
     }
 }
