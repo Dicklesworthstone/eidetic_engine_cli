@@ -5726,6 +5726,61 @@ pub fn render_structural_health_toon(report: &StructuralHealthReport) -> String 
     render_toon_from_json(&render_structural_health_json(report))
 }
 
+/// Render a proximity report as canonical JSON.
+#[must_use]
+pub fn render_proximity_json(report: &crate::graph::gomory_hu::ProximityReport) -> String {
+    serde_json::to_string(report).unwrap_or_else(|_| {
+        r#"{"schema":"ee.error.v1","error":"serialization_failed"}"#.to_string()
+    })
+}
+
+/// Render a proximity report as TOON.
+#[must_use]
+pub fn render_proximity_toon(report: &crate::graph::gomory_hu::ProximityReport) -> String {
+    render_toon_from_json(&render_proximity_json(report))
+}
+
+/// Render a proximity report as Markdown.
+#[must_use]
+pub fn render_proximity_markdown(report: &crate::graph::gomory_hu::ProximityReport) -> String {
+    let min_cut = report
+        .min_cut
+        .map(|value| format!("{value:.6}"))
+        .unwrap_or_else(|| "unavailable".to_string());
+    let tree_path = report
+        .tree_path
+        .as_ref()
+        .map(|nodes| nodes.join(" -> "))
+        .unwrap_or_else(|| "unavailable".to_string());
+
+    let mut output = String::new();
+    let _ = writeln!(output, "# Proximity");
+    let _ = writeln!(output);
+    let _ = writeln!(output, "- Schema: `{}`", report.schema);
+    let _ = writeln!(output, "- Memory A: `{}`", report.memory_a);
+    let _ = writeln!(output, "- Memory B: `{}`", report.memory_b);
+    let _ = writeln!(output, "- Snapshot version: {}", report.snapshot_version);
+    let _ = writeln!(output, "- Interpretation: `{}`", report.interpretation);
+    let _ = writeln!(output, "- Min cut: {min_cut}");
+    let _ = writeln!(output, "- Tree path: {tree_path}");
+
+    if !report.degraded.is_empty() {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## Degraded");
+        for degraded in &report.degraded {
+            let _ = writeln!(
+                output,
+                "- **{}** `{}`: {}",
+                degraded.severity, degraded.code, degraded.message
+            );
+            if let Some(repair) = degraded.repair.as_deref() {
+                let _ = writeln!(output, "  - Repair: `{repair}`");
+            }
+        }
+    }
+    output
+}
+
 /// Render a memory show report as JSON (ee.response.v1 envelope).
 #[must_use]
 pub fn render_memory_show_json(report: &MemoryShowReport) -> String {
@@ -13114,7 +13169,8 @@ mod tests {
         render_learn_experiment_proposal_json, render_learn_experiment_proposal_toon,
         render_memory_history_json, render_memory_history_toon, render_memory_list_json,
         render_memory_show_human, render_memory_show_json, render_preflight_run_json,
-        render_preflight_show_json, render_quarantine_entry_human, render_quarantine_entry_json,
+        render_preflight_show_json, render_proximity_json, render_proximity_markdown,
+        render_proximity_toon, render_quarantine_entry_human, render_quarantine_entry_json,
         render_quarantine_entry_toon, render_quarantine_human, render_quarantine_json,
         render_quarantine_json_filtered, render_quarantine_toon, render_schema_export_json,
         render_shadow_run_human, render_shadow_run_json, render_shadow_run_toon,
@@ -13161,6 +13217,7 @@ mod tests {
         SupportedSchema, VERSION_PROVENANCE_SCHEMA_V1, VersionReport,
     };
     use crate::db::{StoredMemory, StoredTrustQuarantine};
+    use crate::graph::gomory_hu::{PROXIMITY_SCHEMA_V1, ProximityDegradation, ProximityReport};
     use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
     use crate::models::{
         DomainError, ERROR_SCHEMA_V2, MemoryId, ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass,
@@ -15679,6 +15736,28 @@ mod tests {
         }
     }
 
+    fn sample_proximity_report() -> ProximityReport {
+        ProximityReport {
+            schema: PROXIMITY_SCHEMA_V1,
+            memory_a: "mem_alpha".to_owned(),
+            memory_b: "mem_beta".to_owned(),
+            snapshot_version: 11,
+            min_cut: Some(2.5),
+            interpretation: "moderate".to_owned(),
+            tree_path: Some(vec![
+                "mem_alpha".to_owned(),
+                "mem_bridge".to_owned(),
+                "mem_beta".to_owned(),
+            ]),
+            degraded: vec![ProximityDegradation {
+                code: "graph.proximity_fixture".to_owned(),
+                severity: "warning".to_owned(),
+                message: "fixture proximity degradation".to_owned(),
+                repair: Some("ee graph centrality-refresh --workspace .".to_owned()),
+            }],
+        }
+    }
+
     #[test]
     fn status_skyline_markdown_renderer_preserves_summary_and_rows() -> TestResult {
         let markdown = render_status_skyline_markdown(&sample_status_skyline_report());
@@ -15726,6 +15805,69 @@ mod tests {
         let actual = serde_json::Value::from(decoded);
 
         ensure_equal(&actual, &expected, "decoded status skyline TOON")
+    }
+
+    #[test]
+    fn proximity_markdown_renderer_preserves_values_and_degradations() -> TestResult {
+        let markdown = render_proximity_markdown(&sample_proximity_report());
+
+        ensure_contains(&markdown, "# Proximity", "proximity markdown title")?;
+        ensure_contains(
+            &markdown,
+            "- Schema: `ee.proximity.v1`",
+            "proximity markdown schema",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Memory A: `mem_alpha`",
+            "proximity markdown memory A",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Memory B: `mem_beta`",
+            "proximity markdown memory B",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Interpretation: `moderate`",
+            "proximity markdown interpretation",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Min cut: 2.500000",
+            "proximity markdown min cut",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- Tree path: mem_alpha -> mem_bridge -> mem_beta",
+            "proximity markdown tree path",
+        )?;
+        ensure_contains(
+            &markdown,
+            "- **warning** `graph.proximity_fixture`: fixture proximity degradation",
+            "proximity markdown degradation",
+        )?;
+        ensure_contains(
+            &markdown,
+            "  - Repair: `ee graph centrality-refresh --workspace .`",
+            "proximity markdown repair",
+        )
+    }
+
+    #[test]
+    fn proximity_toon_decodes_to_canonical_json() -> TestResult {
+        let report = sample_proximity_report();
+        let json = render_proximity_json(&report);
+        let toon = render_proximity_toon(&report);
+
+        let expected_json = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("proximity JSON should parse: {error}"))?;
+        let expected = serde_json::Value::from(toon::JsonValue::from(expected_json));
+        let decoded = toon::try_decode(&toon, None)
+            .map_err(|error| format!("proximity TOON should decode: {error}"))?;
+        let actual = serde_json::Value::from(decoded);
+
+        ensure_equal(&actual, &expected, "decoded proximity TOON")
     }
 
     #[test]
