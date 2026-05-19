@@ -143,66 +143,164 @@ impl McpPrompt {
     }
 }
 
+type McpToolSchemaBuilder = fn() -> Value;
+type McpToolArgsBuilder = fn(&mut Vec<OsString>, &Value) -> Result<(), String>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum McpTool {
-    Health,
-    Status,
-    Doctor,
-    Capabilities,
-    Search,
-    Context,
-    MemoryShow,
-    Why,
-    Remember,
-    Outcome,
+struct McpToolAnnotations {
+    read_only: bool,
+    destructive: bool,
+    idempotent: bool,
+    open_world: bool,
 }
 
-impl McpTool {
-    fn parse(name: &str) -> Option<Self> {
-        match name {
-            "ee_health" => Some(Self::Health),
-            "ee_status" => Some(Self::Status),
-            "ee_doctor" => Some(Self::Doctor),
-            "ee_capabilities" => Some(Self::Capabilities),
-            "ee_search" => Some(Self::Search),
-            "ee_context" => Some(Self::Context),
-            "ee_memory_show" => Some(Self::MemoryShow),
-            "ee_why" => Some(Self::Why),
-            "ee_remember" => Some(Self::Remember),
-            "ee_outcome" => Some(Self::Outcome),
-            _ => None,
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct McpToolEffect {
+    kind: &'static str,
+    write_surface: &'static [&'static str],
+    default_dry_run: bool,
+    requires_allow_write_when_dry_run_false: bool,
+    audit: &'static str,
+    redaction: &'static str,
+    idempotency: &'static str,
+    destructive: bool,
+}
 
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Health => "ee_health",
-            Self::Status => "ee_status",
-            Self::Doctor => "ee_doctor",
-            Self::Capabilities => "ee_capabilities",
-            Self::Search => "ee_search",
-            Self::Context => "ee_context",
-            Self::MemoryShow => "ee_memory_show",
-            Self::Why => "ee_why",
-            Self::Remember => "ee_remember",
-            Self::Outcome => "ee_outcome",
-        }
-    }
+#[derive(Debug, Clone, Copy)]
+struct McpToolEntry {
+    name: &'static str,
+    description: &'static str,
+    input_schema: McpToolSchemaBuilder,
+    annotations: McpToolAnnotations,
+    effect: Option<McpToolEffect>,
+    args_builder: McpToolArgsBuilder,
+}
 
-    const fn all() -> &'static [Self] {
-        &[
-            Self::Health,
-            Self::Status,
-            Self::Doctor,
-            Self::Capabilities,
-            Self::Search,
-            Self::Context,
-            Self::MemoryShow,
-            Self::Why,
-            Self::Remember,
-            Self::Outcome,
-        ]
-    }
+const READ_ONLY_TOOL_ANNOTATIONS: McpToolAnnotations = McpToolAnnotations {
+    read_only: true,
+    destructive: false,
+    idempotent: true,
+    open_world: false,
+};
+
+const WRITE_TOOL_ANNOTATIONS: McpToolAnnotations = McpToolAnnotations {
+    read_only: false,
+    destructive: false,
+    idempotent: false,
+    open_world: false,
+};
+
+const REMEMBER_TOOL_EFFECT: McpToolEffect = McpToolEffect {
+    kind: "durable_write",
+    write_surface: &["memories", "audit_log", "search_index_jobs"],
+    default_dry_run: true,
+    requires_allow_write_when_dry_run_false: true,
+    audit: "ee remember writes audit_id through the CLI core path",
+    redaction: "content is checked by remember policy before storage",
+    idempotency: "not_idempotent_for_durable_writes",
+    destructive: false,
+};
+
+const OUTCOME_TOOL_EFFECT: McpToolEffect = McpToolEffect {
+    kind: "durable_write",
+    write_surface: &["feedback_events", "audit_log"],
+    default_dry_run: true,
+    requires_allow_write_when_dry_run_false: true,
+    audit: "ee outcome writes audit_id through the CLI core path",
+    redaction: "evidenceJson is validated and stored only through the core outcome path",
+    idempotency: "eventId enables idempotent retries when content matches",
+    destructive: false,
+};
+
+const TOOL_REGISTRY: &[McpToolEntry] = &[
+    McpToolEntry {
+        name: "ee_health",
+        description: "Run ee health --json and return the response envelope",
+        input_schema: workspace_only_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: None,
+        args_builder: build_health_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_status",
+        description: "Run ee status --json and return workspace readiness",
+        input_schema: workspace_only_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: None,
+        args_builder: build_status_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_doctor",
+        description: "Run ee doctor --json and return health checks with repair actions",
+        input_schema: workspace_only_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: None,
+        args_builder: build_doctor_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_capabilities",
+        description: "Run ee capabilities --json and return feature availability",
+        input_schema: workspace_only_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: None,
+        args_builder: build_capabilities_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_search",
+        description: "Run ee search --json over indexed memories and sessions",
+        input_schema: search_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: None,
+        args_builder: build_search_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_context",
+        description: "Run ee context --json to assemble task-specific context",
+        input_schema: context_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: None,
+        args_builder: build_context_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_memory_show",
+        description: "Run ee memory show --json for a single memory",
+        input_schema: memory_show_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: None,
+        args_builder: build_memory_show_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_why",
+        description: "Run ee why --json to explain memory storage, retrieval, or selection",
+        input_schema: why_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: None,
+        args_builder: build_why_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_remember",
+        description: "Gated write tool for ee remember --json; defaults to dry-run and requires allowWrite=true for durable writes",
+        input_schema: remember_tool_schema,
+        annotations: WRITE_TOOL_ANNOTATIONS,
+        effect: Some(REMEMBER_TOOL_EFFECT),
+        args_builder: build_remember_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_outcome",
+        description: "Gated write tool for ee outcome --json; defaults to dry-run and requires allowWrite=true for durable writes",
+        input_schema: outcome_tool_schema,
+        annotations: WRITE_TOOL_ANNOTATIONS,
+        effect: Some(OUTCOME_TOOL_EFFECT),
+        args_builder: build_outcome_tool_args,
+    },
+];
+
+fn mcp_tool_entry(name: &str) -> Option<&'static McpToolEntry> {
+    TOOL_REGISTRY.iter().find(|tool| tool.name == name)
+}
+
+pub fn registered_tool_names() -> impl Iterator<Item = &'static str> {
+    TOOL_REGISTRY.iter().map(|tool| tool.name)
 }
 
 fn json_rpc_error(id: Option<Value>, code: i32, message: &str) -> Value {
@@ -541,399 +639,305 @@ fn handle_resources_templates_list(id: Value) -> Value {
     )
 }
 
+fn workspace_only_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "workspace": {
+                "type": "string",
+                "description": "Workspace path (defaults to current directory)"
+            }
+        }
+    })
+}
+
+fn search_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Search query"
+            },
+            "workspace": {
+                "type": "string",
+                "description": "Workspace path (defaults to current directory)"
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum results (default 10)"
+            },
+            "database": {
+                "type": "string",
+                "description": "Database path override"
+            },
+            "indexDir": {
+                "type": "string",
+                "description": "Index directory override"
+            },
+            "explain": {
+                "type": "boolean",
+                "description": "Include score explanations"
+            }
+        },
+        "required": ["query"]
+    })
+}
+
+fn context_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Task description"
+            },
+            "workspace": {
+                "type": "string",
+                "description": "Workspace path"
+            },
+            "max_tokens": {
+                "type": "integer",
+                "description": "Token budget (default 4000)"
+            },
+            "candidatePool": {
+                "type": "integer",
+                "description": "Maximum candidate memories before packing"
+            },
+            "profile": {
+                "type": "string",
+                "description": "Context profile",
+                "enum": ["compact", "balanced", "thorough", "submodular"]
+            },
+            "database": {
+                "type": "string",
+                "description": "Database path override"
+            },
+            "indexDir": {
+                "type": "string",
+                "description": "Index directory override"
+            }
+        },
+        "required": ["query"]
+    })
+}
+
+fn memory_show_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "memoryId": {
+                "type": "string",
+                "description": "Memory ID to show"
+            },
+            "workspace": {
+                "type": "string",
+                "description": "Workspace path"
+            },
+            "database": {
+                "type": "string",
+                "description": "Database path override"
+            },
+            "includeTombstoned": {
+                "type": "boolean",
+                "description": "Include tombstoned memories"
+            }
+        },
+        "required": ["memoryId"]
+    })
+}
+
+fn why_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "memoryId": {
+                "type": "string",
+                "description": "Memory ID to explain"
+            },
+            "workspace": {
+                "type": "string",
+                "description": "Workspace path"
+            },
+            "database": {
+                "type": "string",
+                "description": "Database path override"
+            },
+            "confidenceThreshold": {
+                "type": "number",
+                "description": "Selection confidence threshold"
+            }
+        },
+        "required": ["memoryId"]
+    })
+}
+
+fn remember_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "content": {
+                "type": "string",
+                "description": "Memory content to store"
+            },
+            "workspace": {
+                "type": "string",
+                "description": "Workspace path"
+            },
+            "level": {
+                "type": "string",
+                "description": "Memory level; defaults to episodic"
+            },
+            "kind": {
+                "type": "string",
+                "description": "Memory kind; defaults to fact"
+            },
+            "tags": {
+                "type": "string",
+                "description": "Comma-separated tags"
+            },
+            "confidence": {
+                "type": "number",
+                "description": "Confidence score from 0.0 to 1.0"
+            },
+            "source": {
+                "type": "string",
+                "description": "Source provenance URI"
+            },
+            "validFrom": {
+                "type": "string",
+                "description": "RFC3339 timestamp when this memory becomes applicable"
+            },
+            "validTo": {
+                "type": "string",
+                "description": "RFC3339 timestamp when this memory stops being applicable"
+            },
+            "dryRun": {
+                "type": "boolean",
+                "description": "Validate without writing; defaults to true"
+            },
+            "allowWrite": {
+                "type": "boolean",
+                "description": "Required and true when dryRun is false"
+            }
+        },
+        "required": ["content"]
+    })
+}
+
+fn outcome_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "targetId": {
+                "type": "string",
+                "description": "Target ID to receive feedback"
+            },
+            "targetType": {
+                "type": "string",
+                "description": "Target type; defaults to memory"
+            },
+            "workspace": {
+                "type": "string",
+                "description": "Workspace path"
+            },
+            "workspaceId": {
+                "type": "string",
+                "description": "Workspace ID for non-memory targets"
+            },
+            "signal": {
+                "type": "string",
+                "description": "Outcome signal such as helpful, harmful, stale, or neutral"
+            },
+            "weight": {
+                "type": "number",
+                "description": "Optional feedback weight from 0.0 to 10.0"
+            },
+            "sourceType": {
+                "type": "string",
+                "description": "Feedback source type"
+            },
+            "sourceId": {
+                "type": "string",
+                "description": "Source identifier, such as a run or task ID"
+            },
+            "reason": {
+                "type": "string",
+                "description": "Human-readable reason for the feedback"
+            },
+            "evidenceJson": {
+                "type": "string",
+                "description": "JSON evidence payload string"
+            },
+            "sessionId": {
+                "type": "string",
+                "description": "Session ID associated with the observed outcome"
+            },
+            "eventId": {
+                "type": "string",
+                "description": "Caller-supplied feedback event ID for idempotent retries"
+            },
+            "actor": {
+                "type": "string",
+                "description": "Actor recorded in the audit log"
+            },
+            "database": {
+                "type": "string",
+                "description": "Database path override"
+            },
+            "dryRun": {
+                "type": "boolean",
+                "description": "Validate without writing; defaults to true"
+            },
+            "allowWrite": {
+                "type": "boolean",
+                "description": "Required and true when dryRun is false"
+            }
+        },
+        "required": ["targetId", "signal"]
+    })
+}
+
+fn mcp_tool_annotations_value(annotations: McpToolAnnotations) -> Value {
+    json!({
+        "readOnlyHint": annotations.read_only,
+        "destructiveHint": annotations.destructive,
+        "idempotentHint": annotations.idempotent,
+        "openWorldHint": annotations.open_world
+    })
+}
+
+fn mcp_tool_effect_value(effect: McpToolEffect) -> Value {
+    json!({
+        "kind": effect.kind,
+        "writeSurface": effect.write_surface,
+        "defaultDryRun": effect.default_dry_run,
+        "requiresAllowWriteWhenDryRunFalse": effect.requires_allow_write_when_dry_run_false,
+        "audit": effect.audit,
+        "redaction": effect.redaction,
+        "idempotency": effect.idempotency,
+        "destructive": effect.destructive
+    })
+}
+
+fn mcp_tool_descriptor(tool: &McpToolEntry) -> Value {
+    let mut descriptor = json!({
+        "name": tool.name,
+        "description": tool.description,
+        "inputSchema": (tool.input_schema)(),
+        "annotations": mcp_tool_annotations_value(tool.annotations)
+    });
+    if let Some(effect) = tool.effect {
+        if let Value::Object(fields) = &mut descriptor {
+            fields.insert("eeEffect".to_string(), mcp_tool_effect_value(effect));
+        }
+    }
+    descriptor
+}
+
 fn handle_tools_list(id: Value) -> Value {
-    json_rpc_result(
-        id,
-        json!({
-            "tools": [
-                {
-                    "name": "ee_health",
-                    "description": "Run ee health --json and return the response envelope",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "workspace": {
-                                "type": "string",
-                                "description": "Workspace path (defaults to current directory)"
-                            }
-                        }
-                    },
-                    "annotations": {
-                        "readOnlyHint": true,
-                        "destructiveHint": false,
-                        "idempotentHint": true,
-                        "openWorldHint": false
-                    }
-                },
-                {
-                    "name": "ee_status",
-                    "description": "Run ee status --json and return workspace readiness",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "workspace": {
-                                "type": "string",
-                                "description": "Workspace path (defaults to current directory)"
-                            }
-                        }
-                    },
-                    "annotations": {
-                        "readOnlyHint": true,
-                        "destructiveHint": false,
-                        "idempotentHint": true,
-                        "openWorldHint": false
-                    }
-                },
-                {
-                    "name": "ee_doctor",
-                    "description": "Run ee doctor --json and return health checks with repair actions",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "workspace": {
-                                "type": "string",
-                                "description": "Workspace path (defaults to current directory)"
-                            }
-                        }
-                    },
-                    "annotations": {
-                        "readOnlyHint": true,
-                        "destructiveHint": false,
-                        "idempotentHint": true,
-                        "openWorldHint": false
-                    }
-                },
-                {
-                    "name": "ee_capabilities",
-                    "description": "Run ee capabilities --json and return feature availability",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "workspace": {
-                                "type": "string",
-                                "description": "Workspace path (defaults to current directory)"
-                            }
-                        }
-                    },
-                    "annotations": {
-                        "readOnlyHint": true,
-                        "destructiveHint": false,
-                        "idempotentHint": true,
-                        "openWorldHint": false
-                    }
-                },
-                {
-                    "name": "ee_search",
-                    "description": "Run ee search --json over indexed memories and sessions",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "Search query"
-                            },
-                            "workspace": {
-                                "type": "string",
-                                "description": "Workspace path (defaults to current directory)"
-                            },
-                            "limit": {
-                                "type": "integer",
-                                "description": "Maximum results (default 10)"
-                            },
-                            "database": {
-                                "type": "string",
-                                "description": "Database path override"
-                            },
-                            "indexDir": {
-                                "type": "string",
-                                "description": "Index directory override"
-                            },
-                            "explain": {
-                                "type": "boolean",
-                                "description": "Include score explanations"
-                            }
-                        },
-                        "required": ["query"]
-                    },
-                    "annotations": {
-                        "readOnlyHint": true,
-                        "destructiveHint": false,
-                        "idempotentHint": true,
-                        "openWorldHint": false
-                    }
-                },
-                {
-                    "name": "ee_context",
-                    "description": "Run ee context --json to assemble task-specific context",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "Task description"
-                            },
-                            "workspace": {
-                                "type": "string",
-                                "description": "Workspace path"
-                            },
-                            "max_tokens": {
-                                "type": "integer",
-                                "description": "Token budget (default 4000)"
-                            },
-                            "candidatePool": {
-                                "type": "integer",
-                                "description": "Maximum candidate memories before packing"
-                            },
-                            "profile": {
-                                "type": "string",
-                                "description": "Context profile",
-                                "enum": ["compact", "balanced", "thorough", "submodular"]
-                            },
-                            "database": {
-                                "type": "string",
-                                "description": "Database path override"
-                            },
-                            "indexDir": {
-                                "type": "string",
-                                "description": "Index directory override"
-                            }
-                        },
-                        "required": ["query"]
-                    },
-                    "annotations": {
-                        "readOnlyHint": true,
-                        "destructiveHint": false,
-                        "idempotentHint": true,
-                        "openWorldHint": false
-                    }
-                },
-                {
-                    "name": "ee_memory_show",
-                    "description": "Run ee memory show --json for a single memory",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "memoryId": {
-                                "type": "string",
-                                "description": "Memory ID to show"
-                            },
-                            "workspace": {
-                                "type": "string",
-                                "description": "Workspace path"
-                            },
-                            "database": {
-                                "type": "string",
-                                "description": "Database path override"
-                            },
-                            "includeTombstoned": {
-                                "type": "boolean",
-                                "description": "Include tombstoned memories"
-                            }
-                        },
-                        "required": ["memoryId"]
-                    },
-                    "annotations": {
-                        "readOnlyHint": true,
-                        "destructiveHint": false,
-                        "idempotentHint": true,
-                        "openWorldHint": false
-                    }
-                },
-                {
-                    "name": "ee_why",
-                    "description": "Run ee why --json to explain memory storage, retrieval, or selection",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "memoryId": {
-                                "type": "string",
-                                "description": "Memory ID to explain"
-                            },
-                            "workspace": {
-                                "type": "string",
-                                "description": "Workspace path"
-                            },
-                            "database": {
-                                "type": "string",
-                                "description": "Database path override"
-                            },
-                            "confidenceThreshold": {
-                                "type": "number",
-                                "description": "Selection confidence threshold"
-                            }
-                        },
-                        "required": ["memoryId"]
-                    },
-                    "annotations": {
-                        "readOnlyHint": true,
-                        "destructiveHint": false,
-                        "idempotentHint": true,
-                        "openWorldHint": false
-                    }
-                },
-                {
-                    "name": "ee_remember",
-                    "description": "Gated write tool for ee remember --json; defaults to dry-run and requires allowWrite=true for durable writes",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "content": {
-                                "type": "string",
-                                "description": "Memory content to store"
-                            },
-                            "workspace": {
-                                "type": "string",
-                                "description": "Workspace path"
-                            },
-                            "level": {
-                                "type": "string",
-                                "description": "Memory level; defaults to episodic"
-                            },
-                            "kind": {
-                                "type": "string",
-                                "description": "Memory kind; defaults to fact"
-                            },
-                            "tags": {
-                                "type": "string",
-                                "description": "Comma-separated tags"
-                            },
-                            "confidence": {
-                                "type": "number",
-                                "description": "Confidence score from 0.0 to 1.0"
-                            },
-                            "source": {
-                                "type": "string",
-                                "description": "Source provenance URI"
-                            },
-                            "validFrom": {
-                                "type": "string",
-                                "description": "RFC3339 timestamp when this memory becomes applicable"
-                            },
-                            "validTo": {
-                                "type": "string",
-                                "description": "RFC3339 timestamp when this memory stops being applicable"
-                            },
-                            "dryRun": {
-                                "type": "boolean",
-                                "description": "Validate without writing; defaults to true"
-                            },
-                            "allowWrite": {
-                                "type": "boolean",
-                                "description": "Required and true when dryRun is false"
-                            }
-                        },
-                        "required": ["content"]
-                    },
-                    "annotations": {
-                        "readOnlyHint": false,
-                        "destructiveHint": false,
-                        "idempotentHint": false,
-                        "openWorldHint": false
-                    },
-                    "eeEffect": {
-                        "kind": "durable_write",
-                        "writeSurface": ["memories", "audit_log", "search_index_jobs"],
-                        "defaultDryRun": true,
-                        "requiresAllowWriteWhenDryRunFalse": true,
-                        "audit": "ee remember writes audit_id through the CLI core path",
-                        "redaction": "content is checked by remember policy before storage",
-                        "idempotency": "not_idempotent_for_durable_writes",
-                        "destructive": false
-                    }
-                },
-                {
-                    "name": "ee_outcome",
-                    "description": "Gated write tool for ee outcome --json; defaults to dry-run and requires allowWrite=true for durable writes",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "targetId": {
-                                "type": "string",
-                                "description": "Target ID to receive feedback"
-                            },
-                            "targetType": {
-                                "type": "string",
-                                "description": "Target type; defaults to memory"
-                            },
-                            "workspace": {
-                                "type": "string",
-                                "description": "Workspace path"
-                            },
-                            "workspaceId": {
-                                "type": "string",
-                                "description": "Workspace ID for non-memory targets"
-                            },
-                            "signal": {
-                                "type": "string",
-                                "description": "Outcome signal such as helpful, harmful, stale, or neutral"
-                            },
-                            "weight": {
-                                "type": "number",
-                                "description": "Optional feedback weight from 0.0 to 10.0"
-                            },
-                            "sourceType": {
-                                "type": "string",
-                                "description": "Feedback source type"
-                            },
-                            "sourceId": {
-                                "type": "string",
-                                "description": "Source identifier, such as a run or task ID"
-                            },
-                            "reason": {
-                                "type": "string",
-                                "description": "Human-readable reason for the feedback"
-                            },
-                            "evidenceJson": {
-                                "type": "string",
-                                "description": "JSON evidence payload string"
-                            },
-                            "sessionId": {
-                                "type": "string",
-                                "description": "Session ID associated with the observed outcome"
-                            },
-                            "eventId": {
-                                "type": "string",
-                                "description": "Caller-supplied feedback event ID for idempotent retries"
-                            },
-                            "actor": {
-                                "type": "string",
-                                "description": "Actor recorded in the audit log"
-                            },
-                            "database": {
-                                "type": "string",
-                                "description": "Database path override"
-                            },
-                            "dryRun": {
-                                "type": "boolean",
-                                "description": "Validate without writing; defaults to true"
-                            },
-                            "allowWrite": {
-                                "type": "boolean",
-                                "description": "Required and true when dryRun is false"
-                            }
-                        },
-                        "required": ["targetId", "signal"]
-                    },
-                    "annotations": {
-                        "readOnlyHint": false,
-                        "destructiveHint": false,
-                        "idempotentHint": false,
-                        "openWorldHint": false
-                    },
-                    "eeEffect": {
-                        "kind": "durable_write",
-                        "writeSurface": ["feedback_events", "audit_log"],
-                        "defaultDryRun": true,
-                        "requiresAllowWriteWhenDryRunFalse": true,
-                        "audit": "ee outcome writes audit_id through the CLI core path",
-                        "redaction": "evidenceJson is validated and stored only through the core outcome path",
-                        "idempotency": "eventId enables idempotent retries when content matches",
-                        "destructive": false
-                    }
-                }
-            ]
-        }),
-    )
+    let tools: Vec<Value> = TOOL_REGISTRY.iter().map(mcp_tool_descriptor).collect();
+    json_rpc_result(id, json!({ "tools": tools }))
 }
 
 fn find_argument<'a>(arguments: &'a Value, names: &[&str]) -> Option<&'a Value> {
@@ -1100,170 +1104,174 @@ fn gated_write_dry_run(tool_name: &str, arguments: &Value) -> Result<bool, Strin
     Ok(dry_run)
 }
 
-fn build_cli_args_for_tool(tool: McpTool, arguments: &Value) -> Result<Vec<OsString>, String> {
+fn build_health_tool_args(args: &mut Vec<OsString>, _arguments: &Value) -> Result<(), String> {
+    push_arg(args, "health");
+    Ok(())
+}
+
+fn build_status_tool_args(args: &mut Vec<OsString>, _arguments: &Value) -> Result<(), String> {
+    push_arg(args, "status");
+    Ok(())
+}
+
+fn build_doctor_tool_args(args: &mut Vec<OsString>, _arguments: &Value) -> Result<(), String> {
+    push_arg(args, "doctor");
+    Ok(())
+}
+
+fn build_capabilities_tool_args(
+    args: &mut Vec<OsString>,
+    _arguments: &Value,
+) -> Result<(), String> {
+    push_arg(args, "capabilities");
+    Ok(())
+}
+
+fn build_search_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
+    push_arg(args, "search");
+    push_arg(args, required_string(arguments, &["query"])?);
+    if let Some(limit) = optional_u32(arguments, &["limit"])? {
+        push_arg(args, "--limit");
+        push_arg(args, limit.to_string());
+    }
+    append_optional_path_flag(args, arguments, &["database"], "--database")?;
+    append_optional_path_flag(args, arguments, &["indexDir", "index_dir"], "--index-dir")?;
+    if optional_bool(arguments, &["explain"])? {
+        push_arg(args, "--explain");
+    }
+    Ok(())
+}
+
+fn build_context_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
+    push_arg(args, "context");
+    push_arg(args, required_string(arguments, &["query"])?);
+    if let Some(max_tokens) = optional_u32(arguments, &["maxTokens", "max_tokens"])? {
+        push_arg(args, "--max-tokens");
+        push_arg(args, max_tokens.to_string());
+    }
+    if let Some(candidate_pool) = optional_u32(arguments, &["candidatePool", "candidate_pool"])? {
+        push_arg(args, "--candidate-pool");
+        push_arg(args, candidate_pool.to_string());
+    }
+    if let Some(profile) = optional_string(arguments, &["profile"])? {
+        push_arg(args, "--profile");
+        push_arg(args, parse_mcp_context_profile(profile)?);
+    }
+    append_optional_path_flag(args, arguments, &["database"], "--database")?;
+    append_optional_path_flag(args, arguments, &["indexDir", "index_dir"], "--index-dir")?;
+    Ok(())
+}
+
+fn build_memory_show_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
+    push_arg(args, "memory");
+    push_arg(args, "show");
+    push_arg(
+        args,
+        required_string(arguments, &["memoryId", "memory_id"])?,
+    );
+    append_optional_path_flag(args, arguments, &["database"], "--database")?;
+    if optional_bool(arguments, &["includeTombstoned", "include_tombstoned"])? {
+        push_arg(args, "--include-tombstoned");
+    }
+    Ok(())
+}
+
+fn build_why_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
+    push_arg(args, "why");
+    push_arg(
+        args,
+        required_string(arguments, &["memoryId", "memory_id"])?,
+    );
+    append_optional_path_flag(args, arguments, &["database"], "--database")?;
+    if let Some(threshold) =
+        optional_number_string(arguments, &["confidenceThreshold", "confidence_threshold"])?
+    {
+        push_arg(args, "--confidence-threshold");
+        push_arg(args, threshold);
+    }
+    Ok(())
+}
+
+fn build_remember_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
+    let dry_run = gated_write_dry_run("ee_remember", arguments)?;
+    push_arg(args, "remember");
+    push_arg(args, required_string(arguments, &["content"])?);
+    append_optional_string_flag(args, arguments, &["level"], "--level")?;
+    append_optional_string_flag(args, arguments, &["kind"], "--kind")?;
+    append_optional_string_flag(args, arguments, &["tags"], "--tags")?;
+    append_optional_number_flag(args, arguments, &["confidence"], "--confidence")?;
+    append_optional_string_flag(args, arguments, &["source"], "--source")?;
+    append_optional_string_flag(
+        args,
+        arguments,
+        &["validFrom", "valid_from"],
+        "--valid-from",
+    )?;
+    append_optional_string_flag(args, arguments, &["validTo", "valid_to"], "--valid-to")?;
+    if dry_run {
+        push_arg(args, "--dry-run");
+    }
+    Ok(())
+}
+
+fn build_outcome_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
+    let dry_run = gated_write_dry_run("ee_outcome", arguments)?;
+    push_arg(args, "outcome");
+    push_arg(
+        args,
+        required_string(arguments, &["targetId", "target_id"])?,
+    );
+    append_optional_string_flag(
+        args,
+        arguments,
+        &["targetType", "target_type"],
+        "--target-type",
+    )?;
+    append_optional_string_flag(
+        args,
+        arguments,
+        &["workspaceId", "workspace_id"],
+        "--workspace-id",
+    )?;
+    push_arg(args, "--signal");
+    push_arg(args, required_string(arguments, &["signal"])?);
+    append_optional_number_flag(args, arguments, &["weight"], "--weight")?;
+    append_optional_string_flag(
+        args,
+        arguments,
+        &["sourceType", "source_type"],
+        "--source-type",
+    )?;
+    append_optional_string_flag(args, arguments, &["sourceId", "source_id"], "--source-id")?;
+    append_optional_string_flag(args, arguments, &["reason"], "--reason")?;
+    append_optional_string_flag(
+        args,
+        arguments,
+        &["evidenceJson", "evidence_json"],
+        "--evidence-json",
+    )?;
+    append_optional_string_flag(
+        args,
+        arguments,
+        &["sessionId", "session_id"],
+        "--session-id",
+    )?;
+    append_optional_string_flag(args, arguments, &["eventId", "event_id"], "--event-id")?;
+    append_optional_string_flag(args, arguments, &["actor"], "--actor")?;
+    append_optional_path_flag(args, arguments, &["database"], "--database")?;
+    if dry_run {
+        push_arg(args, "--dry-run");
+    }
+    Ok(())
+}
+
+fn build_cli_args_for_tool(
+    tool: &McpToolEntry,
+    arguments: &Value,
+) -> Result<Vec<OsString>, String> {
     let mut args = Vec::new();
     append_common_json_args(&mut args, arguments)?;
-
-    match tool {
-        McpTool::Health => push_arg(&mut args, "health"),
-        McpTool::Status => push_arg(&mut args, "status"),
-        McpTool::Doctor => push_arg(&mut args, "doctor"),
-        McpTool::Capabilities => push_arg(&mut args, "capabilities"),
-        McpTool::Search => {
-            push_arg(&mut args, "search");
-            push_arg(&mut args, required_string(arguments, &["query"])?);
-            if let Some(limit) = optional_u32(arguments, &["limit"])? {
-                push_arg(&mut args, "--limit");
-                push_arg(&mut args, limit.to_string());
-            }
-            append_optional_path_flag(&mut args, arguments, &["database"], "--database")?;
-            append_optional_path_flag(
-                &mut args,
-                arguments,
-                &["indexDir", "index_dir"],
-                "--index-dir",
-            )?;
-            if optional_bool(arguments, &["explain"])? {
-                push_arg(&mut args, "--explain");
-            }
-        }
-        McpTool::Context => {
-            push_arg(&mut args, "context");
-            push_arg(&mut args, required_string(arguments, &["query"])?);
-            if let Some(max_tokens) = optional_u32(arguments, &["maxTokens", "max_tokens"])? {
-                push_arg(&mut args, "--max-tokens");
-                push_arg(&mut args, max_tokens.to_string());
-            }
-            if let Some(candidate_pool) =
-                optional_u32(arguments, &["candidatePool", "candidate_pool"])?
-            {
-                push_arg(&mut args, "--candidate-pool");
-                push_arg(&mut args, candidate_pool.to_string());
-            }
-            if let Some(profile) = optional_string(arguments, &["profile"])? {
-                push_arg(&mut args, "--profile");
-                push_arg(&mut args, parse_mcp_context_profile(profile)?);
-            }
-            append_optional_path_flag(&mut args, arguments, &["database"], "--database")?;
-            append_optional_path_flag(
-                &mut args,
-                arguments,
-                &["indexDir", "index_dir"],
-                "--index-dir",
-            )?;
-        }
-        McpTool::MemoryShow => {
-            push_arg(&mut args, "memory");
-            push_arg(&mut args, "show");
-            push_arg(
-                &mut args,
-                required_string(arguments, &["memoryId", "memory_id"])?,
-            );
-            append_optional_path_flag(&mut args, arguments, &["database"], "--database")?;
-            if optional_bool(arguments, &["includeTombstoned", "include_tombstoned"])? {
-                push_arg(&mut args, "--include-tombstoned");
-            }
-        }
-        McpTool::Why => {
-            push_arg(&mut args, "why");
-            push_arg(
-                &mut args,
-                required_string(arguments, &["memoryId", "memory_id"])?,
-            );
-            append_optional_path_flag(&mut args, arguments, &["database"], "--database")?;
-            if let Some(threshold) =
-                optional_number_string(arguments, &["confidenceThreshold", "confidence_threshold"])?
-            {
-                push_arg(&mut args, "--confidence-threshold");
-                push_arg(&mut args, threshold);
-            }
-        }
-        McpTool::Remember => {
-            let dry_run = gated_write_dry_run("ee_remember", arguments)?;
-            push_arg(&mut args, "remember");
-            push_arg(&mut args, required_string(arguments, &["content"])?);
-            append_optional_string_flag(&mut args, arguments, &["level"], "--level")?;
-            append_optional_string_flag(&mut args, arguments, &["kind"], "--kind")?;
-            append_optional_string_flag(&mut args, arguments, &["tags"], "--tags")?;
-            append_optional_number_flag(&mut args, arguments, &["confidence"], "--confidence")?;
-            append_optional_string_flag(&mut args, arguments, &["source"], "--source")?;
-            append_optional_string_flag(
-                &mut args,
-                arguments,
-                &["validFrom", "valid_from"],
-                "--valid-from",
-            )?;
-            append_optional_string_flag(
-                &mut args,
-                arguments,
-                &["validTo", "valid_to"],
-                "--valid-to",
-            )?;
-            if dry_run {
-                push_arg(&mut args, "--dry-run");
-            }
-        }
-        McpTool::Outcome => {
-            let dry_run = gated_write_dry_run("ee_outcome", arguments)?;
-            push_arg(&mut args, "outcome");
-            push_arg(
-                &mut args,
-                required_string(arguments, &["targetId", "target_id"])?,
-            );
-            append_optional_string_flag(
-                &mut args,
-                arguments,
-                &["targetType", "target_type"],
-                "--target-type",
-            )?;
-            append_optional_string_flag(
-                &mut args,
-                arguments,
-                &["workspaceId", "workspace_id"],
-                "--workspace-id",
-            )?;
-            push_arg(&mut args, "--signal");
-            push_arg(&mut args, required_string(arguments, &["signal"])?);
-            append_optional_number_flag(&mut args, arguments, &["weight"], "--weight")?;
-            append_optional_string_flag(
-                &mut args,
-                arguments,
-                &["sourceType", "source_type"],
-                "--source-type",
-            )?;
-            append_optional_string_flag(
-                &mut args,
-                arguments,
-                &["sourceId", "source_id"],
-                "--source-id",
-            )?;
-            append_optional_string_flag(&mut args, arguments, &["reason"], "--reason")?;
-            append_optional_string_flag(
-                &mut args,
-                arguments,
-                &["evidenceJson", "evidence_json"],
-                "--evidence-json",
-            )?;
-            append_optional_string_flag(
-                &mut args,
-                arguments,
-                &["sessionId", "session_id"],
-                "--session-id",
-            )?;
-            append_optional_string_flag(
-                &mut args,
-                arguments,
-                &["eventId", "event_id"],
-                "--event-id",
-            )?;
-            append_optional_string_flag(&mut args, arguments, &["actor"], "--actor")?;
-            append_optional_path_flag(&mut args, arguments, &["database"], "--database")?;
-            if dry_run {
-                push_arg(&mut args, "--dry-run");
-            }
-        }
-    }
-
+    (tool.args_builder)(&mut args, arguments)?;
     Ok(args)
 }
 
@@ -1577,7 +1585,7 @@ fn handle_tools_call(id: Value, params: Option<&Value>) -> Value {
     };
 
     let tool_name = params.get("name").and_then(Value::as_str).unwrap_or("");
-    let Some(tool) = McpTool::parse(tool_name) else {
+    let Some(tool) = mcp_tool_entry(tool_name) else {
         return json_rpc_error(Some(id), -32601, &format!("Unknown tool: {tool_name}"));
     };
 
@@ -2491,10 +2499,14 @@ mod tests {
         Ok(())
     }
 
+    fn registry_tool(name: &str) -> Result<&'static McpToolEntry, String> {
+        mcp_tool_entry(name).ok_or_else(|| format!("missing registry entry for {name}"))
+    }
+
     #[test]
     fn build_cli_args_outcome_defaults_to_dry_run_and_keeps_event_id() -> Result<(), String> {
         let args = os_args_to_strings(build_cli_args_for_tool(
-            McpTool::Outcome,
+            registry_tool("ee_outcome")?,
             &json!({
                 "targetId": "mem_00000000000000000000000001",
                 "signal": "helpful",
@@ -2515,7 +2527,7 @@ mod tests {
     #[test]
     fn build_cli_args_remember_allow_write_removes_dry_run_flag() -> Result<(), String> {
         let args = os_args_to_strings(build_cli_args_for_tool(
-            McpTool::Remember,
+            registry_tool("ee_remember")?,
             &json!({
                 "content": "Persist this only with an explicit write gate.",
                 "dryRun": false,
@@ -2555,7 +2567,7 @@ mod tests {
     #[test]
     fn handle_tools_call_context_forwards_budget_flags() -> Result<(), String> {
         let args = os_args_to_strings(build_cli_args_for_tool(
-            McpTool::Context,
+            registry_tool("ee_context")?,
             &json!({
                 "query": "prepare release",
                 "maxTokens": u32::MAX,
@@ -2783,41 +2795,45 @@ mod tests {
         assert!(response.get("error").is_some());
     }
 
-    // bd-1w75v MCP-TOOL-REGISTRY precursor: round-trip parse(name()) for every
-    // McpTool variant. Guards against drift when adding/renaming tools — the
-    // full registry refactor (bd-1w75v) will replace these methods with a
-    // single TOOL_REGISTRY array, but until then this test pins the contract.
     #[test]
-    fn mcp_tool_name_round_trips_through_parse() {
-        for tool in McpTool::all() {
-            let name = tool.name();
+    fn mcp_tool_registry_names_round_trip_through_lookup() {
+        for tool in TOOL_REGISTRY {
+            let name = tool.name;
             assert!(
                 name.starts_with("ee_"),
                 "tool name must start with ee_: {name}"
             );
-            let parsed = McpTool::parse(name)
-                .unwrap_or_else(|| panic!("McpTool::parse failed for canonical name {name}"));
+            let parsed = mcp_tool_entry(name);
+            assert!(
+                parsed.is_some(),
+                "mcp_tool_entry failed for canonical name {name}"
+            );
             assert_eq!(
-                &parsed, tool,
-                "parse(name) round-trip mismatch for {name}: got {parsed:?}, expected {tool:?}"
+                parsed.map(|entry| entry.name),
+                Some(tool.name),
+                "registry lookup mismatch for {name}"
             );
         }
     }
 
     #[test]
-    fn mcp_tool_all_is_unique_and_exhaustive() {
+    fn mcp_tool_registry_names_are_unique_and_exported() {
         use std::collections::BTreeSet;
-        let names: BTreeSet<&'static str> = McpTool::all().iter().map(|t| t.name()).collect();
+        let names: BTreeSet<&'static str> = TOOL_REGISTRY.iter().map(|tool| tool.name).collect();
         assert_eq!(
             names.len(),
-            McpTool::all().len(),
-            "McpTool::all() must contain unique names"
+            TOOL_REGISTRY.len(),
+            "TOOL_REGISTRY must contain unique names"
         );
-        // Cross-check: every name in all() is parseable.
+        let exported_names: BTreeSet<&'static str> = registered_tool_names().collect();
+        assert_eq!(
+            names, exported_names,
+            "registered_tool_names() must expose TOOL_REGISTRY exactly"
+        );
         for name in &names {
             assert!(
-                McpTool::parse(name).is_some(),
-                "McpTool::all name {name} must be parseable"
+                mcp_tool_entry(name).is_some(),
+                "TOOL_REGISTRY name {name} must be lookupable"
             );
         }
     }

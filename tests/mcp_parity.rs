@@ -663,6 +663,13 @@ fn mcp_tools_list_covers_parity_tested_tools() -> TestResult {
 
     let listed: BTreeSet<&str> = tool_names.into_iter().collect();
     let tested: BTreeSet<&str> = PARITY_TESTED_TOOLS.iter().copied().collect();
+    let registered: BTreeSet<&str> = ee::mcp::registered_tool_names().collect();
+    ensure(
+        listed == registered,
+        format!(
+            "tools/list must be generated from the MCP registry; listed={listed:?}, registered={registered:?}"
+        ),
+    )?;
     ensure(
         listed == tested,
         format!("tools/list parity coverage mismatch; listed={listed:?}, tested={tested:?}"),
