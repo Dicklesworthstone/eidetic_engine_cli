@@ -31056,6 +31056,29 @@ impl MemoryExpireReport {
     }
 
     #[must_use]
+    pub fn markdown_output(&self) -> String {
+        let mut output = format!(
+            "## Memory Expire\n\n- Memory: `{}`\n- Status: `{}`\n- Dry run: `{}`\n- Persisted: `{}`\n- Changed: `{}`\n- Index status: `{}`\n",
+            self.memory_id,
+            self.status,
+            self.dry_run,
+            self.persisted,
+            self.changed,
+            self.index_status
+        );
+        if let Some(valid_to) = &self.valid_to {
+            output.push_str(&format!("- Valid to: `{valid_to}`\n"));
+        }
+        if let Some(audit_id) = &self.audit_id {
+            output.push_str(&format!("- Audit: `{audit_id}`\n"));
+        }
+        if let Some(index_job_id) = &self.index_job_id {
+            output.push_str(&format!("- Index job: `{index_job_id}`\n"));
+        }
+        output
+    }
+
+    #[must_use]
     pub fn toon_output(&self) -> String {
         format!(
             "memory_expire|{}|{}|{}|{}",
