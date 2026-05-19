@@ -173,6 +173,19 @@ fn graph_command_flags_are_help_discoverable() -> TestResult {
         "ee graph centrality --help",
     )?;
 
+    let centrality_refresh_help = help_for(&["ee", "graph", "centrality-refresh", "--help"])?;
+    assert_contains_all(
+        &centrality_refresh_help,
+        &[
+            "--database",
+            "--dry-run",
+            "--min-weight",
+            "--min-confidence",
+            "--link-limit",
+        ],
+        "ee graph centrality-refresh --help",
+    )?;
+
     let snapshot_help = help_for(&["ee", "graph", "snapshot", "refresh", "--help"])?;
     assert_contains_all(
         &snapshot_help,
@@ -303,6 +316,15 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "--limit",
             "10",
             "--require-fresh",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "graph",
+            "centrality-refresh",
+            "--dry-run",
+            "--min-confidence",
+            "0.6",
             "--json",
         ][..],
         &[

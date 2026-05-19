@@ -144,6 +144,7 @@ Example:
 ```bash
 ee graph snapshot refresh --workspace . --graph memory_links --dry-run --json
 ee graph centrality --workspace . --algorithm pagerank --limit 10 --json
+ee graph centrality-refresh --workspace . --dry-run --min-confidence 0.6 --json
 ee graph k-core --workspace . --k 3 --min-confidence 0.6 --json
 ee graph path mem_source mem_target --workspace . --min-weight 0.4 --json
 ee graph explain-link mem_source mem_target --workspace . --link-limit 250 --json
