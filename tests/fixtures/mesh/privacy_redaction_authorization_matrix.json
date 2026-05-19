@@ -1,0 +1,19 @@
+{
+  "schema": "ee.mesh.privacy_redaction_authorization_matrix.v1",
+  "bead": "bd-3i5q7",
+  "description": "Synthetic hostile privacy fixture for mesh policy e2e coverage. Sentinel strings are intentionally secret-shaped and must never appear in decision, degraded, status, log, provenance, or remote-cache surfaces.",
+  "sentinelSecrets": [
+    "MESH_PRIVACY_SENTINEL_BODY_sk_live_51N0TREAL000000000000000000000000",
+    "MESH_PRIVACY_SENTINEL_EMBEDDING_TOKEN_ghp_000000000000000000000000000000000000",
+    "MESH_PRIVACY_SENTINEL_PEER_PASSWORD_password-not-real-000000000000",
+    "MESH_PRIVACY_SENTINEL_PATH_/Users/alice/private/token_policy.toml"
+  ],
+  "requiredScenarios": [
+    "trusted_full_body_export",
+    "metadata_only_body_export_denied",
+    "metadata_only_embedding_export_denied",
+    "metadata_result_then_body_fetch_denied",
+    "unknown_peer_lookup_failure_redacted",
+    "context_pack_provenance_redacted"
+  ]
+}
