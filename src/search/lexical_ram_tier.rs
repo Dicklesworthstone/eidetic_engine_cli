@@ -57,6 +57,20 @@ pub const LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE: &str = "lexical_ram_tier_not_im
 /// `data.search.lexicalRamTier.schema`.
 pub const STATUS_SEARCH_LEXICAL_RAM_TIER_SCHEMA_V1: &str = "ee.status.search.lexical_ram_tier.v1";
 
+/// Environment-variable name a future bd-21xbi slice will register in
+/// `src/config/env_registry.rs`. Exposed here as a public constant so
+/// [`LexicalRamTierConfig::from_environment_with_reader`] keeps the
+/// canonical spelling in one place: the registry row will read
+/// `EnvVar::LexicalIndexPinRam.name()`, the docs/env_vars.md row will
+/// match this constant, and tests can avoid hard-coding string literals.
+pub const LEXICAL_RAM_TIER_PIN_RAM_ENV: &str = "EE_LEXICAL_INDEX_PIN_RAM";
+
+/// Companion env-var name for the transparent-hugepages opt-in.
+/// Only effective when `EE_LEXICAL_INDEX_PIN_RAM=1` AND the host kernel
+/// supports `MADV_HUGEPAGE`; otherwise the loader emits
+/// [`LEXICAL_HUGEPAGES_UNAVAILABLE_CODE`].
+pub const LEXICAL_RAM_TIER_HUGEPAGES_ENV: &str = "EE_LEXICAL_INDEX_HUGEPAGES";
+
 /// Coarse host classification for the lexical RAM-tier optimization.
 /// Linux is the only platform that exposes the full `mmap + mlock +
 /// MADV_HUGEPAGE` triple; macOS exposes `madvise(MADV_WILLNEED)` + `mlock`
@@ -143,6 +157,96 @@ impl LexicalRamTierConfig {
     pub fn with_populate_on_open(mut self, populate: bool) -> Self {
         self.populate_on_open = populate;
         self
+    }
+
+    /// Build a config from an arbitrary env-var reader.
+    ///
+    /// The reader takes the canonical env-var name (matching
+    /// [`LEXICAL_RAM_TIER_PIN_RAM_ENV`] / [`LEXICAL_RAM_TIER_HUGEPAGES_ENV`])
+    /// and returns the configured value. The intended production wiring is
+    /// `LexicalRamTierConfig::from_environment_with_reader(|name|
+    /// env_registry::read(EnvVar::for_name(name)))` once the bd-21xbi sibling
+    /// slice lands the `EnvVar` variants, but the reader indirection lets
+    /// tests inject deterministic values without touching the process
+    /// environment.
+    ///
+    /// Boolean parsing accepts the same lenient vocabulary `parse_bool_arg`
+    /// uses for CLI flags: `true` / `1` / `yes` / `on` → true and
+    /// `false` / `0` / `no` / `off` → false. Casing is folded. Any other
+    /// non-empty value invokes the `on_unparseable` callback with the var
+    /// name and raw value so the caller can record a degraded code; the
+    /// config field then retains its default. Missing values keep the
+    /// existing default (`enabled = true`, `request_hugepages = false`,
+    /// `populate_on_open = true`).
+    ///
+    /// Semantic precondition: requesting hugepages only makes sense when
+    /// pinning is enabled. If `EE_LEXICAL_INDEX_HUGEPAGES=true` is observed
+    /// while `EE_LEXICAL_INDEX_PIN_RAM=false` is also observed (i.e. the
+    /// operator explicitly disabled the parent), `request_hugepages` is
+    /// forced back to `false` and `on_unparseable` is invoked with a
+    /// "requires-pin-ram" rationale so the caller can surface the
+    /// inconsistency through the existing `lexical_hugepages_unavailable`
+    /// path. This keeps `pin_lexical_index_files` honest: it never claims
+    /// hugepages were requested on a disabled tier.
+    #[must_use]
+    pub fn from_environment_with_reader<F, G>(reader: F, mut on_unparseable: G) -> Self
+    where
+        F: Fn(&'static str) -> Option<String>,
+        G: FnMut(&'static str, &str),
+    {
+        let mut config = Self::default();
+
+        let pin_ram_raw = reader(LEXICAL_RAM_TIER_PIN_RAM_ENV);
+        let pin_ram_value = pin_ram_raw
+            .as_deref()
+            .and_then(|raw| match parse_env_bool(raw) {
+                Some(parsed) => Some(parsed),
+                None => {
+                    on_unparseable(LEXICAL_RAM_TIER_PIN_RAM_ENV, raw);
+                    None
+                }
+            });
+        if let Some(value) = pin_ram_value {
+            config.enabled = value;
+        }
+
+        let hugepages_raw = reader(LEXICAL_RAM_TIER_HUGEPAGES_ENV);
+        let hugepages_value = hugepages_raw
+            .as_deref()
+            .and_then(|raw| match parse_env_bool(raw) {
+                Some(parsed) => Some(parsed),
+                None => {
+                    on_unparseable(LEXICAL_RAM_TIER_HUGEPAGES_ENV, raw);
+                    None
+                }
+            });
+        if let Some(value) = hugepages_value {
+            config.request_hugepages = value;
+        }
+
+        // Hugepages without pinning is a no-op at the syscall level (you
+        // can't MADV_HUGEPAGE a region that was never mmap'd by the
+        // optimization). Force the field back to false and tell the caller
+        // why so they can record the inconsistency through degraded[].
+        if config.request_hugepages && !config.enabled {
+            on_unparseable(LEXICAL_RAM_TIER_HUGEPAGES_ENV, "requires-pin-ram-enabled");
+            config.request_hugepages = false;
+        }
+
+        config
+    }
+}
+
+/// Lenient boolean parser shared with the CLI flag parser. Accepts the
+/// canonical operator vocabulary (`true`/`false`, `1`/`0`, `yes`/`no`,
+/// `on`/`off`) with case folding. Returns `None` for any other token so
+/// the caller can decide whether to emit a degraded code or fall back to
+/// the default.
+fn parse_env_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
     }
 }
 
@@ -494,5 +598,191 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("disabled_by_operator")
         );
+    }
+
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use super::{LEXICAL_RAM_TIER_HUGEPAGES_ENV, LEXICAL_RAM_TIER_PIN_RAM_ENV, parse_env_bool};
+
+    /// Helper: turn a literal `[(name, value)]` slice into the reader
+    /// closure signature [`LexicalRamTierConfig::from_environment_with_reader`]
+    /// expects so the tests stay readable.
+    fn env_reader_from(
+        entries: &[(&'static str, &'static str)],
+    ) -> impl Fn(&'static str) -> Option<String> + '_ {
+        let map: HashMap<&'static str, &'static str> = entries.iter().copied().collect();
+        move |name: &'static str| map.get(name).map(|v| (*v).to_owned())
+    }
+
+    #[test]
+    fn parse_env_bool_accepts_canonical_operator_vocabulary() {
+        for raw in ["true", "TRUE", "1", "yes", "YES", "on", " ON "] {
+            assert_eq!(
+                parse_env_bool(raw),
+                Some(true),
+                "{raw} should parse to true"
+            );
+        }
+        for raw in ["false", "FALSE", "0", "no", "NO", "off", " OFF "] {
+            assert_eq!(
+                parse_env_bool(raw),
+                Some(false),
+                "{raw} should parse to false"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_env_bool_rejects_unknown_tokens() {
+        for raw in ["maybe", "2", "enabled", "", "  "] {
+            assert!(
+                parse_env_bool(raw).is_none(),
+                "{raw} must not parse as a boolean"
+            );
+        }
+    }
+
+    #[test]
+    fn from_environment_with_empty_reader_yields_default_config() {
+        let unparseable: RefCell<Vec<(&'static str, String)>> = RefCell::new(Vec::new());
+        let config = LexicalRamTierConfig::from_environment_with_reader(
+            |_name| None,
+            |name, raw| unparseable.borrow_mut().push((name, raw.to_owned())),
+        );
+        assert_eq!(config, LexicalRamTierConfig::default());
+        assert!(
+            unparseable.borrow().is_empty(),
+            "missing values must not trigger on_unparseable: {:?}",
+            unparseable.borrow()
+        );
+    }
+
+    #[test]
+    fn from_environment_with_explicit_disable_overrides_default_enabled() {
+        let unparseable: RefCell<Vec<(&'static str, String)>> = RefCell::new(Vec::new());
+        let reader = env_reader_from(&[(LEXICAL_RAM_TIER_PIN_RAM_ENV, "false")]);
+        let config = LexicalRamTierConfig::from_environment_with_reader(reader, |name, raw| {
+            unparseable.borrow_mut().push((name, raw.to_owned()))
+        });
+        assert!(!config.enabled);
+        assert!(!config.request_hugepages);
+        assert!(
+            config.populate_on_open,
+            "populate_on_open default should be preserved"
+        );
+        assert!(unparseable.borrow().is_empty());
+    }
+
+    #[test]
+    fn from_environment_with_explicit_hugepages_enables_request_only() {
+        let unparseable: RefCell<Vec<(&'static str, String)>> = RefCell::new(Vec::new());
+        let reader = env_reader_from(&[
+            (LEXICAL_RAM_TIER_PIN_RAM_ENV, "1"),
+            (LEXICAL_RAM_TIER_HUGEPAGES_ENV, "yes"),
+        ]);
+        let config = LexicalRamTierConfig::from_environment_with_reader(reader, |name, raw| {
+            unparseable.borrow_mut().push((name, raw.to_owned()))
+        });
+        assert!(config.enabled);
+        assert!(config.request_hugepages);
+        assert!(unparseable.borrow().is_empty());
+    }
+
+    #[test]
+    fn from_environment_records_unparseable_pin_ram_and_keeps_default() {
+        let unparseable: RefCell<Vec<(&'static str, String)>> = RefCell::new(Vec::new());
+        let reader = env_reader_from(&[(LEXICAL_RAM_TIER_PIN_RAM_ENV, "maybe")]);
+        let config = LexicalRamTierConfig::from_environment_with_reader(reader, |name, raw| {
+            unparseable.borrow_mut().push((name, raw.to_owned()))
+        });
+        assert!(
+            config.enabled,
+            "unparseable value must leave the default enabled in place"
+        );
+        let log = unparseable.borrow();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].0, LEXICAL_RAM_TIER_PIN_RAM_ENV);
+        assert_eq!(log[0].1, "maybe");
+    }
+
+    #[test]
+    fn from_environment_records_unparseable_hugepages_and_keeps_default() {
+        let unparseable: RefCell<Vec<(&'static str, String)>> = RefCell::new(Vec::new());
+        let reader = env_reader_from(&[(LEXICAL_RAM_TIER_HUGEPAGES_ENV, "kinda")]);
+        let config = LexicalRamTierConfig::from_environment_with_reader(reader, |name, raw| {
+            unparseable.borrow_mut().push((name, raw.to_owned()))
+        });
+        assert!(!config.request_hugepages);
+        let log = unparseable.borrow();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].0, LEXICAL_RAM_TIER_HUGEPAGES_ENV);
+        assert_eq!(log[0].1, "kinda");
+    }
+
+    #[test]
+    fn from_environment_forces_hugepages_off_when_pin_ram_is_explicitly_disabled() {
+        // Semantic precondition: requesting hugepages on a disabled tier is
+        // a no-op at the syscall level. The reader records the inconsistency
+        // through on_unparseable so the caller can surface it through the
+        // existing lexical_hugepages_unavailable degraded code.
+        let unparseable: RefCell<Vec<(&'static str, String)>> = RefCell::new(Vec::new());
+        let reader = env_reader_from(&[
+            (LEXICAL_RAM_TIER_PIN_RAM_ENV, "false"),
+            (LEXICAL_RAM_TIER_HUGEPAGES_ENV, "true"),
+        ]);
+        let config = LexicalRamTierConfig::from_environment_with_reader(reader, |name, raw| {
+            unparseable.borrow_mut().push((name, raw.to_owned()))
+        });
+        assert!(!config.enabled);
+        assert!(
+            !config.request_hugepages,
+            "hugepages must be forced off when pinning is explicitly disabled"
+        );
+        let log = unparseable.borrow();
+        let inconsistency = log
+            .iter()
+            .find(|(name, _)| *name == LEXICAL_RAM_TIER_HUGEPAGES_ENV)
+            .expect("hugepages inconsistency must be reported through on_unparseable");
+        assert_eq!(inconsistency.1, "requires-pin-ram-enabled");
+    }
+
+    #[test]
+    fn from_environment_pin_ram_default_keeps_hugepages_request_active() {
+        // When pin-ram is not explicitly set the default `enabled=true`
+        // wins, so an explicit hugepages opt-in should pass through.
+        let unparseable: RefCell<Vec<(&'static str, String)>> = RefCell::new(Vec::new());
+        let reader = env_reader_from(&[(LEXICAL_RAM_TIER_HUGEPAGES_ENV, "on")]);
+        let config = LexicalRamTierConfig::from_environment_with_reader(reader, |name, raw| {
+            unparseable.borrow_mut().push((name, raw.to_owned()))
+        });
+        assert!(config.enabled);
+        assert!(config.request_hugepages);
+        assert!(unparseable.borrow().is_empty());
+    }
+
+    #[test]
+    fn from_environment_is_deterministic_across_repeated_calls() {
+        let reader = env_reader_from(&[
+            (LEXICAL_RAM_TIER_PIN_RAM_ENV, "TRUE"),
+            (LEXICAL_RAM_TIER_HUGEPAGES_ENV, "ON"),
+        ]);
+        let first = LexicalRamTierConfig::from_environment_with_reader(&reader, |_, _| {});
+        let second = LexicalRamTierConfig::from_environment_with_reader(&reader, |_, _| {});
+        assert_eq!(
+            first, second,
+            "same reader inputs must yield identical configs"
+        );
+        assert!(first.enabled);
+        assert!(first.request_hugepages);
+    }
+
+    #[test]
+    fn from_environment_env_var_constants_match_bd21xbi_spec() {
+        // bd-21xbi spec pins these exact names; pinning them here catches
+        // accidental rename drift before the env_registry sibling slice
+        // lands.
+        assert_eq!(LEXICAL_RAM_TIER_PIN_RAM_ENV, "EE_LEXICAL_INDEX_PIN_RAM");
+        assert_eq!(LEXICAL_RAM_TIER_HUGEPAGES_ENV, "EE_LEXICAL_INDEX_HUGEPAGES");
     }
 }
