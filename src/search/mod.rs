@@ -1220,6 +1220,299 @@ impl Default for EmbeddingConfig {
     }
 }
 
+/// Mesh search-surrogate shape pinned by `ee.mesh.surrogate.v1`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchSurrogateType {
+    Embedding,
+    Summary,
+    Minhash,
+    LexicalMetadata,
+    QueryFingerprint,
+}
+
+impl SearchSurrogateType {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Embedding => "embedding",
+            Self::Summary => "summary",
+            Self::Minhash => "minhash",
+            Self::LexicalMetadata => "lexical_metadata",
+            Self::QueryFingerprint => "query_fingerprint",
+        }
+    }
+}
+
+/// Structured degraded codes for mesh surrogate audit decisions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchSurrogateDegradedCode {
+    Denied,
+    Incompatible,
+    Recomputed,
+    LexicalFallbackUsed,
+}
+
+impl SearchSurrogateDegradedCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Denied => "surrogate_denied",
+            Self::Incompatible => "surrogate_incompatible",
+            Self::Recomputed => "surrogate_recomputed",
+            Self::LexicalFallbackUsed => "lexical_fallback_used",
+        }
+    }
+}
+
+/// Model and feature fingerprint used to decide whether a remote surrogate can
+/// be indexed without local recomputation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchSurrogateModelFingerprint {
+    pub model_id: String,
+    pub model_version: String,
+    pub feature_flags: Vec<String>,
+}
+
+impl SearchSurrogateModelFingerprint {
+    #[must_use]
+    pub fn new(
+        model_id: impl Into<String>,
+        model_version: impl Into<String>,
+        feature_flags: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let mut feature_flags: Vec<String> = feature_flags.into_iter().map(Into::into).collect();
+        feature_flags.sort();
+        feature_flags.dedup();
+        Self {
+            model_id: model_id.into(),
+            model_version: model_version.into(),
+            feature_flags,
+        }
+    }
+
+    #[must_use]
+    pub fn from_embedding_config(
+        embedding: &EmbeddingConfig,
+        model_version: impl Into<String>,
+        feature_flags: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self::new(embedding.model_id.clone(), model_version, feature_flags)
+    }
+
+    #[must_use]
+    pub fn is_compatible_with(&self, local: &Self) -> bool {
+        self == local
+    }
+}
+
+/// Privacy and rebuild policy attached to a mesh search surrogate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SearchSurrogatePolicy {
+    pub export_allowed: bool,
+    pub requires_local_recompute: bool,
+    pub requires_compatibility_check: bool,
+    pub lexical_fallback: bool,
+}
+
+impl SearchSurrogatePolicy {
+    #[must_use]
+    pub const fn allow_reuse_after_compatibility_check() -> Self {
+        Self {
+            export_allowed: true,
+            requires_local_recompute: false,
+            requires_compatibility_check: true,
+            lexical_fallback: true,
+        }
+    }
+
+    #[must_use]
+    pub const fn requires_local_recompute() -> Self {
+        Self {
+            export_allowed: true,
+            requires_local_recompute: true,
+            requires_compatibility_check: true,
+            lexical_fallback: true,
+        }
+    }
+}
+
+impl Default for SearchSurrogatePolicy {
+    fn default() -> Self {
+        Self {
+            export_allowed: false,
+            requires_local_recompute: true,
+            requires_compatibility_check: true,
+            lexical_fallback: true,
+        }
+    }
+}
+
+/// Metadata needed to audit one incoming mesh search surrogate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchSurrogateDescriptor {
+    pub surrogate_type: SearchSurrogateType,
+    pub model_fingerprint: SearchSurrogateModelFingerprint,
+    pub content_hash: String,
+    pub valid_until: Option<String>,
+}
+
+/// Search-side decision for an incoming mesh surrogate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchSurrogateAuditDecision {
+    ReuseRemote,
+    RecomputeLocal,
+    LexicalFallback,
+    Denied,
+}
+
+impl SearchSurrogateAuditDecision {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReuseRemote => "reuse_remote",
+            Self::RecomputeLocal => "recompute_local",
+            Self::LexicalFallback => "lexical_fallback",
+            Self::Denied => "denied",
+        }
+    }
+}
+
+/// Input to the deterministic search-surrogate audit.
+#[derive(Clone, Debug)]
+pub struct SearchSurrogateAuditInput<'a> {
+    pub surrogate: &'a SearchSurrogateDescriptor,
+    pub policy: &'a SearchSurrogatePolicy,
+    pub local_model: &'a SearchSurrogateModelFingerprint,
+    pub local_content_hash: Option<&'a str>,
+    pub observed_at: &'a str,
+    pub local_body_available: bool,
+}
+
+/// Outcome of a mesh search-surrogate audit. The JSON is deliberately limited
+/// to hashes, types, model fingerprints, and stable degraded codes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchSurrogateAuditOutcome {
+    pub decision: SearchSurrogateAuditDecision,
+    pub degraded_codes: Vec<SearchSurrogateDegradedCode>,
+}
+
+impl SearchSurrogateAuditOutcome {
+    #[must_use]
+    pub fn data_json(&self, input: &SearchSurrogateAuditInput<'_>) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "ee.mesh.surrogate_audit.v1",
+            "surrogateType": input.surrogate.surrogate_type.as_str(),
+            "decision": self.decision.as_str(),
+            "degradedCodes": self
+                .degraded_codes
+                .iter()
+                .map(|code| code.as_str())
+                .collect::<Vec<_>>(),
+            "modelFingerprint": {
+                "modelId": input.surrogate.model_fingerprint.model_id,
+                "modelVersion": input.surrogate.model_fingerprint.model_version,
+                "featureFlags": input.surrogate.model_fingerprint.feature_flags,
+            },
+            "contentHash": input.surrogate.content_hash,
+            "localContentHashMatched": input
+                .local_content_hash
+                .is_some_and(|hash| hash == input.surrogate.content_hash),
+        })
+    }
+}
+
+/// Audit whether a mesh search surrogate may be reused, must be recomputed, or
+/// should fall back to lexical metadata.
+#[must_use]
+pub fn audit_search_surrogate(
+    input: &SearchSurrogateAuditInput<'_>,
+) -> SearchSurrogateAuditOutcome {
+    if !input.policy.export_allowed {
+        return finish_denied_or_fallback(vec![SearchSurrogateDegradedCode::Denied], input);
+    }
+
+    let mut degraded_codes = Vec::new();
+    if input.policy.requires_compatibility_check
+        && !input
+            .surrogate
+            .model_fingerprint
+            .is_compatible_with(input.local_model)
+    {
+        degraded_codes.push(SearchSurrogateDegradedCode::Incompatible);
+        return finish_recompute_or_fallback(degraded_codes, input);
+    }
+
+    let content_hash_matches = input
+        .local_content_hash
+        .is_some_and(|hash| hash == input.surrogate.content_hash);
+    let surrogate_expired = input
+        .surrogate
+        .valid_until
+        .as_deref()
+        .is_some_and(|valid_until| surrogate_valid_until_expired(valid_until, input.observed_at));
+
+    if input.policy.requires_local_recompute || !content_hash_matches || surrogate_expired {
+        return finish_recompute_or_fallback(degraded_codes, input);
+    }
+
+    SearchSurrogateAuditOutcome {
+        decision: SearchSurrogateAuditDecision::ReuseRemote,
+        degraded_codes,
+    }
+}
+
+fn finish_denied_or_fallback(
+    mut degraded_codes: Vec<SearchSurrogateDegradedCode>,
+    input: &SearchSurrogateAuditInput<'_>,
+) -> SearchSurrogateAuditOutcome {
+    if input.policy.lexical_fallback {
+        degraded_codes.push(SearchSurrogateDegradedCode::LexicalFallbackUsed);
+        SearchSurrogateAuditOutcome {
+            decision: SearchSurrogateAuditDecision::LexicalFallback,
+            degraded_codes,
+        }
+    } else {
+        SearchSurrogateAuditOutcome {
+            decision: SearchSurrogateAuditDecision::Denied,
+            degraded_codes,
+        }
+    }
+}
+
+fn finish_recompute_or_fallback(
+    mut degraded_codes: Vec<SearchSurrogateDegradedCode>,
+    input: &SearchSurrogateAuditInput<'_>,
+) -> SearchSurrogateAuditOutcome {
+    if input.local_body_available {
+        degraded_codes.push(SearchSurrogateDegradedCode::Recomputed);
+        SearchSurrogateAuditOutcome {
+            decision: SearchSurrogateAuditDecision::RecomputeLocal,
+            degraded_codes,
+        }
+    } else if input.policy.lexical_fallback {
+        degraded_codes.push(SearchSurrogateDegradedCode::LexicalFallbackUsed);
+        SearchSurrogateAuditOutcome {
+            decision: SearchSurrogateAuditDecision::LexicalFallback,
+            degraded_codes,
+        }
+    } else {
+        SearchSurrogateAuditOutcome {
+            decision: SearchSurrogateAuditDecision::Denied,
+            degraded_codes,
+        }
+    }
+}
+
+fn surrogate_valid_until_expired(valid_until: &str, observed_at: &str) -> bool {
+    let Ok(valid_until) = chrono::DateTime::parse_from_rfc3339(valid_until) else {
+        return true;
+    };
+    let Ok(observed_at) = chrono::DateTime::parse_from_rfc3339(observed_at) else {
+        return true;
+    };
+    observed_at >= valid_until
+}
+
 /// Index staleness status after validation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IndexStaleness {
@@ -3118,6 +3411,9 @@ mod tests {
     use super::{
         CANONICAL_DOCUMENT_SCHEMA, EmbeddingConfig, FRANKENSEARCH_VERSION,
         INDEX_MANIFEST_SCHEMA_V1, IndexManifest, IndexManifestError, IndexStaleness,
+        SearchSurrogateAuditDecision, SearchSurrogateAuditInput, SearchSurrogateDegradedCode,
+        SearchSurrogateDescriptor, SearchSurrogateModelFingerprint, SearchSurrogatePolicy,
+        SearchSurrogateType, audit_search_surrogate,
     };
 
     #[test]
@@ -3131,6 +3427,257 @@ mod tests {
         assert_eq!(config.model_id, "hash-256");
         assert_eq!(config.dimension, 256);
         assert!(config.deterministic);
+    }
+
+    fn local_surrogate_model() -> SearchSurrogateModelFingerprint {
+        SearchSurrogateModelFingerprint::new("hash-256", "2026-05-19", ["normalize_l2", "utf8"])
+    }
+
+    fn embedding_surrogate() -> SearchSurrogateDescriptor {
+        SearchSurrogateDescriptor {
+            surrogate_type: SearchSurrogateType::Embedding,
+            model_fingerprint: SearchSurrogateModelFingerprint::new(
+                "hash-256",
+                "2026-05-19",
+                ["utf8", "normalize_l2", "utf8"],
+            ),
+            content_hash: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            valid_until: Some("2026-05-20T00:00:00Z".to_owned()),
+        }
+    }
+
+    #[test]
+    fn search_surrogate_type_tokens_match_schema_contract() {
+        assert_eq!(SearchSurrogateType::Embedding.as_str(), "embedding");
+        assert_eq!(SearchSurrogateType::Summary.as_str(), "summary");
+        assert_eq!(SearchSurrogateType::Minhash.as_str(), "minhash");
+        assert_eq!(
+            SearchSurrogateType::LexicalMetadata.as_str(),
+            "lexical_metadata"
+        );
+        assert_eq!(
+            SearchSurrogateType::QueryFingerprint.as_str(),
+            "query_fingerprint"
+        );
+    }
+
+    #[test]
+    fn search_surrogate_model_fingerprint_normalizes_feature_flags_for_matching() {
+        let remote = SearchSurrogateModelFingerprint::new(
+            "hash-256",
+            "2026-05-19",
+            ["utf8", "normalize_l2", "utf8"],
+        );
+        let local = SearchSurrogateModelFingerprint::new(
+            "hash-256",
+            "2026-05-19",
+            ["normalize_l2", "utf8"],
+        );
+
+        assert!(remote.is_compatible_with(&local));
+        assert_eq!(
+            remote.feature_flags,
+            vec!["normalize_l2".to_owned(), "utf8".to_owned()]
+        );
+    }
+
+    #[test]
+    fn search_surrogate_default_policy_denies_embedding_export_and_uses_lexical_fallback() {
+        let surrogate = embedding_surrogate();
+        let local_model = local_surrogate_model();
+        let policy = SearchSurrogatePolicy::default();
+        let input = SearchSurrogateAuditInput {
+            surrogate: &surrogate,
+            policy: &policy,
+            local_model: &local_model,
+            local_content_hash: Some("blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            observed_at: "2026-05-19T23:00:00Z",
+            local_body_available: true,
+        };
+
+        let outcome = audit_search_surrogate(&input);
+
+        assert_eq!(
+            outcome.decision,
+            SearchSurrogateAuditDecision::LexicalFallback
+        );
+        assert_eq!(
+            outcome.degraded_codes,
+            vec![
+                SearchSurrogateDegradedCode::Denied,
+                SearchSurrogateDegradedCode::LexicalFallbackUsed,
+            ]
+        );
+    }
+
+    #[test]
+    fn search_surrogate_incompatible_model_recomputes_when_body_is_available() {
+        let surrogate = SearchSurrogateDescriptor {
+            model_fingerprint: SearchSurrogateModelFingerprint::new(
+                "model2vec-base",
+                "2026-05-19",
+                ["normalize_l2"],
+            ),
+            ..embedding_surrogate()
+        };
+        let local_model = local_surrogate_model();
+        let policy = SearchSurrogatePolicy::allow_reuse_after_compatibility_check();
+        let input = SearchSurrogateAuditInput {
+            surrogate: &surrogate,
+            policy: &policy,
+            local_model: &local_model,
+            local_content_hash: Some("blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            observed_at: "2026-05-19T23:00:00Z",
+            local_body_available: true,
+        };
+
+        let outcome = audit_search_surrogate(&input);
+
+        assert_eq!(
+            outcome.decision,
+            SearchSurrogateAuditDecision::RecomputeLocal
+        );
+        assert_eq!(
+            outcome.degraded_codes,
+            vec![
+                SearchSurrogateDegradedCode::Incompatible,
+                SearchSurrogateDegradedCode::Recomputed,
+            ]
+        );
+    }
+
+    #[test]
+    fn search_surrogate_incompatible_model_falls_back_when_body_is_unavailable() {
+        let surrogate = SearchSurrogateDescriptor {
+            model_fingerprint: SearchSurrogateModelFingerprint::new(
+                "hash-256",
+                "older-version",
+                ["normalize_l2", "utf8"],
+            ),
+            ..embedding_surrogate()
+        };
+        let local_model = local_surrogate_model();
+        let policy = SearchSurrogatePolicy::allow_reuse_after_compatibility_check();
+        let input = SearchSurrogateAuditInput {
+            surrogate: &surrogate,
+            policy: &policy,
+            local_model: &local_model,
+            local_content_hash: Some("blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            observed_at: "2026-05-19T23:00:00Z",
+            local_body_available: false,
+        };
+
+        let outcome = audit_search_surrogate(&input);
+
+        assert_eq!(
+            outcome.decision,
+            SearchSurrogateAuditDecision::LexicalFallback
+        );
+        assert_eq!(
+            outcome.degraded_codes,
+            vec![
+                SearchSurrogateDegradedCode::Incompatible,
+                SearchSurrogateDegradedCode::LexicalFallbackUsed,
+            ]
+        );
+    }
+
+    #[test]
+    fn search_surrogate_content_hash_mismatch_invalidates_and_recomputes() {
+        let surrogate = embedding_surrogate();
+        let local_model = local_surrogate_model();
+        let policy = SearchSurrogatePolicy::allow_reuse_after_compatibility_check();
+        let input = SearchSurrogateAuditInput {
+            surrogate: &surrogate,
+            policy: &policy,
+            local_model: &local_model,
+            local_content_hash: Some("blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            observed_at: "2026-05-19T23:00:00Z",
+            local_body_available: true,
+        };
+
+        let outcome = audit_search_surrogate(&input);
+
+        assert_eq!(
+            outcome.decision,
+            SearchSurrogateAuditDecision::RecomputeLocal
+        );
+        assert_eq!(
+            outcome.degraded_codes,
+            vec![SearchSurrogateDegradedCode::Recomputed]
+        );
+    }
+
+    #[test]
+    fn search_surrogate_valid_until_expiry_invalidates_and_falls_back_without_body() {
+        let surrogate = embedding_surrogate();
+        let local_model = local_surrogate_model();
+        let policy = SearchSurrogatePolicy::allow_reuse_after_compatibility_check();
+        let input = SearchSurrogateAuditInput {
+            surrogate: &surrogate,
+            policy: &policy,
+            local_model: &local_model,
+            local_content_hash: Some("blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            observed_at: "2026-05-20T00:00:01Z",
+            local_body_available: false,
+        };
+
+        let outcome = audit_search_surrogate(&input);
+
+        assert_eq!(
+            outcome.decision,
+            SearchSurrogateAuditDecision::LexicalFallback
+        );
+        assert_eq!(
+            outcome.degraded_codes,
+            vec![SearchSurrogateDegradedCode::LexicalFallbackUsed]
+        );
+    }
+
+    #[test]
+    fn search_surrogate_compatible_fresh_surrogate_can_be_reused() {
+        let surrogate = embedding_surrogate();
+        let local_model = local_surrogate_model();
+        let policy = SearchSurrogatePolicy::allow_reuse_after_compatibility_check();
+        let input = SearchSurrogateAuditInput {
+            surrogate: &surrogate,
+            policy: &policy,
+            local_model: &local_model,
+            local_content_hash: Some("blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            observed_at: "2026-05-19T23:00:00Z",
+            local_body_available: false,
+        };
+
+        let outcome = audit_search_surrogate(&input);
+
+        assert_eq!(outcome.decision, SearchSurrogateAuditDecision::ReuseRemote);
+        assert!(outcome.degraded_codes.is_empty());
+    }
+
+    #[test]
+    fn search_surrogate_audit_json_uses_structured_codes_without_raw_content() {
+        let surrogate = embedding_surrogate();
+        let local_model = local_surrogate_model();
+        let policy = SearchSurrogatePolicy::default();
+        let input = SearchSurrogateAuditInput {
+            surrogate: &surrogate,
+            policy: &policy,
+            local_model: &local_model,
+            local_content_hash: Some("blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            observed_at: "2026-05-19T23:00:00Z",
+            local_body_available: true,
+        };
+        let outcome = audit_search_surrogate(&input);
+
+        let audit_json = outcome.data_json(&input);
+
+        assert_eq!(audit_json["schema"], "ee.mesh.surrogate_audit.v1");
+        assert_eq!(audit_json["surrogateType"], "embedding");
+        assert_eq!(
+            audit_json["degradedCodes"],
+            json!(["surrogate_denied", "lexical_fallback_used"])
+        );
+        assert!(!audit_json.to_string().contains("raw private memory body"));
     }
 
     #[test]
