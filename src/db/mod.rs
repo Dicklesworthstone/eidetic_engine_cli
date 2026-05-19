@@ -9312,8 +9312,8 @@ fn validate_mesh_policy_decision_json(raw: &str, context: &str) -> Result<()> {
         &["allow", "deny", "quarantine", "reject"],
     )?;
     ensure_redaction_safe_json_string(&value, context, "reason")?;
-    ensure_redaction_safe_json_string(&value, context, "policyRef")?;
-    ensure_json_string(
+    let policy_ref = ensure_redaction_safe_json_string(&value, context, "policyRef")?;
+    let material_lane = ensure_json_string(
         &value,
         context,
         "materialLane",
@@ -9326,7 +9326,7 @@ fn validate_mesh_policy_decision_json(raw: &str, context: &str) -> Result<()> {
             "curationSignal",
         ],
     )?;
-    ensure_json_string(&value, context, "redaction", &["share", "redact", "deny"])?;
+    let redaction = ensure_json_string(&value, context, "redaction", &["share", "redact", "deny"])?;
     ensure_json_optional_string(
         &value,
         context,
@@ -9340,6 +9340,16 @@ fn validate_mesh_policy_decision_json(raw: &str, context: &str) -> Result<()> {
         ],
     )?;
     if action == "allow" {
+        if policy_ref == "missing" {
+            return Err(mesh_policy_json_error(format!(
+                "{context}.policyRef must name a matched policy for allowed decisions"
+            )));
+        }
+        if redaction == "deny" {
+            return Err(mesh_policy_json_error(format!(
+                "{context}.redaction must be share or redact for allowed decisions"
+            )));
+        }
         match value.get("trustLane").and_then(serde_json::Value::as_str) {
             Some("peerHumanViaPeer" | "peerAgent" | "peerDerived" | "untrusted") => {}
             _ => {
@@ -9371,17 +9381,57 @@ fn validate_mesh_policy_decision_json(raw: &str, context: &str) -> Result<()> {
                     }
                 }
             }
-            ensure_json_bool(&value, context, "bodyFetchAllowed")?;
-            ensure_json_bool(&value, context, "localTruthSideEffectsAllowed")?;
-            ensure_json_bool(&value, context, "searchOrGraphSideEffectsAllowed")?;
+            let body_fetch_allowed = ensure_json_bool(&value, context, "bodyFetchAllowed")?;
+            let local_truth_side_effects =
+                ensure_json_bool(&value, context, "localTruthSideEffectsAllowed")?;
+            let search_or_graph_side_effects =
+                ensure_json_bool(&value, context, "searchOrGraphSideEffectsAllowed")?;
+            ensure_json_bool_matches(
+                body_fetch_allowed,
+                context,
+                "bodyFetchAllowed",
+                action == "allow" && material_lane == "body",
+            )?;
+            ensure_json_bool_matches(
+                local_truth_side_effects,
+                context,
+                "localTruthSideEffectsAllowed",
+                action == "allow",
+            )?;
+            ensure_json_bool_matches(
+                search_or_graph_side_effects,
+                context,
+                "searchOrGraphSideEffectsAllowed",
+                action == "allow",
+            )?;
             ensure_json_absent(&value, context, "payloadExportAllowed")?;
             ensure_json_absent(&value, context, "rawPayloadExportAllowed")?;
             ensure_json_absent(&value, context, "redactedPayloadRequired")?;
         }
         "outbound" => {
-            ensure_json_bool(&value, context, "payloadExportAllowed")?;
-            ensure_json_bool(&value, context, "rawPayloadExportAllowed")?;
-            ensure_json_bool(&value, context, "redactedPayloadRequired")?;
+            let payload_export_allowed = ensure_json_bool(&value, context, "payloadExportAllowed")?;
+            let raw_payload_export_allowed =
+                ensure_json_bool(&value, context, "rawPayloadExportAllowed")?;
+            let redacted_payload_required =
+                ensure_json_bool(&value, context, "redactedPayloadRequired")?;
+            ensure_json_bool_matches(
+                payload_export_allowed,
+                context,
+                "payloadExportAllowed",
+                action == "allow",
+            )?;
+            ensure_json_bool_matches(
+                raw_payload_export_allowed,
+                context,
+                "rawPayloadExportAllowed",
+                action == "allow" && redaction == "share",
+            )?;
+            ensure_json_bool_matches(
+                redacted_payload_required,
+                context,
+                "redactedPayloadRequired",
+                redaction == "redact",
+            )?;
             ensure_json_absent(&value, context, "importTrustClass")?;
             ensure_json_absent(&value, context, "bodyFetchAllowed")?;
             ensure_json_absent(&value, context, "localTruthSideEffectsAllowed")?;
@@ -9390,10 +9440,52 @@ fn validate_mesh_policy_decision_json(raw: &str, context: &str) -> Result<()> {
         _ => unreachable!("direction was validated above"),
     }
 
+    validate_mesh_policy_decision_failure(&value, context, direction, action)
+}
+
+fn validate_mesh_policy_decision_failure(
+    value: &serde_json::Value,
+    context: &str,
+    direction: &str,
+    action: &str,
+) -> Result<()> {
     match value.get("failure") {
-        None | Some(serde_json::Value::Null) => Ok(()),
+        Some(serde_json::Value::Null) if action == "allow" => Ok(()),
+        Some(serde_json::Value::Null) | None if action == "allow" => Err(mesh_policy_json_error(
+            format!("{context}.failure must be null for allowed policy decisions"),
+        )),
+        Some(serde_json::Value::Null) | None => Err(mesh_policy_json_error(format!(
+            "{context}.failure must describe non-allow policy decisions"
+        ))),
         Some(failure) => {
-            validate_mesh_policy_failure_surface_value(failure, "policy_decision_json.failure")
+            validate_mesh_policy_failure_surface_value(failure, "policy_decision_json.failure")?;
+            let failure_action = failure
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if failure_action != action {
+                return Err(mesh_policy_json_error(format!(
+                    "{context}.failure.action {failure_action:?} does not match decision action {action:?}"
+                )));
+            }
+
+            let failure_code = failure
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            match direction {
+                "inbound" if !failure_code.starts_with("mesh_peer_policy_") => {
+                    Err(mesh_policy_json_error(format!(
+                        "{context}.failure.code must use mesh_peer_policy_* for inbound decisions"
+                    )))
+                }
+                "outbound" if !failure_code.starts_with("mesh_outbound_policy_") => {
+                    Err(mesh_policy_json_error(format!(
+                        "{context}.failure.code must use mesh_outbound_policy_* for outbound decisions"
+                    )))
+                }
+                _ => Ok(()),
+            }
         }
     }
 }
@@ -9454,11 +9546,11 @@ fn ensure_json_optional_string(
     }
 }
 
-fn ensure_redaction_safe_json_string(
-    value: &serde_json::Value,
+fn ensure_redaction_safe_json_string<'a>(
+    value: &'a serde_json::Value,
     context: &str,
     field: &str,
-) -> Result<()> {
+) -> Result<&'a str> {
     let text = value
         .get(field)
         .and_then(serde_json::Value::as_str)
@@ -9468,15 +9560,24 @@ fn ensure_redaction_safe_json_string(
             "{context}.{field} must be redaction-safe"
         )));
     }
-    Ok(())
+    Ok(text)
 }
 
-fn ensure_json_bool(value: &serde_json::Value, context: &str, field: &str) -> Result<()> {
+fn ensure_json_bool(value: &serde_json::Value, context: &str, field: &str) -> Result<bool> {
     value
         .get(field)
         .and_then(serde_json::Value::as_bool)
-        .map(|_| ())
         .ok_or_else(|| mesh_policy_json_error(format!("{context}.{field} must be a boolean")))
+}
+
+fn ensure_json_bool_matches(value: bool, context: &str, field: &str, expected: bool) -> Result<()> {
+    if value == expected {
+        Ok(())
+    } else {
+        Err(mesh_policy_json_error(format!(
+            "{context}.{field} must be {expected}"
+        )))
+    }
 }
 
 fn ensure_json_absent(value: &serde_json::Value, context: &str, field: &str) -> Result<()> {
@@ -21066,6 +21167,74 @@ mod tests {
             let error = connection
                 .insert_mesh_import_ledger_event(&input)
                 .expect_err("allowed peer policy decision should reject unsafe lanes");
+            ensure(
+                error.to_string().contains(field),
+                format!("error should mention {field}: {error}"),
+            )?;
+        }
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_import_ledger_rejects_policy_decision_side_effect_and_failure_drift() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let cases = [
+            (
+                r#"{"schema":"ee.mesh.policy_decision.v1","direction":"inbound","action":"allow","reason":"peer_policy_lane_allowed","policyRef":"mesh_pol_7d4b19e22c","materialLane":"body","redaction":"redact","trustLane":"peerAgent","importTrustClass":"agent_validated","bodyFetchAllowed":false,"localTruthSideEffectsAllowed":true,"searchOrGraphSideEffectsAllowed":true,"failure":null}"#,
+                "policy_decision_json.bodyFetchAllowed",
+            ),
+            (
+                r#"{"schema":"ee.mesh.policy_decision.v1","direction":"inbound","action":"allow","reason":"peer_policy_lane_allowed","policyRef":"mesh_pol_7d4b19e22c","materialLane":"metadata","redaction":"share","trustLane":"peerAgent","importTrustClass":"agent_validated","bodyFetchAllowed":false,"localTruthSideEffectsAllowed":false,"searchOrGraphSideEffectsAllowed":true,"failure":null}"#,
+                "policy_decision_json.localTruthSideEffectsAllowed",
+            ),
+            (
+                r#"{"schema":"ee.mesh.policy_decision.v1","direction":"inbound","action":"allow","reason":"peer_policy_lane_allowed","policyRef":"mesh_pol_7d4b19e22c","materialLane":"metadata","redaction":"share","trustLane":"peerAgent","importTrustClass":"agent_validated","bodyFetchAllowed":false,"localTruthSideEffectsAllowed":true,"searchOrGraphSideEffectsAllowed":true,"failure":{"schema":"ee.mesh.policy_failure_surface.v1","code":"mesh_peer_policy_denied","action":"deny","reason":"peer_policy_redaction_denied","policyRef":"mesh_pol_7d4b19e22c","materialLane":"body","redaction":"deny","trustLane":"peerAgent"}}"#,
+                "policy_decision_json.failure.action",
+            ),
+            (
+                r#"{"schema":"ee.mesh.policy_decision.v1","direction":"inbound","action":"deny","reason":"peer_policy_redaction_denied","policyRef":"mesh_pol_7d4b19e22c","materialLane":"body","redaction":"deny","trustLane":"peerAgent","importTrustClass":"agent_validated","bodyFetchAllowed":true,"localTruthSideEffectsAllowed":false,"searchOrGraphSideEffectsAllowed":false,"failure":{"schema":"ee.mesh.policy_failure_surface.v1","code":"mesh_peer_policy_denied","action":"deny","reason":"peer_policy_redaction_denied","policyRef":"mesh_pol_7d4b19e22c","materialLane":"body","redaction":"deny","trustLane":"peerAgent"}}"#,
+                "policy_decision_json.bodyFetchAllowed",
+            ),
+            (
+                r#"{"schema":"ee.mesh.policy_decision.v1","direction":"inbound","action":"deny","reason":"peer_policy_redaction_denied","policyRef":"mesh_pol_7d4b19e22c","materialLane":"body","redaction":"deny","trustLane":"peerAgent","importTrustClass":"agent_validated","bodyFetchAllowed":false,"localTruthSideEffectsAllowed":false,"searchOrGraphSideEffectsAllowed":false,"failure":null}"#,
+                "policy_decision_json.failure",
+            ),
+            (
+                r#"{"schema":"ee.mesh.policy_decision.v1","direction":"inbound","action":"deny","reason":"peer_policy_redaction_denied","policyRef":"mesh_pol_7d4b19e22c","materialLane":"body","redaction":"deny","trustLane":"peerAgent","importTrustClass":"agent_validated","bodyFetchAllowed":false,"localTruthSideEffectsAllowed":false,"searchOrGraphSideEffectsAllowed":false,"failure":{"schema":"ee.mesh.policy_failure_surface.v1","code":"mesh_outbound_policy_denied","action":"deny","reason":"peer_policy_redaction_denied","policyRef":"mesh_pol_7d4b19e22c","materialLane":"body","redaction":"deny","trustLane":"peerAgent"}}"#,
+                "policy_decision_json.failure.code",
+            ),
+            (
+                r#"{"schema":"ee.mesh.policy_decision.v1","direction":"outbound","action":"allow","reason":"outbound_lane_allowed","policyRef":"mesh_pol_7d4b19e22c","materialLane":"metadata","redaction":"share","trustLane":"peerAgent","payloadExportAllowed":true,"rawPayloadExportAllowed":false,"redactedPayloadRequired":false,"failure":null}"#,
+                "policy_decision_json.rawPayloadExportAllowed",
+            ),
+            (
+                r#"{"schema":"ee.mesh.policy_decision.v1","direction":"outbound","action":"deny","reason":"outbound_lane_denied","policyRef":"mesh_pol_7d4b19e22c","materialLane":"embedding","redaction":"deny","trustLane":"peerAgent","payloadExportAllowed":true,"rawPayloadExportAllowed":false,"redactedPayloadRequired":false,"failure":{"schema":"ee.mesh.policy_failure_surface.v1","code":"mesh_outbound_policy_denied","action":"deny","reason":"outbound_lane_denied","policyRef":"mesh_pol_7d4b19e22c","materialLane":"embedding","redaction":"deny","trustLane":"peerAgent"}}"#,
+                "policy_decision_json.payloadExportAllowed",
+            ),
+            (
+                r#"{"schema":"ee.mesh.policy_decision.v1","direction":"outbound","action":"deny","reason":"outbound_lane_denied","policyRef":"mesh_pol_7d4b19e22c","materialLane":"embedding","redaction":"deny","trustLane":"peerAgent","payloadExportAllowed":false,"rawPayloadExportAllowed":false,"redactedPayloadRequired":false,"failure":{"schema":"ee.mesh.policy_failure_surface.v1","code":"mesh_peer_policy_denied","action":"deny","reason":"outbound_lane_denied","policyRef":"mesh_pol_7d4b19e22c","materialLane":"embedding","redaction":"deny","trustLane":"peerAgent"}}"#,
+                "policy_decision_json.failure.code",
+            ),
+        ];
+
+        for (index, (decision, field)) in cases.iter().enumerate() {
+            let input = super::InsertMeshImportLedgerEventInput {
+                policy_decision_json: Some((*decision).to_string()),
+                ..mesh_import_event_input(
+                    50 + u64::try_from(index).expect("small test index"),
+                    hash('9'),
+                    hash('a'),
+                )
+            };
+
+            let error = connection
+                .insert_mesh_import_ledger_event(&input)
+                .expect_err("policy decision drift should reject");
             ensure(
                 error.to_string().contains(field),
                 format!("error should mention {field}: {error}"),
