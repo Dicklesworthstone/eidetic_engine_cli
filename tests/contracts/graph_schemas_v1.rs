@@ -762,6 +762,95 @@ fn why_schema_documents_load_bearing_graph_block() -> TestResult {
         }
     }
 
+    let example = schema
+        .pointer("/examples/0")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "ee.why.v1 must include a loadBearing example".to_owned())?;
+    ensure_eq(
+        example.get("schema").and_then(Value::as_str),
+        Some("ee.why.v1"),
+        "ee.why.v1 example",
+        "schema",
+    )?;
+    ensure_eq(
+        example.get("memoryId").and_then(Value::as_str),
+        Some("mem_load_bearing_release_rule"),
+        "ee.why.v1 example",
+        "memoryId",
+    )?;
+    ensure_eq(
+        example
+            .pointer("/graph/loadBearing/isLoadBearing")
+            .and_then(Value::as_bool),
+        Some(true),
+        "ee.why.v1 example loadBearing",
+        "isLoadBearing",
+    )?;
+    ensure_eq(
+        example
+            .pointer("/graph/loadBearing/authorityRank")
+            .and_then(Value::as_u64),
+        Some(1),
+        "ee.why.v1 example loadBearing",
+        "authorityRank",
+    )?;
+    ensure_eq(
+        example
+            .pointer("/graph/loadBearing/citingRuleCount")
+            .and_then(Value::as_u64),
+        Some(2),
+        "ee.why.v1 example loadBearing",
+        "citingRuleCount",
+    )?;
+    ensure_eq(
+        example
+            .pointer("/graph/loadBearing/interpretation")
+            .and_then(Value::as_str),
+        Some("load_bearing"),
+        "ee.why.v1 example loadBearing",
+        "interpretation",
+    )?;
+    ensure_eq(
+        example
+            .pointer("/graph/loadBearing/evidence/algorithm")
+            .and_then(Value::as_str),
+        Some("bipartite_hits"),
+        "ee.why.v1 example loadBearing",
+        "evidence.algorithm",
+    )?;
+    let example_rules = example
+        .pointer("/graph/loadBearing/citingRules")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "ee.why.v1 example citingRules must be an array".to_owned())?;
+    if example_rules.len() != 2 {
+        return Err(format!(
+            "ee.why.v1 example should include two redaction-safe rule references, got {}",
+            example_rules.len()
+        ));
+    }
+    for rule in example_rules {
+        if !rule
+            .get("ruleId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| {
+                id.starts_with("rule_")
+                    && !id.contains('/')
+                    && !id.contains("file")
+                    && !id.contains("content")
+            })
+        {
+            return Err(format!(
+                "ee.why.v1 example rule reference should expose only a safe rule id: {rule}"
+            ));
+        }
+        ensure_eq(
+            rule.get("relation").and_then(Value::as_str),
+            Some("cites"),
+            "ee.why.v1 example ruleReference",
+            "relation",
+        )?;
+    }
+
     Ok(())
 }
 
