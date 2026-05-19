@@ -2854,7 +2854,7 @@ mod tests {
     #[test]
     fn secret_redactor_masks_high_entropy_values_adjacent_to_secret_keywords() {
         let hex_secret = synthetic_hex_secret(48);
-        let base64_secret = synthetic_base64_secret(48);
+        let base64_secret = synthetic_base64_secret(48); // ubs:ignore
         let report = redact_secret_like_content(&format!(
             "Azure account key {hex_secret}; webhook secret: {base64_secret}"
         ));
