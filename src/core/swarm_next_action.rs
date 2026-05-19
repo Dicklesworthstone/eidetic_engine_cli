@@ -8,7 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::Path;
 
-use serde::Serialize;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::core::swarm_brief::{
@@ -21,8 +22,7 @@ pub const SWARM_NEXT_ACTION_REDACTION_STATUS: &str =
     "counts_ids_statuses_paths_redacted_no_mail_body_no_file_content";
 const EXTERNAL_AGENT_SPACE_ROOT: &str = "/Volumes/USBNVME16TB/temp_agent_space";
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SwarmNextActionSnapshot {
     pub schema: &'static str,
     pub workspace: String,
@@ -35,6 +35,28 @@ pub struct SwarmNextActionSnapshot {
     pub verification: SwarmNextActionVerificationSummary,
     pub environment: SwarmNextActionEnvironmentSummary,
     pub degraded: Vec<SwarmNextActionDegradation>,
+}
+
+impl Serialize for SwarmNextActionSnapshot {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("SwarmNextActionSnapshot", 12)?;
+        state.serialize_field("schema", &self.schema)?;
+        state.serialize_field("workspace", &self.workspace)?;
+        state.serialize_field("redactionStatus", &self.redaction_status)?;
+        state.serialize_field("inputs", &self.inputs)?;
+        state.serialize_field("candidates", &self.candidates)?;
+        state.serialize_field("recommendationCards", &self.recommendation_cards())?;
+        state.serialize_field("coordination", &self.coordination)?;
+        state.serialize_field("checkout", &self.checkout)?;
+        state.serialize_field("compileHealth", &self.compile_health)?;
+        state.serialize_field("verification", &self.verification)?;
+        state.serialize_field("environment", &self.environment)?;
+        state.serialize_field("degraded", &self.degraded)?;
+        state.end()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -60,6 +82,39 @@ pub struct SwarmNextActionCandidate {
     pub blocked_by: Vec<String>,
     pub blocked_by_compile_health: bool,
     pub action_hint: String,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmNextActionRecommendationCard {
+    pub card_id: String,
+    pub candidate_id: Option<String>,
+    pub candidate_source: &'static str,
+    pub candidate_summary: String,
+    pub decision: &'static str,
+    pub confidence: &'static str,
+    pub score_inputs: Vec<SwarmNextActionScoreInput>,
+    pub overlap: SwarmNextActionOverlapDecision,
+    pub proof_obligations: Vec<String>,
+    pub evidence_caveats: Vec<String>,
+    pub fallback_decision: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmNextActionScoreInput {
+    pub name: &'static str,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmNextActionOverlapDecision {
+    pub decision: &'static str,
+    pub queries: Vec<String>,
+    pub matched_existing_beads: Vec<String>,
+    pub rejected_duplicate_reason: Option<&'static str>,
+    pub selected_relation: &'static str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -229,6 +284,11 @@ impl SwarmNextActionSnapshot {
             environment: environment_summary(brief),
             degraded,
         }
+    }
+
+    #[must_use]
+    pub fn recommendation_cards(&self) -> Vec<SwarmNextActionRecommendationCard> {
+        recommendation_cards_from_snapshot(self)
     }
 }
 
@@ -417,6 +477,261 @@ fn candidate_source_rank(source: &str) -> u8 {
         "beads_ready" => 1,
         _ => 2,
     }
+}
+
+fn recommendation_cards_from_snapshot(
+    snapshot: &SwarmNextActionSnapshot,
+) -> Vec<SwarmNextActionRecommendationCard> {
+    if snapshot.candidates.is_empty() {
+        return no_action_recommendation_cards(snapshot);
+    }
+
+    let mut candidate_counts = BTreeMap::<&str, usize>::new();
+    for candidate in &snapshot.candidates {
+        *candidate_counts.entry(candidate.id.as_str()).or_default() += 1;
+    }
+
+    let caveats = recommendation_evidence_caveats(snapshot);
+    let has_compile_owner_blocker = snapshot
+        .compile_health
+        .blockers
+        .iter()
+        .any(|blocker| blocker.owner_agent.is_some());
+    let mut cards = snapshot
+        .candidates
+        .iter()
+        .map(|candidate| {
+            recommendation_card_for_candidate(
+                candidate,
+                candidate_counts
+                    .get(candidate.id.as_str())
+                    .copied()
+                    .unwrap_or(1),
+                &caveats,
+                has_compile_owner_blocker,
+            )
+        })
+        .collect::<Vec<_>>();
+    cards.sort();
+    cards.dedup();
+    cards
+}
+
+fn no_action_recommendation_cards(
+    snapshot: &SwarmNextActionSnapshot,
+) -> Vec<SwarmNextActionRecommendationCard> {
+    if snapshot.degraded.is_empty() {
+        return Vec::new();
+    }
+    vec![SwarmNextActionRecommendationCard {
+        card_id: "no_action_recommended:evidence_unavailable".to_owned(),
+        candidate_id: None,
+        candidate_source: "evidence_providers",
+        candidate_summary:
+            "No safe recommendation because selected evidence providers are degraded.".to_owned(),
+        decision: "no_action_recommended",
+        confidence: "low",
+        score_inputs: Vec::new(),
+        overlap: SwarmNextActionOverlapDecision {
+            decision: "no_action_recommended",
+            queries: Vec::new(),
+            matched_existing_beads: Vec::new(),
+            rejected_duplicate_reason: None,
+            selected_relation: "none",
+        },
+        proof_obligations: vec!["repair_degraded_sources_before_creating_tracker_work".to_owned()],
+        evidence_caveats: recommendation_evidence_caveats(snapshot),
+        fallback_decision: Some("repair_evidence_providers"),
+    }]
+}
+
+fn recommendation_card_for_candidate(
+    candidate: &SwarmNextActionCandidate,
+    candidate_id_count: usize,
+    evidence_caveats: &[String],
+    has_compile_owner_blocker: bool,
+) -> SwarmNextActionRecommendationCard {
+    let duplicate = candidate_id_count > 1;
+    let blocked_by_owner = candidate.assignee.is_some()
+        || (candidate.blocked_by_compile_health && has_compile_owner_blocker);
+    let decision = if duplicate {
+        "duplicate_rejected"
+    } else if blocked_by_owner {
+        "blocked_by_owner"
+    } else if candidate.status == "unknown" {
+        "new_bead_recommended"
+    } else {
+        "refine_existing_bead"
+    };
+    let fallback_decision = match decision {
+        "duplicate_rejected" => Some("refine_existing_bead"),
+        "blocked_by_owner" => Some("message_owner_before_editing"),
+        _ => None,
+    };
+
+    SwarmNextActionRecommendationCard {
+        card_id: format!("{decision}:{}", candidate.id),
+        candidate_id: Some(candidate.id.clone()),
+        candidate_source: candidate.source,
+        candidate_summary: candidate.title.clone(),
+        decision,
+        confidence: recommendation_confidence(candidate, decision, evidence_caveats),
+        score_inputs: recommendation_score_inputs(candidate),
+        overlap: overlap_decision_for_candidate(candidate, decision, duplicate),
+        proof_obligations: recommendation_proof_obligations(candidate, decision),
+        evidence_caveats: evidence_caveats.to_vec(),
+        fallback_decision,
+    }
+}
+
+fn overlap_decision_for_candidate(
+    candidate: &SwarmNextActionCandidate,
+    decision: &'static str,
+    duplicate: bool,
+) -> SwarmNextActionOverlapDecision {
+    let mut matched_existing_beads = Vec::new();
+    if candidate.status != "unknown" {
+        matched_existing_beads.push(candidate.id.clone());
+    }
+    matched_existing_beads.extend(candidate.blocked_by.iter().cloned());
+    matched_existing_beads.sort();
+    matched_existing_beads.dedup();
+
+    let mut queries = vec![
+        format!("bead_id:{}", candidate.id),
+        format!("source:{}", candidate.source),
+        format!("title:{}", candidate.title),
+    ];
+    queries.sort();
+
+    SwarmNextActionOverlapDecision {
+        decision,
+        queries,
+        matched_existing_beads,
+        rejected_duplicate_reason: if duplicate {
+            Some("candidate_id_already_present")
+        } else {
+            None
+        },
+        selected_relation: match decision {
+            "new_bead_recommended" => "new_child",
+            "duplicate_rejected" | "refine_existing_bead" => "existing_bead",
+            "blocked_by_owner" => "owner_coordination_required",
+            _ => "none",
+        },
+    }
+}
+
+fn recommendation_score_inputs(
+    candidate: &SwarmNextActionCandidate,
+) -> Vec<SwarmNextActionScoreInput> {
+    let mut inputs = vec![
+        SwarmNextActionScoreInput {
+            name: "source_rank",
+            value: candidate_source_rank(candidate.source).to_string(),
+        },
+        SwarmNextActionScoreInput {
+            name: "status",
+            value: candidate.status.clone(),
+        },
+        SwarmNextActionScoreInput {
+            name: "blocked_by_compile_health",
+            value: candidate.blocked_by_compile_health.to_string(),
+        },
+        SwarmNextActionScoreInput {
+            name: "blocked_by_count",
+            value: candidate.blocked_by.len().to_string(),
+        },
+    ];
+    if let Some(score_milli) = candidate.score_milli {
+        inputs.push(SwarmNextActionScoreInput {
+            name: "bv_score_milli",
+            value: score_milli.to_string(),
+        });
+    }
+    if let Some(priority) = candidate.priority {
+        inputs.push(SwarmNextActionScoreInput {
+            name: "priority",
+            value: priority.to_string(),
+        });
+    }
+    inputs.sort();
+    inputs
+}
+
+fn recommendation_proof_obligations(
+    candidate: &SwarmNextActionCandidate,
+    decision: &'static str,
+) -> Vec<String> {
+    let mut obligations = BTreeSet::from([
+        "record_overlap_decision_in_closeout".to_owned(),
+        "reserve_files_before_editing".to_owned(),
+        "use_rch_for_cargo_verification".to_owned(),
+    ]);
+    if candidate.source == "bv_top_pick" {
+        obligations.insert("preserve_bv_reasoning_in_beads_comment".to_owned());
+    }
+    if candidate.blocked_by_compile_health || decision == "blocked_by_owner" {
+        obligations.insert("coordinate_compile_health_blocker_before_rch".to_owned());
+    }
+    if decision == "new_bead_recommended" {
+        obligations.insert("search_existing_beads_before_creation".to_owned());
+    }
+    obligations.into_iter().collect()
+}
+
+fn recommendation_evidence_caveats(snapshot: &SwarmNextActionSnapshot) -> Vec<String> {
+    let mut caveats = BTreeSet::new();
+    if snapshot.checkout.dirty_path_count > 0 {
+        caveats.insert(format!(
+            "dirty_checkout_paths:{}",
+            snapshot.checkout.dirty_path_count
+        ));
+    }
+    match snapshot.compile_health.safe_to_launch_rch {
+        Some(false) => {
+            caveats.insert("compile_health_blocks_rch".to_owned());
+        }
+        None => {
+            caveats.insert("compile_health_uncertain".to_owned());
+        }
+        Some(true) => {}
+    }
+    if snapshot.verification.remote_only_required
+        && snapshot.verification.remote_only_safe == Some(false)
+    {
+        caveats.insert("remote_only_rch_not_safe".to_owned());
+    }
+    for degradation in &snapshot.degraded {
+        caveats.insert(format!(
+            "degraded:{}:{}",
+            degradation.source, degradation.code
+        ));
+    }
+    caveats.into_iter().collect()
+}
+
+fn recommendation_confidence(
+    candidate: &SwarmNextActionCandidate,
+    decision: &'static str,
+    evidence_caveats: &[String],
+) -> &'static str {
+    if matches!(
+        decision,
+        "duplicate_rejected" | "blocked_by_owner" | "no_action_recommended"
+    ) || candidate.blocked_by_compile_health
+    {
+        return "low";
+    }
+    if !evidence_caveats.is_empty() || candidate.score_milli.is_some_and(|score| score < 500) {
+        return "medium";
+    }
+    if candidate.score_milli.is_some_and(|score| score >= 700)
+        || candidate.priority.is_some_and(|priority| priority <= 2)
+    {
+        return "high";
+    }
+    "medium"
 }
 
 fn compile_health_summary(
@@ -961,11 +1276,210 @@ mod tests {
     }
 
     #[test]
+    fn recommendation_cards_explain_refine_new_and_dirty_checkout_caveats() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.beads.ready = vec![bead("bd-ready", "Refine existing SWA bead", 2)];
+        brief.bv = Some(SwarmBriefBvSummary {
+            actionable_count: Some(1),
+            blocked_count: Some(0),
+            in_progress_count: Some(0),
+            track_count: None,
+            top_picks: vec![SwarmBriefBvPick {
+                id: "bd-new".to_owned(),
+                title: "Net-new recommendation candidate".to_owned(),
+                score_milli: Some(850),
+                action_hint: Some("Create a child only after overlap review".to_owned()),
+                blocked_by: Vec::new(),
+            }],
+        });
+        brief.dirty_files = vec![SwarmBriefDirtyFile {
+            path: "docs/planning.md".to_owned(),
+            status: "M".to_owned(),
+        }];
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+        let cards = snapshot.recommendation_cards();
+
+        assert_eq!(
+            cards
+                .iter()
+                .map(|card| (card.candidate_id.as_deref(), card.decision))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some("bd-new"), "new_bead_recommended"),
+                (Some("bd-ready"), "refine_existing_bead"),
+            ]
+        );
+        assert!(cards.iter().all(|card| {
+            card.evidence_caveats
+                .contains(&"dirty_checkout_paths:1".to_owned())
+        }));
+
+        let json = serde_json::to_value(&snapshot).expect("snapshot serializes");
+        assert_eq!(
+            json.get("recommendationCards")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn recommendation_cards_reject_duplicate_candidate_ids() {
+        let snapshot = snapshot_with_candidates(vec![
+            candidate("bd-dup", "Duplicate next action", "beads_ready", Some(2)),
+            candidate("bd-dup", "Duplicate next action", "beads_ready", Some(2)),
+        ]);
+
+        let cards = snapshot.recommendation_cards();
+
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].decision, "duplicate_rejected");
+        assert_eq!(cards[0].fallback_decision, Some("refine_existing_bead"));
+        assert_eq!(
+            cards[0].overlap.rejected_duplicate_reason,
+            Some("candidate_id_already_present")
+        );
+    }
+
+    #[test]
+    fn recommendation_cards_emit_no_action_when_evidence_provider_is_missing() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.degraded = vec![degradation(
+            SwarmBriefSourceKind::Bv,
+            "bv_unavailable",
+            "BV robot triage was unavailable.",
+            Some("Run bv --robot-triage after repairing bv.".to_owned()),
+        )];
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+        let cards = snapshot.recommendation_cards();
+
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].decision, "no_action_recommended");
+        assert_eq!(cards[0].confidence, "low");
+        assert!(
+            cards[0]
+                .evidence_caveats
+                .contains(&"degraded:bv:bv_unavailable".to_owned())
+        );
+    }
+
+    #[test]
+    fn recommendation_cards_call_out_owner_blocked_compile_health() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.beads.ready = vec![bead("bd-rch", "Needs remote proof", 1)];
+        brief.dirty_files = vec![SwarmBriefDirtyFile {
+            path: "src/db/mod.rs".to_owned(),
+            status: "M".to_owned(),
+        }];
+        brief.file_reservations = vec![SwarmBriefFileReservation {
+            path_pattern: "src/db/*.rs".to_owned(),
+            holder: "CloudyHawk".to_owned(),
+            exclusive: true,
+            expires_at: Some("2026-05-18T10:00:00Z".to_owned()),
+        }];
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+        let cards = snapshot.recommendation_cards();
+
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].decision, "blocked_by_owner");
+        assert_eq!(cards[0].confidence, "low");
+        assert_eq!(
+            cards[0].fallback_decision,
+            Some("message_owner_before_editing")
+        );
+        assert!(
+            cards[0]
+                .proof_obligations
+                .contains(&"coordinate_compile_health_blocker_before_rch".to_owned())
+        );
+        assert!(
+            cards[0]
+                .evidence_caveats
+                .contains(&"compile_health_blocks_rch".to_owned())
+        );
+    }
+
+    #[test]
     fn wildcard_path_matching_covers_exact_glob_and_question_patterns() {
         assert!(path_matches_pattern("src/db/mod.rs", "src/db/mod.rs"));
         assert!(path_matches_pattern("src/db/mod.rs", "src/db/*.rs"));
         assert!(path_matches_pattern("src/db/a.rs", "src/db/?.rs"));
         assert!(!path_matches_pattern("src/core/status.rs", "src/db/*.rs"));
+    }
+
+    fn snapshot_with_candidates(
+        candidates: Vec<SwarmNextActionCandidate>,
+    ) -> SwarmNextActionSnapshot {
+        SwarmNextActionSnapshot {
+            schema: SWARM_NEXT_ACTION_SCHEMA_V1,
+            workspace: "/tmp/project".to_owned(),
+            redaction_status: SWARM_NEXT_ACTION_REDACTION_STATUS,
+            inputs: SwarmNextActionInputSummary {
+                source_count: 1,
+                ready_bead_count: candidates.len(),
+                in_progress_bead_count: 0,
+                blocked_bead_count: 0,
+                bv_top_pick_count: 0,
+            },
+            candidates,
+            coordination: SwarmNextActionCoordinationSummary {
+                active_reservation_count: 0,
+                reservation_holders: Vec::new(),
+                unread_inbox_count: 0,
+                ack_required_count: 0,
+            },
+            checkout: SwarmNextActionCheckoutSummary {
+                dirty_path_count: 0,
+                dirty_paths: Vec::new(),
+            },
+            compile_health: SwarmNextActionCompileHealthSummary {
+                safe_to_launch_rch: Some(true),
+                blocker_count: 0,
+                blockers: Vec::new(),
+                recommended_alternative_work: Vec::new(),
+            },
+            verification: SwarmNextActionVerificationSummary {
+                rch_source_enabled: true,
+                remote_only_required: true,
+                remote_only_safe: Some(true),
+                healthy_worker_count: Some(1),
+                active_remote_build_count: Some(0),
+                queued_remote_build_count: Some(0),
+                slots_available: Some(1),
+                queue_head_slots_needed: None,
+                queue_status: Some("ready".to_owned()),
+            },
+            environment: SwarmNextActionEnvironmentSummary {
+                cargo_target_externalized: true,
+                tmpdir_externalized: true,
+                external_agent_space_present: true,
+                disk_pressure_hint_count: 0,
+            },
+            degraded: Vec::new(),
+        }
+    }
+
+    fn candidate(
+        id: &str,
+        title: &str,
+        source: &'static str,
+        priority: Option<i64>,
+    ) -> SwarmNextActionCandidate {
+        SwarmNextActionCandidate {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            source,
+            score_milli: None,
+            status: "open".to_owned(),
+            priority,
+            assignee: None,
+            blocked_by: Vec::new(),
+            blocked_by_compile_health: false,
+            action_hint: "reserve_files_and_start_smallest_useful_slice".to_owned(),
+        }
     }
 
     fn bead(id: &str, title: &str, priority: i64) -> SwarmBriefBead {
