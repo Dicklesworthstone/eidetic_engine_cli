@@ -90,6 +90,63 @@ ee rule provenance rule_release_policy --workspace . --json
 ee status --skyline --workspace . --json
 ```
 
+## Causal Command Flags
+
+`ee causal` is the graph-derived explanation surface for recorder, pack,
+preflight, tripwire, procedure, experiment, and outcome evidence. Use `--dry-run`
+while wiring automation so the command reports the plan without querying or
+promoting live evidence.
+
+| Command | Flag | Values | Default | Use |
+| --- | --- | --- | --- | --- |
+| `ee causal trace [FAILURE_MEMORY_ID]` | `--memory-id <MEMORY_ID>` | memory ID | omitted | Filters causal chains to one memory when no positional failure ID is enough. |
+| `ee causal trace [FAILURE_MEMORY_ID]` | `--run-id <RUN_ID>` | recorder run ID | omitted | Filters evidence by recorder run. |
+| `ee causal trace [FAILURE_MEMORY_ID]` | `--pack-id <PACK_ID>` | context pack ID | omitted | Filters evidence by context pack. |
+| `ee causal trace [FAILURE_MEMORY_ID]` | `--preflight-id <PREFLIGHT_ID>` | preflight ID | omitted | Filters evidence by preflight decision. |
+| `ee causal trace [FAILURE_MEMORY_ID]` | `--tripwire-id <TRIPWIRE_ID>` | tripwire ID | omitted | Filters evidence by tripwire firing. |
+| `ee causal trace [FAILURE_MEMORY_ID]` | `--procedure-id <PROCEDURE_ID>` | procedure ID | omitted | Filters evidence by promoted procedure. |
+| `ee causal trace [FAILURE_MEMORY_ID]` | `--agent-id <AGENT_ID>` | agent ID | omitted | Filters evidence by agent identity. |
+| `ee causal trace [FAILURE_MEMORY_ID]` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Reads causal evidence from an explicit database for diagnostic replay. |
+| `ee causal trace [FAILURE_MEMORY_ID]` | `--database-workspace-id <WORKSPACE_ID>` | workspace ID | current workspace stable ID | Selects the workspace ID stored in the explicit causal database. |
+| `ee causal trace [FAILURE_MEMORY_ID]` | `--limit`, `-n` | integer | `50` | Caps causal chains returned. |
+| `ee causal trace [FAILURE_MEMORY_ID]` | `--depth <N>` | integer | `8` | Caps backward causal edge traversal. |
+| `ee causal trace [FAILURE_MEMORY_ID]` | `--include-exposures` | boolean | false | Includes detailed exposure rows in output. |
+| `ee causal trace [FAILURE_MEMORY_ID]` | `--include-outcomes` | boolean | false | Includes outcome summaries in output. |
+| `ee causal trace [FAILURE_MEMORY_ID]` | `--dry-run` | boolean | false | Reports the trace query plan without executing it. |
+| `ee causal compare [CHAIN_A] [CHAIN_B]` | `--fixture-replay-id <ID>` | fixture replay ID | omitted | Includes replay evidence in the comparison. |
+| `ee causal compare [CHAIN_A] [CHAIN_B]` | `--shadow-run-id <ID>` | shadow-run ID | omitted | Includes shadow-run evidence in the comparison. |
+| `ee causal compare [CHAIN_A] [CHAIN_B]` | `--counterfactual-episode-id <ID>` | counterfactual episode ID | omitted | Includes counterfactual evidence in the comparison. |
+| `ee causal compare [CHAIN_A] [CHAIN_B]` | `--experiment-id <ID>` | experiment ID | omitted | Includes active-learning experiment evidence. |
+| `ee causal compare [CHAIN_A] [CHAIN_B]`, `ee causal estimate`, `ee causal promote-plan` | `--artifact-id <ARTIFACT_ID>` | artifact ID | omitted | Scopes causal evidence to one artifact. |
+| `ee causal compare [CHAIN_A] [CHAIN_B]`, `ee causal estimate`, `ee causal promote-plan` | `--decision-id <DECISION_ID>` | decision ID | omitted | Scopes causal evidence to one decision. |
+| `ee causal compare [CHAIN_A] [CHAIN_B]`, `ee causal estimate`, `ee causal promote-plan` | `--method <METHOD>` | `naive`, `matching`, `replay`, `experiment` | `replay` for compare/promote; `naive` for estimate | Selects the causal comparison or estimation method. |
+| `ee causal compare [CHAIN_A] [CHAIN_B]` | `--dry-run` | boolean | false | Reports comparison inputs without generating concrete comparisons. |
+| `ee causal estimate [CHAIN_ID]` | `--chain-id <CHAIN_ID>` | causal chain ID | omitted | Selects the chain when the positional argument is absent or generated upstream. |
+| `ee causal estimate [CHAIN_ID]` | `--agent-id <AGENT_ID>` | agent ID | omitted | Filters estimates by agent. |
+| `ee causal estimate [CHAIN_ID]` | `--include-confounders` | boolean | false | Includes identified confounders in output. |
+| `ee causal estimate [CHAIN_ID]` | `--include-assumptions` | boolean | false | Includes assumptions used during estimation. |
+| `ee causal estimate [CHAIN_ID]` | `--dry-run` | boolean | false | Reports the estimation plan without computing. |
+| `ee causal promote-plan [CHAIN_ID]` | `--estimate-id <ESTIMATE_ID>` | estimate ID | omitted | Scopes promotion planning to one estimate. |
+| `ee causal promote-plan [CHAIN_ID]` | `--action <ACTION>` | `promote`, `hold`, `demote`, `archive`, `quarantine` | inferred | Requests an explicit target posture action. |
+| `ee causal promote-plan [CHAIN_ID]` | `--minimum-uplift <UPLIFT>` | float | `0.05` | Requires a minimum estimated uplift before promotion. |
+| `ee causal promote-plan [CHAIN_ID]` | `--include-revalidation` | boolean | false | Includes explicit revalidation recommendations. |
+| `ee causal promote-plan [CHAIN_ID]` | `--include-narrower-routing` | boolean | false | Includes narrower routing recommendations. |
+| `ee causal promote-plan [CHAIN_ID]` | `--include-experiment-proposals` | boolean | false | Includes experiment proposals. |
+| `ee causal promote-plan [CHAIN_ID]` | `--dry-run` | boolean | false | Keeps the command in planning mode for automation. |
+
+Example:
+
+```bash
+ee causal trace mem_failed_release --workspace . --depth 3 \
+  --include-exposures --include-outcomes --dry-run --json
+ee causal compare chain_baseline chain_candidate --workspace . \
+  --fixture-replay-id fixture_release --method replay --dry-run --json
+ee causal estimate chain_release --workspace . --method matching \
+  --include-confounders --include-assumptions --dry-run --json
+ee causal promote-plan chain_release --workspace . --action promote \
+  --minimum-uplift 0.08 --include-revalidation --dry-run --json
+```
+
 ## Graph Command Flags
 
 The read-only graph algorithms `pagerank`, `betweenness`, `hits`,
