@@ -26,6 +26,68 @@
         "actionHint": "Work on bd-parent first"
       }
     ],
+    "recommendationCards": [
+      {
+        "cardId": "blocked_by_owner:bd-dirty",
+        "candidateId": "bd-dirty",
+        "candidateSource": "bv_top_pick",
+        "candidateSummary": "Dirty checkout aware slice",
+        "decision": "blocked_by_owner",
+        "confidence": "low",
+        "scoreInputs": [
+          {
+            "name": "blocked_by_compile_health",
+            "value": "true"
+          },
+          {
+            "name": "blocked_by_count",
+            "value": "1"
+          },
+          {
+            "name": "bv_score_milli",
+            "value": "875"
+          },
+          {
+            "name": "priority",
+            "value": "1"
+          },
+          {
+            "name": "source_rank",
+            "value": "0"
+          },
+          {
+            "name": "status",
+            "value": "open"
+          }
+        ],
+        "overlap": {
+          "decision": "blocked_by_owner",
+          "queries": [
+            "bead_id:bd-dirty",
+            "source:bv_top_pick",
+            "title:Dirty checkout aware slice"
+          ],
+          "matchedExistingBeads": [
+            "bd-dirty",
+            "bd-parent"
+          ],
+          "rejectedDuplicateReason": null,
+          "selectedRelation": "owner_coordination_required"
+        },
+        "proofObligations": [
+          "coordinate_compile_health_blocker_before_rch",
+          "preserve_bv_reasoning_in_beads_comment",
+          "record_overlap_decision_in_closeout",
+          "reserve_files_before_editing",
+          "use_rch_for_cargo_verification"
+        ],
+        "evidenceCaveats": [
+          "compile_health_blocks_rch",
+          "dirty_checkout_paths:3"
+        ],
+        "fallbackDecision": "message_owner_before_editing"
+      }
+    ],
     "coordination": {
       "activeReservationCount": 2,
       "reservationHolders": ["BlueLake", "GoldenCompass"],

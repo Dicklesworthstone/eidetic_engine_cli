@@ -13,6 +13,31 @@
       "bvTopPickCount": 0
     },
     "candidates": [],
+    "recommendationCards": [
+      {
+        "cardId": "no_action_recommended:evidence_unavailable",
+        "candidateId": null,
+        "candidateSource": "evidence_providers",
+        "candidateSummary": "No safe recommendation because selected evidence providers are degraded.",
+        "decision": "no_action_recommended",
+        "confidence": "low",
+        "scoreInputs": [],
+        "overlap": {
+          "decision": "no_action_recommended",
+          "queries": [],
+          "matchedExistingBeads": [],
+          "rejectedDuplicateReason": null,
+          "selectedRelation": "none"
+        },
+        "proofObligations": [
+          "repair_degraded_sources_before_creating_tracker_work"
+        ],
+        "evidenceCaveats": [
+          "degraded:beads:beads_unavailable"
+        ],
+        "fallbackDecision": "repair_evidence_providers"
+      }
+    ],
     "coordination": {
       "activeReservationCount": 0,
       "reservationHolders": [],

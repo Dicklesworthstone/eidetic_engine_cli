@@ -26,6 +26,65 @@
         "actionHint": "Pick source-only work until remote slots clear"
       }
     ],
+    "recommendationCards": [
+      {
+        "cardId": "refine_existing_bead:bd-rch",
+        "candidateId": "bd-rch",
+        "candidateSource": "bv_top_pick",
+        "candidateSummary": "Source-only slice while RCH is saturated",
+        "decision": "refine_existing_bead",
+        "confidence": "medium",
+        "scoreInputs": [
+          {
+            "name": "blocked_by_compile_health",
+            "value": "false"
+          },
+          {
+            "name": "blocked_by_count",
+            "value": "0"
+          },
+          {
+            "name": "bv_score_milli",
+            "value": "700"
+          },
+          {
+            "name": "priority",
+            "value": "2"
+          },
+          {
+            "name": "source_rank",
+            "value": "0"
+          },
+          {
+            "name": "status",
+            "value": "open"
+          }
+        ],
+        "overlap": {
+          "decision": "refine_existing_bead",
+          "queries": [
+            "bead_id:bd-rch",
+            "source:bv_top_pick",
+            "title:Source-only slice while RCH is saturated"
+          ],
+          "matchedExistingBeads": [
+            "bd-rch"
+          ],
+          "rejectedDuplicateReason": null,
+          "selectedRelation": "existing_bead"
+        },
+        "proofObligations": [
+          "preserve_bv_reasoning_in_beads_comment",
+          "record_overlap_decision_in_closeout",
+          "reserve_files_before_editing",
+          "use_rch_for_cargo_verification"
+        ],
+        "evidenceCaveats": [
+          "remote_only_rch_not_safe"
+        ],
+        "fallbackDecision": null
+      }
+    ],
     "coordination": {
       "activeReservationCount": 1,
       "reservationHolders": ["GoldenCompass"],

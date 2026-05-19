@@ -578,6 +578,44 @@ fn swarm_next_action_sample() -> Value {
                 "blockedByCompileHealth": false,
                 "actionHint": "inspect_and_reserve_before_editing"
             }],
+            "recommendationCards": [{
+                "cardId": "refine_existing_bead:bd-123",
+                "candidateId": "bd-123",
+                "candidateSource": "bv_top_pick",
+                "candidateSummary": "Add next-action schema",
+                "decision": "refine_existing_bead",
+                "confidence": "medium",
+                "scoreInputs": [
+                    {"name": "blocked_by_compile_health", "value": "false"},
+                    {"name": "blocked_by_count", "value": "0"},
+                    {"name": "bv_score_milli", "value": "900"},
+                    {"name": "priority", "value": "2"},
+                    {"name": "source_rank", "value": "0"},
+                    {"name": "status", "value": "open"}
+                ],
+                "overlap": {
+                    "decision": "refine_existing_bead",
+                    "queries": [
+                        "bead_id:bd-123",
+                        "source:bv_top_pick",
+                        "title:Add next-action schema"
+                    ],
+                    "matchedExistingBeads": ["bd-123"],
+                    "rejectedDuplicateReason": null,
+                    "selectedRelation": "existing_bead"
+                },
+                "proofObligations": [
+                    "preserve_bv_reasoning_in_beads_comment",
+                    "record_overlap_decision_in_closeout",
+                    "reserve_files_before_editing",
+                    "use_rch_for_cargo_verification"
+                ],
+                "evidenceCaveats": [
+                    "dirty_checkout_paths:1",
+                    "remote_only_rch_not_safe"
+                ],
+                "fallbackDecision": null
+            }],
             "coordination": {
                 "activeReservationCount": 1,
                 "reservationHolders": ["GoldenCompass"],

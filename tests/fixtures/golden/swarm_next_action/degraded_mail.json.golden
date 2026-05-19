@@ -26,6 +26,60 @@
         "actionHint": "reserve_files_and_start_smallest_useful_slice"
       }
     ],
+    "recommendationCards": [
+      {
+        "cardId": "refine_existing_bead:bd-mail",
+        "candidateId": "bd-mail",
+        "candidateSource": "beads_ready",
+        "candidateSummary": "Fallback slice when mail is down",
+        "decision": "refine_existing_bead",
+        "confidence": "medium",
+        "scoreInputs": [
+          {
+            "name": "blocked_by_compile_health",
+            "value": "false"
+          },
+          {
+            "name": "blocked_by_count",
+            "value": "0"
+          },
+          {
+            "name": "priority",
+            "value": "2"
+          },
+          {
+            "name": "source_rank",
+            "value": "1"
+          },
+          {
+            "name": "status",
+            "value": "open"
+          }
+        ],
+        "overlap": {
+          "decision": "refine_existing_bead",
+          "queries": [
+            "bead_id:bd-mail",
+            "source:beads_ready",
+            "title:Fallback slice when mail is down"
+          ],
+          "matchedExistingBeads": [
+            "bd-mail"
+          ],
+          "rejectedDuplicateReason": null,
+          "selectedRelation": "existing_bead"
+        },
+        "proofObligations": [
+          "record_overlap_decision_in_closeout",
+          "reserve_files_before_editing",
+          "use_rch_for_cargo_verification"
+        ],
+        "evidenceCaveats": [
+          "degraded:agent_mail:agent_mail_unavailable"
+        ],
+        "fallbackDecision": null
+      }
+    ],
     "coordination": {
       "activeReservationCount": 0,
       "reservationHolders": [],

@@ -26,6 +26,58 @@
         "actionHint": "reserve_files_and_start_smallest_useful_slice"
       }
     ],
+    "recommendationCards": [
+      {
+        "cardId": "refine_existing_bead:bd-clean",
+        "candidateId": "bd-clean",
+        "candidateSource": "beads_ready",
+        "candidateSummary": "Clean ready slice",
+        "decision": "refine_existing_bead",
+        "confidence": "high",
+        "scoreInputs": [
+          {
+            "name": "blocked_by_compile_health",
+            "value": "false"
+          },
+          {
+            "name": "blocked_by_count",
+            "value": "0"
+          },
+          {
+            "name": "priority",
+            "value": "2"
+          },
+          {
+            "name": "source_rank",
+            "value": "1"
+          },
+          {
+            "name": "status",
+            "value": "open"
+          }
+        ],
+        "overlap": {
+          "decision": "refine_existing_bead",
+          "queries": [
+            "bead_id:bd-clean",
+            "source:beads_ready",
+            "title:Clean ready slice"
+          ],
+          "matchedExistingBeads": [
+            "bd-clean"
+          ],
+          "rejectedDuplicateReason": null,
+          "selectedRelation": "existing_bead"
+        },
+        "proofObligations": [
+          "record_overlap_decision_in_closeout",
+          "reserve_files_before_editing",
+          "use_rch_for_cargo_verification"
+        ],
+        "evidenceCaveats": [],
+        "fallbackDecision": null
+      }
+    ],
     "coordination": {
       "activeReservationCount": 0,
       "reservationHolders": [],

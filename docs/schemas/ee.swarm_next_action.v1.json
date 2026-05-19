@@ -30,6 +30,10 @@
           "type": "array",
           "items": {"$ref": "#/$defs/candidate"}
         },
+        "recommendationCards": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/recommendationCard"}
+        },
         "topCandidates": {
           "type": "array",
           "items": {"$ref": "#/$defs/candidate"}
@@ -48,7 +52,7 @@
   "field_presets": {
     "minimal": ["schema", "workspace", "redactionStatus", "candidateCount", "dirtyPathCount", "degradedCount"],
     "summary": ["schema", "workspace", "redactionStatus", "inputs", "coordination", "checkout", "compileHealth", "verification", "environment", "topCandidates", "degraded"],
-    "standard": ["schema", "workspace", "redactionStatus", "inputs", "candidates", "coordination", "checkout", "compileHealth", "verification", "environment", "degraded"],
+    "standard": ["schema", "workspace", "redactionStatus", "inputs", "candidates", "recommendationCards", "coordination", "checkout", "compileHealth", "verification", "environment", "degraded"],
     "full": ["*"]
   },
   "examples": [
@@ -78,6 +82,48 @@
             "blockedBy": [],
             "blockedByCompileHealth": true,
             "actionHint": "inspect_and_reserve_before_editing"
+          }
+        ],
+        "recommendationCards": [
+          {
+            "cardId": "blocked_by_owner:bd-123",
+            "candidateId": "bd-123",
+            "candidateSource": "bv_top_pick",
+            "candidateSummary": "Add next-action schema",
+            "decision": "blocked_by_owner",
+            "confidence": "low",
+            "scoreInputs": [
+              {"name": "blocked_by_compile_health", "value": "true"},
+              {"name": "blocked_by_count", "value": "0"},
+              {"name": "bv_score_milli", "value": "900"},
+              {"name": "priority", "value": "2"},
+              {"name": "source_rank", "value": "0"},
+              {"name": "status", "value": "open"}
+            ],
+            "overlap": {
+              "decision": "blocked_by_owner",
+              "queries": [
+                "bead_id:bd-123",
+                "source:bv_top_pick",
+                "title:Add next-action schema"
+              ],
+              "matchedExistingBeads": ["bd-123"],
+              "rejectedDuplicateReason": null,
+              "selectedRelation": "owner_coordination_required"
+            },
+            "proofObligations": [
+              "coordinate_compile_health_blocker_before_rch",
+              "preserve_bv_reasoning_in_beads_comment",
+              "record_overlap_decision_in_closeout",
+              "reserve_files_before_editing",
+              "use_rch_for_cargo_verification"
+            ],
+            "evidenceCaveats": [
+              "compile_health_blocks_rch",
+              "dirty_checkout_paths:1",
+              "remote_only_rch_not_safe"
+            ],
+            "fallbackDecision": "message_owner_before_editing"
           }
         ],
         "coordination": {
@@ -165,6 +211,57 @@
         "blockedBy": {"type": "array", "items": {"type": "string"}},
         "blockedByCompileHealth": {"type": "boolean"},
         "actionHint": {"type": "string"}
+      }
+    },
+    "recommendationCard": {
+      "type": "object",
+      "required": ["cardId", "candidateId", "candidateSource", "candidateSummary", "decision", "confidence", "scoreInputs", "overlap", "proofObligations", "evidenceCaveats", "fallbackDecision"],
+      "additionalProperties": false,
+      "properties": {
+        "cardId": {"type": "string"},
+        "candidateId": {"type": ["string", "null"]},
+        "candidateSource": {"type": "string"},
+        "candidateSummary": {"type": "string"},
+        "decision": {
+          "type": "string",
+          "enum": ["new_bead_recommended", "refine_existing_bead", "duplicate_rejected", "blocked_by_owner", "no_action_recommended"]
+        },
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "scoreInputs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/scoreInput"}
+        },
+        "overlap": {"$ref": "#/$defs/overlapDecision"},
+        "proofObligations": {"type": "array", "items": {"type": "string"}},
+        "evidenceCaveats": {"type": "array", "items": {"type": "string"}},
+        "fallbackDecision": {"type": ["string", "null"]}
+      }
+    },
+    "scoreInput": {
+      "type": "object",
+      "required": ["name", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "value": {"type": "string"}
+      }
+    },
+    "overlapDecision": {
+      "type": "object",
+      "required": ["decision", "queries", "matchedExistingBeads", "rejectedDuplicateReason", "selectedRelation"],
+      "additionalProperties": false,
+      "properties": {
+        "decision": {
+          "type": "string",
+          "enum": ["new_bead_recommended", "refine_existing_bead", "duplicate_rejected", "blocked_by_owner", "no_action_recommended"]
+        },
+        "queries": {"type": "array", "items": {"type": "string"}},
+        "matchedExistingBeads": {"type": "array", "items": {"type": "string"}},
+        "rejectedDuplicateReason": {"type": ["string", "null"]},
+        "selectedRelation": {
+          "type": "string",
+          "enum": ["new_child", "existing_bead", "owner_coordination_required", "none"]
+        }
       }
     },
     "coordinationSummary": {
