@@ -14,7 +14,12 @@
       "additionalProperties": false,
       "properties": {
         "bayesPosterior": {"$ref": "#/$defs/jsonValue"},
-        "loadBearing": {"$ref": "#/$defs/jsonValue"},
+        "loadBearing": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/loadBearingWhy"}
+          ]
+        },
         "hits": {"$ref": "#/$defs/jsonValue"},
         "revisionLineage": {"$ref": "#/$defs/jsonValue"}
       }
@@ -27,6 +32,53 @@
     "full": ["*"]
   },
   "$defs": {
+    "loadBearingWhy": {
+      "type": "object",
+      "required": [
+        "isLoadBearing",
+        "loadBearingScore",
+        "authorityRank",
+        "citingRuleCount",
+        "citingRules",
+        "interpretation",
+        "evidence",
+        "rationale"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "isLoadBearing": {"type": "boolean"},
+        "loadBearingScore": {"type": ["number", "null"], "minimum": 0},
+        "authorityRank": {"type": ["integer", "null"], "minimum": 1},
+        "citingRuleCount": {"type": "integer", "minimum": 0},
+        "citingRules": {"type": "array", "items": {"$ref": "#/$defs/ruleReference"}},
+        "interpretation": {
+          "type": "string",
+          "enum": ["load_bearing", "not_load_bearing", "unavailable"]
+        },
+        "evidence": {"$ref": "#/$defs/loadBearingEvidence"},
+        "rationale": {"type": "string"}
+      }
+    },
+    "ruleReference": {
+      "type": "object",
+      "required": ["ruleId", "relation"],
+      "additionalProperties": false,
+      "properties": {
+        "ruleId": {"type": "string"},
+        "relation": {"type": "string", "const": "cites"}
+      }
+    },
+    "loadBearingEvidence": {
+      "type": "object",
+      "required": ["schema", "algorithm", "projection", "snapshotVersion"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.graph.hits.v1"},
+        "algorithm": {"type": "string", "const": "bipartite_hits"},
+        "projection": {"type": "string", "const": "rule_provenance_bipartite"},
+        "snapshotVersion": {"type": "integer", "minimum": 0}
+      }
+    },
     "jsonValue": {
       "oneOf": [
         {"type": "null"},

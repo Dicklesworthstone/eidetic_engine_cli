@@ -644,6 +644,127 @@ fn insights_load_bearing_schema_documents_bipartite_items() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn why_schema_documents_load_bearing_graph_block() -> TestResult {
+    let schema_path = repo_root()
+        .join("docs")
+        .join("schemas")
+        .join("ee.why.v1.json");
+    let schema = read_json(&schema_path)?;
+
+    ensure_eq(
+        schema
+            .pointer("/properties/graph/properties/loadBearing/oneOf/1/$ref")
+            .and_then(Value::as_str),
+        Some("#/$defs/loadBearingWhy"),
+        "ee.why.v1 loadBearing",
+        "graph.loadBearing.$ref",
+    )?;
+
+    let block = schema
+        .pointer("/$defs/loadBearingWhy")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "ee.why.v1 missing $defs.loadBearingWhy".to_owned())?;
+    let required = block
+        .get("required")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "$defs.loadBearingWhy.required must be an array".to_owned())?;
+    for field in [
+        "isLoadBearing",
+        "loadBearingScore",
+        "authorityRank",
+        "citingRuleCount",
+        "citingRules",
+        "interpretation",
+        "evidence",
+        "rationale",
+    ] {
+        if !required.iter().any(|value| value.as_str() == Some(field)) {
+            return Err(format!("loadBearingWhy.required missing {field}"));
+        }
+    }
+
+    ensure_eq(
+        schema
+            .pointer("/$defs/loadBearingWhy/properties/loadBearingScore/minimum")
+            .and_then(Value::as_u64),
+        Some(0),
+        "ee.why.v1 loadBearingWhy",
+        "loadBearingScore.minimum",
+    )?;
+    ensure_eq(
+        schema
+            .pointer("/$defs/loadBearingWhy/properties/authorityRank/minimum")
+            .and_then(Value::as_u64),
+        Some(1),
+        "ee.why.v1 loadBearingWhy",
+        "authorityRank.minimum",
+    )?;
+    ensure_eq(
+        schema
+            .pointer("/$defs/loadBearingWhy/properties/citingRuleCount/minimum")
+            .and_then(Value::as_u64),
+        Some(0),
+        "ee.why.v1 loadBearingWhy",
+        "citingRuleCount.minimum",
+    )?;
+    ensure_eq(
+        schema
+            .pointer("/$defs/loadBearingEvidence/properties/schema/const")
+            .and_then(Value::as_str),
+        Some("ee.graph.hits.v1"),
+        "ee.why.v1 loadBearingEvidence",
+        "schema.const",
+    )?;
+    ensure_eq(
+        schema
+            .pointer("/$defs/loadBearingEvidence/properties/algorithm/const")
+            .and_then(Value::as_str),
+        Some("bipartite_hits"),
+        "ee.why.v1 loadBearingEvidence",
+        "algorithm.const",
+    )?;
+    ensure_eq(
+        schema
+            .pointer("/$defs/loadBearingEvidence/properties/projection/const")
+            .and_then(Value::as_str),
+        Some("rule_provenance_bipartite"),
+        "ee.why.v1 loadBearingEvidence",
+        "projection.const",
+    )?;
+    ensure_eq(
+        schema
+            .pointer("/$defs/ruleReference/properties/relation/const")
+            .and_then(Value::as_str),
+        Some("cites"),
+        "ee.why.v1 ruleReference",
+        "relation.const",
+    )?;
+
+    let block_schema = serde_json::to_string(
+        schema
+            .pointer("/$defs/loadBearingWhy")
+            .ok_or_else(|| "ee.why.v1 missing $defs.loadBearingWhy".to_owned())?,
+    )
+    .map_err(|error| format!("serialize loadBearingWhy schema: {error}"))?;
+    for forbidden in [
+        "\"content\"",
+        "\"contentPreview\"",
+        "\"filePath\"",
+        "\"path\"",
+        "\"query\"",
+        "\"workspacePath\"",
+    ] {
+        if block_schema.contains(forbidden) {
+            return Err(format!(
+                "loadBearingWhy schema should not expose raw-bearing field {forbidden}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn assert_hits_item_schema(
     schema: &Value,
     item_name: &str,
