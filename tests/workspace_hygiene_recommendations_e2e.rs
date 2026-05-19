@@ -132,6 +132,112 @@ fn init_mixed_dirty_workspace() -> Result<PathBuf, String> {
     Ok(workspace)
 }
 
+fn init_clean_workspace() -> Result<PathBuf, String> {
+    let workspace = workspace_dir()?;
+    ensure_success(
+        &run_command(
+            Command::new("git")
+                .arg("init")
+                .arg("-b")
+                .arg("main")
+                .current_dir(&workspace),
+            "git init",
+        )?,
+        "git init",
+    )?;
+    write_file(&workspace.join("README.md"), "# clean fixture\n")?;
+    ensure_success(
+        &run_command(
+            Command::new("git")
+                .arg("add")
+                .arg("README.md")
+                .current_dir(&workspace),
+            "git add README",
+        )?,
+        "git add README",
+    )?;
+    ensure_success(
+        &run_command(
+            Command::new("git")
+                .arg("-c")
+                .arg("user.email=ee-test@example.invalid")
+                .arg("-c")
+                .arg("user.name=ee test")
+                .arg("commit")
+                .arg("-m")
+                .arg("seed clean workspace")
+                .current_dir(&workspace),
+            "git commit",
+        )?,
+        "git commit",
+    )?;
+    Ok(workspace)
+}
+
+fn init_beads_only_workspace() -> Result<PathBuf, String> {
+    let workspace = init_clean_workspace()?;
+    write_file(
+        &workspace.join(".beads/issues.jsonl"),
+        "{\"id\":\"bd-fixture-1\",\"title\":\"fixture\"}\n",
+    )?;
+    Ok(workspace)
+}
+
+fn init_coordination_blocked_workspace() -> Result<PathBuf, String> {
+    let workspace = workspace_dir()?;
+    ensure_success(
+        &run_command(
+            Command::new("git")
+                .arg("init")
+                .arg("-b")
+                .arg("main")
+                .current_dir(&workspace),
+            "git init",
+        )?,
+        "git init",
+    )?;
+    for (path, body) in [
+        ("src/core/lib.rs", "pub fn blocked() -> bool { false }\n"),
+        ("src/core/api.rs", "pub fn api() -> bool { false }\n"),
+        ("src/core/util.rs", "pub fn util() -> bool { false }\n"),
+    ] {
+        write_file(&workspace.join(path), body)?;
+    }
+    ensure_success(
+        &run_command(
+            Command::new("git")
+                .arg("add")
+                .arg(".")
+                .current_dir(&workspace),
+            "git add",
+        )?,
+        "git add",
+    )?;
+    ensure_success(
+        &run_command(
+            Command::new("git")
+                .arg("-c")
+                .arg("user.email=ee-test@example.invalid")
+                .arg("-c")
+                .arg("user.name=ee test")
+                .arg("commit")
+                .arg("-m")
+                .arg("seed coordination-blocked workspace")
+                .current_dir(&workspace),
+            "git commit",
+        )?,
+        "git commit",
+    )?;
+    for (path, body) in [
+        ("src/core/lib.rs", "pub fn blocked() -> bool { true }\n"),
+        ("src/core/api.rs", "pub fn api() -> bool { true }\n"),
+        ("src/core/util.rs", "pub fn util() -> bool { true }\n"),
+    ] {
+        write_file(&workspace.join(path), body)?;
+    }
+    Ok(workspace)
+}
+
 fn init_scratch_only_workspace() -> Result<PathBuf, String> {
     let workspace = workspace_dir()?;
     ensure_success(
@@ -251,11 +357,71 @@ fn expected_scratch_only_projection() -> Result<Value, String> {
     .map_err(|error| format!("scratch-only hygiene golden must parse: {error}"))
 }
 
+fn expected_clean_projection() -> Result<Value, String> {
+    serde_json::from_str(include_str!("fixtures/golden/workspace_hygiene_clean.json"))
+        .map_err(|error| format!("clean hygiene golden must parse: {error}"))
+}
+
+fn expected_beads_only_projection() -> Result<Value, String> {
+    serde_json::from_str(include_str!(
+        "fixtures/golden/workspace_hygiene_beads_only.json"
+    ))
+    .map_err(|error| format!("beads-only hygiene golden must parse: {error}"))
+}
+
+fn expected_coordination_blocked_projection() -> Result<Value, String> {
+    serde_json::from_str(include_str!(
+        "fixtures/golden/workspace_hygiene_coordination_blocked.json"
+    ))
+    .map_err(|error| format!("coordination-blocked hygiene golden must parse: {error}"))
+}
+
 fn clone_at(value: &Value, pointer: &str) -> Result<Value, String> {
     value
         .pointer(pointer)
         .cloned()
         .ok_or_else(|| format!("missing {pointer}: {value}"))
+}
+
+fn coordination_blocked_projection(value: &Value) -> Result<Value, String> {
+    let blocked = value
+        .pointer("/data/coordinationState/blockedByCoordination")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("missing blockedByCoordination: {value}"))?
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "path": clone_at(row, "/path")?,
+                "holderAgent": clone_at(row, "/holderAgent")?,
+                "exclusive": clone_at(row, "/exclusive")?,
+                "reasons": clone_at(row, "/reasons")?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let staging_group_paths = value
+        .pointer("/data/stagingRecommendations")
+        .and_then(Value::as_array)
+        .map(|groups| {
+            groups
+                .iter()
+                .map(|group| {
+                    serde_json::json!({
+                        "name": group.get("name").cloned().unwrap_or(Value::Null),
+                        "paths": group.get("paths").cloned().unwrap_or(Value::Null),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(serde_json::json!({
+        "dirtyPathCount": clone_at(value, "/data/dirtyPathCount")?,
+        "stagingRecommendationsPaths": staging_group_paths,
+        "doNotCommit": clone_at(value, "/data/doNotCommit")?,
+        "needsHumanReview": clone_at(value, "/data/needsHumanReview")?,
+        "blockedByCoordination": blocked,
+    }))
 }
 
 fn scratch_only_projection(value: &Value) -> Result<Value, String> {
@@ -384,6 +550,156 @@ fn workspace_hygiene_recommendations_are_grouped_read_only_and_explainable() -> 
     if blocked != Some("src/core/lib.rs") {
         return Err(format!(
             "blocked source path missing from coordination state: {value}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn workspace_hygiene_clean_workspace_reports_no_dirty_paths() -> TestResult {
+    let workspace = init_clean_workspace()?;
+    let workspace_name = workspace
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("workspace path has no file name: {}", workspace.display()))?;
+    let snapshot_path = workspace.with_file_name(format!("{workspace_name}-agent-mail.json"));
+    write_file(
+        &snapshot_path,
+        r#"{
+          "file_reservations": [],
+          "active_agents": [],
+          "inbox": [],
+          "threads": []
+        }"#,
+    )?;
+
+    let before = git_status(&workspace)?;
+    let value = run_hygiene_json(&workspace, &snapshot_path)?;
+    let after = git_status(&workspace)?;
+    if before != after {
+        return Err("workspace hygiene must not mutate clean git state".to_owned());
+    }
+    if value.pointer("/data/readOnly").and_then(Value::as_bool) != Some(true) {
+        return Err(format!(
+            "clean workspace hygiene must be read-only: {value}"
+        ));
+    }
+
+    let projection = scratch_only_projection(&value)?;
+    let expected = expected_clean_projection()?;
+    if projection != expected {
+        return Err(format!(
+            "clean workspace hygiene projection drifted from golden\nexpected: {expected}\nactual: {projection}"
+        ));
+    }
+    if value.to_string().contains("git add") {
+        return Err(format!(
+            "clean report must not emit staging commands: {value}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn workspace_hygiene_beads_only_workspace_routes_jsonl_to_ignore_for_now() -> TestResult {
+    let workspace = init_beads_only_workspace()?;
+    let workspace_name = workspace
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("workspace path has no file name: {}", workspace.display()))?;
+    let snapshot_path = workspace.with_file_name(format!("{workspace_name}-agent-mail.json"));
+    write_file(
+        &snapshot_path,
+        r#"{
+          "file_reservations": [],
+          "active_agents": [],
+          "inbox": [],
+          "threads": []
+        }"#,
+    )?;
+
+    let before = git_status(&workspace)?;
+    let value = run_hygiene_json(&workspace, &snapshot_path)?;
+    let after = git_status(&workspace)?;
+    if before != after {
+        return Err("workspace hygiene must not mutate beads-only git state".to_owned());
+    }
+
+    let projection = scratch_only_projection(&value)?;
+    let expected = expected_beads_only_projection()?;
+    if projection != expected {
+        return Err(format!(
+            "beads-only workspace hygiene projection drifted from golden\nexpected: {expected}\nactual: {projection}"
+        ));
+    }
+    if value.to_string().contains("git add") {
+        return Err(format!(
+            "beads-only report must not emit staging commands: {value}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn workspace_hygiene_coordination_blocked_workspace_strips_blocked_paths_from_staging() -> TestResult
+{
+    let workspace = init_coordination_blocked_workspace()?;
+    let snapshot_path = workspace.join("agent-mail.json");
+    write_file(
+        &snapshot_path,
+        r#"{
+          "file_reservations": [
+            {
+              "path_pattern": "src/core/lib.rs",
+              "holder": "OtherAgent",
+              "exclusive": true,
+              "expires_at": "2099-01-01T00:00:00Z"
+            },
+            {
+              "path_pattern": "src/core/api.rs",
+              "holder": "OtherAgent",
+              "exclusive": true,
+              "expires_at": "2099-01-01T00:00:00Z"
+            },
+            {
+              "path_pattern": "src/core/util.rs",
+              "holder": "OtherAgent",
+              "exclusive": true,
+              "expires_at": "2099-01-01T00:00:00Z"
+            }
+          ],
+          "active_agents": [{"name": "OtherAgent"}],
+          "inbox": [],
+          "threads": []
+        }"#,
+    )?;
+
+    let before = git_status(&workspace)?;
+    let value = run_hygiene_json(&workspace, &snapshot_path)?;
+    let after = git_status(&workspace)?;
+    if before != after {
+        return Err("workspace hygiene must not mutate coordination-blocked git state".to_owned());
+    }
+
+    let projection = coordination_blocked_projection(&value)?;
+    let expected = expected_coordination_blocked_projection()?;
+    if projection != expected {
+        return Err(format!(
+            "coordination-blocked workspace hygiene projection drifted from golden\nexpected: {expected}\nactual: {projection}"
+        ));
+    }
+
+    let source_paths = value
+        .pointer("/data/stagingRecommendations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|group| group.get("name").and_then(Value::as_str) == Some("source"))
+        .map(|group| array_strings_at(group, "/paths"))
+        .unwrap_or_default();
+    if !source_paths.is_empty() {
+        return Err(format!(
+            "fully-blocked source group must hold no paths: {value}"
         ));
     }
     Ok(())

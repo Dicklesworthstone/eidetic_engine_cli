@@ -1,0 +1,31 @@
+{
+  "dirtyPathCount": 3,
+  "stagingRecommendationsPaths": [
+    {
+      "name": "source",
+      "paths": []
+    }
+  ],
+  "doNotCommit": [],
+  "needsHumanReview": [],
+  "blockedByCoordination": [
+    {
+      "path": "src/core/api.rs",
+      "holderAgent": "OtherAgent",
+      "exclusive": true,
+      "reasons": ["active_exclusive_reservation"]
+    },
+    {
+      "path": "src/core/lib.rs",
+      "holderAgent": "OtherAgent",
+      "exclusive": true,
+      "reasons": ["active_exclusive_reservation"]
+    },
+    {
+      "path": "src/core/util.rs",
+      "holderAgent": "OtherAgent",
+      "exclusive": true,
+      "reasons": ["active_exclusive_reservation"]
+    }
+  ]
+}

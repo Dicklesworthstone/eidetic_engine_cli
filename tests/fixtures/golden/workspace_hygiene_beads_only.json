@@ -1,0 +1,28 @@
+{
+  "dirtyPathCount": 1,
+  "bucketCounts": [
+    {
+      "name": "ignore_for_now",
+      "count": 1
+    }
+  ],
+  "kindCounts": [
+    {
+      "name": "beads_metadata",
+      "count": 1
+    }
+  ],
+  "stagingRecommendations": [],
+  "doNotCommit": [],
+  "needsHumanReview": [],
+  "pathClassifications": [
+    {
+      "path": ".beads/issues.jsonl",
+      "bucket": "ignore_for_now",
+      "kind": "beads_metadata",
+      "reasons": ["beads_jsonl"],
+      "suggestedGroup": "beads_metadata"
+    }
+  ],
+  "nextActions": []
+}
