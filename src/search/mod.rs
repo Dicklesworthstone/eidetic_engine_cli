@@ -8,6 +8,7 @@ use crate::models::{
 pub mod plan_cache;
 pub mod query;
 pub mod scoring;
+pub mod simhash;
 
 pub use frankensearch::core::types::IndexableDocument;
 pub use frankensearch::{
