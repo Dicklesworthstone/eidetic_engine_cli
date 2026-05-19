@@ -76,6 +76,8 @@ pub enum EnvVar {
     Profile,
     /// `EE_PPR_CACHE_ENTRIES`
     PprCacheEntries,
+    /// `EE_QUERY_PLAN_CACHE_ENTRIES`
+    QueryPlanCacheEntries,
     /// `EE_READ_POOL_DISABLE_PIN`
     ReadPoolDisablePin,
     /// `EE_READ_POOL_ACQUIRE_TIMEOUT_MS`
@@ -168,6 +170,7 @@ impl EnvVar {
             Self::PreflightBypassSecret,
             Self::Profile,
             Self::PprCacheEntries,
+            Self::QueryPlanCacheEntries,
             Self::ReadPoolDisablePin,
             Self::ReadPoolAcquireTimeoutMs,
             Self::ReadPoolIdleTimeoutSeconds,
@@ -234,6 +237,7 @@ impl EnvVar {
             Self::PreflightBypassSecret => "EE_PREFLIGHT_BYPASS_SECRET",
             Self::Profile => "EE_PROFILE",
             Self::PprCacheEntries => "EE_PPR_CACHE_ENTRIES",
+            Self::QueryPlanCacheEntries => "EE_QUERY_PLAN_CACHE_ENTRIES",
             Self::ReadPoolDisablePin => "EE_READ_POOL_DISABLE_PIN",
             Self::ReadPoolAcquireTimeoutMs => "EE_READ_POOL_ACQUIRE_TIMEOUT_MS",
             Self::ReadPoolIdleTimeoutSeconds => "EE_READ_POOL_IDLE_TIMEOUT_S",
@@ -321,6 +325,9 @@ impl EnvVar {
             Self::PreflightBypassSecret => "Supply preflight bypass secret material.",
             Self::Profile => "Override the default context pack profile.",
             Self::PprCacheEntries => "Override the in-process PPR prefetch cache entry cap.",
+            Self::QueryPlanCacheEntries => {
+                "Override the in-process EQL query plan cache entry cap."
+            }
             Self::ReadPoolDisablePin => "Disable read-side snapshot pinning.",
             Self::ReadPoolAcquireTimeoutMs => {
                 "Override the read-side connection pool acquire timeout in milliseconds."
@@ -395,6 +402,7 @@ impl EnvVar {
             Self::TailscaleDiscoveryMode => Some("service_tag"),
             Self::TailscaleRespondMode => Some("service_tag"),
             Self::PprCacheEntries => Some("4096"),
+            Self::QueryPlanCacheEntries => Some("1024"),
             Self::GraphWitnessesRetentionDays => Some("30"),
             Self::ReadPoolAcquireTimeoutMs => Some("5000"),
             Self::ReadPoolMaxPinSeconds => Some("30"),
@@ -457,6 +465,7 @@ impl EnvVar {
             | Self::MaxTokens
             | Self::Profile
             | Self::PprCacheEntries
+            | Self::QueryPlanCacheEntries
             | Self::ReadPoolDisablePin
             | Self::ReadPoolAcquireTimeoutMs
             | Self::ReadPoolIdleTimeoutSeconds

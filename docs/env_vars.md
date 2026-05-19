@@ -43,6 +43,7 @@ must not expose their current value.
 | `EE_PREFLIGHT_BYPASS_SECRET` | policy | secret string | none | Supply preflight bypass secret material. | Capabilities must never expose this current value. |
 | `EE_PROFILE` | tuning | profile name | none | Override the default context pack profile. | Applies when pack/context profile is not specified explicitly. |
 | `EE_PPR_CACHE_ENTRIES` | tuning | integer count | `4096` | Override the in-process PPR prefetch cache entry cap. | Set to `0` to disable prefetch entries while keeping the algorithm result cache intact. |
+| `EE_QUERY_PLAN_CACHE_ENTRIES` | tuning | integer count | `1024` | Override the in-process EQL query plan cache entry cap. | Set to `0` to disable plan caching. Plan-cache hits skip parse + bind + index-selection cost; see [`docs/search/plan-cache.md`](search/plan-cache.md). Tracks bead `bd-2mey5`. |
 | `EE_READ_POOL_DISABLE_PIN` | tuning | boolean flag | none | Disable read-side snapshot pinning. | Inverts `[storage.read_pool].pin_snapshot` for read-heavy status/context paths. |
 | `EE_READ_POOL_ACQUIRE_TIMEOUT_MS` | tuning | integer milliseconds | `5000` | Override the read-side connection pool acquire timeout in milliseconds. | When all pooled reads are active, context waits this long before opening a one-shot ad-hoc read connection. |
 | `EE_READ_POOL_IDLE_TIMEOUT_S` | tuning | integer seconds | none | Override the read-side connection pool idle timeout in seconds. | Maps to `[storage.read_pool].idle_timeout_seconds`; idle pooled handles are closed after the configured age. |

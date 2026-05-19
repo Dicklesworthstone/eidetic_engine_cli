@@ -5,6 +5,7 @@ use crate::models::{
     CapabilityStatus, INDEX_MANIFEST_SCHEMA_V1, SEARCH_DOCUMENT_SCHEMA_V1, SEARCH_MODULE_SCHEMA_V1,
 };
 
+pub mod plan_cache;
 pub mod query;
 pub mod scoring;
 
@@ -638,10 +639,7 @@ fn redact_search_projection_absolute_path_like_segments(input: &str) -> String {
             output.push_str(REDACTED_PATH);
             cursor += prefix.len();
             while cursor < input.len() {
-                let next = input[cursor..]
-                    .chars()
-                    .next()
-                    .unwrap_or('\0');
+                let next = input[cursor..].chars().next().unwrap_or('\0');
                 if next.is_whitespace()
                     || matches!(
                         next,
@@ -666,10 +664,7 @@ fn redact_search_projection_absolute_path_like_segments(input: &str) -> String {
             continue;
         }
 
-        let next = remaining
-            .chars()
-            .next()
-            .unwrap_or('\0');
+        let next = remaining.chars().next().unwrap_or('\0');
         output.push(next);
         cursor += next.len_utf8();
     }
