@@ -29,6 +29,12 @@ checks local Git hooks for agent identity requirements, legacy Beads metadata
 mutation, local Cargo hooks that should route through RCH, unreadable hook-chain
 targets, and missing preflight-guard coverage.
 
+The no-build e2e harness for this diagnostic is
+`scripts/e2e_overhaul/hook_git_readiness.sh`. It creates real temporary Git
+repositories, requires `EE_BINARY` or an already-built `ee` binary, writes
+`ee.test_event.v1` JSONL, and retains its temporary repositories and event log
+for audit instead of deleting them. The harness must not run Cargo.
+
 For remote Rust proof handoffs, see [`docs/rch_verification.md`](rch_verification.md)
 and [`docs/rch_runbook.md`](rch_runbook.md). Agent-to-agent messages should name
 the RCH proof status and source attribution explicitly:
