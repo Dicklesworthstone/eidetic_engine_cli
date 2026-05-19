@@ -542,6 +542,108 @@ fn insights_proximity_hotspots_schema_documents_min_cut_items() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn insights_load_bearing_schema_documents_bipartite_items() -> TestResult {
+    let schema_path = repo_root()
+        .join("docs")
+        .join("schemas")
+        .join("ee.insights.v1.json");
+    let schema = read_json(&schema_path)?;
+    let item = schema
+        .pointer("/$defs/loadBearingItem")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "ee.insights.v1 missing $defs.loadBearingItem".to_owned())?;
+    let required = item
+        .get("required")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "$defs.loadBearingItem.required must be an array".to_owned())?;
+    for field in [
+        "rank",
+        "memoryId",
+        "loadBearingScore",
+        "citingRuleCount",
+        "interpretation",
+        "evidence",
+    ] {
+        if !required.iter().any(|value| value.as_str() == Some(field)) {
+            return Err(format!("loadBearingItem.required missing {field}"));
+        }
+    }
+
+    ensure_eq(
+        schema
+            .pointer("/$defs/loadBearingItem/properties/loadBearingScore/minimum")
+            .and_then(Value::as_u64),
+        Some(0),
+        "ee.insights.v1 loadBearingItem",
+        "loadBearingScore.minimum",
+    )?;
+    ensure_eq(
+        schema
+            .pointer("/$defs/loadBearingItem/properties/citingRuleCount/minimum")
+            .and_then(Value::as_u64),
+        Some(0),
+        "ee.insights.v1 loadBearingItem",
+        "citingRuleCount.minimum",
+    )?;
+    ensure_eq(
+        schema
+            .pointer("/$defs/loadBearingItem/properties/interpretation/const")
+            .and_then(Value::as_str),
+        Some("load_bearing"),
+        "ee.insights.v1 loadBearingItem",
+        "interpretation.const",
+    )?;
+    ensure_eq(
+        schema
+            .pointer("/$defs/loadBearingItem/properties/evidence/properties/schema/const")
+            .and_then(Value::as_str),
+        Some("ee.graph.hits.v1"),
+        "ee.insights.v1 loadBearingItem",
+        "evidence.schema.const",
+    )?;
+    ensure_eq(
+        schema
+            .pointer("/$defs/loadBearingItem/properties/evidence/properties/algorithm/const")
+            .and_then(Value::as_str),
+        Some("bipartite_hits"),
+        "ee.insights.v1 loadBearingItem",
+        "evidence.algorithm.const",
+    )?;
+
+    let section_schema = serde_json::to_string(
+        schema
+            .pointer("/$defs/section")
+            .ok_or_else(|| "ee.insights.v1 missing $defs.section".to_owned())?,
+    )
+    .map_err(|error| format!("serialize section schema: {error}"))?;
+    if !section_schema.contains("\"#/$defs/loadBearingItem\"") {
+        return Err(
+            "loadBearingMemories section items must reference $defs.loadBearingItem".to_owned(),
+        );
+    }
+
+    let example_sections = schema
+        .pointer("/examples/0/sections")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "ee.insights.v1 example sections must be an array".to_owned())?;
+    let load_bearing_section = example_sections
+        .iter()
+        .find(|section| section.get("name").and_then(Value::as_str) == Some("loadBearingMemories"))
+        .ok_or_else(|| "ee.insights.v1 example missing loadBearingMemories section".to_owned())?;
+    if !load_bearing_section
+        .get("summary")
+        .and_then(Value::as_str)
+        .is_some_and(|summary| summary.contains("rule-to-source provenance"))
+    {
+        return Err(
+            "loadBearingMemories example summary must name rule-to-source provenance".to_owned(),
+        );
+    }
+
+    Ok(())
+}
+
 fn assert_hits_item_schema(
     schema: &Value,
     item_name: &str,

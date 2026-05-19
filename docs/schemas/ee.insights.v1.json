@@ -154,6 +154,20 @@
         },
         {
           "if": {
+            "properties": {"name": {"const": "loadBearingMemories"}},
+            "required": ["name"]
+          },
+          "then": {
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/loadBearingItem"}
+              }
+            }
+          }
+        },
+        {
+          "if": {
             "properties": {"name": {"const": "proximityHotspots"}},
             "required": ["name"]
           },
@@ -257,6 +271,35 @@
           "properties": {
             "schema": {"type": "string", "const": "ee.graph.hits.v1"},
             "algorithm": {"type": "string", "const": "hits_centrality_directed"},
+            "snapshotVersion": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "loadBearingItem": {
+      "type": "object",
+      "required": [
+        "rank",
+        "memoryId",
+        "loadBearingScore",
+        "citingRuleCount",
+        "interpretation",
+        "evidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "rank": {"type": "integer", "minimum": 1},
+        "memoryId": {"type": "string"},
+        "loadBearingScore": {"type": "number", "minimum": 0},
+        "citingRuleCount": {"type": "integer", "minimum": 0},
+        "interpretation": {"type": "string", "const": "load_bearing"},
+        "evidence": {
+          "type": "object",
+          "required": ["schema", "algorithm", "snapshotVersion"],
+          "additionalProperties": false,
+          "properties": {
+            "schema": {"type": "string", "const": "ee.graph.hits.v1"},
+            "algorithm": {"type": "string", "const": "bipartite_hits"},
             "snapshotVersion": {"type": "integer", "minimum": 0}
           }
         }
