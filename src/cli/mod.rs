@@ -11778,12 +11778,13 @@ where
     };
 
     match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &insights::render_insights_human(&report))
-        }
+        output::Renderer::Human => write_stdout(stdout, &insights::render_insights_human(&report)),
+        output::Renderer::Markdown => write_stdout(
+            stdout,
+            &(insights::render_insights_markdown(&report) + "\n"),
+        ),
         output::Renderer::Toon => {
-            let json = insights::render_insights_json(&report);
-            write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+            write_stdout(stdout, &(insights::render_insights_toon(&report) + "\n"))
         }
         output::Renderer::Json
         | output::Renderer::Jsonl
