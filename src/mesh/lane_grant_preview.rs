@@ -374,7 +374,8 @@ pub fn compute_lane_grant_preview(input: &LaneGrantPreviewInput<'_>) -> LaneGran
     let mut redacted_blocked = 0_u64;
 
     for memory in input.memories {
-        let exposable = proposed_allows && !memory.is_tombstoned && !memory.blocked_by_redaction_class;
+        let exposable =
+            proposed_allows && !memory.is_tombstoned && !memory.blocked_by_redaction_class;
         if exposable {
             would_expose.push(memory);
             continue;
@@ -389,7 +390,11 @@ pub fn compute_lane_grant_preview(input: &LaneGrantPreviewInput<'_>) -> LaneGran
 
     let affected_memory_count = would_expose.len() as u64;
 
-    sort_sample(&mut would_expose, input.sample_strategy, input.sample_random_seed);
+    sort_sample(
+        &mut would_expose,
+        input.sample_strategy,
+        input.sample_random_seed,
+    );
     let sample_rows: Vec<PreviewRow> = would_expose
         .iter()
         .take(effective_limit)
@@ -534,9 +539,8 @@ fn collect_cautions(
     let mut sensitive_tag_exposure_count: u64 = 0;
     let proposed_allows = input.lane.decision_in(&input.proposed_policy) == LaneDecision::Allow;
     for memory in input.memories {
-        let would_expose = proposed_allows
-            && !memory.is_tombstoned
-            && !memory.blocked_by_redaction_class;
+        let would_expose =
+            proposed_allows && !memory.is_tombstoned && !memory.blocked_by_redaction_class;
         if !would_expose {
             continue;
         }
@@ -595,7 +599,7 @@ fn collect_cautions(
         cautions.push(Caution {
             kind: caution_kinds::REDACTION_ACTIVE.to_owned(),
             message: format!(
-                "{redacted_blocked} memor{plural} would have specific fields redacted under existing redaction-class rules",
+                "{redacted_blocked} memor{plural} would not be exposed because existing redaction-class rules block that lane",
                 plural = if redacted_blocked == 1 { "y" } else { "ies" }
             ),
             severity: "info".to_owned(),
@@ -671,7 +675,10 @@ mod tests {
             Lane::CurationSignal.decision_in(&policy),
             LaneDecision::Allow
         );
-        assert_eq!(Lane::RevisionNotice.decision_in(&policy), LaneDecision::Allow);
+        assert_eq!(
+            Lane::RevisionNotice.decision_in(&policy),
+            LaneDecision::Allow
+        );
     }
 
     // ---- effective_limit clamping ------------------------------------------
@@ -688,10 +695,7 @@ mod tests {
 
     #[test]
     fn effective_limit_clamps_to_max() {
-        assert_eq!(
-            effective_limit(usize::MAX),
-            LANE_GRANT_PREVIEW_MAX_LIMIT
-        );
+        assert_eq!(effective_limit(usize::MAX), LANE_GRANT_PREVIEW_MAX_LIMIT);
     }
 
     // ---- truncate_chars (multibyte-safe) -----------------------------------
@@ -755,10 +759,12 @@ mod tests {
         assert_eq!(preview.lane, "body");
         assert_eq!(preview.current_policy.decision, "deny");
         assert_eq!(preview.proposed_policy.decision, "allow");
-        assert!(preview
-            .preview_sample
-            .iter()
-            .all(|row| row.would_expose_under_proposed_policy));
+        assert!(
+            preview
+                .preview_sample
+                .iter()
+                .all(|row| row.would_expose_under_proposed_policy)
+        );
     }
 
     // ---- Read-only invariant: tombstoned + blocked are excluded ------------
@@ -813,14 +819,27 @@ mod tests {
 
         assert_eq!(preview.affected_memory_count, 1);
         assert_eq!(preview.redacted_from_exposure_count, 1);
-        assert!(preview
-            .preview_sample
-            .iter()
-            .all(|row| row.memory_id == "live"));
+        assert!(
+            preview
+                .preview_sample
+                .iter()
+                .all(|row| row.memory_id == "live")
+        );
 
         let kinds: BTreeSet<&str> = preview.cautions.iter().map(|c| c.kind.as_str()).collect();
         assert!(kinds.contains(caution_kinds::TOMBSTONED_IN_EXPOSURE));
         assert!(kinds.contains(caution_kinds::REDACTION_ACTIVE));
+        let redaction_caution = preview
+            .cautions
+            .iter()
+            .find(|caution| caution.kind == caution_kinds::REDACTION_ACTIVE)
+            .expect("redaction_active caution present");
+        assert!(redaction_caution.message.contains("would not be exposed"));
+        assert!(
+            redaction_caution
+                .message
+                .contains("redaction-class rules block that lane")
+        );
     }
 
     // ---- Caution: high trust exposure --------------------------------------
@@ -888,8 +907,7 @@ mod tests {
                 sample_random_seed: 42,
             });
 
-            let kinds: BTreeSet<&str> =
-                preview.cautions.iter().map(|c| c.kind.as_str()).collect();
+            let kinds: BTreeSet<&str> = preview.cautions.iter().map(|c| c.kind.as_str()).collect();
             assert!(
                 kinds.contains(caution_kinds::SENSITIVE_TAGS_IN_EXPOSURE),
                 "tag {sensitive_tag} should fire sensitive caution",
@@ -1100,10 +1118,26 @@ mod tests {
         let memories: Vec<MemoryView<'_>> = (0..20)
             .map(|i| {
                 let id: &'static str = match i {
-                    0 => "m00", 1 => "m01", 2 => "m02", 3 => "m03", 4 => "m04",
-                    5 => "m05", 6 => "m06", 7 => "m07", 8 => "m08", 9 => "m09",
-                    10 => "m10", 11 => "m11", 12 => "m12", 13 => "m13", 14 => "m14",
-                    15 => "m15", 16 => "m16", 17 => "m17", 18 => "m18", _ => "m19",
+                    0 => "m00",
+                    1 => "m01",
+                    2 => "m02",
+                    3 => "m03",
+                    4 => "m04",
+                    5 => "m05",
+                    6 => "m06",
+                    7 => "m07",
+                    8 => "m08",
+                    9 => "m09",
+                    10 => "m10",
+                    11 => "m11",
+                    12 => "m12",
+                    13 => "m13",
+                    14 => "m14",
+                    15 => "m15",
+                    16 => "m16",
+                    17 => "m17",
+                    18 => "m18",
+                    _ => "m19",
                 };
                 build_memory(
                     id,
@@ -1165,10 +1199,26 @@ mod tests {
         let memories: Vec<MemoryView<'_>> = (0..20)
             .map(|i| {
                 let id: &'static str = match i {
-                    0 => "m00", 1 => "m01", 2 => "m02", 3 => "m03", 4 => "m04",
-                    5 => "m05", 6 => "m06", 7 => "m07", 8 => "m08", 9 => "m09",
-                    10 => "m10", 11 => "m11", 12 => "m12", 13 => "m13", 14 => "m14",
-                    15 => "m15", 16 => "m16", 17 => "m17", 18 => "m18", _ => "m19",
+                    0 => "m00",
+                    1 => "m01",
+                    2 => "m02",
+                    3 => "m03",
+                    4 => "m04",
+                    5 => "m05",
+                    6 => "m06",
+                    7 => "m07",
+                    8 => "m08",
+                    9 => "m09",
+                    10 => "m10",
+                    11 => "m11",
+                    12 => "m12",
+                    13 => "m13",
+                    14 => "m14",
+                    15 => "m15",
+                    16 => "m16",
+                    17 => "m17",
+                    18 => "m18",
+                    _ => "m19",
                 };
                 build_memory(
                     id,
