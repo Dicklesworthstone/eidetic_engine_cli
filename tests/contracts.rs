@@ -76,6 +76,9 @@ mod recorder_event_spine;
 #[path = "contracts/preflight_tripwires.rs"]
 mod preflight_tripwires;
 
+#[path = "contracts/agent_operating_contract_read_only.rs"]
+mod agent_operating_contract_read_only;
+
 #[path = "contracts/procedure_gate18.rs"]
 mod procedure_gate18;
 
@@ -129,6 +132,9 @@ mod schema_roundtrip;
 
 #[path = "contracts/singleflight_key_schema.rs"]
 mod singleflight_key_schema;
+
+#[path = "contracts/symbol_snapshot_schema.rs"]
+mod symbol_snapshot_schema;
 
 #[path = "contracts/graph_schemas_v1.rs"]
 mod graph_schemas_v1;

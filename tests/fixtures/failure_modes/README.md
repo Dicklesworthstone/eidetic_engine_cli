@@ -43,6 +43,9 @@ in the same commit, keeping the catalog complete by construction.
 | `context_profile_budget_capped` | context | low | bd-17c65.10.6 (J6) |
 | `context_stream_partial_emission` | context --stream | warning | bd-17c65.10.18 |
 | `context_evidence_freshness_changed_source` | context | low | bd-17c65.1.2 (A2) |
+| `memory_drift_source_changed` | search, context | medium | bd-1z1fd.3 |
+| `memory_drift_source_missing` | search, context | high | bd-1z1fd.3 |
+| `memory_drift_source_unverifiable` | search, context | medium | bd-1z1fd.3 |
 | `policy_bypass_used` | remember, note | info | bd-17c65.3.2 (C2) |
 | `policy_tag_rejected_with_details` | remember, note | low | bd-17c65.3.4 (C4) |
 | `policy_secret_detected_with_offsets` | remember, note | medium | bd-17c65.3.4 (C4) |
@@ -117,6 +120,7 @@ in the same commit, keeping the catalog complete by construction.
 | `db_wal_stale` | db status | medium | bd-3usjw.1 |
 | `wal_growth_exceeds_threshold` | status, doctor | warning | bd-2caru.8 |
 | `wal_growth_no_writer` | status, doctor | medium | bd-2caru.8 |
+| `agent_contract_source_unavailable` | agent operating contract | warning | bd-3d6ko.1 (AOP1) |
 | `no_risk_memories` | preflight check | info | bd-3usjw.6 |
 | `preflight_evidence_unavailable` | preflight | medium | bd-17c65.10.6 (J6) |
 | `preflight_evidence_stale` | preflight | warning | bd-17c65.10.6 (J6) |

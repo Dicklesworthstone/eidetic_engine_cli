@@ -528,6 +528,7 @@ fn swarm_next_action_golden_snapshots_match_schema() -> TestResult {
     let schema = schema_doc(SWARM_NEXT_ACTION_SCHEMA_V1)?;
     for fixture_name in [
         "clean",
+        "convoy_rch",
         "dirty",
         "degraded_beads",
         "degraded_mail",
@@ -642,7 +643,16 @@ fn swarm_next_action_sample() -> Value {
                 "queuedRemoteBuildCount": 0,
                 "slotsAvailable": 0,
                 "queueHeadSlotsNeeded": null,
-                "queueStatus": "saturated"
+                "activeBuildMaxAgeSeconds": null,
+                "headOfLineBlocked": null,
+                "queueRecommendation": "wait_for_remote_capacity",
+                "queueStatus": "saturated",
+                "queueEvidence": [
+                    "active_remote_build_count:4",
+                    "queued_remote_build_count:0",
+                    "queue_status:saturated",
+                    "slots_available:0"
+                ]
             },
             "environment": {
                 "cargoTargetExternalized": true,

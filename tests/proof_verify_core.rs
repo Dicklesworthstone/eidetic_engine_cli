@@ -4,8 +4,9 @@ mod proof_verify;
 use std::path::Path;
 
 use proof_verify::{
-    PROOF_CHECK_SCHEMA_V1, ProofArtifactKind, ProofCheckStatus, ProofCommandOutcome,
-    ProofCommandRunner, discover_proof_artifacts, run_proof_checks,
+    PROOF_CHECK_SCHEMA_V1, PROOF_TOOL_MISSING_CODE, PROOF_VIOLATION_DETECTED_CODE,
+    ProofArtifactKind, ProofCheckStatus, ProofCommandOutcome, ProofCommandRunner,
+    discover_proof_artifacts, run_proof_checks,
 };
 
 #[derive(Clone, Debug)]
@@ -19,6 +20,36 @@ impl ProofCommandRunner for PassingRunner {
             exit_code: Some(0),
             stdout: format!("checked {}", artifact.path.display()),
             stderr: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MissingToolRunner;
+
+impl ProofCommandRunner for MissingToolRunner {
+    fn run(&self, artifact: &proof_verify::ProofArtifact) -> ProofCommandOutcome {
+        ProofCommandOutcome {
+            tool_available: false,
+            duration_ms: 0,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: format!("{} not found on PATH", artifact.kind.default_tool()),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FailingRunner;
+
+impl ProofCommandRunner for FailingRunner {
+    fn run(&self, artifact: &proof_verify::ProofArtifact) -> ProofCommandOutcome {
+        ProofCommandOutcome {
+            tool_available: true,
+            duration_ms: 2,
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: format!("{} proof check failed", artifact.kind.as_str()),
         }
     }
 }
@@ -67,5 +98,39 @@ fn passing_runner_maps_kind_specific_success_statuses() {
     assert!(report.checks.iter().any(|check| {
         check.artifact.kind == ProofArtifactKind::TlaPlus
             && check.status == ProofCheckStatus::ModelChecked
+    }));
+}
+
+#[test]
+fn missing_tool_runner_keeps_report_successful_with_degradation() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("proofs");
+    let report = run_proof_checks(&root, &MissingToolRunner).expect("proof checks should run");
+
+    assert!(report.success);
+    assert_eq!(
+        report.degraded,
+        vec![format!("degraded.{PROOF_TOOL_MISSING_CODE}")]
+    );
+    assert!(report.checks.iter().all(|check| {
+        check.status == ProofCheckStatus::ToolMissing
+            && check.exit_code.is_none()
+            && check.stderr.contains(check.artifact.kind.default_tool())
+    }));
+}
+
+#[test]
+fn failing_runner_marks_report_failed_with_violation_degradation() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("proofs");
+    let report = run_proof_checks(&root, &FailingRunner).expect("proof checks should run");
+
+    assert!(!report.success);
+    assert_eq!(
+        report.degraded,
+        vec![format!("degraded.{PROOF_VIOLATION_DETECTED_CODE}")]
+    );
+    assert!(report.checks.iter().all(|check| {
+        check.status == ProofCheckStatus::Violation
+            && check.exit_code == Some(1)
+            && check.stderr.contains(check.artifact.kind.as_str())
     }));
 }

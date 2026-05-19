@@ -843,6 +843,11 @@ fn stale_regression_fixture_hashes(
     now: &str,
     stale_after_days: i64,
 ) -> Result<Vec<String>, String> {
+    if stale_after_days < 0 {
+        return Err(format!(
+            "stale_after_days {stale_after_days} must be non-negative"
+        ));
+    }
     let now = parse_fixture_timestamp("now", now)?;
     let stale_after = Duration::days(stale_after_days);
     let mut stale = Vec::new();
@@ -1774,6 +1779,18 @@ fn determinism_regression_fixture_staleness_rejects_invalid_timestamp() -> Resul
         .expect_err("invalid fixture timestamp should be rejected");
 
     assert!(error.contains("not-a-date"));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_staleness_rejects_negative_window() -> Result<(), String> {
+    let fixture = regression_fixture_for_mismatch(4, b"negative-window", b"expected", b"observed")
+        .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+
+    let error = stale_regression_fixture_hashes(&[fixture], "2026-05-16T00:00:00Z", -1)
+        .expect_err("negative staleness windows should be rejected");
+
+    assert!(error.contains("stale_after_days -1 must be non-negative"));
     Ok(())
 }
 

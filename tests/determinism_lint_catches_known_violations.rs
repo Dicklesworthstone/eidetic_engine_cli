@@ -69,6 +69,13 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "use Deterministic<Seed> instead of rand::random",
             });
         }
+        if line.contains("getrandom::fill(") {
+            findings.push(Finding {
+                line: line_no,
+                code: "ambient_getrandom_fill",
+                message: "use Deterministic<Seed> instead of direct OS entropy",
+            });
+        }
         if line.contains("Uuid::new_v4(") || line.contains("uuid::Uuid::new_v4(") {
             findings.push(Finding {
                 line: line_no,
@@ -465,6 +472,7 @@ mod self_tests {
             fn documentation_mentions() {
                 let _ = "rand::random::<u64>() Instant::now() chrono::Utc::now() std::fs::read_dir(.) HashSet";
                 // rand::thread_rng();
+                // getrandom::fill(&mut bytes);
                 // chrono::Local::now();
                 // std::env::var("EE_SEED");
                 // std::env::var_os("EE_SEED");
@@ -485,6 +493,7 @@ mod self_tests {
         let fixture = r##"
             /*
              * rand::thread_rng();
+             * getrandom::fill(&mut bytes);
              * std::env::var("EE_SEED");
              * std::env::var_os("EE_SEED");
              * std::env::vars();
@@ -558,5 +567,17 @@ mod self_tests {
         "#;
         let report = render_report(&scan_fixture(fixture));
         assert_eq!(report.matches("ambient_domain_id_now").count(), 2);
+    }
+
+    #[test]
+    fn direct_os_entropy_calls_emit_known_violations() {
+        let fixture = r#"
+            fn ambient() {
+                let mut bytes = [0u8; 32];
+                getrandom::fill(&mut bytes).unwrap();
+            }
+        "#;
+        let report = render_report(&scan_fixture(fixture));
+        assert_eq!(report.matches("ambient_getrandom_fill").count(), 1);
     }
 }
