@@ -885,6 +885,24 @@ pub struct ExportMemoryRecord {
     pub importance: Option<f64>,
     pub confidence: Option<f64>,
     pub utility: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pagerank_score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub betweenness_score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hits_authority: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hits_hub: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onion_layer: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub k_truss_max: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub articulation_point: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bayes_alpha: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bayes_beta: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trust_class: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -922,6 +940,15 @@ pub struct ExportMemoryRecordBuilder {
     importance: Option<f64>,
     confidence: Option<f64>,
     utility: Option<f64>,
+    pagerank_score: Option<f64>,
+    betweenness_score: Option<f64>,
+    hits_authority: Option<f64>,
+    hits_hub: Option<f64>,
+    onion_layer: Option<u32>,
+    k_truss_max: Option<u32>,
+    articulation_point: Option<bool>,
+    bayes_alpha: Option<f64>,
+    bayes_beta: Option<f64>,
     trust_class: Option<String>,
     trust_subclass: Option<String>,
     created_at: Option<String>,
@@ -991,6 +1018,60 @@ impl ExportMemoryRecordBuilder {
     #[must_use]
     pub fn utility(mut self, utility: f64) -> Self {
         self.utility = Some(utility);
+        self
+    }
+
+    #[must_use]
+    pub fn pagerank_score(mut self, pagerank_score: f64) -> Self {
+        self.pagerank_score = Some(pagerank_score);
+        self
+    }
+
+    #[must_use]
+    pub fn betweenness_score(mut self, betweenness_score: f64) -> Self {
+        self.betweenness_score = Some(betweenness_score);
+        self
+    }
+
+    #[must_use]
+    pub fn hits_authority(mut self, hits_authority: f64) -> Self {
+        self.hits_authority = Some(hits_authority);
+        self
+    }
+
+    #[must_use]
+    pub fn hits_hub(mut self, hits_hub: f64) -> Self {
+        self.hits_hub = Some(hits_hub);
+        self
+    }
+
+    #[must_use]
+    pub fn onion_layer(mut self, onion_layer: u32) -> Self {
+        self.onion_layer = Some(onion_layer);
+        self
+    }
+
+    #[must_use]
+    pub fn k_truss_max(mut self, k_truss_max: u32) -> Self {
+        self.k_truss_max = Some(k_truss_max);
+        self
+    }
+
+    #[must_use]
+    pub fn articulation_point(mut self, articulation_point: bool) -> Self {
+        self.articulation_point = Some(articulation_point);
+        self
+    }
+
+    #[must_use]
+    pub fn bayes_alpha(mut self, bayes_alpha: f64) -> Self {
+        self.bayes_alpha = Some(bayes_alpha);
+        self
+    }
+
+    #[must_use]
+    pub fn bayes_beta(mut self, bayes_beta: f64) -> Self {
+        self.bayes_beta = Some(bayes_beta);
         self
     }
 
@@ -1105,6 +1186,15 @@ impl ExportMemoryRecordBuilder {
             importance: self.importance,
             confidence: self.confidence,
             utility: self.utility,
+            pagerank_score: self.pagerank_score,
+            betweenness_score: self.betweenness_score,
+            hits_authority: self.hits_authority,
+            hits_hub: self.hits_hub,
+            onion_layer: self.onion_layer,
+            k_truss_max: self.k_truss_max,
+            articulation_point: self.articulation_point,
+            bayes_alpha: self.bayes_alpha,
+            bayes_beta: self.bayes_beta,
             trust_class: self.trust_class,
             trust_subclass: self.trust_subclass,
             created_at: required_string(ExportRecordType::Memory, "created_at", self.created_at)?,
@@ -2037,6 +2127,16 @@ mod tests {
             .content_hash("blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
             .importance(0.8)
             .confidence(0.9)
+            .utility(0.7)
+            .pagerank_score(0.12)
+            .betweenness_score(0.34)
+            .hits_authority(0.56)
+            .hits_hub(0.78)
+            .onion_layer(3)
+            .k_truss_max(4)
+            .articulation_point(true)
+            .bayes_alpha(2.5)
+            .bayes_beta(1.5)
             .created_at("2026-04-30T12:00:00Z")
             .tombstoned_at("2026-05-01T12:00:00Z")
             .tombstoned_reason("outdated release procedure")
@@ -2056,6 +2156,16 @@ mod tests {
             Some("blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
         );
         assert_eq!(memory.importance, Some(0.8));
+        assert_eq!(memory.utility, Some(0.7));
+        assert_eq!(memory.pagerank_score, Some(0.12));
+        assert_eq!(memory.betweenness_score, Some(0.34));
+        assert_eq!(memory.hits_authority, Some(0.56));
+        assert_eq!(memory.hits_hub, Some(0.78));
+        assert_eq!(memory.onion_layer, Some(3));
+        assert_eq!(memory.k_truss_max, Some(4));
+        assert_eq!(memory.articulation_point, Some(true));
+        assert_eq!(memory.bayes_alpha, Some(2.5));
+        assert_eq!(memory.bayes_beta, Some(1.5));
         assert_eq!(
             memory.tombstoned_at.as_deref(),
             Some("2026-05-01T12:00:00Z")
@@ -2387,6 +2497,15 @@ mod tests {
                 .importance(0.8)
                 .confidence(0.9)
                 .utility(0.7)
+                .pagerank_score(0.12)
+                .betweenness_score(0.34)
+                .hits_authority(0.56)
+                .hits_hub(0.78)
+                .onion_layer(3)
+                .k_truss_max(4)
+                .articulation_point(false)
+                .bayes_alpha(2.5)
+                .bayes_beta(1.5)
                 .created_at("2026-04-30T12:00:00Z")
                 .updated_at("2026-04-30T12:01:00Z")
                 .expires_at("2026-05-30T12:00:00Z")
@@ -2661,6 +2780,15 @@ mod tests {
             "importance": 0.8,
             "confidence": 0.9,
             "utility": 0.7,
+            "pagerank_score": 0.12,
+            "betweenness_score": 0.34,
+            "hits_authority": 0.56,
+            "hits_hub": 0.78,
+            "onion_layer": 3,
+            "k_truss_max": 4,
+            "articulation_point": true,
+            "bayes_alpha": 2.5,
+            "bayes_beta": 1.5,
             "trust_class": "human_explicit",
             "trust_subclass": "project-rule",
             "created_at": "2026-04-30T12:00:00Z",
@@ -2675,6 +2803,15 @@ mod tests {
         assert_eq!(memory.schema, EXPORT_MEMORY_SCHEMA_V1);
         assert_eq!(memory.memory_id, "mem-001");
         assert_eq!(memory.importance, Some(0.8));
+        assert_eq!(memory.pagerank_score, Some(0.12));
+        assert_eq!(memory.betweenness_score, Some(0.34));
+        assert_eq!(memory.hits_authority, Some(0.56));
+        assert_eq!(memory.hits_hub, Some(0.78));
+        assert_eq!(memory.onion_layer, Some(3));
+        assert_eq!(memory.k_truss_max, Some(4));
+        assert_eq!(memory.articulation_point, Some(true));
+        assert_eq!(memory.bayes_alpha, Some(2.5));
+        assert_eq!(memory.bayes_beta, Some(1.5));
         assert!(memory.content_hash.is_none());
         assert_eq!(memory.trust_class.as_deref(), Some("human_explicit"));
         assert_eq!(memory.trust_subclass.as_deref(), Some("project-rule"));

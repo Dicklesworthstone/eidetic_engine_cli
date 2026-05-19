@@ -35,6 +35,7 @@ pub mod rule;
 pub mod schema;
 pub mod singleflight;
 pub mod situation;
+pub mod symbol;
 pub mod timing;
 pub mod trust;
 pub mod verification;
@@ -276,11 +277,19 @@ pub use situation::{
     SituationLinkRelation, SituationObjectSchema, SituationReplayPolicy, SituationRoutingSurface,
     TASK_SIGNATURE_SCHEMA_V1, TaskSignature, situation_schema_catalog_json, situation_schemas,
 };
+pub use symbol::{
+    SYMBOL_ID_PREFIX, SYMBOL_SNAPSHOT_SCHEMA_V1, SymbolGraphDegradation,
+    SymbolGraphDegradationCode, SymbolGraphDegradationSeverity, SymbolKind, SymbolParserKind,
+    SymbolRecord, SymbolSnapshot, SymbolSourceFile, SymbolSourceLanguage, SymbolSourceRange,
+    SymbolVisibility,
+};
 pub use timing::{DiagnosticTiming, TimingCapture, TimingPhase};
 pub use trust::{ParseTrustClassError, TrustClass};
 pub use verification::{
     CompileBlockerCacheEntry, CompileBlockerCacheInput, CompileBlockerCacheStatus,
-    CompileBlockerLookup, CompileBlockerLookupRequest, VERIFICATION_BROKER_VIEW_SCHEMA_V1,
+    CompileBlockerLookup, CompileBlockerLookupRequest, GITHUB_ACTIONS_CHECK_RUN_SCHEMA_V1,
+    GithubActionsVerificationEvidenceParseError, RCH_VERIFY_SCHEMA_V1,
+    RchVerificationEvidenceParseError, VERIFICATION_BROKER_VIEW_SCHEMA_V1,
     VERIFICATION_CLOSEOUT_CAPSULE_SCHEMA_V1, VERIFICATION_CLOSURE_GUIDANCE_SCHEMA_V1,
     VERIFICATION_COMPILE_BLOCKER_CACHE_SCHEMA_V1, VERIFICATION_COMPILE_BLOCKER_LOOKUP_SCHEMA_V1,
     VERIFICATION_EVIDENCE_SCHEMA_V1, VERIFICATION_REUSE_ADVISORY_SCHEMA_V1,
@@ -298,6 +307,9 @@ pub use verification::{
     sample_verification_closeout_capsules, sample_verification_evidence_records,
     sample_verification_reuse_advisories, sample_verification_run_records,
     verification_broker_view, verification_closeout_capsule, verification_closure_guidance,
+    verification_evidence_beads_summary,
+    verification_evidence_record_from_github_actions_check_run,
+    verification_evidence_record_from_rch_verify, verification_evidence_record_from_run_record,
     verification_reuse_advisory, verification_run_records_from_j1_jsonl,
 };
 pub use why_tag::{ParseWhyTagError, WhyTag};
