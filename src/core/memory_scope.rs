@@ -1027,6 +1027,16 @@ pub fn decide_mesh_outbound_policy(
             MeshRedactionDecision::Deny,
         );
     }
+    if !policy.trust_lane.permits_peer_import() {
+        return mesh_outbound_policy_decision(
+            input,
+            policy_id,
+            MeshImportDecisionKind::Reject,
+            "outbound_peer_policy_local_human_trust_lane",
+            Some(policy.trust_lane),
+            MeshRedactionDecision::Deny,
+        );
+    }
 
     let redaction = policy.redaction.decision_for_lane(input.material_lane);
     if redaction == MeshRedactionDecision::Deny {
@@ -2278,6 +2288,37 @@ max_bytes = 0
         let origin = decide_mesh_outbound_policy(&wrong_origin, Some(&peer_policy()));
         assert_eq!(origin.action, MeshImportDecisionKind::Deny);
         assert_eq!(origin.reason, "peer_policy_origin_workspace_mismatch");
+    }
+
+    #[test]
+    fn mesh_outbound_policy_rejects_local_human_trust_lane() {
+        let mut policy = peer_policy();
+        policy.trust_lane = MeshTrustLane::LocalHuman;
+
+        let decision =
+            decide_mesh_outbound_policy(&outbound_policy_input(MeshLane::Metadata), Some(&policy));
+
+        assert_eq!(decision.action, MeshImportDecisionKind::Reject);
+        assert_eq!(
+            decision.reason,
+            "outbound_peer_policy_local_human_trust_lane"
+        );
+        assert_eq!(decision.trust_lane, Some(MeshTrustLane::LocalHuman));
+        assert_eq!(decision.redaction, MeshRedactionDecision::Deny);
+        assert!(!decision.permits_payload_export());
+
+        let fields = decision.to_json();
+        assert_eq!(fields["direction"], "outbound");
+        assert_eq!(fields["action"], "reject");
+        assert_eq!(fields["trustLane"], "localHuman");
+        assert_eq!(fields["payloadExportAllowed"], false);
+        assert_eq!(fields["rawPayloadExportAllowed"], false);
+        assert_eq!(fields["redactedPayloadRequired"], false);
+        assert_eq!(fields["failure"]["code"], "mesh_outbound_policy_rejected");
+        assert_eq!(
+            fields["failure"]["reason"],
+            "outbound_peer_policy_local_human_trust_lane"
+        );
     }
 
     #[test]
