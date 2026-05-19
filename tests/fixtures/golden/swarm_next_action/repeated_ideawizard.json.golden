@@ -1,0 +1,119 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "schema": "ee.swarm_next_action.v1",
+    "workspace": "/repo",
+    "redactionStatus": "counts_ids_statuses_paths_redacted_no_mail_body_no_file_content",
+    "inputs": {
+      "sourceCount": 4,
+      "readyBeadCount": 1,
+      "inProgressBeadCount": 0,
+      "blockedBeadCount": 0,
+      "bvTopPickCount": 1
+    },
+    "candidates": [
+      {
+        "id": "bd-3vwx0.9",
+        "title": "SWA9: recommendation provenance and overlap-decision cards for next-action",
+        "source": "beads_ready",
+        "scoreMilli": null,
+        "status": "open",
+        "priority": 2,
+        "assignee": null,
+        "blockedBy": [],
+        "blockedByCompileHealth": false,
+        "actionHint": "reserve_files_and_start_smallest_useful_slice"
+      }
+    ],
+    "recommendationCards": [
+      {
+        "cardId": "refine_existing_bead:bd-3vwx0.9",
+        "candidateId": "bd-3vwx0.9",
+        "candidateSource": "beads_ready",
+        "candidateSummary": "SWA9: recommendation provenance and overlap-decision cards for next-action",
+        "decision": "refine_existing_bead",
+        "confidence": "high",
+        "scoreInputs": [
+          {
+            "name": "blocked_by_compile_health",
+            "value": "false"
+          },
+          {
+            "name": "blocked_by_count",
+            "value": "0"
+          },
+          {
+            "name": "priority",
+            "value": "2"
+          },
+          {
+            "name": "source_rank",
+            "value": "1"
+          },
+          {
+            "name": "status",
+            "value": "open"
+          }
+        ],
+        "overlap": {
+          "decision": "refine_existing_bead",
+          "queries": [
+            "bead_id:bd-3vwx0.9",
+            "source:beads_ready",
+            "title:SWA9: recommendation provenance and overlap-decision cards for next-action"
+          ],
+          "matchedExistingBeads": [
+            "bd-3vwx0.9"
+          ],
+          "rejectedDuplicateReason": null,
+          "selectedRelation": "existing_bead"
+        },
+        "proofObligations": [
+          "record_overlap_decision_in_closeout",
+          "reserve_files_before_editing",
+          "use_rch_for_cargo_verification"
+        ],
+        "evidenceCaveats": [],
+        "fallbackDecision": null
+      }
+    ],
+    "coordination": {
+      "activeReservationCount": 0,
+      "reservationHolders": [],
+      "unreadInboxCount": 0,
+      "ackRequiredCount": 0
+    },
+    "checkout": {
+      "dirtyPathCount": 0,
+      "dirtyPaths": []
+    },
+    "compileHealth": {
+      "safeToLaunchRch": true,
+      "blockerCount": 0,
+      "blockers": [],
+      "recommendedAlternativeWork": [
+        "launch_rch_when_other_verification_inputs_are_ready"
+      ]
+    },
+    "verification": {
+      "rchSourceEnabled": false,
+      "remoteOnlyRequired": false,
+      "remoteOnlySafe": null,
+      "healthyWorkerCount": null,
+      "activeRemoteBuildCount": null,
+      "queuedRemoteBuildCount": null,
+      "slotsAvailable": null,
+      "queueHeadSlotsNeeded": null,
+      "queueStatus": null
+    },
+    "environment": {
+      "cargoTargetExternalized": true,
+      "tmpdirExternalized": true,
+      "externalAgentSpacePresent": true,
+      "diskPressureHintCount": 0
+    },
+    "degraded": []
+  },
+  "degraded": []
+}

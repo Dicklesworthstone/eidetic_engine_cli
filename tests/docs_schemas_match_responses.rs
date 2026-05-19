@@ -531,6 +531,7 @@ fn swarm_next_action_golden_snapshots_match_schema() -> TestResult {
         "dirty",
         "degraded_beads",
         "degraded_mail",
+        "repeated_ideawizard",
         "saturated_rch",
     ] {
         let response = read_json(&fixture_path(&format!(
