@@ -132,6 +132,53 @@ fn init_mixed_dirty_workspace() -> Result<PathBuf, String> {
     Ok(workspace)
 }
 
+fn init_scratch_only_workspace() -> Result<PathBuf, String> {
+    let workspace = workspace_dir()?;
+    ensure_success(
+        &run_command(
+            Command::new("git")
+                .arg("init")
+                .arg("-b")
+                .arg("main")
+                .current_dir(&workspace),
+            "git init",
+        )?,
+        "git init",
+    )?;
+    write_file(&workspace.join("README.md"), "# hygiene fixture\n")?;
+    ensure_success(
+        &run_command(
+            Command::new("git")
+                .arg("add")
+                .arg("README.md")
+                .current_dir(&workspace),
+            "git add README",
+        )?,
+        "git add README",
+    )?;
+    ensure_success(
+        &run_command(
+            Command::new("git")
+                .arg("-c")
+                .arg("user.email=ee-test@example.invalid")
+                .arg("-c")
+                .arg("user.name=ee test")
+                .arg("commit")
+                .arg("-m")
+                .arg("seed scratch-only workspace")
+                .current_dir(&workspace),
+            "git commit",
+        )?,
+        "git commit",
+    )?;
+    write_file(
+        &workspace.join("drift-report.txt"),
+        "local diagnostic output\n",
+    )?;
+    write_file(&workspace.join("ubs.json"), "{\"status\":\"local-only\"}\n")?;
+    Ok(workspace)
+}
+
 fn git_status(workspace: &Path) -> Result<String, String> {
     let output = run_command(
         Command::new("git")
@@ -195,6 +242,49 @@ fn expected_staging_groups() -> Result<Value, String> {
         "fixtures/golden/workspace_hygiene_recommendations.json"
     ))
     .map_err(|error| format!("recommendations staging golden must parse: {error}"))
+}
+
+fn expected_scratch_only_projection() -> Result<Value, String> {
+    serde_json::from_str(include_str!(
+        "fixtures/golden/workspace_hygiene_scratch_only.json"
+    ))
+    .map_err(|error| format!("scratch-only hygiene golden must parse: {error}"))
+}
+
+fn clone_at(value: &Value, pointer: &str) -> Result<Value, String> {
+    value
+        .pointer(pointer)
+        .cloned()
+        .ok_or_else(|| format!("missing {pointer}: {value}"))
+}
+
+fn scratch_only_projection(value: &Value) -> Result<Value, String> {
+    let classifications = value
+        .pointer("/data/pathClassifications")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("missing pathClassifications: {value}"))?
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "path": clone_at(row, "/path")?,
+                "bucket": clone_at(row, "/bucket")?,
+                "kind": clone_at(row, "/kind")?,
+                "reasons": clone_at(row, "/reasons")?,
+                "suggestedGroup": clone_at(row, "/suggestedGroup")?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    Ok(serde_json::json!({
+        "dirtyPathCount": clone_at(value, "/data/dirtyPathCount")?,
+        "bucketCounts": clone_at(value, "/data/bucketCounts")?,
+        "kindCounts": clone_at(value, "/data/kindCounts")?,
+        "stagingRecommendations": clone_at(value, "/data/stagingRecommendations")?,
+        "doNotCommit": clone_at(value, "/data/doNotCommit")?,
+        "needsHumanReview": clone_at(value, "/data/needsHumanReview")?,
+        "pathClassifications": classifications,
+        "nextActions": clone_at(value, "/data/nextActions")?,
+    }))
 }
 
 #[test]
@@ -294,6 +384,42 @@ fn workspace_hygiene_recommendations_are_grouped_read_only_and_explainable() -> 
     if blocked != Some("src/core/lib.rs") {
         return Err(format!(
             "blocked source path missing from coordination state: {value}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn workspace_hygiene_scratch_only_paths_match_golden_without_staging() -> TestResult {
+    let workspace = init_scratch_only_workspace()?;
+    let snapshot_path = workspace.join("agent-mail.json");
+    write_file(
+        &snapshot_path,
+        r#"{
+          "file_reservations": [],
+          "active_agents": [],
+          "inbox": [],
+          "threads": []
+        }"#,
+    )?;
+
+    let before = git_status(&workspace)?;
+    let value = run_hygiene_json(&workspace, &snapshot_path)?;
+    let after = git_status(&workspace)?;
+    if before != after {
+        return Err("workspace hygiene must not mutate scratch-only git state".to_owned());
+    }
+
+    let projection = scratch_only_projection(&value)?;
+    let expected = expected_scratch_only_projection()?;
+    if projection != expected {
+        return Err(format!(
+            "scratch-only workspace hygiene projection drifted from golden\nexpected: {expected}\nactual: {projection}"
+        ));
+    }
+    if value.to_string().contains("git add") {
+        return Err(format!(
+            "scratch-only report must not emit staging commands: {value}"
         ));
     }
     Ok(())

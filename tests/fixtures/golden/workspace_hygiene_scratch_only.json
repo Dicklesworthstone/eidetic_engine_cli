@@ -1,0 +1,44 @@
+{
+  "dirtyPathCount": 2,
+  "bucketCounts": [
+    {
+      "name": "do_not_commit",
+      "count": 2
+    }
+  ],
+  "kindCounts": [
+    {
+      "name": "scratch",
+      "count": 2
+    }
+  ],
+  "stagingRecommendations": [],
+  "doNotCommit": [
+    "drift-report.txt",
+    "ubs.json"
+  ],
+  "needsHumanReview": [],
+  "pathClassifications": [
+    {
+      "path": "drift-report.txt",
+      "bucket": "do_not_commit",
+      "kind": "scratch",
+      "reasons": [
+        "scratch_root_report"
+      ],
+      "suggestedGroup": "scratch"
+    },
+    {
+      "path": "ubs.json",
+      "bucket": "do_not_commit",
+      "kind": "scratch",
+      "reasons": [
+        "scratch_root_report"
+      ],
+      "suggestedGroup": "scratch"
+    }
+  ],
+  "nextActions": [
+    "Leave doNotCommit paths unstaged unless a human explicitly overrides."
+  ]
+}
