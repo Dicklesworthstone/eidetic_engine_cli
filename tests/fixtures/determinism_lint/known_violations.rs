@@ -53,17 +53,19 @@ fn ambient_env(_: &ee::runtime::determinism::Deterministic<Seed>) {
 
 #[determinism::required]
 fn hashmap_iteration(_: &ee::runtime::determinism::Deterministic<Seed>) {
-    let map: HashMap<String, String> = HashMap::new();
+    let mut map: HashMap<String, String> = HashMap::new();
     for _ in map.iter() {}
     for _ in map.keys() {}
     for _ in map.values() {}
+    for _ in map.drain() {}
     for _ in map.into_iter() {}
 }
 
 #[determinism::required]
 fn hashset_iteration(_: &ee::runtime::determinism::Deterministic<Seed>) {
-    let set: HashSet<String> = HashSet::new();
+    let mut set: HashSet<String> = HashSet::new();
     for _ in set.iter() {}
+    for _ in set.drain() {}
     for _ in set.into_iter() {}
 }
 

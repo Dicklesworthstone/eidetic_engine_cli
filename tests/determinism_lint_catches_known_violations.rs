@@ -34,9 +34,18 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     let scan_lines = strip_rust_noise(source);
+    let mut hash_map_bindings = Vec::new();
+    let mut hash_set_bindings = Vec::new();
 
     for (index, line) in scan_lines.iter().enumerate() {
         let line_no = index + 1;
+        if line.trim_start().starts_with("fn ") {
+            hash_map_bindings.clear();
+            hash_set_bindings.clear();
+        }
+        hash_map_bindings.extend(hash_collection_bindings(line, "HashMap"));
+        hash_set_bindings.extend(hash_collection_bindings(line, "HashSet"));
+
         if line.contains("#[determinism::required]")
             && !function_signature_has_deterministic_seed(&scan_lines, index)
         {
@@ -134,18 +143,14 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "iterate env only through a deterministic registered boundary",
             });
         }
-        if hash_collection_iteration_call(line)
-            && nearby_lines_contain(&scan_lines, index, "HashMap")
-        {
+        if hash_collection_iteration_call(line, &hash_map_bindings) {
             findings.push(Finding {
                 line: line_no,
                 code: "hashmap_iteration",
                 message: "sort HashMap entries before deterministic output",
             });
         }
-        if hash_collection_iteration_call(line)
-            && nearby_lines_contain(&scan_lines, index, "HashSet")
-        {
+        if hash_collection_iteration_call(line, &hash_set_bindings) {
             findings.push(Finding {
                 line: line_no,
                 code: "hashset_iteration",
@@ -341,17 +346,53 @@ fn is_identifier_char(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
 }
 
-fn nearby_lines_contain(lines: &[String], index: usize, needle: &str) -> bool {
-    let start = index.saturating_sub(3);
-    lines[start..=index]
-        .iter()
-        .any(|line| line.contains(needle))
+fn hash_collection_bindings(line: &str, type_name: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let short = format!(": {type_name}");
+    let qualified = format!(": std::collections::{type_name}");
+    collect_hash_collection_bindings(line, &short, &mut names);
+    collect_hash_collection_bindings(line, &qualified, &mut names);
+    names
 }
 
-fn hash_collection_iteration_call(line: &str) -> bool {
-    [".iter()", ".keys()", ".values()", ".into_iter()"]
-        .iter()
-        .any(|needle| line.contains(needle))
+fn collect_hash_collection_bindings(line: &str, needle: &str, names: &mut Vec<String>) {
+    let mut search_start = 0;
+    while let Some(relative_index) = line[search_start..].find(needle) {
+        let index = search_start + relative_index;
+        let prefix = &line[..index];
+        if let Some(name) = prefix
+            .rsplit(|ch: char| !is_identifier_char(ch))
+            .next()
+            .filter(|name| !name.is_empty())
+        {
+            if !names.iter().any(|existing| existing == name) {
+                names.push(name.to_owned());
+            }
+        }
+        search_start = index + needle.len();
+    }
+}
+
+fn hash_collection_iteration_call(line: &str, bindings: &[String]) -> bool {
+    bindings.iter().any(|binding| {
+        ["iter", "keys", "values", "into_iter", "drain"]
+            .iter()
+            .any(|method| contains_receiver_method_call(line, binding, method))
+    })
+}
+
+fn contains_receiver_method_call(line: &str, receiver: &str, method: &str) -> bool {
+    let needle = format!("{receiver}.{method}()");
+    let mut search_start = 0;
+    while let Some(relative_index) = line[search_start..].find(&needle) {
+        let index = search_start + relative_index;
+        let previous = line[..index].chars().next_back();
+        if !matches!(previous, Some(ch) if is_identifier_char(ch)) {
+            return true;
+        }
+        search_start = index + needle.len();
+    }
+    false
 }
 
 fn contains_path_call(line: &str, needle: &str) -> bool {
@@ -491,17 +532,19 @@ mod self_tests {
         let fixture = r#"
             use std::collections::{HashMap, HashSet};
 
-            fn ambient(map: HashMap<String, String>, set: HashSet<String>) {
+            fn ambient(mut map: HashMap<String, String>, mut set: HashSet<String>) {
                 for _ in map.keys() {}
                 for _ in map.values() {}
+                for _ in map.drain() {}
                 for _ in map.into_iter() {}
                 for _ in set.iter() {}
+                for _ in set.drain() {}
                 for _ in set.into_iter() {}
             }
         "#;
         let report = render_report(&scan_fixture(fixture));
-        assert_eq!(report.matches("hashmap_iteration").count(), 3);
-        assert_eq!(report.matches("hashset_iteration").count(), 2);
+        assert_eq!(report.matches("hashmap_iteration").count(), 4);
+        assert_eq!(report.matches("hashset_iteration").count(), 3);
     }
 
     #[test]
