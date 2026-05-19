@@ -9,12 +9,12 @@
 //! hot loops) that's the difference between an 8s and a 16s wall-clock.
 //!
 //! This module owns the platform-agnostic public surface for that
-//! optimization: configuration types, a result envelope that records what
-//! actually happened, the degraded-code vocabulary, and the entry points the
-//! `refresh_graph_snapshot` / `load_graph_snapshot` consumers will eventually
-//! call. The Linux libc::mbind real-syscall path and the wiring into
-//! `src/graph/mod.rs` snapshot loaders are deferred to follow-up slices under
-//! bd-1prrl.3.
+//! optimization: configuration types, a deterministic mapping/pinning plan, a
+//! result envelope that records what actually happened, the degraded-code
+//! vocabulary, and the entry points the `refresh_graph_snapshot` /
+//! `load_graph_snapshot` consumers will eventually call. The Linux
+//! libc::mbind real-syscall path and the wiring into `src/graph/mod.rs`
+//! snapshot loaders are deferred to follow-up slices under bd-1prrl.3.
 //!
 //! The scaffold is honest: on every non-Linux platform `pin_snapshot_blob`
 //! returns a fully populated `NumaPinResult` with `supported=false`, a
@@ -180,6 +180,103 @@ pub enum NumaPinFallbackPath {
     DisabledByOperator,
 }
 
+/// Memory representation the graph snapshot loader should use for a platform.
+/// This is a plan-level enum: the scaffold records intent without claiming the
+/// syscall path has executed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NumaPinMappingKind {
+    /// No mapping should be attempted because the optimization is disabled.
+    None,
+    /// Open the snapshot file read-only and mmap it directly.
+    ReadOnlyMmap,
+    /// Deserialize into ordinary process heap memory.
+    HeapOnly,
+}
+
+impl NumaPinMappingKind {
+    #[must_use]
+    pub fn is_mmap(self) -> bool {
+        matches!(self, Self::ReadOnlyMmap)
+    }
+}
+
+/// Deterministic plan for mapping and pinning one graph snapshot. The plan is
+/// intentionally side-effect-free: it does not stat the path, mmap a file,
+/// read host topology, or mutate scheduler state. That makes it safe to build
+/// during graph snapshot selection without changing pack hashes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NumaPinPlan {
+    pub platform: NumaPinPlatform,
+    pub supported: bool,
+    pub enabled: bool,
+    pub mapping_kind: NumaPinMappingKind,
+    pub bind_requested: bool,
+    pub preferred_node: String,
+    pub populate_requested: bool,
+    pub snapshot_bytes: u64,
+    pub snapshot_path: PathBuf,
+    pub fallback_path: NumaPinFallbackPath,
+    pub degraded_codes: Vec<String>,
+}
+
+impl NumaPinPlan {
+    fn for_platform(
+        platform: NumaPinPlatform,
+        snapshot_path: &Path,
+        snapshot_bytes: u64,
+        config: &NumaPinConfig,
+    ) -> Self {
+        let mut plan = Self {
+            platform,
+            supported: platform.is_supported(),
+            enabled: config.enabled,
+            mapping_kind: NumaPinMappingKind::None,
+            bind_requested: false,
+            preferred_node: config.preferred_node.as_str(),
+            populate_requested: config.populate_on_load,
+            snapshot_bytes,
+            snapshot_path: snapshot_path.to_path_buf(),
+            fallback_path: NumaPinFallbackPath::None,
+            degraded_codes: Vec::new(),
+        };
+
+        if !config.enabled {
+            plan.fallback_path = NumaPinFallbackPath::DisabledByOperator;
+            plan.push_unique_code(NUMA_PIN_DISABLED_CODE);
+            return plan;
+        }
+
+        match platform {
+            NumaPinPlatform::Linux => {
+                plan.mapping_kind = NumaPinMappingKind::ReadOnlyMmap;
+                plan.bind_requested = true;
+                plan.fallback_path = NumaPinFallbackPath::SoftwareNotImplemented;
+                plan.push_unique_code(NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE);
+            }
+            NumaPinPlatform::MacosUnsupported => {
+                plan.mapping_kind = NumaPinMappingKind::ReadOnlyMmap;
+                plan.fallback_path = NumaPinFallbackPath::MadviseWillneed;
+                plan.push_unique_code(NUMA_PIN_UNSUPPORTED_PLATFORM_CODE);
+            }
+            NumaPinPlatform::WindowsUnsupported | NumaPinPlatform::OtherUnsupported => {
+                plan.mapping_kind = NumaPinMappingKind::HeapOnly;
+                plan.fallback_path = NumaPinFallbackPath::HeapOnly;
+                plan.push_unique_code(NUMA_PIN_UNSUPPORTED_PLATFORM_CODE);
+            }
+        }
+
+        plan
+    }
+
+    fn push_unique_code(&mut self, code: &str) {
+        if !self.degraded_codes.iter().any(|existing| existing == code) {
+            self.degraded_codes.push(code.to_string());
+        }
+    }
+}
+
 /// Outcome of attempting to pin a snapshot blob. The shape is intentionally
 /// flat-and-Serialize so the wiring slice can drop it straight into the
 /// `data.graph.numaPin` block of `ee status --json`.
@@ -243,36 +340,54 @@ pub fn platform_support() -> NumaPinPlatform {
     NumaPinPlatform::detect()
 }
 
+/// Build the side-effect-free plan for mapping and pinning a graph snapshot.
+/// Callers pass `snapshot_bytes` from already-known snapshot metadata; this
+/// function deliberately avoids filesystem metadata reads so status/context
+/// planning stays deterministic and cheap.
+#[must_use]
+pub fn plan_snapshot_pin(
+    snapshot_path: &Path,
+    snapshot_bytes: u64,
+    config: &NumaPinConfig,
+) -> NumaPinPlan {
+    NumaPinPlan::for_platform(
+        NumaPinPlatform::detect(),
+        snapshot_path,
+        snapshot_bytes,
+        config,
+    )
+}
+
 /// Attempt to pin a serialized graph snapshot blob to the NUMA node
 /// indicated by `config`. The scaffold never panics, never mutates the
 /// filesystem, and never claims a snapshot was pinned that wasn't — every
 /// non-success path populates `degraded_codes` with a code documented in
 /// `tests/fixtures/failure_modes/`.
 pub fn pin_snapshot_blob(snapshot_path: &Path, config: &NumaPinConfig) -> NumaPinResult {
-    let platform = NumaPinPlatform::detect();
-    let mut result = NumaPinResult::base(platform, config, snapshot_path);
+    let plan = plan_snapshot_pin(snapshot_path, 0, config);
+    let mut result = NumaPinResult::base(plan.platform, config, snapshot_path);
 
     if !config.enabled {
-        result.fallback_path = NumaPinFallbackPath::DisabledByOperator;
-        result.push_unique_code(NUMA_PIN_DISABLED_CODE);
+        result.fallback_path = plan.fallback_path;
+        result.degraded_codes = plan.degraded_codes;
         return result;
     }
 
-    match platform {
+    match plan.platform {
         NumaPinPlatform::Linux => {
-            result.attempted = true;
-            result.fallback_path = NumaPinFallbackPath::SoftwareNotImplemented;
-            result.push_unique_code(NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE);
+            result.attempted = plan.bind_requested;
+            result.fallback_path = plan.fallback_path;
+            result.degraded_codes = plan.degraded_codes;
             result
         }
         NumaPinPlatform::MacosUnsupported => {
-            result.fallback_path = NumaPinFallbackPath::MadviseWillneed;
-            result.push_unique_code(NUMA_PIN_UNSUPPORTED_PLATFORM_CODE);
+            result.fallback_path = plan.fallback_path;
+            result.degraded_codes = plan.degraded_codes;
             result
         }
         NumaPinPlatform::WindowsUnsupported | NumaPinPlatform::OtherUnsupported => {
-            result.fallback_path = NumaPinFallbackPath::HeapOnly;
-            result.push_unique_code(NUMA_PIN_UNSUPPORTED_PLATFORM_CODE);
+            result.fallback_path = plan.fallback_path;
+            result.degraded_codes = plan.degraded_codes;
             result
         }
     }
@@ -284,9 +399,10 @@ mod tests {
 
     use super::{
         NUMA_PIN_DISABLED_CODE, NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE, NUMA_PIN_PREFERRED_NODE_AUTO,
-        NUMA_PIN_UNSUPPORTED_PLATFORM_CODE, NumaPinConfig, NumaPinFallbackPath, NumaPinPlatform,
-        NumaPinPreference, NumaPinResult, STATUS_GRAPH_NUMA_PIN_SCHEMA_V1, detect_preferred_node,
-        pin_snapshot_blob, platform_support,
+        NUMA_PIN_UNSUPPORTED_PLATFORM_CODE, NumaPinConfig, NumaPinFallbackPath, NumaPinMappingKind,
+        NumaPinPlan, NumaPinPlatform, NumaPinPreference, NumaPinResult,
+        STATUS_GRAPH_NUMA_PIN_SCHEMA_V1, detect_preferred_node, pin_snapshot_blob,
+        plan_snapshot_pin, platform_support,
     };
 
     fn fake_snapshot_path() -> &'static Path {
@@ -300,6 +416,17 @@ mod tests {
                 seen.insert(code.clone()),
                 "duplicate degraded code {code} in {:?}",
                 result.degraded_codes
+            );
+        }
+    }
+
+    fn assert_plan_has_no_duplicate_codes(plan: &NumaPinPlan) {
+        let mut seen = std::collections::BTreeSet::new();
+        for code in &plan.degraded_codes {
+            assert!(
+                seen.insert(code.clone()),
+                "duplicate degraded code {code} in {:?}",
+                plan.degraded_codes
             );
         }
     }
@@ -330,6 +457,21 @@ mod tests {
     }
 
     #[test]
+    fn disabled_pin_plan_never_requests_mapping_or_bind() {
+        let plan = plan_snapshot_pin(fake_snapshot_path(), 4096, &NumaPinConfig::disabled());
+        assert_eq!(plan.mapping_kind, NumaPinMappingKind::None);
+        assert!(!plan.mapping_kind.is_mmap());
+        assert!(!plan.bind_requested);
+        assert_eq!(plan.snapshot_bytes, 4096);
+        assert_eq!(plan.fallback_path, NumaPinFallbackPath::DisabledByOperator);
+        assert_eq!(
+            plan.degraded_codes,
+            vec![NUMA_PIN_DISABLED_CODE.to_string()]
+        );
+        assert_plan_has_no_duplicate_codes(&plan);
+    }
+
+    #[test]
     fn preferred_node_renders_auto_and_explicit_consistently() {
         assert_eq!(
             NumaPinPreference::Auto.as_str(),
@@ -342,6 +484,63 @@ mod tests {
     #[test]
     fn detect_preferred_node_returns_none_on_scaffold() {
         assert_eq!(detect_preferred_node(), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_pin_plan_requests_readonly_mmap_and_bind_without_claiming_success() {
+        let plan = plan_snapshot_pin(
+            fake_snapshot_path(),
+            128 * 1024 * 1024,
+            &NumaPinConfig::default().with_preferred_node(NumaPinPreference::Node(1)),
+        );
+        assert_eq!(plan.platform, NumaPinPlatform::Linux);
+        assert!(plan.supported);
+        assert_eq!(plan.mapping_kind, NumaPinMappingKind::ReadOnlyMmap);
+        assert!(plan.mapping_kind.is_mmap());
+        assert!(plan.bind_requested);
+        assert_eq!(plan.preferred_node, "1");
+        assert_eq!(plan.snapshot_bytes, 128 * 1024 * 1024);
+        assert_eq!(
+            plan.fallback_path,
+            NumaPinFallbackPath::SoftwareNotImplemented
+        );
+        assert_eq!(
+            plan.degraded_codes,
+            vec![NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE.to_string()]
+        );
+        assert_plan_has_no_duplicate_codes(&plan);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn non_linux_pin_plan_is_deterministic_and_non_binding() {
+        let plan = plan_snapshot_pin(
+            fake_snapshot_path(),
+            128 * 1024 * 1024,
+            &NumaPinConfig::default().with_preferred_node(NumaPinPreference::Node(1)),
+        );
+        assert!(!plan.supported);
+        assert!(!plan.bind_requested);
+        assert_eq!(plan.preferred_node, "1");
+        assert_eq!(plan.snapshot_bytes, 128 * 1024 * 1024);
+        assert!(
+            plan.degraded_codes
+                .iter()
+                .any(|code| code == NUMA_PIN_UNSUPPORTED_PLATFORM_CODE)
+        );
+        match plan.platform {
+            NumaPinPlatform::MacosUnsupported => {
+                assert_eq!(plan.mapping_kind, NumaPinMappingKind::ReadOnlyMmap);
+                assert_eq!(plan.fallback_path, NumaPinFallbackPath::MadviseWillneed);
+            }
+            NumaPinPlatform::WindowsUnsupported | NumaPinPlatform::OtherUnsupported => {
+                assert_eq!(plan.mapping_kind, NumaPinMappingKind::HeapOnly);
+                assert_eq!(plan.fallback_path, NumaPinFallbackPath::HeapOnly);
+            }
+            NumaPinPlatform::Linux => panic!("linux cfg should run the linux-specific plan test"),
+        }
+        assert_plan_has_no_duplicate_codes(&plan);
     }
 
     #[test]
