@@ -14,9 +14,12 @@ use serde::Serialize;
 use super::{DatabaseConfig, DbConnection};
 
 pub const SHARD_FANOUT_STATUS_SCHEMA_V1: &str = "ee.shard_fanout.status.v1";
+pub const SHARD_FANOUT_MIGRATION_PLAN_SCHEMA_V1: &str = "ee.shard_fanout.migration_plan.v1";
+pub const SHARD_FANOUT_MIGRATION_AUDIT_SCHEMA_V1: &str = "ee.shard_fanout.migration_audit.v1";
 pub const SHARD_FANOUT_CATALOG_SCHEMA_VERSION: u32 = 1;
 pub const SHARD_CATALOG_FILE_NAME: &str = "catalog.db";
 pub const SHARD_FILE_EXTENSION: &str = "db";
+pub const PRE_SHARD_FANOUT_FILE_NAME: &str = ".pre-shard-fanout.db";
 
 pub const SHARD_FANOUT_ROOT_UNSAFE_CODE: &str = "shard_fanout_root_unsafe";
 pub const SHARD_FANOUT_HOME_UNAVAILABLE_CODE: &str = "shard_fanout_home_unavailable";
@@ -142,6 +145,59 @@ pub struct ShardFanoutStatusReport {
     pub last_verified_hashes: Vec<ShardVerificationHash>,
     pub degraded: Vec<ShardFanoutDegradation>,
     pub recovery: Vec<ShardFanoutRecoveryAction>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShardFanoutMigrationWorkspaceInput {
+    pub workspace_id: String,
+    pub workspace_root: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShardFanoutMigrationPlanInput {
+    pub source_database_path: PathBuf,
+    pub shards_dir_override: Option<PathBuf>,
+    pub workspaces: Vec<ShardFanoutMigrationWorkspaceInput>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShardFanoutMigrationAuditRowPlan {
+    pub schema: &'static str,
+    pub event: &'static str,
+    pub workspace_id: Option<String>,
+    pub source_path: PathBuf,
+    pub target_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShardFanoutMigrationWorkspacePlan {
+    pub workspace_id: String,
+    pub workspace_root: PathBuf,
+    pub shard_id: Option<String>,
+    pub shard_path: Option<PathBuf>,
+    pub source_database_path: PathBuf,
+    pub planned_row_count: Option<u64>,
+    pub source_hash: Option<String>,
+    pub expected_audit_rows: Vec<ShardFanoutMigrationAuditRowPlan>,
+    pub blockers: Vec<ShardFanoutDegradation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShardFanoutMigrationPlan {
+    pub schema: &'static str,
+    pub dry_run: bool,
+    pub source_database_path: PathBuf,
+    pub preserved_source_database_path: PathBuf,
+    pub source_database_hash: Option<String>,
+    pub shard_root: Option<PathBuf>,
+    pub catalog_path: Option<PathBuf>,
+    pub catalog_schema_version: u32,
+    pub workspaces: Vec<ShardFanoutMigrationWorkspacePlan>,
+    pub expected_audit_rows: Vec<ShardFanoutMigrationAuditRowPlan>,
+    pub blockers: Vec<ShardFanoutDegradation>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -473,6 +529,115 @@ pub fn shard_file_path(shard_root: &Path, shard_id: &str) -> PathBuf {
 }
 
 #[must_use]
+pub fn preserved_legacy_database_path(source_database_path: &Path) -> PathBuf {
+    source_database_path.parent().map_or_else(
+        || PathBuf::from(PRE_SHARD_FANOUT_FILE_NAME),
+        |parent| parent.join(PRE_SHARD_FANOUT_FILE_NAME),
+    )
+}
+
+#[must_use]
+pub fn plan_shard_fanout_migration(
+    input: ShardFanoutMigrationPlanInput,
+) -> ShardFanoutMigrationPlan {
+    let source_database_path = input.source_database_path;
+    let preserved_source_database_path = preserved_legacy_database_path(&source_database_path);
+    let mut blockers = Vec::new();
+    let shard_root_result = input
+        .shards_dir_override
+        .as_deref()
+        .map_or_else(default_shards_dir_from_env, |path| Ok(PathBuf::from(path)))
+        .and_then(|path| normalize_shard_root(&path));
+
+    let (shard_root, catalog_path) = match shard_root_result {
+        Ok(root) => {
+            let catalog_path = catalog_path_for_shard_root(&root);
+            (Some(root), Some(catalog_path))
+        }
+        Err(error) => {
+            blockers.push(error.degradation());
+            (None, None)
+        }
+    };
+
+    let mut workspace_inputs = input.workspaces;
+    workspace_inputs.sort_by(|left, right| {
+        left.workspace_id
+            .cmp(&right.workspace_id)
+            .then_with(|| left.workspace_root.cmp(&right.workspace_root))
+    });
+
+    let mut expected_audit_rows = vec![ShardFanoutMigrationAuditRowPlan {
+        schema: SHARD_FANOUT_MIGRATION_AUDIT_SCHEMA_V1,
+        event: "preserve_legacy_database",
+        workspace_id: None,
+        source_path: source_database_path.clone(),
+        target_path: preserved_source_database_path.clone(),
+    }];
+
+    let workspaces = workspace_inputs
+        .into_iter()
+        .map(|workspace| {
+            let mut workspace_blockers = Vec::new();
+            let shard_resolution = shard_id_for_workspace_id(&workspace.workspace_id)
+                .map(|shard_id| {
+                    let shard_path = shard_root
+                        .as_deref()
+                        .map(|root| shard_file_path(root, &shard_id));
+                    (Some(shard_id), shard_path)
+                })
+                .unwrap_or_else(|_| {
+                    let degradation = unsafe_workspace_id_degradation();
+                    blockers.push(degradation.clone());
+                    workspace_blockers.push(degradation);
+                    (None, None)
+                });
+
+            let (shard_id, shard_path) = shard_resolution;
+            let workspace_expected_audit_rows = shard_path
+                .as_ref()
+                .map(|target_path| {
+                    vec![ShardFanoutMigrationAuditRowPlan {
+                        schema: SHARD_FANOUT_MIGRATION_AUDIT_SCHEMA_V1,
+                        event: "copy_workspace_to_shard",
+                        workspace_id: Some(workspace.workspace_id.clone()),
+                        source_path: source_database_path.clone(),
+                        target_path: target_path.clone(),
+                    }]
+                })
+                .unwrap_or_default();
+            expected_audit_rows.extend(workspace_expected_audit_rows.iter().cloned());
+
+            ShardFanoutMigrationWorkspacePlan {
+                workspace_id: workspace.workspace_id,
+                workspace_root: workspace.workspace_root,
+                shard_id,
+                shard_path,
+                source_database_path: source_database_path.clone(),
+                planned_row_count: None,
+                source_hash: None,
+                expected_audit_rows: workspace_expected_audit_rows,
+                blockers: workspace_blockers,
+            }
+        })
+        .collect();
+
+    ShardFanoutMigrationPlan {
+        schema: SHARD_FANOUT_MIGRATION_PLAN_SCHEMA_V1,
+        dry_run: true,
+        source_database_path,
+        preserved_source_database_path,
+        source_database_hash: None,
+        shard_root,
+        catalog_path,
+        catalog_schema_version: SHARD_FANOUT_CATALOG_SCHEMA_VERSION,
+        workspaces,
+        expected_audit_rows,
+        blockers,
+    }
+}
+
+#[must_use]
 pub fn resolve_shard_fanout_status(input: ShardFanoutResolverInput) -> ShardFanoutStatusReport {
     let mut degraded = Vec::new();
     let mut recovery = Vec::new();
@@ -517,12 +682,7 @@ pub fn resolve_shard_fanout_status(input: ShardFanoutResolverInput) -> ShardFano
             }
             Err(_) => {
                 if input.enabled {
-                    degraded.push(ShardFanoutDegradation::new(
-                        SHARD_FANOUT_WORKSPACE_ID_UNSAFE_CODE,
-                        "high",
-                        "Shard fan-out refused an unsafe workspace ID for path derivation.",
-                        "Re-resolve the workspace through ee workspace status before enabling shard fan-out.",
-                    ));
+                    degraded.push(unsafe_workspace_id_degradation());
                 }
             }
         }
@@ -623,6 +783,15 @@ pub fn resolve_shard_fanout_status(input: ShardFanoutResolverInput) -> ShardFano
     }
 }
 
+fn unsafe_workspace_id_degradation() -> ShardFanoutDegradation {
+    ShardFanoutDegradation::new(
+        SHARD_FANOUT_WORKSPACE_ID_UNSAFE_CODE,
+        "high",
+        "Shard fan-out refused an unsafe workspace ID for path derivation.",
+        "Re-resolve the workspace through ee workspace status before enabling shard fan-out.",
+    )
+}
+
 impl From<OsString> for ShardFanoutResolverInput {
     fn from(value: OsString) -> Self {
         Self {
@@ -660,10 +829,14 @@ fn trace_router_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        DbShardRouter, DbShardRouterError, DbShardRoutingMode, SHARD_CATALOG_FILE_NAME,
-        SHARD_FANOUT_CATALOG_MISSING_CODE, SHARD_FANOUT_STATUS_SCHEMA_V1, ShardFanoutPosture,
-        ShardFanoutResolverInput, default_shards_dir_from_values, normalize_shard_root,
-        resolve_shard_fanout_status, shard_fanout_enabled_from_env_value, shard_file_path,
+        DbShardRouter, DbShardRouterError, DbShardRoutingMode, PRE_SHARD_FANOUT_FILE_NAME,
+        SHARD_CATALOG_FILE_NAME, SHARD_FANOUT_CATALOG_MISSING_CODE,
+        SHARD_FANOUT_MIGRATION_PLAN_SCHEMA_V1, SHARD_FANOUT_STATUS_SCHEMA_V1,
+        SHARD_FANOUT_WORKSPACE_ID_UNSAFE_CODE, ShardFanoutMigrationPlanInput,
+        ShardFanoutMigrationWorkspaceInput, ShardFanoutPosture, ShardFanoutResolverInput,
+        default_shards_dir_from_values, normalize_shard_root, plan_shard_fanout_migration,
+        preserved_legacy_database_path, resolve_shard_fanout_status,
+        shard_fanout_enabled_from_env_value, shard_file_path,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -877,6 +1050,152 @@ mod tests {
             temp.path().join("ee/shards")
         );
         assert!(!temp.path().join("ee").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn preserved_legacy_database_path_uses_hidden_rollback_file() {
+        let source = Path::new("/workspace/.ee/ee.db");
+        assert_eq!(
+            preserved_legacy_database_path(source),
+            PathBuf::from("/workspace/.ee").join(PRE_SHARD_FANOUT_FILE_NAME)
+        );
+    }
+
+    #[test]
+    fn migration_plan_sorts_workspaces_and_preserves_source_database() -> TestResult {
+        let temp = temp_root("ee-shard-migration-plan")?;
+        let source_database_path = temp.path().join("workspace/.ee/ee.db");
+        let shard_root = temp.path().join("data/shards");
+        let plan = plan_shard_fanout_migration(ShardFanoutMigrationPlanInput {
+            source_database_path: source_database_path.clone(),
+            shards_dir_override: Some(shard_root.clone()),
+            workspaces: vec![
+                ShardFanoutMigrationWorkspaceInput {
+                    workspace_id: "wsp_b".to_owned(),
+                    workspace_root: temp.path().join("workspace-b"),
+                },
+                ShardFanoutMigrationWorkspaceInput {
+                    workspace_id: "wsp_a".to_owned(),
+                    workspace_root: temp.path().join("workspace-a"),
+                },
+            ],
+        });
+
+        assert_eq!(plan.schema, SHARD_FANOUT_MIGRATION_PLAN_SCHEMA_V1);
+        assert!(plan.dry_run);
+        assert!(plan.blockers.is_empty());
+        assert_eq!(plan.shard_root.as_deref(), Some(shard_root.as_path()));
+        assert_eq!(
+            plan.catalog_path.as_deref(),
+            Some(temp.path().join("data/catalog.db").as_path())
+        );
+        assert_eq!(
+            plan.preserved_source_database_path,
+            source_database_path
+                .parent()
+                .expect("source db has parent")
+                .join(PRE_SHARD_FANOUT_FILE_NAME)
+        );
+        assert_eq!(
+            plan.workspaces
+                .iter()
+                .map(|workspace| workspace.workspace_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["wsp_a", "wsp_b"]
+        );
+        assert_eq!(
+            plan.workspaces[0].shard_path.as_deref(),
+            Some(shard_root.join("wsp_a.db").as_path())
+        );
+        assert_eq!(
+            plan.workspaces[1].shard_path.as_deref(),
+            Some(shard_root.join("wsp_b.db").as_path())
+        );
+        assert_eq!(plan.expected_audit_rows.len(), 3);
+        assert_eq!(
+            plan.expected_audit_rows
+                .iter()
+                .map(|row| row.event)
+                .collect::<Vec<_>>(),
+            vec![
+                "preserve_legacy_database",
+                "copy_workspace_to_shard",
+                "copy_workspace_to_shard"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn migration_plan_json_is_deterministic_for_workspace_input_order() -> TestResult {
+        let temp = temp_root("ee-shard-migration-deterministic")?;
+        let source_database_path = temp.path().join("workspace/.ee/ee.db");
+        let shard_root = temp.path().join("data/shards");
+        let first = plan_shard_fanout_migration(ShardFanoutMigrationPlanInput {
+            source_database_path: source_database_path.clone(),
+            shards_dir_override: Some(shard_root.clone()),
+            workspaces: vec![
+                ShardFanoutMigrationWorkspaceInput {
+                    workspace_id: "wsp_z".to_owned(),
+                    workspace_root: temp.path().join("workspace-z"),
+                },
+                ShardFanoutMigrationWorkspaceInput {
+                    workspace_id: "wsp_a".to_owned(),
+                    workspace_root: temp.path().join("workspace-a"),
+                },
+            ],
+        });
+        let second = plan_shard_fanout_migration(ShardFanoutMigrationPlanInput {
+            source_database_path,
+            shards_dir_override: Some(shard_root),
+            workspaces: vec![
+                ShardFanoutMigrationWorkspaceInput {
+                    workspace_id: "wsp_a".to_owned(),
+                    workspace_root: temp.path().join("workspace-a"),
+                },
+                ShardFanoutMigrationWorkspaceInput {
+                    workspace_id: "wsp_z".to_owned(),
+                    workspace_root: temp.path().join("workspace-z"),
+                },
+            ],
+        });
+
+        let first_json = serde_json::to_string(&first).map_err(|error| error.to_string())?;
+        let second_json = serde_json::to_string(&second).map_err(|error| error.to_string())?;
+        assert_eq!(first_json, second_json);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_plan_marks_unsafe_workspace_id_as_blocker() -> TestResult {
+        let temp = temp_root("ee-shard-migration-unsafe-id")?;
+        let plan = plan_shard_fanout_migration(ShardFanoutMigrationPlanInput {
+            source_database_path: temp.path().join("workspace/.ee/ee.db"),
+            shards_dir_override: Some(temp.path().join("data/shards")),
+            workspaces: vec![ShardFanoutMigrationWorkspaceInput {
+                workspace_id: "../unsafe".to_owned(),
+                workspace_root: temp.path().join("workspace"),
+            }],
+        });
+
+        assert!(
+            plan.blockers
+                .iter()
+                .any(|entry| entry.code == SHARD_FANOUT_WORKSPACE_ID_UNSAFE_CODE)
+        );
+        assert!(
+            plan.workspaces[0]
+                .blockers
+                .iter()
+                .any(|entry| entry.code == SHARD_FANOUT_WORKSPACE_ID_UNSAFE_CODE)
+        );
+        assert_eq!(plan.workspaces[0].shard_path, None);
+        assert_eq!(plan.expected_audit_rows.len(), 1);
+        assert_eq!(
+            plan.expected_audit_rows[0].event,
+            "preserve_legacy_database"
+        );
         Ok(())
     }
 
