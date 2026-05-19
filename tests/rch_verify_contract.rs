@@ -1538,6 +1538,97 @@ fn synthetic_remote_transcript_extracts_worker_id() -> TestResult {
 }
 
 #[test]
+fn client_daemon_version_skew_refuses_before_rch() -> TestResult {
+    let invocation_log = unique_tmp_path("rch-version-skew-invocations");
+    let fake_rch = write_fake_rch(
+        "fake-rch-version-skew.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+  printf 'rch 1.0.24\n'
+  exit 0
+fi
+if [ "${1:-}" = "status" ]; then
+  cat <<'JSON'
+{"data":{"daemon":{"version":"0.1.3","socket_path":"/tmp/rch.sock","workers":[],"recent_builds":[]}}}
+JSON
+  exit 0
+fi
+if [ "${1:-}" = "exec" ]; then
+  printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+  printf '[RCH] remote trj (0.1s)\n'
+  exit 0
+fi
+printf 'unexpected fake rch args: %s\n' "$*" >&2
+exit 2
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+
+    let (status, stdout, _stderr) = run_script_with_env(
+        &[
+            "--rch-bin",
+            fake_rch_arg,
+            "--summary",
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "version_skew_should_not_run",
+        ],
+        &[("FAKE_RCH_INVOCATIONS", invocation_log_arg)],
+    )?;
+    if status.success() {
+        return Err("client/daemon version skew should refuse before RCH".to_owned());
+    }
+    if invocation_log.exists() {
+        let invocations = fs::read_to_string(&invocation_log)
+            .map_err(|error| format!("read version-skew invocation log: {error}"))?;
+        if !invocations.is_empty() {
+            return Err(format!(
+                "version-skew preflight invoked fake RCH exec: {invocations:?}"
+            ));
+        }
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse version-skew report: {error}"))?;
+    if report["status"] != "rch_environment_failure" || report["exit_code"] != 1 {
+        return Err(format!("unexpected version-skew status: {report}"));
+    }
+    if !degraded_contains(&report, "rch_verify_client_daemon_version_skew")?
+        || !worker_degraded_contains(&report, "rch_verify_client_daemon_version_skew")?
+    {
+        return Err(format!(
+            "version-skew code should be degraded and worker-state: {report}"
+        ));
+    }
+    let runtime = &report["rch_runtime"];
+    if runtime["status"] != "checked"
+        || runtime["client_version"] != "1.0.24"
+        || runtime["client_compat"] != "1.0"
+        || runtime["daemon_version"] != "0.1.3"
+        || runtime["daemon_compat"] != "0.1"
+        || runtime["daemon_socket_path"] != "/tmp/rch.sock"
+    {
+        return Err(format!(
+            "runtime version details should route deployment work: {report}"
+        ));
+    }
+    let summary = report["summary_markdown"]
+        .as_str()
+        .ok_or_else(|| "summary missing".to_owned())?;
+    if !summary.contains("rch_runtime: `checked` client=`1.0.24` daemon=`0.1.3`") {
+        return Err(format!("summary missing runtime skew: {summary}"));
+    }
+    Ok(())
+}
+
+#[test]
 fn build_admission_denial_refuses_before_rch() -> TestResult {
     let fake_ee = write_fake_build_admission_ee("fake-ee-admission-denied.sh", false)?;
     let fake_rch = write_fake_rch(

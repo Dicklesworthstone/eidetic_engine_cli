@@ -171,6 +171,14 @@ Consumers that need to route action should use the two narrower lists:
   includes `cargo_path_dependency_version` with structured `crate`, `required`,
   `candidate_versions`, and `location_searched` fields for routing the worker
   refresh or dependency publication follow-up.
+  `rch_verify_client_daemon_version_skew` is emitted before remote Cargo when
+  the selected `rch` client and the live daemon behind `rch status --json`
+  report different major/minor compatibility prefixes. The proof includes
+  `rch_runtime` with the selected client path, client version, daemon version,
+  compatibility prefixes, and daemon socket path. This fails closed by default
+  so a repo-local verifier client cannot silently talk to an older launchd
+  daemon; set `RCH_VERIFY_FAIL_FAST_VERSION_SKEW=0` only for an explicitly
+  documented diagnostic run.
 - `build_admission.status`: local admission result before RCH. A denied result
   means no remote verifier ran; unavailable or skipped results mean proof
   quality is weaker than an admitted run.

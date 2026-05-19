@@ -58,6 +58,7 @@ BUILD_ADMISSION_ARTIFACT_DESTINATIONS=()
 REQUIRE_CLEAN_TREE=0
 COMMITTED_TREE=0
 TREEISH="HEAD"
+RCH_RUNTIME_JSON='{"status":"not_checked","client_path":null,"client_version":null,"client_compat":null,"daemon_version":null,"daemon_compat":null,"daemon_socket_path":null,"message":null}'
 DEFAULT_RCH_BIN="/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch"
 if [ -z "${RCH_BIN:-}" ] && [ -x "$DEFAULT_RCH_BIN" ]; then
     RCH_BIN="$DEFAULT_RCH_BIN"
@@ -522,6 +523,118 @@ try:
     emit(worker.get("id", "") for worker in workers)
 except Exception:
     print("")
+PY
+}
+
+rch_runtime_json() {
+    FAKE_OUTPUT_PRESENT="${RCH_VERIFY_FAKE_OUTPUT:+1}" \
+    RCH_BIN_PATH="$RCH_BIN" \
+    STATUS_JSON="${RCH_VERIFY_STATUS_JSON:-}" \
+    python3 - <<'PY'
+import json
+import os
+import re
+import subprocess
+
+client_path = os.environ.get("RCH_BIN_PATH") or None
+base = {
+    "status": "not_checked",
+    "client_path": client_path,
+    "client_version": None,
+    "client_compat": None,
+    "daemon_version": None,
+    "daemon_compat": None,
+    "daemon_socket_path": None,
+    "message": None,
+}
+
+def compat(version):
+    if not version:
+        return None
+    match = re.search(r"(\d+)\.(\d+)(?:\.\d+)?", str(version))
+    if not match:
+        return None
+    return f"{match.group(1)}.{match.group(2)}"
+
+def emit(payload):
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+if os.environ.get("FAKE_OUTPUT_PRESENT"):
+    base["status"] = "skipped"
+    base["message"] = "fake RCH transcript without live client/daemon inspection"
+    emit(base)
+    raise SystemExit(0)
+
+try:
+    version = subprocess.run(
+        [os.environ["RCH_BIN_PATH"], "--version"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+    if version.returncode == 0:
+        words = version.stdout.strip().split()
+        base["client_version"] = words[-1] if words else None
+        base["client_compat"] = compat(base["client_version"])
+except Exception as error:
+    base["status"] = "unavailable"
+    base["message"] = f"client version unavailable: {error}"
+    emit(base)
+    raise SystemExit(0)
+
+try:
+    status_json = os.environ.get("STATUS_JSON", "")
+    if status_json:
+        payload = json.loads(status_json)
+    else:
+        status = subprocess.run(
+            [os.environ["RCH_BIN_PATH"], "status", "--workers", "--jobs", "--json"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+        payload = json.loads(status.stdout)
+    daemon_container = payload.get("data", {}).get("daemon", {})
+    daemon = daemon_container.get("daemon") if isinstance(daemon_container.get("daemon"), dict) else daemon_container
+    base["daemon_version"] = daemon.get("version") or daemon_container.get("version")
+    base["daemon_compat"] = compat(base["daemon_version"])
+    base["daemon_socket_path"] = daemon.get("socket_path") or daemon_container.get("socket_path")
+except Exception as error:
+    base["status"] = "unavailable"
+    base["message"] = f"daemon status unavailable: {error}"
+    emit(base)
+    raise SystemExit(0)
+
+if base["client_compat"] and base["daemon_compat"]:
+    base["status"] = "checked"
+elif base["client_version"] or base["daemon_version"]:
+    base["status"] = "partial"
+    base["message"] = "client or daemon version was present but not parseable"
+else:
+    base["status"] = "unavailable"
+    base["message"] = "client and daemon versions unavailable"
+
+emit(base)
+PY
+}
+
+rch_runtime_skew_code() {
+    RCH_RUNTIME_JSON_INPUT="${1:?runtime JSON required}" python3 - <<'PY'
+import json
+import os
+
+runtime = json.loads(os.environ["RCH_RUNTIME_JSON_INPUT"])
+if (
+    runtime.get("status") == "checked"
+    and runtime.get("client_compat")
+    and runtime.get("daemon_compat")
+    and runtime.get("client_compat") != runtime.get("daemon_compat")
+):
+    print("rch_verify_client_daemon_version_skew")
 PY
 }
 
@@ -1146,7 +1259,7 @@ emit_json() {
     shift 5
     local degraded_codes_json
     degraded_codes_json="$(json_array "$@")"
-    local command_json rch_invocation_json command_text_json remote_env_json stdout_json stderr_json requested_workers_json configured_workers_json daemon_workers_json build_admission_json
+    local command_json rch_invocation_json command_text_json remote_env_json stdout_json stderr_json requested_workers_json configured_workers_json daemon_workers_json build_admission_json rch_runtime_json
     command_json="$(json_array "${COMMAND[@]}")"
     rch_invocation_json="$(json_array "${RCH_INVOCATION[@]}")"
     remote_env_json="$(json_array "${ENV_OVERRIDES[@]}")"
@@ -1157,6 +1270,11 @@ emit_json() {
     configured_workers_json="$(csv_json_array "${CONFIGURED_WORKERS_CSV:-}")"
     daemon_workers_json="$(csv_json_array "${DAEMON_WORKERS_CSV:-}")"
     build_admission_json="${BUILD_ADMISSION_JSON:-$(json_object_not_run)}"
+    if [ -n "${RCH_RUNTIME_JSON:-}" ]; then
+        rch_runtime_json="$RCH_RUNTIME_JSON"
+    else
+        rch_runtime_json='{"status":"not_checked","client_path":null,"client_version":null,"client_compat":null,"daemon_version":null,"daemon_compat":null,"daemon_socket_path":null,"message":null}'
+    fi
     local source_state_json
     if [ -n "${SOURCE_STATE_JSON:-}" ]; then
         source_state_json="$SOURCE_STATE_JSON"
@@ -1165,7 +1283,7 @@ emit_json() {
     fi
     local json_payload
     json_payload="$(cat <<EOF
-{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"build_admission":$build_admission_json,"source_state":$source_state_json}
+{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"build_admission":$build_admission_json,"rch_runtime":$rch_runtime_json,"source_state":$source_state_json}
 EOF
 )"
     JSON_PAYLOAD="$json_payload" \
@@ -1319,6 +1437,7 @@ worker_state_code_set = {
     "rch_verify_worker_quarantine_ignored",
     "rch_verify_cargo_workspace_inheritance_blocked",
     "rch_verify_cargo_path_dependency_version_blocked",
+    "rch_verify_client_daemon_version_skew",
 }
 worker_state_degraded = [
     code
@@ -1345,6 +1464,7 @@ elif (
     "rch_verify_topology_blocked" in degraded
     or "rch_verify_cargo_workspace_inheritance_blocked" in degraded
     or "rch_verify_cargo_path_dependency_version_blocked" in degraded
+    or "rch_verify_client_daemon_version_skew" in degraded
     or "rch_verify_local_fallback_refused" in degraded
     or "rch_verify_worker_disk_full" in degraded
     or "rch_verify_worker_quarantine_ignored" in degraded
@@ -1390,6 +1510,13 @@ if build_admission.get("status") not in (None, "not_run"):
     summary_lines.append(
         f"- build_admission: `{build_admission.get('status')}`"
         f" admitted=`{build_admission.get('admitted')}`"
+    )
+runtime = proof.get("rch_runtime") or {}
+if runtime.get("status") not in (None, "not_checked"):
+    summary_lines.append(
+        f"- rch_runtime: `{runtime.get('status')}`"
+        f" client=`{runtime.get('client_version') or 'unknown'}`"
+        f" daemon=`{runtime.get('daemon_version') or 'unknown'}`"
     )
 for key in ("requested_workers", "configured_workers", "daemon_workers"):
     workers = proof.get(key) or []
@@ -1490,6 +1617,7 @@ if event_log_path:
             "worker_state_degraded_codes": proof.get("worker_state_degraded_codes") or [],
             "build_admission_status": build_admission.get("status"),
             "build_admission_admitted": build_admission.get("admitted"),
+            "rch_runtime": proof.get("rch_runtime"),
             "fake_rch_invoked": fake_invocation_count > 0,
             "fake_rch_invocation_count": fake_invocation_count,
             "source_manifest_hash": proof.get("source_manifest_hash"),
@@ -1585,6 +1713,18 @@ RCH_INVOCATION=(
     "${ENV_OVERRIDES[@]}"
     "${COMMAND[@]}"
 )
+
+if [ "$DRY_RUN" -eq 0 ]; then
+    RCH_RUNTIME_JSON="$(rch_runtime_json)"
+    if [ "${RCH_VERIFY_FAIL_FAST_VERSION_SKEW:-1}" = "1" ]; then
+        RCH_RUNTIME_SKEW_CODE="$(rch_runtime_skew_code "$RCH_RUNTIME_JSON")"
+        if [ -n "$RCH_RUNTIME_SKEW_CODE" ]; then
+            emit_json true 1 0 "RCH client/daemon version skew; refusing before remote Cargo" "" \
+                "$RCH_RUNTIME_SKEW_CODE"
+            exit 1
+        fi
+    fi
+fi
 
 BUILD_ADMISSION_JSON="$(compute_build_admission_json)"
 BUILD_ADMISSION_STATUS="$(build_admission_status "$BUILD_ADMISSION_JSON")"
