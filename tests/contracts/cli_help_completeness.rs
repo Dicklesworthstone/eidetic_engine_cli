@@ -319,6 +319,40 @@ fn causal_command_flags_are_help_discoverable() -> TestResult {
 }
 
 #[test]
+fn diagnostic_graph_fixture_flags_are_help_discoverable() -> TestResult {
+    let causal_edge_help = help_for(&["ee", "diag", "causal-edge", "--help"])?;
+    assert_contains_all(
+        &causal_edge_help,
+        &[
+            "--database",
+            "--workspace-id",
+            "--edge-id",
+            "--failure-id",
+            "--candidate-cause-id",
+            "--contribution-score",
+            "--evidence-uri",
+            "--computed-at",
+            "--method",
+        ],
+        "ee diag causal-edge --help",
+    )?;
+
+    let graph_snapshot_help = help_for(&["ee", "diag", "graph-snapshot", "--help"])?;
+    assert_contains_all(
+        &graph_snapshot_help,
+        &[
+            "--database",
+            "--status",
+            "--metrics-json",
+            "--node-count",
+            "--edge-count",
+            "--source-generation",
+        ],
+        "ee diag graph-snapshot --help",
+    )
+}
+
+#[test]
 fn proximity_health_and_maintenance_flags_are_help_discoverable() -> TestResult {
     let proximity_help = help_for(&["ee", "proximity", "--help"])?;
     assert_contains_all(
@@ -385,6 +419,13 @@ fn proximity_health_and_maintenance_flags_are_help_discoverable() -> TestResult 
             "--algorithm-ttl",
         ],
         "ee maintenance graph-witnesses-prune --help",
+    )?;
+
+    let wal_checkpoint_help = help_for(&["ee", "maintenance", "wal-checkpoint", "--help"])?;
+    assert_contains_all(
+        &wal_checkpoint_help,
+        &["--database", "--mode", "--dry-run"],
+        "ee maintenance wal-checkpoint --help",
     )?;
 
     let job_run_help = help_for(&["ee", "job", "run", "--help"])?;
@@ -644,6 +685,59 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "30",
             "--algorithm-ttl",
             "pagerank=14",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "maintenance",
+            "wal-checkpoint",
+            "--database",
+            ".ee/ee.db",
+            "--mode",
+            "truncate",
+            "--dry-run",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "diag",
+            "causal-edge",
+            "--database",
+            ".ee/ee.db",
+            "--workspace-id",
+            "ws_release",
+            "--edge-id",
+            "edge_release_failure",
+            "--failure-id",
+            "mem_failed_release",
+            "--candidate-cause-id",
+            "mem_missing_rch_proof",
+            "--contribution-score",
+            "0.8",
+            "--evidence-uri",
+            "file://proof.json",
+            "--computed-at",
+            "2026-05-19T00:00:00Z",
+            "--method",
+            "manual",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "diag",
+            "graph-snapshot",
+            "--database",
+            ".ee/ee.db",
+            "--status",
+            "stale",
+            "--metrics-json",
+            "{\"pagerank\":1}",
+            "--node-count",
+            "42",
+            "--edge-count",
+            "77",
+            "--source-generation",
+            "3",
             "--json",
         ][..],
     ] {

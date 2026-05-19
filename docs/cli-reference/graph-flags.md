@@ -210,6 +210,40 @@ ee graph path mem_source mem_target --workspace . --min-weight 0.4 --json
 ee graph explain-link mem_source mem_target --workspace . --link-limit 250 --json
 ```
 
+## Diagnostic Graph Fixtures
+
+These commands seed deterministic graph-related diagnostic rows for contract and
+failure-mode replay. They are fixture surfaces, not ordinary user workflows, and
+should be run against disposable or explicitly selected databases.
+
+| Command | Flag | Values | Default | Use |
+| --- | --- | --- | --- | --- |
+| `ee diag causal-edge` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Writes the fixture causal edge to an explicit diagnostic database. |
+| `ee diag causal-edge` | `--workspace-id <WORKSPACE_ID>` | workspace ID | current workspace stable ID | Stores the fixture edge under a deterministic workspace namespace. |
+| `ee diag causal-edge` | `--edge-id <EDGE_ID>` | edge ID | required | Sets the causal evidence edge ID. |
+| `ee diag causal-edge` | `--failure-id <MEMORY_ID>` | memory ID | required | Selects the failure memory endpoint. |
+| `ee diag causal-edge` | `--candidate-cause-id <MEMORY_ID>` | memory ID | required | Selects the candidate cause memory endpoint. |
+| `ee diag causal-edge` | `--contribution-score <SCORE>` | `0.0..=1.0` | `0.7` | Records the causal contribution score. |
+| `ee diag causal-edge` | `--evidence-uri <URI>` | URI, repeatable | omitted | Preserves provenance URIs on the edge. |
+| `ee diag causal-edge` | `--computed-at <RFC3339>` | timestamp | current time | Replays the diagnostic edge with a deterministic timestamp. |
+| `ee diag causal-edge` | `--method <METHOD>` | `manual`, `graph-inferred`, `cass-derived` | `manual` | Labels the causal evidence method. |
+| `ee diag graph-snapshot` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Writes the fixture graph snapshot row to an explicit database. |
+| `ee diag graph-snapshot` | `--status <STATUS>` | `valid`, `stale`, `invalid`, `archived` | `valid` | Seeds the snapshot lifecycle status. |
+| `ee diag graph-snapshot` | `--metrics-json <JSON>` | JSON object | omitted | Stores deterministic graph metrics with the snapshot row. |
+| `ee diag graph-snapshot` | `--node-count <N>` | integer | `1` | Records fixture node count metadata. |
+| `ee diag graph-snapshot` | `--edge-count <N>` | integer | `0` | Records fixture edge count metadata. |
+| `ee diag graph-snapshot` | `--source-generation <N>` | integer | `1` | Records fixture source-generation metadata. |
+
+Example:
+
+```bash
+ee diag causal-edge --workspace . --edge-id edge_release_failure \
+  --failure-id mem_failed_release --candidate-cause-id mem_missing_rch_proof \
+  --contribution-score 0.8 --evidence-uri file://proof.json --json
+ee diag graph-snapshot --workspace . --status stale \
+  --metrics-json '{"pagerank":1}' --node-count 42 --edge-count 77 --json
+```
+
 ## Curation And Maintenance Flags
 
 | Command | Flag | Values | Default | Use |
@@ -235,6 +269,9 @@ ee graph explain-link mem_source mem_target --workspace . --link-limit 250 --jso
 | `ee maintenance graph-witnesses-prune` | `--dry-run` | boolean | false | Reports planned witness pruning without mutating witness rows. |
 | `ee maintenance graph-witnesses-prune` | `--retention-days <DAYS>` | integer days | witness policy default | Overrides the default witness retention window. |
 | `ee maintenance graph-witnesses-prune` | `--algorithm-ttl <NAME=DAYS>` | repeatable key/value | omitted | Overrides one algorithm-specific witness TTL; repeat for multiple algorithms. |
+| `ee maintenance wal-checkpoint` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Reads WAL status and runs the checkpoint through the explicit writer path. |
+| `ee maintenance wal-checkpoint` | `--mode <MODE>` | `passive`, `truncate` | `passive` | Selects the SQLite checkpoint mode. |
+| `ee maintenance wal-checkpoint` | `--dry-run` | boolean | false | Reports WAL status without running a checkpoint. |
 | `ee job run <KIND>` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Runs a steward handler against an explicit DB. |
 | `ee job run <KIND>` | `--dry-run` | boolean | false | Reports planned work without mutating memory scores or job history. |
 | `ee job run <KIND>` | `--time-limit-ms <MS>` | integer | job default | Overrides per-job time budget. |
@@ -249,6 +286,7 @@ ee curate disposition --workspace . --no-structural-decay \
   --now 2026-05-19T00:00:00Z --json
 ee job run centrality_refresh --workspace . --dry-run \
   --time-limit-ms 500 --item-limit 25 --json
+ee maintenance wal-checkpoint --workspace . --mode truncate --dry-run --json
 ```
 
 ## Tracked But Not Yet In Current CLI
