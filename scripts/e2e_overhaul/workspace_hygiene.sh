@@ -351,6 +351,14 @@ run_scenario() {
             sleep 2
             write_file "$workspace/.beads/beads.db" "db changed after export\n"
             ;;
+        beads_export_only)
+            mkdir -p "$workspace/.beads"
+            write_file "$workspace/.beads/.gitignore" "*.db\nlast-touched\n"
+            write_file "$workspace/.beads/issues.jsonl" '{"id":"bd-public","title":"seed"}\n'
+            git -C "$workspace" add .beads/.gitignore .beads/issues.jsonl
+            git -C "$workspace" -c user.email=ee-test@example.invalid -c user.name="ee test" commit -m "seed beads metadata" >/dev/null
+            write_file "$workspace/.beads/issues.jsonl" '{"id":"bd-public","title":"seed"}\n{"id":"bd-export-only","title":"exported update"}\n'
+            ;;
         beads_parse_failure)
             mkdir -p "$workspace/.beads"
             write_file "$workspace/.beads/issues.jsonl" '{"id":"bd-public"}\n{not valid json\n'
@@ -423,6 +431,9 @@ run_scenario() {
         beads_pending_flush)
             first_failure="$(assert_jq "$stdout_artifact" '.data.beadsState.classification == "beads_db_dirty_pending_flush" and .data.beadsState.metadataSignal == "db_dirty_pending_flush"' "beads DB marker should report pending flush" || true)"
             ;;
+        beads_export_only)
+            first_failure="$(assert_jq "$stdout_artifact" '.data.beadsState.classification == "beads_export_only" and .data.beadsState.metadataSignal == "unknown" and (.data.beadsState.degradedCodes | index("workspace_hygiene_beads_db_divergence_unknown")) and (.data.degraded | index("workspace_hygiene_beads_db_divergence_unknown"))' "dirty Beads JSONL without DB signal should report export-only with divergence-unknown degradation" || true)"
+            ;;
         beads_parse_failure)
             first_failure="$(assert_jq "$stdout_artifact" '(.data.degraded | index("workspace_hygiene_beads_parse_error")) and .data.beadsState.parseErrorLine == 2' "invalid Beads JSONL should report parse line 2" || true)"
             ;;
@@ -457,6 +468,7 @@ SCENARIOS=(
     active_reservation
     agent_mail_unavailable
     beads_pending_flush
+    beads_export_only
     beads_parse_failure
 )
 
