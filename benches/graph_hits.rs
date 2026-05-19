@@ -1,4 +1,4 @@
-//! Criterion benchmark for HITS hub/authority scores (bd-igvt.6).
+//! Criterion benchmark for HITS hub/authority scores (bd-jy4w.4).
 //!
 //! Group name: `graph_hits`
 

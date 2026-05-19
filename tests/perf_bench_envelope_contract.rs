@@ -119,6 +119,45 @@ fn bench_script_emits_perf_v1_operation_contract_fields() -> TestResult {
 }
 
 #[test]
+fn graph_hits_benchmark_is_registered_and_budgeted() -> TestResult {
+    let cargo_toml = fs::read_to_string("Cargo.toml")
+        .map_err(|error| format!("failed to read Cargo.toml: {error}"))?;
+    let bench_script = fs::read_to_string("scripts/bench.sh")
+        .map_err(|error| format!("failed to read scripts/bench.sh: {error}"))?;
+    let budgets = fs::read_to_string("benches/budgets.toml")
+        .map_err(|error| format!("failed to read benches/budgets.toml: {error}"))?;
+    let bench_source = fs::read_to_string("benches/graph_hits.rs")
+        .map_err(|error| format!("failed to read benches/graph_hits.rs: {error}"))?;
+
+    for expected in [
+        "[[bench]]\nname = \"graph_hits\"\nharness = false",
+        "BENCHMARKS=\"remember search context pack_size why outcome status workspace_init audit_query index_rebuild concurrent_writes import_cass link graph_pagerank graph_ppr graph_louvain graph_ktruss graph_gomory_hu graph_hits curate_candidates\"",
+        "[operations.ee_graph_hits]",
+        "p50_ms_max = 100.0",
+        "p99_ms_max = 400.0",
+        "10/100/1000 memory-link graphs",
+        "bd-jy4w.4",
+        "const BENCH_GROUP_NAME: &str = \"graph_hits\";",
+        "const BUDGET_P50_MS: f64 = 100.0;",
+        "const BUDGET_P99_MS: f64 = 400.0;",
+        "const SCALES: &[usize] = &[10, 100, 1000];",
+        "std::env::var(\"EE_BENCH_COMPARE_ONLY\")",
+        "assert_budget(scale, quick_stats(scale));",
+        "compute_hits(&graph)",
+    ] {
+        let present = cargo_toml.contains(expected)
+            || bench_script.contains(expected)
+            || budgets.contains(expected)
+            || bench_source.contains(expected);
+        if !present {
+            return Err(format!("HITS benchmark perf contract missing `{expected}`"));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn host_calibration_harness_is_invoked_only_and_perf_v1_shaped() -> TestResult {
     let source = fs::read_to_string("scripts/e2e_overhaul/host_calibration.sh")
         .map_err(|error| format!("failed to read host calibration harness: {error}"))?;
