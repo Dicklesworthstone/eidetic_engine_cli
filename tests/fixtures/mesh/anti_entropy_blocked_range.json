@@ -1,0 +1,37 @@
+{
+  "schema": "ee.mesh.anti_entropy.v1",
+  "lastRoundCompletedAt": "2026-05-19T22:10:30.000Z",
+  "originsTracked": 3,
+  "peerCount": 1,
+  "perPeerCounts": [
+    {
+      "peerAlias": "peer_4f2a91",
+      "eventsAccepted": 14,
+      "eventsDuplicate": 2,
+      "eventsForked": 0,
+      "rangesRequested": 3,
+      "rangesFulfilled": 2
+    }
+  ],
+  "backoffPosture": {
+    "initialMs": 1000,
+    "maxMs": 60000,
+    "maxAttempts": 5,
+    "currentAttempts": 5,
+    "nextRetryAfter": "2026-05-19T22:25:30.000Z"
+  },
+  "blockedRanges": [
+    {
+      "peerAlias": "peer_4f2a91",
+      "originAlias": "origin_b71c30",
+      "startSeq": 41,
+      "endSeq": 58,
+      "retryAfter": "2026-05-19T22:25:30.000Z",
+      "reason": "max_attempts_exceeded"
+    }
+  ],
+  "degraded": [
+    "mesh_anti_entropy_round_blocked",
+    "mesh_anti_entropy_supervisor_budget_exceeded"
+  ]
+}

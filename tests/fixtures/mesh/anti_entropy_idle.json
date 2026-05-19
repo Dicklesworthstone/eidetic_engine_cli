@@ -1,0 +1,16 @@
+{
+  "schema": "ee.mesh.anti_entropy.v1",
+  "lastRoundCompletedAt": null,
+  "originsTracked": 0,
+  "peerCount": 0,
+  "perPeerCounts": [],
+  "backoffPosture": {
+    "initialMs": 1000,
+    "maxMs": 60000,
+    "maxAttempts": 5,
+    "currentAttempts": 0,
+    "nextRetryAfter": null
+  },
+  "blockedRanges": [],
+  "degraded": []
+}

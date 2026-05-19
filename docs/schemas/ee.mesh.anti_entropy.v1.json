@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.anti_entropy.v1.json",
+  "title": "ee.mesh.anti_entropy.v1",
+  "description": "Redaction-safe sync summary for mesh anti-entropy rounds, suitable for ee status and ee doctor surfaces.",
+  "type": "object",
+  "required": [
+    "schema",
+    "lastRoundCompletedAt",
+    "originsTracked",
+    "peerCount",
+    "perPeerCounts",
+    "backoffPosture",
+    "degraded"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.anti_entropy.v1"
+    },
+    "lastRoundCompletedAt": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "string",
+          "format": "date-time"
+        }
+      ],
+      "description": "RFC3339 timestamp of the most recent completed round; null when no round has ever completed."
+    },
+    "originsTracked": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of distinct origin_node_id streams the local frontier tracks. Origin IDs themselves are intentionally omitted from the public surface."
+    },
+    "peerCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of distinct peers exchanged with in the most recent budget window."
+    },
+    "perPeerCounts": {
+      "type": "array",
+      "description": "Per-peer aggregate counts for the most recent budget window. Peer identifiers are aliased (peer_<short-hash>) and never expose Tailscale node-keys, IPs, or user-visible names.",
+      "items": {
+        "$ref": "#/$defs/perPeerCount"
+      }
+    },
+    "backoffPosture": {
+      "$ref": "#/$defs/backoffPosture"
+    },
+    "blockedRanges": {
+      "type": "array",
+      "description": "Ranges that exhausted bounded retry/backoff in the current budget window. Empty when no range is blocked.",
+      "items": {
+        "$ref": "#/$defs/blockedRange"
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "description": "Stable degraded codes raised during the most recent round. The wrapper never renders raw stderr or transcript text.",
+      "items": {
+        "type": "string",
+        "enum": [
+          "mesh_anti_entropy_round_blocked",
+          "mesh_anti_entropy_partition_observed",
+          "mesh_anti_entropy_fork_observed",
+          "mesh_anti_entropy_protocol_error",
+          "mesh_anti_entropy_supervisor_budget_exceeded",
+          "mesh_anti_entropy_peer_policy_refused",
+          "mesh_anti_entropy_transport_unavailable"
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "peerAlias": {
+      "type": "string",
+      "description": "Redaction-safe peer alias of the form peer_<short-hash>. Must not contain '/', '\\', or '@'.",
+      "pattern": "^peer_[a-z0-9]{1,32}$"
+    },
+    "perPeerCount": {
+      "type": "object",
+      "required": [
+        "peerAlias",
+        "eventsAccepted",
+        "eventsDuplicate",
+        "eventsForked",
+        "rangesRequested",
+        "rangesFulfilled"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "peerAlias": {
+          "$ref": "#/$defs/peerAlias"
+        },
+        "eventsAccepted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "eventsDuplicate": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "eventsForked": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rangesRequested": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rangesFulfilled": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "backoffPosture": {
+      "type": "object",
+      "required": [
+        "initialMs",
+        "maxMs",
+        "maxAttempts",
+        "currentAttempts",
+        "nextRetryAfter"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "initialMs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Initial backoff in milliseconds (default 1000)."
+        },
+        "maxMs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum backoff cap in milliseconds (default 60000)."
+        },
+        "maxAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Hard cap on attempts per range per peer (default 5)."
+        },
+        "currentAttempts": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total range-request attempts across all peers in the current budget window."
+        },
+        "nextRetryAfter": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "string",
+              "format": "date-time"
+            }
+          ],
+          "description": "Wall-clock time at which the supervisor may attempt the next round. Null when no retry is pending."
+        }
+      }
+    },
+    "blockedRange": {
+      "type": "object",
+      "required": [
+        "peerAlias",
+        "originAlias",
+        "startSeq",
+        "endSeq",
+        "retryAfter",
+        "reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "peerAlias": {
+          "$ref": "#/$defs/peerAlias"
+        },
+        "originAlias": {
+          "type": "string",
+          "description": "Redaction-safe alias for the origin_node_id of the form origin_<short-hash>.",
+          "pattern": "^origin_[a-z0-9]{1,32}$"
+        },
+        "startSeq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "endSeq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retryAfter": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "max_attempts_exceeded",
+            "peer_policy_refused",
+            "transport_unavailable",
+            "supervisor_budget_exceeded"
+          ]
+        }
+      }
+    }
+  }
+}

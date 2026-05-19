@@ -219,3 +219,6 @@ mod hygiene_reason_code_vocabulary;
 
 #[path = "contracts/mesh_surrogate_schema.rs"]
 mod mesh_surrogate_schema;
+
+#[path = "contracts/mesh_anti_entropy_schema.rs"]
+mod mesh_anti_entropy_schema;
