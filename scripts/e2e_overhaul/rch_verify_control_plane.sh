@@ -144,8 +144,10 @@ assert_source_refusal_json() {
     local expected_unstaged="${3:?expected tracked unstaged count required}"
     local expected_untracked="${4:?expected untracked count required}"
     local expected_secret_risk="${5:?expected secret risk count required}"
-    shift 5
-    python3 - "$path" "$expected_staged" "$expected_unstaged" "$expected_untracked" "$expected_secret_risk" "$@" <<'PY'
+    local expected_beads="${6:?expected beads metadata count required}"
+    local expected_scratch="${7:?expected scratch artifact count required}"
+    shift 7
+    python3 - "$path" "$expected_staged" "$expected_unstaged" "$expected_untracked" "$expected_secret_risk" "$expected_beads" "$expected_scratch" "$@" <<'PY'
 import json
 import sys
 
@@ -154,7 +156,9 @@ expected_staged = int(sys.argv[2])
 expected_unstaged = int(sys.argv[3])
 expected_untracked = int(sys.argv[4])
 expected_secret_risk = int(sys.argv[5])
-required = {"rch_verify_dirty_tree_refused", *sys.argv[6:]}
+expected_beads = int(sys.argv[6])
+expected_scratch = int(sys.argv[7])
+required = {"rch_verify_dirty_tree_refused", *sys.argv[8:]}
 
 with open(path, encoding="utf-8") as handle:
     report = json.load(handle)
@@ -179,6 +183,10 @@ if summary.get("untracked") != expected_untracked:
     raise SystemExit(f"untracked count drifted: {report}")
 if summary.get("secret_risk") != expected_secret_risk:
     raise SystemExit(f"secret_risk count drifted: {report}")
+if summary.get("beads") != expected_beads:
+    raise SystemExit(f"beads count drifted: {report}")
+if summary.get("scratch") != expected_scratch:
+    raise SystemExit(f"scratch count drifted: {report}")
 if not required.issubset(codes) or not required.issubset(source_codes):
     raise SystemExit(f"missing dirty-source degraded codes: {report}")
 if expected_secret_risk:
@@ -187,6 +195,10 @@ if expected_secret_risk:
         raise SystemExit(f"secret-risk fixture leaked raw content: {report}")
     if not any(item.get("kind") == "secret_risk" for item in report.get("dirty_paths_sample") or []):
         raise SystemExit(f"secret-risk fixture did not tag path sample: {report}")
+if expected_beads and not any(item.get("kind") == "beads" for item in report.get("dirty_paths_sample") or []):
+    raise SystemExit(f"beads fixture did not tag path sample: {report}")
+if expected_scratch and not any(item.get("kind") == "scratch" for item in report.get("dirty_paths_sample") or []):
+    raise SystemExit(f"scratch fixture did not tag path sample: {report}")
 print(json.dumps({
     "command_hash": report.get("command_hash", ""),
     "degraded_codes": sorted(codes),
@@ -328,6 +340,8 @@ strict_assert="$(assert_source_refusal_json \
     1 \
     0 \
     0 \
+    0 \
+    0 \
     rch_verify_dirty_tracked_paths \
     rch_verify_dirty_unstaged_paths)"
 emit_event \
@@ -381,6 +395,8 @@ fi
 staged_assert="$(assert_source_refusal_json \
     "$staged_json" \
     1 \
+    0 \
+    0 \
     0 \
     0 \
     0 \
@@ -439,6 +455,8 @@ secret_assert="$(assert_source_refusal_json \
     0 \
     0 \
     1 \
+    0 \
+    0 \
     rch_verify_dirty_untracked_paths)"
 emit_event \
     "assert" \
@@ -449,6 +467,120 @@ emit_event \
     "$(printf '%s' "$secret_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
     "secret-like untracked path refused before fake RCH without raw content leakage" \
     "secret_like_untracked"
+
+start="$(started_ms)"
+beads_repo="$WORK_DIR/beads-export-repo"
+init_fixture_repo "$beads_repo"
+mkdir -p "$beads_repo/.beads"
+printf '%s\n' '{"id":"bd-fixture","status":"open"}' > "$beads_repo/.beads/issues.jsonl"
+beads_before="$WORK_DIR/beads-export.before-status"
+git_status_v2 "$beads_repo" > "$beads_before"
+beads_fake_rch="$WORK_DIR/fake-rch-beads-export"
+beads_invocations="$WORK_DIR/beads-export-rch-invocations.txt"
+beads_json="$WORK_DIR/beads-export-refusal.json"
+beads_event_log="$WORK_DIR/beads-export-events.jsonl"
+write_fake_rch "$beads_fake_rch"
+set +e
+FAKE_RCH_INVOCATIONS="$beads_invocations" \
+RCH_VERIFY_NOW="2026-05-16T06:40:06.000000Z" \
+RCH_VERIFY_CONFIGURED_WORKERS="css" \
+RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
+bash "$RCH_VERIFY" \
+    --bead-id bd-9ygik.3 \
+    --require-clean-tree \
+    --project-root "$beads_repo" \
+    --event-log "$beads_event_log" \
+    --rch-bin "$beads_fake_rch" \
+    -- \
+    cargo test --lib rch_verify_beads_export_e2e > "$beads_json"
+beads_exit=$?
+set -e
+if [ "$beads_exit" -eq 0 ]; then
+    printf 'beads export fixture unexpectedly passed\n' >&2
+    exit 1
+fi
+assert_status_unchanged "$beads_repo" "$beads_before" "beads-export"
+if [ -s "$beads_invocations" ]; then
+    printf 'beads export refusal invoked fake RCH:\n' >&2
+    sed -n '1,120p' "$beads_invocations" >&2
+    exit 1
+fi
+beads_assert="$(assert_source_refusal_json \
+    "$beads_json" \
+    0 \
+    0 \
+    0 \
+    0 \
+    1 \
+    0 \
+    rch_verify_dirty_beads_metadata)"
+emit_event \
+    "assert" \
+    "beads_export_refusal_validated" \
+    "$(elapsed_since "$start")" \
+    "$(printf '%s' "$beads_assert" | python3 -c 'import json,sys; print(json.load(sys.stdin)["command_hash"])')" \
+    "" \
+    "$(printf '%s' "$beads_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
+    "beads metadata churn refused before fake RCH and kept out of source proof" \
+    "beads_export_churn"
+
+start="$(started_ms)"
+scratch_repo="$WORK_DIR/scratch-artifacts-repo"
+init_fixture_repo "$scratch_repo"
+printf '%s\n' '{"warnings":[]}' > "$scratch_repo/ubs.json"
+printf '%s\n' '{"drift":[]}' > "$scratch_repo/.plan-drift-report.json"
+scratch_before="$WORK_DIR/scratch-artifacts.before-status"
+git_status_v2 "$scratch_repo" > "$scratch_before"
+scratch_fake_rch="$WORK_DIR/fake-rch-scratch-artifacts"
+scratch_invocations="$WORK_DIR/scratch-artifacts-rch-invocations.txt"
+scratch_json="$WORK_DIR/scratch-artifacts-refusal.json"
+scratch_event_log="$WORK_DIR/scratch-artifacts-events.jsonl"
+write_fake_rch "$scratch_fake_rch"
+set +e
+FAKE_RCH_INVOCATIONS="$scratch_invocations" \
+RCH_VERIFY_NOW="2026-05-16T06:40:07.000000Z" \
+RCH_VERIFY_CONFIGURED_WORKERS="css" \
+RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
+bash "$RCH_VERIFY" \
+    --bead-id bd-9ygik.3 \
+    --require-clean-tree \
+    --project-root "$scratch_repo" \
+    --event-log "$scratch_event_log" \
+    --rch-bin "$scratch_fake_rch" \
+    -- \
+    cargo test --lib rch_verify_scratch_artifacts_e2e > "$scratch_json"
+scratch_exit=$?
+set -e
+if [ "$scratch_exit" -eq 0 ]; then
+    printf 'scratch artifacts fixture unexpectedly passed\n' >&2
+    exit 1
+fi
+assert_status_unchanged "$scratch_repo" "$scratch_before" "scratch-artifacts"
+if [ -s "$scratch_invocations" ]; then
+    printf 'scratch artifacts refusal invoked fake RCH:\n' >&2
+    sed -n '1,120p' "$scratch_invocations" >&2
+    exit 1
+fi
+scratch_assert="$(assert_source_refusal_json \
+    "$scratch_json" \
+    0 \
+    0 \
+    0 \
+    0 \
+    0 \
+    2 \
+    rch_verify_dirty_untracked_scratch)"
+emit_event \
+    "assert" \
+    "scratch_artifacts_refusal_validated" \
+    "$(elapsed_since "$start")" \
+    "$(printf '%s' "$scratch_assert" | python3 -c 'import json,sys; print(json.load(sys.stdin)["command_hash"])')" \
+    "" \
+    "$(printf '%s' "$scratch_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
+    "scratch artifacts refused before fake RCH and kept out of source proof" \
+    "scratch_artifacts"
 
 start="$(started_ms)"
 committed_repo="$WORK_DIR/committed-tree-repo"
