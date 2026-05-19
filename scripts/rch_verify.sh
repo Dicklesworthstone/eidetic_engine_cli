@@ -31,6 +31,10 @@ Options:
   --require-clean-tree      Refuse before RCH when the git checkout is dirty
   --committed-tree          Verify the committed --treeish from a generated source export when safe
   --treeish <ref>           Committed-tree ref to prove (default: HEAD)
+  --known-blocker-store <path>
+                            Override the known RCH blocker cache path
+  --known-blocker-override  Run through RCH despite a matching active known blocker
+  --skip-known-blocker      Disable known-blocker cache read/write for this run
   --json                    Accepted for symmetry; output is always JSON
   -h, --help                Show this help
 
@@ -58,6 +62,16 @@ BUILD_ADMISSION_ARTIFACT_DESTINATIONS=()
 REQUIRE_CLEAN_TREE=0
 COMMITTED_TREE=0
 TREEISH="HEAD"
+KNOWN_BLOCKER_ENABLED="${RCH_VERIFY_KNOWN_BLOCKER_ENABLED:-1}"
+KNOWN_BLOCKER_OVERRIDE=0
+KNOWN_BLOCKER_STORE="${RCH_VERIFY_KNOWN_BLOCKER_STORE:-}"
+KNOWN_BLOCKER_STORE_EXPLICIT=0
+if [ -n "${RCH_VERIFY_KNOWN_BLOCKER_STORE:-}" ]; then
+    KNOWN_BLOCKER_STORE_EXPLICIT=1
+fi
+KNOWN_BLOCKER_TTL_SECONDS="${RCH_VERIFY_KNOWN_BLOCKER_TTL_SECONDS:-21600}"
+KNOWN_BLOCKER_MAX_ENTRIES="${RCH_VERIFY_KNOWN_BLOCKER_MAX_ENTRIES:-128}"
+KNOWN_BLOCKER_JSON="null"
 RCH_RUNTIME_JSON='{"status":"not_checked","client_path":null,"client_version":null,"client_compat":null,"daemon_version":null,"daemon_compat":null,"daemon_socket_path":null,"message":null}'
 DEFAULT_RCH_BIN="/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch"
 if [ -z "${RCH_BIN:-}" ] && [ -x "$DEFAULT_RCH_BIN" ]; then
@@ -110,6 +124,9 @@ while [ "$#" -gt 0 ]; do
         --require-clean-tree) REQUIRE_CLEAN_TREE=1; shift ;;
         --committed-tree) COMMITTED_TREE=1; shift ;;
         --treeish) TREEISH="${2:?--treeish requires a value}"; shift 2 ;;
+        --known-blocker-store) KNOWN_BLOCKER_STORE="${2:?--known-blocker-store requires a value}"; KNOWN_BLOCKER_STORE_EXPLICIT=1; shift 2 ;;
+        --known-blocker-override) KNOWN_BLOCKER_OVERRIDE=1; shift ;;
+        --skip-known-blocker) KNOWN_BLOCKER_ENABLED=0; shift ;;
         --json) shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;
@@ -125,6 +142,10 @@ if [ "$#" -eq 0 ]; then
     echo "rch_verify: verifier command is required after --" >&2
     usage >&2
     exit 2
+fi
+
+if [ -z "$KNOWN_BLOCKER_STORE" ]; then
+    KNOWN_BLOCKER_STORE="$PROJECT_ROOT/.ee/derived/rch/known_blockers.jsonl"
 fi
 
 COMMAND=("$@")
@@ -635,6 +656,160 @@ if (
     and runtime.get("client_compat") != runtime.get("daemon_compat")
 ):
     print("rch_verify_client_daemon_version_skew")
+PY
+}
+
+known_blocker_lookup_json() {
+    if [ "$KNOWN_BLOCKER_ENABLED" != "1" ]; then
+        printf 'null'
+        return 0
+    fi
+    if [ -n "${RCH_VERIFY_FAKE_OUTPUT:-}" ] && [ "$KNOWN_BLOCKER_STORE_EXPLICIT" != "1" ]; then
+        printf 'null'
+        return 0
+    fi
+    KNOWN_BLOCKER_STORE_PATH="$KNOWN_BLOCKER_STORE" \
+    SOURCE_STATE_JSON_INPUT="${1:?source state JSON required}" \
+    COMMAND_KIND_VALUE="$COMMAND_KIND" \
+    COMMAND_TEXT_VALUE="$(command_string "${ENV_OVERRIDES[@]}" "${COMMAND[@]}")" \
+    REQUESTED_WORKERS_VALUE="${REQUESTED_WORKERS_CSV:-}" \
+    CONFIGURED_WORKERS_VALUE="${CONFIGURED_WORKERS_CSV:-}" \
+    RCH_RUNTIME_JSON_INPUT="${RCH_RUNTIME_JSON:-}" \
+    KNOWN_BLOCKER_NOW="${RCH_VERIFY_NOW:-}" \
+    python3 - <<'PY'
+import datetime as dt
+import hashlib
+import json
+import os
+from pathlib import Path
+
+def csv_items(raw):
+    seen = []
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if item and item not in seen:
+            seen.append(item)
+    return seen
+
+def parse_time(value):
+    if not value:
+        return None
+    text = str(value)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+def now_utc():
+    explicit = parse_time(os.environ.get("KNOWN_BLOCKER_NOW"))
+    return explicit or dt.datetime.now(dt.timezone.utc)
+
+def emit(payload):
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+store_path = os.environ.get("KNOWN_BLOCKER_STORE_PATH", "")
+if not store_path:
+    print("null")
+    raise SystemExit(0)
+
+path = Path(store_path)
+if not path.exists():
+    print("null")
+    raise SystemExit(0)
+
+try:
+    source_state = json.loads(os.environ.get("SOURCE_STATE_JSON_INPUT") or "{}")
+except Exception:
+    source_state = {}
+try:
+    runtime = json.loads(os.environ.get("RCH_RUNTIME_JSON_INPUT") or "{}")
+except Exception:
+    runtime = {}
+
+command_text = os.environ.get("COMMAND_TEXT_VALUE", "")
+command_hash = hashlib.sha256(command_text.encode("utf-8")).hexdigest()
+source_state_hash = (
+    source_state.get("source_manifest_hash")
+    or source_state.get("dirty_status_hash")
+    or ""
+)
+verifier_source_mode = source_state.get("verification_attribution") or None
+requested_workers = csv_items(os.environ.get("REQUESTED_WORKERS_VALUE", ""))
+configured_workers = csv_items(os.environ.get("CONFIGURED_WORKERS_VALUE", ""))
+runtime_fingerprint = {
+    "client_compat": runtime.get("client_compat"),
+    "daemon_compat": runtime.get("daemon_compat"),
+    "status": runtime.get("status"),
+}
+current = {
+    "command_kind": os.environ.get("COMMAND_KIND_VALUE") or None,
+    "command_hash": command_hash,
+    "source_state_hash": source_state_hash,
+    "verifier_source_mode": verifier_source_mode,
+    "requested_workers": requested_workers,
+    "configured_workers": configured_workers,
+    "runtime_fingerprint": runtime_fingerprint,
+}
+
+now = now_utc()
+matches = []
+try:
+    lines = path.read_text(encoding="utf-8").splitlines()
+except OSError:
+    print("null")
+    raise SystemExit(0)
+
+for line in lines:
+    if not line.strip():
+        continue
+    try:
+        entry = json.loads(line)
+    except Exception:
+        continue
+    expires_at = parse_time(entry.get("expires_at"))
+    if expires_at is None or expires_at <= now:
+        continue
+    if entry.get("command_kind") != current["command_kind"]:
+        continue
+    if entry.get("command_hash") != current["command_hash"]:
+        continue
+    if entry.get("source_state_hash") != current["source_state_hash"]:
+        continue
+    if entry.get("verifier_source_mode") != current["verifier_source_mode"]:
+        continue
+    if (entry.get("requested_workers") or []) != current["requested_workers"]:
+        continue
+    if (entry.get("configured_workers") or []) != current["configured_workers"]:
+        continue
+    if (entry.get("runtime_fingerprint") or {}) != current["runtime_fingerprint"]:
+        continue
+    matches.append(entry)
+
+if not matches:
+    print("null")
+    raise SystemExit(0)
+
+matches.sort(key=lambda item: item.get("last_seen") or item.get("first_seen") or "")
+matched = dict(matches[-1])
+matched["matched_at"] = now.isoformat(timespec="microseconds").replace("+00:00", "Z")
+matched["override_used"] = False
+emit(matched)
+PY
+}
+
+known_blocker_override_json() {
+    KNOWN_BLOCKER_JSON_INPUT="${1:?known blocker JSON required}" python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["KNOWN_BLOCKER_JSON_INPUT"])
+payload["override_used"] = True
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 PY
 }
 
@@ -1259,7 +1434,7 @@ emit_json() {
     shift 5
     local degraded_codes_json
     degraded_codes_json="$(json_array "$@")"
-    local command_json rch_invocation_json command_text_json remote_env_json stdout_json stderr_json requested_workers_json configured_workers_json daemon_workers_json build_admission_json rch_runtime_json
+    local command_json rch_invocation_json command_text_json remote_env_json stdout_json stderr_json requested_workers_json configured_workers_json daemon_workers_json build_admission_json rch_runtime_json known_blocker_json
     command_json="$(json_array "${COMMAND[@]}")"
     rch_invocation_json="$(json_array "${RCH_INVOCATION[@]}")"
     remote_env_json="$(json_array "${ENV_OVERRIDES[@]}")"
@@ -1275,6 +1450,7 @@ emit_json() {
     else
         rch_runtime_json='{"status":"not_checked","client_path":null,"client_version":null,"client_compat":null,"daemon_version":null,"daemon_compat":null,"daemon_socket_path":null,"message":null}'
     fi
+    known_blocker_json="${KNOWN_BLOCKER_JSON:-null}"
     local source_state_json
     if [ -n "${SOURCE_STATE_JSON:-}" ]; then
         source_state_json="$SOURCE_STATE_JSON"
@@ -1283,7 +1459,7 @@ emit_json() {
     fi
     local json_payload
     json_payload="$(cat <<EOF
-{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"build_admission":$build_admission_json,"rch_runtime":$rch_runtime_json,"source_state":$source_state_json}
+{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"build_admission":$build_admission_json,"rch_runtime":$rch_runtime_json,"known_blocker":$known_blocker_json,"source_state":$source_state_json}
 EOF
 )"
     JSON_PAYLOAD="$json_payload" \
@@ -1292,8 +1468,15 @@ EOF
     EVENT_LOG_PATH="$EVENT_LOG_PATH" \
     INCLUDE_SUMMARY="$INCLUDE_SUMMARY" \
     NO_WRITE="$NO_WRITE" \
+    KNOWN_BLOCKER_ENABLED="$KNOWN_BLOCKER_ENABLED" \
+    KNOWN_BLOCKER_STORE_PATH="$KNOWN_BLOCKER_STORE" \
+    KNOWN_BLOCKER_STORE_EXPLICIT="$KNOWN_BLOCKER_STORE_EXPLICIT" \
+    KNOWN_BLOCKER_TTL_SECONDS="$KNOWN_BLOCKER_TTL_SECONDS" \
+    KNOWN_BLOCKER_MAX_ENTRIES="$KNOWN_BLOCKER_MAX_ENTRIES" \
+    KNOWN_BLOCKER_FAKE_OUTPUT_PRESENT="${RCH_VERIFY_FAKE_OUTPUT:+1}" \
     RUN_STARTED_AT="$RUN_STARTED_AT" \
     python3 - <<'PY'
+import datetime as dt
 import hashlib
 import json
 import os
@@ -1422,6 +1605,181 @@ def sync_closure_root_counts(text):
             })
     return counts
 
+def parse_time(value):
+    if not value:
+        return None
+    text = str(value)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+def format_time(value):
+    return value.astimezone(dt.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+def csv_fingerprint(values):
+    return [str(item) for item in values or []]
+
+def blocker_kind_for(degraded_codes):
+    if "rch_verify_cargo_workspace_inheritance_blocked" in degraded_codes:
+        return "cargo_workspace_inheritance"
+    if "rch_verify_cargo_path_dependency_version_blocked" in degraded_codes:
+        return "cargo_path_dependency_version"
+    if "rch_verify_client_daemon_version_skew" in degraded_codes:
+        return "client_daemon_version_skew"
+    if "rch_verify_remote_checkout_incomplete" in degraded_codes:
+        return "remote_checkout_incomplete"
+    if "rch_verify_worker_disk_full" in degraded_codes:
+        return "worker_disk_full"
+    if "rch_verify_capacity_or_timeout" in degraded_codes:
+        return "capacity_or_timeout"
+    if "rch_verify_topology_blocked" in degraded_codes:
+        return "topology_blocked"
+    if "rch_verify_local_fallback_refused" in degraded_codes:
+        return "local_fallback_refused"
+    return None
+
+def remediation_bead_for(blocker_kind):
+    mapping = {
+        "cargo_workspace_inheritance": "bd-17c65.10.17.1.3",
+        "cargo_path_dependency_version": "bd-17c65.10.17.1.3",
+        "client_daemon_version_skew": "bd-17c65.10.17.1.4",
+        "remote_checkout_incomplete": "bd-17c65.10.17.1.3",
+        "worker_disk_full": "bd-17c65.10.17",
+        "capacity_or_timeout": "bd-17c65.10.17",
+        "topology_blocked": "bd-17c65.10.17.1.2",
+        "local_fallback_refused": "bd-17c65.10.17.1",
+    }
+    return mapping.get(blocker_kind, "bd-17c65.10.17.1")
+
+def known_blocker_entry(blocker_kind, degraded_codes, command_hash):
+    source_state_hash = proof.get("source_manifest_hash") or proof.get("dirty_status_hash")
+    runtime = proof.get("rch_runtime") or {}
+    details = proof.get("cargo_workspace_inheritance") or proof.get("cargo_path_dependency_version") or {}
+    normalized_argv_hash = "sha256:" + hashlib.sha256(
+        json.dumps(proof.get("command") or [], separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    runtime_fingerprint = {
+        "client_compat": runtime.get("client_compat"),
+        "daemon_compat": runtime.get("daemon_compat"),
+        "status": runtime.get("status"),
+    }
+    fingerprint_inputs = {
+        "blocker_kind": blocker_kind,
+        "degraded_codes": sorted(
+            code
+            for code in degraded_codes
+            if code != "rch_verify_remote_command_failed"
+        ),
+        "source_state_hash": source_state_hash,
+        "source_manifest_hash": proof.get("source_manifest_hash"),
+        "verifier_source_mode": proof.get("verification_attribution"),
+        "command_kind": proof.get("command_kind"),
+        "command_hash": command_hash,
+        "normalized_argv_hash": normalized_argv_hash,
+        "requested_workers": csv_fingerprint(proof.get("requested_workers")),
+        "configured_workers": csv_fingerprint(proof.get("configured_workers")),
+        "runtime_fingerprint": runtime_fingerprint,
+        "dependency": details.get("dependency") or details.get("crate"),
+        "manifest_path": details.get("manifest_path") or details.get("location_searched"),
+    }
+    fingerprint_payload = json.dumps(fingerprint_inputs, sort_keys=True, separators=(",", ":"))
+    now = parse_time(proof.get("generated_at")) or dt.datetime.now(dt.timezone.utc)
+    try:
+        ttl_seconds = int(os.environ.get("KNOWN_BLOCKER_TTL_SECONDS") or "21600")
+    except ValueError:
+        ttl_seconds = 21600
+    if ttl_seconds < 60:
+        ttl_seconds = 60
+    expires_at = now + dt.timedelta(seconds=ttl_seconds)
+    return {
+        "schema": "ee.rch.known_blocker.v1",
+        "blocker_fingerprint": "sha256:" + hashlib.sha256(fingerprint_payload.encode("utf-8")).hexdigest(),
+        "blocker_kind": blocker_kind,
+        "degraded_codes": sorted(dict.fromkeys(degraded_codes)),
+        "source_state_hash": source_state_hash,
+        "source_manifest_hash": proof.get("source_manifest_hash"),
+        "verifier_source_mode": proof.get("verification_attribution"),
+        "command_kind": proof.get("command_kind"),
+        "command_hash": command_hash,
+        "normalized_argv_hash": normalized_argv_hash,
+        "requested_workers": csv_fingerprint(proof.get("requested_workers")),
+        "configured_workers": csv_fingerprint(proof.get("configured_workers")),
+        "runtime_fingerprint": runtime_fingerprint,
+        "dependency": details.get("dependency") or details.get("crate"),
+        "manifest_path": details.get("manifest_path") or details.get("location_searched"),
+        "first_seen": format_time(now),
+        "last_seen": format_time(now),
+        "expires_at": format_time(expires_at),
+        "retry_after": format_time(expires_at),
+        "remediation_bead": remediation_bead_for(blocker_kind),
+        "override_used": False,
+    }
+
+def persist_known_blocker(entry):
+    if os.environ.get("KNOWN_BLOCKER_ENABLED") != "1":
+        return entry
+    if os.environ.get("NO_WRITE") == "1":
+        entry = dict(entry)
+        entry["write_suppressed"] = True
+        return entry
+    if os.environ.get("KNOWN_BLOCKER_FAKE_OUTPUT_PRESENT") and not os.environ.get("KNOWN_BLOCKER_STORE_EXPLICIT"):
+        return entry
+    store_path = os.environ.get("KNOWN_BLOCKER_STORE_PATH") or ""
+    if not store_path:
+        return entry
+    path = Path(store_path)
+    now = parse_time(entry.get("last_seen")) or dt.datetime.now(dt.timezone.utc)
+    try:
+        max_entries = int(os.environ.get("KNOWN_BLOCKER_MAX_ENTRIES") or "128")
+    except ValueError:
+        max_entries = 128
+    if max_entries < 1:
+        max_entries = 1
+    records = []
+    if path.exists():
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    continue
+                expires_at = parse_time(record.get("expires_at"))
+                if expires_at is not None and expires_at > now:
+                    records.append(record)
+        except OSError:
+            return entry
+    merged = []
+    prior_first_seen = None
+    for record in records:
+        if record.get("blocker_fingerprint") == entry.get("blocker_fingerprint"):
+            prior_first_seen = record.get("first_seen") or prior_first_seen
+            continue
+        merged.append(record)
+    if prior_first_seen:
+        entry = dict(entry)
+        entry["first_seen"] = prior_first_seen
+    merged.append(entry)
+    merged.sort(key=lambda item: item.get("last_seen") or item.get("first_seen") or "")
+    merged = merged[-max_entries:]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "".join(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n" for record in merged),
+            encoding="utf-8",
+        )
+    except OSError as error:
+        entry = dict(entry)
+        entry["write_error"] = redact(str(error))
+    return entry
+
 raw_stdout_tail = proof.get("stdout_tail") or ""
 raw_stderr_tail = proof.get("stderr_tail") or ""
 combined_tail = "\n".join(part for part in [raw_stdout_tail, raw_stderr_tail] if part)
@@ -1449,6 +1807,7 @@ source_state_degraded = list(proof.get("source_state_degraded_codes") or [])
 source_state_code_set = set(source_state_degraded)
 
 worker_state_code_set = {
+    "rch_verify_known_blocker_active",
     "rch_verify_capacity_or_timeout",
     "rch_verify_local_fallback_refused",
     "rch_verify_not_offloaded",
@@ -1470,6 +1829,9 @@ worker_state_degraded = [
 ]
 if proof.get("success") is not True:
     status = "refused"
+elif "rch_verify_known_blocker_active" in degraded:
+    status = "known_blocker_refused"
+    proof["verification_attribution"] = "not_run_known_blocker"
 elif exit_code is None:
     status = "dry_run"
 elif exit_code == 0 and proof.get("worker_id"):
@@ -1514,6 +1876,16 @@ proof["worker_state_degraded_codes"] = worker_state_degraded
 if bead_id:
     proof["bead_id"] = bead_id
 build_admission = proof.get("build_admission") or {}
+
+if proof.get("known_blocker") in (None, "null"):
+    proof["known_blocker"] = None
+known_blocker = proof.get("known_blocker")
+if status == "rch_environment_failure" and not isinstance(known_blocker, dict):
+    blocker_kind = blocker_kind_for(degraded)
+    if blocker_kind:
+        proof["known_blocker"] = persist_known_blocker(
+            known_blocker_entry(blocker_kind, degraded, command_hash)
+        )
 
 summary_lines = [
     f"RCH verifier `{command_text}` => `{status}`.",
@@ -1564,6 +1936,12 @@ if proof.get("requested_treeish"):
     summary_lines.append(f"- requested_treeish: `{proof.get('requested_treeish')}`")
 if proof.get("source_manifest_hash"):
     summary_lines.append(f"- source_manifest_hash: `{proof.get('source_manifest_hash')}`")
+known_blocker = proof.get("known_blocker") or {}
+if isinstance(known_blocker, dict) and known_blocker.get("blocker_fingerprint"):
+    summary_lines.append(f"- known_blocker: `{known_blocker.get('blocker_fingerprint')}`")
+    summary_lines.append(f"- remediation_bead: `{known_blocker.get('remediation_bead') or 'unknown'}`")
+    summary_lines.append(f"- retry_after: `{known_blocker.get('retry_after') or 'unknown'}`")
+    summary_lines.append(f"- known_blocker_override_used: `{str(bool(known_blocker.get('override_used'))).lower()}`")
 summary = "\n".join(summary_lines)
 
 if include_summary:
@@ -1600,6 +1978,7 @@ if ledger_path:
             "degraded_codes": proof.get("degraded_codes") or [],
             "source_state_degraded_codes": proof.get("source_state_degraded_codes") or [],
             "worker_state_degraded_codes": proof.get("worker_state_degraded_codes") or [],
+            "known_blocker": proof.get("known_blocker"),
             "error_codes": codes,
             "summary_markdown": summary,
         }
@@ -1645,6 +2024,7 @@ if event_log_path:
             "fake_rch_invoked": fake_invocation_count > 0,
             "fake_rch_invocation_count": fake_invocation_count,
             "source_manifest_hash": proof.get("source_manifest_hash"),
+            "known_blocker": proof.get("known_blocker"),
             "stdout_artifact_path": None,
             "stderr_artifact_path": None,
             "schema_validation_status": "not_run",
@@ -1781,6 +2161,20 @@ esac
 CONFIGURED_WORKERS_CSV="$(configured_workers)"
 DAEMON_WORKERS_CSV="$(daemon_workers)"
 REQUESTED_WORKERS_CSV="${RCH_WORKERS:-}"
+
+if [ "$KNOWN_BLOCKER_ENABLED" = "1" ]; then
+    KNOWN_BLOCKER_JSON="$(known_blocker_lookup_json "$SOURCE_STATE_JSON")"
+    if [ "$KNOWN_BLOCKER_JSON" != "null" ]; then
+        if [ "$KNOWN_BLOCKER_OVERRIDE" -eq 1 ]; then
+            KNOWN_BLOCKER_JSON="$(known_blocker_override_json "$KNOWN_BLOCKER_JSON")"
+        else
+            RCH_INVOCATION=()
+            emit_json true 1 0 "known RCH blocker matched; refusing before remote Cargo" "" \
+                "rch_verify_known_blocker_active"
+            exit 1
+        fi
+    fi
+fi
 
 if [ "${RCH_VERIFY_FAIL_FAST_STALE_WORKER:-1}" = "1" ]; then
     allowed_workers_csv="${REQUESTED_WORKERS_CSV:-$CONFIGURED_WORKERS_CSV}"

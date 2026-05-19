@@ -151,6 +151,117 @@ FAKERCH
     chmod +x "$path"
 }
 
+write_fake_rch_known_blocker() {
+    local path="${1:?fake rch path required}"
+    cat > "$path" <<'FAKERCH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+  printf 'rch 1.0.24\n'
+  exit 0
+fi
+if [ "${1:-}" = "status" ]; then
+  cat <<'JSON'
+{"data":{"daemon":{"version":"1.0.24","socket_path":"/tmp/rch.sock","workers":[],"recent_builds":[]}}}
+JSON
+  exit 0
+fi
+if [ "${1:-}" = "exec" ]; then
+  printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+  cat <<'TRANSCRIPT'
+error: failed to load manifest for dependency `frankensearch`
+
+Caused by:
+  failed to parse manifest at `/data/projects/frankensearch/frankensearch/Cargo.toml`
+
+Caused by:
+  error inheriting `license-file` from workspace root manifest's `workspace.package.license-file`
+
+Caused by:
+  `workspace.package.license-file` was not defined
+[RCH] remote css failed (exit 101)
+TRANSCRIPT
+  exit 101
+fi
+printf 'unexpected fake rch args: %s\n' "$*" >&2
+exit 2
+FAKERCH
+    chmod +x "$path"
+}
+
+assert_known_blocker_recorded_json() {
+    local path="${1:?json path required}"
+    python3 - "$path" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+if report.get("schema") != "ee.rch.verify.v1":
+    raise SystemExit(f"unexpected schema: {report}")
+if report.get("status") != "rch_environment_failure":
+    raise SystemExit(f"expected rch_environment_failure: {report}")
+if report.get("command_kind") != "cargo_test":
+    raise SystemExit(f"expected cargo_test command kind: {report}")
+if report.get("worker_id") != "css":
+    raise SystemExit(f"expected fake worker css: {report}")
+if "rch_verify_cargo_workspace_inheritance_blocked" not in (report.get("degraded_codes") or []):
+    raise SystemExit(f"missing workspace-inheritance degradation: {report}")
+blocker = report.get("known_blocker") or {}
+if blocker.get("blocker_kind") != "cargo_workspace_inheritance":
+    raise SystemExit(f"missing workspace-inheritance known blocker: {report}")
+if blocker.get("remediation_bead") != "bd-17c65.10.17.1.3":
+    raise SystemExit(f"known blocker should route to topology remediation: {report}")
+if not str(blocker.get("blocker_fingerprint") or "").startswith("sha256:"):
+    raise SystemExit(f"missing blocker fingerprint: {report}")
+if blocker.get("override_used") is not False:
+    raise SystemExit(f"first blocker record should not be an override: {report}")
+print(json.dumps({
+    "blocker_fingerprint": blocker.get("blocker_fingerprint"),
+    "command_hash": report.get("command_hash", ""),
+    "degraded_codes": report.get("degraded_codes") or [],
+}, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+assert_known_blocker_refusal_json() {
+    local path="${1:?json path required}"
+    local expected_fingerprint="${2:?expected blocker fingerprint required}"
+    python3 - "$path" "$expected_fingerprint" <<'PY'
+import json
+import sys
+
+path, expected_fingerprint = sys.argv[1:3]
+with open(path, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report.get("schema") != "ee.rch.verify.v1":
+    raise SystemExit(f"unexpected schema: {report}")
+if report.get("status") != "known_blocker_refused":
+    raise SystemExit(f"expected known_blocker_refused: {report}")
+if report.get("verification_attribution") != "not_run_known_blocker":
+    raise SystemExit(f"expected not_run_known_blocker attribution: {report}")
+if report.get("rch_invocation") != []:
+    raise SystemExit(f"known-blocker refusal must not plan RCH invocation: {report}")
+if report.get("elapsed_ms") != 0:
+    raise SystemExit(f"known-blocker refusal should be zero-elapsed preflight: {report}")
+codes = set(report.get("degraded_codes") or [])
+worker_codes = set(report.get("worker_state_degraded_codes") or [])
+if "rch_verify_known_blocker_active" not in codes:
+    raise SystemExit(f"missing known-blocker degraded code: {report}")
+if "rch_verify_known_blocker_active" not in worker_codes:
+    raise SystemExit(f"missing worker-state known-blocker code: {report}")
+blocker = report.get("known_blocker") or {}
+if blocker.get("blocker_fingerprint") != expected_fingerprint:
+    raise SystemExit(f"known-blocker fingerprint drifted: {report}")
+if blocker.get("override_used") is not False:
+    raise SystemExit(f"known-blocker refusal should not be override: {report}")
+print(json.dumps({
+    "command_hash": report.get("command_hash", ""),
+    "degraded_codes": sorted(codes),
+}, sort_keys=True, separators=(",", ":")))
+PY
+}
+
 assert_event_log_json() {
     local path="${1:?event log path required}"
     local expected_status="${2:?expected status required}"
@@ -909,6 +1020,91 @@ emit_event \
     "$(printf '%s' "$path_dep_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
     "committed-tree path dependency fixture reported unsupported before fake RCH" \
     "path_dependency_unsupported"
+
+start="$(started_ms)"
+known_blocker_repo="$WORK_DIR/known-blocker-repo"
+init_fixture_repo "$known_blocker_repo"
+known_blocker_before="$WORK_DIR/known-blocker.before-status"
+git_status_v2 "$known_blocker_repo" > "$known_blocker_before"
+known_blocker_fake_rch="$WORK_DIR/fake-rch-known-blocker"
+known_blocker_first_invocations="$WORK_DIR/known-blocker-first-invocations.txt"
+known_blocker_second_invocations="$WORK_DIR/known-blocker-second-invocations.txt"
+known_blocker_store="$WORK_DIR/known-blockers.jsonl"
+known_blocker_first_json="$WORK_DIR/known-blocker-recorded.json"
+known_blocker_second_json="$WORK_DIR/known-blocker-refused.json"
+known_blocker_first_event_log="$WORK_DIR/known-blocker-recorded-events.jsonl"
+known_blocker_second_event_log="$WORK_DIR/known-blocker-refused-events.jsonl"
+write_fake_rch_known_blocker "$known_blocker_fake_rch"
+set +e
+FAKE_RCH_INVOCATIONS="$known_blocker_first_invocations" \
+RCH_VERIFY_NOW="2026-05-16T06:40:10.000000Z" \
+RCH_VERIFY_CONFIGURED_WORKERS="css" \
+RCH_VERIFY_DAEMON_WORKERS="css" \
+bash "$RCH_VERIFY" \
+    --bead-id bd-9ygik.6.3 \
+    --skip-build-admission \
+    --known-blocker-store "$known_blocker_store" \
+    --project-root "$known_blocker_repo" \
+    --event-log "$known_blocker_first_event_log" \
+    --rch-bin "$known_blocker_fake_rch" \
+    -- \
+    cargo test --lib rch_verify_known_blocker_e2e > "$known_blocker_first_json"
+known_blocker_first_exit=$?
+set -e
+if [ "$known_blocker_first_exit" -eq 0 ]; then
+    printf 'known-blocker first fixture unexpectedly passed\n' >&2
+    exit 1
+fi
+assert_status_unchanged "$known_blocker_repo" "$known_blocker_before" "known-blocker-first"
+if [ "$(wc -l < "$known_blocker_first_invocations" | tr -d ' ')" != "1" ]; then
+    printf 'known-blocker first fixture should invoke fake RCH once:\n' >&2
+    sed -n '1,120p' "$known_blocker_first_invocations" >&2
+    exit 1
+fi
+known_blocker_first_assert="$(assert_known_blocker_recorded_json "$known_blocker_first_json")"
+known_blocker_fingerprint="$(
+    printf '%s' "$known_blocker_first_assert" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["blocker_fingerprint"])'
+)"
+assert_event_log_json "$known_blocker_first_event_log" "rch_environment_failure" "live_dirty_checkout" 1 101 "absent" >/dev/null
+
+set +e
+FAKE_RCH_INVOCATIONS="$known_blocker_second_invocations" \
+RCH_VERIFY_NOW="2026-05-16T06:40:10.000000Z" \
+RCH_VERIFY_CONFIGURED_WORKERS="css" \
+RCH_VERIFY_DAEMON_WORKERS="css" \
+bash "$RCH_VERIFY" \
+    --bead-id bd-9ygik.6.3 \
+    --skip-build-admission \
+    --known-blocker-store "$known_blocker_store" \
+    --project-root "$known_blocker_repo" \
+    --event-log "$known_blocker_second_event_log" \
+    --rch-bin "$known_blocker_fake_rch" \
+    -- \
+    cargo test --lib rch_verify_known_blocker_e2e > "$known_blocker_second_json"
+known_blocker_second_exit=$?
+set -e
+if [ "$known_blocker_second_exit" -eq 0 ]; then
+    printf 'known-blocker second fixture unexpectedly passed\n' >&2
+    exit 1
+fi
+assert_status_unchanged "$known_blocker_repo" "$known_blocker_before" "known-blocker-second"
+if [ -s "$known_blocker_second_invocations" ]; then
+    printf 'known-blocker refusal invoked fake RCH:\n' >&2
+    sed -n '1,120p' "$known_blocker_second_invocations" >&2
+    exit 1
+fi
+known_blocker_second_assert="$(assert_known_blocker_refusal_json "$known_blocker_second_json" "$known_blocker_fingerprint")"
+assert_event_log_json "$known_blocker_second_event_log" "known_blocker_refused" "not_run_known_blocker" 0 1 "absent" >/dev/null
+emit_event \
+    "assert" \
+    "known_blocker_refusal_validated" \
+    "$(elapsed_since "$start")" \
+    "$(printf '%s' "$known_blocker_second_assert" | python3 -c 'import json,sys; print(json.load(sys.stdin)["command_hash"])')" \
+    "" \
+    "$(printf '%s' "$known_blocker_second_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
+    "matching known blocker refused before fake RCH and emitted event-log evidence" \
+    "known_blocker_refusal"
 
 if [ "${RCH_VERIFY_CONTROL_PLANE_LONG_BENCH:-0}" = "1" ]; then
     start="$(started_ms)"

@@ -90,6 +90,21 @@ fn worker_degraded_contains(report: &Value, expected: &str) -> Result<bool, Stri
         .any(|code| code == expected))
 }
 
+fn workspace_inheritance_transcript() -> &'static str {
+    r#"error: failed to load manifest for dependency `frankensearch`
+
+Caused by:
+  failed to parse manifest at `/data/projects/frankensearch/frankensearch/Cargo.toml`
+
+Caused by:
+  error inheriting `license-file` from workspace root manifest's `workspace.package.license-file`
+
+Caused by:
+  `workspace.package.license-file` was not defined
+[RCH] remote vmi1227854 failed (exit 101)
+"#
+}
+
 fn unique_tmp_path(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2473,6 +2488,834 @@ fn synthetic_cargo_workspace_inheritance_failure_is_worker_topology() -> TestRes
     {
         return Err(format!(
             "workspace inheritance details should route the topology fix: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn known_blocker_cache_refuses_second_matching_environment_failure_before_rch() -> TestResult {
+    let invocation_log = unique_tmp_path("rch-known-blocker-invocations");
+    let store = unique_tmp_path("rch-known-blocker-store").join("known_blockers.jsonl");
+    let fake_rch = write_fake_rch(
+        "fake-rch-known-blocker.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+  printf 'rch 1.0.24\n'
+  exit 0
+fi
+if [ "${1:-}" = "status" ]; then
+  cat <<'JSON'
+{"data":{"daemon":{"version":"1.0.24","socket_path":"/tmp/rch.sock","workers":[],"recent_builds":[]}}}
+JSON
+  exit 0
+fi
+if [ "${1:-}" = "exec" ]; then
+  printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+  cat <<'TRANSCRIPT'
+error: failed to load manifest for dependency `frankensearch`
+
+Caused by:
+  failed to parse manifest at `/data/projects/frankensearch/frankensearch/Cargo.toml`
+
+Caused by:
+  error inheriting `license-file` from workspace root manifest's `workspace.package.license-file`
+
+Caused by:
+  `workspace.package.license-file` was not defined
+[RCH] remote vmi1227854 failed (exit 101)
+TRANSCRIPT
+  exit 101
+fi
+printf 'unexpected fake rch args: %s\n' "$*" >&2
+exit 2
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+    let store_arg = store
+        .to_str()
+        .ok_or_else(|| "store path is not utf-8".to_owned())?;
+    let args = [
+        "--skip-build-admission",
+        "--known-blocker-store",
+        store_arg,
+        "--rch-bin",
+        fake_rch_arg,
+        "--summary",
+        "--",
+        "cargo",
+        "test",
+        "--test",
+        "rch_verify_contract",
+        "strict_clean_tree",
+        "--",
+        "--nocapture",
+    ];
+    let envs = [
+        ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854"),
+    ];
+
+    let (first_status, first_stdout, first_stderr) = run_script_with_env(&args, &envs)?;
+    if first_status.success() {
+        return Err("first topology failure should preserve non-zero exit".to_owned());
+    }
+    let first: Value = serde_json::from_str(&first_stdout)
+        .map_err(|error| format!("parse first known-blocker run: {error}"))?;
+    if first["status"] != "rch_environment_failure"
+        || first["known_blocker"]["blocker_kind"] != "cargo_workspace_inheritance"
+        || first["known_blocker"]["remediation_bead"] != "bd-17c65.10.17.1.3"
+    {
+        return Err(format!(
+            "first run did not record a workspace-inheritance known blocker:\nstdout={first_stdout}\nstderr={first_stderr}"
+        ));
+    }
+    let first_fingerprint = first["known_blocker"]["blocker_fingerprint"]
+        .as_str()
+        .ok_or_else(|| format!("first known blocker missing fingerprint: {first}"))?
+        .to_owned();
+    let invocations = fs::read_to_string(&invocation_log)
+        .map_err(|error| format!("read first known-blocker invocations: {error}"))?;
+    if invocations.lines().count() != 1 {
+        return Err(format!(
+            "first run should invoke fake RCH once: {invocations:?}"
+        ));
+    }
+    let store_text =
+        fs::read_to_string(&store).map_err(|error| format!("read known-blocker store: {error}"))?;
+    if store_text.lines().count() != 1 || !store_text.contains(&first_fingerprint) {
+        return Err(format!(
+            "known-blocker store should contain one active fingerprint: {store_text}"
+        ));
+    }
+
+    let (second_status, second_stdout, _second_stderr) = run_script_with_env(&args, &envs)?;
+    if second_status.success() {
+        return Err("second matching known blocker should refuse before RCH".to_owned());
+    }
+    let second: Value = serde_json::from_str(&second_stdout)
+        .map_err(|error| format!("parse second known-blocker run: {error}"))?;
+    if second["status"] != "known_blocker_refused"
+        || second["verification_attribution"] != "not_run_known_blocker"
+        || second["known_blocker"]["blocker_fingerprint"] != first_fingerprint
+        || second["known_blocker"]["override_used"] != false
+        || second["rch_invocation"] != serde_json::json!([])
+        || second["elapsed_ms"] != 0
+    {
+        return Err(format!("second run did not fail fast correctly: {second}"));
+    }
+    if !degraded_contains(&second, "rch_verify_known_blocker_active")?
+        || !worker_degraded_contains(&second, "rch_verify_known_blocker_active")?
+    {
+        return Err(format!(
+            "known-blocker refusal missing degraded evidence: {second}"
+        ));
+    }
+    let invocations = fs::read_to_string(&invocation_log)
+        .map_err(|error| format!("read second known-blocker invocations: {error}"))?;
+    if invocations.lines().count() != 1 {
+        return Err(format!(
+            "second run should not invoke fake RCH again: {invocations:?}"
+        ));
+    }
+    let summary = second["summary_markdown"]
+        .as_str()
+        .ok_or_else(|| "known-blocker summary missing".to_owned())?;
+    if !summary.contains("known_blocker: `")
+        || !summary.contains("remediation_bead: `bd-17c65.10.17.1.3`")
+        || !summary.contains("known_blocker_override_used: `false`")
+    {
+        return Err(format!("summary missing known-blocker fields: {summary}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn known_blocker_source_state_change_allows_new_remote_attempt() -> TestResult {
+    let workspace = seed_git_workspace("rch-known-blocker-source-state")?;
+    let invocation_log = unique_tmp_path("rch-known-blocker-source-invocations");
+    let store = unique_tmp_path("rch-known-blocker-source-store").join("known_blockers.jsonl");
+    let fake_rch = write_fake_rch(
+        "fake-rch-known-blocker-source.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+  printf 'rch 1.0.24\n'
+  exit 0
+fi
+if [ "${1:-}" = "status" ]; then
+  cat <<'JSON'
+{"data":{"daemon":{"version":"1.0.24","socket_path":"/tmp/rch.sock","workers":[],"recent_builds":[]}}}
+JSON
+  exit 0
+fi
+if [ "${1:-}" = "exec" ]; then
+  printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+  cat <<'TRANSCRIPT'
+error: failed to load manifest for dependency `frankensearch`
+
+Caused by:
+  failed to parse manifest at `/data/projects/frankensearch/frankensearch/Cargo.toml`
+
+Caused by:
+  error inheriting `license-file` from workspace root manifest's `workspace.package.license-file`
+
+Caused by:
+  `workspace.package.license-file` was not defined
+[RCH] remote vmi1227854 failed (exit 101)
+TRANSCRIPT
+  exit 101
+fi
+printf 'unexpected fake rch args: %s\n' "$*" >&2
+exit 2
+"#,
+    )?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path is not utf-8".to_owned())?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+    let store_arg = store
+        .to_str()
+        .ok_or_else(|| "store path is not utf-8".to_owned())?;
+    let args = [
+        "--skip-build-admission",
+        "--known-blocker-store",
+        store_arg,
+        "--rch-bin",
+        fake_rch_arg,
+        "--project-root",
+        workspace_arg,
+        "--",
+        "cargo",
+        "test",
+        "--lib",
+        "known_blocker_source_state_smoke",
+    ];
+    let envs = [
+        ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854"),
+    ];
+
+    let (first_status, first_stdout, _first_stderr) = run_script_with_env(&args, &envs)?;
+    if first_status.success() {
+        return Err("first source-state fixture run should fail remotely".to_owned());
+    }
+    let first: Value = serde_json::from_str(&first_stdout)
+        .map_err(|error| format!("parse first source-state known-blocker run: {error}"))?;
+    let first_source_state_hash = first["known_blocker"]["source_state_hash"]
+        .as_str()
+        .ok_or_else(|| format!("first run missing known-blocker source hash: {first}"))?
+        .to_owned();
+
+    let (second_status, second_stdout, _second_stderr) = run_script_with_env(&args, &envs)?;
+    if second_status.success() {
+        return Err("second matching source-state fixture should fail-fast".to_owned());
+    }
+    let second: Value = serde_json::from_str(&second_stdout)
+        .map_err(|error| format!("parse second source-state known-blocker run: {error}"))?;
+    if second["status"] != "known_blocker_refused" {
+        return Err(format!(
+            "unchanged source state should match the blocker: {second}"
+        ));
+    }
+
+    fs::write(
+        workspace.join("tracked.txt"),
+        "changed source-state fixture\n",
+    )
+    .map_err(|error| format!("mutate source-state fixture: {error}"))?;
+
+    let (third_status, third_stdout, _third_stderr) = run_script_with_env(&args, &envs)?;
+    if third_status.success() {
+        return Err("changed source-state fixture should preserve remote failure".to_owned());
+    }
+    let third: Value = serde_json::from_str(&third_stdout)
+        .map_err(|error| format!("parse changed source-state known-blocker run: {error}"))?;
+    if third["status"] == "known_blocker_refused" {
+        return Err(format!(
+            "changed source state should not reuse the active blocker: {third}"
+        ));
+    }
+    if third["status"] != "rch_environment_failure"
+        || third["known_blocker"]["source_state_hash"] == first_source_state_hash
+    {
+        return Err(format!(
+            "changed source state should run RCH and record a distinct blocker: {third}"
+        ));
+    }
+    let invocations = fs::read_to_string(&invocation_log)
+        .map_err(|error| format!("read source-state invocations: {error}"))?;
+    if invocations.lines().count() != 2 {
+        return Err(format!(
+            "changed source state should launch fake RCH again: {invocations:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn known_blocker_command_kind_change_allows_new_remote_attempt() -> TestResult {
+    let invocation_log = unique_tmp_path("rch-known-blocker-kind-invocations");
+    let store = unique_tmp_path("rch-known-blocker-kind-store").join("known_blockers.jsonl");
+    let fake_rch = write_fake_rch(
+        "fake-rch-known-blocker-kind.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+  printf 'rch 1.0.24\n'
+  exit 0
+fi
+if [ "${1:-}" = "status" ]; then
+  cat <<'JSON'
+{"data":{"daemon":{"version":"1.0.24","socket_path":"/tmp/rch.sock","workers":[],"recent_builds":[]}}}
+JSON
+  exit 0
+fi
+if [ "${1:-}" = "exec" ]; then
+  printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+  cat <<'TRANSCRIPT'
+error: failed to load manifest for dependency `frankensearch`
+
+Caused by:
+  failed to parse manifest at `/data/projects/frankensearch/frankensearch/Cargo.toml`
+
+Caused by:
+  error inheriting `license-file` from workspace root manifest's `workspace.package.license-file`
+
+Caused by:
+  `workspace.package.license-file` was not defined
+[RCH] remote vmi1227854 failed (exit 101)
+TRANSCRIPT
+  exit 101
+fi
+printf 'unexpected fake rch args: %s\n' "$*" >&2
+exit 2
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+    let store_arg = store
+        .to_str()
+        .ok_or_else(|| "store path is not utf-8".to_owned())?;
+    let cargo_test_args = [
+        "--skip-build-admission",
+        "--known-blocker-store",
+        store_arg,
+        "--rch-bin",
+        fake_rch_arg,
+        "--",
+        "cargo",
+        "test",
+        "--lib",
+        "known_blocker_command_kind_smoke",
+    ];
+    let cargo_check_args = [
+        "--skip-build-admission",
+        "--known-blocker-store",
+        store_arg,
+        "--rch-bin",
+        fake_rch_arg,
+        "--",
+        "cargo",
+        "check",
+        "--all-targets",
+    ];
+    let envs = [
+        ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854"),
+    ];
+
+    let (first_status, first_stdout, _first_stderr) = run_script_with_env(&cargo_test_args, &envs)?;
+    if first_status.success() {
+        return Err("first command-kind fixture run should fail remotely".to_owned());
+    }
+    let first: Value = serde_json::from_str(&first_stdout)
+        .map_err(|error| format!("parse first command-kind known-blocker run: {error}"))?;
+    if first["command_kind"] != "cargo_test"
+        || first["known_blocker"]["blocker_kind"] != "cargo_workspace_inheritance"
+    {
+        return Err(format!(
+            "first run should record cargo-test blocker: {first}"
+        ));
+    }
+
+    let (second_status, second_stdout, _second_stderr) =
+        run_script_with_env(&cargo_check_args, &envs)?;
+    if second_status.success() {
+        return Err("changed command-kind fixture should preserve remote failure".to_owned());
+    }
+    let second: Value = serde_json::from_str(&second_stdout)
+        .map_err(|error| format!("parse changed command-kind known-blocker run: {error}"))?;
+    if second["status"] == "known_blocker_refused" {
+        return Err(format!(
+            "changed command kind should not reuse the cargo-test blocker: {second}"
+        ));
+    }
+    if second["command_kind"] != "cargo_check"
+        || second["status"] != "rch_environment_failure"
+        || second["known_blocker"]["blocker_kind"] != "cargo_workspace_inheritance"
+    {
+        return Err(format!(
+            "changed command kind should run RCH and record a blocker: {second}"
+        ));
+    }
+    let invocations = fs::read_to_string(&invocation_log)
+        .map_err(|error| format!("read command-kind invocations: {error}"))?;
+    if invocations.lines().count() != 2 {
+        return Err(format!(
+            "changed command kind should launch fake RCH again: {invocations:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn known_blocker_override_runs_rch_and_records_override_evidence() -> TestResult {
+    let invocation_log = unique_tmp_path("rch-known-blocker-override-invocations");
+    let store = unique_tmp_path("rch-known-blocker-override-store").join("known_blockers.jsonl");
+    let fake_rch = write_fake_rch(
+        "fake-rch-known-blocker-override.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+  printf 'rch 1.0.24\n'
+  exit 0
+fi
+if [ "${1:-}" = "status" ]; then
+  cat <<'JSON'
+{"data":{"daemon":{"version":"1.0.24","socket_path":"/tmp/rch.sock","workers":[],"recent_builds":[]}}}
+JSON
+  exit 0
+fi
+if [ "${1:-}" = "exec" ]; then
+  printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+  printf 'error: failed to load manifest for dependency `frankensearch`\n'
+  printf 'error inheriting `license-file` from workspace root manifest'\''s `workspace.package.license-file`\n'
+  printf '`workspace.package.license-file` was not defined\n'
+  printf '[RCH] remote vmi1227854 failed (exit 101)\n'
+  exit 101
+fi
+printf 'unexpected fake rch args: %s\n' "$*" >&2
+exit 2
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+    let store_arg = store
+        .to_str()
+        .ok_or_else(|| "store path is not utf-8".to_owned())?;
+    let base_args = [
+        "--skip-build-admission",
+        "--known-blocker-store",
+        store_arg,
+        "--rch-bin",
+        fake_rch_arg,
+        "--",
+        "cargo",
+        "test",
+        "--lib",
+        "known_blocker_override_smoke",
+    ];
+    let envs = [
+        ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854"),
+    ];
+
+    let (first_status, first_stdout, _first_stderr) = run_script_with_env(&base_args, &envs)?;
+    if first_status.success() {
+        return Err("first override fixture run should fail remotely".to_owned());
+    }
+    let first: Value = serde_json::from_str(&first_stdout)
+        .map_err(|error| format!("parse first override fixture run: {error}"))?;
+    let fingerprint = first["known_blocker"]["blocker_fingerprint"]
+        .as_str()
+        .ok_or_else(|| format!("first override fixture missing known blocker: {first}"))?
+        .to_owned();
+
+    let override_args = [
+        "--skip-build-admission",
+        "--known-blocker-store",
+        store_arg,
+        "--known-blocker-override",
+        "--rch-bin",
+        fake_rch_arg,
+        "--summary",
+        "--",
+        "cargo",
+        "test",
+        "--lib",
+        "known_blocker_override_smoke",
+    ];
+    let (override_status, override_stdout, _override_stderr) =
+        run_script_with_env(&override_args, &envs)?;
+    if override_status.success() {
+        return Err("override fixture should still preserve remote non-zero exit".to_owned());
+    }
+    let report: Value = serde_json::from_str(&override_stdout)
+        .map_err(|error| format!("parse known-blocker override run: {error}"))?;
+    if report["status"] != "rch_environment_failure"
+        || report["known_blocker"]["blocker_fingerprint"] != fingerprint
+        || report["known_blocker"]["override_used"] != true
+    {
+        return Err(format!(
+            "override run missing known-blocker evidence: {report}"
+        ));
+    }
+    let invocations = fs::read_to_string(&invocation_log)
+        .map_err(|error| format!("read override invocations: {error}"))?;
+    if invocations.lines().count() != 2 {
+        return Err(format!(
+            "override should invoke fake RCH after the initial recorded failure: {invocations:?}"
+        ));
+    }
+    let summary = report["summary_markdown"]
+        .as_str()
+        .ok_or_else(|| "override summary missing".to_owned())?;
+    if !summary.contains("known_blocker_override_used: `true`") {
+        return Err(format!("summary missing override flag: {summary}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn known_blocker_no_write_reports_but_does_not_persist() -> TestResult {
+    let store = unique_tmp_path("rch-known-blocker-no-write-store").join("known_blockers.jsonl");
+    let store_arg = store
+        .to_str()
+        .ok_or_else(|| "store path is not utf-8".to_owned())?;
+    let args = [
+        "--skip-build-admission",
+        "--no-write",
+        "--known-blocker-store",
+        store_arg,
+        "--",
+        "cargo",
+        "test",
+        "--lib",
+        "known_blocker_no_write_smoke",
+    ];
+    let envs = [
+        ("RCH_VERIFY_FAKE_OUTPUT", workspace_inheritance_transcript()),
+        ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
+        ("RCH_VERIFY_FAIL_FAST_VERSION_SKEW", "0"),
+    ];
+
+    let (status, stdout, _stderr) = run_script_with_env(&args, &envs)?;
+    if status.success() {
+        return Err("no-write known-blocker fixture should preserve remote failure".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse no-write known-blocker report: {error}"))?;
+    if report["status"] != "rch_environment_failure"
+        || report["known_blocker"]["blocker_kind"] != "cargo_workspace_inheritance"
+        || report["known_blocker"]["write_suppressed"] != true
+    {
+        return Err(format!(
+            "no-write report should include suppressed known-blocker evidence: {report}"
+        ));
+    }
+    if store.exists() {
+        return Err(format!(
+            "no-write must not create known-blocker store: {}",
+            store.display()
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn expired_known_blocker_allows_a_new_remote_attempt() -> TestResult {
+    let store = unique_tmp_path("rch-known-blocker-ttl-store").join("known_blockers.jsonl");
+    let store_arg = store
+        .to_str()
+        .ok_or_else(|| "store path is not utf-8".to_owned())?;
+    let args = [
+        "--skip-build-admission",
+        "--known-blocker-store",
+        store_arg,
+        "--",
+        "cargo",
+        "test",
+        "--lib",
+        "known_blocker_ttl_smoke",
+    ];
+    let first_envs = [
+        ("RCH_VERIFY_FAKE_OUTPUT", workspace_inheritance_transcript()),
+        ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
+        ("RCH_VERIFY_FAIL_FAST_VERSION_SKEW", "0"),
+        ("RCH_VERIFY_KNOWN_BLOCKER_TTL_SECONDS", "60"),
+        ("RCH_VERIFY_NOW", "2026-05-16T04:40:00.000000Z"),
+    ];
+    let second_envs = [
+        ("RCH_VERIFY_FAKE_OUTPUT", workspace_inheritance_transcript()),
+        ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
+        ("RCH_VERIFY_FAIL_FAST_VERSION_SKEW", "0"),
+        ("RCH_VERIFY_KNOWN_BLOCKER_TTL_SECONDS", "60"),
+        ("RCH_VERIFY_NOW", "2026-05-16T04:42:00.000000Z"),
+    ];
+
+    let (first_status, first_stdout, _first_stderr) = run_script_with_env(&args, &first_envs)?;
+    if first_status.success() {
+        return Err("first TTL fixture run should preserve remote failure".to_owned());
+    }
+    let first: Value = serde_json::from_str(&first_stdout)
+        .map_err(|error| format!("parse first TTL known-blocker run: {error}"))?;
+    if first["status"] != "rch_environment_failure" {
+        return Err(format!("first TTL run should record blocker: {first}"));
+    }
+
+    let (second_status, second_stdout, _second_stderr) = run_script_with_env(&args, &second_envs)?;
+    if second_status.success() {
+        return Err("expired TTL fixture run should preserve remote failure".to_owned());
+    }
+    let second: Value = serde_json::from_str(&second_stdout)
+        .map_err(|error| format!("parse second TTL known-blocker run: {error}"))?;
+    if second["status"] == "known_blocker_refused" {
+        return Err(format!("expired blocker should not fail fast: {second}"));
+    }
+    if second["status"] != "rch_environment_failure"
+        || second["known_blocker"]["blocker_kind"] != "cargo_workspace_inheritance"
+    {
+        return Err(format!(
+            "expired blocker should allow and record a new attempt: {second}"
+        ));
+    }
+    let store_text =
+        fs::read_to_string(&store).map_err(|error| format!("read TTL store: {error}"))?;
+    if store_text.lines().count() != 1 {
+        return Err(format!(
+            "expired entries should be compacted before writing replacement: {store_text}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn known_blocker_store_respects_max_entries_cap() -> TestResult {
+    let store = unique_tmp_path("rch-known-blocker-cap-store").join("known_blockers.jsonl");
+    let store_arg = store
+        .to_str()
+        .ok_or_else(|| "store path is not utf-8".to_owned())?;
+    let envs = [
+        ("RCH_VERIFY_FAKE_OUTPUT", workspace_inheritance_transcript()),
+        ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
+        ("RCH_VERIFY_FAIL_FAST_VERSION_SKEW", "0"),
+        ("RCH_VERIFY_KNOWN_BLOCKER_MAX_ENTRIES", "2"),
+    ];
+
+    for test_name in [
+        "known_blocker_cap_first",
+        "known_blocker_cap_second",
+        "known_blocker_cap_third",
+    ] {
+        let args = [
+            "--skip-build-admission",
+            "--known-blocker-store",
+            store_arg,
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            test_name,
+        ];
+        let (status, stdout, _stderr) = run_script_with_env(&args, &envs)?;
+        if status.success() {
+            return Err(format!(
+                "cap fixture {test_name} should preserve remote failure"
+            ));
+        }
+        let report: Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("parse cap fixture {test_name}: {error}"))?;
+        if report["status"] != "rch_environment_failure" {
+            return Err(format!("cap fixture should record blocker: {report}"));
+        }
+    }
+
+    let store_text =
+        fs::read_to_string(&store).map_err(|error| format!("read capped store: {error}"))?;
+    let lines: Vec<&str> = store_text.lines().collect();
+    if lines.len() != 2 {
+        return Err(format!(
+            "known-blocker store should be capped at two entries: {store_text}"
+        ));
+    }
+    for line in lines {
+        let record: Value =
+            serde_json::from_str(line).map_err(|error| format!("parse capped row: {error}"))?;
+        if record["schema"] != "ee.rch.known_blocker.v1"
+            || record["blocker_kind"] != "cargo_workspace_inheritance"
+        {
+            return Err(format!("capped row should be a known blocker: {record}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn known_blocker_store_is_redacted_and_excludes_unbounded_inputs() -> TestResult {
+    let workspace = seed_git_workspace("rch-known-blocker-redaction")?;
+    for idx in 0..24 {
+        fs::write(
+            workspace.join(format!("known-blocker-redaction-untracked-{idx}.txt")),
+            "redacted fixture\n",
+        )
+        .map_err(|error| format!("write redaction dirty path fixture: {error}"))?;
+    }
+    let store = unique_tmp_path("rch-known-blocker-redaction-store").join("known_blockers.jsonl");
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path is not utf-8".to_owned())?;
+    let store_arg = store
+        .to_str()
+        .ok_or_else(|| "store path is not utf-8".to_owned())?;
+    let args = [
+        "--skip-build-admission",
+        "--known-blocker-store",
+        store_arg,
+        "--project-root",
+        workspace_arg,
+        "--env",
+        "API_TOKEN=fixture-token-value",
+        "--",
+        "cargo",
+        "test",
+        "--lib",
+        "known_blocker_redaction_smoke",
+    ];
+    let redaction_transcript = r#"error: failed to load manifest for dependency `frankensearch`
+
+Caused by:
+  failed to parse manifest at `/Users/jemanuel/private/frankensearch/Cargo.toml`
+
+Caused by:
+  error inheriting `license-file` from workspace root manifest's `workspace.package.license-file`
+
+Caused by:
+  `workspace.package.license-file` was not defined
+diagnostic detail: token=fixture-token-value
+[RCH] remote vmi1227854 failed (exit 101)
+"#;
+    let envs = [
+        ("RCH_VERIFY_FAKE_OUTPUT", redaction_transcript),
+        ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
+        ("RCH_VERIFY_FAIL_FAST_VERSION_SKEW", "0"),
+    ];
+
+    let (status, stdout, _stderr) = run_script_with_env(&args, &envs)?;
+    if status.success() {
+        return Err("redaction fixture should preserve remote failure".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse redaction known-blocker run: {error}"))?;
+    if report["known_blocker"]["blocker_kind"] != "cargo_workspace_inheritance" {
+        return Err(format!("redaction fixture should record blocker: {report}"));
+    }
+    let store_text =
+        fs::read_to_string(&store).map_err(|error| format!("read redaction store: {error}"))?;
+    if !store_text.contains("/Users/<redacted>/private/frankensearch/Cargo.toml") {
+        return Err(format!(
+            "known-blocker store should keep redacted manifest evidence: {store_text}"
+        ));
+    }
+    for forbidden in [
+        "/Users/jemanuel",
+        "API_TOKEN",
+        "fixture-token-value",
+        "diagnostic detail",
+        "known-blocker-redaction-untracked-",
+        "dirty_paths_sample",
+        "remote_env",
+        "stdout_tail",
+        "stderr_tail",
+    ] {
+        if store_text.contains(forbidden) {
+            return Err(format!(
+                "known-blocker store leaked forbidden fixture text {forbidden:?}: {store_text}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn known_blocker_refusal_json_is_deterministic_for_same_scrubbed_input() -> TestResult {
+    let store =
+        unique_tmp_path("rch-known-blocker-deterministic-store").join("known_blockers.jsonl");
+    let store_arg = store
+        .to_str()
+        .ok_or_else(|| "store path is not utf-8".to_owned())?;
+    let args = [
+        "--skip-build-admission",
+        "--known-blocker-store",
+        store_arg,
+        "--",
+        "cargo",
+        "test",
+        "--lib",
+        "known_blocker_deterministic_smoke",
+    ];
+    let envs = [
+        ("RCH_VERIFY_FAKE_OUTPUT", workspace_inheritance_transcript()),
+        ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
+        ("RCH_VERIFY_FAIL_FAST_VERSION_SKEW", "0"),
+    ];
+
+    let (first_status, first_stdout, _first_stderr) = run_script_with_env(&args, &envs)?;
+    if first_status.success() {
+        return Err("first deterministic fixture should preserve remote failure".to_owned());
+    }
+    let first: Value = serde_json::from_str(&first_stdout)
+        .map_err(|error| format!("parse first deterministic known-blocker run: {error}"))?;
+    if first["status"] != "rch_environment_failure" {
+        return Err(format!(
+            "first deterministic run should record blocker: {first}"
+        ));
+    }
+
+    let (second_status, second_stdout, _second_stderr) = run_script_with_env(&args, &envs)?;
+    if second_status.success() {
+        return Err("second deterministic fixture should fail-fast".to_owned());
+    }
+    let second: Value = serde_json::from_str(&second_stdout)
+        .map_err(|error| format!("parse second deterministic known-blocker run: {error}"))?;
+    if second["status"] != "known_blocker_refused" {
+        return Err(format!(
+            "second deterministic run should fail-fast: {second}"
+        ));
+    }
+
+    let (third_status, third_stdout, _third_stderr) = run_script_with_env(&args, &envs)?;
+    if third_status.success() {
+        return Err("third deterministic fixture should fail-fast".to_owned());
+    }
+    let third: Value = serde_json::from_str(&third_stdout)
+        .map_err(|error| format!("parse third deterministic known-blocker run: {error}"))?;
+    if second != third {
+        return Err(format!(
+            "known-blocker refusal JSON should be deterministic:\n{second}\n{third}"
         ));
     }
     Ok(())
