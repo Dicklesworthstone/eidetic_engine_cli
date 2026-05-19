@@ -273,12 +273,21 @@ emit_json_cmd() {
                 ),
                 repairActions:(
                     if $allowed == "denied" then
-                        [{
-                            priority:1,
-                            kind:"use_remote_wrapper",
-                            command:$required_remote_wrapper,
-                            message:"Run Rust verification through the repo RCH wrapper; do not retry local Cargo."
-                        }]
+                        if $subcommand == "command_substitution" then
+                            [{
+                                priority:1,
+                                kind:"avoid_shell_command_substitution",
+                                command:null,
+                                message:"Do not embed verifier commands in shell command substitution; pass evidence as plain quoted prose, a direct tool call, or an existing artifact path."
+                            }]
+                        else
+                            [{
+                                priority:1,
+                                kind:"use_remote_wrapper",
+                                command:$required_remote_wrapper,
+                                message:"Run Rust verification through the repo RCH wrapper; do not retry local Cargo."
+                            }]
+                        end
                     else [] end
                 ),
                 evidence:[{
@@ -533,7 +542,19 @@ run_self_test() {
         allowed*) ;;
         *) printf 'self-test FAILED: empty command must be allowed; got %s\n' "$result" >&2; exit 1 ;;
     esac
-    printf 'self-test PASSED: 15 classifier cases produced expected outcomes\n'
+    if command -v jq >/dev/null 2>&1; then
+        repair_kind=$(emit_json_cmd \
+            "denied" \
+            "shell command substitution would execute Rust verification before the outer command" \
+            "command_substitution" \
+            "command substitution containing cargo/rustc/rustdoc must not be used for tracker or mail evidence" |
+            jq -r '.repairActions[0].kind')
+        case "$repair_kind" in
+            avoid_shell_command_substitution) ;;
+            *) printf 'self-test FAILED: command substitution repair action must be avoid_shell_command_substitution; got %s\n' "$repair_kind" >&2; exit 1 ;;
+        esac
+    fi
+    printf 'self-test PASSED: 15 classifier cases and JSON repair action produced expected outcomes\n'
     exit 0
 }
 
