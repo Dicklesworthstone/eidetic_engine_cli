@@ -32,6 +32,7 @@ use crate::search::TantivyIndex;
 use crate::search::{
     Embedder, HashEmbedder, SpeedMode, TwoTierConfig, TwoTierIndex, TwoTierSearcher,
 };
+use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 use frankensearch::LexicalSearch;
 
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
@@ -1369,10 +1370,7 @@ fn redact_search_absolute_path_like_segments(
             output.push_str(REDACTED_PATH);
             cursor += prefix.len();
             while cursor < input.len() {
-                let next = input[cursor..]
-                    .chars()
-                    .next()
-                    .unwrap_or('\0');
+                let next = input[cursor..].chars().next().unwrap_or('\0');
                 if next.is_whitespace()
                     || matches!(
                         next,
@@ -1397,10 +1395,7 @@ fn redact_search_absolute_path_like_segments(
             continue;
         }
 
-        let next = remaining
-            .chars()
-            .next()
-            .unwrap_or('\0');
+        let next = remaining.chars().next().unwrap_or('\0');
         output.push(next);
         cursor += next.len_utf8();
     }
@@ -1502,7 +1497,9 @@ fn public_search_metadata(
                 "content_truncated".to_string(),
                 search_metadata_truncated_value(value),
             );
-        } else if let Some(content) = public_fields.get("content").and_then(serde_json::Value::as_str)
+        } else if let Some(content) = public_fields
+            .get("content")
+            .and_then(serde_json::Value::as_str)
         {
             public_fields.insert(
                 "content_truncated".to_string(),
@@ -1733,10 +1730,21 @@ fn search_hit_pack_item(index: usize, hit: &SearchHit) -> Option<PackDraftItem> 
                 .or_else(|| metadata_string(metadata, "content"))
                 .unwrap_or_default(),
         ),
-        relevance: UnitScore::parse(if hit.score.is_nan() { 0.0 } else { hit.score.clamp(0.0, 1.0) })
-            .unwrap_or_else(|_| UnitScore::neutral()),
+        relevance: UnitScore::parse(if hit.score.is_nan() {
+            0.0
+        } else {
+            hit.score.clamp(0.0, 1.0)
+        })
+        .unwrap_or_else(|_| UnitScore::neutral()),
         utility: metadata_f32(metadata, SEARCH_ANALYSIS_UTILITY_KEY)
-            .and_then(|value| UnitScore::parse(if value.is_nan() { 0.0 } else { value.clamp(0.0, 1.0) }).ok())
+            .and_then(|value| {
+                UnitScore::parse(if value.is_nan() {
+                    0.0
+                } else {
+                    value.clamp(0.0, 1.0)
+                })
+                .ok()
+            })
             .unwrap_or_else(UnitScore::neutral),
         proximity_to_seed: None,
         score_breakdown: None,
@@ -2011,7 +2019,11 @@ impl RetrievalMetrics {
             (1.0_f32 - variance_proxy).clamp(0.0, 1.0)
         };
         let raw = 0.5 * top_signal + 0.3 * recall + 0.2 * variance_signal;
-        Some(if raw.is_nan() { 0.0 } else { raw.clamp(0.0, 1.0) })
+        Some(if raw.is_nan() {
+            0.0
+        } else {
+            raw.clamp(0.0, 1.0)
+        })
     }
 }
 
@@ -3105,7 +3117,7 @@ fn diag_search_sync(
                         .into_iter()
                         .map(|result| search_hit_from_scored_result(result, explain))
                         .collect();
-                    hits.sort_by(search_hit_score_order);
+                    sort_search_hits_by_score_order(&mut hits);
                     Ok(DiagSearchSyncResult {
                         pre_fusion: PreFusionDiagnostics {
                             lexical: lexical_result,
@@ -3286,11 +3298,31 @@ fn search_hit_from_scored_result(result: crate::search::ScoredResult, explain: b
     hit
 }
 
-fn search_hit_score_order(left: &SearchHit, right: &SearchHit) -> std::cmp::Ordering {
-    right
-        .score
-        .total_cmp(&left.score)
-        .then_with(|| left.doc_id.cmp(&right.doc_id))
+fn sort_search_hits_by_score_order(hits: &mut [SearchHit]) {
+    hits.sort_by(|left, right| right.score.total_cmp(&left.score));
+    let mut run_start = 0_usize;
+    while run_start < hits.len() {
+        let mut run_end = run_start + 1;
+        while run_end < hits.len()
+            && hits[run_start].score.total_cmp(&hits[run_end].score) == std::cmp::Ordering::Equal
+        {
+            run_end += 1;
+        }
+        if run_end - run_start > 1 {
+            sort_search_hit_score_tie_by_doc_id(&mut hits[run_start..run_end]);
+        }
+        run_start = run_end;
+    }
+}
+
+fn sort_search_hit_score_tie_by_doc_id(hits: &mut [SearchHit]) {
+    if hits.iter().all(|hit| hit.doc_id.starts_with("mem_")) {
+        let mut ordered = hits.to_vec();
+        sort_by_ulid_payload_or_lexical(&mut ordered, |hit| hit.doc_id.as_str());
+        hits.clone_from_slice(&ordered);
+    } else {
+        hits.sort_by(|left, right| left.doc_id.cmp(&right.doc_id));
+    }
 }
 
 fn option_scores_equivalent(left: Option<f32>, right: Option<f32>) -> bool {
@@ -3392,7 +3424,7 @@ fn search_sync(
                             .map(|result| search_hit_from_scored_result(result, explain))
                             .collect();
                         canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
-                        hits.sort_by(search_hit_score_order);
+                        sort_search_hits_by_score_order(&mut hits);
                         Ok((hits, Vec::new()))
                     }
                     Err(error) => Err(format!("Lexical search failed: {error}")),
@@ -3439,7 +3471,7 @@ fn search_sync(
                         .map(|result| search_hit_from_scored_result(result, explain))
                         .collect();
                     canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
-                    hits.sort_by(search_hit_score_order);
+                    sort_search_hits_by_score_order(&mut hits);
                     Ok((hits, Vec::new()))
                 }
                 Err(e) => Err(format!("Search failed: {e}")),
@@ -5170,10 +5202,7 @@ mod tests {
             json["results"][0]["metadata"]["content"].as_str(),
             Some("Rotate api_key=[REDACTED:api_key] before release.")
         );
-        assert_eq!(
-            json["results"][0]["metadata"].get("contentPreview"),
-            None
-        );
+        assert_eq!(json["results"][0]["metadata"].get("contentPreview"), None);
         assert_eq!(
             json["results"][0]["metadata"]["content_truncated"].as_bool(),
             Some(false)
@@ -5229,10 +5258,7 @@ mod tests {
             json["results"][0]["metadata"]["content"].as_str(),
             Some(expected_preview.as_str())
         );
-        assert_eq!(
-            json["results"][0]["metadata"].get("contentPreview"),
-            None
-        );
+        assert_eq!(json["results"][0]["metadata"].get("contentPreview"), None);
         assert_eq!(
             json["results"][0]["metadata"]["content_truncated"].as_bool(),
             Some(false)
@@ -6384,6 +6410,52 @@ mod tests {
     }
 
     #[test]
+    fn search_hit_sort_uses_radix_tiebreak_for_canonical_memory_ids() {
+        let mut hits = vec![
+            synthetic_hit("mem_01J0000000000000000000000C", 0.20),
+            synthetic_hit("mem_01J0000000000000000000000A", 0.20),
+            synthetic_hit("mem_01J0000000000000000000000B", 0.20),
+        ];
+
+        sort_search_hits_by_score_order(&mut hits);
+
+        let sorted_ids = hits
+            .iter()
+            .map(|hit| hit.doc_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sorted_ids,
+            vec![
+                "mem_01J0000000000000000000000A",
+                "mem_01J0000000000000000000000B",
+                "mem_01J0000000000000000000000C",
+            ]
+        );
+    }
+
+    #[test]
+    fn search_hit_sort_keeps_lexical_fallback_for_mixed_doc_ids() {
+        let mut hits = vec![
+            synthetic_hit("mem_01J0000000000000000000000A", 0.20),
+            synthetic_hit("doc_01J0000000000000000000000C", 0.20),
+        ];
+
+        sort_search_hits_by_score_order(&mut hits);
+
+        let sorted_ids = hits
+            .iter()
+            .map(|hit| hit.doc_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sorted_ids,
+            vec![
+                "doc_01J0000000000000000000000C",
+                "mem_01J0000000000000000000000A",
+            ]
+        );
+    }
+
+    #[test]
     fn component_score_ties_use_memory_id_order_not_rank_fusion_artifacts() {
         let mut hits = vec![synthetic_hit("mem_b", 0.10), synthetic_hit("mem_a", 0.20)];
         for hit in &mut hits {
@@ -6391,7 +6463,7 @@ mod tests {
         }
 
         canonicalize_equivalent_component_scores(&mut hits, &Deterministic::from_seed(7));
-        hits.sort_by(search_hit_score_order);
+        sort_search_hits_by_score_order(&mut hits);
 
         assert_eq!(hits[0].doc_id, "mem_a");
         assert_eq!(hits[1].doc_id, "mem_b");
@@ -6409,8 +6481,8 @@ mod tests {
 
         canonicalize_equivalent_component_scores(&mut seeded_a, &Deterministic::from_seed(11));
         canonicalize_equivalent_component_scores(&mut seeded_b, &Deterministic::from_seed(99));
-        seeded_a.sort_by(search_hit_score_order);
-        seeded_b.sort_by(search_hit_score_order);
+        sort_search_hits_by_score_order(&mut seeded_a);
+        sort_search_hits_by_score_order(&mut seeded_b);
 
         let ids_a = seeded_a
             .iter()
