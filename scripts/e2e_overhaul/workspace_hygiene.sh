@@ -313,9 +313,10 @@ validate_scenario_plan() {
 validate_event_log_contract() {
     local event_log="${1:-$EVENT_LOG}"
     local diagnostics="${2:-$EVENT_ROOT/event_log_contract_diagnostics.txt}"
+    local require_negative_check="${3:-true}"
     local expected_scenarios_json
     expected_scenarios_json="$(scenario_plan_json)"
-    if ! jq -s -e --argjson expected_scenarios "$expected_scenarios_json" '
+    if ! jq -s -e --argjson expected_scenarios "$expected_scenarios_json" --arg require_negative_check "$require_negative_check" '
         . as $events
         | def has_phase($phase): any($events[]; .phase == $phase);
         def phase_event_count($phase; $scenario): [
@@ -362,6 +363,19 @@ validate_event_log_contract() {
         and has_phase("stdout_stderr_isolation")
         and has_phase("mutation_check")
         and has_phase("teardown")
+        and (
+            $require_negative_check != "true"
+            or (
+                has_phase("negative_contract_check")
+                and any($events[];
+                    .phase == "negative_contract_check"
+                    and .scenario == "event_log_negative_contracts"
+                    and .status == "pass"
+                    and .schemaValidationStatus == "passed"
+                    and (.stdoutArtifact | type == "string" and length > 0)
+                )
+            )
+        )
         and any($events[];
             .phase == "scenario_plan"
             and .scenario == "scenario_plan"
@@ -384,7 +398,7 @@ expect_event_log_contract_rejected() {
     local event_log="${2:?event log required}"
     local diagnostics="$EVENT_ROOT/${label}_diagnostics.txt"
 
-    if validate_event_log_contract "$event_log" "$diagnostics" >/dev/null 2>&1; then
+    if validate_event_log_contract "$event_log" "$diagnostics" false >/dev/null 2>&1; then
         printf '%s malformed event log was accepted: %s\n' "$label" "$event_log"
         return 1
     fi
