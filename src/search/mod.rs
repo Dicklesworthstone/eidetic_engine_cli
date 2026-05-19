@@ -1316,6 +1316,27 @@ pub struct SearchSurrogatePolicy {
 
 impl SearchSurrogatePolicy {
     #[must_use]
+    pub const fn metadata_only_for(surrogate_type: SearchSurrogateType) -> Self {
+        match surrogate_type {
+            SearchSurrogateType::LexicalMetadata => Self {
+                export_allowed: true,
+                requires_local_recompute: false,
+                requires_compatibility_check: true,
+                lexical_fallback: true,
+            },
+            SearchSurrogateType::Embedding
+            | SearchSurrogateType::Summary
+            | SearchSurrogateType::Minhash
+            | SearchSurrogateType::QueryFingerprint => Self {
+                export_allowed: false,
+                requires_local_recompute: true,
+                requires_compatibility_check: true,
+                lexical_fallback: true,
+            },
+        }
+    }
+
+    #[must_use]
     pub const fn allow_reuse_after_compatibility_check() -> Self {
         Self {
             export_allowed: true,
@@ -3508,6 +3529,54 @@ mod tests {
                 SearchSurrogateDegradedCode::LexicalFallbackUsed,
             ]
         );
+    }
+
+    #[test]
+    fn search_surrogate_metadata_only_policy_denies_embeddings_but_allows_lexical_metadata() {
+        let embedding = embedding_surrogate();
+        let lexical = SearchSurrogateDescriptor {
+            surrogate_type: SearchSurrogateType::LexicalMetadata,
+            ..embedding_surrogate()
+        };
+        let local_model = local_surrogate_model();
+        let embedding_policy =
+            SearchSurrogatePolicy::metadata_only_for(SearchSurrogateType::Embedding);
+        let lexical_policy =
+            SearchSurrogatePolicy::metadata_only_for(SearchSurrogateType::LexicalMetadata);
+
+        let embedding_outcome = audit_search_surrogate(&SearchSurrogateAuditInput {
+            surrogate: &embedding,
+            policy: &embedding_policy,
+            local_model: &local_model,
+            local_content_hash: Some("blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            observed_at: "2026-05-19T23:00:00Z",
+            local_body_available: true,
+        });
+        let lexical_outcome = audit_search_surrogate(&SearchSurrogateAuditInput {
+            surrogate: &lexical,
+            policy: &lexical_policy,
+            local_model: &local_model,
+            local_content_hash: Some("blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            observed_at: "2026-05-19T23:00:00Z",
+            local_body_available: false,
+        });
+
+        assert_eq!(
+            embedding_outcome.decision,
+            SearchSurrogateAuditDecision::LexicalFallback
+        );
+        assert_eq!(
+            embedding_outcome.degraded_codes,
+            vec![
+                SearchSurrogateDegradedCode::Denied,
+                SearchSurrogateDegradedCode::LexicalFallbackUsed,
+            ]
+        );
+        assert_eq!(
+            lexical_outcome.decision,
+            SearchSurrogateAuditDecision::ReuseRemote
+        );
+        assert!(lexical_outcome.degraded_codes.is_empty());
     }
 
     #[test]
