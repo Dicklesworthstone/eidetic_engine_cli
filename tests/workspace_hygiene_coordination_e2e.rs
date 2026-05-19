@@ -134,6 +134,74 @@ fn string_array_at<'a>(value: &'a Value, pointer: &str) -> Vec<&'a str> {
         .unwrap_or_default()
 }
 
+fn u64_at(value: &Value, pointer: &str) -> u64 {
+    value.pointer(pointer).and_then(Value::as_u64).unwrap_or(0)
+}
+
+fn bool_at(value: &Value, pointer: &str) -> bool {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn staging_group_omitted_path_count(value: &Value) -> u64 {
+    value
+        .pointer("/data/outputTruncation/stagingGroups")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|group| group.get("omittedPathCount").and_then(Value::as_u64))
+        .sum()
+}
+
+fn emit_hygiene_e2e_event(
+    test_name: &str,
+    value: Option<&Value>,
+    elapsed_ms: u128,
+    first_failure_diagnosis: Option<&str>,
+) {
+    let path_count = value
+        .map(|report| u64_at(report, "/data/dirtyPathCount"))
+        .unwrap_or(0);
+    let git_path_count = value
+        .map(|report| u64_at(report, "/data/gitSummary/dirtyPathCount"))
+        .unwrap_or(0);
+    let truncated = value
+        .map(|report| bool_at(report, "/data/outputTruncation/truncated"))
+        .unwrap_or(false);
+    let omitted_path_classifications = value
+        .map(|report| u64_at(report, "/data/outputTruncation/omittedPathClassifications"))
+        .unwrap_or(0);
+    let omitted_do_not_commit = value
+        .map(|report| u64_at(report, "/data/outputTruncation/omittedDoNotCommit"))
+        .unwrap_or(0);
+    let omitted_needs_human_review = value
+        .map(|report| u64_at(report, "/data/outputTruncation/omittedNeedsHumanReview"))
+        .unwrap_or(0);
+    let omitted_staging_group_paths = value.map(staging_group_omitted_path_count).unwrap_or(0);
+
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "schema": "ee.test_event.v1",
+            "beadId": "bd-1eq3l.13",
+            "surface": "workspace_hygiene",
+            "phase": "large_repo_e2e",
+            "testName": test_name,
+            "pathCount": path_count,
+            "gitPathCount": git_path_count,
+            "truncated": truncated,
+            "omittedPathClassifications": omitted_path_classifications,
+            "omittedDoNotCommit": omitted_do_not_commit,
+            "omittedNeedsHumanReview": omitted_needs_human_review,
+            "omittedStagingGroupPaths": omitted_staging_group_paths,
+            "elapsedMs": u64::try_from(elapsed_ms).unwrap_or(u64::MAX),
+            "firstFailureDiagnosis": first_failure_diagnosis,
+        })
+    );
+}
+
 #[test]
 fn workspace_hygiene_snapshot_reservation_blocks_dirty_source_path() -> TestResult {
     let workspace = init_dirty_git_workspace()?;
@@ -204,6 +272,86 @@ fn workspace_hygiene_snapshot_reservation_blocks_dirty_source_path() -> TestResu
             "coordination-blocked path must not remain commit-ready: {value}"
         ));
     }
+    Ok(())
+}
+
+#[test]
+fn workspace_hygiene_large_dirty_workspace_logs_truncation_metrics() -> TestResult {
+    let workspace = workspace_dir()?;
+    ensure_success(
+        &run_command(
+            Command::new("git")
+                .arg("init")
+                .arg("-b")
+                .arg("main")
+                .current_dir(&workspace),
+            "git init large hygiene workspace",
+        )?,
+        "git init large hygiene workspace",
+    )?;
+
+    let dirty_dir = workspace.join("src/perf");
+    fs::create_dir_all(&dirty_dir)
+        .map_err(|error| format!("create {}: {error}", dirty_dir.display()))?;
+    for index in 0..10_010 {
+        fs::write(
+            dirty_dir.join(format!("file_{index:05}.rs")),
+            b"pub fn generated_fixture() {}\n",
+        )
+        .map_err(|error| format!("write large hygiene fixture {index}: {error}"))?;
+    }
+
+    let snapshot_path = workspace.with_extension("agent-mail-empty.json");
+    write_file(
+        &snapshot_path,
+        r#"{
+          "file_reservations": [],
+          "active_agents": [],
+          "inbox": [],
+          "threads": []
+        }"#,
+    )?;
+
+    let started = std::time::Instant::now();
+    let value = match run_hygiene_with_snapshot(&workspace, &snapshot_path) {
+        Ok(value) => value,
+        Err(error) => {
+            emit_hygiene_e2e_event(
+                "workspace_hygiene_large_dirty_workspace_logs_truncation_metrics",
+                None,
+                started.elapsed().as_millis(),
+                Some("workspace_hygiene_command_failed"),
+            );
+            return Err(error);
+        }
+    };
+    let elapsed_ms = started.elapsed().as_millis();
+    emit_hygiene_e2e_event(
+        "workspace_hygiene_large_dirty_workspace_logs_truncation_metrics",
+        Some(&value),
+        elapsed_ms,
+        None,
+    );
+
+    let path_count = u64_at(&value, "/data/dirtyPathCount");
+    if path_count < 10_010 {
+        return Err(format!("large hygiene fixture path count too low: {value}"));
+    }
+    if !bool_at(&value, "/data/outputTruncation/truncated") {
+        return Err(format!("large hygiene fixture did not truncate: {value}"));
+    }
+    if u64_at(&value, "/data/outputTruncation/omittedPathClassifications") == 0 {
+        return Err(format!(
+            "large hygiene fixture missed omitted classification count: {value}"
+        ));
+    }
+    let degraded = string_array_at(&value, "/data/degraded");
+    if !degraded.contains(&"workspace_hygiene_output_truncated") {
+        return Err(format!(
+            "large hygiene fixture did not emit truncation degradation: {value}"
+        ));
+    }
+
     Ok(())
 }
 
