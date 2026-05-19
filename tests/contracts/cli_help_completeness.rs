@@ -853,6 +853,17 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "25",
             "--json",
         ][..],
+        &[
+            "ee",
+            "maintenance",
+            "graph-snapshot-prune",
+            "--dry-run",
+            "--time-limit-ms",
+            "500",
+            "--item-limit",
+            "25",
+            "--json",
+        ][..],
         &["ee", "status", "--skyline", "--json"][..],
         &[
             "ee",

@@ -314,6 +314,10 @@ ee curate disposition --workspace . --no-structural-decay \
   --now 2026-05-19T00:00:00Z --json
 ee job run centrality_refresh --workspace . --dry-run \
   --time-limit-ms 500 --item-limit 25 --json
+ee maintenance graph-snapshot-prune --workspace . --dry-run \
+  --time-limit-ms 500 --item-limit 25 --json
+ee maintenance graph-witnesses-prune --workspace . --dry-run \
+  --retention-days 30 --algorithm-ttl pagerank=14 --json
 ee maintenance wal-checkpoint --workspace . --mode truncate --dry-run --json
 ```
 
