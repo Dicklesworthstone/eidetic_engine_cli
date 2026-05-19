@@ -1,0 +1,6 @@
+{
+  "schema": "ee.test_event.v1",
+  "event": "phase",
+  "phase": "start",
+  "test_id": "verifier_smoke"
+}

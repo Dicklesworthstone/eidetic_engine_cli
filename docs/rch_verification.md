@@ -125,22 +125,26 @@ Ledger rows include `verifier_id`, optional `bead_id`, `command`,
 `command_hash`, `started_at`, `completed_at`, `elapsed_ms`, `worker_id`,
 `remote_project_root`, `remote_target_dir`, `rch_location`, `exit_code`,
 `status`, `first_error_file`, `first_error_line`, `stdout_tail`, `stderr_tail`,
-`transcript_path`, `source_state_degraded_codes`, and
-`worker_state_degraded_codes`. Retained tails redact private `/Users/<name>`
-prefixes and obvious `token=...` / `secret=...` / `password=...` fragments while
-preserving remote `/data/projects/...` and local `/Volumes/...` evidence.
+`transcript_path`, `source_state_degraded_codes`, `worker_state_degraded_codes`,
+and known-blocker fields when a circuit-breaker refusal applies. Retained tails
+redact private `/Users/<name>` prefixes and obvious `token=...` / `secret=...` /
+`password=...` fragments while preserving remote `/data/projects/...` and local
+`/Volumes/...` evidence.
 
 `status` is one of `dry_run`, `remote_pass`, `pass_without_remote_marker`,
 `remote_failure`, `rch_environment_failure`, `capacity_or_timeout`,
 `build_admission_refused`, or `refused`, `source_state_refused`, or
-`committed_tree_unsupported`. Use
+`committed_tree_unsupported`. The planned known-blocker circuit-breaker status
+is `known_blocker_refused`; it means RCH was not launched because an active,
+matching environmental blocker already exists. Use
 `rch_environment_failure` for topology/local-fallback blockers and
 `capacity_or_timeout` for worker capacity, timeout, or all-workers-offline
 signals; those are not code failures. Use `build_admission_refused` when local
 workspace, target, temp, or artifact destination admission failed before RCH.
 Use `source_state_refused` for dirty checkout ambiguity and
 `committed_tree_unsupported` for an intentionally non-executing committed-tree
-proof.
+proof. Use `known_blocker_refused` only for the fail-fast non-proof path
+described below.
 
 ## Degraded-Code Taxonomy
 
@@ -202,6 +206,92 @@ is emitted through an `ee` command response envelope. For the RCH wrapper, the
 owned contract is the `ee.rch.verify.v1` proof plus
 `tests/rch_verify_contract.rs`.
 
+## Known-Blocker Circuit-Breaker Contract
+
+Known-blocker evidence is an admission-control negative cache for repeated RCH
+environment failures. It is not an implementation proof. When a prior remote
+proof has already failed for the same worker/topology condition, a later matching
+invocation may refuse before launching RCH and emit `status=known_blocker_refused`
+with `verification_attribution=not_run_known_blocker`.
+
+The repo wrapper keeps this cache in verifier evidence state, defaulting to
+`.ee/derived/rch/known_blockers.jsonl` under the final `--project-root` for real
+RCH runs. Tests and harnesses can override it with `--known-blocker-store <path>`
+or `RCH_VERIFY_KNOWN_BLOCKER_STORE=<path>`; both forms count as explicit stores
+for fake-output contract runs. Use `--skip-known-blocker` to disable the cache
+for one run, and `--known-blocker-override` to force a fresh remote attempt while
+preserving the matched blocker fingerprint in the proof. `--no-write` suppresses
+cache updates just as it suppresses ledger writes.
+
+The proof and any retained ledger row must include these stable fields when the
+known-blocker path applies:
+
+- `known_blocker.blocker_fingerprint`: stable hash of the normalized blocker
+  inputs listed below.
+- `known_blocker.blocker_kind`: coarse blocker family, such as
+  `cargo_workspace_inheritance`, `cargo_path_dependency_version`,
+  `client_daemon_version_skew`, `remote_checkout_incomplete`, `worker_disk_full`,
+  or `capacity_or_timeout`.
+- `known_blocker.degraded_codes`: the normalized degraded-code family that made
+  the earlier run an environmental blocker.
+- `known_blocker.source_state_hash`: the dirty-state hash, committed-tree
+  manifest hash, or other source identity used to scope the blocker.
+- `known_blocker.source_manifest_hash`: optional committed-tree or workspace
+  manifest hash when the verifier can produce one.
+- `known_blocker.command_kind` and `known_blocker.command_hash`: command family
+  and normalized command fingerprint for the refused verification.
+- `known_blocker.normalized_argv_hash`: hash of normalized argv when it differs
+  from `command_hash`.
+- `known_blocker.dependency` and `known_blocker.manifest_path`: optional
+  dependency or manifest identity, redacted to stable path components, that made
+  the topology blocker specific.
+- `known_blocker.first_seen`, `known_blocker.last_seen`, `known_blocker.expires_at`,
+  and `known_blocker.retry_after`: RFC 3339 timestamps that bound the refusal.
+- `known_blocker.remediation_bead`: Bead ID that owns the root remediation, for
+  example `bd-17c65.10.17.1.3` for path-dependency workspace classification.
+- `known_blocker.override_used`: `true` only when an explicit override launched
+  a new remote run despite the active blocker.
+
+Fingerprint inputs must be narrow enough that fixed or meaningfully different
+work can still verify. At minimum include blocker kind, normalized degraded code
+or stderr family, command kind, verifier policy/source mode, source-state
+identity, environment fingerprint class, and dependency or manifest identity
+when present. Do not include volatile timestamps, worker-selected-at time, raw
+absolute home paths, raw stderr tails, or full environment dumps.
+
+Retention is bounded. A known-blocker store may retain only the compact fields
+above, capped by count and TTL. Expired entries must not block a run. Changed
+source-state identity, changed command kind, changed dependency/manifest identity,
+or explicit override must allow a new remote attempt. Override output must carry
+both `override_used=true` and the matched `blocker_fingerprint`; it still must
+run through RCH and must never fall back to local Cargo.
+
+The wrapper default cap is `RCH_VERIFY_KNOWN_BLOCKER_MAX_ENTRIES=128` and the
+default TTL is `RCH_VERIFY_KNOWN_BLOCKER_TTL_SECONDS=21600`. A matching active
+blocker must have the same command hash, command kind, source-state hash,
+source mode, requested/configured worker set, and RCH runtime compatibility
+fingerprint. This intentionally lets different commands, changed source state,
+worker-scope changes, and client/daemon version changes try remote verification
+again.
+
+Known-blocker output is deliberately weaker than a failed remote run. It proves
+only that the verifier refused to consume another RCH slot because an active,
+matching environmental blocker was already recorded. Use the remediation bead
+and `retry_after` fields to decide whether to wait, dry-run, or coordinate with
+the topology owner.
+
+Decision table:
+
+| Situation | Use | Beads/Agent Mail wording |
+| --- | --- | --- |
+| Real remote retry | Normal `scripts/rch_verify.sh --summary -- cargo ...` after source state, command shape, worker scope, RCH runtime, or dependency topology changed. | "Remote verifier ran. Interpret `status`, `verification_attribution`, `degraded_codes`, and first error normally." |
+| Dry-run proof | `scripts/rch_verify.sh --dry-run --summary -- cargo ...` when queue pressure, topology, or policy makes a real run wasteful but you still need command shape and command hash. | "Dry-run only: command shape and hash were produced; no remote Cargo ran." |
+| Strict clean refusal | `--require-clean-tree` when the closeout claim requires a clean checkout and the wrapper reports `source_state_refused`. | "Clean proof is blocked by dirty state; this is not a remote run." |
+| Committed-tree unsupported | `--committed-tree --treeish <ref>` when a committed-source proof is requested but path dependencies or unsafe materialization prevent export. | "Committed source was identified, but no safe remote materialization ran." |
+| Build-admission refusal | Default build admission when local target/temp/artifact posture is unsafe and the wrapper reports `build_admission_refused`. | "Remote Cargo did not run because local build admission refused the workspace posture." |
+| Known-blocker refusal | Default known-blocker check when an active matching blocker exists and the wrapper reports `known_blocker_refused`. | "Remote Cargo did not run because a matching RCH environmental blocker is active; cite fingerprint, remediation bead, and retry_after." |
+| Explicit override | `--known-blocker-override` only after topology remediation, changed source state, expired or suspect TTL, changed command/dependency scope, or direct owner instruction. | "Override launched a fresh RCH attempt despite blocker `<fingerprint>`; do not claim success unless the new run passed remotely." |
+
 ## Beads and Agent Mail Templates
 
 For Beads comments, paste the summary plus the fields that make attribution
@@ -221,8 +311,28 @@ RCH proof for <bead>:
 - degraded_codes: <proof.degraded_codes or none>
 - source_state_degraded_codes: <proof.source_state_degraded_codes or none>
 - worker_state_degraded_codes: <proof.worker_state_degraded_codes or none>
+- known_blocker: <proof.known_blocker.blocker_fingerprint or none>
+- remediation_bead: <proof.known_blocker.remediation_bead or none>
+- retry_after: <proof.known_blocker.retry_after or none>
 - build_admission: <proof.build_admission.status>/<proof.build_admission.admitted>
 - first_error: <proof.first_error_file>:<proof.first_error_line or none>
+```
+
+For a known-blocker refusal, use a shorter closeout that does not call the result
+a proof:
+
+```text
+RCH known-blocker refusal for <bead>:
+- command_hash: <proof.command_hash>
+- status: known_blocker_refused
+- verification_attribution: not_run_known_blocker
+- blocker_fingerprint: <proof.known_blocker.blocker_fingerprint>
+- blocker_kind: <proof.known_blocker.blocker_kind>
+- degraded_codes: <proof.known_blocker.degraded_codes>
+- remediation_bead: <proof.known_blocker.remediation_bead>
+- retry_after: <proof.known_blocker.retry_after>
+- override_used: <proof.known_blocker.override_used>
+- note: Remote Cargo did not run, so this is not compile proof.
 ```
 
 Agent Mail handoff phrasing should distinguish proof quality:
@@ -237,6 +347,15 @@ Agent Mail handoff phrasing should distinguish proof quality:
   safe remote materialization exists yet; this is not a remote Cargo pass."
 - `build_admission_refused`: "Remote Cargo did not run because local
   build-admission denied the workspace/target/temp/artifact path posture."
+- `known_blocker_refused`: "Remote Cargo did not run because a matching active
+  RCH environmental blocker is already recorded; this is not compile proof."
+
+When Agent Mail is healthy, send the same known-blocker summary to the active
+bead owner or topology owner with the bead ID as `thread_id`. When mail reads or
+delivery are degraded, record the Beads comment only and state that Agent Mail
+handoff was skipped because the coordination channel was unhealthy. Do not paste
+raw stderr tails, raw environment dumps, secrets, or shell-substitution text into
+either channel.
 
 Dirty `.beads/issues.jsonl` is metadata churn, but it still invalidates strict
 clean proof because it changes the shared checkout. If the only dirty path is a

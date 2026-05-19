@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.verification_evidence.v1.json",
+  "title": "ee.verification_evidence.v1",
+  "description": "Normalized verification-evidence envelope for bd-1nxz4.5. Ingests heterogeneous proof artifacts (RCH proof JSON, verify-script logs, GitHub Actions job summaries, local static-check records) and emits one agent-readable envelope that classifies environment blockers separately from code failures. Read-only normalization: never runs Cargo, never deletes files, preserves command hashes and source-tree identity.",
+  "type": "object",
+  "required": [
+    "schema",
+    "source",
+    "status",
+    "degradedCodes",
+    "errorCodes",
+    "environmentBlockerCodes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.verification_evidence.v1"
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "rch_verify",
+        "verify_script",
+        "github_actions_job",
+        "static_check"
+      ],
+      "description": "Where the raw proof came from."
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "passed",
+        "failed_in_code",
+        "environment_blocked",
+        "malformed"
+      ],
+      "description": "Normalized classification across every source. `passed` means verification ran and the diff is good. `failed_in_code` means verification ran and reported a real code failure. `environment_blocked` means verification could not run because of an environment issue (path-dep version skew, worker disk, daemon mismatch, topology refusal). `malformed` means the input was not a recognized evidence shape."
+    },
+    "beadId": {"type": ["string", "null"]},
+    "command": {"type": ["string", "null"]},
+    "commandKind": {"type": ["string", "null"]},
+    "commandHash": {"type": ["string", "null"]},
+    "workerId": {"type": ["string", "null"]},
+    "exitCode": {"type": ["integer", "null"]},
+    "elapsedMs": {"type": ["integer", "null"], "minimum": 0},
+    "gitHead": {"type": ["string", "null"]},
+    "gitTree": {"type": ["string", "null"]},
+    "dirtyStatusHash": {"type": ["string", "null"]},
+    "verificationAttribution": {"type": ["string", "null"]},
+    "degradedCodes": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Union of degraded codes from every section of the source proof (top-level, source-state, worker-state)."
+    },
+    "errorCodes": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Surfaceable error codes from the source proof, e.g. RCH-E327."
+    },
+    "environmentBlockerCodes": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Subset of degradedCodes that represent environment blockers (path-dep skew, topology refusal, worker disk, dirty-tree refusal, etc.) — distinct from code failures."
+    },
+    "firstError": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "file": {"type": ["string", "null"]},
+        "line": {"type": ["integer", "null"], "minimum": 0},
+        "message": {"type": ["string", "null"]}
+      }
+    },
+    "rawStatus": {
+      "type": ["string", "null"],
+      "description": "Raw `status` string from the source proof (e.g. ee.rch.verify.v1's remote_pass / remote_failure / rch_environment_failure)."
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.verification_evidence.v1",
+      "source": "rch_verify",
+      "status": "passed",
+      "beadId": "bd-2mey5",
+      "command": "cargo check --lib",
+      "commandKind": "cargo_check",
+      "commandHash": "abc123",
+      "workerId": "vmi1149989",
+      "exitCode": 0,
+      "elapsedMs": 11000,
+      "gitHead": null,
+      "gitTree": null,
+      "dirtyStatusHash": null,
+      "verificationAttribution": "live_dirty_checkout",
+      "degradedCodes": [],
+      "errorCodes": [],
+      "environmentBlockerCodes": [],
+      "rawStatus": "remote_pass"
+    },
+    {
+      "schema": "ee.verification_evidence.v1",
+      "source": "rch_verify",
+      "status": "environment_blocked",
+      "beadId": "bd-2mey5",
+      "command": "cargo check --lib",
+      "commandKind": "cargo_check",
+      "commandHash": "eae0cb5e0af81aca",
+      "workerId": "vmi1149989",
+      "exitCode": 101,
+      "elapsedMs": 8229,
+      "gitHead": null,
+      "gitTree": null,
+      "dirtyStatusHash": null,
+      "verificationAttribution": "live_dirty_checkout",
+      "degradedCodes": [
+        "rch_verify_build_admission_unavailable",
+        "rch_verify_remote_command_failed",
+        "rch_verify_cargo_path_dependency_version_blocked"
+      ],
+      "errorCodes": [],
+      "environmentBlockerCodes": [
+        "rch_verify_build_admission_unavailable",
+        "rch_verify_cargo_path_dependency_version_blocked"
+      ],
+      "rawStatus": "rch_environment_failure"
+    },
+    {
+      "schema": "ee.verification_evidence.v1",
+      "source": "rch_verify",
+      "status": "failed_in_code",
+      "beadId": null,
+      "command": "cargo test --lib ppr_proof -- --nocapture",
+      "commandKind": "cargo_test",
+      "commandHash": "abc123",
+      "workerId": "trj",
+      "exitCode": 101,
+      "elapsedMs": 5000,
+      "gitHead": null,
+      "gitTree": null,
+      "dirtyStatusHash": null,
+      "verificationAttribution": null,
+      "degradedCodes": ["rch_verify_remote_command_failed"],
+      "errorCodes": [],
+      "environmentBlockerCodes": [],
+      "firstError": {
+        "file": "/data/projects/eidetic_engine_cli/src/db/mod.rs",
+        "line": 431,
+        "message": "expected struct, got enum"
+      },
+      "rawStatus": "remote_failure"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "schema": "ee.rch.verify.v1",
+  "bead_id": "bd-1h8ji.6",
+  "command_text": "cargo test --test rch_verify_contract",
+  "command_kind": "cargo_test",
+  "command_hash": "cd825533cce8c288f43e944a17349832354678ce98473de8add4a7832f908d07",
+  "worker_id": null,
+  "exit_code": 1,
+  "elapsed_ms": 42,
+  "status": "rch_environment_failure",
+  "remote_required": true,
+  "would_offload": true,
+  "error_codes": ["RCH-E327"],
+  "degraded_codes": [
+    "rch_verify_remote_command_failed",
+    "rch_verify_topology_blocked",
+    "rch_verify_local_fallback_refused",
+    "rch_verify_remote_marker_missing"
+  ],
+  "source_state_degraded_codes": [],
+  "worker_state_degraded_codes": []
+}

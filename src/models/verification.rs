@@ -22,6 +22,8 @@ pub const VERIFICATION_COMPILE_BLOCKER_CACHE_SCHEMA_V1: &str =
     "ee.verification.compile_blocker_cache.v1";
 pub const VERIFICATION_COMPILE_BLOCKER_LOOKUP_SCHEMA_V1: &str =
     "ee.verification.compile_blocker_lookup.v1";
+pub const RCH_VERIFY_SCHEMA_V1: &str = "ee.rch.verify.v1";
+pub const GITHUB_ACTIONS_CHECK_RUN_SCHEMA_V1: &str = "ee.github_actions.check_run.v1";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -571,6 +573,57 @@ impl fmt::Display for VerificationRunImportError {
 
 impl Error for VerificationRunImportError {}
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RchVerificationEvidenceParseError {
+    NotAnObject,
+    MissingSchema,
+    UnexpectedSchema { found: String },
+    MissingCommand,
+    MissingCommandHash,
+}
+
+impl fmt::Display for RchVerificationEvidenceParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotAnObject => write!(f, "RCH verification proof must be a JSON object"),
+            Self::MissingSchema => write!(f, "RCH verification proof is missing schema"),
+            Self::UnexpectedSchema { found } => {
+                write!(f, "expected schema {RCH_VERIFY_SCHEMA_V1}, found {found}")
+            }
+            Self::MissingCommand => write!(f, "RCH verification proof is missing command"),
+            Self::MissingCommandHash => {
+                write!(f, "RCH verification proof is missing command_hash")
+            }
+        }
+    }
+}
+
+impl Error for RchVerificationEvidenceParseError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GithubActionsVerificationEvidenceParseError {
+    NotAnObject,
+    UnexpectedSchema { found: String },
+    MissingName,
+    MissingStatus,
+}
+
+impl fmt::Display for GithubActionsVerificationEvidenceParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotAnObject => write!(f, "GitHub Actions proof must be a JSON object"),
+            Self::UnexpectedSchema { found } => write!(
+                f,
+                "expected schema {GITHUB_ACTIONS_CHECK_RUN_SCHEMA_V1}, found {found}"
+            ),
+            Self::MissingName => write!(f, "GitHub Actions proof is missing check name"),
+            Self::MissingStatus => write!(f, "GitHub Actions proof is missing status/conclusion"),
+        }
+    }
+}
+
+impl Error for GithubActionsVerificationEvidenceParseError {}
+
 #[derive(Clone, Debug)]
 pub struct VerificationEvidenceInput<'a> {
     pub verification_id: &'a str,
@@ -620,6 +673,274 @@ impl VerificationEvidenceRecord {
     }
 }
 
+#[must_use]
+pub fn verification_evidence_beads_summary(record: &VerificationEvidenceRecord) -> String {
+    let mut parts = vec![
+        format!("schema={}", shell_safe_beads_summary_value(&record.schema)),
+        format!(
+            "verification_id={}",
+            shell_safe_beads_summary_value(&record.verification_id)
+        ),
+        format!("status={}", record.status.as_str()),
+        format!(
+            "result_class={}",
+            verification_evidence_result_class(record)
+        ),
+        format!("gate={}", shell_safe_beads_summary_value(&record.gate_name)),
+        format!(
+            "command_hash={}",
+            shell_safe_beads_summary_value(&record.command_hash)
+        ),
+    ];
+    if let Some(bead_id) = record.bead_id.as_deref() {
+        parts.push(format!(
+            "bead_id={}",
+            shell_safe_beads_summary_value(bead_id)
+        ));
+    }
+    if let Some(exit_code) = record.exit_code {
+        parts.push(format!("exit_code={exit_code}"));
+    }
+    if let Some(tool) = record.offload.offload_tool.as_deref() {
+        parts.push(format!(
+            "offload_tool={}",
+            shell_safe_beads_summary_value(tool)
+        ));
+    }
+    if record.offload.required_remote {
+        parts.push("remote_required=true".to_owned());
+    }
+    if let Some(worker) = record.offload.worker.as_deref() {
+        parts.push(format!("worker={}", shell_safe_beads_summary_value(worker)));
+    }
+    if record.offload.fallback_detected {
+        parts.push("fallback_detected=true".to_owned());
+    }
+    if let Some(reason) = record.offload.fallback_reason.as_deref() {
+        parts.push(format!(
+            "fallback_reason={}",
+            shell_safe_beads_summary_value(reason)
+        ));
+    }
+    if let Some(workspace) = record.environment.workspace_fingerprint.as_deref() {
+        parts.push(format!(
+            "workspace_fingerprint={}",
+            shell_safe_beads_summary_value(workspace)
+        ));
+    }
+    parts.push("raw_output_included=false".to_owned());
+    parts.join("; ")
+}
+
+fn verification_evidence_result_class(record: &VerificationEvidenceRecord) -> &'static str {
+    match record.status {
+        VerificationStatus::Passed if record.is_authoritative_pass() => "authoritative_pass",
+        VerificationStatus::Passed => "non_authoritative_pass",
+        VerificationStatus::Failed => "code_failure",
+        VerificationStatus::Blocked => "environment_blocker",
+        VerificationStatus::FallbackDetected if record.offload.required_remote => {
+            "environment_blocker"
+        }
+        VerificationStatus::FallbackDetected => "fallback_detected",
+        VerificationStatus::Interrupted => "interrupted",
+        VerificationStatus::Unknown => "unknown",
+    }
+}
+
+fn shell_safe_beads_summary_value(value: &str) -> String {
+    let sanitized: String = value
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, ':' | '_' | '-' | '.' | '/' | '=' | ',') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "empty".to_owned()
+    } else {
+        sanitized
+    }
+}
+
+pub fn verification_evidence_record_from_rch_verify(
+    value: &JsonValue,
+) -> Result<VerificationEvidenceRecord, RchVerificationEvidenceParseError> {
+    if !value.is_object() {
+        return Err(RchVerificationEvidenceParseError::NotAnObject);
+    }
+
+    let schema = value
+        .get("schema")
+        .and_then(JsonValue::as_str)
+        .ok_or(RchVerificationEvidenceParseError::MissingSchema)?;
+    if schema != RCH_VERIFY_SCHEMA_V1 {
+        return Err(RchVerificationEvidenceParseError::UnexpectedSchema {
+            found: schema.to_owned(),
+        });
+    }
+
+    let command = rch_command(value).ok_or(RchVerificationEvidenceParseError::MissingCommand)?;
+    let command_hash = rch_string(value, "command_hash")
+        .ok_or(RchVerificationEvidenceParseError::MissingCommandHash)?;
+    let exit_code = rch_i32(value, "exit_code");
+    let started_at = rch_string(value, "started_at");
+    let finished_at = rch_finished_at(value);
+    let duration_ms = rch_u64(value, "duration_ms").or_else(|| rch_u64(value, "elapsed_ms"));
+    let workspace_fingerprint = rch_workspace_fingerprint(value);
+    let observed_at = finished_at
+        .clone()
+        .or_else(|| rch_string(value, "generated_at"));
+    let degraded_codes = rch_degraded_codes(value);
+    let status = rch_verification_status(
+        rch_string(value, "status").as_deref(),
+        exit_code,
+        &degraded_codes,
+    );
+    let worker = rch_string(value, "worker_id");
+    let fallback_reason = rch_fallback_reason(value, &degraded_codes);
+    let offload = rch_offload(
+        value,
+        worker.as_deref(),
+        fallback_reason.as_deref(),
+        &degraded_codes,
+    );
+    let artifacts = rch_artifacts(value);
+
+    Ok(VerificationEvidenceRecord {
+        schema: VERIFICATION_EVIDENCE_SCHEMA_V1.to_owned(),
+        verification_id: stable_rch_verification_id(
+            &command_hash,
+            finished_at.as_deref(),
+            exit_code,
+        ),
+        bead_id: rch_string(value, "bead_id"),
+        gate_name: rch_string(value, "command_kind").unwrap_or_else(|| "rch verify".to_owned()),
+        command,
+        command_hash,
+        status,
+        exit_code,
+        started_at,
+        finished_at,
+        duration_ms,
+        environment: VerificationEnvironment::new(
+            workspace_fingerprint.as_deref(),
+            rch_string(value, "remote_project_root").as_deref(),
+            rch_toolchain(value).as_deref(),
+        ),
+        offload,
+        output_summary: VerificationOutputSummary {
+            stdout_tail: rch_string(value, "stdout_tail"),
+            stderr_tail: rch_string(value, "stderr_tail"),
+            redacted: true,
+        },
+        artifacts,
+        producer: ProducerMetadata::unknown_agent(
+            ProducerSourceSystem::Verification,
+            Some(RCH_VERIFY_SCHEMA_V1),
+            None,
+            workspace_fingerprint.as_deref(),
+            observed_at.as_deref(),
+        ),
+    })
+}
+
+pub fn verification_evidence_record_from_github_actions_check_run(
+    value: &JsonValue,
+) -> Result<VerificationEvidenceRecord, GithubActionsVerificationEvidenceParseError> {
+    if !value.is_object() {
+        return Err(GithubActionsVerificationEvidenceParseError::NotAnObject);
+    }
+    if let Some(schema) = value.get("schema").and_then(JsonValue::as_str)
+        && schema != GITHUB_ACTIONS_CHECK_RUN_SCHEMA_V1
+    {
+        return Err(
+            GithubActionsVerificationEvidenceParseError::UnexpectedSchema {
+                found: schema.to_owned(),
+            },
+        );
+    }
+
+    let name = gha_string(value, "name")
+        .or_else(|| gha_string(value, "check_name"))
+        .or_else(|| gha_string(value, "job_name"))
+        .ok_or(GithubActionsVerificationEvidenceParseError::MissingName)?;
+    let status_text = gha_string(value, "status");
+    let conclusion = gha_string(value, "conclusion");
+    if status_text.is_none() && conclusion.is_none() {
+        return Err(GithubActionsVerificationEvidenceParseError::MissingStatus);
+    }
+
+    let workflow = gha_string(value, "workflow_name").or_else(|| gha_workflow_name(value));
+    let run_id = gha_run_id(value);
+    let head_sha = gha_string(value, "head_sha").or_else(|| gha_head_sha(value));
+    let completed_at =
+        gha_string(value, "completed_at").or_else(|| gha_string(value, "updated_at"));
+    let started_at = gha_string(value, "started_at");
+    let command = gha_command_summary(
+        workflow.as_deref(),
+        &name,
+        run_id.as_deref(),
+        head_sha.as_deref(),
+    );
+    let command_hash = gha_string(value, "command_hash").unwrap_or_else(|| command_hash(&command));
+    let status = gha_verification_status(status_text.as_deref(), conclusion.as_deref());
+    let exit_code = gha_exit_code(status, conclusion.as_deref());
+    let repo = gha_string(value, "repository")
+        .or_else(|| gha_string(value, "repo"))
+        .or_else(|| gha_repository_full_name(value));
+    let observed_at = completed_at
+        .clone()
+        .or_else(|| gha_string(value, "created_at"));
+    let check_run_id = gha_string(value, "check_run_id").or_else(|| gha_string(value, "id"));
+
+    Ok(VerificationEvidenceRecord {
+        schema: VERIFICATION_EVIDENCE_SCHEMA_V1.to_owned(),
+        verification_id: stable_github_actions_verification_id(
+            &command_hash,
+            completed_at.as_deref(),
+            conclusion.as_deref(),
+        ),
+        bead_id: gha_string(value, "bead_id"),
+        gate_name: gha_gate_name(workflow.as_deref(), &name),
+        command,
+        command_hash,
+        status,
+        exit_code,
+        started_at,
+        finished_at: completed_at,
+        duration_ms: gha_u64(value, "duration_ms"),
+        environment: VerificationEnvironment::new(
+            head_sha
+                .as_deref()
+                .map(|sha| format!("github_head_sha:{sha}"))
+                .as_deref(),
+            repo.as_deref(),
+            gha_toolchain(value, workflow.as_deref(), run_id.as_deref()).as_deref(),
+        ),
+        offload: VerificationOffload {
+            required_remote: false,
+            remote_required_env: None,
+            offload_tool: Some("github_actions".to_owned()),
+            worker: gha_string(value, "runner_name"),
+            fallback_detected: false,
+            fallback_reason: None,
+        },
+        output_summary: gha_output_summary(value, conclusion.as_deref()),
+        artifacts: gha_artifacts(value),
+        producer: ProducerMetadata::unknown_agent(
+            ProducerSourceSystem::Verification,
+            run_id.as_deref(),
+            check_run_id.as_deref(),
+            head_sha.as_deref(),
+            observed_at.as_deref(),
+        ),
+    })
+}
+
 impl VerificationRunRecord {
     #[must_use]
     pub fn from_input(input: VerificationRunInput<'_>) -> Self {
@@ -655,6 +976,48 @@ impl VerificationRunRecord {
             retained_log_path_hash: input.retained_log_path.map(hash_str),
             provenance: input.provenance,
         }
+    }
+}
+
+#[must_use]
+pub fn verification_evidence_record_from_run_record(
+    record: &VerificationRunRecord,
+) -> VerificationEvidenceRecord {
+    let observed_at = record
+        .finished_at
+        .as_deref()
+        .or(record.started_at.as_deref());
+
+    VerificationEvidenceRecord {
+        schema: VERIFICATION_EVIDENCE_SCHEMA_V1.to_owned(),
+        verification_id: stable_run_verification_id(record),
+        bead_id: record.bead_id.clone(),
+        gate_name: run_record_gate_name(record),
+        command: format!("verification_run {}", command_summary(record)),
+        command_hash: record.command_hash.clone(),
+        status: run_record_status(record),
+        exit_code: record.exit_code,
+        started_at: record.started_at.clone(),
+        finished_at: record.finished_at.clone(),
+        duration_ms: None,
+        environment: VerificationEnvironment::new(
+            record.source_hash.as_deref(),
+            None,
+            record.cargo_target_dir_hash_or_class.as_deref(),
+        ),
+        offload: run_record_offload(record),
+        output_summary: run_record_output_summary(record),
+        artifacts: run_record_artifacts(record),
+        producer: ProducerMetadata::known_agent(
+            ProducerSourceSystem::Verification,
+            record.agent_name.as_deref(),
+            None,
+            None,
+            Some(&record.run_id),
+            None,
+            record.source_hash.as_deref(),
+            observed_at,
+        ),
     }
 }
 
@@ -1426,6 +1789,414 @@ fn normalized_non_empty(value: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn rch_string(value: &JsonValue, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(JsonValue::as_str)
+        .and_then(|raw| normalized_non_empty(Some(raw)))
+}
+
+fn rch_i32(value: &JsonValue, key: &str) -> Option<i32> {
+    value
+        .get(key)
+        .and_then(JsonValue::as_i64)
+        .and_then(|raw| i32::try_from(raw).ok())
+}
+
+fn rch_u64(value: &JsonValue, key: &str) -> Option<u64> {
+    value.get(key).and_then(JsonValue::as_u64)
+}
+
+fn rch_bool(value: &JsonValue, key: &str) -> Option<bool> {
+    value.get(key).and_then(JsonValue::as_bool)
+}
+
+fn rch_command(value: &JsonValue) -> Option<String> {
+    rch_string(value, "command_text").or_else(|| {
+        let command = value.get("command")?.as_array()?;
+        let argv = command
+            .iter()
+            .map(JsonValue::as_str)
+            .collect::<Option<Vec<_>>>()?;
+        normalized_non_empty(Some(&argv.join(" ")))
+    })
+}
+
+fn rch_finished_at(value: &JsonValue) -> Option<String> {
+    rch_string(value, "completed_at")
+        .or_else(|| rch_string(value, "finished_at"))
+        .or_else(|| rch_string(value, "generated_at"))
+}
+
+fn rch_workspace_fingerprint(value: &JsonValue) -> Option<String> {
+    let git_tree = rch_string(value, "git_tree");
+    let dirty_status_hash = rch_string(value, "dirty_status_hash");
+
+    match (git_tree, dirty_status_hash) {
+        (Some(tree), Some(dirty)) => Some(format!("git_tree:{tree};dirty_status:{dirty}")),
+        (Some(tree), None) => Some(format!("git_tree:{tree}")),
+        (None, Some(dirty)) => Some(format!("dirty_status:{dirty}")),
+        (None, None) => rch_string(value, "workspace_fingerprint"),
+    }
+}
+
+fn rch_toolchain(value: &JsonValue) -> Option<String> {
+    let runtime = value.get("rch_runtime");
+    let client_version = runtime
+        .and_then(|raw| raw.get("client_version"))
+        .and_then(JsonValue::as_str)
+        .and_then(|raw| normalized_non_empty(Some(raw)))
+        .or_else(|| rch_string(value, "client_version"));
+    let daemon_version = runtime
+        .and_then(|raw| raw.get("daemon_version"))
+        .and_then(JsonValue::as_str)
+        .and_then(|raw| normalized_non_empty(Some(raw)))
+        .or_else(|| rch_string(value, "daemon_version"));
+
+    match (client_version, daemon_version) {
+        (Some(client), Some(daemon)) => Some(format!("rch client={client} daemon={daemon}")),
+        (Some(client), None) => Some(format!("rch client={client}")),
+        (None, Some(daemon)) => Some(format!("rch daemon={daemon}")),
+        (None, None) => None,
+    }
+}
+
+fn rch_degraded_codes(value: &JsonValue) -> Vec<String> {
+    let mut codes = Vec::new();
+    for key in [
+        "degraded_codes",
+        "source_state_degraded_codes",
+        "worker_state_degraded_codes",
+        "error_codes",
+        "degraded",
+    ] {
+        collect_rch_codes(value.get(key), &mut codes);
+    }
+    collect_rch_codes(
+        value.get("error").and_then(|error| error.get("code")),
+        &mut codes,
+    );
+    codes.sort();
+    codes.dedup();
+    codes
+}
+
+fn collect_rch_codes(value: Option<&JsonValue>, codes: &mut Vec<String>) {
+    match value {
+        Some(JsonValue::Array(values)) => {
+            for item in values {
+                collect_rch_codes(Some(item), codes);
+            }
+        }
+        Some(JsonValue::Object(object)) => {
+            collect_rch_codes(object.get("code"), codes);
+            collect_rch_codes(object.get("reason_code"), codes);
+        }
+        Some(JsonValue::String(raw)) => {
+            if let Some(code) = normalized_non_empty(Some(raw)) {
+                codes.push(code);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rch_verification_status(
+    raw_status: Option<&str>,
+    exit_code: Option<i32>,
+    degraded_codes: &[String],
+) -> VerificationStatus {
+    let normalized_status = raw_status.unwrap_or_default().trim().to_ascii_lowercase();
+    if rch_status_is_fallback(&normalized_status, degraded_codes) {
+        return VerificationStatus::FallbackDetected;
+    }
+    if matches!(
+        normalized_status.as_str(),
+        "interrupted" | "cancelled" | "canceled" | "timeout" | "timed_out"
+    ) {
+        return VerificationStatus::Interrupted;
+    }
+    if rch_status_is_blocked(&normalized_status, degraded_codes) {
+        return VerificationStatus::Blocked;
+    }
+    if normalized_status == "remote_pass"
+        || normalized_status == "passed"
+        || normalized_status == "pass"
+        || (exit_code == Some(0) && normalized_status.is_empty())
+    {
+        return VerificationStatus::Passed;
+    }
+    if normalized_status == "remote_failure"
+        || normalized_status == "failed"
+        || normalized_status == "failure"
+        || exit_code.is_some_and(|code| code != 0)
+    {
+        return VerificationStatus::Failed;
+    }
+    VerificationStatus::Unknown
+}
+
+fn rch_status_is_fallback(raw_status: &str, degraded_codes: &[String]) -> bool {
+    raw_status.contains("fallback")
+        || degraded_codes
+            .iter()
+            .any(|code| code.contains("local_fallback") || code.contains("fallback_detected"))
+}
+
+fn rch_status_is_blocked(raw_status: &str, degraded_codes: &[String]) -> bool {
+    raw_status.contains("blocked")
+        || raw_status.contains("refused")
+        || raw_status.contains("unsupported")
+        || raw_status.contains("environment_failure")
+        || raw_status.contains("admission_denied")
+        || degraded_codes.iter().any(|code| {
+            matches!(
+                code.as_str(),
+                "rch_verify_build_admission_unavailable"
+                    | "rch_verify_cargo_path_dependency_version_blocked"
+                    | "rch_verify_cargo_workspace_inheritance_blocked"
+                    | "rch_verify_capacity_or_timeout"
+                    | "rch_verify_client_daemon_version_skew"
+                    | "rch_verify_committed_tree_path_deps_unsupported"
+                    | "rch_verify_remote_marker_missing"
+                    | "rch_verify_topology_blocked"
+                    | "rch_verify_worker_disk_full"
+            ) || code.starts_with("rch_verify_dirty_")
+                || code.contains("version_skew")
+                || code.contains("path_dependency")
+                || code.contains("workspace_inheritance")
+                || code.contains("topology_blocked")
+        })
+}
+
+fn rch_fallback_reason(value: &JsonValue, degraded_codes: &[String]) -> Option<String> {
+    rch_string(value, "fallback_reason").or_else(|| {
+        degraded_codes
+            .iter()
+            .find(|code| code.contains("local_fallback") || code.contains("fallback_detected"))
+            .cloned()
+    })
+}
+
+fn rch_offload(
+    value: &JsonValue,
+    worker: Option<&str>,
+    fallback_reason: Option<&str>,
+    degraded_codes: &[String],
+) -> VerificationOffload {
+    if fallback_reason.is_some() || rch_status_is_fallback("", degraded_codes) {
+        return VerificationOffload::rch_fallback(worker, fallback_reason);
+    }
+
+    let remote_required = rch_bool(value, "remote_required").unwrap_or(true);
+    let would_offload = rch_bool(value, "would_offload").unwrap_or(worker.is_some());
+    if remote_required || would_offload || worker.is_some() {
+        VerificationOffload::rch_required(worker)
+    } else {
+        VerificationOffload::local()
+    }
+}
+
+fn rch_artifacts(value: &JsonValue) -> Vec<VerificationArtifactRef> {
+    let mut artifacts = Vec::new();
+    if let Some(hash) = rch_string(value, "source_manifest_hash") {
+        artifacts.push(VerificationArtifactRef::new(
+            "rch:source_manifest",
+            "source_manifest",
+            Some(&hash),
+        ));
+    }
+    artifacts
+}
+
+fn gha_string(value: &JsonValue, key: &str) -> Option<String> {
+    value.get(key).and_then(|raw| match raw {
+        JsonValue::String(text) => normalized_non_empty(Some(text)),
+        JsonValue::Number(number) => Some(number.to_string()),
+        _ => None,
+    })
+}
+
+fn gha_u64(value: &JsonValue, key: &str) -> Option<u64> {
+    value.get(key).and_then(JsonValue::as_u64)
+}
+
+fn gha_workflow_name(value: &JsonValue) -> Option<String> {
+    value
+        .get("workflow")
+        .and_then(|workflow| workflow.get("name"))
+        .and_then(JsonValue::as_str)
+        .and_then(|name| normalized_non_empty(Some(name)))
+        .or_else(|| {
+            value
+                .get("workflow_run")
+                .and_then(|run| run.get("name"))
+                .and_then(JsonValue::as_str)
+                .and_then(|name| normalized_non_empty(Some(name)))
+        })
+}
+
+fn gha_run_id(value: &JsonValue) -> Option<String> {
+    gha_string(value, "run_id").or_else(|| {
+        value
+            .get("workflow_run")
+            .and_then(|run| run.get("id"))
+            .and_then(|raw| match raw {
+                JsonValue::String(text) => normalized_non_empty(Some(text)),
+                JsonValue::Number(number) => Some(number.to_string()),
+                _ => None,
+            })
+    })
+}
+
+fn gha_head_sha(value: &JsonValue) -> Option<String> {
+    value
+        .get("check_suite")
+        .and_then(|suite| suite.get("head_sha"))
+        .and_then(JsonValue::as_str)
+        .and_then(|sha| normalized_non_empty(Some(sha)))
+        .or_else(|| {
+            value
+                .get("workflow_run")
+                .and_then(|run| run.get("head_sha"))
+                .and_then(JsonValue::as_str)
+                .and_then(|sha| normalized_non_empty(Some(sha)))
+        })
+}
+
+fn gha_repository_full_name(value: &JsonValue) -> Option<String> {
+    value
+        .get("repository")
+        .and_then(|repo| repo.get("full_name"))
+        .and_then(JsonValue::as_str)
+        .and_then(|repo| normalized_non_empty(Some(repo)))
+}
+
+fn gha_command_summary(
+    workflow: Option<&str>,
+    name: &str,
+    run_id: Option<&str>,
+    head_sha: Option<&str>,
+) -> String {
+    let mut parts = vec![format!("check_name={}", summary_token(name))];
+    if let Some(workflow) = workflow {
+        parts.push(format!("workflow={}", summary_token(workflow)));
+    }
+    if let Some(run_id) = run_id {
+        parts.push(format!("run_id={}", summary_token(run_id)));
+    }
+    if let Some(head_sha) = head_sha {
+        parts.push(format!("head_sha={}", summary_token(head_sha)));
+    }
+    format!("github_actions_check_run {}", parts.join(" "))
+}
+
+fn gha_gate_name(workflow: Option<&str>, name: &str) -> String {
+    workflow.map_or_else(
+        || format!("github_actions:{name}"),
+        |workflow| format!("github_actions:{workflow}:{name}"),
+    )
+}
+
+fn gha_toolchain(
+    value: &JsonValue,
+    workflow: Option<&str>,
+    run_id: Option<&str>,
+) -> Option<String> {
+    if workflow.is_none() && run_id.is_none() && gha_string(value, "run_attempt").is_none() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if let Some(workflow) = workflow {
+        parts.push(format!("workflow={}", summary_token(workflow)));
+    }
+    if let Some(run_id) = run_id {
+        parts.push(format!("run_id={}", summary_token(run_id)));
+    }
+    if let Some(run_attempt) = gha_string(value, "run_attempt") {
+        parts.push(format!("run_attempt={}", summary_token(&run_attempt)));
+    }
+    Some(format!("github_actions {}", parts.join(" ")))
+}
+
+fn gha_verification_status(status: Option<&str>, conclusion: Option<&str>) -> VerificationStatus {
+    let normalized_status = status.unwrap_or_default().trim().to_ascii_lowercase();
+    let normalized_conclusion = conclusion.unwrap_or_default().trim().to_ascii_lowercase();
+    match normalized_conclusion.as_str() {
+        "success" => VerificationStatus::Passed,
+        "failure" | "startup_failure" => VerificationStatus::Failed,
+        "cancelled" | "canceled" | "timed_out" => VerificationStatus::Interrupted,
+        "action_required" | "neutral" | "skipped" | "stale" => VerificationStatus::Blocked,
+        "" if matches!(
+            normalized_status.as_str(),
+            "queued" | "in_progress" | "waiting"
+        ) =>
+        {
+            VerificationStatus::Interrupted
+        }
+        "" => VerificationStatus::Unknown,
+        _ => VerificationStatus::Unknown,
+    }
+}
+
+fn gha_exit_code(status: VerificationStatus, conclusion: Option<&str>) -> Option<i32> {
+    match (status, conclusion.unwrap_or_default()) {
+        (VerificationStatus::Passed, _) => Some(0),
+        (VerificationStatus::Failed, _) => Some(1),
+        _ => None,
+    }
+}
+
+fn gha_output_summary(value: &JsonValue, conclusion: Option<&str>) -> VerificationOutputSummary {
+    let title = value
+        .get("output")
+        .and_then(|output| output.get("title"))
+        .and_then(JsonValue::as_str)
+        .and_then(|title| normalized_non_empty(Some(title)))
+        .or_else(|| gha_string(value, "summary"));
+    let mut summary = Vec::new();
+    if let Some(conclusion) = conclusion {
+        summary.push(format!("conclusion={}", summary_token(conclusion)));
+    }
+    if let Some(title) = title.as_deref() {
+        summary.push(format!("title={}", summary_token(title)));
+    }
+
+    VerificationOutputSummary {
+        stdout_tail: None,
+        stderr_tail: (!summary.is_empty()).then(|| summary.join("; ")),
+        redacted: true,
+    }
+}
+
+fn gha_artifacts(value: &JsonValue) -> Vec<VerificationArtifactRef> {
+    let mut artifacts = Vec::new();
+    for (key, kind) in [
+        ("html_url", "ci_url"),
+        ("details_url", "ci_details_url"),
+        ("logs_url", "ci_logs_url"),
+    ] {
+        if let Some(url) = gha_string(value, key) {
+            artifacts.push(VerificationArtifactRef::new(
+                &format!("github_actions:{key}"),
+                kind,
+                Some(&hash_str(&url)),
+            ));
+        }
+    }
+    artifacts
+}
+
+fn summary_token(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            '`' | '$' | '(' | ')' | '\n' | '\r' | '\t' => '_',
+            _ => ch,
+        })
+        .collect()
+}
+
 fn record_matches_request(
     record: &VerificationRunRecord,
     request: &VerificationReuseRequest<'_>,
@@ -1723,6 +2494,98 @@ fn command_summary(record: &VerificationRunRecord) -> String {
     )
 }
 
+fn run_record_gate_name(record: &VerificationRunRecord) -> String {
+    let substrate = record.execution_substrate.trim();
+    if run_record_uses_rch(record) {
+        "rch verification run".to_owned()
+    } else if run_record_is_local_cargo(record) {
+        "local cargo verification run".to_owned()
+    } else if substrate.contains("static") {
+        "static verification run".to_owned()
+    } else if substrate.is_empty() || substrate == "unknown" {
+        "verification run".to_owned()
+    } else {
+        format!("{substrate} verification run")
+    }
+}
+
+fn run_record_status(record: &VerificationRunRecord) -> VerificationStatus {
+    if run_record_is_local_cargo(record) {
+        return VerificationStatus::FallbackDetected;
+    }
+
+    match record.exit_code {
+        Some(0) => VerificationStatus::Passed,
+        Some(_) => VerificationStatus::Failed,
+        None if record.finished_at.is_none() => VerificationStatus::Interrupted,
+        None => VerificationStatus::Unknown,
+    }
+}
+
+fn run_record_offload(record: &VerificationRunRecord) -> VerificationOffload {
+    if run_record_is_local_cargo(record) {
+        return VerificationOffload::rch_fallback(
+            record.worker_host.as_deref(),
+            Some(
+                "verification run executed on local Cargo; remote-required Cargo gate is unverified",
+            ),
+        );
+    }
+
+    if run_record_uses_rch(record) {
+        VerificationOffload::rch_required(record.worker_host.as_deref())
+    } else {
+        VerificationOffload::local()
+    }
+}
+
+fn run_record_output_summary(record: &VerificationRunRecord) -> VerificationOutputSummary {
+    VerificationOutputSummary {
+        stdout_tail: record
+            .stdout_hash
+            .as_ref()
+            .map(|hash| format!("stdout_hash={hash}")),
+        stderr_tail: record
+            .stderr_excerpt_hash
+            .as_ref()
+            .map(|hash| format!("stderr_excerpt_hash={hash}")),
+        redacted: record.stdout_hash.is_some() || record.stderr_excerpt_hash.is_some(),
+    }
+}
+
+fn run_record_artifacts(record: &VerificationRunRecord) -> Vec<VerificationArtifactRef> {
+    let mut artifacts = Vec::new();
+    if let Some(hash) = record.artifact_manifest_hash.as_deref() {
+        artifacts.push(VerificationArtifactRef::new(
+            "artifact_manifest_hash",
+            "artifact_manifest",
+            Some(hash),
+        ));
+    }
+    if let Some(hash) = record.retained_log_path_hash.as_deref() {
+        artifacts.push(VerificationArtifactRef::new(
+            "retained_log_path_hash",
+            "retained_log",
+            Some(hash),
+        ));
+    }
+    artifacts
+}
+
+fn run_record_uses_rch(record: &VerificationRunRecord) -> bool {
+    matches!(
+        record.execution_substrate.as_str(),
+        "rch" | "remote_rch" | "rch_remote"
+    )
+}
+
+fn run_record_is_local_cargo(record: &VerificationRunRecord) -> bool {
+    matches!(
+        record.execution_substrate.as_str(),
+        "local_cargo" | "cargo_local" | "local-cargo"
+    )
+}
+
 #[derive(Clone, Debug)]
 struct PendingJ1Command {
     line: usize,
@@ -1869,6 +2732,48 @@ fn hash_json_array(values: &[&str]) -> String {
         bytes.push(0);
     }
     format!("blake3:{}", blake3::hash(&bytes).to_hex())
+}
+
+fn stable_rch_verification_id(
+    command_hash: &str,
+    finished_at: Option<&str>,
+    exit_code: Option<i32>,
+) -> String {
+    let payload = format!(
+        "{RCH_VERIFY_SCHEMA_V1}\0{command_hash}\0{}\0{}",
+        finished_at.unwrap_or(""),
+        exit_code.map_or_else(|| "none".to_owned(), |code| code.to_string())
+    );
+    let digest = blake3::hash(payload.as_bytes()).to_hex().to_string();
+    format!("ver_rch_{}", &digest[..26])
+}
+
+fn stable_github_actions_verification_id(
+    command_hash: &str,
+    completed_at: Option<&str>,
+    conclusion: Option<&str>,
+) -> String {
+    let payload = format!(
+        "{GITHUB_ACTIONS_CHECK_RUN_SCHEMA_V1}\0{command_hash}\0{}\0{}",
+        completed_at.unwrap_or(""),
+        conclusion.unwrap_or("")
+    );
+    let digest = blake3::hash(payload.as_bytes()).to_hex().to_string();
+    format!("ver_gha_{}", &digest[..26])
+}
+
+fn stable_run_verification_id(record: &VerificationRunRecord) -> String {
+    let payload = format!(
+        "{VERIFICATION_RUN_SCHEMA_V1}\0{}\0{}\0{}\0{}",
+        record.run_id,
+        record.command_hash,
+        record.finished_at.as_deref().unwrap_or(""),
+        record
+            .exit_code
+            .map_or_else(|| "none".to_owned(), |code| code.to_string())
+    );
+    let digest = blake3::hash(payload.as_bytes()).to_hex().to_string();
+    format!("ver_run_{}", &digest[..26])
 }
 
 fn stable_run_id(command_hash: &str, finished_at: Option<&str>, exit_code: Option<i32>) -> String {
@@ -2115,5 +3020,356 @@ mod tests {
         assert!(guidance.can_close);
         assert!(guidance.rejected_reasons.is_empty());
         assert!(guidance.assessments[0].satisfied);
+    }
+
+    #[test]
+    fn verification_run_record_maps_to_canonical_rch_evidence() -> TestResult {
+        let run = VerificationRunRecord::from_input(VerificationRunInput {
+            run_id: Some("vrun_rch_bridge"),
+            bead_id: Some("bd-1nxz4.5"),
+            agent_name: Some("ChartreuseHawk"),
+            source_hash: Some("git_tree:tree123"),
+            command_hash: Some("sha256:j1-command"),
+            command_argv: &["cargo", "test", "--lib", "rch_verify"],
+            cargo_target_dir: Some("/Volumes/USBNVME16TB/temp_agent_space/cargo-target"),
+            execution_substrate: "rch",
+            worker_host: Some("vmi123"),
+            started_at: Some("2026-05-19T05:00:00Z"),
+            finished_at: Some("2026-05-19T05:00:42Z"),
+            exit_code: Some(0),
+            stdout_hash: Some("blake3:stdout"),
+            stderr_excerpt: Some("remote worker passed"),
+            artifact_manifest_hash: Some("blake3:manifest"),
+            retained_log_path: Some("/tmp/verify-log.jsonl"),
+            provenance: vec![VerificationRunProvenance {
+                source: "j1_jsonl".to_owned(),
+                event_kind: "artifact_manifest".to_owned(),
+                line: Some(2),
+            }],
+        });
+
+        let record = verification_evidence_record_from_run_record(&run);
+
+        assert_eq!(record.schema, VERIFICATION_EVIDENCE_SCHEMA_V1);
+        assert!(record.verification_id.starts_with("ver_run_"));
+        assert_eq!(record.bead_id.as_deref(), Some("bd-1nxz4.5"));
+        assert_eq!(record.gate_name, "rch verification run");
+        assert_eq!(record.command_hash, "sha256:j1-command");
+        assert!(record.command.contains("command_hash=sha256:j1-command"));
+        assert_eq!(record.status, VerificationStatus::Passed);
+        assert!(record.is_authoritative_pass());
+        assert!(record.offload.required_remote);
+        assert_eq!(record.offload.worker.as_deref(), Some("vmi123"));
+        assert_eq!(
+            record.environment.workspace_fingerprint.as_deref(),
+            Some("git_tree:tree123")
+        );
+        assert_eq!(
+            record.environment.toolchain.as_deref(),
+            Some("class:external_cargo_target")
+        );
+        assert_eq!(record.artifacts.len(), 2);
+
+        let encoded = serde_json::to_string(&record)?;
+        assert!(!encoded.contains("remote worker passed"));
+        assert!(!encoded.contains("/tmp/verify-log.jsonl"));
+        Ok(())
+    }
+
+    #[test]
+    fn local_cargo_run_record_maps_to_fallback_evidence() {
+        let run = VerificationRunRecord::from_input(VerificationRunInput {
+            run_id: Some("vrun_local_cargo"),
+            bead_id: Some("bd-1nxz4.5"),
+            agent_name: Some("ChartreuseHawk"),
+            source_hash: Some("git_tree:tree123"),
+            command_hash: Some("sha256:local-cargo"),
+            command_argv: &["cargo", "test", "--lib", "rch_verify"],
+            cargo_target_dir: Some("target"),
+            execution_substrate: "local_cargo",
+            worker_host: None,
+            started_at: Some("2026-05-19T05:00:00Z"),
+            finished_at: Some("2026-05-19T05:00:42Z"),
+            exit_code: Some(0),
+            stdout_hash: None,
+            stderr_excerpt: None,
+            artifact_manifest_hash: Some("blake3:manifest"),
+            retained_log_path: None,
+            provenance: Vec::new(),
+        });
+
+        let record = verification_evidence_record_from_run_record(&run);
+
+        assert_eq!(record.status, VerificationStatus::FallbackDetected);
+        assert!(!record.is_authoritative_pass());
+        assert!(record.offload.required_remote);
+        assert!(record.offload.fallback_detected);
+        assert_eq!(record.gate_name, "local cargo verification run");
+    }
+
+    #[test]
+    fn verification_evidence_beads_summary_is_shell_safe() {
+        let producer = ProducerMetadata::unknown_agent(
+            ProducerSourceSystem::Verification,
+            Some("verify-run-danger"),
+            None,
+            Some("repo:abc$(leak)"),
+            Some("2026-05-19T07:10:00Z"),
+        );
+        let mut record = VerificationEvidenceRecord::from_input(VerificationEvidenceInput {
+            verification_id: "ver_$(touch pwned)",
+            bead_id: Some("bd-1nxz4.5`oops`"),
+            gate_name: "cargo test $(launch)",
+            command: "cargo test --lib $(cat secret)",
+            status: VerificationStatus::Blocked,
+            exit_code: None,
+            started_at: Some("2026-05-19T07:00:00Z"),
+            finished_at: None,
+            duration_ms: None,
+            environment: VerificationEnvironment::new(
+                Some("git_tree:abc$(oops)"),
+                Some("/repo"),
+                None,
+            ),
+            offload: VerificationOffload::rch_fallback(
+                Some("vmi`123`"),
+                Some("$(launch remote) && retry"),
+            ),
+            output_summary: VerificationOutputSummary::redacted(Some("$(raw log)")),
+            artifacts: Vec::new(),
+            producer,
+        });
+        record.command_hash = "sha256:$(unsafe)`hash`".to_owned();
+
+        let summary = verification_evidence_beads_summary(&record);
+
+        assert!(summary.contains("schema=ee.verification.evidence.v1"));
+        assert!(summary.contains("status=blocked"));
+        assert!(summary.contains("result_class=environment_blocker"));
+        assert!(summary.contains("raw_output_included=false"));
+        assert!(!summary.contains("cargo test --lib"));
+        assert!(!summary.contains("raw log"));
+        assert!(!summary.contains('$'));
+        assert!(!summary.contains('`'));
+        assert!(!summary.contains('('));
+        assert!(!summary.contains(')'));
+        assert!(!summary.contains('\n'));
+    }
+
+    #[test]
+    fn github_actions_success_maps_to_canonical_ci_evidence() -> TestResult {
+        let proof = serde_json::json!({
+            "schema": GITHUB_ACTIONS_CHECK_RUN_SCHEMA_V1,
+            "name": "verify",
+            "workflow_name": "CI",
+            "run_id": 26077398253_u64,
+            "run_attempt": 1,
+            "check_run_id": 123456_u64,
+            "repository": "Dicklesworthstone/eidetic_engine_cli",
+            "head_sha": "9e02dd424891623d2b5049525b2762a9376e41f9",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-05-19T06:00:00Z",
+            "completed_at": "2026-05-19T06:10:00Z",
+            "html_url": "https://github.example/checks/123",
+            "details_url": "https://github.example/details/123",
+            "output": {
+                "title": "verify passed",
+                "text": "raw log text must not be copied into the evidence summary"
+            }
+        });
+
+        let record = verification_evidence_record_from_github_actions_check_run(&proof)?;
+
+        assert_eq!(record.schema, VERIFICATION_EVIDENCE_SCHEMA_V1);
+        assert!(record.verification_id.starts_with("ver_gha_"));
+        assert_eq!(record.gate_name, "github_actions:CI:verify");
+        assert_eq!(record.status, VerificationStatus::Passed);
+        assert_eq!(record.exit_code, Some(0));
+        assert!(record.is_authoritative_pass());
+        assert_eq!(
+            record.offload.offload_tool.as_deref(),
+            Some("github_actions")
+        );
+        assert_eq!(
+            record.environment.workspace_fingerprint.as_deref(),
+            Some("github_head_sha:9e02dd424891623d2b5049525b2762a9376e41f9")
+        );
+        assert_eq!(record.artifacts.len(), 2);
+
+        let encoded = serde_json::to_string(&record)?;
+        assert!(!encoded.contains("raw log text"));
+        assert!(encoded.contains("verify passed"));
+        Ok(())
+    }
+
+    #[test]
+    fn github_actions_failure_maps_to_failed_ci_evidence() -> TestResult {
+        let proof = serde_json::json!({
+            "name": "verify",
+            "workflow_run": {
+                "id": 26077398253_u64,
+                "name": "CI",
+                "head_sha": "9e02dd424891623d2b5049525b2762a9376e41f9"
+            },
+            "check_suite": {
+                "head_sha": "9e02dd424891623d2b5049525b2762a9376e41f9"
+            },
+            "status": "completed",
+            "conclusion": "failure",
+            "completed_at": "2026-05-19T06:10:00Z",
+            "html_url": "https://github.example/checks/124",
+            "output": {
+                "title": "verify failed"
+            }
+        });
+
+        let record = verification_evidence_record_from_github_actions_check_run(&proof)?;
+
+        assert_eq!(record.status, VerificationStatus::Failed);
+        assert_eq!(record.exit_code, Some(1));
+        assert!(!record.is_authoritative_pass());
+        assert_eq!(record.producer.run.run_id.as_deref(), Some("26077398253"));
+        Ok(())
+    }
+
+    #[test]
+    fn rch_verify_remote_pass_maps_to_canonical_pass_record() -> TestResult {
+        let proof = serde_json::json!({
+            "schema": RCH_VERIFY_SCHEMA_V1,
+            "command_text": "cargo test --lib verification",
+            "command_hash": "sha256:remote-pass",
+            "command_kind": "cargo_test",
+            "status": "remote_pass",
+            "exit_code": 0,
+            "bead_id": "bd-1nxz4.5",
+            "worker_id": "vmi123",
+            "remote_required": true,
+            "started_at": "2026-05-19T04:00:00Z",
+            "completed_at": "2026-05-19T04:00:09Z",
+            "elapsed_ms": 9000,
+            "git_tree": "tree123",
+            "dirty_status_hash": "dirty456",
+            "remote_project_root": "/data/projects/eidetic_engine_cli",
+            "source_manifest_hash": "blake3:manifest",
+            "stdout_tail": "test result: ok",
+            "rch_runtime": {
+                "client_version": "1.0.24",
+                "daemon_version": "0.1.3"
+            }
+        });
+
+        let record = verification_evidence_record_from_rch_verify(&proof)?;
+
+        assert_eq!(record.schema, VERIFICATION_EVIDENCE_SCHEMA_V1);
+        assert_eq!(record.bead_id.as_deref(), Some("bd-1nxz4.5"));
+        assert_eq!(record.gate_name, "cargo_test");
+        assert_eq!(record.command, "cargo test --lib verification");
+        assert_eq!(record.command_hash, "sha256:remote-pass");
+        assert_eq!(record.status, VerificationStatus::Passed);
+        assert_eq!(record.exit_code, Some(0));
+        assert!(record.is_authoritative_pass());
+        assert!(record.offload.required_remote);
+        assert!(!record.offload.fallback_detected);
+        assert_eq!(record.offload.worker.as_deref(), Some("vmi123"));
+        assert_eq!(
+            record.environment.workspace_fingerprint.as_deref(),
+            Some("git_tree:tree123;dirty_status:dirty456")
+        );
+        assert_eq!(
+            record.environment.toolchain.as_deref(),
+            Some("rch client=1.0.24 daemon=0.1.3")
+        );
+        assert_eq!(record.artifacts.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn rch_verify_environment_failure_maps_to_blocked() -> TestResult {
+        let proof = serde_json::json!({
+            "schema": RCH_VERIFY_SCHEMA_V1,
+            "command": ["cargo", "check", "--all-targets"],
+            "command_hash": "sha256:blocked",
+            "status": "rch_environment_failure",
+            "exit_code": 1,
+            "degraded_codes": ["rch_verify_client_daemon_version_skew"],
+            "stderr_tail": "client/daemon version skew"
+        });
+
+        let record = verification_evidence_record_from_rch_verify(&proof)?;
+
+        assert_eq!(record.command, "cargo check --all-targets");
+        assert_eq!(record.status, VerificationStatus::Blocked);
+        assert!(!record.is_authoritative_pass());
+        assert!(record.offload.required_remote);
+        Ok(())
+    }
+
+    #[test]
+    fn rch_verify_remote_compile_failure_maps_to_failed_not_blocked() -> TestResult {
+        let proof = serde_json::json!({
+            "schema": RCH_VERIFY_SCHEMA_V1,
+            "command_text": "cargo test --lib search::simhash",
+            "command_hash": "sha256:compile-failure",
+            "status": "remote_failure",
+            "exit_code": 101,
+            "degraded_codes": ["rch_verify_remote_command_failed"],
+            "stderr_tail": "error[E0425]: cannot find value"
+        });
+
+        let record = verification_evidence_record_from_rch_verify(&proof)?;
+
+        assert_eq!(record.status, VerificationStatus::Failed);
+        assert_eq!(record.exit_code, Some(101));
+        assert!(!record.is_authoritative_pass());
+        assert!(!record.offload.fallback_detected);
+        Ok(())
+    }
+
+    #[test]
+    fn rch_verify_local_fallback_maps_to_fallback_detected() -> TestResult {
+        let proof = serde_json::json!({
+            "schema": RCH_VERIFY_SCHEMA_V1,
+            "command_text": "cargo test --lib explain_latency",
+            "command_hash": "sha256:fallback",
+            "status": "local_fallback",
+            "exit_code": 0,
+            "remote_required": true,
+            "would_offload": false,
+            "degraded_codes": ["rch_verify_local_fallback"],
+            "fallback_reason": "remote marker missing"
+        });
+
+        let record = verification_evidence_record_from_rch_verify(&proof)?;
+
+        assert_eq!(record.status, VerificationStatus::FallbackDetected);
+        assert_eq!(record.exit_code, Some(0));
+        assert!(!record.is_authoritative_pass());
+        assert!(record.offload.required_remote);
+        assert!(record.offload.fallback_detected);
+        assert_eq!(
+            record.offload.fallback_reason.as_deref(),
+            Some("remote marker missing")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rch_verify_rejects_duplicate_underscore_schema() {
+        let proof = serde_json::json!({
+            "schema": "ee.verification_evidence.v1",
+            "command_text": "cargo test",
+            "command_hash": "sha256:duplicate"
+        });
+
+        let error =
+            verification_evidence_record_from_rch_verify(&proof).expect_err("schema is rejected");
+
+        assert_eq!(
+            error,
+            RchVerificationEvidenceParseError::UnexpectedSchema {
+                found: "ee.verification_evidence.v1".to_owned()
+            }
+        );
     }
 }

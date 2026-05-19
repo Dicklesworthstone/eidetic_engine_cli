@@ -2,10 +2,12 @@
 //!
 //! Group name: `ee_context_with_ppr`
 //!
-//! Measures the same 1k-memory fixture with PPR disabled and enabled. The
-//! Criterion pair remains a full-context diagnostic; the 30ms budget applies to
-//! the instrumented `pprRerank` stage so search and persistence variance do not
-//! get misattributed to the graph reranker.
+//! Measures PPR disabled and enabled on the default 1k-memory smoke fixture.
+//! Set `EE_CONTEXT_PPR_BENCH_PRODUCTION_SCALE=1` to also run the pinned
+//! 14k-memory production fixture from bd-ov09's ACL PageRank acceptance notes.
+//! The Criterion pair remains a full-context diagnostic; the per-scale budget
+//! applies to the instrumented `pprRerank` stage so search and persistence
+//! variance do not get misattributed to the graph reranker.
 
 #![allow(clippy::expect_used)]
 
@@ -29,9 +31,51 @@ use ee::pack::DEFAULT_COORDINATION_STALE_AFTER_MS;
 use ee::search::SpeedMode;
 
 const BENCH_GROUP_NAME: &str = "ee_context_with_ppr";
-const MEMORY_COUNT: usize = 1_000;
-#[allow(dead_code)]
-const PPR_OVERHEAD_P50_BUDGET_MS: f64 = 30.0;
+const SMOKE_MEMORY_COUNT: usize = 1_000;
+const PRODUCTION_MEMORY_COUNT: usize = 14_000;
+const SMOKE_PPR_RERANK_P50_BUDGET_MS: f64 = 30.0;
+const PRODUCTION_PPR_RERANK_P50_BUDGET_MS: f64 = 50.0;
+const PRODUCTION_SCALE_ENV: &str = "EE_CONTEXT_PPR_BENCH_PRODUCTION_SCALE";
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BenchScale {
+    label: &'static str,
+    memory_count: usize,
+    ppr_rerank_budget_ms: f64,
+}
+
+const SMOKE_SCALE: BenchScale = BenchScale {
+    label: "smoke_1000_memories",
+    memory_count: SMOKE_MEMORY_COUNT,
+    ppr_rerank_budget_ms: SMOKE_PPR_RERANK_P50_BUDGET_MS,
+};
+
+const PRODUCTION_SCALE: BenchScale = BenchScale {
+    label: "production_14000_memories",
+    memory_count: PRODUCTION_MEMORY_COUNT,
+    ppr_rerank_budget_ms: PRODUCTION_PPR_RERANK_P50_BUDGET_MS,
+};
+
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let trimmed = value.trim();
+            !(trimmed.is_empty()
+                || trimmed == "0"
+                || trimmed.eq_ignore_ascii_case("false")
+                || trimmed.eq_ignore_ascii_case("no")
+                || trimmed.eq_ignore_ascii_case("off"))
+        })
+        .unwrap_or(false)
+}
+
+fn active_bench_scales() -> Vec<BenchScale> {
+    let mut scales = vec![SMOKE_SCALE];
+    if env_truthy(PRODUCTION_SCALE_ENV) {
+        scales.push(PRODUCTION_SCALE);
+    }
+    scales
+}
 
 fn stable_workspace_id(path: &Path) -> String {
     let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
@@ -50,7 +94,7 @@ fn ensure_workspace_row(connection: &DbConnection, workspace_path: &Path) {
         .expect("insert benchmark workspace row");
 }
 
-fn seed_benchmark_fixture(temp_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+fn seed_benchmark_fixture(temp_dir: &Path, scale: BenchScale) -> (PathBuf, PathBuf, PathBuf) {
     let workspace_path = temp_dir.to_path_buf();
     let db_path = workspace_path.join(".ee").join("ee.db");
     let index_dir = workspace_path.join(".ee").join("index");
@@ -66,7 +110,7 @@ fn seed_benchmark_fixture(temp_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     ensure_workspace_row(&connection, &workspace_path);
     let workspace_id = stable_workspace_id(&workspace_path);
 
-    for index in 0..MEMORY_COUNT {
+    for index in 0..scale.memory_count {
         let content = if index < 200 {
             format!(
                 "PPR context benchmark primary memory {index:04}: structural reranking release seed evidence."
@@ -99,7 +143,7 @@ fn seed_benchmark_fixture(temp_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
             .expect("insert benchmark memory");
     }
 
-    for index in 0..(MEMORY_COUNT - 1) {
+    for index in 0..scale.memory_count.saturating_sub(1) {
         connection
             .insert_memory_link(
                 &format!("link_{index:026}"),
@@ -143,7 +187,7 @@ fn seed_benchmark_fixture(temp_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     })
     .expect("rebuild benchmark index");
     assert_eq!(rebuild.status, IndexRebuildStatus::Success);
-    assert_eq!(rebuild.memories_indexed as usize, MEMORY_COUNT);
+    assert_eq!(rebuild.memories_indexed as usize, scale.memory_count);
 
     (workspace_path, db_path, index_dir)
 }
@@ -257,10 +301,12 @@ impl OverheadAttribution {
         }
     }
 
-    fn to_json(self) -> serde_json::Value {
+    fn to_json(self, scale: BenchScale) -> serde_json::Value {
         serde_json::json!({
             "schema": "ee.bench.context_with_ppr.attribution.v1",
-            "budgetMs": PPR_OVERHEAD_P50_BUDGET_MS,
+            "workloadLabel": scale.label,
+            "memoryCount": scale.memory_count,
+            "budgetMs": scale.ppr_rerank_budget_ms,
             "budgetAppliesTo": "pprRerank",
             "deltasMs": {
                 "total": self.total_delta_ms,
@@ -272,28 +318,33 @@ impl OverheadAttribution {
                 "residual": self.residual_delta_ms,
             },
             "budgetStatus": {
-                "total": budget_status(self.total_delta_ms),
-                "pprRerank": budget_status(self.ppr_rerank_delta_ms),
+                "total": budget_status(self.total_delta_ms, scale.ppr_rerank_budget_ms),
+                "pprRerank": budget_status(self.ppr_rerank_delta_ms, scale.ppr_rerank_budget_ms),
             },
         })
     }
 }
 
-fn budget_status(value_ms: f64) -> &'static str {
-    if value_ms <= PPR_OVERHEAD_P50_BUDGET_MS {
+fn budget_status(value_ms: f64, budget_ms: f64) -> &'static str {
+    if value_ms <= budget_ms {
         "within_budget"
     } else {
         "over_budget"
     }
 }
 
-fn emit_stage_diagnostics(workspace_path: &Path, db_path: &Path, index_dir: &Path) {
+fn emit_stage_diagnostics(
+    workspace_path: &Path,
+    db_path: &Path,
+    index_dir: &Path,
+    scale: BenchScale,
+) {
     let mut base_diagnostics = None;
     let mut ppr_diagnostics = None;
 
     for (label, ppr_weight) in [
-        ("base_1000_memories", None),
-        ("ppr_1000_memories", Some(0.5)),
+        (format!("base_{}", scale.label), None),
+        (format!("ppr_{}", scale.label), Some(0.5)),
     ] {
         let run = run_context_pack_with_performance(
             &options(workspace_path, db_path, index_dir, ppr_weight),
@@ -302,7 +353,9 @@ fn emit_stage_diagnostics(workspace_path: &Path, db_path: &Path, index_dir: &Pat
         .expect("context pack stage diagnostics");
         let diagnostics = StageDiagnostics::from_performance(&run.performance);
         println!(
-            "ppr_stage_diagnostics label={label} total_ms={:.3} search_ms={:.3} candidate_resolution_ms={:.3} ppr_rerank_ms={:.3} pack_assembly_ms={:.3} pack_persistence_ms={:.3}",
+            "ppr_stage_diagnostics label={label} memory_count={} ppr_rerank_budget_ms={:.3} total_ms={:.3} search_ms={:.3} candidate_resolution_ms={:.3} ppr_rerank_ms={:.3} pack_assembly_ms={:.3} pack_persistence_ms={:.3}",
+            scale.memory_count,
+            scale.ppr_rerank_budget_ms,
             diagnostics.total_ms,
             diagnostics.search_ms,
             diagnostics.candidate_resolution_ms,
@@ -320,9 +373,14 @@ fn emit_stage_diagnostics(workspace_path: &Path, db_path: &Path, index_dir: &Pat
 
     if let (Some(base), Some(ppr)) = (base_diagnostics, ppr_diagnostics) {
         let attribution = OverheadAttribution::from_diagnostics(base, ppr);
-        println!("ppr_overhead_attribution_json {}", attribution.to_json());
         println!(
-            "ppr_overhead_attribution total_delta_ms={:.3} search_delta_ms={:.3} candidate_resolution_delta_ms={:.3} ppr_rerank_delta_ms={:.3} pack_assembly_delta_ms={:.3} pack_persistence_delta_ms={:.3} residual_delta_ms={:.3} ppr_rerank_budget_ms={PPR_OVERHEAD_P50_BUDGET_MS:.3} total_budget_status={} ppr_rerank_budget_status={}",
+            "ppr_overhead_attribution_json {}",
+            attribution.to_json(scale)
+        );
+        println!(
+            "ppr_overhead_attribution workload_label={} memory_count={} total_delta_ms={:.3} search_delta_ms={:.3} candidate_resolution_delta_ms={:.3} ppr_rerank_delta_ms={:.3} pack_assembly_delta_ms={:.3} pack_persistence_delta_ms={:.3} residual_delta_ms={:.3} ppr_rerank_budget_ms={:.3} total_budget_status={} ppr_rerank_budget_status={}",
+            scale.label,
+            scale.memory_count,
             attribution.total_delta_ms,
             attribution.search_delta_ms,
             attribution.candidate_resolution_delta_ms,
@@ -330,37 +388,46 @@ fn emit_stage_diagnostics(workspace_path: &Path, db_path: &Path, index_dir: &Pat
             attribution.pack_assembly_delta_ms,
             attribution.pack_persistence_delta_ms,
             attribution.residual_delta_ms,
-            budget_status(attribution.total_delta_ms),
-            budget_status(attribution.ppr_rerank_delta_ms),
+            scale.ppr_rerank_budget_ms,
+            budget_status(attribution.total_delta_ms, scale.ppr_rerank_budget_ms),
+            budget_status(attribution.ppr_rerank_delta_ms, scale.ppr_rerank_budget_ms),
         );
     }
 }
 
 fn bench_context_with_ppr(c: &mut Criterion) {
     let mut group = c.benchmark_group(BENCH_GROUP_NAME);
-    let temp_dir = TempDir::new().expect("temp dir");
-    let (workspace_path, db_path, index_dir) = seed_benchmark_fixture(temp_dir.path());
 
-    for (label, ppr_weight) in [
-        ("base_1000_memories", None),
-        ("ppr_1000_memories", Some(0.5)),
-    ] {
-        group.bench_with_input(
-            BenchmarkId::new("context_pack", label),
-            &ppr_weight,
-            |b, weight| {
-                b.iter(|| {
-                    let response =
-                        run_context_pack(&options(&workspace_path, &db_path, &index_dir, *weight))
-                            .expect("context pack");
-                    black_box(response.data.pack.hash);
-                });
-            },
-        );
+    for scale in active_bench_scales() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let (workspace_path, db_path, index_dir) = seed_benchmark_fixture(temp_dir.path(), scale);
+
+        for (label, ppr_weight) in [
+            (format!("base_{}", scale.label), None),
+            (format!("ppr_{}", scale.label), Some(0.5)),
+        ] {
+            group.bench_with_input(
+                BenchmarkId::new("context_pack", label),
+                &ppr_weight,
+                |b, weight| {
+                    b.iter(|| {
+                        let response = run_context_pack(&options(
+                            &workspace_path,
+                            &db_path,
+                            &index_dir,
+                            *weight,
+                        ))
+                        .expect("context pack");
+                        black_box(response.data.pack.hash);
+                    });
+                },
+            );
+        }
+
+        emit_stage_diagnostics(&workspace_path, &db_path, &index_dir, scale);
     }
 
     group.finish();
-    emit_stage_diagnostics(&workspace_path, &db_path, &index_dir);
 }
 
 fn run_criterion_mode() {
@@ -375,12 +442,28 @@ fn run_self_test_mode() -> Result<(), String> {
             "unexpected benchmark group name: {BENCH_GROUP_NAME}"
         ));
     }
-    if MEMORY_COUNT != 1_000 {
-        return Err(format!("unexpected benchmark memory count: {MEMORY_COUNT}"));
-    }
-    if PPR_OVERHEAD_P50_BUDGET_MS != 30.0 {
+    if SMOKE_SCALE.memory_count != 1_000 {
         return Err(format!(
-            "unexpected PPR overhead budget: {PPR_OVERHEAD_P50_BUDGET_MS}"
+            "unexpected smoke benchmark memory count: {}",
+            SMOKE_SCALE.memory_count
+        ));
+    }
+    if PRODUCTION_SCALE.memory_count != 14_000 {
+        return Err(format!(
+            "unexpected production benchmark memory count: {}",
+            PRODUCTION_SCALE.memory_count
+        ));
+    }
+    if SMOKE_SCALE.ppr_rerank_budget_ms != 30.0 {
+        return Err(format!(
+            "unexpected smoke PPR rerank budget: {}",
+            SMOKE_SCALE.ppr_rerank_budget_ms
+        ));
+    }
+    if PRODUCTION_SCALE.ppr_rerank_budget_ms != 50.0 {
+        return Err(format!(
+            "unexpected production PPR rerank budget: {}",
+            PRODUCTION_SCALE.ppr_rerank_budget_ms
         ));
     }
 
@@ -417,10 +500,22 @@ fn run_self_test_mode() -> Result<(), String> {
         pack_persistence_ms: 6.0,
     };
     let attribution = OverheadAttribution::from_diagnostics(base, ppr);
-    let json = attribution.to_json();
+    let json = attribution.to_json(SMOKE_SCALE);
 
     if json["schema"] != "ee.bench.context_with_ppr.attribution.v1" {
         return Err(format!("unexpected attribution schema: {}", json["schema"]));
+    }
+    if json["workloadLabel"] != "smoke_1000_memories" {
+        return Err(format!(
+            "unexpected attribution workload label: {}",
+            json["workloadLabel"]
+        ));
+    }
+    if json["memoryCount"] != 1000 {
+        return Err(format!(
+            "unexpected attribution memory count: {}",
+            json["memoryCount"]
+        ));
     }
     if json["budgetAppliesTo"] != "pprRerank" {
         return Err(format!(
@@ -503,8 +598,10 @@ mod tests {
     #[test]
     fn benchmark_group_name_is_canonical() {
         assert_eq!(super::BENCH_GROUP_NAME, "ee_context_with_ppr");
-        assert_eq!(super::MEMORY_COUNT, 1_000);
-        assert_eq!(super::PPR_OVERHEAD_P50_BUDGET_MS, 30.0);
+        assert_eq!(super::SMOKE_SCALE.memory_count, 1_000);
+        assert_eq!(super::SMOKE_SCALE.ppr_rerank_budget_ms, 30.0);
+        assert_eq!(super::PRODUCTION_SCALE.memory_count, 14_000);
+        assert_eq!(super::PRODUCTION_SCALE.ppr_rerank_budget_ms, 50.0);
     }
 
     #[test]
@@ -541,8 +638,14 @@ mod tests {
 
         assert_close(diagnostics.total_ms, 100.0);
         assert_close(diagnostics.tracked_ms(), 97.0);
-        assert_eq!(super::budget_status(7.0), "within_budget");
-        assert_eq!(super::budget_status(31.0), "over_budget");
+        assert_eq!(
+            super::budget_status(7.0, super::SMOKE_SCALE.ppr_rerank_budget_ms),
+            "within_budget"
+        );
+        assert_eq!(
+            super::budget_status(31.0, super::SMOKE_SCALE.ppr_rerank_budget_ms),
+            "over_budget"
+        );
     }
 
     #[test]
@@ -565,9 +668,11 @@ mod tests {
         };
 
         let attribution = super::OverheadAttribution::from_diagnostics(base, ppr);
-        let json = attribution.to_json();
+        let json = attribution.to_json(super::SMOKE_SCALE);
 
         assert_eq!(json["schema"], "ee.bench.context_with_ppr.attribution.v1");
+        assert_eq!(json["workloadLabel"], "smoke_1000_memories");
+        assert_eq!(json["memoryCount"], 1000);
         assert_eq!(json["budgetAppliesTo"], "pprRerank");
         assert_close(json["deltasMs"]["total"].as_f64().unwrap(), 35.0);
         assert_close(json["deltasMs"]["search"].as_f64().unwrap(), 2.0);

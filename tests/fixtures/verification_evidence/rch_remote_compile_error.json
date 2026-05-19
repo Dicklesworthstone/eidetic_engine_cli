@@ -1,0 +1,19 @@
+{
+  "schema": "ee.rch.verify.v1",
+  "bead_id": "bd-ov09",
+  "command_text": "cargo test --lib ppr_proof -- --nocapture",
+  "command_kind": "cargo_test",
+  "command_hash": "abc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd",
+  "worker_id": "trj",
+  "exit_code": 101,
+  "elapsed_ms": 5000,
+  "status": "remote_failure",
+  "remote_required": true,
+  "would_offload": true,
+  "first_error_file": "/data/projects/eidetic_engine_cli/src/db/mod.rs",
+  "first_error_line": 17092,
+  "first_error_message": "expected struct, got enum",
+  "degraded_codes": ["rch_verify_remote_command_failed"],
+  "source_state_degraded_codes": [],
+  "worker_state_degraded_codes": []
+}
