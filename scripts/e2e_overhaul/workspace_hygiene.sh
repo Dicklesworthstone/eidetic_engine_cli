@@ -557,10 +557,10 @@ run_scenario() {
                 fi
                 ;;
             active_reservation)
-                first_failure="$(assert_jq "$stdout_artifact" '.data.coordinationState.agentMailAvailable == true and (.data.coordinationState.blockedByCoordination[0].path == "src/lib.rs")' "active reservation should block src/lib.rs" || true)"
+                first_failure="$(assert_jq "$stdout_artifact" '.data.coordinationState.agentMailAvailable == true and (.data.coordinationState.blockedByCoordination[0].path == "src/lib.rs") and (.data.coordinationState.blockedByCoordination[0].holderAgent == "OtherAgent") and (.data.coordinationState.blockedByCoordination[0].pathPattern == "src/lib.rs") and (.data.coordinationState.blockedByCoordination[0].exclusive == true) and ([.data.stagingRecommendations[].paths[]?] | index("src/lib.rs") | not) and (.data.degraded | index("workspace_hygiene_agent_mail_unavailable") | not)' "active reservation should block src/lib.rs and keep it out of staging" || true)"
                 ;;
             agent_mail_unavailable)
-                first_failure="$(assert_jq "$stdout_artifact" '(.data.degraded | index("workspace_hygiene_agent_mail_unavailable")) and (.data.degraded | index("workspace_hygiene_partial_metadata"))' "missing snapshot should emit Agent Mail unavailable degraded codes" || true)"
+                first_failure="$(assert_jq "$stdout_artifact" '(.data.coordinationState.agentMailAvailable == false) and (.data.coordinationState.blockedByCoordination | length == 0) and (.data.coordinationState.activeAgents | length == 0) and (.data.degraded | index("workspace_hygiene_agent_mail_unavailable")) and (.data.degraded | index("workspace_hygiene_partial_metadata"))' "missing snapshot should emit Agent Mail unavailable posture and degraded codes" || true)"
                 ;;
             beads_pending_flush)
                 first_failure="$(assert_jq "$stdout_artifact" '.data.beadsState.classification == "beads_db_dirty_pending_flush" and .data.beadsState.metadataSignal == "db_dirty_pending_flush"' "beads DB marker should report pending flush" || true)"
