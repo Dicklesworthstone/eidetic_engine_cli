@@ -175,6 +175,24 @@ fn configure_recovery_state_open_no_follow(options: &mut fs::OpenOptions) {
 #[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
 fn configure_recovery_state_open_no_follow(_options: &mut fs::OpenOptions) {}
 
+fn sync_recovery_state_file(file: &fs::File) -> io::Result<()> {
+    match file.sync_data() {
+        Ok(()) => Ok(()),
+        Err(error) if recovery_state_file_sync_is_unsupported(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn recovery_state_file_sync_is_unsupported(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(1)
+}
+
+#[cfg(not(windows))]
+fn recovery_state_file_sync_is_unsupported(_error: &io::Error) -> bool {
+    false
+}
+
 fn write_recovery_state(workspace_path: &Path, state: &str) -> std::io::Result<()> {
     let path = write_spool_recovery_state_path(workspace_path);
     ensure_recovery_state_path_has_no_symlink_components(&path)?;
@@ -203,7 +221,7 @@ fn write_recovery_state(workspace_path: &Path, state: &str) -> std::io::Result<(
                 Err(error) => return Err(error),
             };
             file.write_all(payload.as_bytes())?;
-            file.sync_data()?;
+            sync_recovery_state_file(&file)?;
         }
 
         publish_recovery_state_temp_file(&path, &temp_path)?;
@@ -2507,6 +2525,22 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_recovery_state_sync_treats_error_invalid_function_as_unsupported() {
+        let error = io::Error::from_raw_os_error(1);
+
+        assert!(recovery_state_file_sync_is_unsupported(&error));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn recovery_state_sync_errors_are_not_suppressed_on_non_windows() {
+        let error = io::Error::from_raw_os_error(1);
+
+        assert!(!recovery_state_file_sync_is_unsupported(&error));
     }
 
     #[cfg(unix)]
