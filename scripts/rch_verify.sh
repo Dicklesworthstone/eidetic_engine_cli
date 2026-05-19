@@ -459,6 +459,10 @@ is_cargo_path_dependency_version_output() {
         printf '%s' "$text" | grep -Eiq "location searched: /data/projects/"
 }
 
+is_all_workers_preflight_failed_output() {
+    grep -Eiq "all workers failed preflight checks|all workers failed preflight|no worker selected.*all workers failed preflight"
+}
+
 configured_workers() {
     CONFIGURED_WORKERS="${RCH_VERIFY_CONFIGURED_WORKERS:-}" \
     FAKE_OUTPUT_PRESENT="${RCH_VERIFY_FAKE_OUTPUT:+1}" \
@@ -1636,6 +1640,8 @@ def blocker_kind_for(degraded_codes):
         return "remote_checkout_incomplete"
     if "rch_verify_worker_disk_full" in degraded_codes:
         return "worker_disk_full"
+    if "rch_verify_all_workers_preflight_failed" in degraded_codes:
+        return "all_workers_preflight_failed"
     if "rch_verify_capacity_or_timeout" in degraded_codes:
         return "capacity_or_timeout"
     if "rch_verify_topology_blocked" in degraded_codes:
@@ -1651,6 +1657,7 @@ def remediation_bead_for(blocker_kind):
         "client_daemon_version_skew": "bd-17c65.10.17.1.4",
         "remote_checkout_incomplete": "bd-17c65.10.17.1.3",
         "worker_disk_full": "bd-17c65.10.17",
+        "all_workers_preflight_failed": "bd-17c65.10.19",
         "capacity_or_timeout": "bd-17c65.10.17",
         "topology_blocked": "bd-17c65.10.17.1.2",
         "local_fallback_refused": "bd-17c65.10.17.1",
@@ -1815,6 +1822,7 @@ worker_state_code_set = {
     "rch_verify_remote_marker_missing",
     "rch_verify_retry_after_worker_disk_full",
     "rch_verify_topology_blocked",
+    "rch_verify_all_workers_preflight_failed",
     "rch_verify_worker_disk_full",
     "rch_verify_worker_filter_ignored",
     "rch_verify_worker_quarantine_ignored",
@@ -1852,6 +1860,7 @@ elif (
     or "rch_verify_cargo_path_dependency_version_blocked" in degraded
     or "rch_verify_client_daemon_version_skew" in degraded
     or "rch_verify_local_fallback_refused" in degraded
+    or "rch_verify_all_workers_preflight_failed" in degraded
     or "rch_verify_worker_disk_full" in degraded
     or "rch_verify_worker_quarantine_ignored" in degraded
     or "rch_verify_worker_filter_ignored" in degraded
@@ -2298,6 +2307,9 @@ if printf '%s' "$combined_output" | grep -q "RCH-E327"; then
 fi
 if printf '%s' "$combined_output" | grep -q "remote required; refusing local fallback"; then
     degraded+=("rch_verify_local_fallback_refused")
+fi
+if printf '%s' "$combined_output" | is_all_workers_preflight_failed_output; then
+    degraded+=("rch_verify_all_workers_preflight_failed")
 fi
 if [ "$exit_code" -ne 0 ] && [ -z "$worker_id" ] && printf '%s' "$combined_output" | grep -Eiq "timed out|timeout|capacity|busy|no workers|workers_healthy: 0|all_workers_offline"; then
     degraded+=("rch_verify_capacity_or_timeout")
