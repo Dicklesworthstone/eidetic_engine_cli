@@ -141,9 +141,10 @@ proptest! {
 
     #[test]
     fn prop_serde_round_trip_preserves_value(a in arbitrary_simhash()) {
-        let serialized = serde_json::to_string(&a).map_err(TestCaseError::fail)?;
-        let restored: SimHash128 =
-            serde_json::from_str(&serialized).map_err(TestCaseError::fail)?;
+        let serialized = serde_json::to_string(&a)
+            .map_err(|error| TestCaseError::fail(error.to_string()))?;
+        let restored: SimHash128 = serde_json::from_str(&serialized)
+            .map_err(|error| TestCaseError::fail(error.to_string()))?;
         prop_assert_eq!(a, restored);
     }
 
