@@ -750,6 +750,14 @@ pub fn detect_claim_contradictions(bundle: &EvidenceBundle) -> Vec<ClaimContradi
     push_status_issue(
         &mut contradictions,
         bundle,
+        ClaimContradictionKind::VerifierInconclusive,
+        &["local_cargo_tripwire"],
+        &[EvidenceRecordStatus::Fail],
+        true,
+    );
+    push_status_issue(
+        &mut contradictions,
+        bundle,
         ClaimContradictionKind::SourceDocsConflict,
         &["source_docs", "docs_contract"],
         &[EvidenceRecordStatus::Fail],
@@ -1814,6 +1822,40 @@ mod tests {
 
         assert_eq!(item.support, RequirementSupport::Blocked);
         assert_eq!(item.confidence, "blocked");
+    }
+
+    #[test]
+    fn completion_report_flags_local_cargo_tripwire_failure_as_verifier_risk() {
+        let checklist = extract_completion_checklist(
+            "objective",
+            "Run all cargo builds and tests through RCH.",
+        );
+        let bundle = EvidenceBundle {
+            records: vec![record(
+                "local_cargo_tripwire",
+                "cargo/build/test command",
+                "policyStatus=local_cargo_disallowed",
+                EvidenceRecordStatus::Fail,
+                "direct",
+            )],
+        };
+
+        let report = build_completion_audit_report(&checklist, &bundle);
+
+        assert_eq!(report.completion_verdict, CompletionVerdict::Incomplete);
+        assert!(report.gaps.iter().any(|gap| {
+            gap.reason == "required_evidence_missing"
+                || gap.reason == "evidence_contradicts_completion_claim"
+        }));
+        assert!(report.residual_risks.iter().any(|risk| {
+            risk.kind == "verifier_inconclusive" && risk.target == "cargo/build/test command"
+        }));
+        assert!(
+            report
+                .recommended_next_actions
+                .iter()
+                .any(|action| action == "rerun_or_record_remote_verifier_result")
+        );
     }
 
     #[test]

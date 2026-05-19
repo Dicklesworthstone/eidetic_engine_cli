@@ -73,6 +73,8 @@ const MAX_COORDINATION_FALLBACK_SUMMARY_RECORDS: usize = 16;
 const SINGLEFLIGHT_POSTURE_FILE: &str = "singleflight_posture.json";
 const QOS_LANE_SUMMARY_FILE: &str = "qos_lane_summary.json";
 const TRIAGE_SUMMARY_FILE: &str = "scale_triage_summary.json";
+const LOCAL_CARGO_TRIPWIRE_FILE: &str = "local_cargo_tripwire.json";
+const SUPPORT_BUNDLE_REQUIRED_REMOTE_WRAPPER: &str = "scripts/rch_verify.sh -- <cargo command>";
 const TAILSCALE_METADATA_FIELDS: &[&str] = &[
     "selfNodeKey",
     "selfTailscaleIp",
@@ -267,6 +269,7 @@ struct CollectedDiagnostics {
     singleflight_posture_json: String,
     qos_lane_summary_json: String,
     triage_summary_json: String,
+    local_cargo_tripwire_json: String,
 }
 
 /// Plan what would be collected without actually creating the bundle.
@@ -376,6 +379,10 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         ),
         (QOS_LANE_SUMMARY_FILE, &diagnostics.qos_lane_summary_json),
         (TRIAGE_SUMMARY_FILE, &diagnostics.triage_summary_json),
+        (
+            LOCAL_CARGO_TRIPWIRE_FILE,
+            &diagnostics.local_cargo_tripwire_json,
+        ),
     ];
 
     for (filename, content) in files_to_write {
@@ -842,6 +849,7 @@ fn collect_diagnostics(
     let singleflight_posture_json = singleflight_posture_json();
     let qos_lane_summary_json = qos_lane_summary_json(workspace);
     let triage_summary_json = triage_summary_json(&status, &swarm_reports);
+    let local_cargo_tripwire_json = local_cargo_tripwire_json(workspace);
 
     Ok(CollectedDiagnostics {
         status_json,
@@ -862,6 +870,7 @@ fn collect_diagnostics(
         singleflight_posture_json,
         qos_lane_summary_json,
         triage_summary_json,
+        local_cargo_tripwire_json,
     })
 }
 
@@ -1609,6 +1618,136 @@ fn qos_lane_summary_json(workspace: &Path) -> String {
         })
     });
     stable_json(&value)
+}
+
+fn local_cargo_tripwire_json(workspace: &Path) -> String {
+    let direct_cargo = local_cargo_preflight_classification(
+        workspace,
+        "cargo test --lib support_bundle_tripwire_probe",
+    );
+    let wrapped_cargo = local_cargo_preflight_classification(
+        workspace,
+        "scripts/rch_verify.sh -- cargo test --lib support_bundle_tripwire_probe",
+    );
+    let direct_status = direct_cargo
+        .get("policyStatus")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let wrapped_status = wrapped_cargo
+        .get("policyStatus")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let build_admission = super::disk_pressure::gather_build_admission_report(
+        &super::disk_pressure::BuildAdmissionOptions {
+            workspace: workspace.to_path_buf(),
+            workspace_source: "support_bundle",
+            min_free_bytes: 1024 * 1024 * 1024,
+            artifact_destinations: Vec::new(),
+        },
+    );
+    let build_admission_json = serde_json::to_value(&build_admission).unwrap_or_else(|error| {
+        json!({
+            "schema": "ee.support_bundle.serialization_error.v1",
+            "message": error.to_string(),
+        })
+    });
+    let build_admission_status = if build_admission.admitted {
+        "remote_required_ready"
+    } else {
+        "remote_required_blocked"
+    };
+
+    stable_json(&json!({
+        "schema": "ee.support_bundle.local_cargo_tripwire.v1",
+        "collectionStatus": "policy_summary_no_live_process_scan",
+        "localBuildPolicy": {
+            "policy": "rch_only",
+            "status": if direct_status == "local_cargo_disallowed" && wrapped_status == "remote_wrapper_required" {
+                "enforced"
+            } else {
+                "needs_review"
+            },
+            "commandScope": "support_bundle_policy_summary",
+            "allowedReadOnlyCargoSubcommands": ["metadata", "locate-project", "pkgid", "tree"],
+        },
+        "requiredRemoteWrapper": SUPPORT_BUNDLE_REQUIRED_REMOTE_WRAPPER,
+        "detectedLocalBuilds": [],
+        "repairActions": if direct_status == "local_cargo_disallowed" {
+            json!([{
+                "priority": 1,
+                "kind": "use_remote_wrapper",
+                "command": SUPPORT_BUNDLE_REQUIRED_REMOTE_WRAPPER,
+                "message": "Run Rust verification through the repo RCH wrapper; do not retry local Cargo.",
+            }])
+        } else {
+            json!([])
+        },
+        "evidence": [
+            {
+                "kind": "planned_command_classification",
+                "result": direct_status,
+                "command": "cargo test --lib support_bundle_tripwire_probe",
+            },
+            {
+                "kind": "planned_command_classification",
+                "result": wrapped_status,
+                "command": "scripts/rch_verify.sh -- cargo test --lib support_bundle_tripwire_probe",
+            },
+            {
+                "kind": "build_admission",
+                "result": build_admission_status,
+                "admitted": build_admission.admitted,
+            }
+        ],
+        "plannedCommandClassifications": [direct_cargo, wrapped_cargo],
+        "buildAdmission": build_admission_json,
+        "notes": [
+            "Support bundle collection is read-only and does not execute Cargo.",
+            "Live process evidence remains the responsibility of the explicit tripwire process scanner."
+        ],
+    }))
+}
+
+fn local_cargo_preflight_classification(workspace: &Path, command: &str) -> Value {
+    let registry = super::preflight_guard::PreflightGuardRegistry::with_builtins();
+    let report = super::preflight_guard::run_preflight_guard(
+        &registry,
+        &super::preflight_guard::PreflightGuardOptions {
+            command: command.to_owned(),
+            workspace: workspace.to_path_buf(),
+            bypass_tokens: Vec::new(),
+            bypass_secret: None,
+        },
+    );
+    let matched_rule_ids = report
+        .matches
+        .iter()
+        .map(|matched| matched.rule_id.clone())
+        .collect::<Vec<_>>();
+    let local_cargo_denied = matched_rule_ids.iter().any(|rule_id| {
+        matches!(
+            rule_id.as_str(),
+            "builtin:local_cargo_heavy_verification" | "builtin:local_cargo_target_dir_override"
+        )
+    });
+    let policy_status = if local_cargo_denied {
+        "local_cargo_disallowed"
+    } else if report.exit_code == 0 && command.contains("scripts/rch_verify.sh") {
+        "remote_wrapper_required"
+    } else if report.exit_code == 0 {
+        "allowed"
+    } else {
+        "blocked_by_other_policy"
+    };
+
+    json!({
+        "schema": super::preflight_guard::PREFLIGHT_GUARD_SCHEMA_V1,
+        "command": command,
+        "policyStatus": policy_status,
+        "exitCode": report.exit_code,
+        "matchedRuleIds": matched_rule_ids,
+        "guardReport": report.to_json(),
+    })
 }
 
 fn collect_pack_replay_summary(workspace: &Path) -> Value {
@@ -2464,6 +2603,7 @@ fn planned_files() -> Vec<String> {
         SINGLEFLIGHT_POSTURE_FILE.to_owned(),
         QOS_LANE_SUMMARY_FILE.to_owned(),
         TRIAGE_SUMMARY_FILE.to_owned(),
+        LOCAL_CARGO_TRIPWIRE_FILE.to_owned(),
         MANIFEST_FILE.to_owned(),
     ]
 }
@@ -3431,12 +3571,55 @@ mod tests {
             SWARM_BRIEF_SUMMARY_FILE,
             TRIAGE_SUMMARY_FILE,
             QOS_LANE_SUMMARY_FILE,
+            LOCAL_CARGO_TRIPWIRE_FILE,
         ] {
             assert!(
                 files.contains(&required.to_owned()),
                 "planned support-bundle files must include {required}"
             );
         }
+    }
+
+    #[test]
+    fn local_cargo_tripwire_summary_reports_policy_without_running_cargo() -> TestResult {
+        let workspace = unique_test_path("local-cargo-tripwire-summary");
+        fs::create_dir_all(&workspace)
+            .map_err(|error| format!("failed to create workspace: {error}"))?;
+
+        let value: Value = serde_json::from_str(&local_cargo_tripwire_json(&workspace))
+            .map_err(|error| format!("local cargo tripwire summary must parse: {error}"))?;
+
+        assert_eq!(
+            value.pointer("/schema"),
+            Some(&json!("ee.support_bundle.local_cargo_tripwire.v1"))
+        );
+        assert_eq!(
+            value.pointer("/collectionStatus"),
+            Some(&json!("policy_summary_no_live_process_scan"))
+        );
+        assert_eq!(
+            value.pointer("/localBuildPolicy/status"),
+            Some(&json!("enforced"))
+        );
+        assert_eq!(
+            value.pointer("/requiredRemoteWrapper"),
+            Some(&json!(SUPPORT_BUNDLE_REQUIRED_REMOTE_WRAPPER))
+        );
+        assert_eq!(value.pointer("/detectedLocalBuilds"), Some(&json!([])));
+        assert_eq!(
+            value.pointer("/plannedCommandClassifications/0/policyStatus"),
+            Some(&json!("local_cargo_disallowed"))
+        );
+        assert_eq!(
+            value.pointer("/plannedCommandClassifications/1/policyStatus"),
+            Some(&json!("remote_wrapper_required"))
+        );
+        assert!(
+            value.pointer("/buildAdmission/admitted").is_some(),
+            "summary must include build-admission evidence"
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -4534,6 +4717,7 @@ mod tests {
             PERFORMANCE_EXPLAIN_SAMPLES_FILE,
             SINGLEFLIGHT_POSTURE_FILE,
             TRIAGE_SUMMARY_FILE,
+            LOCAL_CARGO_TRIPWIRE_FILE,
         ] {
             assert!(
                 report.files_collected.contains(&required.to_owned()),
