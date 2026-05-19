@@ -278,6 +278,19 @@ fn proximity_health_and_maintenance_flags_are_help_discoverable() -> TestResult 
             "--algorithm-ttl",
         ],
         "ee maintenance graph-witnesses-prune --help",
+    )?;
+
+    let job_run_help = help_for(&["ee", "job", "run", "--help"])?;
+    assert_contains_all(
+        &job_run_help,
+        &[
+            "KIND",
+            "--database",
+            "--dry-run",
+            "--time-limit-ms",
+            "--item-limit",
+        ],
+        "ee job run --help",
     )
 }
 
@@ -375,6 +388,18 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "decay_sweep",
             "--no-structural-decay",
             "--dry-run",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "job",
+            "run",
+            "centrality_refresh",
+            "--dry-run",
+            "--time-limit-ms",
+            "500",
+            "--item-limit",
+            "25",
             "--json",
         ][..],
         &["ee", "status", "--skyline", "--json"][..],
