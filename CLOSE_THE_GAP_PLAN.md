@@ -1576,3 +1576,18 @@ Per AGENTS.md L1167-1175, the reality-check cadence fires on the **90-day clock 
 ---
 
 *End of Part III. Part III adds 4 new beads (§59.1–§59.4) and consolidates the verification scoreboard. Total bridge plan now spans 60 numbered sections across Parts I, II, and III. Next reality check on 2026-08-13 unless gap > 5 % first.*
+
+---
+
+## Refinement Round 1 (2026-05-19, post-filing)
+
+After the four §59 beads were filed, a Phase-5 refinement pass populated each bead's structured `design`, `acceptance_criteria`, and `notes` fields via `br update` (per `DO NOT OVERSIMPLIFY / DO NOT LOSE FEATURES`). The acceptance summaries in §59.1–§59.4 above are intentionally compact; the **canonical, hardened contract for each bead lives in the bead itself** — see `br show <id> --json | jq '.[0].acceptance_criteria'`.
+
+Hardening summary per bead:
+
+- **`bd-3usjw.73`** — tests are now MANDATORY (not optional). Contract test spec: `tests/contracts/br_concurrent_read_race.rs` with 3 concurrent JSONL flushers + 1 reader, deterministic seeds, ±10% flake tolerance. E2E shell: `scripts/e2e_br_concurrent_race.sh` emitting `ee.test_event.v1`. New failure-mode fixture: `beads_jsonl_partial_write_transient` at severity `low`. Path A/B clear demarcation; pick less-invasive in closeout.
+- **`bd-3usjw.74`** — `.gitignore` patterns pinned verbatim (anchored at repo root via leading `/`); `.rchignore` parallel update mandated; contract test `tests/contracts/repo_hygiene_root_clutter.rs` walks `git status --porcelain --ignored` AND `cargo metadata --no-deps` (defense-in-depth against bin-target leakage); e2e shell `scripts/e2e_repo_hygiene.sh` does synthetic-file `git check-ignore -v` per pattern; coverage matrix locks 10 pattern families.
+- **`bd-3usjw.75`** — Step 0 pre-deletion safety verification added as hard prerequisite (catch the "no callers, I assume" trap). Regression test `tests/contracts/situation_decisioning_sentinel_removed.rs` prevents future re-introduction. Full E2E in `scripts/e2e_situation_decisioning.sh` exercises classify/compare/link and asserts non-abstention. Sibling-bead boundary pinned: this bead MUST NOT touch `LAB_REPLAY_UNAVAILABLE_CODE` (legitimate, tracked by N15 family).
+- **`bd-3usjw.76`** — now owns TWO deliverables: (a) TRACING-paragraph edits on `bd-3usjw.50/.56/.69`, (b) NEW contract test `tests/contracts/tracing_paragraph_required.rs` walking `.beads/beads.db` for every open `implements-surface:*` bead and asserting `## TRACING` heading + 7 required fields. Whitelist file for docs-only beads. Closes when (a) + (b) land; not gated on the sibling beads' code work.
+
+The plan doc snapshot of acceptance criteria is for navigation only; the bead is authoritative. CI tooling (`scripts/closure-lint.sh`, the upcoming `tests/contracts/tracing_paragraph_required.rs`) reads from `.beads/beads.db`, not from this plan file.
