@@ -1148,6 +1148,18 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
         result.parsed.pointer("/data/manifestHash").is_some(),
         "support bundle create must report manifest hash".to_owned(),
     )?;
+    ensure(
+        result
+            .parsed
+            .pointer("/data/filesCollected")
+            .and_then(Value::as_array)
+            .is_some_and(|files| {
+                files
+                    .iter()
+                    .any(|file| file.as_str() == Some("qos_lane_summary.json"))
+            }),
+        "support bundle create report must advertise qos_lane_summary.json".to_owned(),
+    )?;
     ensure_json_pointer(
         &result.parsed,
         "/data/dryRun",
@@ -1185,6 +1197,25 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
     ensure(
         bundle_dir.join("swarm_brief_summary.json").is_file(),
         "bundle must contain swarm_brief_summary.json".to_owned(),
+    )?;
+    ensure(
+        bundle_dir.join("qos_lane_summary.json").is_file(),
+        "bundle must contain qos_lane_summary.json".to_owned(),
+    )?;
+    let manifest = fs::read_to_string(bundle_dir.join("manifest.json"))
+        .map_err(|error| format!("failed to read support bundle manifest: {error}"))?;
+    let manifest_json: Value = serde_json::from_str(&manifest)
+        .map_err(|error| format!("support bundle manifest must parse: {error}"))?;
+    ensure(
+        manifest_json
+            .pointer("/files")
+            .and_then(Value::as_array)
+            .is_some_and(|files| {
+                files.iter().any(|entry| {
+                    entry.pointer("/path").and_then(Value::as_str) == Some("qos_lane_summary.json")
+                })
+            }),
+        "support bundle manifest must include qos_lane_summary.json".to_owned(),
     )?;
     let pack_replay_summary = fs::read_to_string(bundle_dir.join("pack_replay_summary.json"))
         .map_err(|error| format!("failed to read pack replay support summary: {error}"))?;
@@ -1260,6 +1291,60 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
             .pointer("/counts/activeConflictCount")
             .is_some(),
         "swarm brief summary must include active conflict count".to_owned(),
+    )?;
+    let qos_lane_summary = fs::read_to_string(bundle_dir.join("qos_lane_summary.json"))
+        .map_err(|error| format!("failed to read QoS lane support summary: {error}"))?;
+    let qos_lane_summary_json: Value = serde_json::from_str(&qos_lane_summary)
+        .map_err(|error| format!("QoS lane support summary must parse: {error}"))?;
+    ensure_json_pointer(
+        &qos_lane_summary_json,
+        "/schema",
+        json!("ee.qos.active_lane_summary.v1"),
+        "support bundle QoS lane summary schema",
+    )?;
+    ensure(
+        qos_lane_summary_json
+            .pointer("/workspaceHash")
+            .and_then(Value::as_str)
+            .is_some_and(|hash| hash.starts_with("sha256:")),
+        "support bundle QoS summary must expose hashed workspace identity".to_owned(),
+    )?;
+    for pointer in [
+        "/foregroundActiveCount",
+        "/backgroundActiveCount",
+        "/verificationActiveCount",
+        "/maintenanceActiveCount",
+        "/staleIgnoredCount",
+    ] {
+        ensure(
+            qos_lane_summary_json
+                .pointer(pointer)
+                .and_then(Value::as_u64)
+                .is_some(),
+            format!("support bundle QoS summary must include numeric {pointer}"),
+        )?;
+    }
+    ensure(
+        qos_lane_summary_json
+            .pointer("/activeRecords")
+            .and_then(Value::as_array)
+            .is_some(),
+        "support bundle QoS summary must include activeRecords array".to_owned(),
+    )?;
+    ensure(
+        qos_lane_summary_json
+            .pointer("/degraded")
+            .and_then(Value::as_array)
+            .is_some(),
+        "support bundle QoS summary must include structured degraded array".to_owned(),
+    )?;
+    let raw_workspace_path = env::current_dir()
+        .map_err(|error| format!("failed to read current directory: {error}"))?
+        .display()
+        .to_string();
+    ensure(
+        !qos_lane_summary.contains(&raw_workspace_path),
+        "support bundle QoS summary must not include the raw workspace path".to_owned(),
     )?;
 
     let inspect_result = run_ee_logged(
