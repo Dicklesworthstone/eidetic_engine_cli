@@ -12,6 +12,7 @@ use serde::Serialize;
 use crate::graph::DiGraph;
 use crate::graph::GraphResult;
 use crate::graph::algorithms::{check_cancelled, current_or_testing_cx};
+use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 pub const MINHASH_RANK_SCHEMA_V1: &str = "ee.graph.minhash_rank.v1";
 pub const DEFAULT_MINHASH_SIGNATURE_COUNT: usize = 64;
@@ -143,7 +144,7 @@ struct MinHashRankCandidate {
 impl<'g> MinHashRankInput<'g> {
     fn from_graph(graph: &'g DiGraph) -> Self {
         let mut nodes: Vec<&str> = graph.nodes_ordered();
-        nodes.sort_unstable();
+        sort_by_ulid_payload_or_lexical(&mut nodes, |node| *node);
 
         let incoming_counts: Vec<usize> = nodes.iter().map(|node| graph.in_degree(node)).collect();
         let outgoing_counts: Vec<usize> = nodes.iter().map(|node| graph.out_degree(node)).collect();
@@ -189,9 +190,7 @@ fn compute_minhash_rank_unbudgeted(
     let candidates = if candidates.len() <= top_k {
         candidates
     } else {
-        candidates.select_nth_unstable_by(top_k - 1, |left, right| {
-            candidate_primary_order(left, right, &nodes)
-        });
+        candidates.select_nth_unstable_by(top_k - 1, candidate_primary_order);
         let marginal_density = candidates[top_k - 1].signature_density;
 
         let mut strict = Vec::with_capacity(top_k);
@@ -206,9 +205,7 @@ fn compute_minhash_rank_unbudgeted(
 
         let needed_from_marginal = top_k.saturating_sub(strict.len());
         if marginal_density == 0 && marginal.len() > needed_from_marginal {
-            marginal.select_nth_unstable_by(needed_from_marginal, |left, right| {
-                candidate_zero_marginal_order(left, right, &nodes)
-            });
+            marginal.select_nth_unstable_by(needed_from_marginal, candidate_zero_marginal_order);
             marginal.truncate(needed_from_marginal);
         }
         strict.extend(marginal);
@@ -254,13 +251,13 @@ fn compute_minhash_rank_unbudgeted(
             }
         })
         .collect();
+    sort_by_ulid_payload_or_lexical(&mut rows, |score| score.node.as_str());
     rows.sort_by(|left, right| {
         right
             .signature_density
             .cmp(&left.signature_density)
             .then_with(|| right.incoming_edge_count.cmp(&left.incoming_edge_count))
             .then_with(|| right.outgoing_edge_count.cmp(&left.outgoing_edge_count))
-            .then_with(|| left.node.cmp(&right.node))
     });
     rows.truncate(top_k);
     for (index, row) in rows.iter_mut().enumerate() {
@@ -285,25 +282,23 @@ fn compute_minhash_rank_unbudgeted(
 fn candidate_primary_order(
     left: &MinHashRankCandidate,
     right: &MinHashRankCandidate,
-    nodes: &[&str],
 ) -> std::cmp::Ordering {
     right
         .signature_density
         .cmp(&left.signature_density)
         .then_with(|| right.incoming_edge_count.cmp(&left.incoming_edge_count))
         .then_with(|| right.outgoing_edge_count.cmp(&left.outgoing_edge_count))
-        .then_with(|| nodes[left.node_index].cmp(nodes[right.node_index]))
+        .then_with(|| left.node_index.cmp(&right.node_index))
 }
 
 fn candidate_zero_marginal_order(
     left: &MinHashRankCandidate,
     right: &MinHashRankCandidate,
-    nodes: &[&str],
 ) -> std::cmp::Ordering {
     right
         .outgoing_edge_count
         .cmp(&left.outgoing_edge_count)
-        .then_with(|| nodes[left.node_index].cmp(nodes[right.node_index]))
+        .then_with(|| left.node_index.cmp(&right.node_index))
 }
 
 fn stable_node_hash(node: &str) -> u64 {
@@ -367,6 +362,9 @@ mod tests {
     use fnx_runtime::CompatibilityMode;
 
     type TestResult = Result<(), String>;
+    const PUBLIC_ID_EARLY: &str = "note_01J0000000000000000000000A";
+    const PUBLIC_ID_MIDDLE: &str = "rule_01J0000000000000000000000B";
+    const PUBLIC_ID_LATE: &str = "mem_01J0000000000000000000000C";
 
     fn graph_result<T>(result: GraphResult<T>) -> Result<T, String> {
         result.map_err(|error| error.to_string())
@@ -472,6 +470,40 @@ mod tests {
             result.scores[1..]
                 .iter()
                 .all(|score| score.incoming_edge_count == 0)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn minhash_rank_zero_incoming_ties_use_radix_public_id_payload_order() -> TestResult {
+        let mut graph = graph();
+        graph.add_node(PUBLIC_ID_LATE.to_owned());
+        graph.add_node(PUBLIC_ID_MIDDLE.to_owned());
+        graph.add_node(PUBLIC_ID_EARLY.to_owned());
+
+        let result = graph_result(compute_minhash_rank_with_policy(
+            &graph,
+            MinHashRankPolicy {
+                signature_count: 8,
+                top_k: 2,
+            },
+        ))?;
+
+        assert_eq!(
+            result
+                .scores
+                .iter()
+                .map(|score| score.node.as_str())
+                .collect::<Vec<_>>(),
+            vec![PUBLIC_ID_EARLY, PUBLIC_ID_MIDDLE]
+        );
+        assert_eq!(
+            result
+                .scores
+                .iter()
+                .map(|score| score.rank)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
         );
         Ok(())
     }
