@@ -213,6 +213,7 @@ fuzz_target_audit() {
         insights_json_decode
     do
         local target_path="fuzz_targets/${target}.rs"
+        local target_file="${REPO_ROOT}/fuzz/${target_path}"
         if ! grep -Fq "name = \"${target}\"" "$manifest"; then
             echo "error: fuzz/Cargo.toml missing bin registration for ${target}" >&2
             failures=1
@@ -221,9 +222,18 @@ fuzz_target_audit() {
             echo "error: fuzz/Cargo.toml missing path registration for ${target_path}" >&2
             failures=1
         fi
-        if [ ! -f "${REPO_ROOT}/fuzz/${target_path}" ]; then
+        if [ ! -f "$target_file" ]; then
             echo "error: missing fuzz target file: fuzz/${target_path}" >&2
             failures=1
+        else
+            if ! grep -Fq '#![no_main]' "$target_file"; then
+                echo "error: fuzz/${target_path} is missing #![no_main]" >&2
+                failures=1
+            fi
+            if ! grep -Fq 'fuzz_target!' "$target_file"; then
+                echo "error: fuzz/${target_path} is missing fuzz_target! entrypoint" >&2
+                failures=1
+            fi
         fi
         if ! grep -Fq "cargo fuzz run ${target}" "$readme"; then
             echo "error: fuzz/README.md missing cargo-fuzz command for ${target}" >&2
@@ -240,7 +250,7 @@ fuzz_target_audit() {
         return 1
     fi
 
-    echo "ok: bd-bife.10 fuzz targets are registered, present, and documented"
+    echo "ok: bd-bife.10 fuzz targets are registered, present, documented, and shaped as cargo-fuzz harnesses"
 }
 
 test_trace_root() {
