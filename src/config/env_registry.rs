@@ -32,6 +32,12 @@ pub enum EnvVar {
     DisableToon,
     /// `EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS`
     DisableRememberSearchNeighbors,
+    /// `EE_EMBED_DEDUP_COSINE_FLOOR`
+    EmbedDedupCosineFloor,
+    /// `EE_EMBED_DEDUP_ENABLED`
+    EmbedDedupEnabled,
+    /// `EE_EMBED_DEDUP_HAMMING_K`
+    EmbedDedupHammingK,
     /// `EE_EXPERIMENTAL_TRIAD`
     ExperimentalTriad,
     /// `EE_FORMAT`
@@ -56,6 +62,10 @@ pub enum EnvVar {
     L2PackCacheDir,
     /// `EE_L2_PACK_CACHE_DISABLE`
     L2PackCacheDisable,
+    /// `EE_LEXICAL_INDEX_HUGEPAGES`
+    LexicalIndexHugepages,
+    /// `EE_LEXICAL_INDEX_PIN_RAM`
+    LexicalIndexPinRam,
     /// `EE_LOG_FORMAT`
     LogFormat,
     /// `EE_LOG_JSON`
@@ -148,6 +158,9 @@ impl EnvVar {
             Self::DiagForceCapabilityGap,
             Self::DisableToon,
             Self::DisableRememberSearchNeighbors,
+            Self::EmbedDedupCosineFloor,
+            Self::EmbedDedupEnabled,
+            Self::EmbedDedupHammingK,
             Self::ExperimentalTriad,
             Self::Format,
             Self::GraphWitnessesRetentionDays,
@@ -160,6 +173,8 @@ impl EnvVar {
             Self::L2PackCacheBytes,
             Self::L2PackCacheDir,
             Self::L2PackCacheDisable,
+            Self::LexicalIndexHugepages,
+            Self::LexicalIndexPinRam,
             Self::LogFormat,
             Self::LogJson,
             Self::MaxTokens,
@@ -215,6 +230,9 @@ impl EnvVar {
             Self::DiagForceCapabilityGap => "EE_DIAG_FORCE_CAPABILITY_GAP",
             Self::DisableToon => "EE_DISABLE_TOON",
             Self::DisableRememberSearchNeighbors => "EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS",
+            Self::EmbedDedupCosineFloor => "EE_EMBED_DEDUP_COSINE_FLOOR",
+            Self::EmbedDedupEnabled => "EE_EMBED_DEDUP_ENABLED",
+            Self::EmbedDedupHammingK => "EE_EMBED_DEDUP_HAMMING_K",
             Self::ExperimentalTriad => "EE_EXPERIMENTAL_TRIAD",
             Self::Format => "EE_FORMAT",
             Self::GraphWitnessesRetentionDays => "EE_GRAPH_WITNESSES_RETENTION_DAYS",
@@ -227,6 +245,8 @@ impl EnvVar {
             Self::L2PackCacheBytes => "EE_L2_PACK_CACHE_BYTES",
             Self::L2PackCacheDir => "EE_L2_PACK_CACHE_DIR",
             Self::L2PackCacheDisable => "EE_L2_PACK_CACHE_DISABLE",
+            Self::LexicalIndexHugepages => "EE_LEXICAL_INDEX_HUGEPAGES",
+            Self::LexicalIndexPinRam => "EE_LEXICAL_INDEX_PIN_RAM",
             Self::LogFormat => "EE_LOG_FORMAT",
             Self::LogJson => "EE_LOG_JSON",
             Self::MaxTokens => "EE_MAX_TOKENS",
@@ -295,6 +315,15 @@ impl EnvVar {
             Self::DisableRememberSearchNeighbors => {
                 "Disable Frankensearch neighbors during remember-time proposal."
             }
+            Self::EmbedDedupCosineFloor => {
+                "Set the cosine-similarity floor for insert-time embedding dedup confirmation."
+            }
+            Self::EmbedDedupEnabled => {
+                "Enable insert-time embedding deduplication after storage and write-path gates are wired."
+            }
+            Self::EmbedDedupHammingK => {
+                "Set the maximum SimHash Hamming distance admitted to dedup cosine confirmation."
+            }
             Self::ExperimentalTriad => {
                 "Compatibility no-op for the promoted ee pack/note/why aliases."
             }
@@ -315,6 +344,10 @@ impl EnvVar {
             Self::L2PackCacheBytes => "Override the L2 pack cache byte cap per workspace.",
             Self::L2PackCacheDir => "Override the L2 pack cache root directory.",
             Self::L2PackCacheDisable => "Disable L2 pack cache lookup and writes.",
+            Self::LexicalIndexHugepages => {
+                "Request transparent hugepage hints for opt-in lexical index RAM-tier pinning."
+            }
+            Self::LexicalIndexPinRam => "Opt in to lexical index RAM-tier page-cache population.",
             Self::LogFormat => "Select structured log format.",
             Self::LogJson => "Enable JSON command-start logs on stderr.",
             Self::MaxTokens => "Override the default context pack token budget.",
@@ -401,6 +434,11 @@ impl EnvVar {
             Self::TailscaleProbeTimeoutMs => Some("1500"),
             Self::TailscaleDiscoveryMode => Some("service_tag"),
             Self::TailscaleRespondMode => Some("service_tag"),
+            Self::EmbedDedupCosineFloor => Some("0.97"),
+            Self::EmbedDedupEnabled => Some("false"),
+            Self::EmbedDedupHammingK => Some("12"),
+            Self::LexicalIndexHugepages => Some("false"),
+            Self::LexicalIndexPinRam => Some("false"),
             Self::PprCacheEntries => Some("4096"),
             Self::QueryPlanCacheEntries => Some("1024"),
             Self::GraphWitnessesRetentionDays => Some("30"),
@@ -447,6 +485,9 @@ impl EnvVar {
             | Self::TestLogLevel
             | Self::TestLogPath
             | Self::TestLogTestId => "diagnostics",
+            Self::EmbedDedupCosineFloor | Self::EmbedDedupEnabled | Self::EmbedDedupHammingK => {
+                "embeddings"
+            }
             Self::MeshEnabled
             | Self::MeshMode
             | Self::TailscaleBinaryOverride
@@ -462,6 +503,8 @@ impl EnvVar {
             | Self::HarmfulPerSourcePerHour
             | Self::L2PackCacheBytes
             | Self::L2PackCacheDisable
+            | Self::LexicalIndexHugepages
+            | Self::LexicalIndexPinRam
             | Self::MaxTokens
             | Self::Profile
             | Self::PprCacheEntries
@@ -623,6 +666,32 @@ mod tests {
         }
         if EnvVar::ShardsDir.category() != "paths" {
             return Err("EE_SHARDS_DIR must be categorized as a path override".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn embed_dedup_env_vars_are_registered_disabled_by_default() -> TestResult {
+        if !EnvVar::all().contains(&EnvVar::EmbedDedupEnabled) {
+            return Err("EE_EMBED_DEDUP_ENABLED missing from registry order".to_owned());
+        }
+        if !EnvVar::all().contains(&EnvVar::EmbedDedupHammingK) {
+            return Err("EE_EMBED_DEDUP_HAMMING_K missing from registry order".to_owned());
+        }
+        if !EnvVar::all().contains(&EnvVar::EmbedDedupCosineFloor) {
+            return Err("EE_EMBED_DEDUP_COSINE_FLOOR missing from registry order".to_owned());
+        }
+        if EnvVar::EmbedDedupEnabled.default_value() != Some("false") {
+            return Err("EE_EMBED_DEDUP_ENABLED must default to false".to_owned());
+        }
+        if EnvVar::EmbedDedupHammingK.default_value() != Some("12") {
+            return Err("EE_EMBED_DEDUP_HAMMING_K must default to 12".to_owned());
+        }
+        if EnvVar::EmbedDedupCosineFloor.default_value() != Some("0.97") {
+            return Err("EE_EMBED_DEDUP_COSINE_FLOOR must default to 0.97".to_owned());
+        }
+        if EnvVar::EmbedDedupEnabled.category() != "embeddings" {
+            return Err("embed dedup vars must be categorized as embeddings".to_owned());
         }
         Ok(())
     }
