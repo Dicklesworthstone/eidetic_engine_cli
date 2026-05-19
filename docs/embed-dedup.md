@@ -48,7 +48,12 @@ The reusable substrate lives in `src/search/simhash.rs`:
 
 Property coverage lives in `tests/property_simhash.rs` and covers deterministic
 hashing, Hamming-distance ranking, nearest-candidate selection, cosine edge
-cases, cosine rejection, and confirmed-candidate ordering.
+cases, cosine rejection, and confirmed-candidate ordering. Contract-style unit
+coverage in `tests/embed_dedup_unit.rs` pins the public dedup decision scaffold:
+exact-content reuse, whitespace/case variant reuse, SimHash false-positive
+rejection by the cosine floor, continued candidate scan after cosine rejection,
+default Hamming-threshold rejection, and 16-byte big-endian `content_simhash`
+encoding.
 
 ## Write-Path Contract
 
@@ -133,11 +138,13 @@ and `decision`.
 
 ## Verification
 
-Current evidence is limited to build-independent static review and the existing
-SimHash property test source. Full acceptance for `bd-1iltv` still requires:
+Current evidence is limited to build-independent static review,
+`tests/property_simhash.rs`, and `tests/embed_dedup_unit.rs`. The unit coverage
+proves the reusable SimHash/cosine decision scaffold, not the persisted
+remember-path feature. Full acceptance for `bd-1iltv` still requires:
 
-- Unit tests for env parsing, SimHash storage encoding, Hamming thresholding,
-  cosine confirmation, and dedup-link selection.
+- Unit tests for env parsing and dedup-link selection after DB/write-path
+  fields exist.
 - E2E tests showing identical and near-identical memories reuse embeddings.
 - A semantic false-positive test showing SimHash proximity alone does not reuse
   embeddings when cosine is under the floor.
@@ -153,7 +160,7 @@ Do not use local Cargo as a fallback on the Mac dev host.
 - Register the three `EE_EMBED_DEDUP_*` variables.
 - Wire the lookup and confirmation gate into `remember_memory_inner`.
 - Persist the dedup link and surface it through `ee why`.
-- Add the unit, E2E, and golden tests listed above.
+- Add the remaining env, dedup-link, E2E, and golden tests listed above.
 - Add degraded-code taxonomy rows and fixtures if the source emits new runtime
   degraded codes.
 - Prove the full slice through RCH.
