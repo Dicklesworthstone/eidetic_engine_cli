@@ -30061,8 +30061,12 @@ where
         write_stdout(stdout, &(output::render_why_mermaid(&report) + "\n"))
     } else {
         match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
+            output::Renderer::Human => {
                 let output = format_why_human(&report);
+                write_stdout(stdout, &output)
+            }
+            output::Renderer::Markdown => {
+                let output = format_why_markdown(&report);
                 write_stdout(stdout, &output)
             }
             output::Renderer::Toon => {
@@ -30545,6 +30549,20 @@ fn format_why_human(report: &crate::core::why::WhyReport) -> String {
         }
     }
 
+    output
+}
+
+fn format_why_markdown(report: &crate::core::why::WhyReport) -> String {
+    let mut output = format_why_human(report);
+    if let Some(causal_explanation) = &report.causal_explanation {
+        if !output.ends_with("\n\n") {
+            if !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push('\n');
+        }
+        output.push_str(&output::render_why_causal_markdown(causal_explanation));
+    }
     output
 }
 
@@ -41686,6 +41704,59 @@ mod tests {
             "human agent profile counts",
         )?;
         ensure_contains(&output, "Bias: 0.0312", "human agent profile bias")
+    }
+
+    #[test]
+    fn why_markdown_includes_causal_explanation_renderer_block() -> TestResult {
+        let report = why_found_fixture().with_causal_explanation(serde_json::json!({
+            "schema": "ee.why.causal.v1",
+            "memoryId": "mem_release_rule",
+            "snapshotVersion": 7,
+            "paths": [{
+                "rank": 1,
+                "sourceMemoryId": "mem_root_cause",
+                "targetMemoryId": "mem_release_rule",
+                "edgeCount": 1,
+                "totalContribution": 0.75,
+                "minCost": 0.25,
+                "steps": [{
+                    "source": "mem_root_cause",
+                    "target": "mem_release_rule",
+                    "contributionScore": 0.75
+                }]
+            }],
+            "minCut": null,
+            "degraded": [{
+                "code": "graph_causal_explanation_unavailable",
+                "severity": "low",
+                "message": "fixture degraded causal message",
+                "repair": "record causal evidence"
+            }]
+        }));
+        let output = super::format_why_markdown(&report);
+
+        ensure_contains(&output, "Memory: mem_release_rule", "base why section")?;
+        ensure_contains(&output, "# Why Causal", "causal markdown heading")?;
+        ensure_contains(
+            &output,
+            "- Schema: `ee.why.causal.v1`",
+            "causal schema marker",
+        )?;
+        ensure_contains(
+            &output,
+            "- Memory: `mem_release_rule`",
+            "causal memory marker",
+        )?;
+        ensure_contains(
+            &output,
+            "`mem_root_cause` -> `mem_release_rule`",
+            "causal path",
+        )?;
+        ensure_contains(
+            &output,
+            "graph_causal_explanation_unavailable",
+            "causal degraded code",
+        )
     }
 
     #[test]
