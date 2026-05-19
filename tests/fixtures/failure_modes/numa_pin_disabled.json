@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "numa_pin_disabled",
+  "introduced_by": {
+    "bead": "bd-ldstd",
+    "epic_letter": "swarmx.4"
+  },
+  "surfaces": [
+    "status",
+    "doctor"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "An operator has set `[graph.numa_pin] enabled = false` (or the equivalent `EE_GRAPH_NUMA_PIN_DISABLE=1` env var) and a graph snapshot load runs. The loader short-circuits the pinning path, returns the operator-disabled fallback, and surfaces this code so `ee status --json` does not silently look identical to the unsupported-platform case.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "printf '%s\\n' '[graph.numa_pin]' 'enabled = false' >> .ee/config.toml"
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "numa_pin_disabled",
+    "severity": "info",
+    "message_contains": [
+      "NUMA",
+      "disabled"
+    ],
+    "repair_contains": "[graph.numa_pin] enabled = true",
+    "repair_string": "Set [graph.numa_pin] enabled = true (or unset EE_GRAPH_NUMA_PIN_DISABLE) and re-run to opt back into NUMA-aware snapshot pinning on supported Linux hosts."
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "numa_pin_linux_not_implemented",
+  "introduced_by": {
+    "bead": "bd-ldstd",
+    "epic_letter": "swarmx.4"
+  },
+  "surfaces": [
+    "status",
+    "doctor"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Running `ee status --json` or `ee doctor --json` on Linux while the swarmx.4 scaffold ships without the real libc::mbind / MAP_POPULATE syscall path. The scaffold reports the snapshot was not actually pinned and surfaces this code so an operator knows the optimization is announced but not yet wired. The wiring slice under bd-1prrl.3 deletes this code and replaces it with a true success path; until then this is the honest signal.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "numa_pin_linux_not_implemented",
+    "severity": "info",
+    "message_contains": [
+      "NUMA",
+      "Linux"
+    ],
+    "repair_contains": "bd-1prrl.3",
+    "repair_string": "Track the libc::mbind syscall slice under bd-1prrl.3 follow-ups; until that ships the scaffold reports the snapshot as not pinned and the loader falls back to plain heap deserialization with no functional regression."
+  }
+}

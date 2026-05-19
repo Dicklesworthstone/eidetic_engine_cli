@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "numa_pin_unsupported_platform",
+  "introduced_by": {
+    "bead": "bd-ldstd",
+    "epic_letter": "swarmx.4"
+  },
+  "surfaces": [
+    "status",
+    "doctor"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Running `ee status --json` or `ee doctor --json` on macOS, Windows, or any non-Linux host. The NUMA-aware snapshot pinning optimization needs `mbind` / `MAP_POPULATE`, which Linux is the only platform to expose; every other platform falls through to the safe-by-construction heap deserialization path and surfaces this code so an operator sees the expected fallback at a glance.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "numa_pin_unsupported_platform",
+    "severity": "info",
+    "message_contains": [
+      "NUMA",
+      "unsupported"
+    ],
+    "repair_contains": "Linux multi-socket host",
+    "repair_string": "Run ee on a Linux multi-socket host to enable NUMA-aware snapshot pinning; on this platform the loader falls back to heap-only deserialization with no functional regression."
+  }
+}

@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.status.graph.numa_pin.v1.json",
+  "title": "ee.status.graph.numa_pin.v1",
+  "description": "NUMA-aware graph snapshot pinning posture surfaced under `ee status --json` at `data.graph.numaPin`. Scaffold contract for bd-ldstd / bd-1prrl.3 (swarmx.4); the wiring slice consumes this schema verbatim.",
+  "type": "object",
+  "required": [
+    "schema",
+    "platform",
+    "supported",
+    "enabled",
+    "attempted",
+    "succeeded",
+    "preferredNode",
+    "populateRequested",
+    "bytesResident",
+    "populated",
+    "fallbackPath",
+    "degradedCodes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.status.graph.numa_pin.v1"
+    },
+    "platform": {
+      "type": "string",
+      "description": "Coarse host classification for the NUMA optimization. Linux is the only supported platform today; the others fall through to a safe-by-construction heap deserialization path.",
+      "enum": [
+        "linux",
+        "macos_unsupported",
+        "windows_unsupported",
+        "other_unsupported"
+      ]
+    },
+    "supported": {
+      "type": "boolean",
+      "description": "True iff `platform` exposes the syscall primitives the optimization needs."
+    },
+    "enabled": {
+      "type": "boolean",
+      "description": "True iff the operator left `[graph.numa_pin] enabled = true`."
+    },
+    "attempted": {
+      "type": "boolean",
+      "description": "True iff the loader actually invoked the pinning path. Must be false on unsupported platforms and when `enabled=false`."
+    },
+    "succeeded": {
+      "type": "boolean",
+      "description": "True iff the snapshot blob is now pinned to the requested NUMA node. The scaffold never sets this to true; only the syscall slice does."
+    },
+    "preferredNode": {
+      "type": "string",
+      "description": "Either the literal string `auto` or a stringified integer node id matching the operator's preference.",
+      "pattern": "^(auto|-?[0-9]+)$"
+    },
+    "populateRequested": {
+      "type": "boolean",
+      "description": "True iff the operator asked for MAP_POPULATE / madvise(WILLNEED) at load time."
+    },
+    "bytesResident": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Bytes of the snapshot blob currently resident on the preferred node. Always 0 in the scaffold."
+    },
+    "populated": {
+      "type": "boolean",
+      "description": "True iff the loader pre-faulted the snapshot blob. Always false in the scaffold."
+    },
+    "fallbackPath": {
+      "type": "string",
+      "description": "Coarse strategy the loader took when the NUMA optimization could not be applied. `none` is reserved for a successful pin.",
+      "enum": [
+        "none",
+        "software_not_implemented",
+        "madvise_willneed",
+        "heap_only",
+        "disabled_by_operator"
+      ]
+    },
+    "snapshotPath": {
+      "type": ["string", "null"],
+      "description": "Filesystem path of the snapshot blob the loader operated on, when known."
+    },
+    "degradedCodes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true,
+      "description": "Stable degraded[] codes documented in tests/fixtures/failure_modes/. Empty only when the optimization succeeded."
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"enabled": {"const": false}}, "required": ["enabled"]},
+      "then": {
+        "properties": {
+          "attempted": {"const": false},
+          "succeeded": {"const": false},
+          "fallbackPath": {"const": "disabled_by_operator"}
+        },
+        "required": ["attempted", "succeeded", "fallbackPath"]
+      }
+    },
+    {
+      "if": {"properties": {"supported": {"const": false}}, "required": ["supported"]},
+      "then": {
+        "properties": {
+          "succeeded": {"const": false},
+          "attempted": {"const": false}
+        },
+        "required": ["succeeded", "attempted"]
+      }
+    }
+  ]
+}
