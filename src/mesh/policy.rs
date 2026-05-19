@@ -263,29 +263,33 @@ fn select_unique_policy<'a>(
 ) -> Result<&'a MeshPeerPolicy, MeshPeerPolicyLookupError> {
     match matches.len() {
         1 => Ok(matches[0]),
-        0 => Err(MeshPeerPolicyLookupError::Missing(Box::new(lookup_failure(
-            direction,
-            "missing_peer_policy",
-            local_workspace_id,
-            peer_id,
-            origin_workspace_id,
-            material_lane,
-            Vec::new(),
-        )))),
+        0 => Err(MeshPeerPolicyLookupError::Missing(Box::new(
+            lookup_failure(
+                direction,
+                "missing_peer_policy",
+                local_workspace_id,
+                peer_id,
+                origin_workspace_id,
+                material_lane,
+                Vec::new(),
+            ),
+        ))),
         _ => {
             let policy_refs = matches
                 .iter()
                 .map(|policy| mesh_policy_ref(&policy.policy_id))
                 .collect();
-            Err(MeshPeerPolicyLookupError::Ambiguous(Box::new(lookup_failure(
-                direction,
-                "ambiguous_peer_policy",
-                local_workspace_id,
-                peer_id,
-                origin_workspace_id,
-                material_lane,
-                policy_refs,
-            ))))
+            Err(MeshPeerPolicyLookupError::Ambiguous(Box::new(
+                lookup_failure(
+                    direction,
+                    "ambiguous_peer_policy",
+                    local_workspace_id,
+                    peer_id,
+                    origin_workspace_id,
+                    material_lane,
+                    policy_refs,
+                ),
+            )))
         }
     }
 }
