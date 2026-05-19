@@ -21,6 +21,13 @@ These flags are accepted by every command:
 | `--schema-version <VERSION>` | `v0`, `v1` | `v1` | Selects the response envelope schema version. |
 | `--meta` | boolean | false | Includes additional response-envelope metadata. |
 
+Example:
+
+```bash
+ee --fields standard --cards summary --meta graph pagerank \
+  --workspace . --limit 5 --json
+```
+
 ## Context And Pack Flags
 
 `ee context "<task>"` is the main graph-aware retrieval surface. `ee pack` and
@@ -228,6 +235,8 @@ ee graph communities --workspace . --link-limit 500 --limit 5 --json
 ee graph articulation --workspace . --include-tombstoned --limit 10 --json
 ee graph louvain --workspace . --resolution 1.2 --threshold 0.000001 \
   --max-level 4 --seed 42 --limit 5 --json
+ee graph export --workspace . --graph-type memory_links \
+  --workspace-id ws_release --snapshot-id snap_release --format mermaid
 ee graph export --workspace . --type memory_links \
   --workspace-id ws_release --snapshot-id snap_release --format mermaid
 ee graph centrality --workspace . --algorithm pagerank --limit 10 --json

@@ -484,6 +484,10 @@ fn proximity_health_and_maintenance_flags_are_help_discoverable() -> TestResult 
 fn documented_graph_flag_combinations_parse() -> TestResult {
     for args in [
         &[
+            "ee", "--fields", "standard", "--cards", "summary", "--meta", "graph", "pagerank",
+            "--limit", "5", "--json",
+        ][..],
+        &[
             "ee",
             "context",
             "prepare release",
@@ -641,6 +645,19 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "--limit",
             "5",
             "--json",
+        ][..],
+        &[
+            "ee",
+            "graph",
+            "export",
+            "--graph-type",
+            "memory_links",
+            "--workspace-id",
+            "ws_release",
+            "--snapshot-id",
+            "snap_release",
+            "--format",
+            "mermaid",
         ][..],
         &[
             "ee",
