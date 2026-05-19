@@ -16,6 +16,7 @@ use crate::models::{
     TrustClass, UnitScore,
 };
 use crate::runtime::determinism::{Deterministic, Seed};
+use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 pub mod budget_classifier;
 
@@ -1158,10 +1159,7 @@ fn redact_pack_absolute_path_like_segments(input: &str) -> String {
             output.push_str(REDACTED_PATH);
             cursor += prefix.len();
             while cursor < input.len() {
-                let next = input[cursor..]
-                    .chars()
-                    .next()
-                    .unwrap_or('\0');
+                let next = input[cursor..].chars().next().unwrap_or('\0');
                 if next.is_whitespace()
                     || matches!(
                         next,
@@ -1186,10 +1184,7 @@ fn redact_pack_absolute_path_like_segments(input: &str) -> String {
             continue;
         }
 
-        let next = remaining
-            .chars()
-            .next()
-            .unwrap_or('\0');
+        let next = remaining.chars().next().unwrap_or('\0');
         output.push(next);
         cursor += next.len_utf8();
     }
@@ -2073,7 +2068,7 @@ pub fn analyze_pack_consensus_conflicts(pack: &PackDraft) -> ConsensusConflictRe
         if items.len() < 2 {
             continue;
         }
-        items.sort_by_key(|item| item.memory_id.to_string());
+        items.sort_by_key(|item| item.memory_id);
         let fingerprint = subject_fingerprint(&subject_key);
         if let Some(conflict) = conflict_for_group(&items, &fingerprint) {
             report.conflicts.push(conflict);
@@ -2158,7 +2153,7 @@ fn conflict_for_group(items: &[&PackDraftItem], fingerprint: &str) -> Option<Con
 
     let (left, right, kind) = best_pair?;
     let mut memory_ids = vec![left.memory_id, right.memory_id];
-    memory_ids.sort_by_key(ToString::to_string);
+    memory_ids.sort();
     Some(ConflictEntry {
         schema: CONFLICT_SCHEMA_V1,
         subject_fingerprint: fingerprint.to_string(),
@@ -4360,9 +4355,9 @@ fn select_next_candidate_index(
     let mut best_score = strict_mmr_marginal_gain(&candidates[0], selected);
     for (candidate_index, candidate) in candidates.iter().enumerate().skip(1) {
         let score = strict_mmr_marginal_gain(candidate, selected);
-        let ordering = best_score
-            .total_cmp(&score)
-            .then_with(|| compare_candidates(&candidate.candidate, &candidates[best_index].candidate));
+        let ordering = best_score.total_cmp(&score).then_with(|| {
+            compare_candidates(&candidate.candidate, &candidates[best_index].candidate)
+        });
         if ordering == Ordering::Less {
             best_index = candidate_index;
             best_score = score;
@@ -5160,7 +5155,7 @@ impl PackHotset {
                 .iter()
                 .map(|item| item.memory_id.to_string())
                 .collect();
-            memory_ids.sort();
+            sort_by_ulid_payload_or_lexical(&mut memory_ids, String::as_str);
             let used_tokens = items.iter().map(|item| item.estimated_tokens).sum::<u32>();
             entries.push(PackHotsetEntry::pack_section(
                 section,
@@ -5534,8 +5529,9 @@ mod tests {
         FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR, PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE,
         PACK_ASSEMBLY_SLOW_CODE, PackAssemblyOptions, PackAssemblySlo, PackAssemblySloActuals,
         PackAssemblySloStatus, PackCacheGovernor, PackCacheStatus, PackCandidate,
-        PackCandidateInput, PackHotset, PackHotsetEntry, PackItemRedaction, PackOmissionReason,
-        PackProvenance, PackRejectionStage, PackResourceProfile, PackSection,
+        PackCandidateInput, PackDraft, PackDraftItem, PackHotset, PackHotsetEntry,
+        PackHotsetEntryKind, PackItemRedaction, PackOmissionReason, PackProvenance,
+        PackRejectionStage, PackResourceProfile, PackSection, PackSelectedItem, PackSelectionAudit,
         PackSelectionObjective, PackSelectionPhase, PackTrustSignal, PackValidationError,
         SectionQuota, SectionQuotas, TokenBudget, TokenEstimationStrategy,
         WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR, WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR,
@@ -5806,6 +5802,55 @@ mod tests {
             why: format!("selected because memory {seed} matches the task"),
         })
         .map_err(|error| format!("test candidate rejected: {error:?}"))
+    }
+
+    fn draft_from_candidates(candidates: Vec<PackCandidate>) -> Result<PackDraft, String> {
+        let budget = TokenBudget::new(1_000).map_err(|error| format!("budget: {error:?}"))?;
+        let mut used_tokens = 0_u32;
+        let candidate_count = candidates.len();
+        let mut selected_items = Vec::new();
+        let mut items = Vec::new();
+        for (index, candidate) in candidates.into_iter().enumerate() {
+            used_tokens = used_tokens.saturating_add(candidate.estimated_tokens);
+            let rank = u32::try_from(index + 1).unwrap_or(u32::MAX);
+            selected_items.push(PackSelectedItem {
+                rank,
+                memory_id: candidate.memory_id,
+                token_cost: candidate.estimated_tokens,
+                feasible: true,
+            });
+            items.push(PackDraftItem::from_selected_candidate(
+                rank,
+                candidate,
+                Vec::new(),
+                PackSelectionPhase::StrictMmr,
+            ));
+        }
+
+        Ok(PackDraft {
+            query: "test pack ordering".to_owned(),
+            budget,
+            used_tokens,
+            items,
+            omitted: Vec::new(),
+            selection_audit: PackSelectionAudit {
+                profile: ContextPackProfile::Balanced,
+                objective: PackSelectionObjective::MmrRedundancy,
+                algorithm_id: "test",
+                algorithm_description: "test selection audit",
+                candidate_count,
+                selected_count: selected_items.len(),
+                omitted_count: 0,
+                budget_limit: 1_000,
+                budget_used: used_tokens,
+                total_objective_value: 0.0,
+                monotone: false,
+                submodular: false,
+                selected_items,
+                steps: Vec::new(),
+            },
+            hash: None,
+        })
     }
 
     fn facility_benchmark_candidates(count: usize) -> Result<Vec<PackCandidate>, String> {
@@ -7319,6 +7364,54 @@ mod tests {
             &draft.items.get(1).map(|item| item.rank),
             &Some(2),
             "second rank",
+        )
+    }
+
+    #[test]
+    fn consensus_member_memory_ids_use_typed_memory_id_order() -> TestResult {
+        let shared = "Run cargo fmt before release.";
+        let draft = draft_from_candidates(vec![
+            candidate_with_content(3, 0.8, 0.5, 10, shared)?.with_diversity_key("release-format"),
+            candidate_with_content(1, 0.8, 0.5, 10, shared)?.with_diversity_key("release-format"),
+            candidate_with_content(2, 0.8, 0.5, 10, shared)?.with_diversity_key("release-format"),
+        ])?;
+
+        let report = super::analyze_pack_consensus_conflicts(&draft);
+
+        ensure_equal(
+            &report.conflicts.len(),
+            &0,
+            "no conflicts for matching content",
+        )?;
+        ensure_equal(&report.consensus.len(), &1, "single consensus group")?;
+        ensure_equal(
+            &report.consensus[0].member_memory_ids,
+            &vec![memory_id(1), memory_id(2), memory_id(3)],
+            "consensus member memory id order",
+        )
+    }
+
+    #[test]
+    fn conflict_memory_ids_use_typed_memory_id_order() -> TestResult {
+        let draft = draft_from_candidates(vec![
+            candidate_with_content(3, 0.8, 0.5, 10, "Always run cargo fmt before release.")?
+                .with_diversity_key("release-format"),
+            candidate_with_content(1, 0.8, 0.5, 10, "Never run cargo fmt before release.")?
+                .with_diversity_key("release-format"),
+        ])?;
+
+        let report = super::analyze_pack_consensus_conflicts(&draft);
+
+        ensure_equal(
+            &report.consensus.len(),
+            &0,
+            "no consensus for direct conflict",
+        )?;
+        ensure_equal(&report.conflicts.len(), &1, "single direct conflict")?;
+        ensure_equal(
+            &report.conflicts[0].conflicting_memory_ids,
+            &vec![memory_id(1), memory_id(3)],
+            "conflict memory id order",
         )
     }
 
@@ -9039,6 +9132,30 @@ mod tests {
             &Some("memory_pressure_critical"),
             "critical fallback reason",
         )
+    }
+
+    #[test]
+    fn pack_cache_hotset_section_key_uses_radix_memory_id_order() -> TestResult {
+        let draft = draft_from_candidates(vec![
+            candidate_with_content(3, 0.8, 0.5, 10, "third release rule")?,
+            candidate_with_content(1, 0.8, 0.5, 10, "first release rule")?,
+            candidate_with_content(2, 0.8, 0.5, 10, "second release rule")?,
+        ])?;
+        let hotset = PackHotset::from_draft(&draft, 13);
+        let actual = hotset
+            .entries()
+            .iter()
+            .find(|entry| entry.kind == PackHotsetEntryKind::PackSection)
+            .ok_or_else(|| "expected pack-section hotset entry".to_owned())?;
+        let memory_ids = vec![
+            memory_id(1).to_string(),
+            memory_id(2).to_string(),
+            memory_id(3).to_string(),
+        ];
+        let expected =
+            PackHotsetEntry::pack_section(PackSection::ProceduralRules, &memory_ids, 30, 13, 3);
+
+        ensure_equal(actual, &expected, "pack-section hotset entry")
     }
 
     #[test]
