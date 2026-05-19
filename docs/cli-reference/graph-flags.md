@@ -75,6 +75,7 @@ ee context "prepare release" --workspace . --profile thorough \
 | `ee why <MEMORY_ID>` | `--causal-explain` | boolean | false | Adds a `causalExplanation` block with causal ancestry and min-cost path evidence. |
 | `ee why <MEMORY_ID>` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Reads causal graph evidence for `--causal-explain`. |
 | `ee why <MEMORY_ID>` | `--confidence-threshold <THRESHOLD>` | `0.0..=1.0` | `0.5` | Filters causal explanation edges below the confidence floor. |
+| `ee rule provenance <RULE_ID>` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Reads the rule-to-memory provenance ego graph. |
 | `ee health` | `--robot-insights` | boolean | false | Emits graph-derived structural health for robot consumers. |
 | `ee status` | `--skyline` | boolean | false | Emits the `ee.status.skyline.v1` status block in JSON and compact human output; full community scoring remains owned by G8.a composite skyline work. |
 
@@ -85,6 +86,7 @@ ee insights --section proximityHotspots --workspace . --limit 5 --json
 ee proximity mem_release_policy mem_rch_remote_required --workspace . --json
 ee why mem_failed_release --causal-explain --confidence-threshold 0.7 \
   --workspace . --json
+ee rule provenance rule_release_policy --workspace . --json
 ee status --skyline --workspace . --json
 ```
 

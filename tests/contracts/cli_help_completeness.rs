@@ -84,6 +84,13 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
         &why_help,
         &["--database", "--confidence-threshold", "--causal-explain"],
         "ee why --help",
+    )?;
+
+    let rule_provenance_help = help_for(&["ee", "rule", "provenance", "--help"])?;
+    assert_contains_all(
+        &rule_provenance_help,
+        &["RULE_ID", "--database"],
+        "ee rule provenance --help",
     )
 }
 
@@ -407,6 +414,15 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "--causal-explain",
             "--confidence-threshold",
             "0.7",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "rule",
+            "provenance",
+            "rule_release_policy",
+            "--database",
+            ".ee/ee.db",
             "--json",
         ][..],
         &[
