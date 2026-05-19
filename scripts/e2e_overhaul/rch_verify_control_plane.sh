@@ -73,7 +73,9 @@ if "exec" not in invocation:
     raise SystemExit(f"missing explicit rch exec invocation: {report}")
 if "/Users/jemanuel" in json.dumps(report):
     raise SystemExit("private user path leaked into proof")
-if "token=" in json.dumps(report).lower() or "secret=" in json.dumps(report).lower():
+serialized = json.dumps(report).lower()
+leak_markers = [f"{name}=" for name in ("token", "secret")]
+if any(marker in serialized for marker in leak_markers):
     raise SystemExit("secret-shaped text leaked into proof")
 print(json.dumps({
     "command_hash": report.get("command_hash", ""),
@@ -138,17 +140,24 @@ FAKERCH
 
 assert_source_refusal_json() {
     local path="${1:?json path required}"
-    python3 - "$path" <<'PY'
+    local expected_staged="${2:?expected tracked staged count required}"
+    local expected_unstaged="${3:?expected tracked unstaged count required}"
+    local expected_untracked="${4:?expected untracked count required}"
+    local expected_secret_risk="${5:?expected secret risk count required}"
+    shift 5
+    python3 - "$path" "$expected_staged" "$expected_unstaged" "$expected_untracked" "$expected_secret_risk" "$@" <<'PY'
 import json
 import sys
 
-with open(sys.argv[1], encoding="utf-8") as handle:
+path = sys.argv[1]
+expected_staged = int(sys.argv[2])
+expected_unstaged = int(sys.argv[3])
+expected_untracked = int(sys.argv[4])
+expected_secret_risk = int(sys.argv[5])
+required = {"rch_verify_dirty_tree_refused", *sys.argv[6:]}
+
+with open(path, encoding="utf-8") as handle:
     report = json.load(handle)
-required = {
-    "rch_verify_dirty_tree_refused",
-    "rch_verify_dirty_tracked_paths",
-    "rch_verify_dirty_unstaged_paths",
-}
 codes = set(report.get("degraded_codes") or [])
 source_codes = set(report.get("source_state_degraded_codes") or [])
 if report.get("schema") != "ee.rch.verify.v1":
@@ -162,10 +171,22 @@ if report.get("exit_code") != 1:
 if report.get("rch_invocation") != []:
     raise SystemExit(f"source refusal must not plan RCH invocation: {report}")
 summary = report.get("dirty_summary") or {}
-if summary.get("tracked_unstaged") != 1 or summary.get("tracked_staged") != 0:
-    raise SystemExit(f"dirty tracked counters drifted: {report}")
+if summary.get("tracked_staged") != expected_staged:
+    raise SystemExit(f"tracked_staged drifted: {report}")
+if summary.get("tracked_unstaged") != expected_unstaged:
+    raise SystemExit(f"tracked_unstaged drifted: {report}")
+if summary.get("untracked") != expected_untracked:
+    raise SystemExit(f"untracked count drifted: {report}")
+if summary.get("secret_risk") != expected_secret_risk:
+    raise SystemExit(f"secret_risk count drifted: {report}")
 if not required.issubset(codes) or not required.issubset(source_codes):
     raise SystemExit(f"missing dirty-source degraded codes: {report}")
+if expected_secret_risk:
+    serialized = json.dumps(report)
+    if "SYNTHETIC_TOKEN_VALUE" in serialized:
+        raise SystemExit(f"secret-risk fixture leaked raw content: {report}")
+    if not any(item.get("kind") == "secret_risk" for item in report.get("dirty_paths_sample") or []):
+        raise SystemExit(f"secret-risk fixture did not tag path sample: {report}")
 print(json.dumps({
     "command_hash": report.get("command_hash", ""),
     "degraded_codes": sorted(codes),
@@ -301,7 +322,14 @@ if [ -s "$strict_invocations" ]; then
     sed -n '1,120p' "$strict_invocations" >&2
     exit 1
 fi
-strict_assert="$(assert_source_refusal_json "$strict_json")"
+strict_assert="$(assert_source_refusal_json \
+    "$strict_json" \
+    0 \
+    1 \
+    0 \
+    0 \
+    rch_verify_dirty_tracked_paths \
+    rch_verify_dirty_unstaged_paths)"
 emit_event \
     "assert" \
     "strict_dirty_refusal_validated" \
@@ -311,6 +339,116 @@ emit_event \
     "$(printf '%s' "$strict_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
     "real git dirty fixture refused before fake RCH" \
     "strict_dirty_source"
+
+start="$(started_ms)"
+staged_repo="$WORK_DIR/staged-change-repo"
+init_fixture_repo "$staged_repo"
+printf '%s\n' "staged live checkout" > "$staged_repo/tracked.txt"
+git -C "$staged_repo" add tracked.txt
+staged_before="$WORK_DIR/staged-change.before-status"
+git_status_v2 "$staged_repo" > "$staged_before"
+staged_fake_rch="$WORK_DIR/fake-rch-staged-change"
+staged_invocations="$WORK_DIR/staged-change-rch-invocations.txt"
+staged_json="$WORK_DIR/staged-change-refusal.json"
+staged_event_log="$WORK_DIR/staged-change-events.jsonl"
+write_fake_rch "$staged_fake_rch"
+set +e
+FAKE_RCH_INVOCATIONS="$staged_invocations" \
+RCH_VERIFY_NOW="2026-05-16T06:40:05.000000Z" \
+RCH_VERIFY_CONFIGURED_WORKERS="css" \
+RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
+bash "$RCH_VERIFY" \
+    --bead-id bd-9ygik.3 \
+    --require-clean-tree \
+    --project-root "$staged_repo" \
+    --event-log "$staged_event_log" \
+    --rch-bin "$staged_fake_rch" \
+    -- \
+    cargo test --lib rch_verify_staged_dirty_e2e > "$staged_json"
+staged_exit=$?
+set -e
+if [ "$staged_exit" -eq 0 ]; then
+    printf 'staged dirty fixture unexpectedly passed\n' >&2
+    exit 1
+fi
+assert_status_unchanged "$staged_repo" "$staged_before" "staged-change"
+if [ -s "$staged_invocations" ]; then
+    printf 'staged dirty refusal invoked fake RCH:\n' >&2
+    sed -n '1,120p' "$staged_invocations" >&2
+    exit 1
+fi
+staged_assert="$(assert_source_refusal_json \
+    "$staged_json" \
+    1 \
+    0 \
+    0 \
+    0 \
+    rch_verify_dirty_tracked_paths \
+    rch_verify_dirty_staged_paths)"
+emit_event \
+    "assert" \
+    "staged_dirty_refusal_validated" \
+    "$(elapsed_since "$start")" \
+    "$(printf '%s' "$staged_assert" | python3 -c 'import json,sys; print(json.load(sys.stdin)["command_hash"])')" \
+    "" \
+    "$(printf '%s' "$staged_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
+    "staged tracked fixture refused before fake RCH with staged-only counters" \
+    "staged_change"
+
+start="$(started_ms)"
+secret_repo="$WORK_DIR/secret-risk-repo"
+init_fixture_repo "$secret_repo"
+printf '%s\n' "SYNTHETIC_TOKEN_VALUE" > "$secret_repo/token-draft.txt"
+secret_before="$WORK_DIR/secret-risk.before-status"
+git_status_v2 "$secret_repo" > "$secret_before"
+secret_fake_rch="$WORK_DIR/fake-rch-secret-risk"
+secret_invocations="$WORK_DIR/secret-risk-rch-invocations.txt"
+secret_json="$WORK_DIR/secret-risk-refusal.json"
+secret_event_log="$WORK_DIR/secret-risk-events.jsonl"
+write_fake_rch "$secret_fake_rch"
+set +e
+FAKE_RCH_INVOCATIONS="$secret_invocations" \
+RCH_VERIFY_NOW="2026-05-16T06:40:04.000000Z" \
+RCH_VERIFY_CONFIGURED_WORKERS="css" \
+RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
+bash "$RCH_VERIFY" \
+    --bead-id bd-9ygik.3 \
+    --require-clean-tree \
+    --project-root "$secret_repo" \
+    --event-log "$secret_event_log" \
+    --rch-bin "$secret_fake_rch" \
+    -- \
+    cargo test --lib rch_verify_secret_risk_e2e > "$secret_json"
+secret_exit=$?
+set -e
+if [ "$secret_exit" -eq 0 ]; then
+    printf 'secret-risk fixture unexpectedly passed\n' >&2
+    exit 1
+fi
+assert_status_unchanged "$secret_repo" "$secret_before" "secret-risk"
+if [ -s "$secret_invocations" ]; then
+    printf 'secret-risk refusal invoked fake RCH:\n' >&2
+    sed -n '1,120p' "$secret_invocations" >&2
+    exit 1
+fi
+secret_assert="$(assert_source_refusal_json \
+    "$secret_json" \
+    0 \
+    0 \
+    0 \
+    1 \
+    rch_verify_dirty_untracked_paths)"
+emit_event \
+    "assert" \
+    "secret_risk_refusal_validated" \
+    "$(elapsed_since "$start")" \
+    "$(printf '%s' "$secret_assert" | python3 -c 'import json,sys; print(json.load(sys.stdin)["command_hash"])')" \
+    "" \
+    "$(printf '%s' "$secret_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
+    "secret-like untracked path refused before fake RCH without raw content leakage" \
+    "secret_like_untracked"
 
 start="$(started_ms)"
 committed_repo="$WORK_DIR/committed-tree-repo"
@@ -361,7 +499,7 @@ if [ "${RCH_VERIFY_CONTROL_PLANE_LONG_BENCH:-0}" = "1" ]; then
     start="$(started_ms)"
     bench_json="$WORK_DIR/optional-bench.json"
     RCH_BIN="${RCH_BIN:-rch}" \
-    RCH_VERIFY_NOW="2026-05-16T06:40:02.000000Z" \
+    RCH_VERIFY_NOW="2026-05-16T06:40:06.000000Z" \
     bash "$RCH_VERIFY" \
         --bead-id bd-1h8ji.6 \
         --summary \
