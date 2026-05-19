@@ -3076,10 +3076,23 @@ fn sort_scores_by_metric_desc_then_memory_id(
     scores: &mut Vec<MemoryCentralityScore>,
     metric: impl Fn(&MemoryCentralityScore) -> f64,
 ) {
+    sort_scores_by_metrics_desc_then_memory_id(scores, metric, |_| 0.0);
+}
+
+fn sort_scores_by_metrics_desc_then_memory_id(
+    scores: &mut Vec<MemoryCentralityScore>,
+    primary: impl Fn(&MemoryCentralityScore) -> f64,
+    secondary: impl Fn(&MemoryCentralityScore) -> f64,
+) {
     sort_by_ulid_payload_or_lexical(scores, |score| score.memory_id.as_str());
     scores.sort_by(|left, right| {
-        metric(right)
-            .partial_cmp(&metric(left))
+        secondary(right)
+            .partial_cmp(&secondary(left))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    scores.sort_by(|left, right| {
+        primary(right)
+            .partial_cmp(&primary(left))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 }
@@ -3864,45 +3877,37 @@ pub fn graph_snapshot_centrality_report(
     }
 
     let mut scores: Vec<_> = scores_by_memory.into_values().collect();
-    scores.sort_by(|left, right| {
-        right
-            .pagerank
-            .total_cmp(&left.pagerank)
-            .then_with(|| right.betweenness.total_cmp(&left.betweenness))
-            .then_with(|| left.memory_id.cmp(&right.memory_id))
-    });
+    sort_scores_by_metrics_desc_then_memory_id(
+        &mut scores,
+        |score| score.pagerank,
+        |score| score.betweenness,
+    );
 
     let mut top_pagerank = scores.clone();
     top_pagerank.truncate(10);
 
     let mut top_betweenness = scores.clone();
-    top_betweenness.sort_by(|left, right| {
-        right
-            .betweenness
-            .total_cmp(&left.betweenness)
-            .then_with(|| right.pagerank.total_cmp(&left.pagerank))
-            .then_with(|| left.memory_id.cmp(&right.memory_id))
-    });
+    sort_scores_by_metrics_desc_then_memory_id(
+        &mut top_betweenness,
+        |score| score.betweenness,
+        |score| score.pagerank,
+    );
     top_betweenness.truncate(10);
 
     let mut top_hubs = scores.clone();
-    top_hubs.sort_by(|left, right| {
-        right
-            .hub
-            .total_cmp(&left.hub)
-            .then_with(|| right.pagerank.total_cmp(&left.pagerank))
-            .then_with(|| left.memory_id.cmp(&right.memory_id))
-    });
+    sort_scores_by_metrics_desc_then_memory_id(
+        &mut top_hubs,
+        |score| score.hub,
+        |score| score.pagerank,
+    );
     top_hubs.truncate(10);
 
     let mut top_authorities = scores.clone();
-    top_authorities.sort_by(|left, right| {
-        right
-            .authority
-            .total_cmp(&left.authority)
-            .then_with(|| right.pagerank.total_cmp(&left.pagerank))
-            .then_with(|| left.memory_id.cmp(&right.memory_id))
-    });
+    sort_scores_by_metrics_desc_then_memory_id(
+        &mut top_authorities,
+        |score| score.authority,
+        |score| score.pagerank,
+    );
     top_authorities.truncate(10);
 
     Ok(CentralityRefreshReport {
@@ -7333,6 +7338,40 @@ mod tests {
             node: node.to_owned(),
             score,
         }
+    }
+
+    #[test]
+    fn centrality_sort_uses_radix_memory_id_tie_break_after_metrics() {
+        let first = numbered_memory_id(11);
+        let second = numbered_memory_id(12);
+        let lower_secondary = numbered_memory_id(13);
+        let lower_primary = numbered_memory_id(14);
+        let mut scores = vec![
+            centrality_score(&lower_primary, 0.7, 0.9),
+            centrality_score(&lower_secondary, 0.8, 0.1),
+            centrality_score(&second, 0.8, 0.2),
+            centrality_score(&first, 0.8, 0.2),
+        ];
+
+        super::sort_scores_by_metrics_desc_then_memory_id(
+            &mut scores,
+            |score| score.pagerank,
+            |score| score.betweenness,
+        );
+
+        let ordered = scores
+            .iter()
+            .map(|score| score.memory_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered,
+            vec![
+                first.as_str(),
+                second.as_str(),
+                lower_secondary.as_str(),
+                lower_primary.as_str(),
+            ]
+        );
     }
 
     #[test]

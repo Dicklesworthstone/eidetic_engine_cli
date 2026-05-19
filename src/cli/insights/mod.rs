@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
@@ -21,6 +22,7 @@ use crate::graph::gomory_hu::{
 };
 use crate::graph::hits::{HITS_REPORT_SCHEMA_V1, HitsScores, compute_hits_report};
 use crate::models::{DomainError, RESPONSE_SCHEMA_V1};
+use crate::output::render_toon_from_json;
 
 pub const INSIGHTS_SCHEMA_V1: &str = "ee.insights.v1";
 const PROXIMITY_REPORT_SCHEMA_V1: &str = PROXIMITY_SCHEMA_V1;
@@ -722,6 +724,97 @@ pub fn render_insights_json(report: &InsightsReport) -> String {
     .to_string()
 }
 
+/// Render the insights report as TOON through the canonical JSON envelope.
+#[must_use]
+pub fn render_insights_toon(report: &InsightsReport) -> String {
+    render_toon_from_json(&render_insights_json(report))
+}
+
+/// Render the insights report as Markdown.
+#[must_use]
+pub fn render_insights_markdown(report: &InsightsReport) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output, "# Insights");
+    let _ = writeln!(output);
+    let _ = writeln!(output, "- Schema: `{}`", report.schema);
+    let _ = writeln!(output, "- Mode: `{}`", report.mode.as_str());
+    let _ = writeln!(output, "- Snapshot version: {}", report.snapshot_version);
+    let _ = writeln!(output, "- Generated at: `{}`", report.generated_at);
+    let _ = writeln!(output, "- Run duration ms: {}", report.run_duration_ms);
+    let _ = writeln!(
+        output,
+        "- Available sections: {}",
+        report.available_sections.join(", ")
+    );
+    match report.selected_section.as_deref() {
+        Some(section) => {
+            let _ = writeln!(output, "- Selected section: `{section}`");
+        }
+        None => {
+            let _ = writeln!(output, "- Selected section: none");
+        }
+    }
+    if let Some(memory_id) = report.explain_memory_id.as_deref() {
+        let _ = writeln!(output, "- Explain target: `{memory_id}`");
+    }
+    if let Some(command) = report.explain_command.as_deref() {
+        let _ = writeln!(output, "- Explain command: `{command}`");
+    }
+    if let Some(pagination) = &report.pagination {
+        let _ = writeln!(
+            output,
+            "- Pagination: limit={} offset={} returned={} total={}",
+            pagination.limit, pagination.offset, pagination.returned, pagination.total
+        );
+    }
+
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## Sections");
+    for section in &report.sections {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "### {}", section.title);
+        let _ = writeln!(output, "- Name: `{}`", section.name);
+        let _ = writeln!(output, "- Summary: {}", section.summary);
+        let _ = writeln!(output, "- Why it matters: {}", section.why_it_matters);
+        let _ = writeln!(output, "- Items: {}", section.items.len());
+        if !section.items.is_empty() {
+            for (index, item) in section.items.iter().enumerate() {
+                let item_json = serde_json::to_string(item).unwrap_or_else(|_| "null".to_owned());
+                let _ = writeln!(output, "- Item {}:", index + 1);
+                let _ = writeln!(output, "  ```json");
+                let _ = writeln!(output, "  {item_json}");
+                let _ = writeln!(output, "  ```");
+            }
+        }
+        if !section.next_commands.is_empty() {
+            let _ = writeln!(output, "- Next commands:");
+            for command in &section.next_commands {
+                let _ = writeln!(output, "  - `{command}`");
+            }
+        }
+    }
+
+    if !report.degraded_signals.is_empty() {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## Degraded");
+        for degraded in &report.degraded_signals {
+            let _ = writeln!(
+                output,
+                "- **{}** `{}`: {}",
+                degraded.severity, degraded.code, degraded.message
+            );
+            if let Some(repair) = degraded.repair.as_deref() {
+                let _ = writeln!(output, "  - Repair: `{repair}`");
+            }
+            if !degraded.sources.is_empty() {
+                let _ = writeln!(output, "  - Sources: {}", degraded.sources.join(", "));
+            }
+        }
+    }
+
+    output
+}
+
 #[must_use]
 pub fn render_insights_human(report: &InsightsReport) -> String {
     let mut output = String::new();
@@ -1181,6 +1274,73 @@ mod tests {
         assert_eq!(data["pagination"]["total"], 0);
         assert_eq!(data["degradedSignals"][0]["code"], "graph.workspace_empty");
 
+        Ok(())
+    }
+
+    #[test]
+    fn rendered_markdown_preserves_sections_items_and_degraded() -> TestResult {
+        let mut report = build_insights_report(&InsightsArgs {
+            section: Some("topMemories".to_owned()),
+            explain: None,
+            limit: DEFAULT_SECTION_LIMIT,
+            offset: 0,
+        })
+        .map_err(|error| error.to_string())?;
+        report.sections = vec![InsightsSection {
+            name: "topMemories",
+            title: "Top Memories",
+            summary: "Top-ranked memories by cached graph centrality and retrieval posture.",
+            why_it_matters: "Top memories provide an immediate overview of the facts most likely to shape agent behavior.",
+            items: vec![serde_json::json!({"memoryId": "mem_top"})],
+            next_commands: vec!["ee insights --section topMemories --workspace . --json"],
+        }];
+        report.degraded_signals = vec![InsightsDegradedSignal {
+            code: "graph.insights_fixture".to_owned(),
+            severity: "warning".to_owned(),
+            message: "fixture insights degradation".to_owned(),
+            repair: Some("ee graph snapshot refresh --workspace . --json".to_owned()),
+            sources: vec!["insights".to_owned(), "topMemories".to_owned()],
+        }];
+
+        let markdown = render_insights_markdown(&report);
+
+        assert!(markdown.contains("# Insights"));
+        assert!(markdown.contains("- Schema: `ee.insights.v1`"));
+        assert!(markdown.contains("- Mode: `section`"));
+        assert!(markdown.contains("- Selected section: `topMemories`"));
+        assert!(markdown.contains("- Pagination: limit=10 offset=0 returned=0 total=0"));
+        assert!(markdown.contains("### Top Memories"));
+        assert!(markdown.contains(r#""memoryId":"mem_top""#));
+        assert!(markdown.contains("`ee insights --section topMemories --workspace . --json`"));
+        assert!(
+            markdown
+                .contains("- **warning** `graph.insights_fixture`: fixture insights degradation")
+        );
+        assert!(markdown.contains("  - Sources: insights, topMemories"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn rendered_toon_decodes_to_canonical_json() -> TestResult {
+        let report = build_insights_report(&InsightsArgs {
+            section: Some("topMemories".to_owned()),
+            explain: None,
+            limit: DEFAULT_SECTION_LIMIT,
+            offset: 0,
+        })
+        .map_err(|error| error.to_string())?;
+        let json = render_insights_json(&report);
+        let toon = render_insights_toon(&report);
+
+        let expected_json = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("insights JSON should parse: {error}"))?;
+        let expected = serde_json::Value::from(toon::JsonValue::from(expected_json));
+        let decoded = toon::try_decode(&toon, None)
+            .map_err(|error| format!("insights TOON should decode: {error}"))?;
+        let actual = serde_json::Value::from(decoded);
+
+        assert_eq!(actual, expected);
         Ok(())
     }
 
