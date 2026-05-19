@@ -2335,7 +2335,7 @@ fn load_export_data(
         .filter(|link| {
             crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref())
         })
-        .collect();
+        .collect::<Vec<_>>();
     let audits = connection
         .list_audit_entries(Some(&workspace.id), None)
         .map_err(|error| DomainError::Storage {

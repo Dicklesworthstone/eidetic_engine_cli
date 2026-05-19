@@ -74,7 +74,7 @@ use crate::pack::{
     ConflictKind, ConflictRecommendedAction, ConsensusConflictReport, ContextPackProfile,
     ContextRequest, ContextRequestInput, ContextResponse, ContextResponseDegradation,
     ContextResponseSeverity, PackAssemblySlo, PackAssemblySloActuals, PackCandidate,
-    PackCandidateInput, PackCoordinationSnapshot, PackItemLifecycle, PackProvenance,
+    PackCandidateInput, PackCoordinationSnapshot, PackDraft, PackItemLifecycle, PackProvenance,
     PackResourceProfile, PackScoreBreakdown, PackSection, PackTrustSignal,
     assemble_draft_with_profile_and_options_seeded,
     budget_classifier::{AdaptiveBudgetDecision, AdaptiveBudgetInput, classify_adaptive_budget},
