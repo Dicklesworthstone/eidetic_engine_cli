@@ -252,6 +252,121 @@ ee mesh preview-grant <node-key> --lane body --workspace . --json \
   | jq '.data.preview | {action, materialLane, redaction, bodyFetchAllowed, failure}'
 ```
 
+## Safe Profile Promotion
+
+Treat sharing profiles as a ladder, not a switch. A profile should move to the
+next rung only when the current rung has produced useful evidence and no
+unexpected peers, workspaces, or degraded codes.
+
+| From | To | Required evidence before promotion |
+| --- | --- | --- |
+| Local only | Metadata only | `ee mesh status --json` names only expected peers and workspaces. |
+| Metadata only | Graph hints | Preview shows `graphLink` is allowed or quarantined without body or embedding export. |
+| Metadata only | Redacted body | Preview sample is small, consented, redacted, and tied to safe peer/workspace aliases. |
+| Redacted body | Full peer body | Operator owns both nodes, audit trail is intact, and the exact body lane grant is intentional. |
+| Any profile | Embedding/search surrogate | Treat as high-sensitivity semantic export; require a separate privacy review. |
+
+Rollback should be practiced before widening a lane. If the operator cannot
+explain how to disable mesh, revoke a peer, and inspect the audit timeline, the
+profile is not ready for body, embedding, or search-surrogate lanes.
+
+## Incident Containment
+
+Use containment when a peer appears unexpected, drift crosses the documented
+thresholds, a policy decision surprises the operator, or an agent reports a
+body/embedding export that was not explicitly approved.
+
+Start with read-only evidence:
+
+```bash
+ee mesh status --workspace . --json
+ee mesh status --workspace . --refresh --json
+ee mesh status --workspace . --explain-peer <node-key> --json
+ee audit verify --workspace . --json
+```
+
+Then choose the narrowest mutating action that matches the incident:
+
+| Situation | First action | Why |
+| --- | --- | --- |
+| Unknown or wrong workspace peer | `ee mesh disable --workspace . --dry-run --json` | Shows rollback impact before changing peer-group rows. |
+| One peer should stop receiving material | `ee mesh revoke <node-key> --workspace . --json` | Preserves the rest of the peer group when only one peer is wrong. |
+| Tailnet or node-key changed | `ee mesh disable --reason "tailnet or node-key changed" --workspace . --json` | Backup-restored or tailnet-changed identity must fail closed. |
+| Audit row write fails | Stop before enrollment or grant changes | Mesh state must not change without its forensic precursor row. |
+| Body or embedding lane was too broad | Revoke the lane, then review audit and cache rows | Withdrawal is local and best-effort; do not claim remote deletion. |
+
+Do not destroy caches or rewrite Git state during containment. Preserve evidence
+first; later cleanup belongs to the owning recovery bead or an explicit human
+operation.
+
+## Audit And Forensics
+
+Mesh operations should leave enough redaction-safe evidence for an operator to
+answer three questions: what was attempted, what policy decided, and what local
+state changed.
+
+Use the audit timeline for materialized changes:
+
+```bash
+ee audit timeline \
+  --event-type mesh.auto_enrollment_intended \
+  --workspace . \
+  --json
+```
+
+For a support handoff, include only:
+
+- command name and mode, not raw memory bodies;
+- peer/workspace aliases, not raw peer paths or local host paths;
+- policy code, schema id, fixture id, and summary hash;
+- whether body, embedding, graphLink, or revisionNotice lanes were allowed;
+- whether the operation was dry-run, audit-only, applied, revoked, or disabled.
+
+If the audit chain itself is degraded, treat mesh as blocked for any widening
+action. Existing local-only `ee` commands remain valid while audit repair is
+investigated.
+
+## Restore And Disaster Recovery Semantics
+
+A restored database can be correct storage-wise but wrong identity-wise. The
+mesh layer must treat restored-on-another-machine and tailnet-change cases as
+high-risk until the operator explicitly re-enrolls.
+
+Operational rules:
+
+- If `selfNodeKey`, tailnet id, workspace binding, or peer-group hash differs
+  from the stored materialization, block auto-enrollment and lane widening.
+- Run `ee mesh disable --dry-run --workspace . --json` before mutating restored
+  mesh state.
+- Prefer metadata-only re-enrollment after restore, even when the old machine
+  previously had body lanes.
+- Do not reuse old body, embedding, or search-surrogate grants just because the
+  backup restored them.
+- Record restore context in the audit reason, for example
+  `--reason "restored from backup onto replacement machine"`.
+
+Backups and restores are local durability operations; they do not prove that
+remote peers purged cached material. Any closeout must keep that limitation
+visible.
+
+## Peer Throttling And Resource Isolation
+
+Mesh should not let a noisy peer make local `ee context`, `ee search`, or
+`ee why` feel slower or less deterministic. Operators should prefer backpressure
+and quarantine over broad blocking mode.
+
+| Signal | Meaning | Response |
+| --- | --- | --- |
+| Peer repeatedly times out | Transport or responder is slow | Keep local Tier 1 usable; avoid blocking mode. |
+| Peer sends too much material | Resource isolation is working only if it throttles or quarantines | Keep metadata-only until rate limits are tuned. |
+| Peer causes audit backpressure | Forensics path is overloaded | Stop widening lanes; inspect audit health before retrying. |
+| Peer returns low-quality evidence | Trust decay should lower influence | Keep material as peer evidence, not local truth. |
+| Many agents poll mesh status | Coordination issue, not a reason to widen mesh | Use cached status, Agent Mail, or Beads handoffs instead of poll storms. |
+
+If the command supports a blocking mesh mode in the future, reserve it for
+explicit operator-initiated freshness checks with a hard latency budget. Default
+agent workflows should stay `off`, `cache`, or `revisable`.
+
 ## Diagnosing Stale Or Unreachable Peers
 
 Start with read-only status surfaces:
