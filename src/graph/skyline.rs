@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::graph::decay::compute_onion_layers;
 use crate::graph::health::{compute_k_truss, detect_louvain_communities};
+use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 pub const KNOWLEDGE_SKYLINE_SCHEMA_V1: &str = "ee.knowledge_skyline.v1";
 
@@ -88,7 +89,7 @@ struct MemoryMetrics {
 #[must_use]
 pub fn compute_knowledge_skyline(input: &KnowledgeSkylineInput) -> KnowledgeSkyline {
     let mut memories = input.memories.clone();
-    memories.sort_by(|left, right| left.memory_id.cmp(&right.memory_id));
+    sort_by_ulid_payload_or_lexical(&mut memories, |memory| memory.memory_id.as_str());
 
     let onion_layers = compute_onion_layers(&input.graph);
     let k_truss = compute_k_truss(&input.graph);
@@ -218,7 +219,7 @@ fn community_summaries(
         .into_iter()
         .enumerate()
         .map(|(community_id, mut members)| {
-            members.sort();
+            sort_by_ulid_payload_or_lexical(&mut members, String::as_str);
             let layers = members
                 .iter()
                 .filter_map(|memory_id| metrics_by_memory.get(memory_id))
@@ -285,11 +286,8 @@ fn ppr_percentiles(scores: &BTreeMap<String, f64>) -> BTreeMap<String, f64> {
         .iter()
         .map(|(memory_id, score)| (memory_id.clone(), finite_or_zero(*score)))
         .collect::<Vec<_>>();
-    ranked.sort_by(|left, right| {
-        left.1
-            .total_cmp(&right.1)
-            .then_with(|| left.0.cmp(&right.0))
-    });
+    sort_by_ulid_payload_or_lexical(&mut ranked, |(memory_id, _)| memory_id.as_str());
+    ranked.sort_by(|left, right| left.1.total_cmp(&right.1));
     if ranked.is_empty() {
         return BTreeMap::new();
     }
@@ -309,11 +307,8 @@ fn age_deciles(
         .iter()
         .map(|memory| (memory.memory_id.clone(), age_days(memory.created_at, as_of)))
         .collect::<Vec<_>>();
-    ranked.sort_by(|left, right| {
-        left.1
-            .total_cmp(&right.1)
-            .then_with(|| left.0.cmp(&right.0))
-    });
+    sort_by_ulid_payload_or_lexical(&mut ranked, |(memory_id, _)| memory_id.as_str());
+    ranked.sort_by(|left, right| left.1.total_cmp(&right.1));
     if ranked.is_empty() {
         return BTreeMap::new();
     }
@@ -553,6 +548,30 @@ mod tests {
 
         assert!(populated.iter().any(|cell| cell.mean_age_decile > 0.0));
         assert!(populated.iter().any(|cell| cell.ppr_percentile > 0.0));
+    }
+
+    #[test]
+    fn skyline_same_metric_ties_accept_radix_memory_ids() {
+        let first = "mem_01J0000000000000000000000A";
+        let second = "mem_01J0000000000000000000000B";
+        let third = "mem_01J0000000000000000000000C";
+
+        let percentiles = ppr_percentiles(&ppr(&[(third, 0.5), (first, 0.5), (second, 0.5)]));
+        assert_eq!(percentiles.get(first), Some(&0.0));
+        assert_eq!(percentiles.get(second), Some(&0.5));
+        assert_eq!(percentiles.get(third), Some(&1.0));
+
+        let deciles = age_deciles(
+            &[
+                memory(third, "agent_assertion", 1),
+                memory(first, "agent_assertion", 1),
+                memory(second, "agent_assertion", 1),
+            ],
+            ts(16),
+        );
+        assert_eq!(deciles.get(first), Some(&0));
+        assert_eq!(deciles.get(second), Some(&5));
+        assert_eq!(deciles.get(third), Some(&9));
     }
 
     #[test]

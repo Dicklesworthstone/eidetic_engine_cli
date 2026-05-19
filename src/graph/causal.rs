@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::graph::algorithms::{DEFAULT_BACKGROUND_BUDGET, current_or_testing_cx, run_with_budget};
 use crate::graph::{GraphError, GraphResult};
 use crate::models::degradation::GRAPH_CAUSAL_NO_EVIDENCE_CODE;
+use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 use super::{AttrMap, DiGraph};
 
@@ -120,11 +121,8 @@ fn compute_causal_ancestry_unbudgeted(graph: &DiGraph, failure_id: &str) -> Caus
                 })
         })
         .collect();
-    ancestors.sort_by(|left, right| {
-        left.path_length
-            .cmp(&right.path_length)
-            .then_with(|| left.memory_id.cmp(&right.memory_id))
-    });
+    sort_by_ulid_payload_or_lexical(&mut ancestors, |ancestor| ancestor.memory_id.as_str());
+    ancestors.sort_by_key(|ancestor| ancestor.path_length);
 
     CausalAncestry {
         failure_id: failure_id.to_owned(),
@@ -565,6 +563,30 @@ mod tests {
                 ],
                 degraded: Vec::new(),
             }
+        );
+    }
+
+    #[test]
+    fn causal_ancestry_same_depth_ties_accept_radix_memory_ids() {
+        let mut graph = graph();
+        add_causal_edge(&mut graph, "failure", "mem_01J0000000000000000000000C", 0.8);
+        add_causal_edge(&mut graph, "failure", "mem_01J0000000000000000000000A", 0.8);
+        add_causal_edge(&mut graph, "failure", "mem_01J0000000000000000000000B", 0.8);
+
+        let ancestry = compute_causal_ancestry(&graph, "failure");
+        let ids = ancestry
+            .ancestors
+            .iter()
+            .map(|ancestor| ancestor.memory_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ids,
+            vec![
+                "mem_01J0000000000000000000000A",
+                "mem_01J0000000000000000000000B",
+                "mem_01J0000000000000000000000C",
+            ]
         );
     }
 
