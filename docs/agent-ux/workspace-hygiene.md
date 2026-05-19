@@ -19,8 +19,9 @@ The machine report uses schema `ee.workspace_hygiene.v1` and sets
 or cleanup command.
 
 Key agent-facing fields are `workspace`, `gitSummary`, `pathClassifications`,
-`stagingRecommendations`, `doNotCommit`, `needsHumanReview`, `coordinationState`,
-`beadsState`, `degraded`, and `nextActions`.
+`stagingRecommendations`, `doNotCommit`, `needsHumanReview`,
+`outputTruncation`, `secretScan`, `coordinationState`, `beadsState`,
+`degraded`, and `nextActions`.
 
 The diagnostic exists to help agents decide what is safe to include in a commit
 slice. It does not replace human review, Beads ownership, or Agent Mail file
@@ -44,8 +45,10 @@ coordination blockers as stronger than any local allow or stage pattern.
 
 `stagingRecommendations[]` are deterministic, read-only commit-slice hints.
 Each entry contains `name`, sorted `paths`, `pathCount`, `kinds`, `reasons`,
-`recommendation`, and `readOnly=true`. They are not shell commands and must not
-stage files on their own.
+`recommendation`, and `readOnly=true`. When a group is too large to serialize
+fully, `pathCount` remains the total group size while `pathsTruncated=true` and
+`omittedPathCount` report how many sorted paths were left out. They are not
+shell commands and must not stage files on their own.
 
 Default grouping keeps source, tests, docs, and golden fixture updates in
 separate logical slices. Coordination-blocked paths are omitted from staging
@@ -53,6 +56,44 @@ recommendations even when their classifier bucket is `stage_candidate`.
 Scratch, generated, local-machine, secret-risk, binary, and unknown-review paths
 stay in `doNotCommit` or `needsHumanReview` instead of being recommended for a
 fast commit.
+
+## Output Budgets
+
+Workspace hygiene is designed for large shared checkouts. It preserves total
+counts in `gitSummary`, `dirtyPathCount`, `bucketCounts`, `kindCounts`, and
+staging group `pathCount`, but caps path-heavy arrays before serialization.
+Content secret-risk scanning is also budgeted: only small dirty regular files
+are read, each file is capped at 64 KiB, at most 1,000 files are scanned, and
+total scanned content is capped at 1,000,000 bytes per report.
+
+Default caps:
+
+| Array | Cap |
+| --- | ---: |
+| `pathClassifications[]` | 10,000 rows |
+| `doNotCommit[]` | 10,000 paths |
+| `needsHumanReview[]` | 10,000 paths |
+| `stagingRecommendations[].paths[]` | 10,000 paths per group |
+| content secret-risk files | 1,000 files |
+| content secret-risk file size | 64 KiB per file |
+| content secret-risk total bytes | 1,000,000 bytes |
+
+If any cap is hit, `outputTruncation.truncated=true`,
+`workspace_hygiene_output_truncated` appears in `degraded[]`, and
+`outputTruncation` records omitted counts by list, bucket, kind, and staging
+group. The visible prefixes are deterministic because classification rows and
+path lists are sorted before truncation. Human output stays compact: staging
+groups print total path counts plus visible/omitted counts instead of listing
+every path. Agents should narrow the dirty path set or inspect
+`outputTruncation` before staging from a truncated report.
+
+If content secret-risk scanning skips a dirty file because a file, total-byte,
+binary/UTF-8, or symlink/path-safety budget is hit,
+`workspace_hygiene_secret_scan_skipped` appears in `degraded[]`. Path-only
+secret-risk classification still applies even when content scanning is skipped.
+The `secretScan` block records the read-only counters and caps:
+`scannedFileCount`, `scannedByteCount`, `skippedContentScanCount`, `maxFiles`,
+`maxFileBytes`, and `maxTotalBytes`.
 
 ## Kinds
 

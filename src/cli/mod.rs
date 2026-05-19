@@ -12860,8 +12860,33 @@ where
             if !report.staging_groups.is_empty() {
                 out.push_str("\nStage candidates:\n");
                 for group in &report.staging_groups {
-                    out.push_str(&format!("  {}: {} paths\n", group.name, group.paths.len()));
+                    if group.paths_truncated {
+                        out.push_str(&format!(
+                            "  {}: {} paths (showing {}, omitted {})\n",
+                            group.name,
+                            group.path_count,
+                            group.paths.len(),
+                            group.omitted_path_count
+                        ));
+                    } else {
+                        out.push_str(&format!("  {}: {} paths\n", group.name, group.path_count));
+                    }
                 }
+            }
+            if report.output_truncation.truncated {
+                out.push_str(
+                    "\nOutput truncated: rerun with JSON and inspect outputTruncation for omitted counts.\n",
+                );
+            }
+            if report.secret_scan.scanned_file_count > 0
+                || report.secret_scan.skipped_content_scan_count > 0
+            {
+                out.push_str(&format!(
+                    "\nSecret scan: {} files, {} bytes, {} skipped\n",
+                    report.secret_scan.scanned_file_count,
+                    report.secret_scan.scanned_byte_count,
+                    report.secret_scan.skipped_content_scan_count
+                ));
             }
             if !report.degraded_codes.is_empty() {
                 out.push_str("\nDegraded:\n");

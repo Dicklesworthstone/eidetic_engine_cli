@@ -22,6 +22,8 @@
         "stagingRecommendations",
         "doNotCommit",
         "needsHumanReview",
+        "outputTruncation",
+        "secretScan",
         "coordinationState",
         "beadsState",
         "degraded",
@@ -55,6 +57,8 @@
               "name": {"type": "string"},
               "paths": {"type": "array", "items": {"type": "string"}},
               "pathCount": {"type": "integer", "minimum": 0},
+              "pathsTruncated": {"type": "boolean"},
+              "omittedPathCount": {"type": "integer", "minimum": 0},
               "kinds": {"type": "array", "items": {"type": "string"}},
               "reasons": {"type": "array", "items": {"type": "string"}},
               "recommendation": {"type": "string"},
@@ -64,6 +68,67 @@
         },
         "doNotCommit": {"type": "array", "items": {"type": "string"}},
         "needsHumanReview": {"type": "array", "items": {"type": "string"}},
+        "outputTruncation": {
+          "type": "object",
+          "required": [
+            "truncated",
+            "maxPathClassifications",
+            "maxPathsPerList",
+            "maxPathsPerStagingGroup",
+            "omittedPathClassifications",
+            "omittedDoNotCommit",
+            "omittedNeedsHumanReview",
+            "omittedByBucket",
+            "omittedByKind",
+            "stagingGroups"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "truncated": {"type": "boolean"},
+            "maxPathClassifications": {"type": "integer", "minimum": 0},
+            "maxPathsPerList": {"type": "integer", "minimum": 0},
+            "maxPathsPerStagingGroup": {"type": "integer", "minimum": 0},
+            "omittedPathClassifications": {"type": "integer", "minimum": 0},
+            "omittedDoNotCommit": {"type": "integer", "minimum": 0},
+            "omittedNeedsHumanReview": {"type": "integer", "minimum": 0},
+            "omittedByBucket": {"type": "array", "items": {"$ref": "#/$defs/count"}},
+            "omittedByKind": {"type": "array", "items": {"$ref": "#/$defs/count"}},
+            "stagingGroups": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "omittedPathCount"],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {"type": "string"},
+                  "omittedPathCount": {"type": "integer", "minimum": 0}
+                }
+              }
+            }
+          }
+        },
+        "secretScan": {
+          "type": "object",
+          "required": [
+            "readOnly",
+            "scannedFileCount",
+            "scannedByteCount",
+            "skippedContentScanCount",
+            "maxFiles",
+            "maxFileBytes",
+            "maxTotalBytes"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "readOnly": {"type": "boolean", "const": true},
+            "scannedFileCount": {"type": "integer", "minimum": 0},
+            "scannedByteCount": {"type": "integer", "minimum": 0},
+            "skippedContentScanCount": {"type": "integer", "minimum": 0},
+            "maxFiles": {"type": "integer", "minimum": 0},
+            "maxFileBytes": {"type": "integer", "minimum": 0},
+            "maxTotalBytes": {"type": "integer", "minimum": 0}
+          }
+        },
         "coordinationState": {"type": "object"},
         "beadsState": {"type": "object"},
         "degraded": {"type": "array", "items": {"type": "string"}},
@@ -83,9 +148,9 @@
     }
   },
   "field_presets": {
-    "minimal": ["data.schema", "data.command", "data.readOnly", "data.gitSummary.dirtyPathCount"],
-    "summary": ["data.schema", "data.command", "data.gitSummary", "data.stagingRecommendations", "data.doNotCommit", "data.needsHumanReview", "data.degraded", "data.nextActions"],
-    "standard": ["data.schema", "data.command", "data.readOnly", "data.workspace", "data.gitSummary", "data.pathClassifications", "data.stagingRecommendations", "data.doNotCommit", "data.needsHumanReview", "data.coordinationState", "data.beadsState", "data.degraded", "data.nextActions"],
+    "minimal": ["data.schema", "data.command", "data.readOnly", "data.gitSummary.dirtyPathCount", "data.outputTruncation.truncated", "data.secretScan.skippedContentScanCount"],
+    "summary": ["data.schema", "data.command", "data.gitSummary", "data.stagingRecommendations", "data.doNotCommit", "data.needsHumanReview", "data.outputTruncation", "data.secretScan", "data.degraded", "data.nextActions"],
+    "standard": ["data.schema", "data.command", "data.readOnly", "data.workspace", "data.gitSummary", "data.pathClassifications", "data.stagingRecommendations", "data.doNotCommit", "data.needsHumanReview", "data.outputTruncation", "data.secretScan", "data.coordinationState", "data.beadsState", "data.degraded", "data.nextActions"],
     "full": ["*"]
   }
 }

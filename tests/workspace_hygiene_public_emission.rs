@@ -87,7 +87,7 @@ const WORKSPACE_HYGIENE_COVERAGE: &[CoverageEntry] = &[
     CoverageEntry {
         code: "workspace_hygiene_output_truncated",
         kind: CoverageKind::FixtureOnly {
-            rationale: "the current public hygiene report has no item-budget truncation path to trigger deterministically",
+            rationale: "the public path exists but needs a giant dirty fixture; deterministic trigger coverage lives in the core workspace-hygiene truncation unit test",
         },
     },
     CoverageEntry {
@@ -96,9 +96,7 @@ const WORKSPACE_HYGIENE_COVERAGE: &[CoverageEntry] = &[
     },
     CoverageEntry {
         code: "workspace_hygiene_secret_scan_skipped",
-        kind: CoverageKind::FixtureOnly {
-            rationale: "content secret scanning is cataloged but not yet wired into the public hygiene collector",
-        },
+        kind: CoverageKind::PublicTriggered,
     },
 ];
 
@@ -415,12 +413,32 @@ fn workspace_hygiene_json_public_surface_emits_beads_degraded_codes() -> TestRes
     for expected in [
         "workspace_hygiene_beads_db_divergence_unknown",
         "workspace_hygiene_beads_jsonl_truncated",
+        "workspace_hygiene_secret_scan_skipped",
     ] {
         if !codes.contains(&expected) {
             return Err(format!(
                 "workspace hygiene JSON missing Beads degraded code {expected}; got {codes:?}; response: {value}"
             ));
         }
+    }
+    if value
+        .pointer("/data/secretScan/skippedContentScanCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        == 0
+    {
+        return Err(format!(
+            "secretScan must report skipped content scan count for oversized dirty files: {value}"
+        ));
+    }
+    if value
+        .pointer("/data/secretScan/maxFileBytes")
+        .and_then(Value::as_u64)
+        != Some(64 * 1024)
+    {
+        return Err(format!(
+            "secretScan must expose the default per-file cap: {value}"
+        ));
     }
 
     let beads_codes = string_array_at(&value, "/data/beadsState/degradedCodes");

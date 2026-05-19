@@ -40,9 +40,11 @@ use crate::db::{
     WorkspaceScopeFields, generate_audit_id,
 };
 use crate::models::degradation::{
-    WORKSPACE_HYGIENE_AGENT_MAIL_UNAVAILABLE_CODE, WORKSPACE_HYGIENE_PARTIAL_METADATA_CODE,
+    WORKSPACE_HYGIENE_AGENT_MAIL_UNAVAILABLE_CODE, WORKSPACE_HYGIENE_OUTPUT_TRUNCATED_CODE,
+    WORKSPACE_HYGIENE_PARTIAL_METADATA_CODE, WORKSPACE_HYGIENE_SECRET_SCAN_SKIPPED_CODE,
 };
 use crate::models::{DomainError, WorkspaceId};
+use crate::policy::{WORKSPACE_SECRET_RISK_DEFAULT_MAX_SCAN_BYTES, workspace_secret_risk_evidence};
 use crate::runtime::determinism::{Deterministic, Seed};
 
 pub const WORKSPACE_REGISTRY_SCHEMA_V1: &str = "ee.workspace.registry.v1";
@@ -53,6 +55,11 @@ pub const WORKSPACE_REGISTRY_ENV_VAR: &str = EnvVar::WorkspaceRegistry.name();
 
 const WORKSPACE_ALIAS_SET_ACTION: &str = "workspace.alias.set";
 const WORKSPACE_ALIAS_CLEAR_ACTION: &str = "workspace.alias.clear";
+pub const WORKSPACE_HYGIENE_MAX_PATH_CLASSIFICATIONS: usize = 10_000;
+pub const WORKSPACE_HYGIENE_MAX_PATHS_PER_LIST: usize = 10_000;
+pub const WORKSPACE_HYGIENE_MAX_PATHS_PER_STAGING_GROUP: usize = 10_000;
+pub const WORKSPACE_HYGIENE_SECRET_SCAN_MAX_FILES: usize = 1_000;
+pub const WORKSPACE_HYGIENE_SECRET_SCAN_MAX_TOTAL_BYTES: usize = 1_000_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceListOptions {
@@ -185,6 +192,10 @@ pub struct WorkspaceHygieneReport {
     pub do_not_commit: Vec<String>,
     #[serde(rename = "needsHumanReview")]
     pub needs_human_review: Vec<String>,
+    #[serde(rename = "outputTruncation")]
+    pub output_truncation: WorkspaceHygieneOutputTruncation,
+    #[serde(rename = "secretScan")]
+    pub secret_scan: WorkspaceHygieneSecretScanReport,
     #[serde(rename = "beadsState")]
     pub beads_state: BeadsHygieneState,
     #[serde(rename = "coordinationState")]
@@ -217,10 +228,46 @@ pub struct WorkspaceHygieneStagingGroup {
     pub name: String,
     pub paths: Vec<String>,
     pub path_count: usize,
+    pub paths_truncated: bool,
+    pub omitted_path_count: usize,
     pub kinds: Vec<String>,
     pub reasons: Vec<String>,
     pub recommendation: &'static str,
     pub read_only: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceHygieneOutputTruncation {
+    pub truncated: bool,
+    pub max_path_classifications: usize,
+    pub max_paths_per_list: usize,
+    pub max_paths_per_staging_group: usize,
+    pub omitted_path_classifications: usize,
+    pub omitted_do_not_commit: usize,
+    pub omitted_needs_human_review: usize,
+    pub omitted_by_bucket: Vec<WorkspaceHygieneCount>,
+    pub omitted_by_kind: Vec<WorkspaceHygieneCount>,
+    pub staging_groups: Vec<WorkspaceHygieneStagingGroupTruncation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceHygieneStagingGroupTruncation {
+    pub name: String,
+    pub omitted_path_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceHygieneSecretScanReport {
+    pub read_only: bool,
+    pub scanned_file_count: usize,
+    pub scanned_byte_count: usize,
+    pub skipped_content_scan_count: usize,
+    pub max_files: usize,
+    pub max_file_bytes: usize,
+    pub max_total_bytes: usize,
 }
 
 struct WorkspaceHygieneReportInputs<'a> {
@@ -233,6 +280,30 @@ struct WorkspaceHygieneReportInputs<'a> {
     beads_reservations: &'a [BeadsReservationHolder],
     agent_mail_input: &'a AgentMailCoordinationInput,
     now: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WorkspaceHygieneSecretScanBudget {
+    max_files: usize,
+    max_file_bytes: usize,
+    max_total_bytes: usize,
+}
+
+impl Default for WorkspaceHygieneSecretScanBudget {
+    fn default() -> Self {
+        Self {
+            max_files: WORKSPACE_HYGIENE_SECRET_SCAN_MAX_FILES,
+            max_file_bytes: WORKSPACE_SECRET_RISK_DEFAULT_MAX_SCAN_BYTES,
+            max_total_bytes: WORKSPACE_HYGIENE_SECRET_SCAN_MAX_TOTAL_BYTES,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct WorkspaceHygieneSecretScanSummary {
+    scanned_file_count: usize,
+    scanned_byte_count: usize,
+    skipped_content_scan_count: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -402,8 +473,13 @@ pub fn build_workspace_hygiene_report(
 fn build_workspace_hygiene_report_from_inputs(
     inputs: WorkspaceHygieneReportInputs<'_>,
 ) -> WorkspaceHygieneReport {
-    let secret_evidence = SecretEvidenceLookup::default();
-    let classifications = classify_workspace_with_config(
+    let secret_scan_budget = WorkspaceHygieneSecretScanBudget::default();
+    let (secret_evidence, secret_scan) = workspace_hygiene_secret_evidence_with_budget(
+        inputs.workspace_path,
+        &inputs.snapshot,
+        secret_scan_budget,
+    );
+    let classifications_all = classify_workspace_with_config(
         &inputs.snapshot,
         &secret_evidence,
         inputs.classifier_config,
@@ -416,19 +492,49 @@ fn build_workspace_hygiene_report_from_inputs(
         reservations: inputs.beads_reservations,
     });
     let coordination = overlay_coordination_state(
-        &classifications,
+        &classifications_all,
         inputs.agent_mail_input,
         inputs.now,
         inputs.self_agent_name,
     );
-    let degraded_codes = workspace_hygiene_degraded_codes(&beads_state, &coordination);
 
-    let bucket_counts = workspace_hygiene_bucket_counts(&classifications);
-    let kind_counts = workspace_hygiene_kind_counts(&classifications);
-    let staging_groups = workspace_hygiene_staging_groups(&classifications, &coordination);
-    let do_not_commit = workspace_hygiene_paths_for_bucket(&classifications, Bucket::DoNotCommit);
-    let needs_human_review =
-        workspace_hygiene_paths_for_bucket(&classifications, Bucket::NeedsHumanReview);
+    let bucket_counts = workspace_hygiene_bucket_counts(&classifications_all);
+    let kind_counts = workspace_hygiene_kind_counts(&classifications_all);
+    let staging_groups_all = workspace_hygiene_staging_groups(&classifications_all, &coordination);
+    let do_not_commit_all =
+        workspace_hygiene_paths_for_bucket(&classifications_all, Bucket::DoNotCommit);
+    let needs_human_review_all =
+        workspace_hygiene_paths_for_bucket(&classifications_all, Bucket::NeedsHumanReview);
+
+    let (classifications, omitted_path_classifications) =
+        workspace_hygiene_truncate_classifications(&classifications_all);
+    let (staging_groups, staging_group_truncations) =
+        workspace_hygiene_truncate_staging_groups(staging_groups_all);
+    let (do_not_commit, omitted_do_not_commit) =
+        workspace_hygiene_truncate_path_list(do_not_commit_all);
+    let (needs_human_review, omitted_needs_human_review) =
+        workspace_hygiene_truncate_path_list(needs_human_review_all);
+    let output_truncation = workspace_hygiene_output_truncation(
+        &classifications_all,
+        omitted_path_classifications,
+        omitted_do_not_commit,
+        omitted_needs_human_review,
+        staging_group_truncations,
+    );
+    let secret_scan = workspace_hygiene_secret_scan_report(secret_scan_budget, secret_scan);
+    let mut degraded_codes = workspace_hygiene_degraded_codes(&beads_state, &coordination);
+    if secret_scan.skipped_content_scan_count > 0 {
+        degraded_codes.push(WORKSPACE_HYGIENE_SECRET_SCAN_SKIPPED_CODE);
+        degraded_codes.sort_unstable();
+        degraded_codes.dedup();
+    }
+    if output_truncation.truncated
+        && !degraded_codes.contains(&WORKSPACE_HYGIENE_OUTPUT_TRUNCATED_CODE)
+    {
+        degraded_codes.push(WORKSPACE_HYGIENE_OUTPUT_TRUNCATED_CODE);
+        degraded_codes.sort_unstable();
+        degraded_codes.dedup();
+    }
     let next_actions = workspace_hygiene_next_actions(
         &staging_groups,
         &do_not_commit,
@@ -443,18 +549,20 @@ fn build_workspace_hygiene_report_from_inputs(
         workspace_path: inputs.workspace_path.display().to_string(),
         git_summary: WorkspaceHygieneGitSummary {
             repository_root: inputs.snapshot.repository_root.clone(),
-            dirty_path_count: classifications.len(),
+            dirty_path_count: classifications_all.len(),
             bucket_counts: bucket_counts.clone(),
             kind_counts: kind_counts.clone(),
         },
         repository_root: inputs.snapshot.repository_root,
-        dirty_path_count: classifications.len(),
+        dirty_path_count: classifications_all.len(),
         bucket_counts,
         kind_counts,
         staging_groups,
         classifications,
         do_not_commit,
         needs_human_review,
+        output_truncation,
+        secret_scan,
         beads_state,
         coordination,
         degraded_codes,
@@ -637,6 +745,115 @@ fn read_bounded_file(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
     Ok(buffer)
 }
 
+fn workspace_hygiene_secret_evidence_with_budget(
+    workspace_path: &Path,
+    snapshot: &WorkspaceGitSnapshot,
+    budget: WorkspaceHygieneSecretScanBudget,
+) -> (SecretEvidenceLookup, WorkspaceHygieneSecretScanSummary) {
+    let mut lookup = SecretEvidenceLookup::default();
+    let mut summary = WorkspaceHygieneSecretScanSummary::default();
+
+    for entry in &snapshot.entries {
+        let Some(metadata) = entry.metadata.as_ref() else {
+            continue;
+        };
+        if !metadata.exists || metadata.file_type != "file" {
+            continue;
+        }
+        let Some(size_bytes) = metadata.size_bytes else {
+            summary.skipped_content_scan_count += 1;
+            continue;
+        };
+        let Ok(size_bytes) = usize::try_from(size_bytes) else {
+            summary.skipped_content_scan_count += 1;
+            continue;
+        };
+        if metadata.large_file || size_bytes > budget.max_file_bytes {
+            summary.skipped_content_scan_count += 1;
+            continue;
+        }
+        if summary.scanned_file_count >= budget.max_files {
+            summary.skipped_content_scan_count += 1;
+            continue;
+        }
+        if summary
+            .scanned_byte_count
+            .checked_add(size_bytes)
+            .is_none_or(|total| total > budget.max_total_bytes)
+        {
+            summary.skipped_content_scan_count += 1;
+            continue;
+        }
+        let Some(full_path) = workspace_hygiene_safe_content_path(workspace_path, &entry.path)
+        else {
+            summary.skipped_content_scan_count += 1;
+            continue;
+        };
+        let bytes = match read_bounded_file(&full_path, budget.max_file_bytes.saturating_add(1)) {
+            Ok(bytes) if bytes.len() <= budget.max_file_bytes => bytes,
+            Ok(_) | Err(_) => {
+                summary.skipped_content_scan_count += 1;
+                continue;
+            }
+        };
+        if summary
+            .scanned_byte_count
+            .checked_add(bytes.len())
+            .is_none_or(|total| total > budget.max_total_bytes)
+        {
+            summary.skipped_content_scan_count += 1;
+            continue;
+        }
+        summary.scanned_file_count += 1;
+        summary.scanned_byte_count += bytes.len();
+        let report =
+            workspace_secret_risk_evidence(&entry.path, Some(&bytes), budget.max_file_bytes);
+        if report.skipped_content_scan {
+            summary.skipped_content_scan_count += 1;
+        }
+        if report.secret_risk {
+            lookup.insert(entry.path.clone(), report);
+        }
+    }
+
+    (lookup, summary)
+}
+
+fn workspace_hygiene_safe_content_path(
+    workspace_path: &Path,
+    relative_path: &str,
+) -> Option<PathBuf> {
+    let path = Path::new(relative_path);
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir
+        )
+    }) {
+        return None;
+    }
+    let full_path = workspace_path.join(path);
+    match first_existing_symlink_component(&full_path) {
+        Ok(None) => Some(full_path),
+        Ok(Some(_)) | Err(_) => None,
+    }
+}
+
+fn workspace_hygiene_secret_scan_report(
+    budget: WorkspaceHygieneSecretScanBudget,
+    summary: WorkspaceHygieneSecretScanSummary,
+) -> WorkspaceHygieneSecretScanReport {
+    WorkspaceHygieneSecretScanReport {
+        read_only: true,
+        scanned_file_count: summary.scanned_file_count,
+        scanned_byte_count: summary.scanned_byte_count,
+        skipped_content_scan_count: summary.skipped_content_scan_count,
+        max_files: budget.max_files,
+        max_file_bytes: budget.max_file_bytes,
+        max_total_bytes: budget.max_total_bytes,
+    }
+}
+
 fn detect_beads_metadata_signal(workspace_path: &Path) -> BeadsMetadataSignal {
     let beads_dir = workspace_path.join(".beads");
     let jsonl_modified = modified_at(&beads_dir.join("issues.jsonl"));
@@ -761,6 +978,8 @@ impl WorkspaceHygieneStagingGroupBuilder {
             name,
             paths,
             path_count,
+            paths_truncated: false,
+            omitted_path_count: 0,
             kinds: self.kinds.into_iter().collect(),
             reasons: self.reasons.into_iter().collect(),
             recommendation: "review_and_stage_as_one_logical_commit",
@@ -777,6 +996,95 @@ fn workspace_hygiene_paths_for_bucket(rows: &[ClassificationRow], bucket: Bucket
         }
     }
     paths.into_iter().collect()
+}
+
+fn workspace_hygiene_truncate_classifications(
+    rows: &[ClassificationRow],
+) -> (Vec<ClassificationRow>, usize) {
+    let omitted = rows
+        .len()
+        .saturating_sub(WORKSPACE_HYGIENE_MAX_PATH_CLASSIFICATIONS);
+    let mut visible = rows
+        .iter()
+        .take(WORKSPACE_HYGIENE_MAX_PATH_CLASSIFICATIONS)
+        .cloned()
+        .collect::<Vec<_>>();
+    visible.shrink_to_fit();
+    (visible, omitted)
+}
+
+fn workspace_hygiene_truncate_path_list(paths: Vec<String>) -> (Vec<String>, usize) {
+    let original_len = paths.len();
+    let omitted = original_len.saturating_sub(WORKSPACE_HYGIENE_MAX_PATHS_PER_LIST);
+    if omitted == 0 {
+        return (paths, 0);
+    }
+    (
+        paths
+            .into_iter()
+            .take(WORKSPACE_HYGIENE_MAX_PATHS_PER_LIST)
+            .collect(),
+        omitted,
+    )
+}
+
+fn workspace_hygiene_truncate_staging_groups(
+    mut groups: Vec<WorkspaceHygieneStagingGroup>,
+) -> (
+    Vec<WorkspaceHygieneStagingGroup>,
+    Vec<WorkspaceHygieneStagingGroupTruncation>,
+) {
+    let mut truncations = Vec::new();
+    for group in &mut groups {
+        let original_len = group.paths.len();
+        let omitted = original_len.saturating_sub(WORKSPACE_HYGIENE_MAX_PATHS_PER_STAGING_GROUP);
+        if omitted == 0 {
+            continue;
+        }
+        group
+            .paths
+            .truncate(WORKSPACE_HYGIENE_MAX_PATHS_PER_STAGING_GROUP);
+        group.paths_truncated = true;
+        group.omitted_path_count = omitted;
+        group.path_count = original_len;
+        truncations.push(WorkspaceHygieneStagingGroupTruncation {
+            name: group.name.clone(),
+            omitted_path_count: omitted,
+        });
+    }
+    (groups, truncations)
+}
+
+fn workspace_hygiene_output_truncation(
+    full_rows: &[ClassificationRow],
+    omitted_path_classifications: usize,
+    omitted_do_not_commit: usize,
+    omitted_needs_human_review: usize,
+    staging_groups: Vec<WorkspaceHygieneStagingGroupTruncation>,
+) -> WorkspaceHygieneOutputTruncation {
+    let truncated = omitted_path_classifications > 0
+        || omitted_do_not_commit > 0
+        || omitted_needs_human_review > 0
+        || staging_groups
+            .iter()
+            .any(|group| group.omitted_path_count > 0);
+    let omitted_rows = if omitted_path_classifications == 0 {
+        &[][..]
+    } else {
+        &full_rows[WORKSPACE_HYGIENE_MAX_PATH_CLASSIFICATIONS..]
+    };
+    WorkspaceHygieneOutputTruncation {
+        truncated,
+        max_path_classifications: WORKSPACE_HYGIENE_MAX_PATH_CLASSIFICATIONS,
+        max_paths_per_list: WORKSPACE_HYGIENE_MAX_PATHS_PER_LIST,
+        max_paths_per_staging_group: WORKSPACE_HYGIENE_MAX_PATHS_PER_STAGING_GROUP,
+        omitted_path_classifications,
+        omitted_do_not_commit,
+        omitted_needs_human_review,
+        omitted_by_bucket: workspace_hygiene_bucket_counts(omitted_rows),
+        omitted_by_kind: workspace_hygiene_kind_counts(omitted_rows),
+        staging_groups,
+    }
 }
 
 fn workspace_hygiene_next_actions(
@@ -805,6 +1113,15 @@ fn workspace_hygiene_next_actions(
     {
         actions.push(
             "Refresh Agent Mail reservations before committing coordination-sensitive paths."
+                .to_string(),
+        );
+    }
+    if degraded_codes
+        .iter()
+        .any(|code| *code == WORKSPACE_HYGIENE_OUTPUT_TRUNCATED_CODE)
+    {
+        actions.push(
+            "Narrow the dirty path set or inspect JSON outputTruncation before staging large changes."
                 .to_string(),
         );
     }
@@ -1489,7 +1806,9 @@ mod tests {
 
     use super::*;
     use crate::core::hygiene_coordination::{ActiveAgent, AgentMailReservation};
-    use crate::core::swarm_brief::{WorkspaceGitOperationState, WorkspaceGitStatusEntry};
+    use crate::core::swarm_brief::{
+        WorkspaceGitOperationState, WorkspaceGitPathMetadata, WorkspaceGitStatusEntry,
+    };
 
     type TestResult = Result<(), String>;
 
@@ -1531,6 +1850,35 @@ mod tests {
         }
     }
 
+    fn file_status_entry(
+        path: &str,
+        staged: &str,
+        unstaged: &str,
+        size_bytes: u64,
+    ) -> WorkspaceGitStatusEntry {
+        let mut entry = status_entry(path, staged, unstaged);
+        entry.metadata = Some(WorkspaceGitPathMetadata {
+            exists: true,
+            file_type: "file".to_owned(),
+            size_bytes: Some(size_bytes),
+            large_file: false,
+            skip_reason: None,
+        });
+        entry
+    }
+
+    fn file_untracked_status_entry(path: &str, size_bytes: u64) -> WorkspaceGitStatusEntry {
+        let mut entry = untracked_status_entry(path);
+        entry.metadata = Some(WorkspaceGitPathMetadata {
+            exists: true,
+            file_type: "file".to_owned(),
+            size_bytes: Some(size_bytes),
+            large_file: false,
+            skip_reason: None,
+        });
+        entry
+    }
+
     fn hygiene_snapshot(entries: Vec<WorkspaceGitStatusEntry>) -> WorkspaceGitSnapshot {
         WorkspaceGitSnapshot {
             repository_root: "/repo".to_owned(),
@@ -1547,6 +1895,28 @@ mod tests {
     ) -> WorkspaceHygieneReport {
         build_workspace_hygiene_report_from_inputs(WorkspaceHygieneReportInputs {
             workspace_path: Path::new("/repo"),
+            snapshot,
+            classifier_config: &HygieneClassifierConfig::default(),
+            jsonl_content: Some(b"{\"id\":\"bd-test\",\"title\":\"test\"}\n"),
+            self_agent_name: Some("IvoryCondor"),
+            beads_metadata_signal,
+            beads_reservations,
+            agent_mail_input,
+            now: DateTime::parse_from_rfc3339("2026-05-18T08:00:00Z")
+                .expect("valid test timestamp")
+                .with_timezone(&Utc),
+        })
+    }
+
+    fn hygiene_report_from_workspace_parts(
+        workspace_path: &Path,
+        snapshot: WorkspaceGitSnapshot,
+        agent_mail_input: &AgentMailCoordinationInput,
+        beads_metadata_signal: BeadsMetadataSignal,
+        beads_reservations: &[BeadsReservationHolder],
+    ) -> WorkspaceHygieneReport {
+        build_workspace_hygiene_report_from_inputs(WorkspaceHygieneReportInputs {
+            workspace_path,
             snapshot,
             classifier_config: &HygieneClassifierConfig::default(),
             jsonl_content: Some(b"{\"id\":\"bd-test\",\"title\":\"test\"}\n"),
@@ -2081,5 +2451,221 @@ mod tests {
         assert_eq!(tracked_secret_row.kind, Kind::SecretRisk);
         assert_eq!(tracked_secret_row.bucket, Bucket::NeedsHumanReview);
         assert!(report.read_only);
+    }
+
+    #[test]
+    fn hygiene_secret_scan_collects_redacted_content_evidence() -> TestResult {
+        let workspace = unique_dir("ee-workspace-hygiene-secret-scan")?;
+        let raw_value = concat!(
+            "sk",
+            "-",
+            "proj-",
+            "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+        );
+        write_file(
+            &workspace.join("notes.txt"),
+            &format!("ordinary notes\nOPENAI_API_KEY={raw_value}\n"),
+        )?;
+        let report = hygiene_report_from_workspace_parts(
+            &workspace,
+            hygiene_snapshot(vec![file_untracked_status_entry(
+                "notes.txt",
+                u64::try_from(format!("ordinary notes\nOPENAI_API_KEY={raw_value}\n").len())
+                    .unwrap_or(u64::MAX),
+            )]),
+            &AgentMailCoordinationInput::Available {
+                reservations: Vec::new(),
+                active_agents: Vec::new(),
+            },
+            BeadsMetadataSignal::Unknown,
+            &[],
+        );
+
+        let row = report
+            .classifications
+            .iter()
+            .find(|row| row.path == "notes.txt")
+            .expect("notes classification");
+        assert_eq!(row.kind, Kind::SecretRisk);
+        assert_eq!(row.bucket, Bucket::DoNotCommit);
+        assert!(row.reasons.contains(&"secret_content_evidence"));
+        assert!(!row.redacted_evidence.is_empty());
+        assert_eq!(report.secret_scan.scanned_file_count, 1);
+        assert_eq!(
+            report.secret_scan.max_file_bytes,
+            WORKSPACE_SECRET_RISK_DEFAULT_MAX_SCAN_BYTES
+        );
+        assert_eq!(
+            report.secret_scan.max_total_bytes,
+            WORKSPACE_HYGIENE_SECRET_SCAN_MAX_TOTAL_BYTES
+        );
+        let rendered = serde_json::to_string(&report).expect("workspace hygiene JSON");
+        assert!(
+            !rendered.contains(raw_value),
+            "workspace hygiene report must not leak raw content secret"
+        );
+        assert!(
+            !report
+                .degraded_codes
+                .contains(&WORKSPACE_HYGIENE_SECRET_SCAN_SKIPPED_CODE)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hygiene_secret_scan_enforces_file_count_and_total_byte_budgets() -> TestResult {
+        let workspace = unique_dir("ee-workspace-hygiene-secret-budget")?;
+        write_file(&workspace.join("a.txt"), "alpha")?;
+        write_file(&workspace.join("b.txt"), "bravo")?;
+        write_file(&workspace.join("large.txt"), "0123456789")?;
+        let snapshot = hygiene_snapshot(vec![
+            file_status_entry("a.txt", ".", "M", 5),
+            file_status_entry("b.txt", ".", "M", 5),
+            file_status_entry("large.txt", ".", "M", 10),
+        ]);
+
+        let (lookup, summary) = workspace_hygiene_secret_evidence_with_budget(
+            &workspace,
+            &snapshot,
+            WorkspaceHygieneSecretScanBudget {
+                max_files: 10,
+                max_file_bytes: 8,
+                max_total_bytes: 5,
+            },
+        );
+
+        assert!(lookup.is_empty());
+        assert_eq!(summary.scanned_file_count, 1);
+        assert_eq!(summary.scanned_byte_count, 5);
+        assert_eq!(
+            summary.skipped_content_scan_count, 2,
+            "one path should exceed max_total_bytes and one should exceed max_file_bytes"
+        );
+
+        let (_, file_count_summary) = workspace_hygiene_secret_evidence_with_budget(
+            &workspace,
+            &snapshot,
+            WorkspaceHygieneSecretScanBudget {
+                max_files: 1,
+                max_file_bytes: 8,
+                max_total_bytes: 20,
+            },
+        );
+        assert_eq!(file_count_summary.scanned_file_count, 1);
+        assert_eq!(file_count_summary.scanned_byte_count, 5);
+        assert_eq!(
+            file_count_summary.skipped_content_scan_count, 2,
+            "one path should hit max_files and one should exceed max_file_bytes"
+        );
+
+        let report = workspace_hygiene_secret_scan_report(
+            WorkspaceHygieneSecretScanBudget {
+                max_files: 1,
+                max_file_bytes: 8,
+                max_total_bytes: 20,
+            },
+            file_count_summary,
+        );
+        assert!(report.read_only);
+        assert_eq!(report.max_files, 1);
+        assert_eq!(report.max_file_bytes, 8);
+        assert_eq!(report.max_total_bytes, 20);
+        assert_eq!(report.skipped_content_scan_count, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn hygiene_report_truncates_large_path_arrays_deterministically() {
+        let entries = (0..100_050)
+            .map(|index| status_entry(&format!("src/generated/file_{index:06}.rs"), ".", "M"))
+            .collect::<Vec<_>>();
+        let report = hygiene_report_from_parts(
+            hygiene_snapshot(entries),
+            &AgentMailCoordinationInput::Available {
+                reservations: Vec::new(),
+                active_agents: Vec::new(),
+            },
+            BeadsMetadataSignal::Unknown,
+            &[],
+        );
+
+        assert_eq!(report.dirty_path_count, 100_050);
+        assert_eq!(report.git_summary.dirty_path_count, 100_050);
+        assert_eq!(
+            report.classifications.len(),
+            WORKSPACE_HYGIENE_MAX_PATH_CLASSIFICATIONS
+        );
+        assert!(report.output_truncation.truncated);
+        assert_eq!(
+            report.output_truncation.omitted_path_classifications,
+            100_050 - WORKSPACE_HYGIENE_MAX_PATH_CLASSIFICATIONS
+        );
+        assert_eq!(report.output_truncation.omitted_do_not_commit, 0);
+        assert_eq!(report.output_truncation.omitted_needs_human_review, 0);
+        assert_eq!(
+            report.output_truncation.omitted_by_bucket,
+            vec![WorkspaceHygieneCount {
+                name: "stage_candidate".to_owned(),
+                count: 100_050 - WORKSPACE_HYGIENE_MAX_PATH_CLASSIFICATIONS,
+            }]
+        );
+        assert_eq!(
+            report.output_truncation.omitted_by_kind,
+            vec![WorkspaceHygieneCount {
+                name: "source".to_owned(),
+                count: 100_050 - WORKSPACE_HYGIENE_MAX_PATH_CLASSIFICATIONS,
+            }]
+        );
+        assert!(
+            report
+                .degraded_codes
+                .contains(&WORKSPACE_HYGIENE_OUTPUT_TRUNCATED_CODE)
+        );
+        assert_eq!(report.staging_groups.len(), 1);
+        let source_group = &report.staging_groups[0];
+        assert_eq!(source_group.name, "source");
+        assert_eq!(source_group.path_count, 100_050);
+        assert!(source_group.paths_truncated);
+        assert_eq!(
+            source_group.paths.len(),
+            WORKSPACE_HYGIENE_MAX_PATHS_PER_STAGING_GROUP
+        );
+        assert_eq!(
+            source_group.omitted_path_count,
+            100_050 - WORKSPACE_HYGIENE_MAX_PATHS_PER_STAGING_GROUP
+        );
+        assert_eq!(source_group.paths[0], "src/generated/file_000000.rs");
+        assert_eq!(
+            source_group
+                .paths
+                .last()
+                .map(String::as_str)
+                .expect("last truncated path"),
+            "src/generated/file_009999.rs"
+        );
+        assert_eq!(
+            report.output_truncation.staging_groups[0].omitted_path_count,
+            100_050 - WORKSPACE_HYGIENE_MAX_PATHS_PER_STAGING_GROUP
+        );
+        assert!(
+            report
+                .next_actions
+                .iter()
+                .any(|action| action.contains("outputTruncation")),
+            "truncated reports should point agents at outputTruncation details"
+        );
+
+        let serialized = serde_json::to_string(&report).expect("workspace hygiene JSON");
+        assert!(
+            serialized.len() < 8_000_000,
+            "serialized report should stay within the large-report output budget, got {} bytes",
+            serialized.len()
+        );
+        assert!(serialized.contains("\"outputTruncation\""));
+        assert!(serialized.contains("\"pathsTruncated\":true"));
+        assert!(
+            !serialized.contains("src/generated/file_010000.rs"),
+            "paths beyond the deterministic visible prefix must be omitted"
+        );
     }
 }
