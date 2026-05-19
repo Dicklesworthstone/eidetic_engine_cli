@@ -2,8 +2,9 @@
 
 Bead: `bd-1iltv`
 
-Status: SimHash/cosine substrate is landed; remember-path integration is not
-complete.
+Status: SimHash/cosine substrate, disabled-by-default env rollout parsing, and
+the nullable storage/lookup substrate are landed; remember-path integration is
+not complete.
 
 ## Goal
 
@@ -75,10 +76,12 @@ The unfinished remember-path integration should implement this order:
    reused memory when reuse occurred.
 9. If no candidate confirms, run the embedder and store a fresh embedding.
 
-The database migration should add a nullable `content_simhash` column encoded as
-16 bytes. Null means the row predates this feature or was stored through a path
-that could not compute a SimHash. Null rows are ignored by the SimHash lookup
-but remain valid memories.
+The database migration adds a nullable `content_simhash` column encoded as 16
+big-endian bytes. Null means the row predates this feature or was stored through
+a path that could not compute a SimHash. Null rows are ignored by the SimHash
+lookup but remain valid memories. The DB layer intentionally stores and ranks
+raw bytes only; `src/search/simhash.rs` remains the owner of SimHash
+computation, so storage does not depend on the search module.
 
 The public explanation surface should expose the link in `ee why` as
 `dedupLink` when the surrounding JSON schema uses camelCase. Internal Rust
@@ -87,14 +90,23 @@ for that response.
 
 ## Configuration
 
-The integration must register and document these env vars before source code
-reads them:
+`bd-1iltv.4` registers and documents these env vars before the remember
+write-path starts reading them:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `EE_EMBED_DEDUP_ENABLED` | `false` | Enables insert-time embedding dedup. |
 | `EE_EMBED_DEDUP_HAMMING_K` | `12` | Maximum SimHash Hamming distance admitted to cosine confirmation. |
 | `EE_EMBED_DEDUP_COSINE_FLOOR` | `0.97` | Minimum cosine similarity required before reusing an embedding. |
+
+The defaults intentionally preserve byte-compatible `ee remember` behavior:
+dedup is off until storage, write-path, output-evidence, and e2e proof beads
+land. The parser rejects invalid rollout values with structured repair text:
+
+- `EE_EMBED_DEDUP_ENABLED` accepts boolean flags such as `true`, `false`, `1`,
+  `0`, `yes`, `no`, `on`, and `off`.
+- `EE_EMBED_DEDUP_HAMMING_K` must be an integer in `0..=128`.
+- `EE_EMBED_DEDUP_COSINE_FLOOR` must be a finite float in `0.0..=1.0`.
 
 Raw `std::env::var("EE_*")` reads outside `src/config/env_registry.rs` remain
 forbidden.
@@ -139,14 +151,17 @@ and `decision`.
 ## Verification
 
 Current evidence is limited to build-independent static review,
-`tests/property_simhash.rs`, `tests/embed_dedup_unit.rs`, and the intended
-chain fixture at `tests/golden/embed_dedup_chain.json`. The unit coverage
-proves the reusable SimHash/cosine decision scaffold and parses the fixture to
-pin the future `dedupLink` emission shape. It does not prove the persisted
+`tests/property_simhash.rs`, `tests/embed_dedup_unit.rs`, the env-registry
+coverage in `tests/env_registry_unit.rs`, DB unit coverage for the
+`content_simhash` storage/lookup API, and the intended chain fixture at
+`tests/golden/embed_dedup_chain.json`. The unit coverage proves the reusable
+SimHash/cosine decision scaffold, disabled-by-default config parsing, threshold
+repair text, the nullable storage substrate, null-row lookup exclusion, 16-byte
+storage validation, workspace-scoped Hamming lookup, and the fixture that pins
+the future `dedupLink` emission shape. It does not prove the persisted
 remember-path feature yet. Full acceptance for `bd-1iltv` still requires:
 
-- Unit tests for env parsing and dedup-link selection after DB/write-path
-  fields exist.
+- Unit tests for dedup-link selection after DB/write-path fields exist.
 - E2E tests showing identical and near-identical memories reuse embeddings.
 - A semantic false-positive test showing SimHash proximity alone does not reuse
   embeddings when cosine is under the floor.
@@ -159,11 +174,12 @@ Do not use local Cargo as a fallback on the Mac dev host.
 
 ## Remaining Integration Checklist
 
-- Add the nullable `content_simhash` migration and workspace-scoped lookup.
-- Register the three `EE_EMBED_DEDUP_*` variables.
+- Wire parsed `EE_EMBED_DEDUP_*` rollout config into `remember_memory_inner`.
+- Compute SimHash in the remember path and pass the resulting 16-byte
+  fingerprint to the DB storage API.
 - Wire the lookup and confirmation gate into `remember_memory_inner`.
 - Persist the dedup link and surface it through `ee why`.
-- Add the remaining env, dedup-link, E2E, and golden tests listed above.
+- Add the remaining dedup-link, E2E, and golden tests listed above.
 - Add degraded-code taxonomy rows and fixtures if the source emits new runtime
   degraded codes.
 - Prove the full slice through RCH.

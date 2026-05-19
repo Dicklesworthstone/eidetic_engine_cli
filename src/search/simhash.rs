@@ -12,9 +12,9 @@
 //! Charikar fingerprint with deterministic token normalization, a Hamming
 //! distance helper, and the explicit normalization entry point that callers
 //! and tests can audit. The wiring into `remember_memory_inner`, the DB
-//! `content_simhash` column, env-var registration, and the workspace-scoped
-//! index live under sibling slices of bd-1iltv so that this module can land
-//! without touching any of the contested write-path files.
+//! `content_simhash` column, and the workspace-scoped index live under sibling
+//! slices of bd-1iltv so that this module can land without touching any of the
+//! contested write-path files.
 //!
 //! Determinism contract: same input bytes always produce the same
 //! `SimHash128`, regardless of `HashMap` iteration order, platform, or
@@ -22,6 +22,8 @@
 //! vectors.
 
 use std::{cmp::Ordering, fmt};
+
+use crate::config::env_registry::{self, EnvVar};
 
 use blake3::Hasher as Blake3Hasher;
 use serde::{Deserialize, Serialize};
@@ -34,6 +36,148 @@ const SIMHASH_DOMAIN_TAG: &[u8] = b"ee.simhash.v1";
 
 /// Bit width of the fingerprint.
 const SIMHASH_BITS: usize = 128;
+
+/// Default maximum Hamming distance admitted to cosine confirmation.
+pub const EMBED_DEDUP_DEFAULT_HAMMING_K: u32 = 12;
+
+/// Default cosine floor required before embedding reuse.
+pub const EMBED_DEDUP_DEFAULT_COSINE_FLOOR: f64 = 0.97;
+
+/// Runtime rollout posture for insert-time embedding deduplication.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EmbedDedupConfig {
+    pub enabled: bool,
+    pub hamming_k: u32,
+    pub cosine_floor: f64,
+}
+
+impl Default for EmbedDedupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hamming_k: EMBED_DEDUP_DEFAULT_HAMMING_K,
+            cosine_floor: EMBED_DEDUP_DEFAULT_COSINE_FLOOR,
+        }
+    }
+}
+
+/// Structured repair detail for invalid embed-dedup rollout configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmbedDedupConfigError {
+    pub env_var: &'static str,
+    pub raw_value: String,
+    pub message: &'static str,
+    pub repair: &'static str,
+}
+
+impl fmt::Display for EmbedDedupConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} has invalid value {:?}: {}. {}",
+            self.env_var, self.raw_value, self.message, self.repair
+        )
+    }
+}
+
+impl std::error::Error for EmbedDedupConfigError {}
+
+impl EmbedDedupConfig {
+    /// Load rollout configuration from the central `EE_*` registry.
+    ///
+    /// This parser is intentionally independent of the remember write path so
+    /// bd-1iltv.4 can land the disabled-by-default contract before later
+    /// storage and write-path beads start consuming it.
+    pub fn from_env() -> Result<Self, EmbedDedupConfigError> {
+        let enabled = env_registry::read_or_default(EnvVar::EmbedDedupEnabled);
+        let hamming_k = env_registry::read_or_default(EnvVar::EmbedDedupHammingK);
+        let cosine_floor = env_registry::read_or_default(EnvVar::EmbedDedupCosineFloor);
+
+        Self::from_raw_values(
+            enabled.as_deref(),
+            hamming_k.as_deref(),
+            cosine_floor.as_deref(),
+        )
+    }
+
+    /// Parse raw values using registry defaults when a value is absent.
+    pub fn from_raw_values(
+        enabled: Option<&str>,
+        hamming_k: Option<&str>,
+        cosine_floor: Option<&str>,
+    ) -> Result<Self, EmbedDedupConfigError> {
+        Ok(Self {
+            enabled: parse_bool_env(
+                EnvVar::EmbedDedupEnabled,
+                enabled.unwrap_or("false"),
+                "Set EE_EMBED_DEDUP_ENABLED to true or false.",
+            )?,
+            hamming_k: parse_hamming_k(hamming_k.unwrap_or("12"))?,
+            cosine_floor: parse_cosine_floor(cosine_floor.unwrap_or("0.97"))?,
+        })
+    }
+}
+
+fn parse_bool_env(
+    var: EnvVar,
+    raw: &str,
+    repair: &'static str,
+) -> Result<bool, EmbedDedupConfigError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(EmbedDedupConfigError {
+            env_var: var.name(),
+            raw_value: raw.to_owned(),
+            message: "expected a boolean flag",
+            repair,
+        }),
+    }
+}
+
+fn parse_hamming_k(raw: &str) -> Result<u32, EmbedDedupConfigError> {
+    let parsed = raw
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| EmbedDedupConfigError {
+            env_var: EnvVar::EmbedDedupHammingK.name(),
+            raw_value: raw.to_owned(),
+            message: "expected an integer in the inclusive range 0..=128",
+            repair: "Set EE_EMBED_DEDUP_HAMMING_K to an integer between 0 and 128.",
+        })?;
+    if parsed <= SIMHASH_BITS as u32 {
+        Ok(parsed)
+    } else {
+        Err(EmbedDedupConfigError {
+            env_var: EnvVar::EmbedDedupHammingK.name(),
+            raw_value: raw.to_owned(),
+            message: "expected an integer in the inclusive range 0..=128",
+            repair: "Set EE_EMBED_DEDUP_HAMMING_K to an integer between 0 and 128.",
+        })
+    }
+}
+
+fn parse_cosine_floor(raw: &str) -> Result<f64, EmbedDedupConfigError> {
+    let parsed = raw
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| EmbedDedupConfigError {
+            env_var: EnvVar::EmbedDedupCosineFloor.name(),
+            raw_value: raw.to_owned(),
+            message: "expected a finite float in the inclusive range 0.0..=1.0",
+            repair: "Set EE_EMBED_DEDUP_COSINE_FLOOR to a finite number between 0.0 and 1.0.",
+        })?;
+    if parsed.is_finite() && (0.0..=1.0).contains(&parsed) {
+        Ok(parsed)
+    } else {
+        Err(EmbedDedupConfigError {
+            env_var: EnvVar::EmbedDedupCosineFloor.name(),
+            raw_value: raw.to_owned(),
+            message: "expected a finite float in the inclusive range 0.0..=1.0",
+            repair: "Set EE_EMBED_DEDUP_COSINE_FLOOR to a finite number between 0.0 and 1.0.",
+        })
+    }
+}
 
 /// Opaque 128-bit Charikar SimHash fingerprint. Two memories whose tokens
 /// largely overlap have small `hamming_distance` between their fingerprints
@@ -363,7 +507,8 @@ pub fn first_confirmed_simhash_candidate<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfirmedSimHashCandidate, CosineConfirmation, NearestSimHashCandidate, SIMHASH_BITS,
+        ConfirmedSimHashCandidate, CosineConfirmation, EMBED_DEDUP_DEFAULT_COSINE_FLOOR,
+        EMBED_DEDUP_DEFAULT_HAMMING_K, EmbedDedupConfig, NearestSimHashCandidate, SIMHASH_BITS,
         SimHash128, canonicalize_content_for_simhash, confirm_cosine_similarity, cosine_similarity,
         first_confirmed_simhash_candidate, hamming_distance, nearest_simhash_candidate,
         ranked_simhash_candidates, simhash_128,
@@ -381,6 +526,43 @@ mod tests {
             .iter()
             .map(|candidate| candidate.hamming_distance)
             .collect()
+    }
+
+    #[test]
+    fn embed_dedup_config_defaults_are_disabled_and_bounded() {
+        let config = EmbedDedupConfig::from_raw_values(None, None, None).expect("defaults parse");
+
+        assert!(!config.enabled);
+        assert_eq!(config.hamming_k, EMBED_DEDUP_DEFAULT_HAMMING_K);
+        assert!((config.cosine_floor - EMBED_DEDUP_DEFAULT_COSINE_FLOOR).abs() <= f64::EPSILON);
+    }
+
+    #[test]
+    fn embed_dedup_config_accepts_enabled_thresholds() {
+        let config = EmbedDedupConfig::from_raw_values(Some("true"), Some("8"), Some("0.99"))
+            .expect("explicit config parses");
+
+        assert!(config.enabled);
+        assert_eq!(config.hamming_k, 8);
+        assert!((config.cosine_floor - 0.99).abs() <= f64::EPSILON);
+    }
+
+    #[test]
+    fn embed_dedup_config_rejects_out_of_range_hamming_k_with_repair() {
+        let error = EmbedDedupConfig::from_raw_values(Some("false"), Some("129"), Some("0.97"))
+            .expect_err("hamming threshold above bit width must fail");
+
+        assert_eq!(error.env_var, "EE_EMBED_DEDUP_HAMMING_K");
+        assert!(error.repair.contains("between 0 and 128"));
+    }
+
+    #[test]
+    fn embed_dedup_config_rejects_invalid_cosine_floor_with_repair() {
+        let error = EmbedDedupConfig::from_raw_values(Some("false"), Some("12"), Some("NaN"))
+            .expect_err("non-finite cosine floor must fail");
+
+        assert_eq!(error.env_var, "EE_EMBED_DEDUP_COSINE_FLOOR");
+        assert!(error.repair.contains("between 0.0 and 1.0"));
     }
 
     #[test]
