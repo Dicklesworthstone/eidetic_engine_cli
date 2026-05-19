@@ -446,7 +446,15 @@ printf '[RCH] remote css (0.1s)\n'
             "--lib",
             "strict_clean_tree_dirty_smoke",
         ],
-        &[("FAKE_RCH_INVOCATIONS", invocation_log_arg)],
+        &[
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            (
+                "RCH_VERIFY_STATUS_JSON",
+                r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
+            ),
+        ],
         &workspace,
     )?;
     assert_git_status_unchanged(
@@ -858,7 +866,15 @@ printf '[RCH] remote trj (0.1s)\n'
             "--lib",
             "event_log_source_refusal_smoke",
         ],
-        &[("FAKE_RCH_INVOCATIONS", invocation_log_arg)],
+        &[
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            (
+                "RCH_VERIFY_STATUS_JSON",
+                r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
+            ),
+        ],
         &workspace,
     )?;
     assert_git_status_unchanged(&workspace, &before_status, "event-log source refusal")?;
@@ -986,7 +1002,15 @@ printf '[RCH] remote trj (0.1s)\n'
     ];
     let (status, stdout, stderr) = run_script_with_env_in_dir(
         &args,
-        &[("FAKE_RCH_INVOCATIONS", invocation_log_arg)],
+        &[
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            (
+                "RCH_VERIFY_STATUS_JSON",
+                r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
+            ),
+        ],
         &workspace,
     )?;
     assert_git_status_unchanged(&workspace, &before_status, "committed-tree preflight")?;
@@ -1058,7 +1082,15 @@ printf '[RCH] remote trj (0.1s)\n'
         .map_err(|error| format!("write second untracked fixture: {error}"))?;
     let (second_status, second_stdout, _second_stderr) = run_script_with_env_in_dir(
         &args,
-        &[("FAKE_RCH_INVOCATIONS", invocation_log_arg)],
+        &[
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            (
+                "RCH_VERIFY_STATUS_JSON",
+                r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
+            ),
+        ],
         &workspace,
     )?;
     if !second_status.success() {
@@ -1069,6 +1101,130 @@ printf '[RCH] remote trj (0.1s)\n'
     if second_report["source_manifest_hash"] != first_manifest_hash {
         return Err(format!(
             "committed-tree manifest changed when only dirty live checkout changed:\nfirst={report}\nsecond={second_report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn committed_tree_event_log_records_manifest_hash_and_fake_rch_count() -> TestResult {
+    let workspace = seed_git_workspace("rch-committed-tree-event-log")?;
+    fs::write(workspace.join("tracked.txt"), "dirty live checkout\n")
+        .map_err(|error| format!("dirty tracked fixture: {error}"))?;
+    fs::write(workspace.join("token-draft.txt"), "redacted fixture\n")
+        .map_err(|error| format!("write untracked token fixture: {error}"))?;
+    let before_status = git_status_porcelain_v2(&workspace)?;
+    let invocation_log = unique_tmp_path("rch-committed-tree-event-invocations");
+    let event_log = unique_tmp_path("rch-committed-tree-event").join("events.jsonl");
+    let fake_rch = write_fake_rch(
+        "fake-rch-committed-tree-event-log.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+printf 'tracked=%s\n' "$(cat tracked.txt)"
+test ! -e token-draft.txt
+printf '[RCH] remote trj (0.1s)\n'
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+    let event_log_arg = event_log
+        .to_str()
+        .ok_or_else(|| "event log path is not utf-8".to_owned())?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--bead-id",
+            "bd-9ygik.3",
+            "--committed-tree",
+            "--treeish",
+            "HEAD",
+            "--event-log",
+            event_log_arg,
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "committed_tree_event_log_smoke",
+        ],
+        &[
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            (
+                "RCH_VERIFY_STATUS_JSON",
+                r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
+            ),
+        ],
+        &workspace,
+    )?;
+    assert_git_status_unchanged(&workspace, &before_status, "committed-tree event log")?;
+    if !status.success() {
+        return Err(format!(
+            "committed-tree event-log run should succeed from the generated source export\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let invocations = fs::read_to_string(&invocation_log)
+        .map_err(|error| format!("read committed-tree event invocation log: {error}"))?;
+    if invocations.lines().count() != 1 {
+        return Err(format!(
+            "committed-tree event-log mode should invoke fake RCH once: {invocations:?}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse committed-tree event report: {error}"))?;
+    if report["status"] != "remote_pass"
+        || report["verification_attribution"] != "committed_tree"
+        || report["source_manifest_hash"]
+            .as_str()
+            .is_none_or(|hash| !hash.starts_with("sha256:") || hash.len() != 71)
+        || report["resolved_commit"].as_str().map(str::len) != Some(40)
+    {
+        return Err(format!(
+            "unexpected committed-tree event proof report: {report}"
+        ));
+    }
+
+    let event_text =
+        fs::read_to_string(&event_log).map_err(|error| format!("read event log: {error}"))?;
+    let rows = event_text.lines().collect::<Vec<_>>();
+    if rows.len() != 1 {
+        return Err(format!(
+            "expected one committed-tree event row, got {}",
+            rows.len()
+        ));
+    }
+    let event: Value =
+        serde_json::from_str(rows[0]).map_err(|error| format!("parse event row: {error}"))?;
+    if event["schema"] != "ee.test_event.v1"
+        || event["kind"] != "command_end"
+        || event["test_id"] != "bd-9ygik.3"
+        || event["exit_code"] != 0
+    {
+        return Err(format!(
+            "event row does not record committed-tree basics: {event}"
+        ));
+    }
+    let fields = &event["fields"];
+    if fields["status"] != "remote_pass"
+        || fields["bead_id"] != "bd-9ygik.3"
+        || fields["verification_attribution"] != "committed_tree"
+        || fields["git_head"] != report["resolved_commit"]
+        || fields["source_manifest_hash"] != report["source_manifest_hash"]
+        || fields["deterministic_rerun_hash"] != report["source_manifest_hash"]
+        || fields["fake_rch_invoked"] != true
+        || fields["fake_rch_invocation_count"] != 1
+        || fields["source_state_degraded_codes"] != serde_json::json!([])
+        || fields["worker_state_degraded_codes"] != serde_json::json!([])
+    {
+        return Err(format!(
+            "event row missing committed-tree manifest/fake-RCH fields: {event}"
         ));
     }
     Ok(())
