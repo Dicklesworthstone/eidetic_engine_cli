@@ -1,0 +1,19 @@
+{
+  "name": "basic",
+  "surface": "memory_show",
+  "mcpTool": "ee_memory_show",
+  "seedMemoryContent": "Show this memory through both CLI and MCP.",
+  "cliArgs": [
+    "ee",
+    "memory",
+    "show",
+    "__MEMORY_ID__",
+    "--workspace",
+    "__WORKSPACE__",
+    "--json"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "memoryId": "__MEMORY_ID__"
+  }
+}

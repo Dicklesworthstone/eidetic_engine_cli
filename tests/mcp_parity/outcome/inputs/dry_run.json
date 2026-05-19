@@ -1,0 +1,28 @@
+{
+  "name": "dry_run",
+  "surface": "outcome",
+  "mcpTool": "ee_outcome",
+  "seedMemoryContent": "Record dry-run feedback parity for this memory.",
+  "cliArgs": [
+    "ee",
+    "outcome",
+    "__MEMORY_ID__",
+    "--workspace",
+    "__WORKSPACE__",
+    "--signal",
+    "helpful",
+    "--reason",
+    "parity dry run",
+    "--event-id",
+    "__EVENT_ID__",
+    "--dry-run",
+    "--json"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "targetId": "__MEMORY_ID__",
+    "signal": "helpful",
+    "reason": "parity dry run",
+    "eventId": "__EVENT_ID__"
+  }
+}

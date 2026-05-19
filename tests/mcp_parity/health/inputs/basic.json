@@ -1,0 +1,9 @@
+{
+  "name": "basic",
+  "surface": "health",
+  "mcpTool": "ee_health",
+  "cliArgs": ["ee", "health", "--workspace", "__WORKSPACE__", "--json"],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__"
+  }
+}

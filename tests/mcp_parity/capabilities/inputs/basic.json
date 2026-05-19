@@ -1,0 +1,9 @@
+{
+  "name": "basic",
+  "surface": "capabilities",
+  "mcpTool": "ee_capabilities",
+  "cliArgs": ["ee", "capabilities", "--workspace", "__WORKSPACE__", "--json"],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__"
+  }
+}

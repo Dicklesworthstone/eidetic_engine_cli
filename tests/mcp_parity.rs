@@ -69,6 +69,130 @@ fn scenario_dir(name: &str) -> Result<PathBuf, String> {
         .join(format!("{}-{ts}", std::process::id())))
 }
 
+fn parity_fixture_path(surface: &str, name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("mcp_parity")
+        .join(surface)
+        .join("inputs")
+        .join(format!("{name}.json"))
+}
+
+fn load_parity_fixture(surface: &str, name: &str) -> Result<JsonValue, String> {
+    let path = parity_fixture_path(surface, name);
+    let contents =
+        fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    serde_json::from_str(&contents).map_err(|e| format!("failed to parse {}: {e}", path.display()))
+}
+
+fn fixture_str<'a>(fixture: &'a JsonValue, field: &str) -> Result<&'a str, String> {
+    fixture
+        .get(field)
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| format!("MCP parity fixture missing string field {field}"))
+}
+
+fn optional_fixture_str<'a>(
+    fixture: &'a JsonValue,
+    field: &str,
+) -> Result<Option<&'a str>, String> {
+    match fixture.get(field) {
+        Some(value) => value
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| format!("MCP parity fixture field {field} must be a string")),
+        None => Ok(None),
+    }
+}
+
+fn replace_fixture_placeholders(
+    text: &str,
+    workspace: &Path,
+    memory_id: Option<&str>,
+    event_id: Option<&str>,
+) -> Result<String, String> {
+    let workspace_text = workspace.to_string_lossy();
+    let mut replaced = text.replace("__WORKSPACE__", workspace_text.as_ref());
+    if let Some(memory_id) = memory_id {
+        replaced = replaced.replace("__MEMORY_ID__", memory_id);
+    }
+    if let Some(event_id) = event_id {
+        replaced = replaced.replace("__EVENT_ID__", event_id);
+    }
+    if replaced.contains("__MEMORY_ID__") {
+        return Err("MCP parity fixture needs a memory id but none was provided".to_string());
+    }
+    if replaced.contains("__EVENT_ID__") {
+        return Err("MCP parity fixture needs an event id but none was provided".to_string());
+    }
+    Ok(replaced)
+}
+
+fn replace_fixture_value(
+    value: &JsonValue,
+    workspace: &Path,
+    memory_id: Option<&str>,
+    event_id: Option<&str>,
+) -> Result<JsonValue, String> {
+    match value {
+        JsonValue::String(text) => Ok(JsonValue::String(replace_fixture_placeholders(
+            text, workspace, memory_id, event_id,
+        )?)),
+        JsonValue::Array(items) => items
+            .iter()
+            .map(|item| replace_fixture_value(item, workspace, memory_id, event_id))
+            .collect::<Result<Vec<_>, _>>()
+            .map(JsonValue::Array),
+        JsonValue::Object(fields) => {
+            let mut replaced = serde_json::Map::new();
+            for (key, value) in fields {
+                replaced.insert(
+                    key.clone(),
+                    replace_fixture_value(value, workspace, memory_id, event_id)?,
+                );
+            }
+            Ok(JsonValue::Object(replaced))
+        }
+        _ => Ok(value.clone()),
+    }
+}
+
+fn fixture_cli_args(
+    fixture: &JsonValue,
+    workspace: &Path,
+    memory_id: Option<&str>,
+    event_id: Option<&str>,
+) -> Result<Vec<OsString>, String> {
+    let args = fixture
+        .get("cliArgs")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| "MCP parity fixture missing cliArgs array".to_string())?;
+    args.iter()
+        .map(|arg| {
+            let arg = arg
+                .as_str()
+                .ok_or_else(|| "MCP parity fixture cliArgs entries must be strings".to_string())?;
+            replace_fixture_placeholders(arg, workspace, memory_id, event_id).map(OsString::from)
+        })
+        .collect()
+}
+
+fn fixture_mcp_arguments(
+    fixture: &JsonValue,
+    workspace: &Path,
+    memory_id: Option<&str>,
+    event_id: Option<&str>,
+) -> Result<JsonValue, String> {
+    let arguments = fixture
+        .get("mcpArguments")
+        .ok_or_else(|| "MCP parity fixture missing mcpArguments".to_string())?;
+    replace_fixture_value(arguments, workspace, memory_id, event_id)
+}
+
+fn fixture_mcp_tool(fixture: &JsonValue) -> Result<&str, String> {
+    fixture_str(fixture, "mcpTool")
+}
+
 fn init_workspace(dir: &Path) -> TestResult {
     trace_mcp_top_level("input", 0, &[]);
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -272,23 +396,21 @@ fn assert_json_equal_modulo_timestamps(
 /// Parity test: `ee status --json` vs `ee_status` MCP tool
 #[test]
 fn mcp_parity_status_command() -> TestResult {
+    let fixture = load_parity_fixture("status", "basic")?;
     let dir = scenario_dir("status")?;
     init_workspace(&dir)?;
 
-    let (cli_exit, cli_stdout, _cli_stderr) = run_cli(vec![
-        OsString::from("ee"),
-        OsString::from("status"),
-        OsString::from("--workspace"),
-        OsString::from(&dir),
-        OsString::from("--json"),
-    ]);
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
     ensure(
         cli_exit == ee::models::ProcessExitCode::Success,
         "CLI status failed",
     )?;
 
-    let mcp_response =
-        run_mcp_tool_call("ee_status", json!({ "workspace": dir.to_string_lossy() }))?;
+    let mcp_response = run_mcp_tool_call(
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, None, None)?,
+    )?;
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "status")
@@ -297,23 +419,21 @@ fn mcp_parity_status_command() -> TestResult {
 /// Parity test: `ee doctor --json` vs `ee_doctor` MCP tool
 #[test]
 fn mcp_parity_doctor_command() -> TestResult {
+    let fixture = load_parity_fixture("doctor", "basic")?;
     let dir = scenario_dir("doctor")?;
     init_workspace(&dir)?;
 
-    let (cli_exit, cli_stdout, _cli_stderr) = run_cli(vec![
-        OsString::from("ee"),
-        OsString::from("doctor"),
-        OsString::from("--workspace"),
-        OsString::from(&dir),
-        OsString::from("--json"),
-    ]);
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
     ensure(
         cli_exit == ee::models::ProcessExitCode::Success,
         "CLI doctor failed",
     )?;
 
-    let mcp_response =
-        run_mcp_tool_call("ee_doctor", json!({ "workspace": dir.to_string_lossy() }))?;
+    let mcp_response = run_mcp_tool_call(
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, None, None)?,
+    )?;
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "doctor")
@@ -322,23 +442,21 @@ fn mcp_parity_doctor_command() -> TestResult {
 /// Parity test: `ee health --json` vs `ee_health` MCP tool
 #[test]
 fn mcp_parity_health_command() -> TestResult {
+    let fixture = load_parity_fixture("health", "basic")?;
     let dir = scenario_dir("health")?;
     init_workspace(&dir)?;
 
-    let (cli_exit, cli_stdout, _cli_stderr) = run_cli(vec![
-        OsString::from("ee"),
-        OsString::from("health"),
-        OsString::from("--workspace"),
-        OsString::from(&dir),
-        OsString::from("--json"),
-    ]);
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
     ensure(
         cli_exit == ee::models::ProcessExitCode::Success,
         "CLI health failed",
     )?;
 
-    let mcp_response =
-        run_mcp_tool_call("ee_health", json!({ "workspace": dir.to_string_lossy() }))?;
+    let mcp_response = run_mcp_tool_call(
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, None, None)?,
+    )?;
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "health")
@@ -347,24 +465,20 @@ fn mcp_parity_health_command() -> TestResult {
 /// Parity test: `ee capabilities --json` vs `ee_capabilities` MCP tool
 #[test]
 fn mcp_parity_capabilities_command() -> TestResult {
+    let fixture = load_parity_fixture("capabilities", "basic")?;
     let dir = scenario_dir("capabilities")?;
     init_workspace(&dir)?;
 
-    let (cli_exit, cli_stdout, _cli_stderr) = run_cli(vec![
-        OsString::from("ee"),
-        OsString::from("capabilities"),
-        OsString::from("--workspace"),
-        OsString::from(&dir),
-        OsString::from("--json"),
-    ]);
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
     ensure(
         cli_exit == ee::models::ProcessExitCode::Success,
         "CLI capabilities failed",
     )?;
 
     let mcp_response = run_mcp_tool_call(
-        "ee_capabilities",
-        json!({ "workspace": dir.to_string_lossy() }),
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, None, None)?,
     )?;
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
@@ -374,33 +488,24 @@ fn mcp_parity_capabilities_command() -> TestResult {
 /// Parity test: `ee search --json` vs `ee_search` MCP tool
 #[test]
 fn mcp_parity_search_command() -> TestResult {
+    let fixture = load_parity_fixture("search", "basic")?;
     let dir = scenario_dir("search")?;
     init_workspace(&dir)?;
 
-    remember_test_memory(&dir, "Always run cargo test before release.")?;
+    if let Some(seed_content) = optional_fixture_str(&fixture, "seedMemoryContent")? {
+        remember_test_memory(&dir, seed_content)?;
+    }
 
-    let (cli_exit, cli_stdout, _cli_stderr) = run_cli(vec![
-        OsString::from("ee"),
-        OsString::from("search"),
-        OsString::from("cargo test release"),
-        OsString::from("--workspace"),
-        OsString::from(&dir),
-        OsString::from("--limit"),
-        OsString::from("5"),
-        OsString::from("--json"),
-    ]);
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
     ensure(
         cli_exit == ee::models::ProcessExitCode::Success,
         "CLI search failed",
     )?;
 
     let mcp_response = run_mcp_tool_call(
-        "ee_search",
-        json!({
-            "workspace": dir.to_string_lossy(),
-            "query": "cargo test release",
-            "limit": 5
-        }),
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, None, None)?,
     )?;
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
@@ -410,33 +515,24 @@ fn mcp_parity_search_command() -> TestResult {
 /// Parity test: `ee context --json` vs `ee_context` MCP tool
 #[test]
 fn mcp_parity_context_command() -> TestResult {
+    let fixture = load_parity_fixture("context", "basic")?;
     let dir = scenario_dir("context")?;
     init_workspace(&dir)?;
 
-    remember_test_memory(&dir, "Run cargo fmt --check before committing.")?;
+    if let Some(seed_content) = optional_fixture_str(&fixture, "seedMemoryContent")? {
+        remember_test_memory(&dir, seed_content)?;
+    }
 
-    let (cli_exit, cli_stdout, _cli_stderr) = run_cli(vec![
-        OsString::from("ee"),
-        OsString::from("context"),
-        OsString::from("prepare a release"),
-        OsString::from("--workspace"),
-        OsString::from(&dir),
-        OsString::from("--max-tokens"),
-        OsString::from("2000"),
-        OsString::from("--json"),
-    ]);
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
     ensure(
         cli_exit == ee::models::ProcessExitCode::Success,
         "CLI context failed",
     )?;
 
     let mcp_response = run_mcp_tool_call(
-        "ee_context",
-        json!({
-            "workspace": dir.to_string_lossy(),
-            "query": "prepare a release",
-            "maxTokens": 2000
-        }),
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, None, None)?,
     )?;
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
@@ -446,29 +542,23 @@ fn mcp_parity_context_command() -> TestResult {
 /// Parity test: `ee why <memory-id> --json` vs `ee_why` MCP tool
 #[test]
 fn mcp_parity_why_command() -> TestResult {
+    let fixture = load_parity_fixture("why", "basic")?;
     let dir = scenario_dir("why")?;
     init_workspace(&dir)?;
-    let memory_id = remember_test_memory(&dir, "Explain why this release rule was selected.")?;
+    let seed_content = optional_fixture_str(&fixture, "seedMemoryContent")?
+        .ok_or_else(|| "why parity fixture missing seedMemoryContent".to_string())?;
+    let memory_id = remember_test_memory(&dir, seed_content)?;
 
-    let (cli_exit, cli_stdout, _cli_stderr) = run_cli(vec![
-        OsString::from("ee"),
-        OsString::from("why"),
-        OsString::from(&memory_id),
-        OsString::from("--workspace"),
-        OsString::from(&dir),
-        OsString::from("--json"),
-    ]);
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, Some(&memory_id), None)?);
     ensure(
         cli_exit == ee::models::ProcessExitCode::Success,
         "CLI why failed",
     )?;
 
     let mcp_response = run_mcp_tool_call(
-        "ee_why",
-        json!({
-            "workspace": dir.to_string_lossy(),
-            "memoryId": memory_id
-        }),
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, Some(&memory_id), None)?,
     )?;
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
@@ -478,30 +568,23 @@ fn mcp_parity_why_command() -> TestResult {
 /// Parity test: `ee memory show <memory-id> --json` vs `ee_memory_show` MCP tool
 #[test]
 fn mcp_parity_memory_show_command() -> TestResult {
+    let fixture = load_parity_fixture("memory_show", "basic")?;
     let dir = scenario_dir("memory_show")?;
     init_workspace(&dir)?;
-    let memory_id = remember_test_memory(&dir, "Show this memory through both CLI and MCP.")?;
+    let seed_content = optional_fixture_str(&fixture, "seedMemoryContent")?
+        .ok_or_else(|| "memory_show parity fixture missing seedMemoryContent".to_string())?;
+    let memory_id = remember_test_memory(&dir, seed_content)?;
 
-    let (cli_exit, cli_stdout, _cli_stderr) = run_cli(vec![
-        OsString::from("ee"),
-        OsString::from("memory"),
-        OsString::from("show"),
-        OsString::from(&memory_id),
-        OsString::from("--workspace"),
-        OsString::from(&dir),
-        OsString::from("--json"),
-    ]);
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, Some(&memory_id), None)?);
     ensure(
         cli_exit == ee::models::ProcessExitCode::Success,
         "CLI memory show failed",
     )?;
 
     let mcp_response = run_mcp_tool_call(
-        "ee_memory_show",
-        json!({
-            "workspace": dir.to_string_lossy(),
-            "memoryId": memory_id
-        }),
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, Some(&memory_id), None)?,
     )?;
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
@@ -511,38 +594,20 @@ fn mcp_parity_memory_show_command() -> TestResult {
 /// Parity test: `ee remember --dry-run --json` vs `ee_remember` MCP tool (default dry-run)
 #[test]
 fn mcp_parity_remember_dry_run_command() -> TestResult {
+    let fixture = load_parity_fixture("remember", "dry_run")?;
     let dir = scenario_dir("remember")?;
     init_workspace(&dir)?;
 
-    let (cli_exit, cli_stdout, _cli_stderr) = run_cli(vec![
-        OsString::from("ee"),
-        OsString::from("remember"),
-        OsString::from("Test memory content for parity check."),
-        OsString::from("--workspace"),
-        OsString::from(&dir),
-        OsString::from("--kind"),
-        OsString::from("fact"),
-        OsString::from("--level"),
-        OsString::from("semantic"),
-        OsString::from("--confidence"),
-        OsString::from("0.85"),
-        OsString::from("--dry-run"),
-        OsString::from("--json"),
-    ]);
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
     ensure(
         cli_exit == ee::models::ProcessExitCode::Success,
         "CLI remember --dry-run failed",
     )?;
 
     let mcp_response = run_mcp_tool_call(
-        "ee_remember",
-        json!({
-            "workspace": dir.to_string_lossy(),
-            "content": "Test memory content for parity check.",
-            "kind": "fact",
-            "level": "semantic",
-            "confidence": 0.85
-        }),
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, None, None)?,
     )?;
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
@@ -552,40 +617,28 @@ fn mcp_parity_remember_dry_run_command() -> TestResult {
 /// Parity test: `ee outcome --dry-run --json` vs `ee_outcome` MCP tool
 #[test]
 fn mcp_parity_outcome_dry_run_command() -> TestResult {
+    let fixture = load_parity_fixture("outcome", "dry_run")?;
     let dir = scenario_dir("outcome")?;
     init_workspace(&dir)?;
-    let memory_id = remember_test_memory(&dir, "Record dry-run feedback parity for this memory.")?;
+    let seed_content = optional_fixture_str(&fixture, "seedMemoryContent")?
+        .ok_or_else(|| "outcome parity fixture missing seedMemoryContent".to_string())?;
+    let memory_id = remember_test_memory(&dir, seed_content)?;
     let event_id = "fb_01234567890123456789012345";
 
-    let (cli_exit, cli_stdout, _cli_stderr) = run_cli(vec![
-        OsString::from("ee"),
-        OsString::from("outcome"),
-        OsString::from(&memory_id),
-        OsString::from("--workspace"),
-        OsString::from(&dir),
-        OsString::from("--signal"),
-        OsString::from("helpful"),
-        OsString::from("--reason"),
-        OsString::from("parity dry run"),
-        OsString::from("--event-id"),
-        OsString::from(event_id),
-        OsString::from("--dry-run"),
-        OsString::from("--json"),
-    ]);
+    let (cli_exit, cli_stdout, _cli_stderr) = run_cli(fixture_cli_args(
+        &fixture,
+        &dir,
+        Some(&memory_id),
+        Some(event_id),
+    )?);
     ensure(
         cli_exit == ee::models::ProcessExitCode::Success,
         "CLI outcome --dry-run failed",
     )?;
 
     let mcp_response = run_mcp_tool_call(
-        "ee_outcome",
-        json!({
-            "workspace": dir.to_string_lossy(),
-            "targetId": memory_id,
-            "signal": "helpful",
-            "reason": "parity dry run",
-            "eventId": event_id
-        }),
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, Some(&memory_id), Some(event_id))?,
     )?;
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
