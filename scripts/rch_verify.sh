@@ -1405,6 +1405,23 @@ def cargo_workspace_inheritance_details(text):
         details["manifest_path"] = redact(manifest.group(1).strip())
     return details
 
+def sync_closure_root_counts(text):
+    if not text:
+        return []
+    counts = []
+    for line in text.splitlines():
+        match = re.search(
+            r"Prepared dependency sync manifest for\s+(\d+)\s+roots?\b",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            counts.append({
+                "root_count": int(match.group(1)),
+                "line": redact(line.strip()),
+            })
+    return counts
+
 raw_stdout_tail = proof.get("stdout_tail") or ""
 raw_stderr_tail = proof.get("stderr_tail") or ""
 combined_tail = "\n".join(part for part in [raw_stdout_tail, raw_stderr_tail] if part)
@@ -1414,10 +1431,17 @@ first_error_file, first_error_line = first_error_location(combined_tail)
 codes = error_codes(combined_tail)
 cargo_workspace_inheritance = cargo_workspace_inheritance_details(combined_tail)
 cargo_path_dependency_version = cargo_path_dependency_version_details(combined_tail)
+sync_closure_counts = sync_closure_root_counts(combined_tail)
 if cargo_workspace_inheritance:
     proof["cargo_workspace_inheritance"] = cargo_workspace_inheritance
 if cargo_path_dependency_version:
     proof["cargo_path_dependency_version"] = cargo_path_dependency_version
+if sync_closure_counts:
+    proof["sync_closure"] = {
+        "source": "rch_transcript",
+        "last_root_count": sync_closure_counts[-1]["root_count"],
+        "root_counts": sync_closure_counts,
+    }
 
 exit_code = proof.get("exit_code")
 degraded = list(proof.get("degraded_codes") or [])

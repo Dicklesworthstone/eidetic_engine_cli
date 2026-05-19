@@ -179,6 +179,12 @@ Consumers that need to route action should use the two narrower lists:
   so a repo-local verifier client cannot silently talk to an older launchd
   daemon; set `RCH_VERIFY_FAIL_FAST_VERSION_SKEW=0` only for an explicitly
   documented diagnostic run.
+  When an RCH transcript includes a line such as
+  `Prepared dependency sync manifest for N roots`, the proof also includes
+  `sync_closure.source = "rch_transcript"`,
+  `sync_closure.last_root_count`, and `sync_closure.root_counts[]` entries
+  with the parsed root count and redacted source line. This is evidence for
+  dependency-closure topology debugging; it is not by itself a degraded code.
 - `build_admission.status`: local admission result before RCH. A denied result
   means no remote verifier ran; unavailable or skipped results mean proof
   quality is weaker than an admitted run.

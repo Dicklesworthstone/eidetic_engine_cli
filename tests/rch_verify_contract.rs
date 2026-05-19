@@ -2544,6 +2544,55 @@ required by package `eidetic-engine v0.1.0 (/data/projects/eidetic_engine_cli)`\
 }
 
 #[test]
+fn synthetic_sync_closure_root_count_is_structured() -> TestResult {
+    let (status, stdout, _stderr) = run_script_with_env(
+        &[
+            "--",
+            "cargo",
+            "test",
+            "--test",
+            "rch_verify_contract",
+            "strict_clean_tree",
+            "--",
+            "--nocapture",
+        ],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "2026-05-19T02:46:29Z INFO Prepared dependency sync manifest for 1 roots\n\
+[RCH] remote vmi1149989 failed (exit 101)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "2100"),
+        ],
+    )?;
+    if status.success() {
+        return Err("sync-closure failure transcript should preserve non-zero exit".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse sync-closure report: {error}"))?;
+    if report["worker_id"] != "vmi1149989" {
+        return Err(format!("worker id should be preserved: {report}"));
+    }
+    let sync_closure = &report["sync_closure"];
+    if sync_closure["source"] != "rch_transcript"
+        || sync_closure["last_root_count"] != 1
+        || sync_closure["root_counts"][0]["root_count"] != 1
+    {
+        return Err(format!(
+            "sync closure root count should be structured: {report}"
+        ));
+    }
+    let line = sync_closure["root_counts"][0]["line"]
+        .as_str()
+        .ok_or_else(|| format!("sync closure line missing: {report}"))?;
+    if !line.contains("Prepared dependency sync manifest for 1 roots") {
+        return Err(format!("sync closure proof line missing: {report}"));
+    }
+    Ok(())
+}
+
+#[test]
 fn synthetic_e0583_for_tracked_module_is_remote_checkout_incomplete() -> TestResult {
     let (status, stdout, _stderr) = run_script_with_env(
         &["--", "cargo", "test", "--test", "context_stream"],
