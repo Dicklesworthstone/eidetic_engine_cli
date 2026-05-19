@@ -84,9 +84,13 @@ Example:
 ```bash
 ee insights --section proximityHotspots --workspace . --limit 5 --json
 ee proximity mem_release_policy mem_rch_remote_required --workspace . --json
+ee proximity mem_release_policy mem_rch_remote_required --workspace . \
+  --min-weight 0.4 --min-confidence 0.6 --link-limit 250 \
+  --include-tombstoned --json
 ee why mem_failed_release --causal-explain --confidence-threshold 0.7 \
   --workspace . --json
 ee rule provenance rule_release_policy --workspace . --json
+ee health --robot-insights --workspace . --json
 ee status --skyline --workspace . --json
 ```
 
@@ -203,6 +207,12 @@ Example:
 
 ```bash
 ee graph snapshot refresh --workspace . --graph memory_links --dry-run --json
+ee graph pagerank --workspace . --min-weight 0.2 --min-confidence 0.5 \
+  --link-limit 500 --limit 10 --include-tombstoned --json
+ee graph louvain --workspace . --resolution 1.2 --threshold 0.000001 \
+  --max-level 4 --seed 42 --limit 5 --json
+ee graph export --workspace . --type memory_links \
+  --workspace-id ws_release --snapshot-id snap_release --format mermaid
 ee graph centrality --workspace . --algorithm pagerank --limit 10 --json
 ee graph centrality-refresh --workspace . --dry-run --min-confidence 0.6 --json
 ee graph k-core --workspace . --k 3 --min-confidence 0.6 --json
