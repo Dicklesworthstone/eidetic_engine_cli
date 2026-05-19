@@ -198,16 +198,19 @@ pub fn detect_contradiction_clusters_with_threshold(
         })
         .collect::<Vec<_>>();
 
+    sort_by_ulid_payload_or_lexical(&mut clusters, |cluster| {
+        cluster
+            .exemplar_memory_ids
+            .first()
+            .map_or("", String::as_str)
+    });
+    // Stable sort preserves radix exemplar order for equal-density clusters.
     clusters.sort_by(|left, right| {
-        right
-            .density
-            .total_cmp(&left.density)
-            .then_with(|| {
-                right
-                    .internal_contradictions
-                    .cmp(&left.internal_contradictions)
-            })
-            .then_with(|| left.exemplar_memory_ids.cmp(&right.exemplar_memory_ids))
+        right.density.total_cmp(&left.density).then_with(|| {
+            right
+                .internal_contradictions
+                .cmp(&left.internal_contradictions)
+        })
     });
     clusters
 }
@@ -245,6 +248,9 @@ mod tests {
     const PUBLIC_ID_EARLY: &str = "note_01J0000000000000000000000A";
     const PUBLIC_ID_MIDDLE: &str = "rule_01J0000000000000000000000B";
     const PUBLIC_ID_LATE: &str = "mem_01J0000000000000000000000C";
+    const PUBLIC_ID_D: &str = "rule_01J0000000000000000000000D";
+    const PUBLIC_ID_E: &str = "mem_01J0000000000000000000000E";
+    const PUBLIC_ID_F: &str = "rule_01J0000000000000000000000F";
 
     #[test]
     fn k_truss_report_finds_complete_graph_core() {
@@ -370,6 +376,35 @@ mod tests {
         assert_eq!(
             clusters[0].exemplar_memory_ids,
             vec![PUBLIC_ID_EARLY, PUBLIC_ID_MIDDLE, PUBLIC_ID_LATE]
+        );
+    }
+
+    #[test]
+    fn contradiction_clusters_equal_metrics_tie_by_radix_exemplar_order() {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        let _ = graph.extend_edges_unrecorded([
+            (PUBLIC_ID_EARLY, PUBLIC_ID_D),
+            (PUBLIC_ID_D, PUBLIC_ID_F),
+            (PUBLIC_ID_EARLY, PUBLIC_ID_F),
+            (PUBLIC_ID_MIDDLE, PUBLIC_ID_LATE),
+            (PUBLIC_ID_LATE, PUBLIC_ID_E),
+            (PUBLIC_ID_MIDDLE, PUBLIC_ID_E),
+        ]);
+
+        let clusters = detect_contradiction_clusters_with_threshold(&graph, 0.50);
+
+        assert_eq!(clusters.len(), 2);
+        assert_eq!(
+            clusters
+                .iter()
+                .map(|cluster| cluster.exemplar_memory_ids[0].as_str())
+                .collect::<Vec<_>>(),
+            vec![PUBLIC_ID_EARLY, PUBLIC_ID_MIDDLE]
+        );
+        assert!(
+            clusters
+                .iter()
+                .all(|cluster| cluster.internal_contradictions == 3)
         );
     }
 
