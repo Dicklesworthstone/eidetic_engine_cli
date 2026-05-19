@@ -40,5 +40,21 @@
     "must_report"
   ],
   "reporting_gap_codes": [],
+  "readiness_service_count": 5,
+  "readiness_services": [
+    "agent_mail",
+    "beads",
+    "bv",
+    "rch",
+    "tracker"
+  ],
+  "readiness_statuses": [
+    "agent_mail:not_collected",
+    "beads:not_collected",
+    "bv:not_collected",
+    "rch:not_collected",
+    "tracker:not_collected"
+  ],
+  "readiness_degraded_codes": [],
   "degraded_codes": []
 }

@@ -1231,12 +1231,19 @@ fn risk_rank(level: RiskLevel) -> u8 {
 pub struct AgentOperatingContractOptions {
     /// Workspace path whose AGENTS.md and README.md should be inspected.
     pub workspace: PathBuf,
+    /// Already-collected coordination and verification readiness snapshots.
+    ///
+    /// The extractor never probes live services itself; callers can populate
+    /// this field from fixture data, Agent Mail, Beads/BV, git status, or RCH
+    /// evidence they gathered before calling the read-only contract surface.
+    pub readiness: AgentReadinessEvidenceInput,
 }
 
 impl Default for AgentOperatingContractOptions {
     fn default() -> Self {
         Self {
             workspace: PathBuf::from("."),
+            readiness: AgentReadinessEvidenceInput::default(),
         }
     }
 }
@@ -1247,6 +1254,7 @@ pub struct AgentOperatingContractReport {
     pub schema: String,
     pub rules: Vec<AgentOperatingContractRule>,
     pub reporting_obligations: Vec<AgentOperatingContractReportingObligation>,
+    pub readiness_evidence: Vec<AgentOperatingContractReadinessEvidence>,
     pub degraded: Vec<PreflightDegradation>,
 }
 
@@ -1258,6 +1266,9 @@ impl AgentOperatingContractReport {
             rules: Vec::new(),
             reporting_obligations: agent_operating_contract_reporting_obligations(
                 &AgentReportingObligationInput::default(),
+            ),
+            readiness_evidence: agent_operating_contract_readiness_evidence(
+                &AgentReadinessEvidenceInput::default(),
             ),
             degraded: Vec::new(),
         }
@@ -1304,6 +1315,27 @@ pub struct AgentOperatingContractReportingObligation {
     pub gap_code: Option<String>,
 }
 
+/// One coordination or verification substrate snapshot for deciding whether an
+/// agent can safely edit or claim proof. The report stores evidence already
+/// gathered by callers; it does not run live probes itself.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentOperatingContractReadinessEvidence {
+    pub service: String,
+    pub status: String,
+    pub summary: String,
+    pub evidence_refs: Vec<String>,
+    pub metrics: Vec<AgentOperatingContractReadinessMetric>,
+    pub degraded_codes: Vec<String>,
+    pub next_action: Option<String>,
+}
+
+/// Deterministic string metric attached to a readiness evidence block.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentOperatingContractReadinessMetric {
+    pub name: String,
+    pub value: String,
+}
+
 /// Fixture-friendly evidence input for reporting-obligation evaluation.
 /// Production integrations can populate this from Beads, Agent Mail, RCH, git
 /// status, and memory citations without making the contract extractor itself
@@ -1322,6 +1354,74 @@ pub struct AgentReportingObligationInput {
     pub coordination_refs: Vec<String>,
     pub static_only_work: bool,
     pub static_check_refs: Vec<String>,
+}
+
+/// Fixture-friendly readiness input for coordination and verification
+/// substrates. Callers populate these fields from already-collected probe
+/// results; the preflight contract builder remains read-only and deterministic.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AgentReadinessEvidenceInput {
+    pub agent_mail: Option<AgentReadinessSourceInput>,
+    pub beads: Option<AgentReadinessSourceInput>,
+    pub bv: Option<AgentReadinessSourceInput>,
+    pub tracker: Option<AgentReadinessSourceInput>,
+    pub rch: Option<AgentReadinessSourceInput>,
+}
+
+/// Fixture input for one readiness source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentReadinessSourceInput {
+    pub status: AgentReadinessStatus,
+    pub summary: String,
+    pub evidence_refs: Vec<String>,
+    pub metrics: Vec<AgentOperatingContractReadinessMetric>,
+    pub degraded_codes: Vec<String>,
+    pub next_action: Option<String>,
+}
+
+impl AgentReadinessSourceInput {
+    #[must_use]
+    pub fn new(status: AgentReadinessStatus, summary: impl Into<String>) -> Self {
+        Self {
+            status,
+            summary: summary.into(),
+            evidence_refs: Vec::new(),
+            metrics: Vec::new(),
+            degraded_codes: Vec::new(),
+            next_action: None,
+        }
+    }
+}
+
+/// Stable readiness posture vocabulary for dynamic operating-contract evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentReadinessStatus {
+    NotCollected,
+    Ok,
+    Unavailable,
+    Stale,
+    Ambiguous,
+    Blocked,
+    Saturated,
+    LocalOnly,
+    Dirty,
+}
+
+impl AgentReadinessStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotCollected => "not_collected",
+            Self::Ok => "ok",
+            Self::Unavailable => "unavailable",
+            Self::Stale => "stale",
+            Self::Ambiguous => "ambiguous",
+            Self::Blocked => "blocked",
+            Self::Saturated => "saturated",
+            Self::LocalOnly => "local_only",
+            Self::Dirty => "dirty",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1448,6 +1548,176 @@ fn reporting_obligation_from_template(
         evidence_refs,
         gap_code: gap_code.map(str::to_owned),
     }
+}
+
+#[must_use]
+pub fn agent_operating_contract_readiness_evidence(
+    input: &AgentReadinessEvidenceInput,
+) -> Vec<AgentOperatingContractReadinessEvidence> {
+    [
+        ("agent_mail", input.agent_mail.as_ref()),
+        ("beads", input.beads.as_ref()),
+        ("bv", input.bv.as_ref()),
+        ("tracker", input.tracker.as_ref()),
+        ("rch", input.rch.as_ref()),
+    ]
+    .into_iter()
+    .map(|(service, source)| agent_readiness_evidence_for_service(service, source))
+    .collect()
+}
+
+fn agent_readiness_evidence_for_service(
+    service: &str,
+    source: Option<&AgentReadinessSourceInput>,
+) -> AgentOperatingContractReadinessEvidence {
+    let Some(source) = source else {
+        return AgentOperatingContractReadinessEvidence {
+            service: service.to_owned(),
+            status: AgentReadinessStatus::NotCollected.as_str().to_owned(),
+            summary: "No readiness fixture or live-probe snapshot was supplied.".to_owned(),
+            evidence_refs: Vec::new(),
+            metrics: Vec::new(),
+            degraded_codes: Vec::new(),
+            next_action: None,
+        };
+    };
+
+    AgentOperatingContractReadinessEvidence {
+        service: service.to_owned(),
+        status: source.status.as_str().to_owned(),
+        summary: source.summary.clone(),
+        evidence_refs: sorted_unique(source.evidence_refs.clone()),
+        metrics: sorted_unique_metrics(source.metrics.clone()),
+        degraded_codes: sorted_unique(readiness_degraded_codes(service, source)),
+        next_action: source
+            .next_action
+            .clone()
+            .or_else(|| readiness_default_next_action(service, source.status).map(str::to_owned)),
+    }
+}
+
+fn readiness_degraded_codes(service: &str, source: &AgentReadinessSourceInput) -> Vec<String> {
+    if !source.degraded_codes.is_empty() {
+        return source.degraded_codes.clone();
+    }
+
+    readiness_default_degraded_code(service, source.status)
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn readiness_default_degraded_code(
+    service: &str,
+    status: AgentReadinessStatus,
+) -> Option<&'static str> {
+    match (service, status) {
+        (_, AgentReadinessStatus::NotCollected | AgentReadinessStatus::Ok) => None,
+        ("agent_mail", AgentReadinessStatus::Unavailable) => Some("agent_mail_unavailable"),
+        ("agent_mail", AgentReadinessStatus::Stale | AgentReadinessStatus::Ambiguous) => {
+            Some("coordination_source_stale")
+        }
+        ("beads", AgentReadinessStatus::Unavailable) => Some("beads_unavailable"),
+        ("beads", AgentReadinessStatus::Stale | AgentReadinessStatus::Dirty) => {
+            Some("beads_tracker_stale")
+        }
+        ("beads", AgentReadinessStatus::Ambiguous) => {
+            Some("workspace_hygiene_beads_db_divergence_unknown")
+        }
+        ("bv", AgentReadinessStatus::Unavailable) => Some("bv_unavailable"),
+        ("tracker", AgentReadinessStatus::Unavailable) => Some("beads_unavailable"),
+        ("tracker", AgentReadinessStatus::Dirty | AgentReadinessStatus::Ambiguous) => {
+            Some("workspace_hygiene_beads_db_divergence_unknown")
+        }
+        ("tracker", AgentReadinessStatus::Stale) => Some("beads_tracker_stale"),
+        ("rch", AgentReadinessStatus::Unavailable) => Some("rch_unavailable"),
+        ("rch", AgentReadinessStatus::Blocked | AgentReadinessStatus::Saturated) => {
+            Some("rch_worker_topology_blocked")
+        }
+        ("rch", AgentReadinessStatus::LocalOnly) => Some("rch_remote_required_fallback_prevented"),
+        (_, AgentReadinessStatus::Stale | AgentReadinessStatus::Ambiguous) => {
+            Some("coordination_source_stale")
+        }
+        (_, AgentReadinessStatus::Unavailable | AgentReadinessStatus::Blocked) => {
+            Some("coordination_source_unavailable")
+        }
+        (_, AgentReadinessStatus::Saturated | AgentReadinessStatus::LocalOnly) => {
+            Some("coordination_source_unavailable")
+        }
+        (_, AgentReadinessStatus::Dirty) => Some("coordination_source_stale"),
+    }
+}
+
+fn readiness_default_next_action(
+    service: &str,
+    status: AgentReadinessStatus,
+) -> Option<&'static str> {
+    match (service, status) {
+        (_, AgentReadinessStatus::NotCollected | AgentReadinessStatus::Ok) => None,
+        ("agent_mail", AgentReadinessStatus::Unavailable) => Some(
+            "Refresh Agent Mail health or continue with Beads/local inspection and report the coordination gap.",
+        ),
+        ("agent_mail", AgentReadinessStatus::Stale | AgentReadinessStatus::Ambiguous) => Some(
+            "Fetch a fresh Agent Mail inbox and reservation snapshot before claiming new work.",
+        ),
+        ("beads", AgentReadinessStatus::Unavailable) => {
+            Some("Refresh Beads with br ready --json before selecting or closing work.")
+        }
+        ("beads", AgentReadinessStatus::Stale | AgentReadinessStatus::Ambiguous) => {
+            Some("Refresh Beads state and record any stale tracker caveat before claiming work.")
+        }
+        ("tracker", AgentReadinessStatus::Dirty | AgentReadinessStatus::Ambiguous) => Some(
+            "Report the dirty .beads/issues.jsonl caveat and avoid staging tracker metadata blindly.",
+        ),
+        ("tracker", AgentReadinessStatus::Stale) => {
+            Some("Run br sync --flush-only only when intentionally exporting tracker updates.")
+        }
+        ("bv", AgentReadinessStatus::Unavailable) => Some(
+            "Use br ready --json as the source of truth and record that BV ranking was unavailable.",
+        ),
+        ("rch", AgentReadinessStatus::Blocked) => Some(
+            "Use scripts/rch_verify.sh --dry-run evidence and defer Rust proof until RCH topology is unblocked.",
+        ),
+        ("rch", AgentReadinessStatus::Saturated) => Some(
+            "Defer heavy Cargo verification or wait for RCH capacity; do not fall back to local Cargo.",
+        ),
+        ("rch", AgentReadinessStatus::LocalOnly) => Some(
+            "Refuse local Cargo fallback and rerun through RCH when remote workers are available.",
+        ),
+        ("rch", AgentReadinessStatus::Unavailable) => Some(
+            "Record RCH unavailability and use non-Cargo static checks until remote verification is restored.",
+        ),
+        (_, AgentReadinessStatus::Dirty) => Some(
+            "Record the dirty coordination source and refresh it before relying on the report.",
+        ),
+        (_, AgentReadinessStatus::Stale | AgentReadinessStatus::Ambiguous) => {
+            Some("Refresh the coordination source before relying on this readiness snapshot.")
+        }
+        (_, AgentReadinessStatus::Unavailable | AgentReadinessStatus::Blocked) => Some(
+            "Record the unavailable coordination source and continue only with explicit caveats.",
+        ),
+        (_, AgentReadinessStatus::Saturated | AgentReadinessStatus::LocalOnly) => {
+            Some("Defer the affected verification or coordination step until the source recovers.")
+        }
+    }
+}
+
+fn sorted_unique(mut values: Vec<String>) -> Vec<String> {
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn sorted_unique_metrics(
+    mut metrics: Vec<AgentOperatingContractReadinessMetric>,
+) -> Vec<AgentOperatingContractReadinessMetric> {
+    metrics.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.value.cmp(&right.value))
+    });
+    metrics.dedup();
+    metrics
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1613,6 +1883,7 @@ pub fn extract_agent_operating_contract(
         .map(|(source_file, text)| (source_file.as_str(), text.as_str()))
         .collect::<Vec<_>>();
     report.rules = extract_agent_operating_contract_rules(&doc_refs);
+    report.readiness_evidence = agent_operating_contract_readiness_evidence(&options.readiness);
     Ok(report)
 }
 
@@ -2063,6 +2334,10 @@ mod tests {
         reporting_obligation_ids: Vec<String>,
         reporting_obligation_types: Vec<String>,
         reporting_gap_codes: Vec<String>,
+        readiness_service_count: usize,
+        readiness_services: Vec<String>,
+        readiness_statuses: Vec<String>,
+        readiness_degraded_codes: Vec<String>,
         degraded_codes: Vec<String>,
     }
 
@@ -2103,6 +2378,25 @@ mod tests {
             .collect::<Vec<_>>();
         reporting_gap_codes.sort();
         reporting_gap_codes.dedup();
+        let mut readiness_services = report
+            .readiness_evidence
+            .iter()
+            .map(|evidence| evidence.service.clone())
+            .collect::<Vec<_>>();
+        readiness_services.sort();
+        let mut readiness_statuses = report
+            .readiness_evidence
+            .iter()
+            .map(|evidence| format!("{}:{}", evidence.service, evidence.status))
+            .collect::<Vec<_>>();
+        readiness_statuses.sort();
+        let mut readiness_degraded_codes = report
+            .readiness_evidence
+            .iter()
+            .flat_map(|evidence| evidence.degraded_codes.clone())
+            .collect::<Vec<_>>();
+        readiness_degraded_codes.sort();
+        readiness_degraded_codes.dedup();
         let mut degraded_codes = report
             .degraded
             .iter()
@@ -2121,6 +2415,10 @@ mod tests {
             reporting_obligation_ids,
             reporting_obligation_types,
             reporting_gap_codes,
+            readiness_service_count: report.readiness_evidence.len(),
+            readiness_services,
+            readiness_statuses,
+            readiness_degraded_codes,
             degraded_codes,
         }
     }
@@ -2736,6 +3034,7 @@ RULE NUMBER 2: NO WORKTREES. EVER.
 
         let report = extract_agent_operating_contract(&AgentOperatingContractOptions {
             workspace: workspace.path().to_path_buf(),
+            ..AgentOperatingContractOptions::default()
         })
         .map_err(|error| error.message())?;
 
@@ -2759,6 +3058,71 @@ RULE NUMBER 2: NO WORKTREES. EVER.
                 .any(|rule| rule.id == "agent.no_tokio_runtime"),
             true,
             "extracts available AGENTS rule",
+        )
+    }
+
+    #[test]
+    fn agent_operating_contract_extracts_supplied_readiness_evidence() -> TestResult {
+        let workspace = temp_workspace()?;
+        std::fs::write(
+            workspace.path().join("AGENTS.md"),
+            "# AGENTS\n\nRULE NUMBER 1: NO FILE DELETION.\n",
+        )
+        .map_err(|error| error.to_string())?;
+        std::fs::write(
+            workspace.path().join("README.md"),
+            "# README\n\nEvery machine-facing command supports stable JSON output.\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report = extract_agent_operating_contract(&AgentOperatingContractOptions {
+            workspace: workspace.path().to_path_buf(),
+            readiness: AgentReadinessEvidenceInput {
+                agent_mail: Some(readiness_source(
+                    AgentReadinessStatus::Ok,
+                    "Agent Mail snapshot supplied by caller.",
+                    &[("ack_required_count", "0")],
+                )),
+                rch: Some(readiness_source(
+                    AgentReadinessStatus::LocalOnly,
+                    "RCH snapshot says only local fallback is available.",
+                    &[("workers_healthy", "0")],
+                )),
+                ..AgentReadinessEvidenceInput::default()
+            },
+        })
+        .map_err(|error| error.message())?;
+        let readiness = report
+            .readiness_evidence
+            .iter()
+            .map(|entry| (entry.service.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+        let agent_mail = readiness
+            .get("agent_mail")
+            .ok_or_else(|| "missing Agent Mail readiness".to_owned())?;
+        let rch = readiness
+            .get("rch")
+            .ok_or_else(|| "missing RCH readiness".to_owned())?;
+
+        ensure(
+            agent_mail.status.clone(),
+            "ok".to_owned(),
+            "supplied Agent Mail status",
+        )?;
+        ensure(
+            agent_mail.metrics[0].name.clone(),
+            "ack_required_count".to_owned(),
+            "supplied Agent Mail metric",
+        )?;
+        ensure(
+            rch.status.clone(),
+            "local_only".to_owned(),
+            "supplied RCH status",
+        )?;
+        ensure(
+            rch.degraded_codes.clone(),
+            vec!["rch_remote_required_fallback_prevented".to_owned()],
+            "supplied RCH default degraded code",
         )
     }
 
@@ -2879,6 +3243,297 @@ RULE NUMBER 2: NO WORKTREES. EVER.
     }
 
     #[test]
+    fn agent_operating_contract_readiness_defaults_to_not_collected() -> TestResult {
+        let readiness =
+            agent_operating_contract_readiness_evidence(&AgentReadinessEvidenceInput::default());
+        let statuses = readiness
+            .iter()
+            .map(|entry| format!("{}:{}", entry.service, entry.status))
+            .collect::<Vec<_>>();
+
+        ensure(
+            statuses,
+            vec![
+                "agent_mail:not_collected".to_owned(),
+                "beads:not_collected".to_owned(),
+                "bv:not_collected".to_owned(),
+                "tracker:not_collected".to_owned(),
+                "rch:not_collected".to_owned(),
+            ],
+            "default readiness statuses",
+        )?;
+        ensure(
+            readiness
+                .iter()
+                .all(|entry| entry.degraded_codes.is_empty()),
+            true,
+            "not-collected readiness is static-safe",
+        )
+    }
+
+    #[test]
+    fn agent_operating_contract_readiness_preserves_fixture_evidence_sorted() -> TestResult {
+        let mut rch = AgentReadinessSourceInput::new(
+            AgentReadinessStatus::Blocked,
+            "RCH workers are healthy but path topology blocks remote-required Cargo.",
+        );
+        rch.evidence_refs = vec![
+            "rch:status".to_owned(),
+            "beads:comment-4242".to_owned(),
+            "rch:status".to_owned(),
+        ];
+        rch.metrics = vec![
+            AgentOperatingContractReadinessMetric {
+                name: "workers_healthy".to_owned(),
+                value: "5".to_owned(),
+            },
+            AgentOperatingContractReadinessMetric {
+                name: "active_builds".to_owned(),
+                value: "1".to_owned(),
+            },
+        ];
+        rch.degraded_codes = vec![
+            "rch_remote_required_fallback_prevented".to_owned(),
+            "rch_worker_topology_blocked".to_owned(),
+            "rch_worker_topology_blocked".to_owned(),
+        ];
+        rch.next_action =
+            Some("Use scripts/rch_verify.sh dry-run proof until topology is fixed.".to_owned());
+
+        let readiness = agent_operating_contract_readiness_evidence(&AgentReadinessEvidenceInput {
+            rch: Some(rch),
+            ..AgentReadinessEvidenceInput::default()
+        });
+        let rch = readiness
+            .iter()
+            .find(|entry| entry.service == "rch")
+            .ok_or_else(|| "missing RCH readiness block".to_owned())?;
+
+        ensure(rch.status.clone(), "blocked".to_owned(), "RCH status")?;
+        ensure(
+            rch.evidence_refs.clone(),
+            vec!["beads:comment-4242".to_owned(), "rch:status".to_owned()],
+            "sorted unique evidence refs",
+        )?;
+        ensure(
+            rch.metrics
+                .iter()
+                .map(|metric| format!("{}={}", metric.name, metric.value))
+                .collect::<Vec<_>>(),
+            vec!["active_builds=1".to_owned(), "workers_healthy=5".to_owned()],
+            "sorted metrics",
+        )?;
+        ensure(
+            rch.degraded_codes.clone(),
+            vec![
+                "rch_remote_required_fallback_prevented".to_owned(),
+                "rch_worker_topology_blocked".to_owned(),
+            ],
+            "sorted unique RCH degraded codes",
+        )?;
+        ensure(
+            rch.next_action.clone(),
+            Some("Use scripts/rch_verify.sh dry-run proof until topology is fixed.".to_owned()),
+            "caller supplied RCH next action is preserved",
+        )
+    }
+
+    #[test]
+    fn agent_operating_contract_readiness_defaults_degraded_codes_for_bad_postures() -> TestResult {
+        let readiness = agent_operating_contract_readiness_evidence(&AgentReadinessEvidenceInput {
+            agent_mail: Some(AgentReadinessSourceInput::new(
+                AgentReadinessStatus::Unavailable,
+                "Agent Mail probe failed.",
+            )),
+            tracker: Some(AgentReadinessSourceInput::new(
+                AgentReadinessStatus::Dirty,
+                ".beads/issues.jsonl is dirty or divergence is ambiguous.",
+            )),
+            rch: Some(AgentReadinessSourceInput::new(
+                AgentReadinessStatus::LocalOnly,
+                "RCH would fall back local, which is denied.",
+            )),
+            ..AgentReadinessEvidenceInput::default()
+        });
+        let degraded_by_service = readiness
+            .iter()
+            .map(|entry| (entry.service.as_str(), entry.degraded_codes.clone()))
+            .collect::<BTreeMap<_, _>>();
+
+        ensure(
+            degraded_by_service.get("agent_mail").cloned(),
+            Some(vec!["agent_mail_unavailable".to_owned()]),
+            "agent mail default degraded code",
+        )?;
+        ensure(
+            degraded_by_service.get("tracker").cloned(),
+            Some(vec![
+                "workspace_hygiene_beads_db_divergence_unknown".to_owned(),
+            ]),
+            "tracker dirty default degraded code",
+        )?;
+        ensure(
+            degraded_by_service.get("rch").cloned(),
+            Some(vec!["rch_remote_required_fallback_prevented".to_owned()]),
+            "RCH local-only default degraded code",
+        )?;
+        let next_actions = readiness
+            .iter()
+            .map(|entry| (entry.service.as_str(), entry.next_action.clone()))
+            .collect::<BTreeMap<_, _>>();
+        ensure(
+            next_actions
+                .get("agent_mail")
+                .cloned()
+                .flatten()
+                .is_some_and(|action| action.contains("Agent Mail health")),
+            true,
+            "agent mail default next action",
+        )?;
+        ensure(
+            next_actions
+                .get("tracker")
+                .cloned()
+                .flatten()
+                .is_some_and(|action| action.contains(".beads/issues.jsonl")),
+            true,
+            "tracker dirty default next action",
+        )?;
+        ensure(
+            next_actions
+                .get("rch")
+                .cloned()
+                .flatten()
+                .is_some_and(|action| action.contains("Refuse local Cargo fallback")),
+            true,
+            "RCH local-only default next action",
+        )
+    }
+
+    #[test]
+    fn agent_operating_contract_readiness_accepts_all_services_healthy() -> TestResult {
+        let readiness = agent_operating_contract_readiness_evidence(&AgentReadinessEvidenceInput {
+            agent_mail: Some(readiness_source(
+                AgentReadinessStatus::Ok,
+                "Agent Mail available for SandyTern.",
+                &[
+                    ("ack_required_count", "0"),
+                    ("active_reservation_count", "0"),
+                ],
+            )),
+            beads: Some(readiness_source(
+                AgentReadinessStatus::Ok,
+                "Beads ready queue and sync state are current.",
+                &[("ready_count", "12"), ("stale_count", "0")],
+            )),
+            bv: Some(readiness_source(
+                AgentReadinessStatus::Ok,
+                "BV robot triage returned a ranked top pick.",
+                &[("top_pick_count", "1")],
+            )),
+            tracker: Some(readiness_source(
+                AgentReadinessStatus::Ok,
+                "Tracker export is clean for this contract fixture.",
+                &[("dirty_tracker_paths", "0")],
+            )),
+            rch: Some(readiness_source(
+                AgentReadinessStatus::Ok,
+                "RCH has remote workers and local fallback is not needed.",
+                &[("workers_healthy", "5"), ("queued_builds", "0")],
+            )),
+        });
+
+        ensure(readiness.len(), 5, "healthy readiness service count")?;
+        ensure(
+            readiness
+                .iter()
+                .all(|entry| entry.status == "ok" && entry.degraded_codes.is_empty()),
+            true,
+            "healthy readiness has no degraded codes",
+        )?;
+        ensure(
+            readiness
+                .iter()
+                .all(|entry| entry.next_action.is_none() && !entry.metrics.is_empty()),
+            true,
+            "healthy readiness carries metrics and no repair action",
+        )
+    }
+
+    #[test]
+    fn agent_operating_contract_readiness_covers_beads_stale_and_rch_saturated() -> TestResult {
+        let readiness = agent_operating_contract_readiness_evidence(&AgentReadinessEvidenceInput {
+            beads: Some(readiness_source(
+                AgentReadinessStatus::Stale,
+                "Beads export is older than the live database.",
+                &[("stale_count", "3")],
+            )),
+            rch: Some(readiness_source(
+                AgentReadinessStatus::Saturated,
+                "RCH workers are healthy but verifier queue capacity is exhausted.",
+                &[("workers_healthy", "5"), ("slots_available", "0")],
+            )),
+            ..AgentReadinessEvidenceInput::default()
+        });
+        let by_service = readiness
+            .iter()
+            .map(|entry| (entry.service.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+
+        let beads = by_service
+            .get("beads")
+            .ok_or_else(|| "missing Beads readiness block".to_owned())?;
+        ensure(
+            beads.status.clone(),
+            "stale".to_owned(),
+            "Beads stale status",
+        )?;
+        ensure(
+            beads.degraded_codes.clone(),
+            vec!["beads_tracker_stale".to_owned()],
+            "Beads stale degraded code",
+        )?;
+
+        let rch = by_service
+            .get("rch")
+            .ok_or_else(|| "missing RCH readiness block".to_owned())?;
+        ensure(
+            rch.status.clone(),
+            "saturated".to_owned(),
+            "RCH saturated status",
+        )?;
+        ensure(
+            rch.degraded_codes.clone(),
+            vec!["rch_worker_topology_blocked".to_owned()],
+            "RCH saturated degraded code",
+        )?;
+        ensure(
+            rch.next_action
+                .clone()
+                .is_some_and(|action| action.contains("RCH capacity")),
+            true,
+            "RCH saturated default next action",
+        )
+    }
+
+    fn readiness_source(
+        status: AgentReadinessStatus,
+        summary: &str,
+        metrics: &[(&str, &str)],
+    ) -> AgentReadinessSourceInput {
+        let mut source = AgentReadinessSourceInput::new(status, summary);
+        source.evidence_refs = vec![format!("fixture:{}", status.as_str())];
+        source.metrics = metrics
+            .iter()
+            .map(|(name, value)| AgentOperatingContractReadinessMetric {
+                name: (*name).to_owned(),
+                value: (*value).to_owned(),
+            })
+            .collect();
+        source
+    }
+
+    #[test]
     fn agent_operating_contract_minimal_workspace_matches_golden() -> TestResult {
         let docs = [
             (
@@ -2909,6 +3564,9 @@ RULE NUMBER 2: NO WORKTREES. EVER.
             reporting_obligations: agent_operating_contract_reporting_obligations(
                 &AgentReportingObligationInput::default(),
             ),
+            readiness_evidence: agent_operating_contract_readiness_evidence(
+                &AgentReadinessEvidenceInput::default(),
+            ),
             degraded: Vec::new(),
         };
 
@@ -2922,6 +3580,7 @@ RULE NUMBER 2: NO WORKTREES. EVER.
     fn agent_operating_contract_repository_projection_matches_golden() -> TestResult {
         let report = extract_agent_operating_contract(&AgentOperatingContractOptions {
             workspace: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            ..AgentOperatingContractOptions::default()
         })
         .map_err(|error| error.message())?;
 

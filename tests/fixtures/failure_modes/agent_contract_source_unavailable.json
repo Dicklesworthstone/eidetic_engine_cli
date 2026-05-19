@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "agent_contract_source_unavailable",
+  "introduced_by": {
+    "bead": "bd-3d6ko.1",
+    "epic_letter": "AOP"
+  },
+  "surfaces": [
+    "agent operating contract"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "The read-only agent operating contract extractor cannot read AGENTS.md or README.md from the requested workspace.",
+    "setup_commands": [
+      "mkdir -p <workspace>",
+      "printf '# Agent Rules\\n' > <workspace>/AGENTS.md"
+    ],
+    "invocation": "agent operating contract extraction with unreadable or missing README.md"
+  },
+  "expected_emission": {
+    "code": "agent_contract_source_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "Could not read",
+      "while extracting the agent operating contract"
+    ],
+    "repair_contains": "Restore readable"
+  }
+}

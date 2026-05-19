@@ -4,7 +4,7 @@
   "title": "ee.agent_operating_contract.v1",
   "description": "Read-only operating rules extracted from repository-local agent instructions and README requirements.",
   "type": "object",
-  "required": ["schema", "rules", "reporting_obligations", "degraded"],
+  "required": ["schema", "rules", "reporting_obligations", "readiness_evidence", "degraded"],
   "properties": {
     "schema": {
       "const": "ee.agent_operating_contract.v1"
@@ -134,6 +134,94 @@
       },
       "uniqueItems": true
     },
+    "readiness_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "service",
+          "status",
+          "summary",
+          "evidence_refs",
+          "metrics",
+          "degraded_codes",
+          "next_action"
+        ],
+        "properties": {
+          "service": {
+            "enum": ["agent_mail", "beads", "bv", "tracker", "rch"]
+          },
+          "status": {
+            "enum": [
+              "not_collected",
+              "ok",
+              "unavailable",
+              "stale",
+              "ambiguous",
+              "blocked",
+              "saturated",
+              "local_only",
+              "dirty"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "metrics": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "value"],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9_]+$"
+                },
+                "value": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "additionalProperties": false
+            },
+            "uniqueItems": true
+          },
+          "degraded_codes": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "agent_mail_archive_degraded",
+                "agent_mail_unavailable",
+                "beads_tracker_stale",
+                "beads_unavailable",
+                "bv_unavailable",
+                "coordination_source_stale",
+                "coordination_source_unavailable",
+                "rch_remote_required_fallback_prevented",
+                "rch_unavailable",
+                "rch_worker_topology_blocked",
+                "workspace_hygiene_beads_db_divergence_unknown"
+              ]
+            },
+            "uniqueItems": true
+          },
+          "next_action": {
+            "type": ["string", "null"]
+          }
+        },
+        "additionalProperties": false
+      },
+      "uniqueItems": true
+    },
     "degraded": {
       "type": "array",
       "items": {
@@ -161,8 +249,8 @@
   "additionalProperties": false,
   "field_presets": {
     "minimal": ["schema"],
-    "summary": ["schema", "rules", "reporting_obligations", "degraded"],
-    "standard": ["schema", "rules", "reporting_obligations", "degraded"],
+    "summary": ["schema", "rules", "reporting_obligations", "readiness_evidence", "degraded"],
+    "standard": ["schema", "rules", "reporting_obligations", "readiness_evidence", "degraded"],
     "full": ["*"]
   }
 }
