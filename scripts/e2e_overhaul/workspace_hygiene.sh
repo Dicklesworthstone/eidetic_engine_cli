@@ -260,7 +260,10 @@ assert_not_json() {
 validate_event_log_contract() {
     local diagnostics="$EVENT_ROOT/event_log_contract_diagnostics.txt"
     if ! jq -s -e '
-        all(.[];
+        . as $events
+        | def has_phase($phase): any($events[]; .phase == $phase);
+        def has_scenario($scenario): any($events[]; .phase == "scenario" and .scenario == $scenario and .status == "pass");
+        all($events[];
             .schema == "ee.test_event.v1"
             and .beadId == "bd-1eq3l.8"
             and .surface == "workspace_hygiene"
@@ -286,8 +289,84 @@ validate_event_log_contract() {
                 )
             )
         )
+        and has_phase("setup")
+        and has_phase("redaction_check")
+        and has_phase("stdout_stderr_isolation")
+        and has_phase("mutation_check")
+        and has_phase("teardown")
+        and ([
+            "clean",
+            "source_and_test",
+            "human_source_and_test",
+            "scratch_only",
+            "scratch_generated_secret",
+            "active_reservation",
+            "agent_mail_unavailable",
+            "beads_pending_flush",
+            "beads_export_only",
+            "beads_parse_failure"
+        ] | all(. as $scenario | has_scenario($scenario)))
     ' "$EVENT_LOG" >/dev/null 2>"$diagnostics"; then
         printf 'event log contract check failed; diagnostics=%s\n' "$diagnostics"
+        return 1
+    fi
+}
+
+validate_stdout_stderr_isolation() {
+    local diagnostics="$EVENT_ROOT/stdout_stderr_isolation_diagnostics.txt"
+    local scenario_count=0
+    local failure_count=0
+    : > "$diagnostics"
+
+    local scenario schema_status stdout_artifact stderr_artifact
+    while IFS=$'\t' read -r scenario schema_status stdout_artifact stderr_artifact; do
+        scenario_count=$((scenario_count + 1))
+
+        if [ ! -s "$stdout_artifact" ]; then
+            printf '%s stdout artifact missing or empty: %s\n' "$scenario" "$stdout_artifact" >> "$diagnostics"
+            failure_count=$((failure_count + 1))
+            continue
+        fi
+
+        if [ ! -e "$stderr_artifact" ]; then
+            printf '%s stderr artifact missing: %s\n' "$scenario" "$stderr_artifact" >> "$diagnostics"
+            failure_count=$((failure_count + 1))
+            continue
+        fi
+
+        if grep -E '"schema"[[:space:]]*:[[:space:]]*"ee\.(response|workspace_hygiene)' "$stderr_artifact" >/dev/null 2>&1; then
+            printf '%s stderr artifact contains a response/workspace schema payload: %s\n' "$scenario" "$stderr_artifact" >> "$diagnostics"
+            failure_count=$((failure_count + 1))
+        fi
+
+        case "$schema_status" in
+            passed)
+                if ! jq -e '.schema == "ee.response.v2" and .success == true and .data.schema == "ee.workspace_hygiene.v1"' "$stdout_artifact" >/dev/null 2>&1; then
+                    printf '%s JSON stdout artifact does not contain the expected response envelope: %s\n' "$scenario" "$stdout_artifact" >> "$diagnostics"
+                    failure_count=$((failure_count + 1))
+                fi
+                ;;
+            human_output)
+                if jq -e . "$stdout_artifact" >/dev/null 2>&1; then
+                    printf '%s human stdout artifact unexpectedly parses as JSON: %s\n' "$scenario" "$stdout_artifact" >> "$diagnostics"
+                    failure_count=$((failure_count + 1))
+                fi
+                ;;
+            *)
+                printf '%s scenario did not pass schema/output classification: %s\n' "$scenario" "$schema_status" >> "$diagnostics"
+                failure_count=$((failure_count + 1))
+                ;;
+        esac
+    done < <(jq -r '. | select(.phase == "scenario") | [.scenario, .schemaValidationStatus, .stdoutArtifact, .stderrArtifact] | @tsv' "$EVENT_LOG")
+
+    if [ "$scenario_count" -eq 0 ]; then
+        printf 'no scenario events found in %s\n' "$EVENT_LOG" >> "$diagnostics"
+        printf 'stdout/stderr isolation check failed; diagnostics=%s\n' "$diagnostics"
+        return 1
+    fi
+
+    if [ "$failure_count" -ne 0 ]; then
+        printf 'stdout/stderr isolation check failed; diagnostics=%s\n' "$diagnostics"
         return 1
     fi
 }
@@ -508,13 +587,13 @@ if [ -n "$EVENT_LOG_REDACTION_FAILURE" ]; then
 fi
 emit_event "event_log_redaction" "redaction_check" "pass" 0 "grep event log for raw synthetic secret" "$REPO_ROOT" "$EVENT_LOG" "" "passed" "" "[]" "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
 
-EVENT_LOG_FAILURE="$(validate_event_log_contract || true)"
-if [ -n "$EVENT_LOG_FAILURE" ]; then
-    emit_event "event_log_contract" "schema_check" "failed" 1 "jq validate ee.test_event.v1 events" "$REPO_ROOT" "$EVENT_LOG" "" "failed" "$EVENT_LOG_FAILURE" '["workspace_hygiene_event_log_contract_failed"]' "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
-    printf '%s\n' "$EVENT_LOG_FAILURE" >&2
+STDIO_FAILURE="$(validate_stdout_stderr_isolation || true)"
+if [ -n "$STDIO_FAILURE" ]; then
+    emit_event "stdout_stderr_isolation" "stdout_stderr_isolation" "failed" 1 "validate stdout/stderr artifact separation" "$REPO_ROOT" "$EVENT_ROOT/stdout_stderr_isolation_diagnostics.txt" "" "failed" "$STDIO_FAILURE" '["workspace_hygiene_stdout_stderr_isolation_failed"]' "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
+    printf '%s\n' "$STDIO_FAILURE" >&2
     exit 1
 fi
-emit_event "event_log_contract" "schema_check" "pass" 0 "jq validate ee.test_event.v1 events" "$REPO_ROOT" "$EVENT_LOG" "" "passed" "" "[]" "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
+emit_event "stdout_stderr_isolation" "stdout_stderr_isolation" "pass" 0 "validate stdout/stderr artifact separation" "$REPO_ROOT" "$EVENT_ROOT/stdout_stderr_isolation_diagnostics.txt" "" "passed" "" "[]" "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
 
 read -r REPO_AFTER_HASH REPO_AFTER_ARTIFACT < <(capture_repo_state "after")
 if [ "$REPO_BEFORE_HASH" != "$REPO_AFTER_HASH" ]; then
@@ -523,4 +602,13 @@ if [ "$REPO_BEFORE_HASH" != "$REPO_AFTER_HASH" ]; then
 fi
 
 emit_event "teardown" "mutation_check" "pass" 0 "compare caller checkout state" "$REPO_ROOT" "" "" "not_run" "" "[]" "$REPO_BEFORE_HASH" "$REPO_AFTER_HASH" "$REPO_BEFORE_ARTIFACT" "$REPO_AFTER_ARTIFACT"
+emit_event "teardown" "teardown" "pass" 0 "complete workspace hygiene e2e run" "$REPO_ROOT" "" "" "not_run" "" "[]" "$REPO_BEFORE_HASH" "$REPO_AFTER_HASH" "$REPO_BEFORE_ARTIFACT" "$REPO_AFTER_ARTIFACT"
+
+EVENT_LOG_FAILURE="$(validate_event_log_contract || true)"
+if [ -n "$EVENT_LOG_FAILURE" ]; then
+    emit_event "event_log_contract" "schema_check" "failed" 1 "jq validate ee.test_event.v1 events" "$REPO_ROOT" "$EVENT_LOG" "" "failed" "$EVENT_LOG_FAILURE" '["workspace_hygiene_event_log_contract_failed"]' "$REPO_BEFORE_HASH" "$REPO_AFTER_HASH" "$REPO_BEFORE_ARTIFACT" "$REPO_AFTER_ARTIFACT"
+    printf '%s\n' "$EVENT_LOG_FAILURE" >&2
+    exit 1
+fi
+emit_event "event_log_contract" "schema_check" "pass" 0 "jq validate ee.test_event.v1 events" "$REPO_ROOT" "$EVENT_LOG" "" "passed" "" "[]" "$REPO_BEFORE_HASH" "$REPO_AFTER_HASH" "$REPO_BEFORE_ARTIFACT" "$REPO_AFTER_ARTIFACT"
 printf 'workspace_hygiene: all scenarios passed; events=%s\n' "$EVENT_LOG" >&2
