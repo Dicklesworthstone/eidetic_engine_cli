@@ -207,7 +207,7 @@ memory bodies in `sources[]`.
 
 ### `response_time` codes — stay in `degraded[]`
 
-#### Search and pack quality (40)
+#### Search and pack quality (43)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|
 | `conflict_direct` | medium | bd-1zb7k.9 (S8) |
@@ -227,6 +227,9 @@ memory bodies in `sources[]`.
 | `index_stale` | high | bd-17c65.2.1 (B1) |
 | `low_recall_after_floor` | info | bd-17c65.2.1 (B1) |
 | `malformed_validity_filtered` | medium | bd-17c65.2.10 (B11) |
+| `memory_drift_source_changed` | medium | bd-1z1fd.3 |
+| `memory_drift_source_missing` | high | bd-1z1fd.3 |
+| `memory_drift_source_unverifiable` | medium | bd-1z1fd.3 |
 | `mesh_peer_human_explicit_filtered` | medium | bd-29ulx (SRR6.5) |
 | `no_relevant_results` | medium | bd-17c65.2.1 (B1) |
 | `output_redaction_disabled` | info | bd-17c65.2.9 (B10) |
@@ -339,9 +342,10 @@ memory bodies in `sources[]`.
 | `why_pack_selection_unavailable` | low | bd-17c65.10.6 (J6) |
 | `why_result_target_unsupported_source` | medium | bd-17c65.10.6 (J6) |
 
-#### Preflight + quarantine (11)
+#### Preflight + quarantine (12)
 | Code | Severity | Bead |
 |------|----------|------|
+| `agent_contract_source_unavailable` | warning | bd-3d6ko.1 (AOP1) |
 | `bypass_rate_limit_exceeded` | high | bd-3usjw.6.1 |
 | `bypass_token_exhausted` | high | bd-3usjw.6.1 |
 | `bypass_token_expired` | medium | bd-3usjw.6.1 |
