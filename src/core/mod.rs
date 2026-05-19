@@ -51,6 +51,7 @@ pub mod lab;
 pub mod learn;
 pub mod legacy_import;
 pub mod memory;
+pub mod memory_drift;
 pub mod memory_lifecycle;
 pub mod memory_scope;
 pub mod model;
