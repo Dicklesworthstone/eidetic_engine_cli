@@ -902,7 +902,9 @@ fn proptest_run_event(
         .map(|fixture| fixture.input_hash.clone())
         .collect::<Vec<_>>();
     new_regressions.sort();
+    new_regressions.dedup();
     stale_regressions_flagged.sort();
+    stale_regressions_flagged.dedup();
 
     Ok(DeterminismProptestRunEvent {
         schema: PROPTEST_RUN_EVENT_SCHEMA.to_string(),
@@ -1839,9 +1841,13 @@ fn determinism_proptest_run_event_is_stable_and_sorted() -> Result<(), String> {
 
     let event = proptest_run_event(
         1024,
-        2,
-        &[second.clone(), first.clone()],
-        vec![second.input_hash.clone(), first.input_hash.clone()],
+        3,
+        &[second.clone(), first.clone(), second.clone()],
+        vec![
+            second.input_hash.clone(),
+            first.input_hash.clone(),
+            second.input_hash.clone(),
+        ],
         12.5,
         60.0,
     )?;
@@ -1856,8 +1862,8 @@ fn determinism_proptest_run_event_is_stable_and_sorted() -> Result<(), String> {
     assert_eq!(event.kind, "proptest_run");
     assert_eq!(event.axes_count, 6);
     assert_eq!(event.cases_sampled, 1024);
-    assert_eq!(event.cases_passed, 1022);
-    assert_eq!(event.cases_failed, 2);
+    assert_eq!(event.cases_passed, 1021);
+    assert_eq!(event.cases_failed, 3);
     assert_eq!(event.new_regressions, expected_hashes);
     assert_eq!(event.stale_regressions_flagged, event.new_regressions);
     Ok(())
