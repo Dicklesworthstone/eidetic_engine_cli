@@ -32,9 +32,20 @@ const DECISION_FIXTURES: &[&str] = &[
     "tests/fixtures/mesh/peer_policy_decision_inbound_allowed.json",
     "tests/fixtures/mesh/peer_policy_decision_inbound_redacted_body_allowed.json",
     "tests/fixtures/mesh/peer_policy_decision_inbound_denied.json",
+    "tests/fixtures/mesh/peer_policy_decision_inbound_quarantined.json",
+    "tests/fixtures/mesh/peer_policy_decision_inbound_rejected.json",
+    "tests/fixtures/mesh/peer_policy_decision_outbound_metadata_allowed.json",
+    "tests/fixtures/mesh/peer_policy_decision_outbound_revision_notice_allowed.json",
     "tests/fixtures/mesh/peer_policy_decision_outbound_redacted_body_allowed.json",
+    "tests/fixtures/mesh/peer_policy_decision_outbound_redacted_embedding_allowed.json",
+    "tests/fixtures/mesh/peer_policy_decision_outbound_shared_body_allowed.json",
+    "tests/fixtures/mesh/peer_policy_decision_outbound_shared_embedding_allowed.json",
     "tests/fixtures/mesh/peer_policy_decision_outbound_denied.json",
+    "tests/fixtures/mesh/peer_policy_decision_outbound_quarantined.json",
+    "tests/fixtures/mesh/peer_policy_decision_outbound_rejected.json",
 ];
+const DISALLOWED_PEER_IMPORT_TRUST_CLASSES: &[&str] =
+    &["human_explicit", "cass_evidence", "legacy_import"];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -64,6 +75,19 @@ fn ensure(condition: bool, context: impl Into<String>) -> TestResult {
     } else {
         Err(context.into())
     }
+}
+
+fn ensure_not_disallowed_peer_import_trust_class(
+    actual: Option<&str>,
+    context: &str,
+) -> TestResult {
+    for disallowed_class in DISALLOWED_PEER_IMPORT_TRUST_CLASSES {
+        ensure(
+            actual != Some(*disallowed_class),
+            format!("{context} imports peer material as {disallowed_class}"),
+        )?;
+    }
+    Ok(())
 }
 
 fn ensure_schema_registered(schema_id: &str, supported_name: &str) -> TestResult {
@@ -123,34 +147,36 @@ fn peer_policy_schema_pins_default_deny_and_trust_boundaries() -> TestResult {
         .pointer("/properties/importTrustClass/enum")
         .and_then(Value::as_array)
         .ok_or_else(|| "importTrustClass enum missing".to_string())?;
-    ensure(
-        !import_trust
-            .iter()
-            .any(|value| value.as_str() == Some("human_explicit")),
-        "peer policy must not allow peer material to import as human_explicit",
-    )?;
+    for disallowed_class in DISALLOWED_PEER_IMPORT_TRUST_CLASSES {
+        ensure(
+            !import_trust
+                .iter()
+                .any(|value| value.as_str() == Some(*disallowed_class)),
+            format!("peer policy must not allow peer material to import as {disallowed_class}"),
+        )?;
+    }
 
     let trust_lanes = schema
         .pointer("/$defs/trustLane/enum")
         .and_then(Value::as_array)
         .ok_or_else(|| "trustLane enum missing".to_string())?;
-    for lane in [
-        "localHuman",
-        "peerHumanViaPeer",
-        "peerAgent",
-        "peerDerived",
-        "untrusted",
-    ] {
+    for lane in ["peerHumanViaPeer", "peerAgent", "peerDerived", "untrusted"] {
         ensure(
             trust_lanes.iter().any(|value| value.as_str() == Some(lane)),
             format!("trust lane {lane} missing"),
         )?;
     }
+    ensure(
+        !trust_lanes
+            .iter()
+            .any(|value| value.as_str() == Some("localHuman")),
+        "peer policy schema must reject localHuman trustLane assignments",
+    )?;
     Ok(())
 }
 
 #[test]
-fn peer_policy_fixtures_are_redaction_safe_and_never_human_explicit() -> TestResult {
+fn peer_policy_fixtures_are_redaction_safe_and_peer_import_safe() -> TestResult {
     for fixture in FIXTURES {
         let value = read_json(fixture)?;
         ensure_equal(
@@ -163,9 +189,9 @@ fn peer_policy_fixtures_are_redaction_safe_and_never_human_explicit() -> TestRes
             &Some("deny"),
             fixture,
         )?;
-        ensure(
-            value.pointer("/importTrustClass").and_then(Value::as_str) != Some("human_explicit"),
-            format!("{fixture} imports peer material as human_explicit"),
+        ensure_not_disallowed_peer_import_trust_class(
+            value.pointer("/importTrustClass").and_then(Value::as_str),
+            fixture,
         )?;
         for field in ["workspaceId", "peerId", "policyId"] {
             let text = value
@@ -230,7 +256,58 @@ fn peer_policy_failure_surface_schema_pins_structured_codes() -> TestResult {
     ensure(
         !actions.iter().any(|value| value.as_str() == Some("allow")),
         "failure surface must not include allow action",
-    )
+    )?;
+
+    let code_action_invariants = schema
+        .pointer("/allOf")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "failure surface code/action invariants missing".to_string())?;
+    let cases = [
+        (
+            0,
+            ["mesh_peer_policy_denied", "mesh_outbound_policy_denied"],
+            "deny",
+        ),
+        (
+            1,
+            [
+                "mesh_peer_policy_quarantined",
+                "mesh_outbound_policy_quarantined",
+            ],
+            "quarantine",
+        ),
+        (
+            2,
+            ["mesh_peer_policy_rejected", "mesh_outbound_policy_rejected"],
+            "reject",
+        ),
+    ];
+    for (index, expected_codes, expected_action) in cases {
+        let invariant = code_action_invariants
+            .get(index)
+            .ok_or_else(|| format!("failure surface invariant {index} missing"))?;
+        let invariant_codes = invariant
+            .pointer("/if/properties/code/enum")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("failure surface invariant {index} code enum missing"))?;
+        for code in expected_codes {
+            ensure(
+                invariant_codes
+                    .iter()
+                    .any(|value| value.as_str() == Some(code)),
+                format!("failure surface invariant {index} missing code {code}"),
+            )?;
+        }
+        ensure_equal(
+            &invariant
+                .pointer("/then/properties/action/const")
+                .and_then(Value::as_str),
+            &Some(expected_action),
+            &format!("failure surface invariant {index} action"),
+        )?;
+    }
+
+    Ok(())
 }
 
 #[test]
@@ -269,12 +346,26 @@ fn peer_policy_decision_schema_pins_directional_side_effect_fields() -> TestResu
         .pointer("/properties/importTrustClass/enum")
         .and_then(Value::as_array)
         .ok_or_else(|| "importTrustClass enum missing".to_string())?;
+    for allowed_class in ["agent_validated", "agent_assertion"] {
+        ensure(
+            import_trust
+                .iter()
+                .any(|value| value.as_str() == Some(allowed_class)),
+            format!("policy decision importTrustClass missing {allowed_class}"),
+        )?;
+    }
     ensure(
-        !import_trust
-            .iter()
-            .any(|value| value.as_str() == Some("human_explicit")),
-        "policy decision must not allow peer material to import as human_explicit",
+        import_trust.iter().any(Value::is_null),
+        "policy decision importTrustClass must permit null when no policy applies",
     )?;
+    for disallowed_class in DISALLOWED_PEER_IMPORT_TRUST_CLASSES {
+        ensure(
+            !import_trust
+                .iter()
+                .any(|value| value.as_str() == Some(*disallowed_class)),
+            format!("policy decision must not allow peer material to import as {disallowed_class}"),
+        )?;
+    }
 
     for field in [
         "bodyFetchAllowed",
@@ -381,6 +472,677 @@ fn peer_policy_decision_schema_pins_directional_side_effect_fields() -> TestResu
         &Some("null"),
         "outbound redacted body allow decisions must not carry failure",
     )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/4/if/properties/direction/const")
+            .and_then(Value::as_str),
+        &Some("outbound"),
+        "outbound redacted embedding invariant direction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/4/if/properties/action/const")
+            .and_then(Value::as_str),
+        &Some("allow"),
+        "outbound redacted embedding invariant action",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/4/if/properties/materialLane/const")
+            .and_then(Value::as_str),
+        &Some("embedding"),
+        "outbound redacted embedding invariant lane",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/4/if/properties/redaction/const")
+            .and_then(Value::as_str),
+        &Some("redact"),
+        "outbound redacted embedding invariant redaction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/4/then/properties/payloadExportAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "outbound redacted embedding decisions may export only redacted payloads",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/4/then/properties/rawPayloadExportAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(false),
+        "outbound redacted embedding decisions must not export raw payloads",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/4/then/properties/redactedPayloadRequired/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "outbound redacted embedding decisions must require redacted payloads",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/4/then/properties/failure/type")
+            .and_then(Value::as_str),
+        &Some("null"),
+        "outbound redacted embedding allow decisions must not carry failure",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/5/if/properties/direction/const")
+            .and_then(Value::as_str),
+        &Some("outbound"),
+        "outbound shared body invariant direction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/5/if/properties/materialLane/const")
+            .and_then(Value::as_str),
+        &Some("body"),
+        "outbound shared body invariant lane",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/5/if/properties/redaction/const")
+            .and_then(Value::as_str),
+        &Some("share"),
+        "outbound shared body invariant redaction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/5/then/properties/payloadExportAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "outbound shared body decisions may export payloads",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/5/then/properties/rawPayloadExportAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "outbound shared body decisions explicitly permit raw payload export",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/5/then/properties/redactedPayloadRequired/const")
+            .and_then(Value::as_bool),
+        &Some(false),
+        "outbound shared body decisions must not claim redaction is required",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/5/then/properties/failure/type")
+            .and_then(Value::as_str),
+        &Some("null"),
+        "outbound shared body allow decisions must not carry failure",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/6/if/properties/direction/const")
+            .and_then(Value::as_str),
+        &Some("outbound"),
+        "outbound shared embedding invariant direction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/6/if/properties/materialLane/const")
+            .and_then(Value::as_str),
+        &Some("embedding"),
+        "outbound shared embedding invariant lane",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/6/if/properties/redaction/const")
+            .and_then(Value::as_str),
+        &Some("share"),
+        "outbound shared embedding invariant redaction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/6/then/properties/payloadExportAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "outbound shared embedding decisions may export payloads",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/6/then/properties/rawPayloadExportAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "outbound shared embedding decisions explicitly permit raw payload export",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/6/then/properties/redactedPayloadRequired/const")
+            .and_then(Value::as_bool),
+        &Some(false),
+        "outbound shared embedding decisions must not claim redaction is required",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/6/then/properties/failure/type")
+            .and_then(Value::as_str),
+        &Some("null"),
+        "outbound shared embedding allow decisions must not carry failure",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/7/if/properties/direction/const")
+            .and_then(Value::as_str),
+        &Some("outbound"),
+        "outbound shared metadata invariant direction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/7/if/properties/materialLane/const")
+            .and_then(Value::as_str),
+        &Some("metadata"),
+        "outbound shared metadata invariant lane",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/7/if/properties/redaction/const")
+            .and_then(Value::as_str),
+        &Some("share"),
+        "outbound shared metadata invariant redaction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/7/then/properties/payloadExportAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "outbound shared metadata decisions may export payloads",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/7/then/properties/rawPayloadExportAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "outbound shared metadata decisions explicitly permit raw payload export",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/7/then/properties/redactedPayloadRequired/const")
+            .and_then(Value::as_bool),
+        &Some(false),
+        "outbound shared metadata decisions must not claim redaction is required",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/7/then/properties/failure/type")
+            .and_then(Value::as_str),
+        &Some("null"),
+        "outbound shared metadata allow decisions must not carry failure",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/8/if/properties/direction/const")
+            .and_then(Value::as_str),
+        &Some("outbound"),
+        "outbound shared revision notice invariant direction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/8/if/properties/materialLane/const")
+            .and_then(Value::as_str),
+        &Some("revisionNotice"),
+        "outbound shared revision notice invariant lane",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/8/if/properties/redaction/const")
+            .and_then(Value::as_str),
+        &Some("share"),
+        "outbound shared revision notice invariant redaction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/8/then/properties/payloadExportAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "outbound shared revision notice decisions may export payloads",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/8/then/properties/rawPayloadExportAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "outbound shared revision notice decisions explicitly permit raw payload export",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/8/then/properties/redactedPayloadRequired/const")
+            .and_then(Value::as_bool),
+        &Some(false),
+        "outbound shared revision notice decisions must not claim redaction is required",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/8/then/properties/failure/type")
+            .and_then(Value::as_str),
+        &Some("null"),
+        "outbound shared revision notice allow decisions must not carry failure",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/9/if/properties/action/const")
+            .and_then(Value::as_str),
+        &Some("allow"),
+        "allow decision invariant action",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/9/then/properties/failure/type")
+            .and_then(Value::as_str),
+        &Some("null"),
+        "allowed decisions must not carry failure",
+    )?;
+    let non_allow_actions = schema
+        .pointer("/allOf/10/if/properties/action/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "non-allow action invariant enum missing".to_string())?;
+    for action in ["deny", "quarantine", "reject"] {
+        ensure(
+            non_allow_actions
+                .iter()
+                .any(|value| value.as_str() == Some(action)),
+            format!("non-allow action invariant missing {action}"),
+        )?;
+    }
+    ensure_equal(
+        &schema
+            .pointer("/allOf/10/then/properties/failure/$ref")
+            .and_then(Value::as_str),
+        &Some("ee.mesh.policy_failure_surface.v1.json"),
+        "non-allow decisions must carry structured failure",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/11/if/properties/direction/const")
+            .and_then(Value::as_str),
+        &Some("inbound"),
+        "inbound non-allow side-effect invariant direction",
+    )?;
+    let inbound_non_allow_actions = schema
+        .pointer("/allOf/11/if/properties/action/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "inbound non-allow action invariant enum missing".to_string())?;
+    for action in ["deny", "quarantine", "reject"] {
+        ensure(
+            inbound_non_allow_actions
+                .iter()
+                .any(|value| value.as_str() == Some(action)),
+            format!("inbound non-allow side-effect invariant missing {action}"),
+        )?;
+    }
+    for field in [
+        "bodyFetchAllowed",
+        "localTruthSideEffectsAllowed",
+        "searchOrGraphSideEffectsAllowed",
+    ] {
+        ensure_equal(
+            &schema
+                .pointer(&format!("/allOf/11/then/properties/{field}/const"))
+                .and_then(Value::as_bool),
+            &Some(false),
+            &format!("inbound non-allow decisions must set {field}=false"),
+        )?;
+    }
+    ensure_equal(
+        &schema
+            .pointer("/allOf/12/if/properties/direction/const")
+            .and_then(Value::as_str),
+        &Some("outbound"),
+        "outbound non-allow export invariant direction",
+    )?;
+    let outbound_non_allow_actions = schema
+        .pointer("/allOf/12/if/properties/action/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "outbound non-allow action invariant enum missing".to_string())?;
+    for action in ["deny", "quarantine", "reject"] {
+        ensure(
+            outbound_non_allow_actions
+                .iter()
+                .any(|value| value.as_str() == Some(action)),
+            format!("outbound non-allow export invariant missing {action}"),
+        )?;
+    }
+    for field in ["payloadExportAllowed", "rawPayloadExportAllowed"] {
+        ensure_equal(
+            &schema
+                .pointer(&format!("/allOf/12/then/properties/{field}/const"))
+                .and_then(Value::as_bool),
+            &Some(false),
+            &format!("outbound non-allow decisions must set {field}=false"),
+        )?;
+    }
+    ensure_equal(
+        &schema
+            .pointer("/allOf/13/if/properties/direction/const")
+            .and_then(Value::as_str),
+        &Some("inbound"),
+        "inbound allow import trust invariant direction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/13/if/properties/action/const")
+            .and_then(Value::as_str),
+        &Some("allow"),
+        "inbound allow import trust invariant action",
+    )?;
+    let inbound_allow_import_trust = schema
+        .pointer("/allOf/13/then/properties/importTrustClass/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "inbound allow import trust invariant enum missing".to_string())?;
+    for allowed_class in ["agent_validated", "agent_assertion"] {
+        ensure(
+            inbound_allow_import_trust
+                .iter()
+                .any(|value| value.as_str() == Some(allowed_class)),
+            format!("inbound allow import trust invariant missing {allowed_class}"),
+        )?;
+    }
+    ensure(
+        !inbound_allow_import_trust.iter().any(Value::is_null),
+        "inbound allow decisions must use a concrete importTrustClass",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/14/if/properties/action/const")
+            .and_then(Value::as_str),
+        &Some("allow"),
+        "allow trust lane invariant action",
+    )?;
+    let allow_trust_lanes = schema
+        .pointer("/allOf/14/then/properties/trustLane/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "allow trust lane invariant enum missing".to_string())?;
+    for trust_lane in ["peerHumanViaPeer", "peerAgent", "peerDerived", "untrusted"] {
+        ensure(
+            allow_trust_lanes
+                .iter()
+                .any(|value| value.as_str() == Some(trust_lane)),
+            format!("allow trust lane invariant missing {trust_lane}"),
+        )?;
+    }
+    ensure(
+        !allow_trust_lanes
+            .iter()
+            .any(|value| value.as_str() == Some("localHuman")),
+        "allowed decisions must not use localHuman trustLane",
+    )?;
+    ensure(
+        !allow_trust_lanes.iter().any(Value::is_null),
+        "allowed decisions must use a concrete trustLane",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/15/if/properties/direction/const")
+            .and_then(Value::as_str),
+        &Some("inbound"),
+        "inbound allow non-body fetch invariant direction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/15/if/properties/action/const")
+            .and_then(Value::as_str),
+        &Some("allow"),
+        "inbound allow non-body fetch invariant action",
+    )?;
+    let non_body_lanes = schema
+        .pointer("/allOf/15/if/properties/materialLane/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "inbound allow non-body lane enum missing".to_string())?;
+    for material_lane in [
+        "metadata",
+        "embedding",
+        "graphLink",
+        "revisionNotice",
+        "curationSignal",
+    ] {
+        ensure(
+            non_body_lanes
+                .iter()
+                .any(|value| value.as_str() == Some(material_lane)),
+            format!("inbound allow non-body invariant missing {material_lane}"),
+        )?;
+    }
+    ensure(
+        !non_body_lanes
+            .iter()
+            .any(|value| value.as_str() == Some("body")),
+        "inbound allow non-body invariant must not include body",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/15/then/properties/bodyFetchAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(false),
+        "inbound allowed non-body decisions must not permit body fetch",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/16/if/properties/action/const")
+            .and_then(Value::as_str),
+        &Some("allow"),
+        "allow policy reference invariant action",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/16/then/properties/policyRef/not/const")
+            .and_then(Value::as_str),
+        &Some("missing"),
+        "allowed decisions must not use the missing policy reference sentinel",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/17/if/properties/action/const")
+            .and_then(Value::as_str),
+        &Some("allow"),
+        "allow redaction posture invariant action",
+    )?;
+    let allow_redactions = schema
+        .pointer("/allOf/17/then/properties/redaction/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "allow redaction posture invariant enum missing".to_string())?;
+    for redaction in ["share", "redact"] {
+        ensure(
+            allow_redactions
+                .iter()
+                .any(|value| value.as_str() == Some(redaction)),
+            format!("allow redaction posture invariant missing {redaction}"),
+        )?;
+    }
+    ensure(
+        !allow_redactions
+            .iter()
+            .any(|value| value.as_str() == Some("deny")),
+        "allowed decisions must not use the deny redaction posture",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/18/if/properties/direction/const")
+            .and_then(Value::as_str),
+        &Some("inbound"),
+        "inbound allow side-effect invariant direction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/18/if/properties/action/const")
+            .and_then(Value::as_str),
+        &Some("allow"),
+        "inbound allow side-effect invariant action",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/18/then/properties/localTruthSideEffectsAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "inbound allowed decisions must permit local-truth side effects",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/18/then/properties/searchOrGraphSideEffectsAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "inbound allowed decisions must permit search or graph side effects",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/19/if/properties/direction/const")
+            .and_then(Value::as_str),
+        &Some("outbound"),
+        "outbound allowed share export invariant direction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/19/if/properties/action/const")
+            .and_then(Value::as_str),
+        &Some("allow"),
+        "outbound allowed share export invariant action",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/19/if/properties/redaction/const")
+            .and_then(Value::as_str),
+        &Some("share"),
+        "outbound allowed share export invariant redaction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/19/then/properties/payloadExportAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "outbound allowed share decisions must permit payload export",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/19/then/properties/rawPayloadExportAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "outbound allowed share decisions must permit raw payload export",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/19/then/properties/redactedPayloadRequired/const")
+            .and_then(Value::as_bool),
+        &Some(false),
+        "outbound allowed share decisions must not require redacted payloads",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/19/then/properties/failure/type")
+            .and_then(Value::as_str),
+        &Some("null"),
+        "outbound allowed share decisions must not carry failure",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/20/if/properties/direction/const")
+            .and_then(Value::as_str),
+        &Some("outbound"),
+        "outbound allowed redact export invariant direction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/20/if/properties/action/const")
+            .and_then(Value::as_str),
+        &Some("allow"),
+        "outbound allowed redact export invariant action",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/20/if/properties/redaction/const")
+            .and_then(Value::as_str),
+        &Some("redact"),
+        "outbound allowed redact export invariant redaction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/20/then/properties/payloadExportAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "outbound allowed redact decisions must permit payload export",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/20/then/properties/rawPayloadExportAllowed/const")
+            .and_then(Value::as_bool),
+        &Some(false),
+        "outbound allowed redact decisions must not permit raw payload export",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/20/then/properties/redactedPayloadRequired/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "outbound allowed redact decisions must require redacted payloads",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/20/then/properties/failure/type")
+            .and_then(Value::as_str),
+        &Some("null"),
+        "outbound allowed redact decisions must not carry failure",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/21/if/properties/direction/const")
+            .and_then(Value::as_str),
+        &Some("outbound"),
+        "outbound redaction-required invariant direction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/21/if/properties/redaction/const")
+            .and_then(Value::as_str),
+        &Some("redact"),
+        "outbound redaction-required invariant posture",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/21/then/properties/redactedPayloadRequired/const")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "outbound redacted decisions must report redacted payload requirement",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/22/if/properties/direction/const")
+            .and_then(Value::as_str),
+        &Some("inbound"),
+        "inbound allow peer-safe trust lane invariant direction",
+    )?;
+    ensure_equal(
+        &schema
+            .pointer("/allOf/22/if/properties/action/const")
+            .and_then(Value::as_str),
+        &Some("allow"),
+        "inbound allow peer-safe trust lane invariant action",
+    )?;
+    let inbound_allow_trust_lanes = schema
+        .pointer("/allOf/22/then/properties/trustLane/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "inbound allow peer-safe trust lane enum missing".to_string())?;
+    for trust_lane in ["peerHumanViaPeer", "peerAgent", "peerDerived", "untrusted"] {
+        ensure(
+            inbound_allow_trust_lanes
+                .iter()
+                .any(|value| value.as_str() == Some(trust_lane)),
+            format!("inbound allow trust lane invariant missing {trust_lane}"),
+        )?;
+    }
+    ensure(
+        !inbound_allow_trust_lanes
+            .iter()
+            .any(|value| value.as_str() == Some("localHuman")),
+        "inbound allowed peer decisions must not use localHuman trustLane",
+    )?;
+    ensure(
+        !inbound_allow_trust_lanes.iter().any(Value::is_null),
+        "inbound allowed peer decisions must use a concrete trustLane",
+    )?;
     Ok(())
 }
 
@@ -416,11 +1178,24 @@ fn mesh_storage_status_schema_pins_policy_decision_counts() -> TestResult {
         "storage status schema must require policyDecisionEventCount",
     )?;
     ensure(
+        required
+            .iter()
+            .any(|value| value.as_str() == Some("policyFailureEventCount")),
+        "storage status schema must require policyFailureEventCount",
+    )?;
+    ensure(
         schema
             .pointer("/properties/policyDecisionEventCount/minimum")
             .and_then(Value::as_u64)
             == Some(0),
         "policyDecisionEventCount must be a non-negative counter",
+    )?;
+    ensure(
+        schema
+            .pointer("/properties/policyFailureEventCount/minimum")
+            .and_then(Value::as_u64)
+            == Some(0),
+        "policyFailureEventCount must be a non-negative counter",
     )
 }
 
@@ -656,6 +1431,157 @@ fn peer_policy_decision_fixture_pins_nested_inbound_failure() -> TestResult {
 }
 
 #[test]
+fn peer_policy_decision_fixtures_pin_inbound_non_allow_failures() -> TestResult {
+    let cases = [
+        (
+            "tests/fixtures/mesh/peer_policy_decision_inbound_denied.json",
+            "deny",
+            "mesh_peer_policy_denied",
+            "peer_policy_redaction_denied",
+            "body",
+            "deny",
+            "peerAgent",
+            "agent_validated",
+        ),
+        (
+            "tests/fixtures/mesh/peer_policy_decision_inbound_quarantined.json",
+            "quarantine",
+            "mesh_peer_policy_quarantined",
+            "peer_policy_lane_quarantined",
+            "curationSignal",
+            "share",
+            "peerHumanViaPeer",
+            "agent_validated",
+        ),
+        (
+            "tests/fixtures/mesh/peer_policy_decision_inbound_rejected.json",
+            "reject",
+            "mesh_peer_policy_rejected",
+            "peer_import_local_human_trust_lane",
+            "metadata",
+            "deny",
+            "localHuman",
+            "agent_validated",
+        ),
+    ];
+
+    for (fixture, action, code, reason, material_lane, redaction, trust_lane, import_trust_class) in
+        cases
+    {
+        let value = read_json(fixture)?;
+        ensure_equal(
+            &value.pointer("/schema").and_then(Value::as_str),
+            &Some(MESH_POLICY_DECISION_SCHEMA_V1),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/direction").and_then(Value::as_str),
+            &Some("inbound"),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/action").and_then(Value::as_str),
+            &Some(action),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/reason").and_then(Value::as_str),
+            &Some(reason),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/materialLane").and_then(Value::as_str),
+            &Some(material_lane),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/redaction").and_then(Value::as_str),
+            &Some(redaction),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/trustLane").and_then(Value::as_str),
+            &Some(trust_lane),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/importTrustClass").and_then(Value::as_str),
+            &Some(import_trust_class),
+            fixture,
+        )?;
+        ensure_not_disallowed_peer_import_trust_class(
+            value.pointer("/importTrustClass").and_then(Value::as_str),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/bodyFetchAllowed").and_then(Value::as_bool),
+            &Some(false),
+            fixture,
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/localTruthSideEffectsAllowed")
+                .and_then(Value::as_bool),
+            &Some(false),
+            fixture,
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/searchOrGraphSideEffectsAllowed")
+                .and_then(Value::as_bool),
+            &Some(false),
+            fixture,
+        )?;
+
+        let failure = value
+            .pointer("/failure")
+            .ok_or_else(|| format!("{fixture} missing failure"))?;
+        ensure_equal(
+            &failure.pointer("/schema").and_then(Value::as_str),
+            &Some(MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1),
+            fixture,
+        )?;
+        ensure_equal(
+            &failure.pointer("/code").and_then(Value::as_str),
+            &Some(code),
+            fixture,
+        )?;
+        ensure_equal(
+            &failure.pointer("/action").and_then(Value::as_str),
+            &Some(action),
+            fixture,
+        )?;
+        ensure_equal(
+            &failure.pointer("/reason").and_then(Value::as_str),
+            &value.pointer("/reason").and_then(Value::as_str),
+            fixture,
+        )?;
+        ensure_equal(
+            &failure.pointer("/policyRef").and_then(Value::as_str),
+            &value.pointer("/policyRef").and_then(Value::as_str),
+            fixture,
+        )?;
+        ensure_equal(
+            &failure.pointer("/materialLane").and_then(Value::as_str),
+            &value.pointer("/materialLane").and_then(Value::as_str),
+            fixture,
+        )?;
+        ensure_equal(
+            &failure.pointer("/redaction").and_then(Value::as_str),
+            &value.pointer("/redaction").and_then(Value::as_str),
+            fixture,
+        )?;
+        ensure_equal(
+            &failure.pointer("/trustLane").and_then(Value::as_str),
+            &value.pointer("/trustLane").and_then(Value::as_str),
+            fixture,
+        )?;
+    }
+
+    Ok(())
+}
+
+#[test]
 fn peer_policy_decision_fixture_pins_inbound_redacted_body_allow() -> TestResult {
     let value =
         read_json("tests/fixtures/mesh/peer_policy_decision_inbound_redacted_body_allowed.json")?;
@@ -689,9 +1615,9 @@ fn peer_policy_decision_fixture_pins_inbound_redacted_body_allow() -> TestResult
         &Some("agent_validated"),
         "import trust class",
     )?;
-    ensure(
-        value.pointer("/importTrustClass").and_then(Value::as_str) != Some("human_explicit"),
-        "peer-imported redacted body must not be human_explicit",
+    ensure_not_disallowed_peer_import_trust_class(
+        value.pointer("/importTrustClass").and_then(Value::as_str),
+        "peer-imported redacted body",
     )?;
     ensure_equal(
         &value.pointer("/bodyFetchAllowed").and_then(Value::as_bool),
@@ -771,6 +1697,130 @@ fn peer_policy_decision_fixture_pins_nested_outbound_failure() -> TestResult {
 }
 
 #[test]
+fn peer_policy_decision_fixtures_pin_outbound_non_allow_failures() -> TestResult {
+    let cases = [
+        (
+            "tests/fixtures/mesh/peer_policy_decision_outbound_denied.json",
+            "deny",
+            "mesh_outbound_policy_denied",
+            "outbound_payload_requires_redaction",
+            "embedding",
+            "redact",
+        ),
+        (
+            "tests/fixtures/mesh/peer_policy_decision_outbound_quarantined.json",
+            "quarantine",
+            "mesh_outbound_policy_quarantined",
+            "outbound_lane_quarantined",
+            "curationSignal",
+            "share",
+        ),
+        (
+            "tests/fixtures/mesh/peer_policy_decision_outbound_rejected.json",
+            "reject",
+            "mesh_outbound_policy_rejected",
+            "non_deny_default_action",
+            "metadata",
+            "deny",
+        ),
+    ];
+
+    for (fixture, action, code, reason, material_lane, redaction) in cases {
+        let value = read_json(fixture)?;
+        ensure_equal(
+            &value.pointer("/schema").and_then(Value::as_str),
+            &Some(MESH_POLICY_DECISION_SCHEMA_V1),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/direction").and_then(Value::as_str),
+            &Some("outbound"),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/action").and_then(Value::as_str),
+            &Some(action),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/reason").and_then(Value::as_str),
+            &Some(reason),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/materialLane").and_then(Value::as_str),
+            &Some(material_lane),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/redaction").and_then(Value::as_str),
+            &Some(redaction),
+            fixture,
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/payloadExportAllowed")
+                .and_then(Value::as_bool),
+            &Some(false),
+            fixture,
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/rawPayloadExportAllowed")
+                .and_then(Value::as_bool),
+            &Some(false),
+            fixture,
+        )?;
+
+        let failure = value
+            .pointer("/failure")
+            .ok_or_else(|| format!("{fixture} missing failure"))?;
+        ensure_equal(
+            &failure.pointer("/schema").and_then(Value::as_str),
+            &Some(MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1),
+            fixture,
+        )?;
+        ensure_equal(
+            &failure.pointer("/code").and_then(Value::as_str),
+            &Some(code),
+            fixture,
+        )?;
+        ensure_equal(
+            &failure.pointer("/action").and_then(Value::as_str),
+            &Some(action),
+            fixture,
+        )?;
+        ensure_equal(
+            &failure.pointer("/reason").and_then(Value::as_str),
+            &value.pointer("/reason").and_then(Value::as_str),
+            fixture,
+        )?;
+        ensure_equal(
+            &failure.pointer("/policyRef").and_then(Value::as_str),
+            &value.pointer("/policyRef").and_then(Value::as_str),
+            fixture,
+        )?;
+        ensure_equal(
+            &failure.pointer("/materialLane").and_then(Value::as_str),
+            &value.pointer("/materialLane").and_then(Value::as_str),
+            fixture,
+        )?;
+        ensure_equal(
+            &failure.pointer("/redaction").and_then(Value::as_str),
+            &value.pointer("/redaction").and_then(Value::as_str),
+            fixture,
+        )?;
+        ensure_equal(
+            &failure.pointer("/trustLane").and_then(Value::as_str),
+            &value.pointer("/trustLane").and_then(Value::as_str),
+            fixture,
+        )?;
+    }
+
+    Ok(())
+}
+
+#[test]
 fn peer_policy_decision_fixture_pins_outbound_redacted_body_allow() -> TestResult {
     let value =
         read_json("tests/fixtures/mesh/peer_policy_decision_outbound_redacted_body_allowed.json")?;
@@ -825,6 +1875,139 @@ fn peer_policy_decision_fixture_pins_outbound_redacted_body_allow() -> TestResul
         &Some(&Value::Null),
         "allowed outbound redacted body decision must not include failure",
     )
+}
+
+#[test]
+fn peer_policy_decision_fixture_pins_outbound_redacted_embedding_allow() -> TestResult {
+    let value = read_json(
+        "tests/fixtures/mesh/peer_policy_decision_outbound_redacted_embedding_allowed.json",
+    )?;
+    ensure_equal(
+        &value.pointer("/schema").and_then(Value::as_str),
+        &Some(MESH_POLICY_DECISION_SCHEMA_V1),
+        "decision schema",
+    )?;
+    ensure_equal(
+        &value.pointer("/direction").and_then(Value::as_str),
+        &Some("outbound"),
+        "decision direction",
+    )?;
+    ensure_equal(
+        &value.pointer("/action").and_then(Value::as_str),
+        &Some("allow"),
+        "decision action",
+    )?;
+    ensure_equal(
+        &value.pointer("/materialLane").and_then(Value::as_str),
+        &Some("embedding"),
+        "material lane",
+    )?;
+    ensure_equal(
+        &value.pointer("/redaction").and_then(Value::as_str),
+        &Some("redact"),
+        "redaction posture",
+    )?;
+    ensure_equal(
+        &value
+            .pointer("/payloadExportAllowed")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "payload export allowed",
+    )?;
+    ensure_equal(
+        &value
+            .pointer("/rawPayloadExportAllowed")
+            .and_then(Value::as_bool),
+        &Some(false),
+        "raw payload export allowed",
+    )?;
+    ensure_equal(
+        &value
+            .pointer("/redactedPayloadRequired")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "redacted payload required",
+    )?;
+    ensure_equal(
+        &value.pointer("/failure"),
+        &Some(&Value::Null),
+        "allowed outbound redacted embedding decision must not include failure",
+    )
+}
+
+#[test]
+fn peer_policy_decision_fixtures_pin_outbound_shared_payload_allow() -> TestResult {
+    let cases = [
+        (
+            "tests/fixtures/mesh/peer_policy_decision_outbound_metadata_allowed.json",
+            "metadata",
+        ),
+        (
+            "tests/fixtures/mesh/peer_policy_decision_outbound_revision_notice_allowed.json",
+            "revisionNotice",
+        ),
+        (
+            "tests/fixtures/mesh/peer_policy_decision_outbound_shared_body_allowed.json",
+            "body",
+        ),
+        (
+            "tests/fixtures/mesh/peer_policy_decision_outbound_shared_embedding_allowed.json",
+            "embedding",
+        ),
+    ];
+
+    for (fixture, material_lane) in cases {
+        let value = read_json(fixture)?;
+        ensure_equal(
+            &value.pointer("/schema").and_then(Value::as_str),
+            &Some(MESH_POLICY_DECISION_SCHEMA_V1),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/direction").and_then(Value::as_str),
+            &Some("outbound"),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/action").and_then(Value::as_str),
+            &Some("allow"),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/materialLane").and_then(Value::as_str),
+            &Some(material_lane),
+            fixture,
+        )?;
+        ensure_equal(
+            &value.pointer("/redaction").and_then(Value::as_str),
+            &Some("share"),
+            fixture,
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/payloadExportAllowed")
+                .and_then(Value::as_bool),
+            &Some(true),
+            fixture,
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/rawPayloadExportAllowed")
+                .and_then(Value::as_bool),
+            &Some(true),
+            fixture,
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/redactedPayloadRequired")
+                .and_then(Value::as_bool),
+            &Some(false),
+            fixture,
+        )?;
+        ensure_equal(&value.pointer("/failure"), &Some(&Value::Null), fixture)?;
+    }
+
+    Ok(())
 }
 
 #[test]

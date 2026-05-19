@@ -1,0 +1,24 @@
+{
+  "schema": "ee.mesh.policy_decision.v1",
+  "direction": "inbound",
+  "action": "quarantine",
+  "reason": "peer_policy_lane_quarantined",
+  "policyRef": "mesh_pol_21c8a6de90",
+  "materialLane": "curationSignal",
+  "redaction": "share",
+  "trustLane": "peerHumanViaPeer",
+  "importTrustClass": "agent_validated",
+  "bodyFetchAllowed": false,
+  "localTruthSideEffectsAllowed": false,
+  "searchOrGraphSideEffectsAllowed": false,
+  "failure": {
+    "schema": "ee.mesh.policy_failure_surface.v1",
+    "code": "mesh_peer_policy_quarantined",
+    "action": "quarantine",
+    "reason": "peer_policy_lane_quarantined",
+    "policyRef": "mesh_pol_21c8a6de90",
+    "materialLane": "curationSignal",
+    "redaction": "share",
+    "trustLane": "peerHumanViaPeer"
+  }
+}

@@ -68,7 +68,7 @@
     },
     "importTrustClass": {
       "type": ["string", "null"],
-      "enum": ["agent_validated", "agent_assertion", "cass_evidence", "legacy_import", null]
+      "enum": ["agent_validated", "agent_assertion", null]
     },
     "bodyFetchAllowed": {
       "type": "boolean"
@@ -183,6 +183,394 @@
           "rawPayloadExportAllowed": { "const": false },
           "redactedPayloadRequired": { "const": true },
           "failure": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "direction": { "const": "outbound" },
+          "action": { "const": "allow" },
+          "materialLane": { "const": "embedding" },
+          "redaction": { "const": "redact" }
+        },
+        "required": ["direction", "action", "materialLane", "redaction"]
+      },
+      "then": {
+        "required": [
+          "payloadExportAllowed",
+          "rawPayloadExportAllowed",
+          "redactedPayloadRequired",
+          "failure"
+        ],
+        "properties": {
+          "payloadExportAllowed": { "const": true },
+          "rawPayloadExportAllowed": { "const": false },
+          "redactedPayloadRequired": { "const": true },
+          "failure": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "direction": { "const": "outbound" },
+          "action": { "const": "allow" },
+          "materialLane": { "const": "body" },
+          "redaction": { "const": "share" }
+        },
+        "required": ["direction", "action", "materialLane", "redaction"]
+      },
+      "then": {
+        "required": [
+          "payloadExportAllowed",
+          "rawPayloadExportAllowed",
+          "redactedPayloadRequired",
+          "failure"
+        ],
+        "properties": {
+          "payloadExportAllowed": { "const": true },
+          "rawPayloadExportAllowed": { "const": true },
+          "redactedPayloadRequired": { "const": false },
+          "failure": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "direction": { "const": "outbound" },
+          "action": { "const": "allow" },
+          "materialLane": { "const": "embedding" },
+          "redaction": { "const": "share" }
+        },
+        "required": ["direction", "action", "materialLane", "redaction"]
+      },
+      "then": {
+        "required": [
+          "payloadExportAllowed",
+          "rawPayloadExportAllowed",
+          "redactedPayloadRequired",
+          "failure"
+        ],
+        "properties": {
+          "payloadExportAllowed": { "const": true },
+          "rawPayloadExportAllowed": { "const": true },
+          "redactedPayloadRequired": { "const": false },
+          "failure": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "direction": { "const": "outbound" },
+          "action": { "const": "allow" },
+          "materialLane": { "const": "metadata" },
+          "redaction": { "const": "share" }
+        },
+        "required": ["direction", "action", "materialLane", "redaction"]
+      },
+      "then": {
+        "required": [
+          "payloadExportAllowed",
+          "rawPayloadExportAllowed",
+          "redactedPayloadRequired",
+          "failure"
+        ],
+        "properties": {
+          "payloadExportAllowed": { "const": true },
+          "rawPayloadExportAllowed": { "const": true },
+          "redactedPayloadRequired": { "const": false },
+          "failure": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "direction": { "const": "outbound" },
+          "action": { "const": "allow" },
+          "materialLane": { "const": "revisionNotice" },
+          "redaction": { "const": "share" }
+        },
+        "required": ["direction", "action", "materialLane", "redaction"]
+      },
+      "then": {
+        "required": [
+          "payloadExportAllowed",
+          "rawPayloadExportAllowed",
+          "redactedPayloadRequired",
+          "failure"
+        ],
+        "properties": {
+          "payloadExportAllowed": { "const": true },
+          "rawPayloadExportAllowed": { "const": true },
+          "redactedPayloadRequired": { "const": false },
+          "failure": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": { "const": "allow" }
+        },
+        "required": ["action"]
+      },
+      "then": {
+        "required": ["failure"],
+        "properties": {
+          "failure": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": { "enum": ["deny", "quarantine", "reject"] }
+        },
+        "required": ["action"]
+      },
+      "then": {
+        "required": ["failure"],
+        "properties": {
+          "failure": { "$ref": "ee.mesh.policy_failure_surface.v1.json" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "direction": { "const": "inbound" },
+          "action": { "enum": ["deny", "quarantine", "reject"] }
+        },
+        "required": ["direction", "action"]
+      },
+      "then": {
+        "required": [
+          "bodyFetchAllowed",
+          "localTruthSideEffectsAllowed",
+          "searchOrGraphSideEffectsAllowed"
+        ],
+        "properties": {
+          "bodyFetchAllowed": { "const": false },
+          "localTruthSideEffectsAllowed": { "const": false },
+          "searchOrGraphSideEffectsAllowed": { "const": false }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "direction": { "const": "outbound" },
+          "action": { "enum": ["deny", "quarantine", "reject"] }
+        },
+        "required": ["direction", "action"]
+      },
+      "then": {
+        "required": ["payloadExportAllowed", "rawPayloadExportAllowed"],
+        "properties": {
+          "payloadExportAllowed": { "const": false },
+          "rawPayloadExportAllowed": { "const": false }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "direction": { "const": "inbound" },
+          "action": { "const": "allow" }
+        },
+        "required": ["direction", "action"]
+      },
+      "then": {
+        "required": ["importTrustClass"],
+        "properties": {
+          "importTrustClass": {
+            "enum": ["agent_validated", "agent_assertion"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": { "const": "allow" }
+        },
+        "required": ["action"]
+      },
+      "then": {
+        "required": ["trustLane"],
+        "properties": {
+          "trustLane": {
+            "enum": [
+              "peerHumanViaPeer",
+              "peerAgent",
+              "peerDerived",
+              "untrusted"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "direction": { "const": "inbound" },
+          "action": { "const": "allow" },
+          "materialLane": {
+            "enum": [
+              "metadata",
+              "embedding",
+              "graphLink",
+              "revisionNotice",
+              "curationSignal"
+            ]
+          }
+        },
+        "required": ["direction", "action", "materialLane"]
+      },
+      "then": {
+        "required": ["bodyFetchAllowed"],
+        "properties": {
+          "bodyFetchAllowed": { "const": false }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": { "const": "allow" }
+        },
+        "required": ["action"]
+      },
+      "then": {
+        "required": ["policyRef"],
+        "properties": {
+          "policyRef": {
+            "not": { "const": "missing" }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": { "const": "allow" }
+        },
+        "required": ["action"]
+      },
+      "then": {
+        "required": ["redaction"],
+        "properties": {
+          "redaction": {
+            "enum": ["share", "redact"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "direction": { "const": "inbound" },
+          "action": { "const": "allow" }
+        },
+        "required": ["direction", "action"]
+      },
+      "then": {
+        "required": [
+          "localTruthSideEffectsAllowed",
+          "searchOrGraphSideEffectsAllowed"
+        ],
+        "properties": {
+          "localTruthSideEffectsAllowed": { "const": true },
+          "searchOrGraphSideEffectsAllowed": { "const": true }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "direction": { "const": "outbound" },
+          "action": { "const": "allow" },
+          "redaction": { "const": "share" }
+        },
+        "required": ["direction", "action", "redaction"]
+      },
+      "then": {
+        "required": [
+          "payloadExportAllowed",
+          "rawPayloadExportAllowed",
+          "redactedPayloadRequired",
+          "failure"
+        ],
+        "properties": {
+          "payloadExportAllowed": { "const": true },
+          "rawPayloadExportAllowed": { "const": true },
+          "redactedPayloadRequired": { "const": false },
+          "failure": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "direction": { "const": "outbound" },
+          "action": { "const": "allow" },
+          "redaction": { "const": "redact" }
+        },
+        "required": ["direction", "action", "redaction"]
+      },
+      "then": {
+        "required": [
+          "payloadExportAllowed",
+          "rawPayloadExportAllowed",
+          "redactedPayloadRequired",
+          "failure"
+        ],
+        "properties": {
+          "payloadExportAllowed": { "const": true },
+          "rawPayloadExportAllowed": { "const": false },
+          "redactedPayloadRequired": { "const": true },
+          "failure": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "direction": { "const": "outbound" },
+          "redaction": { "const": "redact" }
+        },
+        "required": ["direction", "redaction"]
+      },
+      "then": {
+        "required": ["redactedPayloadRequired"],
+        "properties": {
+          "redactedPayloadRequired": { "const": true }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "direction": { "const": "inbound" },
+          "action": { "const": "allow" }
+        },
+        "required": ["direction", "action"]
+      },
+      "then": {
+        "required": ["trustLane"],
+        "properties": {
+          "trustLane": {
+            "enum": [
+              "peerHumanViaPeer",
+              "peerAgent",
+              "peerDerived",
+              "untrusted"
+            ]
+          }
         }
       }
     }

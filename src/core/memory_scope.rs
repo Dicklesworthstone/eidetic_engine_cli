@@ -329,7 +329,7 @@ impl MeshOutboundPolicyDecision {
 
     #[must_use]
     pub fn requires_redacted_payload(&self) -> bool {
-        self.permits_payload_export() && self.redaction == MeshRedactionDecision::Redact
+        self.redaction == MeshRedactionDecision::Redact
     }
 
     #[must_use]
@@ -836,12 +836,12 @@ pub fn decide_mesh_peer_policy(
             false,
         );
     }
-    if policy.import_trust_class == TrustClass::HumanExplicit {
+    if let Some(reason) = mesh_peer_import_trust_class_rejection_reason(policy.import_trust_class) {
         return mesh_peer_policy_decision(
             &import_input,
             policy_id,
             MeshImportDecisionKind::Reject,
-            "peer_import_human_explicit_disallowed",
+            reason,
             Some(policy.trust_lane),
             Some(policy.import_trust_class),
             MeshRedactionDecision::Deny,
@@ -1273,9 +1273,27 @@ fn mesh_peer_policy_decision(
         import: mesh_decision(input, None, workspace_scope_decision, reason),
         policy_id,
         trust_lane,
-        import_trust_class,
+        import_trust_class: peer_safe_mesh_import_trust_class(import_trust_class),
         redaction,
         body_fetch_allowed,
+    }
+}
+
+fn peer_safe_mesh_import_trust_class(import_trust_class: Option<TrustClass>) -> Option<TrustClass> {
+    import_trust_class.filter(|trust_class| {
+        matches!(
+            *trust_class,
+            TrustClass::AgentValidated | TrustClass::AgentAssertion
+        )
+    })
+}
+
+fn mesh_peer_import_trust_class_rejection_reason(trust_class: TrustClass) -> Option<&'static str> {
+    match trust_class {
+        TrustClass::HumanExplicit => Some("peer_import_human_explicit_disallowed"),
+        TrustClass::CassEvidence => Some("peer_import_cass_evidence_disallowed"),
+        TrustClass::LegacyImport => Some("peer_import_legacy_import_disallowed"),
+        TrustClass::AgentValidated | TrustClass::AgentAssertion => None,
     }
 }
 
@@ -1877,22 +1895,45 @@ team_members = ["OutsideAgent"]
     }
 
     #[test]
-    fn mesh_peer_policy_rejects_human_explicit_import_trust_class() {
-        let mut policy = peer_policy();
-        policy.import_trust_class = TrustClass::HumanExplicit;
+    fn mesh_peer_policy_rejects_non_peer_safe_import_trust_classes() {
+        for (trust_class, reason) in [
+            (
+                TrustClass::HumanExplicit,
+                "peer_import_human_explicit_disallowed",
+            ),
+            (
+                TrustClass::CassEvidence,
+                "peer_import_cass_evidence_disallowed",
+            ),
+            (
+                TrustClass::LegacyImport,
+                "peer_import_legacy_import_disallowed",
+            ),
+        ] {
+            let mut policy = peer_policy();
+            policy.import_trust_class = trust_class;
 
-        let decision =
-            decide_mesh_peer_policy(&peer_policy_input(MeshLane::Metadata), Some(&policy));
+            let decision =
+                decide_mesh_peer_policy(&peer_policy_input(MeshLane::Metadata), Some(&policy));
 
-        assert_eq!(
-            decision.import.workspace_scope_decision,
-            MeshImportDecisionKind::Reject
-        );
-        assert_eq!(
-            decision.import.reason,
-            "peer_import_human_explicit_disallowed"
-        );
-        assert!(!decision.permits_import_as_human_explicit());
+            assert_eq!(
+                decision.import.workspace_scope_decision,
+                MeshImportDecisionKind::Reject
+            );
+            assert_eq!(decision.import.reason, reason);
+            assert_eq!(decision.import_trust_class, None);
+            assert!(!decision.permits_import_as_human_explicit());
+
+            let json = decision.to_json();
+            assert_eq!(json["importTrustClass"], JsonValue::Null);
+            assert_eq!(json["failure"]["code"], "mesh_peer_policy_rejected");
+            assert_ne!(
+                json.pointer("/importTrustClass")
+                    .and_then(JsonValue::as_str),
+                Some(trust_class.as_str()),
+                "decision JSON leaked unsafe import trust class: {json}"
+            );
+        }
     }
 
     #[test]
@@ -2284,6 +2325,7 @@ max_bytes = 0
         assert_eq!(raw.action, MeshImportDecisionKind::Deny);
         assert_eq!(raw.reason, "outbound_payload_requires_redaction");
         assert!(!raw.permits_payload_export());
+        assert!(raw.requires_redacted_payload());
 
         let mut redacted_input = outbound_policy_input(MeshLane::Body);
         redacted_input.payload_is_redacted = true;
@@ -2306,6 +2348,7 @@ max_bytes = 0
         assert_eq!(raw.action, MeshImportDecisionKind::Deny);
         assert_eq!(raw.reason, "outbound_payload_requires_redaction");
         assert!(!raw.permits_payload_export());
+        assert!(raw.requires_redacted_payload());
 
         let mut redacted_input = outbound_policy_input(MeshLane::Metadata);
         redacted_input.payload_is_redacted = true;
@@ -2328,6 +2371,7 @@ max_bytes = 0
             decide_mesh_outbound_policy(&outbound_policy_input(MeshLane::Embedding), Some(&policy));
         assert_eq!(raw.action, MeshImportDecisionKind::Deny);
         assert_eq!(raw.reason, "outbound_payload_requires_redaction");
+        assert!(raw.requires_redacted_payload());
 
         let mut redacted_input = outbound_policy_input(MeshLane::Embedding);
         redacted_input.payload_is_redacted = true;
@@ -2374,6 +2418,23 @@ max_bytes = 0
             denied_json["failure"]["schema"],
             "ee.mesh.policy_failure_surface.v1"
         );
+
+        let mut redaction_required_policy = peer_policy();
+        redaction_required_policy.allowed_lanes.embedding = Some(MeshLaneDecision::Allow);
+        redaction_required_policy.redaction.embedding = MeshRedactionDecision::Redact;
+        let redaction_required = decide_mesh_outbound_policy(
+            &outbound_policy_input(MeshLane::Embedding),
+            Some(&redaction_required_policy),
+        )
+        .to_json();
+        assert_eq!(redaction_required["action"], "deny");
+        assert_eq!(
+            redaction_required["reason"],
+            "outbound_payload_requires_redaction"
+        );
+        assert_eq!(redaction_required["payloadExportAllowed"], false);
+        assert_eq!(redaction_required["rawPayloadExportAllowed"], false);
+        assert_eq!(redaction_required["redactedPayloadRequired"], true);
         assert!(
             !denied_json.to_string().contains("/Users/alice/private"),
             "outbound decision JSON leaked raw policy path: {denied_json}"

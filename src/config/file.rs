@@ -1856,7 +1856,7 @@ fn required_table_peer_import_trust_class(
         _ => Err(ConfigParseError::InvalidValue {
             key: format!("{prefix}.{key}"),
             value,
-            message: "peer material must import as `agent_assertion` or `agent_validated`, never `human_explicit`".to_string(),
+            message: "peer material must import as `agent_assertion` or `agent_validated`, never `human_explicit`, `cass_evidence`, or `legacy_import`".to_string(),
         }),
     }
 }
@@ -2985,7 +2985,7 @@ requires_consent = true
     }
 
     #[test]
-    fn peer_policy_rejects_local_human_lane_and_human_explicit_import() -> TestResult {
+    fn peer_policy_rejects_local_human_lane_and_non_peer_safe_import_trust() -> TestResult {
         let local_human_error = expect_config_error(
             r#"
 [[mesh.peer_policies]]
@@ -3025,15 +3025,16 @@ requires_consent = true
             format!("unexpected localHuman error: {local_human_error:?}"),
         )?;
 
-        let human_explicit_error = expect_config_error(
-            r#"
+        for disallowed_class in ["human_explicit", "cass_evidence", "legacy_import"] {
+            let config = format!(
+                r#"
 [[mesh.peer_policies]]
-policy_id = "pol_human_explicit_001"
+policy_id = "pol_disallowed_import_001"
 workspace_id = "wsp_workspace_a_001"
 peer_id = "peer_agent_001"
 origin_workspace_ids = ["wsp_origin_001"]
 trust_lane = "peerAgent"
-import_trust_class = "human_explicit"
+import_trust_class = "{disallowed_class}"
 default_action = "deny"
 
 [mesh.peer_policies.allowed_lanes]
@@ -3054,15 +3055,24 @@ embedding = "deny"
 allowed = false
 requires_consent = true
 "#,
-        )?;
-        ensure(
-            matches!(
-                human_explicit_error,
-                ConfigParseError::InvalidValue { ref key, .. }
-                    if key == "mesh.peer_policies[0].import_trust_class"
-            ),
-            format!("unexpected human_explicit error: {human_explicit_error:?}"),
-        )
+            );
+            let error = expect_config_error(&config)?;
+            ensure(
+                matches!(
+                    error,
+                    ConfigParseError::InvalidValue { ref key, ref value, ref message }
+                        if key == "mesh.peer_policies[0].import_trust_class"
+                            && value == disallowed_class
+                            && message.contains("agent_assertion")
+                            && message.contains("agent_validated")
+                            && message.contains("human_explicit")
+                            && message.contains("cass_evidence")
+                            && message.contains("legacy_import")
+                ),
+                format!("unexpected {disallowed_class} error: {error:?}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

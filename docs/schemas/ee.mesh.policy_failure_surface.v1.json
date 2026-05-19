@@ -72,5 +72,67 @@
         null
       ]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
+              "mesh_peer_policy_denied",
+              "mesh_outbound_policy_denied"
+            ]
+          }
+        },
+        "required": ["code"]
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "const": "deny"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
+              "mesh_peer_policy_quarantined",
+              "mesh_outbound_policy_quarantined"
+            ]
+          }
+        },
+        "required": ["code"]
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "const": "quarantine"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
+              "mesh_peer_policy_rejected",
+              "mesh_outbound_policy_rejected"
+            ]
+          }
+        },
+        "required": ["code"]
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "const": "reject"
+          }
+        }
+      }
+    }
+  ]
 }

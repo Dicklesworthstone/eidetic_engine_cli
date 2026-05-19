@@ -50,7 +50,7 @@
       "$ref": "#/$defs/trustLane"
     },
     "importTrustClass": {
-      "description": "Local trust class assigned to imported peer material. Peer material must never import as human_explicit.",
+      "description": "Local trust class assigned to imported peer material. Peer material may import only as agent_assertion or agent_validated, never as human_explicit, cass_evidence, or legacy_import.",
       "type": "string",
       "enum": ["agent_assertion", "agent_validated"]
     },
@@ -153,9 +153,9 @@
       "pattern": "^[A-Za-z0-9._:-]+$"
     },
     "trustLane": {
+      "description": "Trust lane assigned to imported peer material. localHuman is reserved for local records and rejected by peer policy config parsing.",
       "type": "string",
       "enum": [
-        "localHuman",
         "peerHumanViaPeer",
         "peerAgent",
         "peerDerived",

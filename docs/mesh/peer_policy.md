@@ -20,7 +20,7 @@ runtime decisions.
 
 ## Trust Lanes
 
-Peer material can use these trust lanes:
+The full mesh trust-lane vocabulary is:
 
 | Lane | Meaning |
 | --- | --- |
@@ -30,9 +30,14 @@ Peer material can use these trust lanes:
 | `peerDerived` | Material is derived from a peer cache, index, graph, or summary. |
 | `untrusted` | Material is retained only for audit, quarantine, or operator review. |
 
+Peer policy records may assign only the peer-safe lanes:
+`peerHumanViaPeer`, `peerAgent`, `peerDerived`, or `untrusted`. The config
+parser and schema both reject `localHuman` in peer policy records.
+
 Imported peer material maps to `agent_assertion` or `agent_validated` in the
-local memory trust class. It must never import as `human_explicit`, even when
-the remote peer says a human authored the original record.
+local memory trust class. It must never import as `human_explicit`,
+`cass_evidence`, or `legacy_import`, even when the remote peer says a human
+authored the original record.
 
 ## Lane Grants
 
@@ -73,23 +78,51 @@ Inbound failures use these stable policy-layer codes:
 The failure fields include the action, reason, material lane, redaction posture,
 trust lane, and a redaction-safe policy reference. Path-like policy identifiers
 are replaced with stable `mesh_pol_*` aliases before they leave the policy
-layer.
+layer. The failure-surface schema rejects mismatched code/action pairs, so a
+`*_denied` code must carry `deny`, a `*_quarantined` code must carry
+`quarantine`, and a `*_rejected` code must carry `reject`.
 
 The full inbound decision also has a stable redaction-safe JSON surface for
 callers that need to expose allowed decisions:
 
 - `action`, `reason`, `policyRef`, `materialLane`, `redaction`, `trustLane`,
   and `importTrustClass` describe the policy result.
+- Allowed decisions must carry a matched redaction-safe `policyRef`; the
+  `missing` sentinel is reserved for fail-closed non-allow decisions.
+- Allowed decisions must use a shareable redaction posture: `share` for content
+  that can leave the peer boundary or `redact` for payloads with protected body
+  fields removed. `redaction=deny` is a fail-closed non-allow result.
+- Allowed decisions must carry a concrete peer-safe `trustLane`
+  (`peerHumanViaPeer`, `peerAgent`, `peerDerived`, or `untrusted`). `null` is
+  reserved for missing-policy denial surfaces, and `localHuman` is local-only
+  failure evidence, not an allowed peer-policy posture.
+- `importTrustClass` is limited to `agent_assertion`, `agent_validated`, or
+  `null` when no matching policy exists. Mesh peer decisions must not surface
+  `human_explicit`, `cass_evidence`, or `legacy_import` as imported peer trust.
+  If a malformed in-memory policy attempts to use one of those local-only
+  classes, the decision rejects it and suppresses the unsafe class to `null` in
+  JSON. Allowed inbound decisions must use a concrete peer-safe trust class;
+  `null` is reserved for missing-policy denial surfaces and rejected invalid
+  policy material.
 - `bodyFetchAllowed`, `localTruthSideEffectsAllowed`, and
-  `searchOrGraphSideEffectsAllowed` make side effects explicit.
+  `searchOrGraphSideEffectsAllowed` make side effects explicit. Only allowed
+  inbound body decisions may set `bodyFetchAllowed=true`; allowed non-body
+  decisions must set it to `false`. Allowed inbound decisions set local-truth
+  and search/graph side effects to `true`; non-allow inbound decisions set both
+  to `false`.
 - `failure` is either `null` for allowed decisions or the
   `ee.mesh.policy_failure_surface.v1` object described above.
+- Non-allow inbound decisions (`deny`, `quarantine`, `reject`) must set all
+  inbound side-effect booleans to `false`.
 
 The same policy is checked before outbound sharing. A lane grant alone is not
 enough for body or embedding payloads: if the redaction posture is `deny`, the
 payload must not leave the node; if the posture is `redact`, only an already
 redacted payload can be exported. Raw body or embedding payloads require both
-`allow` on the lane and `share` on the matching redaction posture.
+`allow` on the lane and `share` on the matching redaction posture. Non-allow
+outbound decisions must set `payloadExportAllowed` and `rawPayloadExportAllowed`
+to `false`; they still report `redactedPayloadRequired=true` when the blocked
+lane would have required a redacted payload.
 
 Outbound failures use the same structured surface with outbound-specific codes
 that later export/status callers can embed directly:
@@ -103,7 +136,14 @@ that later export/status callers can embed directly:
 The outbound decision JSON uses the same safe policy reference and exposes
 `payloadExportAllowed`, `rawPayloadExportAllowed`, and
 `redactedPayloadRequired`, so export callers can enforce body/embedding privacy
-without reinterpreting policy internals.
+without reinterpreting policy internals. For every outbound allowed decision,
+`redaction=share` permits raw payload export and leaves
+`redactedPayloadRequired=false`, while `redaction=redact` permits only redacted
+payload export and sets `redactedPayloadRequired=true`.
+
+Mesh storage status reports both the total policy-decision event count and the
+subset that produced policy failure surfaces so status callers can distinguish
+ordinary allowed decisions from denied, quarantined, or rejected material.
 
 The mesh import ledger persists the same `ee.mesh.policy_failure_surface.v1`
 JSON in `policy_failure_surface_json` when an imported event is retained after
@@ -118,8 +158,9 @@ Workspace-local peer policies are registered in `.ee/config.toml` under
 `[[mesh.peer_policies]]`. The config parser is intentionally stricter than the
 schema fixture surface: missing policy fields are configuration errors, the
 default action must be `deny`, peer material can import only as
-`agent_assertion` or `agent_validated`, and `localHuman` is rejected for peer
-policy imports.
+`agent_assertion` or `agent_validated`, `human_explicit`/`cass_evidence`/
+`legacy_import` are rejected as local-only import trust classes, and
+`localHuman` is rejected for peer policy trust lanes.
 
 ```toml
 [[mesh.peer_policies]]
@@ -166,13 +207,38 @@ Initial fixtures live under `tests/fixtures/mesh/`:
 - `peer_policy_decision_inbound_allowed.json` pins the stable JSON shape for an
   allowed inbound metadata decision and its local side-effect booleans.
 - `peer_policy_decision_inbound_redacted_body_allowed.json` pins the allowed
-  inbound redacted body-fetch decision without ever promoting peer material to
-  `human_explicit`.
+  inbound redacted body-fetch decision without ever promoting peer material to a
+  local-only import trust class.
 - `peer_policy_decision_inbound_denied.json` pins a denied inbound body decision
   with a nested redaction-safe `ee.mesh.policy_failure_surface.v1` failure.
+- `peer_policy_decision_inbound_quarantined.json` pins an inbound
+  curation-signal quarantine decision with a nested redaction-safe
+  `ee.mesh.policy_failure_surface.v1` failure.
+- `peer_policy_decision_inbound_rejected.json` pins an inbound rejected metadata
+  decision with a nested redaction-safe `ee.mesh.policy_failure_surface.v1`
+  failure.
+- `peer_policy_decision_outbound_metadata_allowed.json` pins the outbound
+  metadata export decision shape.
+- `peer_policy_decision_outbound_revision_notice_allowed.json` pins the
+  outbound revision-notice export decision shape for freshness signaling without
+  body or embedding exposure.
 - `peer_policy_decision_outbound_redacted_body_allowed.json` pins the outbound
   redacted body export decision shape.
+- `peer_policy_decision_outbound_redacted_embedding_allowed.json` pins the
+  outbound redacted embedding export decision shape.
+- `peer_policy_decision_outbound_shared_body_allowed.json` pins the explicit
+  raw body export decision shape when the body lane and body redaction posture
+  both allow sharing.
+- `peer_policy_decision_outbound_shared_embedding_allowed.json` pins the
+  explicit raw embedding export decision shape when the embedding lane and
+  embedding redaction posture both allow sharing.
 - `peer_policy_decision_outbound_denied.json` pins an outbound denied embedding
+  decision with a nested redaction-safe `ee.mesh.policy_failure_surface.v1`
+  failure.
+- `peer_policy_decision_outbound_quarantined.json` pins an outbound quarantined
+  curation-signal decision with a nested redaction-safe
+  `ee.mesh.policy_failure_surface.v1` failure.
+- `peer_policy_decision_outbound_rejected.json` pins an outbound rejected metadata
   decision with a nested redaction-safe `ee.mesh.policy_failure_surface.v1`
   failure.
 - `peer_policy_failure_surface_denied.json` pins the standalone inbound body
