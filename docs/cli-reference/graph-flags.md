@@ -82,7 +82,7 @@ ee search "release blockers" --workspace . --explain-performance --json
 
 | Command | Flag | Values | Default | Use |
 | --- | --- | --- | --- | --- |
-| `ee insights` | `--section <NAME>` | section name | omitted | Emits one deterministic insights section, such as `bridges`, `proximityHotspots`, `knowledgeSkyline`, `hubs`, or `authorities`. |
+| `ee insights` | `--section <NAME>` | section name | omitted | Emits one deterministic insights section, such as `bridges`, `proximityHotspots`, `knowledgeSkyline`, `hubs`, `authorities`, or `loadBearingMemories`. |
 | `ee insights` | `--explain <MEMORY_ID>` | memory ID | omitted | Frames the insights bundle around one memory explanation target. Conflicts with `--section`. |
 | `ee insights` | `--limit <N>` | integer | `10` | Caps items returned for `--section`; capped internally at 100. |
 | `ee insights` | `--offset <N>` | integer | `0` | Skips section items before returning the page. |
@@ -102,6 +102,9 @@ Example:
 
 ```bash
 ee insights --section proximityHotspots --workspace . --limit 5 --json
+ee insights --section hubs --workspace . --limit 5 --json
+ee insights --section authorities --workspace . --limit 5 --json
+ee insights --section loadBearingMemories --workspace . --limit 5 --json
 ee insights --explain mem_failed_release --workspace . --limit 5 --json
 ee proximity mem_release_policy mem_rch_remote_required --workspace . --json
 ee proximity mem_release_policy mem_rch_remote_required --workspace . \
@@ -113,6 +116,13 @@ ee rule provenance rule_release_policy --workspace . --json
 ee health --robot-insights --workspace . --json
 ee status --skyline --workspace . --json
 ```
+
+`hubs` and `authorities` require `graph.feature.hits_profiles.enabled`.
+`loadBearingMemories` requires `graph.feature.load_bearing.enabled`. When a
+section is disabled, `ee insights --section ... --json` returns a degraded
+signal with the repair command, such as
+`ee config set graph.feature.hits_profiles.enabled true` or
+`ee config set graph.feature.load_bearing.enabled true`.
 
 ## Causal Command Flags
 

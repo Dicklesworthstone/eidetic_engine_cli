@@ -133,6 +133,30 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
 }
 
 #[test]
+fn graph_cli_reference_documents_hits_and_load_bearing_insights_examples() -> TestResult {
+    let reference_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("docs")
+        .join("cli-reference")
+        .join("graph-flags.md");
+    let reference = std::fs::read_to_string(&reference_path)
+        .map_err(|error| format!("failed to read {}: {error}", reference_path.display()))?;
+
+    assert_contains_all(
+        &reference,
+        &[
+            "ee insights --section hubs --workspace . --limit 5 --json",
+            "ee insights --section authorities --workspace . --limit 5 --json",
+            "ee insights --section loadBearingMemories --workspace . --limit 5 --json",
+            "graph.feature.hits_profiles.enabled",
+            "graph.feature.load_bearing.enabled",
+            "ee config set graph.feature.hits_profiles.enabled true",
+            "ee config set graph.feature.load_bearing.enabled true",
+        ],
+        "docs/cli-reference/graph-flags.md",
+    )
+}
+
+#[test]
 fn graph_command_flags_are_help_discoverable() -> TestResult {
     let graph_help = help_for(&["ee", "graph", "--help"])?;
     assert_contains_all(
@@ -611,6 +635,33 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "5",
             "--offset",
             "1",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "insights",
+            "--section",
+            "hubs",
+            "--limit",
+            "5",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "insights",
+            "--section",
+            "authorities",
+            "--limit",
+            "5",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "insights",
+            "--section",
+            "loadBearingMemories",
+            "--limit",
+            "5",
             "--json",
         ][..],
         &[
