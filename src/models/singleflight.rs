@@ -550,6 +550,56 @@ mod tests {
     }
 
     #[test]
+    fn posture_serialization_excludes_raw_key_inputs() -> TestResult {
+        let raw_query = "release plan with password=swordfish and secret-token-123";
+        let raw_workspace = "/private/user/project-with-secret-name";
+        let raw_memory = "raw memory body must not appear in posture";
+        let mut input = SingleFlightKeyInput::new(
+            SingleFlightSurface::Context,
+            raw_workspace,
+            7,
+            "ee.context.v2",
+        );
+        input.index_generation = Some(11);
+        input.graph_generation = Some(13);
+        input.query_text = Some(raw_query);
+        input.option_pairs = &[
+            ("memoryBody", raw_memory),
+            ("sourcePath", "/private/source/path.md"),
+        ];
+
+        let key = SingleFlightKey::from_input(&input);
+        let report =
+            SingleFlightPostureReport::from_surfaces(vec![SingleFlightSurfacePosture::new(
+                SingleFlightSurface::Context,
+                true,
+                0,
+                SingleFlightSurfaceCounters::default(),
+                2_000,
+                Some(SingleFlightLastKeyPosture::from_key(&key)),
+            )]);
+
+        let serialized = serde_json::to_string(&report)?;
+        assert!(serialized.contains(&key.key_hash));
+        assert!(serialized.contains("\"lastKey\""));
+        for forbidden in [
+            raw_query,
+            "password=swordfish",
+            "secret-token-123",
+            raw_workspace,
+            "project-with-secret-name",
+            raw_memory,
+            "/private/source/path.md",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "single-flight posture leaked raw key input {forbidden:?}: {serialized}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn sorted_flags_and_options_are_canonical() {
         let mut left = SingleFlightKeyInput::new(
             SingleFlightSurface::Search,
