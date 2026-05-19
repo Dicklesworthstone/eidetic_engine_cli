@@ -7,13 +7,22 @@
 //! asserts the stable JSON and human summaries expose the codes that the
 //! current public collector can deterministically emit.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::UNIX_EPOCH;
 
 use serde_json::{Map, Value};
 
 type TestResult = Result<(), String>;
+
+#[derive(Debug, Eq, PartialEq)]
+struct FileFingerprint {
+    len: u64,
+    modified_nanos: Option<u128>,
+    blake3: String,
+}
 
 const OVERSIZED_BEADS_JSONL_LEN: usize = 8 * 1024 * 1024 + 1024;
 const SYNTHETIC_RAW_SECRET: &str = "sk-proj-WORKSPACEHYGIENEPUBLICSYNTHETIC000000000000";
@@ -207,6 +216,72 @@ fn parse_json(output: &Output, context: &str) -> Result<Value, String> {
             String::from_utf8_lossy(&output.stdout)
         )
     })
+}
+
+fn workspace_file_fingerprints(
+    workspace: &Path,
+) -> Result<BTreeMap<String, FileFingerprint>, String> {
+    let mut fingerprints = BTreeMap::new();
+    collect_file_fingerprints(workspace, workspace, &mut fingerprints)?;
+    Ok(fingerprints)
+}
+
+fn collect_file_fingerprints(
+    workspace: &Path,
+    dir: &Path,
+    fingerprints: &mut BTreeMap<String, FileFingerprint>,
+) -> TestResult {
+    let mut entries = fs::read_dir(dir)
+        .map_err(|error| format!("read directory {}: {error}", dir.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("read directory entry in {}: {error}", dir.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(workspace)
+            .map_err(|error| format!("strip workspace prefix for {}: {error}", path.display()))?;
+        if relative.starts_with(".git") {
+            continue;
+        }
+
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("stat {}: {error}", path.display()))?;
+        if metadata.is_dir() {
+            collect_file_fingerprints(workspace, &path, fingerprints)?;
+        } else if metadata.is_file() {
+            let bytes =
+                fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+            let modified_nanos = metadata
+                .modified()
+                .map_err(|error| format!("read mtime for {}: {error}", path.display()))?
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_nanos());
+            fingerprints.insert(
+                relative_workspace_path(relative)?,
+                FileFingerprint {
+                    len: metadata.len(),
+                    modified_nanos,
+                    blake3: blake3::hash(&bytes).to_hex().to_string(),
+                },
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn relative_workspace_path(path: &Path) -> Result<String, String> {
+    path.iter()
+        .map(|component| {
+            component
+                .to_str()
+                .ok_or_else(|| format!("workspace path is not UTF-8: {}", path.display()))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|components| components.join("/"))
 }
 
 fn degraded_codes(value: &Value) -> Vec<&str> {
@@ -461,6 +536,53 @@ fn workspace_hygiene_json_public_surface_emits_degraded_codes() -> TestResult {
             "workspace hygiene JSON missing Agent Mail recovery next action; got {next_actions:?}"
         ));
     }
+    Ok(())
+}
+
+#[test]
+fn workspace_hygiene_public_surfaces_do_not_mutate_fixture_files() -> TestResult {
+    let workspace = init_dirty_git_workspace()?;
+    write_synthetic_secret_fixture(&workspace)?;
+    let before = workspace_file_fingerprints(&workspace)?;
+
+    let json_output = run_ee(
+        &[
+            "--json",
+            "workspace",
+            "hygiene",
+            "--agent-name",
+            "IvoryCondor",
+        ],
+        &workspace,
+        "workspace hygiene json read-only guard",
+    )?;
+    ensure_success(&json_output, "workspace hygiene json read-only guard")?;
+    let value = parse_json(&json_output, "workspace hygiene json read-only guard")?;
+    if value.pointer("/data/readOnly").and_then(Value::as_bool) != Some(true) {
+        return Err(format!(
+            "workspace hygiene JSON must report readOnly=true: {value}"
+        ));
+    }
+    let after_json = workspace_file_fingerprints(&workspace)?;
+    if before != after_json {
+        return Err(format!(
+            "workspace hygiene JSON mutated fixture files\nbefore: {before:#?}\nafter: {after_json:#?}"
+        ));
+    }
+
+    let human_output = run_ee(
+        &["workspace", "hygiene", "--agent-name", "IvoryCondor"],
+        &workspace,
+        "workspace hygiene human read-only guard",
+    )?;
+    ensure_success(&human_output, "workspace hygiene human read-only guard")?;
+    let after_human = workspace_file_fingerprints(&workspace)?;
+    if before != after_human {
+        return Err(format!(
+            "workspace hygiene human output mutated fixture files\nbefore: {before:#?}\nafter: {after_human:#?}"
+        ));
+    }
+
     Ok(())
 }
 
