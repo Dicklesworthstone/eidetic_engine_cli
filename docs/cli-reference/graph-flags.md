@@ -226,6 +226,8 @@ ee graph louvain --workspace . --resolution 1.2 --threshold 0.000001 \
 ee graph export --workspace . --type memory_links \
   --workspace-id ws_release --snapshot-id snap_release --format mermaid
 ee graph centrality --workspace . --algorithm pagerank --limit 10 --json
+ee graph centrality --workspace . --algorithm hits-authorities \
+  --memory-id mem_release_policy --require-fresh --json
 ee graph centrality-refresh --workspace . --dry-run --min-confidence 0.6 --json
 ee graph k-core --workspace . --k 3 --min-confidence 0.6 --json
 ee graph path mem_source mem_target --workspace . --min-weight 0.4 --json

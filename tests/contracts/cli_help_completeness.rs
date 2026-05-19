@@ -621,6 +621,17 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
         &[
             "ee",
             "graph",
+            "centrality",
+            "--algorithm",
+            "hits-authorities",
+            "--memory-id",
+            "mem_release_policy",
+            "--require-fresh",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "graph",
             "centrality-refresh",
             "--dry-run",
             "--min-confidence",
