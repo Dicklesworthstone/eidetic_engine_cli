@@ -40,6 +40,7 @@ use crate::graph::DiGraph;
 use crate::graph::GraphResult;
 use crate::graph::algorithms::{DEFAULT_BACKGROUND_BUDGET, current_or_testing_cx, run_with_budget};
 use crate::models::degradation::GRAPH_DOMINANCE_NO_REVISION_CHAIN_CODE;
+use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 pub const MEMORY_IMPACT_ANALYSIS_SCHEMA_V1: &str = "ee.memory.impact_analysis.v1";
 
@@ -193,7 +194,7 @@ pub fn compute_dominance_frontiers_with_cx(
             dominance_frontiers(&graph, &start)
                 .into_iter()
                 .map(|(node, mut frontier)| {
-                    frontier.sort();
+                    sort_by_ulid_payload_or_lexical(&mut frontier, String::as_str);
                     frontier.dedup();
                     (node, frontier)
                 })
@@ -408,7 +409,7 @@ fn revision_frontier_items(
     frontiers: &DominanceFrontiers,
     snapshot_version: u64,
 ) -> Vec<RevisionFrontierItem> {
-    frontiers
+    let mut items = frontiers
         .iter()
         .map(|(memory_id, frontier)| RevisionFrontierItem {
             memory_id: memory_id.clone(),
@@ -419,7 +420,9 @@ fn revision_frontier_items(
                 snapshot_version,
             },
         })
-        .collect()
+        .collect::<Vec<_>>();
+    sort_by_ulid_payload_or_lexical(&mut items, |item| item.memory_id.as_str());
+    items
 }
 
 #[cfg(test)]
@@ -428,6 +431,10 @@ mod tests {
     use fnx_runtime::CompatibilityMode;
 
     type TestResult = Result<(), String>;
+
+    const PUBLIC_ID_EARLY: &str = "note_01J0000000000000000000000A";
+    const PUBLIC_ID_MIDDLE: &str = "rule_01J0000000000000000000000B";
+    const PUBLIC_ID_LATE: &str = "mem_01J0000000000000000000000C";
 
     fn graph_result<T>(result: GraphResult<T>) -> Result<T, String> {
         result.map_err(|error| error.to_string())
@@ -530,6 +537,29 @@ mod tests {
         assert!(
             !frontiers.contains_key("y"),
             "unreachable-from-start nodes must not appear in frontiers map"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dominance_frontiers_use_radix_public_id_payload_order() -> TestResult {
+        let mut graph = empty_digraph();
+        add_edge(&mut graph, "root", "left");
+        add_edge(&mut graph, "root", "right");
+        add_edge(&mut graph, "left", PUBLIC_ID_LATE);
+        add_edge(&mut graph, "left", PUBLIC_ID_EARLY);
+        add_edge(&mut graph, "right", PUBLIC_ID_LATE);
+        add_edge(&mut graph, "right", PUBLIC_ID_EARLY);
+
+        let frontiers = graph_result(compute_dominance_frontiers(&graph, "root"))?;
+
+        assert_eq!(
+            frontiers.get("left").cloned().unwrap_or_default(),
+            vec![PUBLIC_ID_EARLY, PUBLIC_ID_LATE]
+        );
+        assert_eq!(
+            frontiers.get("right").cloned().unwrap_or_default(),
+            vec![PUBLIC_ID_EARLY, PUBLIC_ID_LATE]
         );
         Ok(())
     }
@@ -657,6 +687,24 @@ mod tests {
             Some(&serde_json::json!(["graph_dominance"]))
         );
         Ok(())
+    }
+
+    #[test]
+    fn revision_frontier_items_use_radix_public_id_payload_order() {
+        let mut frontiers = DominanceFrontiers::new();
+        frontiers.insert(PUBLIC_ID_LATE.to_owned(), Vec::new());
+        frontiers.insert(PUBLIC_ID_EARLY.to_owned(), Vec::new());
+        frontiers.insert(PUBLIC_ID_MIDDLE.to_owned(), Vec::new());
+
+        let items = revision_frontier_items(&frontiers, 23);
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.memory_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![PUBLIC_ID_EARLY, PUBLIC_ID_MIDDLE, PUBLIC_ID_LATE]
+        );
     }
 
     #[test]
