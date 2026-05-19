@@ -3189,6 +3189,163 @@ fn known_blocker_no_write_reports_but_does_not_persist() -> TestResult {
 }
 
 #[test]
+fn skip_known_blocker_bypasses_active_cache_without_writing_store() -> TestResult {
+    let invocation_log = unique_tmp_path("rch-known-blocker-skip-invocations");
+    let store = unique_tmp_path("rch-known-blocker-skip-store").join("known_blockers.jsonl");
+    let fake_rch = write_fake_rch(
+        "fake-rch-known-blocker-skip.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+  printf 'rch 1.0.24\n'
+  exit 0
+fi
+if [ "${1:-}" = "status" ]; then
+  cat <<'JSON'
+{"data":{"daemon":{"version":"1.0.24","socket_path":"/tmp/rch.sock","workers":[],"recent_builds":[]}}}
+JSON
+  exit 0
+fi
+if [ "${1:-}" = "exec" ]; then
+  printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+  cat <<'TRANSCRIPT'
+error: failed to load manifest for dependency `frankensearch`
+
+Caused by:
+  failed to parse manifest at `/data/projects/frankensearch/frankensearch/Cargo.toml`
+
+Caused by:
+  error inheriting `license-file` from workspace root manifest's `workspace.package.license-file`
+
+Caused by:
+  `workspace.package.license-file` was not defined
+[RCH] remote vmi1227854 failed (exit 101)
+TRANSCRIPT
+  exit 101
+fi
+printf 'unexpected fake rch args: %s\n' "$*" >&2
+exit 2
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+    let store_arg = store
+        .to_str()
+        .ok_or_else(|| "store path is not utf-8".to_owned())?;
+    let base_args = [
+        "--skip-build-admission",
+        "--known-blocker-store",
+        store_arg,
+        "--rch-bin",
+        fake_rch_arg,
+        "--",
+        "cargo",
+        "test",
+        "--lib",
+        "known_blocker_skip_smoke",
+    ];
+    let skip_args = [
+        "--skip-build-admission",
+        "--known-blocker-store",
+        store_arg,
+        "--skip-known-blocker",
+        "--rch-bin",
+        fake_rch_arg,
+        "--",
+        "cargo",
+        "test",
+        "--lib",
+        "known_blocker_skip_smoke",
+    ];
+    let envs = [
+        ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854"),
+    ];
+
+    let (first_status, first_stdout, _first_stderr) = run_script_with_env(&base_args, &envs)?;
+    if first_status.success() {
+        return Err("first skip-known-blocker fixture should preserve remote failure".to_owned());
+    }
+    let first: Value = serde_json::from_str(&first_stdout)
+        .map_err(|error| format!("parse first skip-known-blocker run: {error}"))?;
+    let first_fingerprint = first["known_blocker"]["blocker_fingerprint"]
+        .as_str()
+        .ok_or_else(|| format!("first run should record an active known blocker: {first}"))?
+        .to_owned();
+    let store_before =
+        fs::read_to_string(&store).map_err(|error| format!("read skip store: {error}"))?;
+    if store_before.lines().count() != 1 || !store_before.contains(&first_fingerprint) {
+        return Err(format!(
+            "first run should write one known-blocker row: {store_before}"
+        ));
+    }
+
+    let (skip_status, skip_stdout, _skip_stderr) = run_script_with_env(&skip_args, &envs)?;
+    if skip_status.success() {
+        return Err("skip-known-blocker fixture should preserve remote failure".to_owned());
+    }
+    let skipped: Value = serde_json::from_str(&skip_stdout)
+        .map_err(|error| format!("parse skip-known-blocker run: {error}"))?;
+    if skipped["status"] == "known_blocker_refused"
+        || degraded_contains(&skipped, "rch_verify_known_blocker_active")?
+        || skipped["rch_invocation"] == serde_json::json!([])
+    {
+        return Err(format!(
+            "--skip-known-blocker should bypass the cache and invoke fake RCH: {skipped}"
+        ));
+    }
+    if skipped["status"] != "rch_environment_failure"
+        || skipped["known_blocker"]["blocker_kind"] != "cargo_workspace_inheritance"
+    {
+        return Err(format!(
+            "skip-known-blocker should still report remote topology evidence: {skipped}"
+        ));
+    }
+    let store_after = fs::read_to_string(&store)
+        .map_err(|error| format!("read skip store after run: {error}"))?;
+    if store_after != store_before {
+        return Err(format!(
+            "--skip-known-blocker must not write the blocker store:\nbefore={store_before}\nafter={store_after}"
+        ));
+    }
+
+    let invocations = fs::read_to_string(&invocation_log)
+        .map_err(|error| format!("read skip invocations: {error}"))?;
+    if invocations.lines().count() != 2 {
+        return Err(format!(
+            "skip-known-blocker should launch fake RCH after the cached failure: {invocations:?}"
+        ));
+    }
+
+    let (third_status, third_stdout, _third_stderr) = run_script_with_env(&base_args, &envs)?;
+    if third_status.success() {
+        return Err("post-skip matching known blocker should still fail fast".to_owned());
+    }
+    let third: Value = serde_json::from_str(&third_stdout)
+        .map_err(|error| format!("parse post-skip known-blocker run: {error}"))?;
+    if third["status"] != "known_blocker_refused"
+        || third["known_blocker"]["blocker_fingerprint"] != first_fingerprint
+    {
+        return Err(format!(
+            "skip run should leave the original blocker usable for later admission: {third}"
+        ));
+    }
+    let invocations = fs::read_to_string(&invocation_log)
+        .map_err(|error| format!("read post-skip invocations: {error}"))?;
+    if invocations.lines().count() != 2 {
+        return Err(format!(
+            "post-skip fail-fast should not invoke fake RCH again: {invocations:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn expired_known_blocker_allows_a_new_remote_attempt() -> TestResult {
     let store = unique_tmp_path("rch-known-blocker-ttl-store").join("known_blockers.jsonl");
     let store_arg = store
