@@ -776,12 +776,59 @@ mod tests {
     }
 
     #[test]
-    fn personalized_pagerank_weighted_multi_seed_star_ranks_seed_mass_first() -> TestResult {
+    fn personalized_pagerank_filters_invalid_and_off_graph_seed_weights() -> TestResult {
         let mut graph = DiGraph::strict();
         let a = memory_id(14);
         let b = memory_id(15);
-        let c = memory_id(16);
-        let d = memory_id(17);
+        let zero = memory_id(16);
+        let negative = memory_id(17);
+        let nan = memory_id(18);
+        let infinite = memory_id(19);
+        let missing = memory_id(20);
+        for node in [a, b, zero, negative, nan, infinite] {
+            graph.add_node(node.to_string());
+        }
+        let seeds = HashMap::from([
+            (a, 2.0),
+            (b, 1.0),
+            (zero, 0.0),
+            (negative, -4.0),
+            (nan, f64::NAN),
+            (infinite, f64::INFINITY),
+            (missing, 5.0),
+        ]);
+
+        let result = graph_result(compute_personalized_pagerank_with_policy(
+            &graph,
+            &seeds,
+            PersonalizedPageRankPolicy {
+                alpha: 0.0,
+                ..PersonalizedPageRankPolicy::default()
+            },
+        ))?;
+
+        assert!((result.get(&a).copied().unwrap_or(0.0) - (2.0 / 3.0)).abs() < 1.0e-12);
+        assert!((result.get(&b).copied().unwrap_or(0.0) - (1.0 / 3.0)).abs() < 1.0e-12);
+        for ignored in [zero, negative, nan, infinite] {
+            assert!(
+                (result.get(&ignored).copied().unwrap_or(1.0)).abs() < 1.0e-12,
+                "ignored seed {ignored} should not receive normalized seed mass: {result:?}"
+            );
+        }
+        assert!(
+            !result.contains_key(&missing),
+            "off-graph seed should not appear in PPR result: {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn personalized_pagerank_weighted_multi_seed_star_ranks_seed_mass_first() -> TestResult {
+        let mut graph = DiGraph::strict();
+        let a = memory_id(21);
+        let b = memory_id(22);
+        let c = memory_id(23);
+        let d = memory_id(24);
         for (source, target) in [(a, c), (a, d), (b, c), (b, d)] {
             graph
                 .add_edge_with_attrs(
