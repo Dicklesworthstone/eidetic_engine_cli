@@ -257,6 +257,28 @@ assert_not_json() {
     fi
 }
 
+validate_event_log_contract() {
+    local diagnostics="$EVENT_ROOT/event_log_contract_diagnostics.txt"
+    if ! jq -s -e '
+        all(.[];
+            .schema == "ee.test_event.v1"
+            and .beadId == "bd-1eq3l.8"
+            and .surface == "workspace_hygiene"
+            and (.scenario | type == "string" and length > 0)
+            and (.phase | type == "string" and length > 0)
+            and (.status | IN("pass", "failed", "blocked"))
+            and (.exitCode | type == "number")
+            and (.elapsedMs | type == "number")
+            and (.schemaValidationStatus | type == "string" and length > 0)
+            and (.degradedCodes | type == "array")
+            and (.sanitizedEnv | type == "object")
+        )
+    ' "$EVENT_LOG" >/dev/null 2>"$diagnostics"; then
+        printf 'event log contract check failed; diagnostics=%s\n' "$diagnostics"
+        return 1
+    fi
+}
+
 run_hygiene_human() {
     local scenario="${1:?scenario required}"
     local workspace="${2:?workspace required}"
@@ -441,6 +463,14 @@ SCENARIOS=(
 for scenario in "${SCENARIOS[@]}"; do
     run_scenario "$scenario"
 done
+
+EVENT_LOG_FAILURE="$(validate_event_log_contract || true)"
+if [ -n "$EVENT_LOG_FAILURE" ]; then
+    emit_event "event_log_contract" "schema_check" "failed" 1 "jq validate ee.test_event.v1 events" "$REPO_ROOT" "$EVENT_LOG" "" "failed" "$EVENT_LOG_FAILURE" '["workspace_hygiene_event_log_contract_failed"]' "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
+    printf '%s\n' "$EVENT_LOG_FAILURE" >&2
+    exit 1
+fi
+emit_event "event_log_contract" "schema_check" "pass" 0 "jq validate ee.test_event.v1 events" "$REPO_ROOT" "$EVENT_LOG" "" "passed" "" "[]" "$REPO_BEFORE_HASH" "" "$REPO_BEFORE_ARTIFACT" ""
 
 read -r REPO_AFTER_HASH REPO_AFTER_ARTIFACT < <(capture_repo_state "after")
 if [ "$REPO_BEFORE_HASH" != "$REPO_AFTER_HASH" ]; then
