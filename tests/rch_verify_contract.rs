@@ -179,6 +179,66 @@ fn write_fake_rch(name: &str, body: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+fn write_fake_build_admission_ee(name: &str, admitted: bool) -> Result<PathBuf, String> {
+    let status = if admitted { "true" } else { "false" };
+    let degraded = if admitted {
+        "[]"
+    } else {
+        r#"[{"code":"build_admission_denied","severity":"medium","message":"workspace below threshold","repair":"ask human before cleanup"}]"#
+    };
+    write_fake_rch(
+        name,
+        &format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+cat <<'JSON'
+{{"schema":"ee.response.v1","success":true,"data":{{"schema":"ee.build_admission.diagnostics.v1","admitted":{status},"minFreeBytes":1073741824,"checks":[{{"label":"workspace","path":"/tmp/ws","bytesAvailable":1024,"minFreeBytes":1073741824,"admitted":{status},"externalRequired":false,"external":false}},{{"label":"cargo_target","path":"/Volumes/USBNVME16TB/temp_agent_space/cargo-target","bytesAvailable":9000000000000,"minFreeBytes":1073741824,"admitted":true,"externalRequired":true,"external":true}}],"degraded":{degraded}}}}}
+JSON
+"#,
+        ),
+    )
+}
+
+fn write_fake_build_admission_candidate(
+    path: &Path,
+    version_stdout: &str,
+    admitted: bool,
+) -> Result<(), String> {
+    let status = if admitted { "true" } else { "false" };
+    let degraded = if admitted {
+        "[]"
+    } else {
+        r#"[{"code":"build_admission_denied","severity":"medium","message":"workspace below threshold","repair":"ask human before cleanup"}]"#
+    };
+    fs::write(
+        path,
+        format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}}" = "--version" ]; then
+  printf '%s\n' {version_stdout:?}
+  exit 0
+fi
+cat <<'JSON'
+{{"schema":"ee.response.v1","success":true,"data":{{"schema":"ee.build_admission.diagnostics.v1","admitted":{status},"minFreeBytes":1073741824,"checks":[{{"label":"workspace","path":"/tmp/ws","bytesAvailable":9000000000,"minFreeBytes":1073741824,"admitted":{status},"externalRequired":false,"external":false}}],"degraded":{degraded}}}}}
+JSON
+"#,
+        ),
+    )
+    .map_err(|error| format!("write fake ee candidate {}: {error}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)
+            .map_err(|error| format!("stat fake ee candidate: {error}"))?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions)
+            .map_err(|error| format!("chmod fake ee candidate: {error}"))?;
+    }
+    Ok(())
+}
+
 #[test]
 fn script_is_syntax_valid_and_uses_explicit_rch_exec() -> TestResult {
     let output = Command::new("bash")
@@ -1189,6 +1249,214 @@ fn synthetic_remote_transcript_extracts_worker_id() -> TestResult {
         return Err(
             "successful timeout-text transcript should not be capacity degraded".to_owned(),
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn build_admission_denial_refuses_before_rch() -> TestResult {
+    let fake_ee = write_fake_build_admission_ee("fake-ee-admission-denied.sh", false)?;
+    let fake_rch = write_fake_rch(
+        "fake-rch-admission-should-not-run.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+printf '[RCH] remote css (1.0s)\n'
+"#,
+    )?;
+    let invocation_log = unique_tmp_path("rch-admission-denied-invocations");
+    let fake_ee_arg = fake_ee
+        .to_str()
+        .ok_or_else(|| "fake ee path is not utf-8".to_owned())?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+
+    let (status, stdout, _stderr) = run_script_with_env(
+        &[
+            "--rch-bin",
+            fake_rch_arg,
+            "--build-admission-ee-bin",
+            fake_ee_arg,
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "admission_denied_smoke",
+        ],
+        &[("FAKE_RCH_INVOCATIONS", invocation_log_arg)],
+    )?;
+    if status.success() {
+        return Err("build-admission denial should refuse before RCH".to_owned());
+    }
+    if invocation_log.exists() {
+        let invocations = fs::read_to_string(&invocation_log)
+            .map_err(|error| format!("read invocation log: {error}"))?;
+        if !invocations.is_empty() {
+            return Err(format!(
+                "build-admission denial invoked fake RCH: {invocations:?}"
+            ));
+        }
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse admission denial: {error}"))?;
+    if report["status"] != "build_admission_refused"
+        || report["exit_code"] != 1
+        || report["build_admission"]["status"] != "denied"
+        || report["build_admission"]["admitted"] != false
+    {
+        return Err(format!("unexpected build-admission refusal: {report}"));
+    }
+    if !degraded_contains(&report, "rch_verify_build_admission_denied")? {
+        return Err(format!("missing build-admission degraded code: {report}"));
+    }
+    if !report["worker_id"].is_null() {
+        return Err(format!("denial should not have a worker id: {report}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn build_admission_pass_is_recorded_and_allows_rch() -> TestResult {
+    let fake_ee = write_fake_build_admission_ee("fake-ee-admission-pass.sh", true)?;
+    let fake_rch = write_fake_rch(
+        "fake-rch-admission-pass.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+printf '[RCH] remote css (1.0s)\n'
+"#,
+    )?;
+    let invocation_log = unique_tmp_path("rch-admission-pass-invocations");
+    let fake_ee_arg = fake_ee
+        .to_str()
+        .ok_or_else(|| "fake ee path is not utf-8".to_owned())?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--rch-bin",
+            fake_rch_arg,
+            "--build-admission-ee-bin",
+            fake_ee_arg,
+            "--summary",
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "admission_pass_smoke",
+        ],
+        &[
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "css"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "css"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "build-admission pass should allow fake RCH\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let invocations = fs::read_to_string(&invocation_log)
+        .map_err(|error| format!("read invocation log: {error}"))?;
+    if !invocations.contains("exec -- env TMPDIR=/tmp CARGO_TARGET_DIR=/tmp/ee-rch-verify-target cargo test --lib admission_pass_smoke") {
+        return Err(format!("fake RCH did not receive expected invocation: {invocations}"));
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse admission pass: {error}"))?;
+    if report["status"] != "remote_pass"
+        || report["worker_id"] != "css"
+        || report["build_admission"]["status"] != "passed"
+        || report["build_admission"]["admitted"] != true
+    {
+        return Err(format!("unexpected build-admission pass report: {report}"));
+    }
+    if degraded_contains(&report, "rch_verify_build_admission_denied")? {
+        return Err(format!("pass reported admission denial: {report}"));
+    }
+    let summary = report["summary_markdown"]
+        .as_str()
+        .ok_or_else(|| "summary missing".to_owned())?;
+    if !summary.contains("build_admission: `passed` admitted=`true`") {
+        return Err(format!("summary missing build-admission line: {summary}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn build_admission_auto_candidate_skips_empty_version_binary() -> TestResult {
+    let target_dir = unique_tmp_path("rch-admission-candidates");
+    let debug_dir = target_dir.join("debug");
+    let release_dir = target_dir.join("release");
+    fs::create_dir_all(&debug_dir).map_err(|error| format!("create debug dir: {error}"))?;
+    fs::create_dir_all(&release_dir).map_err(|error| format!("create release dir: {error}"))?;
+    let empty_version_candidate = debug_dir.join("ee");
+    let valid_candidate = release_dir.join("ee");
+    write_fake_build_admission_candidate(&empty_version_candidate, "", false)?;
+    write_fake_build_admission_candidate(&valid_candidate, "ee 0.0.0-test", true)?;
+
+    let fake_rch = write_fake_rch(
+        "fake-rch-admission-auto-candidate.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+printf '[RCH] remote css (1.0s)\n'
+"#,
+    )?;
+    let invocation_log = unique_tmp_path("rch-admission-auto-candidate-invocations");
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+    let target_dir_arg = target_dir
+        .to_str()
+        .ok_or_else(|| "target dir path is not utf-8".to_owned())?;
+    let valid_candidate_arg = valid_candidate
+        .to_str()
+        .ok_or_else(|| "valid candidate path is not utf-8".to_owned())?;
+
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--rch-bin",
+            fake_rch_arg,
+            "--summary",
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "admission_auto_candidate_smoke",
+        ],
+        &[
+            ("CARGO_TARGET_DIR", target_dir_arg),
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "css"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "css"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "auto candidate admission should allow fake RCH\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse admission auto-candidate report: {error}"))?;
+    if report["status"] != "remote_pass"
+        || report["build_admission"]["status"] != "passed"
+        || report["build_admission"]["ee_bin"] != valid_candidate_arg
+    {
+        return Err(format!(
+            "auto candidate should skip empty --version binary and use release candidate: {report}"
+        ));
     }
     Ok(())
 }

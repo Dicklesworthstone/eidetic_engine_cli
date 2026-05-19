@@ -11,6 +11,7 @@ scripts/rch_verify.sh --dry-run -- cargo test --lib output::streaming -- --nocap
 scripts/rch_verify.sh -- cargo clippy --all-targets -- -D warnings
 scripts/rch_verify.sh -- cargo fmt --check
 scripts/rch_verify.sh --bead-id bd-123 --ledger .ee/derived/rch/runs.jsonl --summary -- cargo test --test mesh_off_no_network -- --nocapture
+scripts/rch_verify.sh --skip-build-admission -- cargo test --lib focused_case -- --nocapture
 ```
 
 Accepted verifier shapes are `cargo check`, `cargo test`, `cargo bench`,
@@ -31,13 +32,44 @@ The wrapper sets these remote-safe defaults:
 - `RCH_ALIAS_PROJECT_ROOT=/data/projects`
 - remote command `TMPDIR=/tmp`
 - remote command `CARGO_TARGET_DIR=/tmp/ee-rch-verify-target`
+- local build-admission preflight enabled when a host-runnable `ee` binary is
+  available from `--build-admission-ee-bin`, `RCH_VERIFY_EE_BIN`, `EE_BIN`,
+  `EE_BINARY`, or the current target directory. Automatic target-directory
+  discovery skips candidates whose `--version` output is empty.
 
 The JSON proof schema is `ee.rch.verify.v1` and includes the command kind,
 remote-required flag, planned or actual RCH invocation, worker id when observed,
 remote project root, remote target dir, exit code, elapsed time, command hash,
 first Rust compiler error location, output tail, source attribution, dirty-state
-hashes, degradation codes, and the source-state/worker-state degraded-code
-partitions described below.
+hashes, local build-admission summary, degradation codes, and the
+source-state/worker-state degraded-code partitions described below.
+
+## Local Build-Admission Preflight
+
+Before launching RCH for a real run, the wrapper attempts a side-effect-free
+`ee diag build-admission --json` check. The preflight checks the local
+workspace, `CARGO_TARGET_DIR`, `TMPDIR`, and any explicit
+`--artifact-destination` paths. This catches the Mac failure mode where Cargo
+target and temp scratch are correctly on `/Volumes/USBNVME16TB/...`, but the
+repo checkout on the internal APFS volume is still too full for reliable
+verification or artifact handling.
+
+The preflight never runs local Cargo and never deletes, moves, truncates, or
+repairs files. If admission is denied, the wrapper refuses before invoking RCH
+and emits `status=build_admission_refused` with
+`rch_verify_build_admission_denied`. The proof also includes
+`build_admission.status`, `build_admission.admitted`,
+`build_admission.checks`, and the degraded codes reported by
+`ee diag build-admission`.
+
+If no usable `ee` binary is available, the wrapper records
+`build_admission.status=unavailable` and continues with
+`rch_verify_build_admission_unavailable`; do not treat that as a clean
+admission pass. A target-directory `ee` file must be executable on this host
+and produce non-empty `--version` output before automatic discovery trusts it.
+Use `--build-admission-ee-bin <path>` when you have a known current binary. Use
+`--skip-build-admission` only when you intentionally need to bypass this local
+admission guard; the proof records `rch_verify_build_admission_skipped`.
 
 ## Source Attribution Modes
 
@@ -99,13 +131,16 @@ prefixes and obvious `token=...` / `secret=...` / `password=...` fragments while
 preserving remote `/data/projects/...` and local `/Volumes/...` evidence.
 
 `status` is one of `dry_run`, `remote_pass`, `pass_without_remote_marker`,
-`remote_failure`, `rch_environment_failure`, `capacity_or_timeout`, or
-`refused`, `source_state_refused`, or `committed_tree_unsupported`. Use
+`remote_failure`, `rch_environment_failure`, `capacity_or_timeout`,
+`build_admission_refused`, or `refused`, `source_state_refused`, or
+`committed_tree_unsupported`. Use
 `rch_environment_failure` for topology/local-fallback blockers and
 `capacity_or_timeout` for worker capacity, timeout, or all-workers-offline
-signals; those are not code failures. Use `source_state_refused` for dirty
-checkout ambiguity and `committed_tree_unsupported` for an intentionally
-non-executing committed-tree proof.
+signals; those are not code failures. Use `build_admission_refused` when local
+workspace, target, temp, or artifact destination admission failed before RCH.
+Use `source_state_refused` for dirty checkout ambiguity and
+`committed_tree_unsupported` for an intentionally non-executing committed-tree
+proof.
 
 ## Degraded-Code Taxonomy
 
@@ -119,6 +154,9 @@ Consumers that need to route action should use the two narrower lists:
 - `worker_state_degraded_codes`: RCH worker, topology, capacity, remote-checkout,
   or local-fallback blockers. These mean the same source may verify after the
   worker fleet, root mapping, or queue state is fixed.
+- `build_admission.status`: local admission result before RCH. A denied result
+  means no remote verifier ran; unavailable or skipped results mean proof
+  quality is weaker than an admitted run.
 
 The two lists are intentionally disjoint. Generic command failure codes such as
 `rch_verify_remote_command_failed` stay only in `degraded_codes`; they provide
@@ -152,6 +190,7 @@ RCH proof for <bead>:
 - degraded_codes: <proof.degraded_codes or none>
 - source_state_degraded_codes: <proof.source_state_degraded_codes or none>
 - worker_state_degraded_codes: <proof.worker_state_degraded_codes or none>
+- build_admission: <proof.build_admission.status>/<proof.build_admission.admitted>
 - first_error: <proof.first_error_file>:<proof.first_error_line or none>
 ```
 
@@ -165,6 +204,8 @@ Agent Mail handoff phrasing should distinguish proof quality:
   by dirty source state."
 - `committed_tree_unsupported`: "Committed source manifest was computed, but no
   safe remote materialization exists yet; this is not a remote Cargo pass."
+- `build_admission_refused`: "Remote Cargo did not run because local
+  build-admission denied the workspace/target/temp/artifact path posture."
 
 Dirty `.beads/issues.jsonl` is metadata churn, but it still invalidates strict
 clean proof because it changes the shared checkout. If the only dirty path is a

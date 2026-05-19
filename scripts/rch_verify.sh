@@ -21,6 +21,13 @@ Options:
   --rch-bin <path>          RCH binary (default: $RCH_BIN or rch)
   --project-root <path>     Local project root (default: cwd)
   --env <NAME=VALUE>        Pass an explicit environment override to the remote verifier command
+  --skip-build-admission    Skip local ee diag build-admission preflight with proof degradation
+  --build-admission-ee-bin <path>
+                            ee binary to use for build-admission preflight
+  --build-admission-min-free-bytes <bytes>
+                            Required local free bytes for build-admission checks
+  --artifact-destination <path>
+                            Extra local artifact destination checked by build-admission
   --require-clean-tree      Refuse before RCH when the git checkout is dirty
   --committed-tree          Verify the committed --treeish from a generated source export when safe
   --treeish <ref>           Committed-tree ref to prove (default: HEAD)
@@ -44,6 +51,10 @@ EVENT_LOG_PATH=""
 INCLUDE_SUMMARY=0
 NO_WRITE=0
 ENV_OVERRIDES=()
+BUILD_ADMISSION_ENABLED="${RCH_VERIFY_BUILD_ADMISSION:-1}"
+BUILD_ADMISSION_EE_BIN="${RCH_VERIFY_EE_BIN:-${EE_BIN:-${EE_BINARY:-}}}"
+BUILD_ADMISSION_MIN_FREE_BYTES="${RCH_VERIFY_BUILD_ADMISSION_MIN_FREE_BYTES:-1073741824}"
+BUILD_ADMISSION_ARTIFACT_DESTINATIONS=()
 REQUIRE_CLEAN_TREE=0
 COMMITTED_TREE=0
 TREEISH="HEAD"
@@ -91,6 +102,10 @@ while [ "$#" -gt 0 ]; do
         --rch-bin) RCH_BIN="${2:?--rch-bin requires a value}"; shift 2 ;;
         --project-root) PROJECT_ROOT="${2:?--project-root requires a value}"; shift 2 ;;
         --env) ENV_OVERRIDES+=("$(validate_env_override "${2:?--env requires NAME=VALUE}")"); shift 2 ;;
+        --skip-build-admission) BUILD_ADMISSION_ENABLED=0; shift ;;
+        --build-admission-ee-bin) BUILD_ADMISSION_EE_BIN="${2:?--build-admission-ee-bin requires a value}"; shift 2 ;;
+        --build-admission-min-free-bytes) BUILD_ADMISSION_MIN_FREE_BYTES="${2:?--build-admission-min-free-bytes requires a value}"; shift 2 ;;
+        --artifact-destination) BUILD_ADMISSION_ARTIFACT_DESTINATIONS+=("${2:?--artifact-destination requires a value}"); shift 2 ;;
         --require-clean-tree) REQUIRE_CLEAN_TREE=1; shift ;;
         --committed-tree) COMMITTED_TREE=1; shift ;;
         --treeish) TREEISH="${2:?--treeish requires a value}"; shift 2 ;;
@@ -176,6 +191,10 @@ json_quote() {
     python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$1"
 }
 
+json_object_not_run() {
+    printf '{"status":"not_run","admitted":null,"ee_bin":null,"min_free_bytes":null,"checks":[],"degraded_codes":[],"message":null}'
+}
+
 csv_json_array() {
     CSV_INPUT="${1:-}" python3 - <<'PY'
 import json
@@ -187,6 +206,191 @@ for item in os.environ.get("CSV_INPUT", "").split(","):
     if item and item not in seen:
         seen.append(item)
 print(json.dumps(seen, separators=(",", ":")))
+PY
+}
+
+build_admission_skipped_json() {
+    local reason="${1:?skip reason required}"
+    local ee_bin="${2:-}"
+    BUILD_ADMISSION_REASON="$reason" \
+    BUILD_ADMISSION_EE_BIN_VALUE="$ee_bin" \
+    BUILD_ADMISSION_MIN_FREE_BYTES_VALUE="$BUILD_ADMISSION_MIN_FREE_BYTES" \
+    python3 - <<'PY'
+import json
+import os
+
+payload = {
+    "status": "skipped",
+    "admitted": None,
+    "ee_bin": os.environ.get("BUILD_ADMISSION_EE_BIN_VALUE") or None,
+    "min_free_bytes": int(os.environ.get("BUILD_ADMISSION_MIN_FREE_BYTES_VALUE") or 0),
+    "checks": [],
+    "degraded_codes": [],
+    "message": os.environ.get("BUILD_ADMISSION_REASON") or None,
+}
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+candidate_ee_bin() {
+    if [ -n "$BUILD_ADMISSION_EE_BIN" ]; then
+        printf '%s' "$BUILD_ADMISSION_EE_BIN"
+        return 0
+    fi
+
+    local candidate version_output
+    for candidate in \
+        "${CARGO_TARGET_DIR:-}/debug/ee" \
+        "${CARGO_TARGET_DIR:-}/release/ee" \
+        "$PROJECT_ROOT/target/debug/ee" \
+        "$PROJECT_ROOT/target/release/ee"
+    do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            version_output="$("$candidate" --version 2>/dev/null || true)"
+            if [ -n "${version_output//[[:space:]]/}" ]; then
+                printf '%s' "$candidate"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+compute_build_admission_json() {
+    if [ "$BUILD_ADMISSION_ENABLED" != "1" ]; then
+        build_admission_skipped_json "disabled by --skip-build-admission or RCH_VERIFY_BUILD_ADMISSION=0" ""
+        return 0
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        build_admission_skipped_json "dry-run does not execute build-admission" ""
+        return 0
+    fi
+    if [ -n "${RCH_VERIFY_FAKE_OUTPUT:-}" ] && [ -z "$BUILD_ADMISSION_EE_BIN" ]; then
+        build_admission_skipped_json "fake RCH transcript without explicit ee binary" ""
+        return 0
+    fi
+
+    local ee_bin
+    if ! ee_bin="$(candidate_ee_bin)"; then
+        BUILD_ADMISSION_MESSAGE="no executable ee binary found for build-admission preflight" \
+        BUILD_ADMISSION_MIN_FREE_BYTES_VALUE="$BUILD_ADMISSION_MIN_FREE_BYTES" \
+        python3 - <<'PY'
+import json
+import os
+
+payload = {
+    "status": "unavailable",
+    "admitted": None,
+    "ee_bin": None,
+    "min_free_bytes": int(os.environ.get("BUILD_ADMISSION_MIN_FREE_BYTES_VALUE") or 0),
+    "checks": [],
+    "degraded_codes": [],
+    "message": os.environ.get("BUILD_ADMISSION_MESSAGE"),
+}
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
+        return 0
+    fi
+
+    local args=(
+        "$ee_bin" "--workspace" "$PROJECT_ROOT" "diag" "build-admission" "--json"
+        "--min-free-bytes" "$BUILD_ADMISSION_MIN_FREE_BYTES"
+    )
+    local destination
+    for destination in "${BUILD_ADMISSION_ARTIFACT_DESTINATIONS[@]}"; do
+        args+=("--artifact-destination" "$destination")
+    done
+
+    local output exit_code
+    set +e
+    output="$("${args[@]}" 2>&1)"
+    exit_code=$?
+    set -e
+
+    BUILD_ADMISSION_OUTPUT="$output" \
+    BUILD_ADMISSION_EXIT_CODE="$exit_code" \
+    BUILD_ADMISSION_EE_BIN_VALUE="$ee_bin" \
+    BUILD_ADMISSION_MIN_FREE_BYTES_VALUE="$BUILD_ADMISSION_MIN_FREE_BYTES" \
+    python3 - <<'PY'
+import hashlib
+import json
+import os
+import re
+
+raw = os.environ.get("BUILD_ADMISSION_OUTPUT", "")
+exit_code = int(os.environ.get("BUILD_ADMISSION_EXIT_CODE") or 0)
+ee_bin = os.environ.get("BUILD_ADMISSION_EE_BIN_VALUE") or None
+min_free = int(os.environ.get("BUILD_ADMISSION_MIN_FREE_BYTES_VALUE") or 0)
+
+def redact(text):
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text or "")
+    text = re.sub(r"/Users/[^/\s]+", "/Users/<redacted>", text)
+    text = re.sub(r"(?i)(token|secret|password|api[_-]?key)=\S+", r"\1=<redacted>", text)
+    return text[-1200:]
+
+base = {
+    "status": "unavailable",
+    "admitted": None,
+    "ee_bin": ee_bin,
+    "min_free_bytes": min_free,
+    "checks": [],
+    "degraded_codes": [],
+    "message": None,
+    "exit_code": exit_code,
+    "raw_hash": "sha256:" + hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest(),
+}
+
+try:
+    payload = json.loads(raw)
+except Exception:
+    base["message"] = "ee diag build-admission did not emit valid JSON: " + redact(raw)
+    print(json.dumps(base, sort_keys=True, separators=(",", ":")))
+    raise SystemExit(0)
+
+data = payload.get("data") if isinstance(payload, dict) else None
+if exit_code != 0 or not isinstance(data, dict) or payload.get("success") is not True:
+    base["message"] = "ee diag build-admission did not return a successful response"
+    print(json.dumps(base, sort_keys=True, separators=(",", ":")))
+    raise SystemExit(0)
+
+checks = []
+for check in data.get("checks") or []:
+    if not isinstance(check, dict):
+        continue
+    checks.append({
+        "label": check.get("label"),
+        "path": check.get("path"),
+        "bytes_available": check.get("bytesAvailable"),
+        "min_free_bytes": check.get("minFreeBytes"),
+        "admitted": check.get("admitted"),
+        "external_required": check.get("externalRequired"),
+        "external": check.get("external"),
+    })
+
+degraded_codes = []
+for item in data.get("degraded") or []:
+    if isinstance(item, dict) and item.get("code"):
+        degraded_codes.append(str(item["code"]))
+
+admitted = data.get("admitted")
+base.update({
+    "status": "passed" if admitted is True else "denied",
+    "admitted": admitted,
+    "checks": checks,
+    "degraded_codes": degraded_codes,
+    "message": None if admitted is True else "ee diag build-admission denied local verification admission",
+})
+print(json.dumps(base, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+build_admission_status() {
+    BUILD_ADMISSION_JSON_INPUT="${1:?build-admission JSON required}" python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["BUILD_ADMISSION_JSON_INPUT"])
+print(payload.get("status") or "")
 PY
 }
 
@@ -930,7 +1134,7 @@ emit_json() {
     shift 5
     local degraded_codes_json
     degraded_codes_json="$(json_array "$@")"
-    local command_json rch_invocation_json command_text_json remote_env_json stdout_json stderr_json requested_workers_json configured_workers_json daemon_workers_json
+    local command_json rch_invocation_json command_text_json remote_env_json stdout_json stderr_json requested_workers_json configured_workers_json daemon_workers_json build_admission_json
     command_json="$(json_array "${COMMAND[@]}")"
     rch_invocation_json="$(json_array "${RCH_INVOCATION[@]}")"
     remote_env_json="$(json_array "${ENV_OVERRIDES[@]}")"
@@ -940,6 +1144,7 @@ emit_json() {
     requested_workers_json="$(csv_json_array "${REQUESTED_WORKERS_CSV:-}")"
     configured_workers_json="$(csv_json_array "${CONFIGURED_WORKERS_CSV:-}")"
     daemon_workers_json="$(csv_json_array "${DAEMON_WORKERS_CSV:-}")"
+    build_admission_json="${BUILD_ADMISSION_JSON:-$(json_object_not_run)}"
     local source_state_json
     if [ -n "${SOURCE_STATE_JSON:-}" ]; then
         source_state_json="$SOURCE_STATE_JSON"
@@ -948,7 +1153,7 @@ emit_json() {
     fi
     local json_payload
     json_payload="$(cat <<EOF
-{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"source_state":$source_state_json}
+{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"build_admission":$build_admission_json,"source_state":$source_state_json}
 EOF
 )"
     JSON_PAYLOAD="$json_payload" \
@@ -1052,6 +1257,8 @@ elif exit_code == 0:
     status = "pass_without_remote_marker"
 elif "rch_verify_committed_tree_unsupported" in degraded:
     status = "committed_tree_unsupported"
+elif "rch_verify_build_admission_denied" in degraded:
+    status = "build_admission_refused"
 elif (
     "rch_verify_dirty_tree_refused" in degraded
 ):
@@ -1082,6 +1289,7 @@ proof["error_codes"] = codes
 proof["worker_state_degraded_codes"] = worker_state_degraded
 if bead_id:
     proof["bead_id"] = bead_id
+build_admission = proof.get("build_admission") or {}
 
 summary_lines = [
     f"RCH verifier `{command_text}` => `{status}`.",
@@ -1098,6 +1306,11 @@ summary_lines = [
     f"- elapsed_ms: `{proof.get('elapsed_ms')}`",
     f"- command_hash: `{command_hash}`",
 ]
+if build_admission.get("status") not in (None, "not_run"):
+    summary_lines.append(
+        f"- build_admission: `{build_admission.get('status')}`"
+        f" admitted=`{build_admission.get('admitted')}`"
+    )
 for key in ("requested_workers", "configured_workers", "daemon_workers"):
     workers = proof.get(key) or []
     if workers:
@@ -1195,6 +1408,8 @@ if event_log_path:
             "verification_attribution": proof.get("verification_attribution"),
             "source_state_degraded_codes": proof.get("source_state_degraded_codes") or [],
             "worker_state_degraded_codes": proof.get("worker_state_degraded_codes") or [],
+            "build_admission_status": build_admission.get("status"),
+            "build_admission_admitted": build_admission.get("admitted"),
             "fake_rch_invoked": fake_invocation_count > 0,
             "fake_rch_invocation_count": fake_invocation_count,
             "source_manifest_hash": proof.get("source_manifest_hash"),
@@ -1224,6 +1439,7 @@ REMOTE_TARGET_DIR_JSON="$(json_quote "$REMOTE_TARGET_DIR")"
 REQUESTED_WORKERS_CSV="${RCH_WORKERS:-}"
 CONFIGURED_WORKERS_CSV=""
 DAEMON_WORKERS_CSV=""
+BUILD_ADMISSION_JSON="$(json_object_not_run)"
 
 if contains_forbidden_text "${COMMAND[@]}"; then
     RCH_INVOCATION=()
@@ -1290,6 +1506,9 @@ RCH_INVOCATION=(
     "${COMMAND[@]}"
 )
 
+BUILD_ADMISSION_JSON="$(compute_build_admission_json)"
+BUILD_ADMISSION_STATUS="$(build_admission_status "$BUILD_ADMISSION_JSON")"
+
 if [ "$DRY_RUN" -eq 1 ]; then
     dry_run_degraded=("rch_verify_dry_run")
     if [ "$COMMAND_KIND" = "raw" ]; then
@@ -1298,6 +1517,22 @@ if [ "$DRY_RUN" -eq 1 ]; then
     emit_json true null 0 "dry run: explicit rch exec planned" "" "${dry_run_degraded[@]}"
     exit 0
 fi
+
+if [ "$BUILD_ADMISSION_STATUS" = "denied" ]; then
+    emit_json true 1 0 "build-admission preflight denied RCH execution" "" \
+        "rch_verify_build_admission_denied"
+    exit 1
+fi
+
+build_admission_degraded=()
+case "$BUILD_ADMISSION_STATUS" in
+    unavailable)
+        build_admission_degraded+=("rch_verify_build_admission_unavailable")
+        ;;
+    skipped)
+        build_admission_degraded+=("rch_verify_build_admission_skipped")
+        ;;
+esac
 
 CONFIGURED_WORKERS_CSV="$(configured_workers)"
 DAEMON_WORKERS_CSV="$(daemon_workers)"
@@ -1318,6 +1553,7 @@ if [ "${RCH_VERIFY_FAIL_FAST_STALE_WORKER:-1}" = "1" ]; then
         WORKER_ID_JSON="$(json_quote "$first_stale_worker")"
         preflight_note="[RCH_VERIFY] stale daemon worker(s) excluded from $allowed_workers_note workers and recently disk-full: $stale_disk_full_workers"
         emit_json true 1 0 "$preflight_note" "" \
+            "${build_admission_degraded[@]}" \
             "rch_verify_remote_command_failed" \
             "rch_verify_worker_disk_full" \
             "rch_verify_worker_filter_ignored"
@@ -1327,6 +1563,7 @@ if [ "${RCH_VERIFY_FAIL_FAST_STALE_WORKER:-1}" = "1" ]; then
         WORKER_ID_JSON="$(json_quote "$first_stale_worker")"
         preflight_note="[RCH_VERIFY] stale daemon worker(s) excluded from $allowed_workers_note workers and recently failed fast: $stale_recent_failed_workers"
         emit_json true 1 0 "$preflight_note" "" \
+            "${build_admission_degraded[@]}" \
             "rch_verify_remote_command_failed" \
             "rch_verify_worker_filter_ignored"
         exit 1
@@ -1390,7 +1627,7 @@ if [ -n "$remote_checkout_missing_paths" ]; then
 fi
 
 stdout_tail="$(printf '%s' "$combined_output" | tail_text)"
-degraded=()
+degraded=("${build_admission_degraded[@]}")
 if [ "$exit_code" -ne 0 ]; then
     degraded+=("rch_verify_remote_command_failed")
 fi

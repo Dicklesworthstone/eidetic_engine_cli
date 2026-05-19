@@ -41,6 +41,19 @@ scripts/rch_verify.sh --bead-id bd-XXXX -- cargo test --lib my_focused_unit_test
 The wrapper emits an `ee.rch.verify.v1` JSON proof to stdout, which you paste
 into the Beads comment for closure evidence.
 
+Before a real remote run, the wrapper also attempts a read-only
+`ee diag build-admission --json` preflight when it can find a usable `ee`
+binary. This is local diagnostics only, not local Cargo. It checks the
+workspace, `CARGO_TARGET_DIR`, `TMPDIR`, and explicit artifact destinations so
+agents do not launch RCH when the Mac checkout volume is already below the
+admission threshold. If this preflight denies admission, the wrapper refuses
+before RCH with `status=build_admission_refused`. If the `ee` binary is missing
+or stale, the proof records `build_admission.status=unavailable`; automatic
+discovery skips target-directory `ee` files that do not produce non-empty
+`--version` output on this host. Provide `--build-admission-ee-bin <path>` for
+stronger evidence, or
+`--skip-build-admission` only when the weaker proof is intentional.
+
 ## Choose the source proof mode first
 
 Before launching RCH, decide what source tree the proof should mean:
@@ -77,6 +90,7 @@ response to an ambiguous proof is coordination, not mutation.
 | `RCH_COMPRESSION=0` | Compression on the sync pipe occasionally corrupts the manifest header during topology preflight. Disabling has zero throughput cost on the local-network workers. |
 | Absolute RCH binary path | `~/.local/bin/rch` may be stale (missing the `exec` subcommand). The `target-local/release/rch` is always the live build. |
 | Inner `CARGO_TARGET_DIR` | RCH rewrites this to a worker-scoped path automatically; the outer value is only used by RCH to know which artifacts to pull back. |
+| Build-admission preflight | Stops before RCH when local workspace/target/tmp/artifact paths are below threshold. This is why an external `CARGO_TARGET_DIR` is necessary but not sufficient when `/System/Volumes/Data` is critically full. |
 
 ## Allowed Cargo subcommands and their wrapper variants
 
@@ -164,6 +178,7 @@ RCH proof:
 - degraded_codes: <degraded_codes or none>
 - source_state_degraded_codes: <source_state_degraded_codes or none>
 - worker_state_degraded_codes: <worker_state_degraded_codes or none>
+- build_admission: <build_admission.status>/<build_admission.admitted>
 - first_error: <first_error_file>:<first_error_line or none>
 ```
 
@@ -173,6 +188,9 @@ Use precise Agent Mail wording:
 - `live_dirty_checkout` + `remote_pass`: useful signal, but not clean proof.
 - `committed_tree` + `remote_pass`: remote run passed from the committed-tree
   export named by `resolved_commit`, `git_tree`, and `source_manifest_hash`.
+- `build_admission_refused`: remote run did not start because local disk or
+  artifact-path admission failed; fix the environment or ask the human before
+  cleanup.
 - `source_state_refused`: implementation may be done, but clean proof is
   blocked by dirty checkout state.
 - `committed_tree_unsupported`: committed source identity is known, but remote
