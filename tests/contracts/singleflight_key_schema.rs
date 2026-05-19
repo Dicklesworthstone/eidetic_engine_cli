@@ -90,6 +90,7 @@ fn singleflight_posture_schema_is_documented_and_registered() -> TestResult {
         return Err("single-flight posture schema must require surface lastKey".to_owned());
     }
     ensure_json_bool(&schema, "/$defs/lastKey/additionalProperties", false)?;
+    ensure_last_key_schema_is_redaction_safe(&schema)?;
 
     if !KNOWN_SCHEMAS.contains(&SINGLEFLIGHT_POSTURE_SCHEMA_V1) {
         return Err("KNOWN_SCHEMAS missing ee.singleflight.posture.v1".to_owned());
@@ -101,6 +102,48 @@ fn singleflight_posture_schema_is_documented_and_registered() -> TestResult {
         .collect::<Vec<_>>();
     if !supported.contains(&SINGLEFLIGHT_POSTURE_SCHEMA_V1) {
         return Err("supported_schemas() missing ee.singleflight.posture.v1".to_owned());
+    }
+
+    Ok(())
+}
+
+fn ensure_last_key_schema_is_redaction_safe(schema: &Value) -> TestResult {
+    let last_key_properties = schema
+        .pointer("/$defs/lastKey/properties")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "single-flight posture lastKey properties missing object".to_owned())?;
+    let actual = last_key_properties.keys().cloned().collect::<Vec<_>>();
+    let expected = [
+        "graphGeneration",
+        "indexGeneration",
+        "keyHash",
+        "workspaceGeneration",
+    ];
+    if actual != expected {
+        return Err(format!(
+            "single-flight posture lastKey properties must stay redaction-safe; expected {:?}, got {:?}",
+            expected, actual
+        ));
+    }
+
+    let serialized = serde_json::to_string(schema)
+        .map_err(|error| format!("serialize posture schema: {error}"))?;
+    for forbidden in [
+        "rawQuery",
+        "queryText",
+        "workspacePath",
+        "workspaceIdentity",
+        "memoryContent",
+        "memoryBody",
+        "sourcePath",
+        "optionPairs",
+        "optionHashInput",
+    ] {
+        if serialized.contains(forbidden) {
+            return Err(format!(
+                "single-flight posture schema exposed raw key-input field {forbidden:?}"
+            ));
+        }
     }
 
     Ok(())
