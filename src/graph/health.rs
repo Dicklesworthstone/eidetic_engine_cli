@@ -1,8 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use fnx_algorithms::{k_truss, louvain_communities};
 use fnx_classes::Graph;
 use serde::Serialize;
+
+use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 pub const HEALTH_STRUCTURAL_SCHEMA_V1: &str = "ee.health.structural.v1";
 pub const DEFAULT_CONTRADICTION_DENSITY_THRESHOLD: f64 = 0.20;
@@ -107,12 +112,8 @@ pub fn compute_k_truss(graph: &Graph) -> KTrussReport {
         .into_iter()
         .map(|(memory_id, max_k)| KTrussMemory { memory_id, max_k })
         .collect::<Vec<_>>();
-    top_memories_at_k.sort_by(|left, right| {
-        right
-            .max_k
-            .cmp(&left.max_k)
-            .then_with(|| left.memory_id.cmp(&right.memory_id))
-    });
+    sort_by_ulid_payload_or_lexical(&mut top_memories_at_k, |memory| memory.memory_id.as_str());
+    top_memories_at_k.sort_by_key(|memory| Reverse(memory.max_k));
 
     KTrussReport {
         schema: HEALTH_STRUCTURAL_SCHEMA_V1,
@@ -161,7 +162,7 @@ pub fn detect_contradiction_clusters_with_threshold(
         .into_iter()
         .enumerate()
         .filter_map(|(louvain_id, mut community)| {
-            community.sort();
+            sort_by_ulid_payload_or_lexical(&mut community, String::as_str);
             let size = community.len();
             if size < MIN_CLUSTER_SIZE {
                 return None;
@@ -241,6 +242,10 @@ mod tests {
     use super::*;
     use fnx_runtime::CompatibilityMode;
 
+    const PUBLIC_ID_EARLY: &str = "note_01J0000000000000000000000A";
+    const PUBLIC_ID_MIDDLE: &str = "rule_01J0000000000000000000000B";
+    const PUBLIC_ID_LATE: &str = "mem_01J0000000000000000000000C";
+
     #[test]
     fn k_truss_report_finds_complete_graph_core() {
         let graph = Graph::complete_graph(CompatibilityMode::Strict, 4);
@@ -272,6 +277,33 @@ mod tests {
         assert_eq!(report.max_k, 3);
         assert_eq!(report.member_counts.get(&3), Some(&3));
         assert_eq!(report.top_memories_at_k.len(), 3);
+        assert!(
+            report
+                .top_memories_at_k
+                .iter()
+                .all(|memory| memory.max_k == 3)
+        );
+    }
+
+    #[test]
+    fn k_truss_report_same_k_ties_use_radix_public_id_payload_order() {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        let _ = graph.extend_edges_unrecorded([
+            (PUBLIC_ID_LATE, PUBLIC_ID_EARLY),
+            (PUBLIC_ID_MIDDLE, PUBLIC_ID_LATE),
+            (PUBLIC_ID_EARLY, PUBLIC_ID_MIDDLE),
+        ]);
+
+        let report = compute_k_truss(&graph);
+
+        assert_eq!(
+            report
+                .top_memories_at_k
+                .iter()
+                .map(|memory| memory.memory_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![PUBLIC_ID_EARLY, PUBLIC_ID_MIDDLE, PUBLIC_ID_LATE]
+        );
         assert!(
             report
                 .top_memories_at_k
@@ -321,6 +353,24 @@ mod tests {
         assert_eq!(clusters[0].internal_contradictions, 3);
         assert_eq!(clusters[0].severity, ContradictionSeverity::Incoherent);
         assert_eq!(clusters[0].exemplar_memory_ids, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn contradiction_clusters_exemplars_use_radix_public_id_payload_order() {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        let _ = graph.extend_edges_unrecorded([
+            (PUBLIC_ID_LATE, PUBLIC_ID_EARLY),
+            (PUBLIC_ID_MIDDLE, PUBLIC_ID_LATE),
+            (PUBLIC_ID_EARLY, PUBLIC_ID_MIDDLE),
+        ]);
+
+        let clusters = detect_contradiction_clusters_with_threshold(&graph, 0.50);
+
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(
+            clusters[0].exemplar_memory_ids,
+            vec![PUBLIC_ID_EARLY, PUBLIC_ID_MIDDLE, PUBLIC_ID_LATE]
+        );
     }
 
     #[test]
