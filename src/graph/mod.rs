@@ -11,6 +11,10 @@ use crate::core::degraded_aggregation::{
 use crate::core::graph_audit::{
     SnapshotArchivedInputs, SnapshotArchivedReason, build_snapshot_archived_payload,
 };
+use crate::core::graph_memory_budget::{
+    LARGE_GRAPH_UNCACHED_CODE, MemoryBudgetPolicy, SnapshotAdmissionDecision,
+    check_snapshot_admission, estimate_snapshot_bytes,
+};
 use crate::core::graph_telemetry::{
     CacheEvictEvent, CacheEvictReason, SnapshotRefreshEvent, emit_cache_evict,
     emit_snapshot_refresh,
@@ -2100,6 +2104,8 @@ pub enum CentralityRefreshStatus {
     Refreshed,
     /// Operation completed but the graph was empty.
     EmptyGraph,
+    /// Operation skipped because the graph would exceed memory budget.
+    MemoryBudgetRefused,
     /// Operation would refresh but dry_run was enabled.
     DryRun,
     /// Graph feature is not enabled.
@@ -2112,6 +2118,7 @@ impl CentralityRefreshStatus {
         match self {
             Self::Refreshed => "refreshed",
             Self::EmptyGraph => "empty_graph",
+            Self::MemoryBudgetRefused => "memory_budget_refused",
             Self::DryRun => "dry_run",
             Self::GraphFeatureDisabled => "graph_feature_disabled",
         }
@@ -2194,6 +2201,11 @@ impl CentralityRefreshReport {
             CentralityRefreshStatus::Refreshed => "Centrality refresh completed\n\n".to_string(),
             CentralityRefreshStatus::EmptyGraph => {
                 return "Centrality refresh skipped: graph is empty (no memory links)\n"
+                    .to_string();
+            }
+            CentralityRefreshStatus::MemoryBudgetRefused => {
+                return "Centrality refresh skipped: graph memory budget refused snapshot build\n\
+                        Next: raise graph.memory.snapshot_cap_mb or shrink the workspace\n"
                     .to_string();
             }
             CentralityRefreshStatus::DryRun => "DRY RUN: Would refresh centrality\n\n".to_string(),
@@ -2341,7 +2353,7 @@ impl CentralityRefreshReport {
             })
             .collect();
 
-        serde_json::json!({
+        let mut data = serde_json::json!({
             "command": "graph centrality refresh",
             "version": self.version,
             "status": self.status.as_str(),
@@ -2362,8 +2374,33 @@ impl CentralityRefreshReport {
             "topBetweenness": top_betweenness,
             "topHubs": top_hubs,
             "topAuthorities": top_authorities,
-        })
+        });
+
+        let degraded = centrality_refresh_degraded(self.status);
+        if !degraded.is_empty() {
+            if let Some(object) = data.as_object_mut() {
+                object.insert(
+                    "degraded".to_owned(),
+                    serde_json::to_value(degraded).unwrap_or_else(|_| serde_json::json!([])),
+                );
+            }
+        }
+
+        data
     }
+}
+
+fn centrality_refresh_degraded(status: CentralityRefreshStatus) -> Vec<AggregatedDegradation> {
+    if status != CentralityRefreshStatus::MemoryBudgetRefused {
+        return Vec::new();
+    }
+    aggregate_degraded_entries([DegradationAggregationInput::new(
+        "graph_centrality_refresh",
+        LARGE_GRAPH_UNCACHED_CODE,
+        "high",
+        "Graph snapshot estimate exceeds the configured cap; centrality refresh skipped before allocation.",
+        "raise graph.memory.snapshot_cap_mb or shrink the workspace",
+    )])
 }
 
 impl GraphRefreshSnapshot {
@@ -2551,7 +2588,11 @@ fn refresh_typed_graph_snapshot_with_owner(
     let projection_start = Instant::now();
     let topology = typed_graph_snapshot_topology(conn, workspace_id, graph_type)?;
     let projection_ms = projection_start.elapsed().as_secs_f64() * 1000.0;
-    let status = if options.dry_run {
+    let budget_preflight =
+        graph_snapshot_budget_preflight(topology.node_count, topology.edge_count);
+    let status = if budget_preflight.refused() {
+        CentralityRefreshStatus::MemoryBudgetRefused
+    } else if options.dry_run {
         CentralityRefreshStatus::DryRun
     } else if topology.node_count == 0 {
         CentralityRefreshStatus::EmptyGraph
@@ -3028,16 +3069,24 @@ fn refresh_centrality_from_links(
     use std::time::Instant;
 
     let total_start = Instant::now();
+    let budget_preflight = memory_link_snapshot_budget_preflight(links);
+
+    if budget_preflight.refused() {
+        return Ok(memory_budget_refused_centrality_report(
+            budget_preflight,
+            dry_run,
+            total_start.elapsed().as_secs_f64() * 1000.0,
+        ));
+    }
 
     if dry_run {
-        let projection = build_memory_graph_from_links(links, 0)?;
         return Ok(CentralityRefreshReport {
             version: env!("CARGO_PKG_VERSION"),
             status: CentralityRefreshStatus::DryRun,
             dry_run: true,
-            node_count: projection.node_count,
-            edge_count: projection.edge_count,
-            projection_ms: projection.build_ms,
+            node_count: budget_preflight.node_count,
+            edge_count: budget_preflight.edge_count,
+            projection_ms: 0.0,
             pagerank_ms: 0.0,
             betweenness_ms: 0.0,
             hits_ms: 0.0,
@@ -3122,6 +3171,75 @@ fn refresh_centrality_from_links(
         top_hubs,
         top_authorities,
     })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GraphSnapshotBudgetPreflight {
+    node_count: usize,
+    edge_count: usize,
+    decision: SnapshotAdmissionDecision,
+}
+
+impl GraphSnapshotBudgetPreflight {
+    #[must_use]
+    fn refused(self) -> bool {
+        matches!(self.decision, SnapshotAdmissionDecision::Refuse(_))
+    }
+}
+
+fn memory_link_snapshot_budget_preflight(
+    links: &[StoredMemoryLink],
+) -> GraphSnapshotBudgetPreflight {
+    let (node_count, edge_count) = memory_link_snapshot_shape(links);
+    graph_snapshot_budget_preflight(node_count, edge_count)
+}
+
+fn memory_link_snapshot_shape(links: &[StoredMemoryLink]) -> (usize, usize) {
+    let mut nodes = BTreeSet::new();
+    let mut edge_count = 0usize;
+    for link in links {
+        nodes.insert(link.src_memory_id.as_str());
+        nodes.insert(link.dst_memory_id.as_str());
+        edge_count = edge_count.saturating_add(if link.directed { 1 } else { 2 });
+    }
+    (nodes.len(), edge_count)
+}
+
+fn graph_snapshot_budget_preflight(
+    node_count: usize,
+    edge_count: usize,
+) -> GraphSnapshotBudgetPreflight {
+    let estimate_bytes = estimate_snapshot_bytes(node_count, edge_count);
+    let policy = MemoryBudgetPolicy::defaults();
+    GraphSnapshotBudgetPreflight {
+        node_count,
+        edge_count,
+        decision: check_snapshot_admission(estimate_bytes, &policy),
+    }
+}
+
+fn memory_budget_refused_centrality_report(
+    preflight: GraphSnapshotBudgetPreflight,
+    dry_run: bool,
+    total_ms: f64,
+) -> CentralityRefreshReport {
+    CentralityRefreshReport {
+        version: env!("CARGO_PKG_VERSION"),
+        status: CentralityRefreshStatus::MemoryBudgetRefused,
+        dry_run,
+        node_count: preflight.node_count,
+        edge_count: preflight.edge_count,
+        projection_ms: 0.0,
+        pagerank_ms: 0.0,
+        betweenness_ms: 0.0,
+        hits_ms: 0.0,
+        total_ms,
+        scores: Vec::new(),
+        top_pagerank: Vec::new(),
+        top_betweenness: Vec::new(),
+        top_hubs: Vec::new(),
+        top_authorities: Vec::new(),
+    }
 }
 
 fn sort_scores_by_metric_desc_then_memory_id(
@@ -3813,6 +3931,12 @@ fn unavailable_graph_feature_report(
             "low",
             "Graph feature enrichment has no memory links to score.",
             "Create memory links or run autolink maintenance before enrichment.",
+        ),
+        CentralityRefreshStatus::MemoryBudgetRefused => (
+            LARGE_GRAPH_UNCACHED_CODE,
+            "high",
+            "Graph feature enrichment is unavailable because centrality refresh was skipped by the graph memory budget.",
+            "raise graph.memory.snapshot_cap_mb or shrink the workspace",
         ),
         CentralityRefreshStatus::Refreshed => (
             "centrality_scores_empty",
@@ -7336,6 +7460,10 @@ mod tests {
         use super::CentralityRefreshStatus;
         assert_eq!(CentralityRefreshStatus::Refreshed.as_str(), "refreshed");
         assert_eq!(CentralityRefreshStatus::EmptyGraph.as_str(), "empty_graph");
+        assert_eq!(
+            CentralityRefreshStatus::MemoryBudgetRefused.as_str(),
+            "memory_budget_refused"
+        );
         assert_eq!(CentralityRefreshStatus::DryRun.as_str(), "dry_run");
         assert_eq!(
             CentralityRefreshStatus::GraphFeatureDisabled.as_str(),
@@ -7489,6 +7617,57 @@ mod tests {
             created_by: None,
             metadata_json: None,
         }
+    }
+
+    #[test]
+    fn memory_link_snapshot_shape_counts_unique_nodes_and_directed_edges() {
+        let directed = stored_memory_link("link_directed", MEMORY_A, MEMORY_B);
+        let mut undirected = stored_memory_link("link_undirected", MEMORY_B, MEMORY_C);
+        undirected.directed = false;
+
+        let (node_count, edge_count) = super::memory_link_snapshot_shape(&[directed, undirected]);
+
+        assert_eq!(node_count, 3);
+        assert_eq!(edge_count, 3);
+    }
+
+    #[test]
+    fn graph_snapshot_budget_preflight_refuses_dense_graph_before_build() {
+        let preflight = super::graph_snapshot_budget_preflight(100_000, 3_000_000);
+
+        assert_eq!(preflight.node_count, 100_000);
+        assert_eq!(preflight.edge_count, 3_000_000);
+        assert!(preflight.refused());
+        let crate::core::graph_memory_budget::SnapshotAdmissionDecision::Refuse(refusal) =
+            preflight.decision
+        else {
+            panic!("expected memory budget refusal");
+        };
+        assert_eq!(
+            refusal.code,
+            crate::core::graph_memory_budget::LARGE_GRAPH_UNCACHED_CODE
+        );
+    }
+
+    #[test]
+    fn centrality_refresh_json_includes_memory_budget_degraded_when_refused() {
+        let report = centrality_report(
+            super::CentralityRefreshStatus::MemoryBudgetRefused,
+            Vec::new(),
+        );
+
+        let json = report.data_json();
+        let degraded = json["degraded"]
+            .as_array()
+            .expect("memory-budget refusal should emit degraded array");
+
+        assert_eq!(json["status"], "memory_budget_refused");
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(
+            degraded[0]["code"],
+            crate::core::graph_memory_budget::LARGE_GRAPH_UNCACHED_CODE
+        );
+        assert_eq!(degraded[0]["severity"], "high");
     }
 
     #[test]
