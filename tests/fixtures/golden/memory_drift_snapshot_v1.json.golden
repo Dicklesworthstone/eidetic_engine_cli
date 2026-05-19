@@ -1,0 +1,85 @@
+{
+  "schema": "ee.memory_drift.snapshot.v1",
+  "memoryId": "mem_123",
+  "workspaceId": "workspace_abc",
+  "capturedAt": null,
+  "redactionStatus": "redaction_safe",
+  "sourceWindowBytes": 16,
+  "anchors": [
+    {
+      "kind": "bead_id",
+      "label": "bd-1z1fd.1",
+      "status": "captured",
+      "contentHash": "blake3:1f9b1ce1a81c7ccf6e8cd7406f793671a31942e3ef746c8d297997debb69f8bb",
+      "metadataHash": "blake3:9ef397a07c25a484d1dcd381e72db173e1c9cfac48765ef725fcfe92b3e9e5a7",
+      "sourceWindow": null,
+      "freshness": {
+        "observedAt": null,
+        "sourceModifiedAt": null,
+        "sourceByteLen": null,
+        "unavailableReason": null
+      },
+      "metadata": {
+        "valueHash": "blake3:1f9b1ce1a81c7ccf6e8cd7406f793671a31942e3ef746c8d297997debb69f8bb"
+      }
+    },
+    {
+      "kind": "command_hash",
+      "label": "command:f4c8086b0140fa81",
+      "status": "captured",
+      "contentHash": "blake3:f4c8086b0140fa81b557ad749280f4ae198c02a388f52c2b4b120aef83b7fb4f",
+      "metadataHash": "blake3:b37d91b0ff1c1446aa010c49c4d8d0fb42f0200ff25737f6bdc15c2d20159fbf",
+      "sourceWindow": null,
+      "freshness": {
+        "observedAt": null,
+        "sourceModifiedAt": null,
+        "sourceByteLen": null,
+        "unavailableReason": null
+      },
+      "metadata": {
+        "valueHash": "blake3:f4c8086b0140fa81b557ad749280f4ae198c02a388f52c2b4b120aef83b7fb4f"
+      }
+    },
+    {
+      "kind": "file_path",
+      "label": "path:memory_drift.rs:98deee1c49a79393",
+      "status": "too_large",
+      "contentHash": "blake3:9ee4b1b1a11a05e5c9b62b42e6cb59ff0c506cf54078a053fb4e6512335338cb",
+      "metadataHash": "blake3:6be0ce3db85946fbc986ca1fb6b8a2e28df14dc3e9fa07c6f1a2f2fcbbf9a99f",
+      "sourceWindow": {
+        "startByte": 0,
+        "endByte": 16,
+        "byteLen": 19,
+        "truncated": true
+      },
+      "freshness": {
+        "observedAt": null,
+        "sourceModifiedAt": null,
+        "sourceByteLen": 19,
+        "unavailableReason": "too_large"
+      },
+      "metadata": {
+        "pathHash": "blake3:98deee1c49a79393f5efe67f6f2357308170d668c4dc2771889136214e7cae3d",
+        "sourceKind": "file_path"
+      }
+    },
+    {
+      "kind": "schema_id",
+      "label": "ee.memory_drift.snapshot.v1",
+      "status": "captured",
+      "contentHash": "blake3:564d5e73ed3dc61170f5fd5d865c4e2e2a2a66974e31989398347c0f42957f5f",
+      "metadataHash": "blake3:0ce34db14c0235930f46c6915a761324687512428860c9d381041ae566a0e448",
+      "sourceWindow": null,
+      "freshness": {
+        "observedAt": null,
+        "sourceModifiedAt": null,
+        "sourceByteLen": null,
+        "unavailableReason": null
+      },
+      "metadata": {
+        "valueHash": "blake3:564d5e73ed3dc61170f5fd5d865c4e2e2a2a66974e31989398347c0f42957f5f"
+      }
+    }
+  ],
+  "degraded": []
+}

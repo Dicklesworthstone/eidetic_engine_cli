@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.memory_drift.snapshot.v1.json",
+  "title": "ee.memory_drift.snapshot.v1",
+  "description": "Compact provenance snapshot for read-only memory drift checks. Anchors capture redaction-safe labels, bounded source-window hashes, metadata hashes, and freshness or unavailable reasons without storing raw large source bodies.",
+  "type": "object",
+  "required": [
+    "schema",
+    "memoryId",
+    "workspaceId",
+    "capturedAt",
+    "redactionStatus",
+    "sourceWindowBytes",
+    "anchors",
+    "degraded"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.memory_drift.snapshot.v1"
+    },
+    "memoryId": {
+      "type": "string"
+    },
+    "workspaceId": {
+      "type": ["string", "null"]
+    },
+    "capturedAt": {
+      "type": ["string", "null"],
+      "description": "RFC 3339 capture time when available. Determinism tests may scrub this volatile field."
+    },
+    "redactionStatus": {
+      "type": "string",
+      "enum": ["redaction_safe", "redacted", "mixed"]
+    },
+    "sourceWindowBytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Maximum number of source bytes hashed per anchor window."
+    },
+    "anchors": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/anchor"}
+    },
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradation"}
+    }
+  },
+  "$defs": {
+    "anchor": {
+      "type": "object",
+      "required": [
+        "kind",
+        "label",
+        "status",
+        "contentHash",
+        "metadataHash",
+        "sourceWindow",
+        "freshness",
+        "metadata"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "file_path",
+            "symbol",
+            "line_span_hash",
+            "command_hash",
+            "schema_id",
+            "bead_id",
+            "commit_hash",
+            "session_fragment_hash"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "description": "Redaction-safe display label. Absolute directories, raw commands, and raw session fragments must not appear here."
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "captured",
+            "missing_source",
+            "binary_source",
+            "too_large",
+            "unavailable",
+            "redacted"
+          ]
+        },
+        "contentHash": {
+          "type": ["string", "null"],
+          "pattern": "^blake3:[0-9a-f]+$"
+        },
+        "metadataHash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]+$"
+        },
+        "sourceWindow": {
+          "anyOf": [
+            {"$ref": "#/$defs/sourceWindow"},
+            {"type": "null"}
+          ]
+        },
+        "freshness": {
+          "$ref": "#/$defs/freshness"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        }
+      }
+    },
+    "sourceWindow": {
+      "type": "object",
+      "required": ["startByte", "endByte", "byteLen", "truncated"],
+      "additionalProperties": false,
+      "properties": {
+        "startByte": {"type": "integer", "minimum": 0},
+        "endByte": {"type": "integer", "minimum": 0},
+        "byteLen": {"type": "integer", "minimum": 0},
+        "truncated": {"type": "boolean"}
+      }
+    },
+    "freshness": {
+      "type": "object",
+      "required": [
+        "observedAt",
+        "sourceModifiedAt",
+        "sourceByteLen",
+        "unavailableReason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "observedAt": {"type": ["string", "null"]},
+        "sourceModifiedAt": {"type": ["string", "null"]},
+        "sourceByteLen": {"type": ["integer", "null"], "minimum": 0},
+        "unavailableReason": {"type": ["string", "null"]}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {"type": "string"}
+      }
+    }
+  }
+}

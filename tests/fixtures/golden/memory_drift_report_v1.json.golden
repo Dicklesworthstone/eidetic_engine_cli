@@ -1,0 +1,76 @@
+{
+  "schema": "ee.memory_drift.report.v1",
+  "mode": "recent_pack_items",
+  "generatedAt": null,
+  "summary": {
+    "totalMemories": 3,
+    "current": 1,
+    "changed": 1,
+    "missingSource": 1,
+    "staleAnchor": 0,
+    "unverifiable": 0,
+    "suppressed": 0
+  },
+  "items": [
+    {
+      "memoryId": "mem_missing",
+      "driftStatus": "missing_source",
+      "topReason": "provenance_chain_missing",
+      "evidenceCount": 0,
+      "revalidationCommand": "ee memory drift mem_missing --json",
+      "degradedCode": "memory_drift_source_missing",
+      "severity": "high"
+    },
+    {
+      "memoryId": "mem_changed",
+      "driftStatus": "changed",
+      "topReason": "provenance_chain_mismatch",
+      "evidenceCount": 1,
+      "revalidationCommand": "ee memory drift mem_changed --json",
+      "degradedCode": "memory_drift_source_changed",
+      "severity": "medium"
+    },
+    {
+      "memoryId": "mem_current",
+      "driftStatus": "current",
+      "topReason": "provenance_chain_verified",
+      "evidenceCount": 1,
+      "revalidationCommand": "ee memory drift mem_current --json",
+      "degradedCode": null,
+      "severity": "info"
+    }
+  ],
+  "recoveryActions": [
+    {
+      "priority": 1,
+      "kind": "rerun_source_validation",
+      "command": "ee memory drift --mode recent-pack-items --json",
+      "description": "Rerun the read-only drift report before reusing affected memories."
+    },
+    {
+      "priority": 2,
+      "kind": "revise_memory",
+      "command": null,
+      "description": "Revise or re-remember affected memories after updating their source evidence."
+    },
+    {
+      "priority": 3,
+      "kind": "mark_source_unavailable",
+      "command": null,
+      "description": "Record source-unavailable status only through a later explicit audited mutation flow."
+    },
+    {
+      "priority": 4,
+      "kind": "ignore_with_audit",
+      "command": null,
+      "description": "Ignore a drift warning only with a later audited decision; this report is read-only."
+    }
+  ],
+  "degraded": [
+    {
+      "code": "memory_drift_report_partial",
+      "severity": "low",
+      "message": "Fixture report omits unavailable source bodies."
+    }
+  ]
+}

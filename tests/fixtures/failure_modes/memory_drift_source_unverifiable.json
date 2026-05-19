@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "memory_drift_source_unverifiable",
+  "introduced_by": {
+    "bead": "bd-1z1fd.3",
+    "epic_letter": "drift-sentinel"
+  },
+  "surfaces": [
+    "search",
+    "context"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Search or context selects a memory whose provenance verification was skipped or could not be inspected, so the agent cannot treat the selected evidence as freshly verified.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "ee remember 'Skipped provenance marker.' --workspace . --level procedural --kind rule --json",
+      "ee diag integrity --workspace . --json"
+    ],
+    "invocation": "ee search 'Skipped provenance marker' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "memory_drift_source_unverifiable",
+    "severity": "medium",
+    "message_contains": [
+      "stale provenance evidence",
+      "status=unverifiable",
+      "reason=provenance_verification_skipped"
+    ],
+    "repair_contains": "ee memory drift"
+  }
+}

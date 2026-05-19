@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.memory_drift.report.v1.json",
+  "title": "ee.memory_drift.report.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "mode",
+    "generatedAt",
+    "summary",
+    "items",
+    "recoveryActions",
+    "degraded"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ee.memory_drift.report.v1"
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["all_memories", "one_memory", "recent_pack_items"]
+    },
+    "generatedAt": {
+      "type": ["string", "null"]
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "totalMemories",
+        "current",
+        "changed",
+        "missingSource",
+        "staleAnchor",
+        "unverifiable",
+        "suppressed"
+      ],
+      "properties": {
+        "totalMemories": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "current": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "changed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missingSource": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "staleAnchor": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unverifiable": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "suppressed": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/selectionHint"
+      }
+    },
+    "recoveryActions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/recoveryAction"
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/degraded"
+      }
+    }
+  },
+  "$defs": {
+    "selectionHint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "memoryId",
+        "driftStatus",
+        "topReason",
+        "evidenceCount",
+        "revalidationCommand",
+        "degradedCode",
+        "severity"
+      ],
+      "properties": {
+        "memoryId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "driftStatus": {
+          "type": "string",
+          "enum": [
+            "current",
+            "changed",
+            "missing_source",
+            "stale_anchor",
+            "unverifiable",
+            "suppressed"
+          ]
+        },
+        "topReason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidenceCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "revalidationCommand": {
+          "type": "string",
+          "minLength": 1
+        },
+        "degradedCode": {
+          "type": ["string", "null"]
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        }
+      }
+    },
+    "recoveryAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["priority", "kind", "command", "description"],
+      "properties": {
+        "priority": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "rerun_source_validation",
+            "revise_memory",
+            "mark_source_unavailable",
+            "ignore_with_audit"
+          ]
+        },
+        "command": {
+          "type": ["string", "null"]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "degraded": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

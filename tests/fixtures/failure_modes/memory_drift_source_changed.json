@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "memory_drift_source_changed",
+  "introduced_by": {
+    "bead": "bd-1z1fd.3",
+    "epic_letter": "drift-sentinel"
+  },
+  "surfaces": [
+    "search",
+    "context"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Search or context selects a memory whose persisted provenance chain verification status is mismatch, meaning the remembered source evidence no longer matches the stored chain hash.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "ee remember 'Changed provenance marker.' --workspace . --level procedural --kind rule --json",
+      "ee memory drift verify --workspace . --sample-size 1 --json"
+    ],
+    "invocation": "ee search 'Changed provenance marker' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "memory_drift_source_changed",
+    "severity": "medium",
+    "message_contains": [
+      "stale provenance evidence",
+      "status=changed",
+      "reason=provenance_chain_mismatch"
+    ],
+    "repair_contains": "ee memory drift"
+  }
+}

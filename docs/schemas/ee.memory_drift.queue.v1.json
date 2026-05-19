@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.memory_drift.queue.v1.json",
+  "title": "ee.memory_drift.queue.v1",
+  "description": "Deterministic, read-only queue of memories whose source provenance snapshots need explicit revalidation.",
+  "type": "object",
+  "required": ["schema", "generatedAt", "queueTruncated", "items", "degraded"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.memory_drift.queue.v1"
+    },
+    "generatedAt": {
+      "type": ["string", "null"],
+      "description": "RFC 3339 generation time when available. Determinism tests may scrub this volatile field."
+    },
+    "queueTruncated": {
+      "type": "boolean"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/item"
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/degradation"
+      }
+    }
+  },
+  "$defs": {
+    "driftStatus": {
+      "type": "string",
+      "enum": [
+        "current",
+        "changed",
+        "missing_source",
+        "stale_anchor",
+        "unverifiable",
+        "suppressed"
+      ]
+    },
+    "anchorKind": {
+      "type": "string",
+      "enum": [
+        "file_path",
+        "symbol",
+        "line_span_hash",
+        "command_hash",
+        "schema_id",
+        "bead_id",
+        "commit_hash",
+        "session_fragment_hash"
+      ]
+    },
+    "factors": {
+      "type": "object",
+      "required": [
+        "memoryId",
+        "importance",
+        "trustClass",
+        "trustScore",
+        "recentPackInclusions",
+        "downstreamGraphRefs",
+        "daysSinceValidation",
+        "suppressed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": { "type": "string" },
+        "importance": { "type": "number", "minimum": 0, "maximum": 1 },
+        "trustClass": { "type": "string" },
+        "trustScore": { "type": "number", "minimum": 0, "maximum": 1 },
+        "recentPackInclusions": { "type": "integer", "minimum": 0 },
+        "downstreamGraphRefs": { "type": "integer", "minimum": 0 },
+        "daysSinceValidation": { "type": "integer", "minimum": 0 },
+        "suppressed": { "type": "boolean" }
+      }
+    },
+    "comparison": {
+      "type": "object",
+      "required": [
+        "anchorLabel",
+        "anchorKind",
+        "driftStatus",
+        "previousContentHash",
+        "currentContentHash",
+        "previousMetadataHash",
+        "currentMetadataHash",
+        "reasonCodes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "anchorLabel": { "type": "string" },
+        "anchorKind": { "$ref": "#/$defs/anchorKind" },
+        "driftStatus": { "$ref": "#/$defs/driftStatus" },
+        "previousContentHash": { "type": ["string", "null"], "pattern": "^blake3:[0-9a-f]+$" },
+        "currentContentHash": { "type": ["string", "null"], "pattern": "^blake3:[0-9a-f]+$" },
+        "previousMetadataHash": { "type": "string", "pattern": "^blake3:[0-9a-f]+$" },
+        "currentMetadataHash": { "type": ["string", "null"], "pattern": "^blake3:[0-9a-f]+$" },
+        "reasonCodes": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "item": {
+      "type": "object",
+      "required": [
+        "memoryId",
+        "driftStatus",
+        "priorityScore",
+        "priorityScoreMicros",
+        "affectedAnchorCount",
+        "totalAnchorCount",
+        "changeMagnitude",
+        "factors",
+        "reasonCodes",
+        "comparisons"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": { "type": "string" },
+        "driftStatus": { "$ref": "#/$defs/driftStatus" },
+        "priorityScore": { "type": "number", "minimum": 0, "maximum": 1 },
+        "priorityScoreMicros": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "affectedAnchorCount": { "type": "integer", "minimum": 0 },
+        "totalAnchorCount": { "type": "integer", "minimum": 0 },
+        "changeMagnitude": { "type": "number", "minimum": 0, "maximum": 1 },
+        "factors": { "$ref": "#/$defs/factors" },
+        "reasonCodes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "comparisons": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/comparison" }
+        }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "string" },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

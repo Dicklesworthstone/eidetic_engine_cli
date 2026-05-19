@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "memory_drift_source_missing",
+  "introduced_by": {
+    "bead": "bd-1z1fd.3",
+    "epic_letter": "drift-sentinel"
+  },
+  "surfaces": [
+    "search",
+    "context"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "Search or context selects a memory whose persisted provenance verification status is missing, meaning the source evidence needed to recompute the provenance chain is absent.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "ee remember 'Missing provenance marker.' --workspace . --level procedural --kind rule --json",
+      "ee diag integrity --workspace . --json"
+    ],
+    "invocation": "ee context 'Missing provenance marker' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "memory_drift_source_missing",
+    "severity": "high",
+    "message_contains": [
+      "stale provenance evidence",
+      "status=missing_source",
+      "reason=provenance_chain_missing"
+    ],
+    "repair_contains": "ee memory drift"
+  }
+}

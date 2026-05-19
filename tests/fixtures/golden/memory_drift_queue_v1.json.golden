@@ -1,0 +1,67 @@
+{
+  "schema": "ee.memory_drift.queue.v1",
+  "generatedAt": null,
+  "queueTruncated": false,
+  "items": [
+    {
+      "memoryId": "mem_changed",
+      "driftStatus": "changed",
+      "priorityScore": 0.885,
+      "priorityScoreMicros": 885000,
+      "affectedAnchorCount": 1,
+      "totalAnchorCount": 1,
+      "changeMagnitude": 1.0,
+      "factors": {
+        "memoryId": "mem_changed",
+        "importance": 0.8,
+        "trustClass": "agent_validated",
+        "trustScore": 0.5,
+        "recentPackInclusions": 3,
+        "downstreamGraphRefs": 4,
+        "daysSinceValidation": 180,
+        "suppressed": false
+      },
+      "reasonCodes": ["content_hash_changed", "kind:file_path"],
+      "comparisons": [
+        {
+          "anchorLabel": "path:memory_drift.rs:98deee1c49a79393",
+          "anchorKind": "file_path",
+          "driftStatus": "changed",
+          "previousContentHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+          "currentContentHash": "blake3:2222222222222222222222222222222222222222222222222222222222222222",
+          "previousMetadataHash": "blake3:3333333333333333333333333333333333333333333333333333333333333333",
+          "currentMetadataHash": "blake3:4444444444444444444444444444444444444444444444444444444444444444",
+          "reasonCodes": ["content_hash_changed", "kind:file_path"]
+        }
+      ]
+    },
+    {
+      "memoryId": "mem_unverifiable",
+      "driftStatus": "unverifiable",
+      "priorityScore": 0.5,
+      "priorityScoreMicros": 500000,
+      "affectedAnchorCount": 0,
+      "totalAnchorCount": 0,
+      "changeMagnitude": 1.0,
+      "factors": {
+        "memoryId": "mem_unverifiable",
+        "importance": 0.4,
+        "trustClass": "cass_evidence",
+        "trustScore": 0.2,
+        "recentPackInclusions": 0,
+        "downstreamGraphRefs": 0,
+        "daysSinceValidation": 365,
+        "suppressed": false
+      },
+      "reasonCodes": ["no_previous_evidence"],
+      "comparisons": []
+    }
+  ],
+  "degraded": [
+    {
+      "code": "memory_drift_graph_blast_radius_unavailable",
+      "severity": "low",
+      "message": "Graph blast-radius evidence was unavailable; queue ordering used source and memory metadata only."
+    }
+  ]
+}
