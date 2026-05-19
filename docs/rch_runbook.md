@@ -75,7 +75,7 @@ tree could not be exported safely. If it reports
 dependencies that cannot be represented safely by the export alone.
 
 Never use source-proof modes as permission to run `git worktree`, `git stash`,
-`git reset`, `git checkout`, deletion cleanup, or local Cargo. The correct
+`git reset`, `git checkout`, `git clean`, deletion cleanup, or local Cargo. The correct
 response to an ambiguous proof is coordination, not mutation.
 
 ## Why every flag matters
@@ -209,8 +209,8 @@ scripts/rch_verify.sh --bead-id bd-XXXX --summary -- \
 # 2. Pretty-print the human summary and paste into Agent Mail
 jq -r '.summary_markdown' /tmp/proof.json
 
-# 3. Close the bead with the proof embedded
-br close bd-XXXX --reason "$(jq -r '.close_reason_markdown' /tmp/proof.json)"
+# 3. Close the bead with a pasted/static reason, never command substitution
+br close bd-XXXX --reason "RCH proof: command_hash=<hash>; status=<status>; verification_attribution=<mode>; see /tmp/proof.json"
 
 # 4. Optional: ledger the proof for swarm-wide reuse (bd-1h8ji.3)
 scripts/rch_verify.sh --ledger .ee/derived/rch/runs.jsonl -- <cmd>
@@ -384,8 +384,7 @@ them and choke.
 
 **Fix:** the project `.rchignore` already excludes `._*` and `.DS_Store`
 (landed in bd-1h8ji.4). If you see a new one slip through, file a child
-bead — most likely you have a stale checkout that needs `git status` +
-`git clean -nd` to identify.
+bead after read-only inspection with `git status --short --ignored`.
 
 ### Daemon timeout
 

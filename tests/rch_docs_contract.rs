@@ -197,6 +197,47 @@ fn rch_runbook_beads_comment_template_names_source_attribution_fields() -> TestR
 }
 
 #[test]
+fn rch_runbook_tracker_and_mail_examples_avoid_shell_substitution() -> TestResult {
+    let runbook = read_doc("docs/rch_runbook.md")?;
+    let sensitive_commands = [
+        "br close",
+        "br comment",
+        "br update",
+        "send_message",
+        "reply_message",
+    ];
+    let mut offenders: Vec<String> = Vec::new();
+    for (lang_hint, block) in fenced_code_blocks(&runbook) {
+        let lower_hint = lang_hint.to_ascii_lowercase();
+        if !(lower_hint.contains("bash") || lower_hint.contains("sh") || lower_hint.is_empty()) {
+            continue;
+        }
+        if block.contains("ee preflight check --cmd") {
+            continue;
+        }
+        let contains_tracker_or_mail = sensitive_commands
+            .iter()
+            .any(|command| block.contains(command));
+        let contains_shell_substitution = block.contains("$(") || block.contains('`');
+        if contains_tracker_or_mail && contains_shell_substitution {
+            offenders.push(format!(
+                "fenced ```{lang_hint}``` block mixes tracker/mail update commands with shell substitution:\n----\n{block}----"
+            ));
+        }
+    }
+    if !offenders.is_empty() {
+        return Err(format!(
+            "docs/rch_runbook.md has {} tracker/mail example(s) that use shell substitution. \
+             Paste proof fields or reference an artifact path instead of executing commands inside \
+             br/Agent Mail updates:\n{}",
+            offenders.len(),
+            offenders.join("\n")
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn rch_runbook_names_handoff_attribution_buckets() -> TestResult {
     let runbook = read_doc("docs/rch_runbook.md")?;
     // bd-9ygik.4 acceptance: handoff wording must distinguish
@@ -250,6 +291,7 @@ fn rch_runbook_refuses_forbidden_cleanup_operations() -> TestResult {
         "git stash",
         "git reset",
         "git checkout",
+        "git clean",
         "local Cargo",
     ];
     let mut missing: Vec<&str> = Vec::new();
