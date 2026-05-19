@@ -1756,7 +1756,9 @@ fn local_cargo_preflight_classification(workspace: &Path, command: &str) -> Valu
     let local_cargo_denied = matched_rule_ids.iter().any(|rule_id| {
         matches!(
             rule_id.as_str(),
-            "builtin:local_cargo_heavy_verification" | "builtin:local_cargo_target_dir_override"
+            "builtin:local_cargo_heavy_verification"
+                | "builtin:local_cargo_target_dir_override"
+                | "builtin:local_rust_compiler_verification"
         )
     });
     let policy_status = if local_cargo_denied {
@@ -3997,6 +3999,31 @@ mod tests {
         assert!(
             value.pointer("/buildAdmission/admitted").is_some(),
             "summary must include build-admission evidence"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn local_cargo_tripwire_summary_classifies_direct_rustdoc_as_disallowed() -> TestResult {
+        let workspace = unique_test_path("local-rustdoc-tripwire-summary");
+        fs::create_dir_all(&workspace)
+            .map_err(|error| format!("failed to create workspace: {error}"))?;
+
+        let value = local_cargo_preflight_classification(&workspace, "rustdoc --test src/lib.rs");
+
+        assert_eq!(
+            value.pointer("/policyStatus"),
+            Some(&json!("local_cargo_disallowed"))
+        );
+        assert!(
+            value
+                .pointer("/matchedRuleIds")
+                .and_then(Value::as_array)
+                .is_some_and(|ids| ids
+                    .iter()
+                    .any(|id| id == "builtin:local_rust_compiler_verification")),
+            "classification must cite the direct rustc/rustdoc guard: {value}"
         );
 
         Ok(())

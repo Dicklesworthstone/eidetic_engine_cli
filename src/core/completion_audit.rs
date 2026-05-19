@@ -495,7 +495,9 @@ fn local_cargo_preflight_policy_status(workspace: &Path, command: &str) -> Strin
     let local_cargo_denied = report.matches.iter().any(|matched| {
         matches!(
             matched.rule_id.as_str(),
-            "builtin:local_cargo_heavy_verification" | "builtin:local_cargo_target_dir_override"
+            "builtin:local_cargo_heavy_verification"
+                | "builtin:local_cargo_target_dir_override"
+                | "builtin:local_rust_compiler_verification"
         )
     });
 
@@ -2300,6 +2302,16 @@ mod tests {
                 .any(|record| record.kind == "local_cargo_tripwire"),
             "workspace audit should surface the read-only preflight tripwire probe"
         );
+    }
+
+    #[test]
+    fn local_build_policy_probe_treats_direct_rustdoc_as_local_attempt() {
+        let status = local_cargo_preflight_policy_status(
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            "rustdoc --test src/lib.rs",
+        );
+
+        assert_eq!(status, "local_cargo_disallowed");
     }
 
     #[test]

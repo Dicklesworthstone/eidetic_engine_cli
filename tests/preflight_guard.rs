@@ -415,6 +415,55 @@ fn rust_verifier_command_substitution_allows_wrappers_and_literal_prose() {
 }
 
 #[test]
+fn local_rustc_and_rustdoc_verification_halt_before_execution() {
+    let registry = PreflightGuardRegistry::with_builtins();
+
+    for command in [
+        "rustc src/main.rs",
+        "rustdoc --test src/lib.rs",
+        "env RCH_REQUIRE_REMOTE=1 rustc --crate-type lib src/lib.rs",
+        "bash -lc 'rustdoc --test src/lib.rs'",
+    ] {
+        let report = run_preflight_guard(&registry, &opts(command));
+        assert_eq!(
+            report.exit_code, 7,
+            "command `{command}` should be denied before local Rust verification"
+        );
+        assert!(
+            report
+                .matches
+                .iter()
+                .any(|matched| matched.rule_id == "builtin:local_rust_compiler_verification"),
+            "command `{command}` did not cite local rustc/rustdoc guard: {:?}",
+            report.matches,
+        );
+    }
+}
+
+#[test]
+fn local_rustc_guard_allows_rch_wrappers_and_literal_mentions() {
+    let registry = PreflightGuardRegistry::with_builtins();
+
+    for command in [
+        "rch exec -- rustc src/main.rs",
+        "scripts/rch_verify.sh -- rustdoc --test src/lib.rs",
+        "br comment bd-123 --message 'RCH command: `rustdoc --test src/lib.rs`'",
+        "rg 'rustc src/main.rs' docs src",
+    ] {
+        let report = run_preflight_guard(&registry, &opts(command));
+        assert_eq!(report.exit_code, 0, "command `{command}` should pass");
+        assert!(
+            report
+                .matches
+                .iter()
+                .all(|matched| matched.rule_id != "builtin:local_rust_compiler_verification"),
+            "command `{command}` unexpectedly matched local rustc/rustdoc guard: {:?}",
+            report.matches,
+        );
+    }
+}
+
+#[test]
 fn workspace_toml_layered_after_builtins() {
     let toml = r#"
 [[rules]]

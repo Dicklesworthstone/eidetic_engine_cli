@@ -353,6 +353,9 @@ fn rule_matches_command(rule: &PreflightGuardRule, command: &str) -> bool {
             "local_cargo_target_dir_override" => {
                 return matches_local_cargo_target_dir_override(command);
             }
+            "local_rust_compiler_verification" => {
+                return matches_local_rust_compiler_verification(command);
+            }
             "rust_verifier_command_substitution" => {
                 return matches_rust_verifier_command_substitution(command);
             }
@@ -511,6 +514,12 @@ fn matches_local_cargo_target_dir_override(command: &str) -> bool {
     shell_command_segments(command)
         .iter()
         .any(|segment| local_cargo_target_dir_override_segment_matches(segment))
+}
+
+fn matches_local_rust_compiler_verification(command: &str) -> bool {
+    shell_command_segments(command)
+        .iter()
+        .any(|segment| local_rust_compiler_segment_matches(segment))
 }
 
 fn matches_rust_verifier_command_substitution(command: &str) -> bool {
@@ -691,6 +700,22 @@ fn local_cargo_target_dir_override_segment_matches(segment: &[String]) -> bool {
         })
 }
 
+fn local_rust_compiler_segment_matches(segment: &[String]) -> bool {
+    let Some(command_index) = shell_segment_command_index(segment) else {
+        return false;
+    };
+    let Some(command_name) = segment.get(command_index) else {
+        return false;
+    };
+    if is_rch_wrapper_command(command_name) {
+        return false;
+    }
+    if let Some(shell_body) = shell_c_argument(segment, command_index) {
+        return matches_local_rust_compiler_verification(shell_body);
+    }
+    matches!(command_basename(command_name), "rustc" | "rustdoc")
+}
+
 fn cargo_heavy_subcommand(segment: &[String], command_index: usize) -> Option<&str> {
     let command_name = segment.get(command_index)?;
     let command_base = command_basename(command_name);
@@ -724,7 +749,16 @@ fn cargo_heavy_subcommand(segment: &[String], command_index: usize) -> Option<&s
 fn cargo_subcommand_is_heavy(word: &str) -> bool {
     matches!(
         word,
-        "bench" | "build" | "check" | "clippy" | "doc" | "run" | "test"
+        "bench"
+            | "build"
+            | "check"
+            | "clippy"
+            | "doc"
+            | "fix"
+            | "install"
+            | "run"
+            | "rustc"
+            | "test"
     )
 }
 
@@ -1381,6 +1415,13 @@ fn builtin_rules() -> Vec<PreflightGuardRule> {
             source: RuleSource::Builtin { name: "local_cargo_target_dir_override".to_owned() },
         },
         PreflightGuardRule {
+            id: "builtin:local_rust_compiler_verification".to_owned(),
+            pattern: "*".to_owned(),
+            action: GuardAction::Halt,
+            message: "Direct local rustc or rustdoc verification is forbidden in this repository; route Rust verification through RCH.".to_owned(),
+            source: RuleSource::Builtin { name: "local_rust_compiler_verification".to_owned() },
+        },
+        PreflightGuardRule {
             id: "builtin:rust_verifier_command_substitution".to_owned(),
             pattern: "*".to_owned(),
             action: GuardAction::Halt,
@@ -1601,8 +1642,10 @@ impl PreflightGuardReport {
 
 fn recovery_guidance_for_match(matched: &GuardMatch) -> &'static str {
     match matched.rule_id.as_str() {
-        "builtin:local_cargo_heavy_verification" | "builtin:local_cargo_target_dir_override" => {
-            "Route Cargo verification through RCH, for example scripts/rch_verify.sh or rch exec; do not run local Cargo."
+        "builtin:local_cargo_heavy_verification"
+        | "builtin:local_cargo_target_dir_override"
+        | "builtin:local_rust_compiler_verification" => {
+            "Route Rust verification through RCH, for example scripts/rch_verify.sh or rch exec; do not run local Cargo, rustc, or rustdoc."
         }
         "builtin:rust_verifier_command_substitution" => {
             "Do not pass command-bearing evidence through shell substitution; use a file/stdin payload, a direct MCP Agent Mail call, or literal prose that the shell will not execute."
@@ -2429,6 +2472,9 @@ action = "explode"
         for command in [
             "cargo check --lib",
             "cargo +nightly clippy --all-targets -- -D warnings",
+            "cargo fix --allow-dirty",
+            "cargo install --path .",
+            "cargo rustc --lib",
             "env TMPDIR=/tmp cargo test --workspace --no-run",
             "CARGO_TARGET_DIR=/tmp/cargo_target cargo test --workspace --no-run",
             "cargo-clippy clippy --all-targets -- -D warnings",
@@ -2451,11 +2497,36 @@ action = "explode"
     }
 
     #[test]
+    fn builtins_block_direct_local_rustc_and_rustdoc_verification() {
+        let registry = PreflightGuardRegistry::with_builtins();
+
+        for command in [
+            "rustc src/main.rs",
+            "rustdoc --test src/lib.rs",
+            "env RCH_REQUIRE_REMOTE=1 rustc --crate-type lib src/lib.rs",
+            "bash -lc 'rustdoc --test src/lib.rs'",
+        ] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert!(
+                report
+                    .matches
+                    .iter()
+                    .any(|matched| matched.rule_id == "builtin:local_rust_compiler_verification"),
+                "command `{command}` did not cite local rustc/rustdoc guard: {:?}",
+                report.matches,
+            );
+        }
+    }
+
+    #[test]
     fn local_cargo_guard_allows_rch_wrapped_cargo_and_lightweight_commands() {
         let registry = PreflightGuardRegistry::with_builtins();
 
         for command in [
             "rch exec -- env TMPDIR=/tmp CARGO_TARGET_DIR=/tmp/ee-rch-target cargo test --lib foo",
+            "rch exec -- rustc src/main.rs",
+            "scripts/rch_verify.sh -- rustdoc --test src/lib.rs",
             "scripts/rch_verify.sh --bead-id bd-123 -- cargo check --all-targets",
             "bash scripts/rch_verify.sh --summary -- cargo clippy --all-targets -- -D warnings",
             "cargo metadata --no-deps --format-version 1",
@@ -2469,8 +2540,9 @@ action = "explode"
                 report.matches.iter().all(|matched| {
                     matched.rule_id != "builtin:local_cargo_heavy_verification"
                         && matched.rule_id != "builtin:local_cargo_target_dir_override"
+                        && matched.rule_id != "builtin:local_rust_compiler_verification"
                 }),
-                "command `{command}` unexpectedly matched local Cargo rules: {:?}",
+                "command `{command}` unexpectedly matched local Rust verification rules: {:?}",
                 report.matches,
             );
         }
