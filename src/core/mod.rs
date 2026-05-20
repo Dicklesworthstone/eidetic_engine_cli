@@ -37,6 +37,7 @@ pub mod doctor_fixers;
 pub mod doctor_runtime;
 pub mod economy;
 pub mod effect;
+pub mod explanation_latency_budget;
 pub mod feedback;
 pub mod focus;
 pub mod graph_audit;

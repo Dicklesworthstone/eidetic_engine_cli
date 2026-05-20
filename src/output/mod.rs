@@ -4311,7 +4311,10 @@ pub fn render_status_toon_filtered(report: &StatusReport, profile: FieldProfile)
 pub fn render_doctor_json(report: &DoctorReport) -> String {
     let mut b = JsonBuilder::with_capacity(512);
     b.field_str("schema", RESPONSE_SCHEMA_V1);
-    b.field_bool("success", report.overall_healthy);
+    // bd-2xdom Gap 4: envelope `success` means "command ran", not "system is healthy".
+    // System state is in `data.posture` (canonical, 5-state enum) and `data.healthy`
+    // (deprecated boolean kept for v0.1→v0.2 transition).
+    b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "doctor");
         d.field_str("version", report.version);
@@ -9270,6 +9273,353 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
         subcommands: &[],
         args: &[],
     },
+    // ─── Top-level commands surfaced in `ee --help` "Most-used" prelude
+    //     and "Quick categories" that were previously missing from the
+    //     machine-readable manifest. Each entry advertises the command to
+    //     agents discovering capabilities through `--help-json`, the MCP
+    //     tool manifest, and `ee introspect`.
+    CommandEntry {
+        name: "init",
+        description: "Initialize an ee workspace",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "note",
+        description: "Capture a memory with agent-friendly level/kind inference",
+        available: true,
+        subcommands: &[],
+        args: &[CommandArg {
+            name: "CONTENT",
+            description: "Memory content to store",
+            required: true,
+            default: None,
+        }],
+    },
+    CommandEntry {
+        name: "context",
+        description: "Assemble a task-specific context pack from relevant memories",
+        available: true,
+        subcommands: &[],
+        args: &[CommandArg {
+            name: "TASK",
+            description: "Task description to assemble a context pack for",
+            required: true,
+            default: None,
+        }],
+    },
+    CommandEntry {
+        name: "pack",
+        description: "Build, replay, or diff context packs",
+        available: true,
+        subcommands: &[
+            SubcommandEntry {
+                name: "build",
+                description: "Build a pack from an explicit query document",
+            },
+            SubcommandEntry {
+                name: "replay",
+                description: "Inspect the persisted selection ledger for a historical pack",
+            },
+            SubcommandEntry {
+                name: "diff",
+                description: "Compare two persisted pack ledgers",
+            },
+        ],
+        args: &[],
+    },
+    CommandEntry {
+        name: "why",
+        description: "Explain why a memory was stored, retrieved, or selected",
+        available: true,
+        subcommands: &[],
+        args: &[CommandArg {
+            name: "MEMORY_ID",
+            description: "Identifier of the memory to explain",
+            required: true,
+            default: None,
+        }],
+    },
+    CommandEntry {
+        name: "outcome",
+        description: "Record observed feedback about a memory or related target",
+        available: true,
+        subcommands: &[],
+        args: &[CommandArg {
+            name: "ID",
+            description: "Memory or target identifier",
+            required: true,
+            default: None,
+        }],
+    },
+    CommandEntry {
+        name: "memory",
+        description: "Manage stored memories (show, list, history, level, expire, link, tags)",
+        available: true,
+        subcommands: &[
+            SubcommandEntry {
+                name: "show",
+                description: "Show a memory with provenance, links, and audit trail",
+            },
+            SubcommandEntry {
+                name: "list",
+                description: "List filtered memories",
+            },
+            SubcommandEntry {
+                name: "history",
+                description: "Audit trail for a memory",
+            },
+            SubcommandEntry {
+                name: "level",
+                description: "Audited adjacent memory level transition",
+            },
+            SubcommandEntry {
+                name: "expire",
+                description: "Audited soft expiration without deleting rows",
+            },
+            SubcommandEntry {
+                name: "link",
+                description: "List or create deterministic memory links",
+            },
+            SubcommandEntry {
+                name: "tags",
+                description: "Audited tag listing and mutation",
+            },
+        ],
+        args: &[],
+    },
+    CommandEntry {
+        name: "workspace",
+        description: "Resolve and manage workspace identities and aliases",
+        available: true,
+        subcommands: &[
+            SubcommandEntry {
+                name: "resolve",
+                description: "Resolve the current workspace identity",
+            },
+            SubcommandEntry {
+                name: "list",
+                description: "List registered workspaces",
+            },
+            SubcommandEntry {
+                name: "alias",
+                description: "Manage workspace aliases for monorepo subscopes",
+            },
+        ],
+        args: &[],
+    },
+    CommandEntry {
+        name: "insights",
+        description: "Bundle read-only operational insight sections for agents",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "swarm",
+        description: "Read-only coordination snapshot and preflight recommendations for agent swarms",
+        available: true,
+        subcommands: &[SubcommandEntry {
+            name: "brief",
+            description: "Compact coordination preflight bundle for crowded repos",
+        }],
+        args: &[],
+    },
+    CommandEntry {
+        name: "graph",
+        description: "Graph analytics, snapshots, and export artifacts",
+        available: true,
+        subcommands: &[
+            SubcommandEntry {
+                name: "export",
+                description: "Export a deterministic graph snapshot artifact",
+            },
+            SubcommandEntry {
+                name: "neighborhood",
+                description: "Expand around a memory/session/rule",
+            },
+            SubcommandEntry {
+                name: "centrality-refresh",
+                description: "Refresh PageRank / betweenness metrics",
+            },
+        ],
+        args: &[],
+    },
+    CommandEntry {
+        name: "curate",
+        description: "Review curation proposals without silently mutating memory",
+        available: true,
+        subcommands: &[
+            SubcommandEntry {
+                name: "candidates",
+                description: "List pending curation candidates",
+            },
+            SubcommandEntry {
+                name: "validate",
+                description: "Run validation on a candidate",
+            },
+            SubcommandEntry {
+                name: "apply",
+                description: "Apply an accepted candidate",
+            },
+        ],
+        args: &[],
+    },
+    CommandEntry {
+        name: "backup",
+        description: "Create, verify, and inspect local backups",
+        available: true,
+        subcommands: &[
+            SubcommandEntry {
+                name: "create",
+                description: "Create a verified backup with manifest",
+            },
+            SubcommandEntry {
+                name: "list",
+                description: "List existing backups",
+            },
+            SubcommandEntry {
+                name: "verify",
+                description: "Re-verify a backup against its manifest hashes",
+            },
+            SubcommandEntry {
+                name: "inspect",
+                description: "Inspect backup contents without restoring",
+            },
+            SubcommandEntry {
+                name: "restore",
+                description: "Restore a backup into an isolated side path",
+            },
+        ],
+        args: &[],
+    },
+    CommandEntry {
+        name: "export",
+        description: "Export redacted local memory records as a portable JSONL artifact",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "handoff",
+        description: "Session handoff and resume capsules for agent continuity",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "audit",
+        description: "Operation audit timeline and inspection commands",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "migrate",
+        description: "Apply or inspect workspace schema migrations",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "proximity",
+        description: "Report pairwise min-cut proximity between two memories",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "share",
+        description: "Preview and consent-check outbound mesh sharing",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "mesh",
+        description: "Foreground local mesh operations for peers, status, export/import, and sync-once",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "focus",
+        description: "Show and manage passive active-memory focus state",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "introspect",
+        description: "Introspect ee's command, schema, and error maps",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "maintenance",
+        description: "Run explicit maintenance jobs without a daemon",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "preflight",
+        description: "Run, show, or close preflight risk assessments",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "support",
+        description: "Create or inspect redacted diagnostic support bundles",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "completion",
+        description: "Generate shell completion scripts for ee",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "update",
+        description: "Plan an update without mutating the installation",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "perf",
+        description: "Compare normalized performance artifacts without mutating state",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "config",
+        description: "Inspect and update workspace configuration",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "verify",
+        description: "Record and evaluate verification evidence for closure decisions",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "db",
+        description: "Inspect database state without mutation",
+        available: true,
+        subcommands: &[],
+        args: &[],
+    },
 ];
 
 #[must_use]
@@ -10279,7 +10629,9 @@ pub fn render_capabilities_json_filtered(
 pub fn render_doctor_json_filtered(report: &DoctorReport, profile: FieldProfile) -> String {
     let mut b = JsonBuilder::with_capacity(512);
     b.field_str("schema", RESPONSE_SCHEMA_V1);
-    b.field_bool("success", report.overall_healthy);
+    // bd-2xdom Gap 4: envelope `success` means "command ran", not "system is healthy".
+    // System state is in `data.posture` (canonical) and `data.healthy` (deprecated alias).
+    b.field_bool("success", true);
     b.field_str("fields", profile.as_str());
     b.field_object("data", |d| {
         d.field_str("command", "doctor");

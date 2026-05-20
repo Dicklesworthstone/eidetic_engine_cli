@@ -22717,6 +22717,9 @@ where
         min_weight: args.min_weight,
         min_confidence: args.min_confidence,
         link_limit: args.link_limit,
+        memory_budget_policy: crate::core::graph_memory_budget::workspace_memory_budget_policy(
+            &workspace,
+        ),
     };
 
     match crate::graph::refresh_graph_snapshot(&conn, &workspace_id, &options) {
@@ -22806,6 +22809,9 @@ where
         min_weight: args.min_weight,
         min_confidence: args.min_confidence,
         link_limit: args.link_limit,
+        memory_budget_policy: crate::core::graph_memory_budget::workspace_memory_budget_policy(
+            &workspace,
+        ),
     };
     let mut reports = Vec::with_capacity(graph_types.len());
     for graph_type in graph_types {
