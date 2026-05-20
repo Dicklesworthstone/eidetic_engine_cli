@@ -20,6 +20,8 @@ pub const PEER_ENROLLMENT_HANDSHAKE_DENIED_CODE: &str = "mesh_peer_handshake_den
 pub const PEER_ENROLLMENT_NETWORK_ONLY_DENIED_CODE: &str = "mesh_peer_network_only_denied";
 pub const PEER_ENROLLMENT_CAPABILITY_MISMATCH_CODE: &str =
     "mesh_peer_capability_handshake_mismatch";
+pub const PEER_KEY_ROTATION_INVALID_KEY_CODE: &str = "mesh_peer_key_rotation_invalid_key";
+pub const PEER_KEY_ROTATION_UNCHANGED_CODE: &str = "mesh_peer_key_rotation_unchanged";
 pub const PEER_KEY_ROTATION_REVOKED_CODE: &str = "mesh_peer_key_rotation_revoked";
 pub const PEER_UNKNOWN_ATTEMPT_DENIED_CODE: &str = "mesh_peer_unknown_attempt_denied";
 pub const MESH_PEER_E2E_SURFACE: &str = "mesh_peer_enrollment";
@@ -572,9 +574,24 @@ pub fn rotate_peer_key(peer: &MeshPeerRecord, input: MeshPeerRotateInput) -> Mes
             "revoked peers cannot rotate keys",
         );
     }
+    let new_public_key_fingerprint = input.new_public_key_fingerprint.trim();
+    if new_public_key_fingerprint.is_empty() {
+        return MeshPeerCommandReport::denied(
+            "mesh peer rotate",
+            PEER_KEY_ROTATION_INVALID_KEY_CODE,
+            "peer key rotation requires a non-empty public key fingerprint",
+        );
+    }
+    if new_public_key_fingerprint == peer.key.public_key_fingerprint {
+        return MeshPeerCommandReport::denied(
+            "mesh peer rotate",
+            PEER_KEY_ROTATION_UNCHANGED_CODE,
+            "peer key rotation requires a new public key fingerprint",
+        );
+    }
     let mut rotated = peer.clone();
     rotated.key.generation = rotated.key.generation.saturating_add(1);
-    rotated.key.public_key_fingerprint = input.new_public_key_fingerprint;
+    rotated.key.public_key_fingerprint = new_public_key_fingerprint.to_owned();
     rotated.key.rotated_at = Some(input.rotated_at);
     MeshPeerCommandReport::success(
         "mesh peer rotate",
@@ -784,5 +801,43 @@ mod tests {
         assert!(json.contains("\"schema\":\"ee.test_event.v1\""));
         assert!(json.contains("\"scenario\":\"unknown_peer\""));
         assert!(!json.contains("private_key"));
+    }
+
+    #[test]
+    fn key_rotation_fails_closed_for_empty_or_unchanged_public_key() {
+        let peer =
+            enroll_with_capabilities(MeshPeerCapabilityProfile::MetadataOnly, &["mesh:metadata"])
+                .peer
+                .expect("paired peer");
+
+        let empty = rotate_peer_key(
+            &peer,
+            MeshPeerRotateInput {
+                new_public_key_fingerprint: "  ".to_owned(),
+                rotated_at: "2026-05-20T00:20:00Z".to_owned(),
+                reason: "operator pasted an empty key".to_owned(),
+            },
+        );
+        assert!(!empty.success);
+        assert_eq!(
+            empty.denied_code,
+            Some(super::PEER_KEY_ROTATION_INVALID_KEY_CODE)
+        );
+        assert!(empty.peer.is_none());
+
+        let unchanged = rotate_peer_key(
+            &peer,
+            MeshPeerRotateInput {
+                new_public_key_fingerprint: peer.key.public_key_fingerprint.clone(),
+                rotated_at: "2026-05-20T00:25:00Z".to_owned(),
+                reason: "operator retried the active key".to_owned(),
+            },
+        );
+        assert!(!unchanged.success);
+        assert_eq!(
+            unchanged.denied_code,
+            Some(super::PEER_KEY_ROTATION_UNCHANGED_CODE)
+        );
+        assert!(unchanged.peer.is_none());
     }
 }
