@@ -2195,7 +2195,13 @@ fn fetch_contradictions(
 /// exist, or none of the link rows carry the dedup schema marker; the why
 /// surface is best-effort here because dedup linkage is supporting evidence,
 /// not load-bearing for the rest of the report.
-fn find_embed_dedup_link(conn: &DbConnection, memory_id: &str) -> Option<DedupLinkEvidence> {
+///
+/// Public (bd-1iltv.3) so audit and search-provenance surfaces can embed
+/// dedupLink evidence without duplicating the JSON-parsing logic. Returns
+/// `None` when no `memory_links` row with schema `ee.embed_dedup.link.v1`
+/// exists for the memory — the honest-degradation contract pinned by
+/// `find_embed_dedup_link_returns_none_when_no_dedup_link_persisted`.
+pub fn find_embed_dedup_link(conn: &DbConnection, memory_id: &str) -> Option<DedupLinkEvidence> {
     let links = conn.list_memory_links_for_memory(memory_id, None).ok()?;
     for link in links {
         let Some(raw_metadata) = link.metadata_json.as_deref() else {

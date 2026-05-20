@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
+use crate::core::why::{DedupLinkEvidence, find_embed_dedup_link};
 use crate::db::{DbConnection, StoredAuditEntry, compute_audit_row_hash};
 use crate::models::{DomainError, ProducerMetadata};
 
@@ -27,6 +28,35 @@ pub const AUDIT_VERIFY_SCHEMA_V1: &str = "ee.audit.verify.v1";
 
 /// Degraded-code emitted when one shard-local audit chain is broken.
 pub const SHARD_CHAIN_MISMATCH_CODE: &str = "shard_chain_mismatch";
+
+/// Read-only audit-side dedup-link projection helper (bd-1iltv.3).
+///
+/// Wraps [`crate::core::why::find_embed_dedup_link`] so audit consumers
+/// can embed dedupLink evidence into an audit-render or support-bundle
+/// surface without duplicating the JSON-parsing path. Returns `None`
+/// when the audit entry does not target a memory or when no
+/// `memory_links` row with schema `ee.embed_dedup.link.v1` exists for
+/// the targeted memory — the same honest-degradation contract pinned
+/// by the why surface tests.
+///
+/// Only audit entries whose `target_type` resolves to a memory row are
+/// considered: that keeps the lookup cheap and avoids issuing a
+/// memory_links query for every audit row (e.g. workspace creates,
+/// pack persists) that has no dedup-link semantics at all.
+#[must_use]
+pub fn audit_entry_dedup_link(
+    conn: &DbConnection,
+    entry: &AuditTimelineEntry,
+) -> Option<DedupLinkEvidence> {
+    if entry.target_type.as_deref() != Some("memory") {
+        return None;
+    }
+    let memory_id = entry.target_id.as_deref()?;
+    if memory_id.is_empty() {
+        return None;
+    }
+    find_embed_dedup_link(conn, memory_id)
+}
 
 /// Options for listing the audit timeline.
 #[derive(Clone, Debug, Default)]
