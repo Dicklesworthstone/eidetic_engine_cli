@@ -6120,6 +6120,26 @@ pub struct DoctorArgs {
         ],
     )]
     pub list_runs: bool,
+
+    /// Emit a read-only garbage-collection PLAN listing every run under
+    /// `<workspace>/.doctor/runs/` whose `state.json.finished_at` (or
+    /// `started_at` fallback) is older than the supplied threshold in
+    /// days. Per AGENTS.md RULE 1 this NEVER deletes anything — the
+    /// output is an agent-consumable manifest of candidates the
+    /// operator can review and act on explicitly. Emits
+    /// `ee.doctor.gc_plan.v1` and exits. The chokepoint at
+    /// `src/core/doctor_runtime::mutate` is NOT invoked. This is the
+    /// read-only half of the `gc` surface from bd-3boan pass-2; the
+    /// actual cleanup mutation requires an explicit follow-up bead.
+    #[arg(
+        long = "gc-plan",
+        value_name = "DAYS",
+        conflicts_with_all = [
+            "fix_plan", "franken_health", "capabilities", "robot_docs", "undo",
+            "quick", "only", "since", "list_runs",
+        ],
+    )]
+    pub gc_plan: Option<u32>,
 }
 
 /// Arguments for `ee init`.
@@ -9017,6 +9037,17 @@ where
                 write_stdout(
                     stdout,
                     &(doctor_list_runs_json(&workspace, &runs_root) + "\n"),
+                );
+                return ProcessExitCode::Success;
+            }
+            if let Some(days) = args.gc_plan {
+                let workspace = cli.workspace.clone().unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                });
+                let runs_root = workspace.join(".doctor").join("runs");
+                write_stdout(
+                    stdout,
+                    &(doctor_gc_plan_json(&workspace, &runs_root, days) + "\n"),
                 );
                 return ProcessExitCode::Success;
             }
@@ -13956,6 +13987,99 @@ fn doctor_list_runs_json(workspace: &Path, runs_root: &Path) -> String {
         "runsRootExists": runs_root.exists(),
         "count": runs.len(),
         "runs": runs,
+    })
+    .to_string()
+}
+
+/// Emit the agent-facing `ee.doctor.gc_plan.v1` JSON envelope listing
+/// every run under `<workspace>/.doctor/runs/` whose `state.json` age
+/// exceeds the supplied `threshold_days`. Per AGENTS.md RULE 1 this
+/// NEVER deletes anything — it is a manifest of candidates an operator
+/// or follow-up tool can review and act on explicitly. Read-only; the
+/// `src/core/doctor_runtime::mutate` chokepoint is NOT invoked.
+///
+/// Age resolution: `state.json.finished_at` wins when present; falls
+/// back to `state.json.started_at`; falls back to the run directory's
+/// filesystem mtime. Rows that cannot resolve a timestamp at all
+/// surface as `ageDays: null` with `reason: "no_timestamp_resolvable"`
+/// and are NEVER included in `eligible`. Corrupt state.json rows
+/// surface with `parseError` and are also kept out of `eligible`.
+fn doctor_gc_plan_json(workspace: &Path, runs_root: &Path, threshold_days: u32) -> String {
+    let now = chrono::Utc::now();
+    let threshold = chrono::Duration::days(i64::from(threshold_days));
+    let mut eligible: Vec<serde_json::Value> = Vec::new();
+    let mut ineligible: Vec<serde_json::Value> = Vec::new();
+    if let Ok(iter) = std::fs::read_dir(runs_root) {
+        for entry in iter.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let run_id = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_owned();
+            if run_id.is_empty() {
+                continue;
+            }
+            let state_path = path.join("state.json");
+            let raw = std::fs::read_to_string(&state_path);
+            let (timestamp_str, parse_error): (Option<String>, Option<String>) = match raw {
+                Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+                    Ok(value) => {
+                        let finished = value
+                            .get("finished_at")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned);
+                        let started = value
+                            .get("started_at")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned);
+                        (finished.or(started), None)
+                    }
+                    Err(error) => (None, Some(error.to_string())),
+                },
+                Err(error) => (None, Some(format!("read state.json: {error}"))),
+            };
+            let parsed_ts = timestamp_str
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc));
+            let age = parsed_ts.map(|ts| now.signed_duration_since(ts));
+            let age_days = age.map(|d| d.num_days());
+            let entry_json = serde_json::json!({
+                "runId": run_id,
+                "runDir": path.display().to_string(),
+                "timestamp": timestamp_str,
+                "ageDays": age_days,
+                "parseError": parse_error,
+            });
+            match age {
+                Some(d) if d >= threshold => eligible.push(entry_json),
+                _ => ineligible.push(entry_json),
+            }
+        }
+    }
+    eligible.sort_by(|left, right| {
+        let lhs = left.get("ageDays").and_then(serde_json::Value::as_i64);
+        let rhs = right.get("ageDays").and_then(serde_json::Value::as_i64);
+        rhs.cmp(&lhs)
+    });
+    serde_json::json!({
+        "schema": "ee.doctor.gc_plan.v1",
+        "doctor_version": env!("CARGO_PKG_VERSION"),
+        "workspace": workspace.display().to_string(),
+        "runsRoot": runs_root.display().to_string(),
+        "runsRootExists": runs_root.exists(),
+        "thresholdDays": threshold_days,
+        "now": now.to_rfc3339(),
+        "eligibleCount": eligible.len(),
+        "eligible": eligible,
+        "ineligibleCount": ineligible.len(),
+        "ineligible": ineligible,
+        "sideEffectFree": true,
+        "configMutation": "never",
     })
     .to_string()
 }
