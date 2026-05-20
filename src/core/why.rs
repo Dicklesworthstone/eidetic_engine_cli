@@ -512,6 +512,60 @@ pub struct WhyReport {
     pub degraded: Vec<WhyDegradation>,
     /// Error message if query failed.
     pub error: Option<String>,
+    /// Embedding-dedup link evidence when this memory reused another
+    /// memory's embedding. `None` when no dedup link was recorded.
+    pub dedup_link: Option<DedupLinkEvidence>,
+}
+
+/// Schema id for the `dedupLink` evidence block surfaced by `ee why`,
+/// `ee search`, and audit history when a memory reused an embedding.
+///
+/// MUST stay in sync with the private `REMEMBER_EMBED_DEDUP_LINK_SCHEMA_V1`
+/// in [`crate::core::memory`]; the why surface looks for this exact schema
+/// value in the persisted `memory_links.metadata_json` to recognize an
+/// embedding-reuse link without depending on the relation enum.
+pub const WHY_DEDUP_LINK_SCHEMA_REF: &str = "ee.embed_dedup.link.v1";
+
+/// Evidence block describing why a memory reused an embedding from another
+/// row. Surfaced in `WhyReport.dedup_link` so an agent can distinguish a
+/// dedup-linked memory from a normal fresh memory write without chaining a
+/// separate `ee memory show` for the linked row.
+///
+/// The block intentionally excludes raw embedding vectors and any content
+/// excerpts to keep it redaction-safe across `ee why`, `ee search`
+/// provenance, and audit history surfaces.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DedupLinkEvidence {
+    /// Schema id for forward-compatible contract tests.
+    pub schema: &'static str,
+    /// memory_links row id that recorded the dedup link.
+    pub link_id: String,
+    /// Source memory whose embedding was reused.
+    pub target_memory_id: String,
+    /// Decision string carried verbatim from the dedup decision
+    /// (e.g. `"reuse"` or `"new_embed"`).
+    pub decision: String,
+    /// Reason code carried verbatim from the dedup decision.
+    pub reason: String,
+    /// Relationship marker stored in the link metadata (typically
+    /// `"embedding_reuse"`).
+    pub relationship: String,
+    /// SimHash Hamming distance between the new memory and the linked
+    /// candidate, when recorded in the link metadata.
+    pub hamming_distance: Option<u32>,
+    /// Cosine similarity between the new memory's embedding and the
+    /// linked candidate's embedding, when recorded.
+    pub cosine_similarity: Option<f32>,
+    /// Cosine floor (configured admission threshold) when recorded.
+    pub cosine_floor: Option<f32>,
+    /// Stored link source (`auto`, `agent`, `human`, etc.).
+    pub link_source: String,
+    /// Stored link weight.
+    pub link_weight: f32,
+    /// Stored link confidence.
+    pub link_confidence: f32,
+    /// `memory_links.created_at` timestamp.
+    pub created_at: String,
 }
 
 impl WhyReport {
@@ -545,7 +599,25 @@ impl WhyReport {
             coordination_fallback_evidence: Vec::new(),
             degraded: Vec::new(),
             error: None,
+            dedup_link: None,
         }
+    }
+
+    /// Attach a dedup-link evidence block to the report. Returns `self` so
+    /// the assembler can chain after other `with_*` builders.
+    #[must_use]
+    pub fn with_dedup_link(mut self, dedup_link: DedupLinkEvidence) -> Self {
+        self.dedup_link = Some(dedup_link);
+        self
+    }
+
+    /// Optionally attach a dedup-link evidence block. `None` is a no-op so
+    /// the assembler can thread the optional query result without an
+    /// `if let` in the builder chain.
+    #[must_use]
+    pub fn with_optional_dedup_link(mut self, dedup_link: Option<DedupLinkEvidence>) -> Self {
+        self.dedup_link = dedup_link;
+        self
     }
 
     /// Attach the full memory body to the report. Returns `self` to allow
@@ -581,6 +653,7 @@ impl WhyReport {
             coordination_fallback_evidence: Vec::new(),
             degraded: Vec::new(),
             error: None,
+            dedup_link: None,
         }
     }
 
@@ -609,6 +682,7 @@ impl WhyReport {
             coordination_fallback_evidence: Vec::new(),
             degraded: Vec::new(),
             error: Some(message),
+            dedup_link: None,
         }
     }
 
