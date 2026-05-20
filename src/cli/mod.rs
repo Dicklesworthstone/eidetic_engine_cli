@@ -202,6 +202,9 @@ use crate::core::status::{
     StatusOptions, StatusReport, StatusSkylineReport, WalStatusReport,
     wal_checkpoint_bytes_threshold,
 };
+use crate::core::subscribe::{
+    SubscribeFilter, SubscribePollOptions, parse_subscribe_filter, poll_memory_deltas,
+};
 use crate::core::swarm_brief::{
     SwarmBriefCollectOptions, SwarmBriefReport, SwarmBriefSourceKind, SwarmBriefSourceStatus,
     SystemSwarmBriefCommandRunner, all_swarm_brief_sources, collect_swarm_brief,
@@ -786,6 +789,9 @@ pub enum Command {
     Situation(SituationCommand),
     /// Report workspace and subsystem readiness.
     Status(StatusArgs),
+    /// Subscribe to memory change deltas by cursor or foreground stream.
+    #[command(subcommand)]
+    Subscribe(SubscribeCommand),
     /// Create or inspect redacted diagnostic support bundles.
     #[command(subcommand)]
     Support(SupportCommand),
@@ -841,6 +847,63 @@ pub struct StatusArgs {
     /// Mesh command mode for status posture: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
     pub mesh_mode: MeshCommandMode,
+}
+
+/// Subcommands for `ee subscribe`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum SubscribeCommand {
+    /// Return matching memory deltas since a cursor and exit.
+    Poll(SubscribePollArgs),
+    /// Emit matching memory deltas as JSON Lines until interrupted.
+    Stream(SubscribeStreamArgs),
+}
+
+/// Arguments for `ee subscribe poll`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct SubscribePollArgs {
+    /// Monotonic cursor returned by a previous subscribe poll or stream frame.
+    #[arg(long, default_value_t = 0)]
+    pub cursor: u64,
+
+    /// Advisory filter tokens, e.g. LEVEL=procedural,TAG=release.
+    #[arg(long, value_name = "FILTER")]
+    pub filter: Option<String>,
+
+    /// Maximum audit rows to inspect in one poll window.
+    #[arg(long, default_value_t = 1000)]
+    pub limit: u32,
+
+    /// Explicit database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee subscribe stream`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct SubscribeStreamArgs {
+    /// Monotonic cursor returned by a previous subscribe poll or stream frame.
+    #[arg(long, default_value_t = 0)]
+    pub cursor: u64,
+
+    /// Advisory filter tokens, e.g. LEVEL=procedural,TAG=release.
+    #[arg(long, value_name = "FILTER")]
+    pub filter: Option<String>,
+
+    /// Maximum audit rows to inspect in one poll window.
+    #[arg(long, default_value_t = 1000)]
+    pub limit: u32,
+
+    /// Poll interval while waiting for new audit rows.
+    #[arg(long = "interval-ms", default_value_t = 100)]
+    pub interval_ms: u64,
+
+    /// Stop after emitting this many deltas. Primarily for harness tests.
+    #[arg(long, value_name = "N")]
+    pub max_events: Option<u64>,
+
+    /// Explicit database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Subcommands for `ee artifact`.
@@ -10253,6 +10316,12 @@ where
                 }
             }
         }
+        Some(Command::Subscribe(SubscribeCommand::Poll(ref args))) => {
+            handle_subscribe_poll(&cli, args, stdout, stderr)
+        }
+        Some(Command::Subscribe(SubscribeCommand::Stream(ref args))) => {
+            handle_subscribe_stream(&cli, args, stdout, stderr)
+        }
         Some(Command::Support(SupportCommand::Bundle(ref args))) => {
             handle_support_bundle(&cli, args, stdout, stderr)
         }
@@ -13405,6 +13474,165 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V1,
                 "success": true,
                 "data": report.data_json(),
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn handle_subscribe_poll<W, E>(
+    cli: &Cli,
+    args: &SubscribePollArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let filter = match parse_subscribe_filter(args.filter.as_deref()) {
+        Ok(filter) => filter,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let options = SubscribePollOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        cursor: args.cursor,
+        filter,
+        limit: args.limit,
+    };
+
+    match poll_memory_deltas(&options) {
+        Ok(report) => write_subscribe_poll_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_subscribe_stream<W, E>(
+    cli: &Cli,
+    args: &SubscribeStreamArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if let Err(error) = validate_subscribe_stream_request(cli) {
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    if args.max_events == Some(0) {
+        return ProcessExitCode::Success;
+    }
+
+    let workspace_path = cli.resolve_workspace();
+    let filter = match parse_subscribe_filter(args.filter.as_deref()) {
+        Ok(filter) => filter,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    stream_subscribe_deltas(cli, args, &workspace_path, filter, stdout, stderr)
+}
+
+fn validate_subscribe_stream_request(cli: &Cli) -> Result<(), DomainError> {
+    match cli.renderer() {
+        output::Renderer::Json | output::Renderer::Jsonl => Ok(()),
+        _ => Err(DomainError::Usage {
+            message:
+                "`ee subscribe stream` requires --json, --robot, --format json, or --format jsonl."
+                    .to_string(),
+            repair: Some("Use `ee subscribe stream --filter LEVEL=procedural --json`.".to_string()),
+        }),
+    }
+}
+
+fn stream_subscribe_deltas<W, E>(
+    cli: &Cli,
+    args: &SubscribeStreamArgs,
+    workspace_path: &Path,
+    filter: SubscribeFilter,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let mut cursor = args.cursor;
+    let mut emitted = 0_u64;
+    loop {
+        let options = SubscribePollOptions {
+            workspace_path,
+            database_path: args.database.as_deref(),
+            cursor,
+            filter: filter.clone(),
+            limit: args.limit,
+        };
+        let report = match poll_memory_deltas(&options) {
+            Ok(report) => report,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        cursor = report.next_cursor;
+        for delta in &report.deltas {
+            let line = match serde_json::to_string(delta) {
+                Ok(line) => line,
+                Err(error) => {
+                    let domain_error = DomainError::Storage {
+                        message: format!("Failed to serialize subscribe delta: {error}"),
+                        repair: Some(
+                            "Retry the stream or use `ee subscribe poll --json`.".to_owned(),
+                        ),
+                    };
+                    return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                }
+            };
+            if stdout.write_all(line.as_bytes()).is_err() || stdout.write_all(b"\n").is_err() {
+                return ProcessExitCode::Usage;
+            }
+            emitted += 1;
+            if let Some(max_events) = args.max_events {
+                if emitted >= max_events {
+                    let _ = stdout.flush();
+                    return ProcessExitCode::Success;
+                }
+            }
+        }
+        if stdout.flush().is_err() {
+            return ProcessExitCode::Usage;
+        }
+        std::thread::sleep(Duration::from_millis(args.interval_ms.max(1)));
+    }
+}
+
+fn write_subscribe_poll_report<W>(
+    cli: &Cli,
+    report: &crate::core::subscribe::SubscribePollReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let data = report.data_json();
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &format!(
+                "Subscribe poll\n  Cursor: {}\n  Next cursor: {}\n  Deltas: {}\n",
+                report.cursor, report.next_cursor, report.delta_count
+            ),
+        ),
+        output::Renderer::Toon => {
+            let raw = data.to_string();
+            write_stdout(stdout, &(output::render_toon_from_json(&raw) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": data,
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
@@ -42170,6 +42398,11 @@ fn enhance_error_with_suggestion(error: &clap::Error, args: &[OsString]) -> Opti
     if let Some(hint) = detect_flag_as_subcommand(args) {
         return Some(hint);
     }
+    if matches!(error.kind(), ErrorKind::UnknownArgument)
+        && let Some(hint) = detect_unknown_long_flag(args)
+    {
+        return Some(hint);
+    }
 
     if !matches!(
         error.kind(),
@@ -42184,17 +42417,72 @@ fn enhance_error_with_suggestion(error: &clap::Error, args: &[OsString]) -> Opti
     Some(format!("did you mean `{suggestion}`?"))
 }
 
+/// Detect unknown long-form flags that are near-misses for a known global
+/// flag — e.g. `--jsno`, `--jason`, `--robbot`, `--scheme-version`. Returns a
+/// `did you mean \`--<canonical>\`?` hint, which the existing repair-selection
+/// logic in `write_parse_error` then turns into `ee --<canonical>` in the
+/// JSON envelope's `repair` field.
+///
+/// Distance threshold scales with flag length so short flags don't collide
+/// with each other (e.g. `--mata` should match `--meta`, not `--robot`).
+fn detect_unknown_long_flag(args: &[OsString]) -> Option<String> {
+    for arg in args {
+        let s = arg.to_string_lossy();
+        if !s.starts_with("--") || s.len() <= 3 {
+            continue;
+        }
+        let flag_part = s.trim_start_matches("--");
+        let (flag_name, _) = flag_part.split_once('=').unwrap_or((flag_part, ""));
+        let lower = flag_name.to_lowercase();
+
+        // Skip canonical flags — there's nothing to correct.
+        if GLOBAL_FLAGS.contains(&lower.as_str()) {
+            continue;
+        }
+
+        let threshold = (flag_name.len() / 3).clamp(1, 2);
+        let mut best: Option<(&'static str, usize)> = None;
+        for &candidate in GLOBAL_FLAGS {
+            let distance = levenshtein_distance(&lower, candidate);
+            if distance == 0 || distance > threshold {
+                continue;
+            }
+            match best {
+                None => best = Some((candidate, distance)),
+                Some((_, best_distance)) if distance < best_distance => {
+                    best = Some((candidate, distance));
+                }
+                _ => {}
+            }
+        }
+
+        if let Some((suggestion, _)) = best {
+            return Some(format!("did you mean `--{suggestion}`?"));
+        }
+    }
+    None
+}
+
 // ============================================================================
 // EE-317: Extended Invocation Normalization
 // ============================================================================
 
-/// Known global flags (long form without dashes).
+/// Known global flags (long form without dashes). Kept in sync with the
+/// `Cli` struct in `src/cli/mod.rs` and the `GLOBAL_OPTIONS` table in
+/// `src/output/mod.rs`. The Levenshtein-based unknown-long-flag detector
+/// (`detect_unknown_long_flag`) relies on this list being the canonical
+/// set of "things an agent likely meant to type."
 const GLOBAL_FLAGS: &[&str] = &[
     "json",
     "robot",
     "format",
     "fields",
     "schema",
+    "schema-version",
+    "legacy-schema",
+    "cards",
+    "shadow",
+    "policy",
     "help-json",
     "agent-docs",
     "meta",
@@ -53640,6 +53928,84 @@ mod tests {
         ensure(hint.is_some(), "should detect single-dash flag")?;
         let hint = hint.ok_or_else(|| "missing single-dash flag hint".to_string())?;
         ensure_contains(&hint, "--json", "should suggest --json")
+    }
+
+    #[test]
+    fn detect_unknown_long_flag_suggests_canonical_for_jsno() -> TestResult {
+        let args: Vec<OsString> = ["ee", "--jsno"].iter().map(OsString::from).collect();
+        let hint = super::detect_unknown_long_flag(&args);
+        ensure(hint.is_some(), "should detect near-miss long flag")?;
+        let hint = hint.ok_or_else(|| "missing typo hint".to_string())?;
+        ensure_equal(
+            &hint,
+            &"did you mean `--json`?".to_string(),
+            "--jsno -> --json",
+        )
+    }
+
+    #[test]
+    fn detect_unknown_long_flag_suggests_canonical_for_robbot() -> TestResult {
+        let args: Vec<OsString> = ["ee", "--robbot"].iter().map(OsString::from).collect();
+        let hint = super::detect_unknown_long_flag(&args);
+        ensure_equal(
+            &hint,
+            &Some("did you mean `--robot`?".to_string()),
+            "--robbot -> --robot",
+        )
+    }
+
+    #[test]
+    fn detect_unknown_long_flag_recognizes_schema_version_typos() -> TestResult {
+        let args: Vec<OsString> = ["ee", "--scheme-version", "v1"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let hint = super::detect_unknown_long_flag(&args);
+        ensure_equal(
+            &hint,
+            &Some("did you mean `--schema-version`?".to_string()),
+            "--scheme-version -> --schema-version",
+        )
+    }
+
+    #[test]
+    fn detect_unknown_long_flag_returns_none_for_canonical_flags() -> TestResult {
+        let args: Vec<OsString> = ["ee", "--json", "--robot"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let hint = super::detect_unknown_long_flag(&args);
+        ensure_equal(
+            &hint,
+            &None,
+            "canonical flags must not produce a typo suggestion",
+        )
+    }
+
+    #[test]
+    fn detect_unknown_long_flag_returns_none_for_unrelated_typo() -> TestResult {
+        let args: Vec<OsString> = ["ee", "--xyzabc"].iter().map(OsString::from).collect();
+        let hint = super::detect_unknown_long_flag(&args);
+        ensure_equal(
+            &hint,
+            &None,
+            "wholly unrelated unknown flag should not suggest anything",
+        )
+    }
+
+    #[test]
+    fn detect_unknown_long_flag_handles_equals_form() -> TestResult {
+        // `--scheme-version=v1` should still suggest `--schema-version`.
+        let args: Vec<OsString> = ["ee", "--scheme-version=v1"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let hint = super::detect_unknown_long_flag(&args);
+        ensure_equal(
+            &hint,
+            &Some("did you mean `--schema-version`?".to_string()),
+            "equals form should be normalized",
+        )
     }
 
     #[test]

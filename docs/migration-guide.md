@@ -506,14 +506,7 @@ is byte-identical to v0.2.x. This invariant is gated by
 
 | Env var | Default | Owner bead | Purpose |
 |---|---|---|---|
-| `EE_MESH_DISCOVERY_CACHE_TTL_SECONDS` | `30` | bd-36bbk.1.13 | Autodiscovery cache TTL for `ee mesh status` and auto-enroll readiness checks |
-| `EE_MESH_DRIFT_SOFT_STALE_AFTER` | `1` | bd-36bbk.1.13 | Missed hello-probe count before a peer enters soft-stale drift grace |
-| `EE_MESH_DRIFT_SOFT_STALE_AFTER_SECONDS` | `300` | bd-36bbk.1.13 | Minimum seconds since last success before soft-stale drift grace applies |
-| `EE_MESH_DRIFT_HARD_STALE_AFTER` | `3` | bd-36bbk.1.13 | Missed hello-probe count before a peer enters hard-stale drift |
-| `EE_MESH_DRIFT_HARD_STALE_AFTER_SECONDS` | `3600` | bd-36bbk.1.13 | Minimum seconds since last success before hard-stale drift applies |
 | `EE_MESH_ENABLED` | `0` | bd-36bbk umbrella | Master kill-switch; `0` disables every mesh code path |
-| `EE_MESH_HELLO_PORT` | `41888` | bd-36bbk.1.12 | Tailnet-only hello responder port used by `ee daemon` |
-| `EE_MESH_HELLO_RESPONDER_DISABLED` | `0` | bd-36bbk.1.12 | Emergency switch to keep mesh enabled but prevent the responder from binding |
 | `EE_MESH_MODE` | `off` | bd-36bbk umbrella | Default mesh command mode; accepted values are `off`, `cache`, `revisable`, and `blocking` |
 | `EE_TAILSCALE_BINARY_OVERRIDE` | unset | bd-36bbk.1.1 | Test-only: pin the `tailscale` binary path (production code rejects relative paths) |
 | `EE_TAILSCALE_PROBE_SOCKET_OVERRIDE` | unset | bd-36bbk.1.1 | Test-only: pin the tailscaled socket path |
@@ -521,9 +514,10 @@ is byte-identical to v0.2.x. This invariant is gated by
 | `EE_TAILSCALE_DISCOVERY_MODE` | `service_tag` | bd-36bbk.1.7 | Caller-side mesh peer discovery policy; accepted values are `service_tag`, `auto_admit`, `allowlist` |
 | `EE_TAILSCALE_RESPOND_MODE` | `service_tag` | bd-36bbk.1.7 | Responder-side mesh discovery consent policy; same value space as `EE_TAILSCALE_DISCOVERY_MODE` |
 
-Future v0.3.x point releases may register further `EE_MESH_*` and
+Future v0.3.x point releases will register further `EE_MESH_*` and
 `EE_TAILSCALE_*` env vars as the remaining SRR6.46 sub-beads land
-(steward interval, daily cap, etc.). Every new var is registered in
+(discovery cache TTL, drift grace thresholds, hello port, steward
+interval, daily cap, etc.). Every new var is registered in
 `src/config/env_registry.rs` and documented in `docs/env_vars.md`.
 
 ### Schemas added
@@ -532,15 +526,12 @@ Future v0.3.x point releases may register further `EE_MESH_*` and
 |---|---|---|
 | `ee.completion_audit.report.v2` | bd-3d6ko.6.1 | Completion-audit report with `localBuildPolicy` state for local Cargo bypass attempts, remote-required blockers, and remote RCH verification |
 | `ee.tailscale.local.v1` | bd-36bbk.1.1 | Local `tailscaled` probe report block on `ee status` |
-| `ee.mesh.auto_status.v1` | bd-36bbk.1.4 | Auto-enrollment readiness, materialized peer-group, discovery cache, and drift status block |
 | `ee.mesh.auto_enrollment_summary.v1` | bd-36bbk.1.5 | Forensic audit-row payload before any peer-group write |
 | `ee.mesh.discovery_policy.v1` | bd-36bbk.1.7 | Service-tag, allowlist, denylist, and discovery consent policy |
 | `ee.mesh.hello.v1` | bd-36bbk.1.2 (SRR6.46.2) | Tiny bounded handshake request sent to candidate peers (read-only; payload ≤ 4096 bytes) |
 | `ee.mesh.hello.response.v1` | bd-36bbk.1.12 (SRR6.46.12) | Hello-handshake success response from the responder when discovery policy grants consent |
 | `ee.mesh.hello.error.v1` | bd-36bbk.1.12 (SRR6.46.12) | Hello-handshake decline response; privacy-invariant — must NOT carry responder-side metadata |
-| `ee.mesh.hello_responder.status.v1` | bd-36bbk.1.12 (SRR6.46.12) | Read-only hello-responder lifecycle status emitted by `ee mesh hello-responder status` |
 | `ee.mesh.lane_grant_preview.v1` | bd-36bbk.1.17 (SRR6.46.17) | Pre-grant lane visibility audit; read-only by construction (`src/mesh/lane_grant_preview.rs`) |
-| `ee.repair_action_graph.v1` | bd-36bbk.1.16 (SRR6.46.16) | Shared machine-readable repair-action graph consumed by doctor and mesh status surfaces |
 | `ee.mesh.peer_group_binding.v1` | bd-2jb3s (SRR6.30) | Workspace-scoped peer-group authorization record |
 | `ee.mesh.peer_policy.v1` | bd-29ulx (SRR6.5) | Per-peer trust, lane policy, and redaction grant |
 | `ee.mesh.policy_decision.v1` | bd-29ulx | Per-call policy evaluation outcome |
@@ -563,13 +554,11 @@ the JSON Schema file lands under `docs/schemas/`.
 |---|---|---|
 | `mesh.auto_enrollment_intended` | bd-36bbk.1.5 | BEFORE any durable peer-group write; fail-closed if this row fails |
 | `mesh.auto_enrollment_outcome_recorded` | bd-36bbk.1.5 | Back-fill once SRR6.46.3 knows materialized/rolled_back/dry_run/audit_only |
-| `mesh.hello_responder_started` | bd-36bbk.1.12 | Foreground daemon started the supervised hello responder |
-| `mesh.hello_responder_stopped` | bd-36bbk.1.12 | Foreground daemon stopped the supervised hello responder cleanly |
-| `mesh.hello_responder_crashed_restarted` | bd-36bbk.1.12 | Supervision restarted the responder after a crash |
 
 Future v0.3.x will register additional event types as further sub-beads
 land (`mesh.auto_enrollment_materialized`, `mesh.auto_enrollment_rolled_back`,
 `mesh.peer_revoked`, `mesh.manual_to_auto_migration_intended`,
+`mesh.hello_responder_started/stopped/crashed_restarted`,
 `mesh.steward_reconciliation_skipped/triggered/refused/daily_cap_reached`,
 `mesh.discovery_policy_changed`, etc.).
 

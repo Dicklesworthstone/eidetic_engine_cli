@@ -811,8 +811,7 @@ fn degradation(
         SymbolGraphDegradationCode::SourceMissing
         | SymbolGraphDegradationCode::SourceNonRegular
         | SymbolGraphDegradationCode::SourceTooLarge
-        | SymbolGraphDegradationCode::SourceUnreadable
-        | SymbolGraphDegradationCode::SymbolIndexStale => SymbolGraphDegradationSeverity::Warning,
+        | SymbolGraphDegradationCode::SourceUnreadable => SymbolGraphDegradationSeverity::Warning,
     };
 
     SymbolGraphDegradation {

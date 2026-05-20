@@ -121,16 +121,6 @@ pub struct TailscalePeerReport {
     pub hostname: Option<String>,
     pub advertised_tags: Vec<String>,
     pub online: Option<bool>,
-    pub ee_capability: Option<TailscalePeerEeCapability>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TailscalePeerEeCapability {
-    pub ee_version: String,
-    pub ee_protocol_version: String,
-    pub workspace_ids: Vec<String>,
-    pub respond: bool,
-    pub latency_ms: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1069,26 +1059,11 @@ fn peer_reports(status: &Value) -> Vec<TailscalePeerReport> {
                 hostname: string_value(peer, "HostName"),
                 advertised_tags: string_array_value(peer, "Tags"),
                 online: bool_value(peer, "Online"),
-                ee_capability: peer_ee_capability(peer),
             })
         })
         .collect();
     reports.sort_by(|left, right| left.node_key.cmp(&right.node_key));
     reports
-}
-
-fn peer_ee_capability(peer: &Value) -> Option<TailscalePeerEeCapability> {
-    let capabilities = peer.get("Capabilities")?;
-    Some(TailscalePeerEeCapability {
-        ee_version: string_value(capabilities, "eeVersion").unwrap_or_default(),
-        ee_protocol_version: string_value(capabilities, "eeProtocol").unwrap_or_default(),
-        workspace_ids: string_array_value(capabilities, "workspaceIds"),
-        respond: bool_value(capabilities, "respond").unwrap_or(true),
-        latency_ms: capabilities
-            .get("latencyMs")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-    })
 }
 
 #[cfg(test)]
@@ -1219,42 +1194,6 @@ mod tests {
         assert_eq!(report.peers[0].advertised_tags, vec!["tag:ee-mesh"]);
         assert_eq!(report.peers[0].online, Some(true));
         assert_eq!(report.peers[1].node_key, "nodekey:zulu");
-    }
-
-    #[test]
-    fn peer_capability_metadata_is_parsed_from_status_payload() {
-        let report = classify(
-            r#"{
-              "BackendState": "Running",
-              "Self": {
-                "ID":"nodekey:self",
-                "Authenticated":true,
-                "TailscaleIPs":["100.64.0.10"],
-                "Platform":"linux"
-              },
-              "Peer": {
-                "nodekey:alpha": {
-                  "ID": "nodekey:alpha",
-                  "Tags": ["tag:ee-mesh"],
-                  "TailscaleIPs": ["100.64.0.20"],
-                  "Capabilities": {
-                    "eeVersion": "0.2.0",
-                    "eeProtocol": "1.0",
-                    "workspaceIds": ["workspace-alpha"],
-                    "respond": true,
-                    "latencyMs": 17
-                  }
-                }
-              }
-            }"#,
-        );
-
-        let capability = report.peers[0].ee_capability.as_ref().expect("capability");
-        assert_eq!(capability.ee_version, "0.2.0");
-        assert_eq!(capability.ee_protocol_version, "1.0");
-        assert_eq!(capability.workspace_ids, vec!["workspace-alpha".to_owned()]);
-        assert!(capability.respond);
-        assert_eq!(capability.latency_ms, 17);
     }
 
     #[test]

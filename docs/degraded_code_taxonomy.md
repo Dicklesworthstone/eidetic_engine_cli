@@ -255,18 +255,6 @@ memory bodies in `sources[]`.
 | `discovery_cache_invalidated_tailnet_changed` | info | bd-36bbk.1.13 |
 | `discovery_cache_stale_due_to_workspace_mismatch` | info | bd-36bbk.1.13 |
 | `drift_grace_soft_stale_peer_count_high` | warning | bd-36bbk.1.13 |
-| `hello_responder_not_running` | medium | bd-36bbk.1.12 |
-| `hello_responder_port_in_use` | medium | bd-36bbk.1.12 |
-| `hello_responder_no_tailscale_ip` | medium | bd-36bbk.1.12 |
-| `hello_responder_crash_loop` | high | bd-36bbk.1.12 |
-| `hello_responder_rate_limited_storm` | warning | bd-36bbk.1.12 |
-| `host_calibration_contradictory` | medium | bd-1zb7k.12.3.4 (H3.4) |
-| `host_calibration_missing` | warning | bd-1zb7k.12.3.4 (H3.4) |
-| `host_calibration_partial` | warning | bd-1zb7k.12.3.4 (H3.4) |
-| `host_calibration_rch_topology_blocked` | warning | bd-1zb7k.12.3.4 (H3.4) |
-| `host_calibration_stale` | warning | bd-1zb7k.12.3.4 (H3.4) |
-| `host_calibration_synthetic_only` | warning | bd-1zb7k.12.3.4 (H3.4) |
-| `host_calibration_unavailable` | warning | bd-1zb7k.12.3.4 (H3.4) |
 | `perf_latency_evidence_missing` | medium | bd-1zb7k.11 (P) |
 | `perf_latency_evidence_partial` | warning | bd-1zb7k.11 (P) |
 
@@ -452,15 +440,6 @@ memory bodies in `sources[]`.
 | `tailscale_probe_unavailable` | info | bd-36bbk.1.1 |
 | `tailscale_shields_up` | warning | bd-36bbk.1.1 |
 
-#### Tailscale peer autodiscovery (5)
-| Code | Severity | Bead |
-|------|----------|------|
-| `tailscale_peer_probe_timeout` | warning | bd-36bbk.1.2 |
-| `no_ee_peers_on_tailnet` | info | bd-36bbk.1.2 |
-| `tailscale_peer_list_unavailable` | warning | bd-36bbk.1.2 |
-| `peer_discovery_workspace_mismatch` | info | bd-36bbk.1.2 |
-| `peer_discovery_budget_exhausted` | warning | bd-36bbk.1.2 |
-
 #### Mesh discovery policy (2)
 | Code | Severity | Bead |
 |------|----------|------|
@@ -510,6 +489,14 @@ memory bodies in `sources[]`.
 | `missing_metric` | low | bd-17c65.10.6 (J6) |
 | `replay_fidelity` | info | bd-17c65.14.15.5 (N15.4) |
 | `stable_unit` | info | bd-17c65.14.3 (N3) — replay verification |
+
+#### Symbol graph contracts (4)
+| Code | Severity | Bead |
+|------|----------|------|
+| `ambiguous_containing_symbols` | warning | bd-2xuu7.6 |
+| `source_unparsable` | medium | bd-2xuu7.6 |
+| `stale_line_span` | warning | bd-2xuu7.6 |
+| `symbol_index_stale` | warning | bd-2xuu7.6 |
 
 #### Graph snapshot (6 — response_time variants of graph_unavailable)
 | Code | Severity | Bead |

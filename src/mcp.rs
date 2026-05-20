@@ -212,21 +212,6 @@ const OUTCOME_TOOL_EFFECT: McpToolEffect = McpToolEffect {
     destructive: false,
 };
 
-const MESH_DISCOVERY_POLICY_TOOL_EFFECT: McpToolEffect = McpToolEffect {
-    kind: "policy_write",
-    write_surface: &[
-        ".ee/discovery_policy.toml",
-        ".ee/discovery_*list.toml",
-        "audit_log",
-    ],
-    default_dry_run: false,
-    requires_allow_write_when_dry_run_false: true,
-    audit: "set/allow/deny operations write mesh.discovery_policy_changed",
-    redaction: "node keys are reported in command output but audit details store nodeKeyHash",
-    idempotency: "set/allow/deny are deterministic and converge the workspace policy files",
-    destructive: false,
-};
-
 const TOOL_REGISTRY: &[McpToolEntry] = &[
     McpToolEntry {
         name: "ee_health",
@@ -307,14 +292,6 @@ const TOOL_REGISTRY: &[McpToolEntry] = &[
         annotations: WRITE_TOOL_ANNOTATIONS,
         effect: Some(OUTCOME_TOOL_EFFECT),
         args_builder: build_outcome_tool_args,
-    },
-    McpToolEntry {
-        name: "ee_mesh_discovery_policy",
-        description: "Inspect or update ee mesh discovery policy; set/allow/deny require allowWrite=true",
-        input_schema: mesh_discovery_policy_tool_schema,
-        annotations: WRITE_TOOL_ANNOTATIONS,
-        effect: Some(MESH_DISCOVERY_POLICY_TOOL_EFFECT),
-        args_builder: build_mesh_discovery_policy_tool_args,
     },
 ];
 
@@ -921,49 +898,6 @@ fn outcome_tool_schema() -> Value {
     })
 }
 
-fn mesh_discovery_policy_tool_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "workspace": {
-                "type": "string",
-                "description": "Workspace path"
-            },
-            "database": {
-                "type": "string",
-                "description": "Database path override"
-            },
-            "operation": {
-                "type": "string",
-                "description": "Operation to run",
-                "enum": ["inspect", "set", "allow", "deny"]
-            },
-            "discoveryMode": {
-                "type": "string",
-                "description": "Mode for operation=set",
-                "enum": ["service_tag", "auto_admit", "allowlist"]
-            },
-            "respondMode": {
-                "type": "string",
-                "description": "Responder mode for operation=set",
-                "enum": ["service_tag", "auto_admit", "allowlist"]
-            },
-            "nodeKey": {
-                "type": "string",
-                "description": "Tailscale node key for allow/deny operations"
-            },
-            "explain": {
-                "type": "boolean",
-                "description": "Include effectiveDecisionPreview"
-            },
-            "allowWrite": {
-                "type": "boolean",
-                "description": "Required and true for set/allow/deny"
-            }
-        }
-    })
-}
-
 fn mcp_tool_annotations_value(annotations: McpToolAnnotations) -> Value {
     json!({
         "readOnlyHint": annotations.read_only,
@@ -1329,62 +1263,6 @@ fn build_outcome_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Resul
         push_arg(args, "--dry-run");
     }
     Ok(())
-}
-
-fn build_mesh_discovery_policy_tool_args(
-    args: &mut Vec<OsString>,
-    arguments: &Value,
-) -> Result<(), String> {
-    push_arg(args, "mesh");
-    push_arg(args, "discovery-policy");
-    append_optional_path_flag(args, arguments, &["database"], "--database")?;
-    if optional_bool(arguments, &["explain"])? {
-        push_arg(args, "--explain");
-    }
-
-    let operation = optional_string(arguments, &["operation"])?.unwrap_or("inspect");
-    match operation {
-        "inspect" => Ok(()),
-        "set" => {
-            require_mesh_discovery_policy_allow_write(arguments, operation)?;
-            push_arg(args, "set");
-            append_optional_string_flag(
-                args,
-                arguments,
-                &["discoveryMode", "discovery_mode"],
-                "--discovery-mode",
-            )?;
-            append_optional_string_flag(
-                args,
-                arguments,
-                &["respondMode", "respond_mode"],
-                "--respond-mode",
-            )?;
-            Ok(())
-        }
-        "allow" | "deny" => {
-            require_mesh_discovery_policy_allow_write(arguments, operation)?;
-            push_arg(args, operation);
-            push_arg(args, required_string(arguments, &["nodeKey", "node_key"])?);
-            Ok(())
-        }
-        other => Err(format!(
-            "Invalid mesh discovery policy operation '{other}'. Expected inspect, set, allow, or deny."
-        )),
-    }
-}
-
-fn require_mesh_discovery_policy_allow_write(
-    arguments: &Value,
-    operation: &str,
-) -> Result<(), String> {
-    if optional_bool(arguments, &["allowWrite", "allow_write"])? {
-        Ok(())
-    } else {
-        Err(format!(
-            "Write tool ee_mesh_discovery_policy operation {operation} requires allowWrite=true"
-        ))
-    }
 }
 
 fn build_cli_args_for_tool(

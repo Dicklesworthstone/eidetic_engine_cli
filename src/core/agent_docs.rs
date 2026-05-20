@@ -546,18 +546,6 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         category: EnvVar::TailscaleDiscoveryMode.category(),
     },
     EnvVarEntry {
-        name: EnvVar::TailscalePeerProbeTimeoutMs.name(),
-        description: EnvVar::TailscalePeerProbeTimeoutMs.description(),
-        default: EnvVar::TailscalePeerProbeTimeoutMs.default_value(),
-        category: EnvVar::TailscalePeerProbeTimeoutMs.category(),
-    },
-    EnvVarEntry {
-        name: EnvVar::TailscaleDiscoveryBudgetMs.name(),
-        description: EnvVar::TailscaleDiscoveryBudgetMs.description(),
-        default: EnvVar::TailscaleDiscoveryBudgetMs.default_value(),
-        category: EnvVar::TailscaleDiscoveryBudgetMs.category(),
-    },
-    EnvVarEntry {
         name: EnvVar::TailscaleRespondMode.name(),
         description: EnvVar::TailscaleRespondMode.description(),
         default: EnvVar::TailscaleRespondMode.default_value(),

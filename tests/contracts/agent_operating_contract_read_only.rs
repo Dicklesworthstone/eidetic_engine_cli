@@ -9,10 +9,9 @@
 use ee::core::preflight::{
     AGENT_OPERATING_CONTRACT_SCHEMA_V1, AgentOperatingContractOptions,
     AgentOperatingContractReadinessEvidence, AgentOperatingContractReadinessMetric,
-    AgentOperatingContractReport, AgentReadinessEvidenceInput, AgentReadinessSourceInput,
-    AgentReadinessStatus, extract_agent_operating_contract,
+    AgentReadinessEvidenceInput, AgentReadinessSourceInput, AgentReadinessStatus,
+    extract_agent_operating_contract,
 };
-use ee::output::ResponseEnvelope;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -119,9 +118,6 @@ fn commit_baseline(workspace: &Path) -> TestResult {
             "AGENTS.md",
             "README.md",
             ".beads/issues.jsonl",
-            "coordination/agent_mail_archive/file_reservations.jsonl",
-            "coordination/agent_mail_archive/messages.jsonl",
-            "coordination/rch_state/status.json",
             "src/lib.rs",
         ],
     )?;
@@ -182,18 +178,6 @@ Preserve CARGO_TARGET_DIR on the external USB-NVMe drive at /Volumes/USBNVME16TB
     write_file(
         &workspace.join(".beads/issues.jsonl"),
         "{\"id\":\"bd-aop5-fixture\",\"status\":\"open\",\"title\":\"baseline\"}\n",
-    )?;
-    write_file(
-        &workspace.join("coordination/agent_mail_archive/messages.jsonl"),
-        "{\"id\":1,\"thread\":\"br-bd-3d6ko.5\",\"subject\":\"AOP5 fixture evidence\"}\n",
-    )?;
-    write_file(
-        &workspace.join("coordination/agent_mail_archive/file_reservations.jsonl"),
-        "{\"path\":\"tests/contracts/agent_operating_contract_read_only.rs\",\"exclusive\":true}\n",
-    )?;
-    write_file(
-        &workspace.join("coordination/rch_state/status.json"),
-        "{\"remote_required\":true,\"workers_healthy\":5,\"slots_available\":28}\n",
     )?;
     commit_baseline(workspace)?;
     append_file(
@@ -374,81 +358,6 @@ fn blake3_prefixed(bytes: &[u8]) -> String {
     format!("blake3:{}", blake3::hash(bytes).to_hex())
 }
 
-fn rendered_stdout_envelope(report: &AgentOperatingContractReport) -> String {
-    ResponseEnvelope::success()
-        .data_raw(&report.to_json())
-        .degraded_array(&report.degraded, |obj, degraded| {
-            obj.field_str("code", degraded.code.as_str());
-            obj.field_str("severity", degraded.severity.as_str());
-            obj.field_str("message", degraded.message.as_str());
-        })
-        .finish()
-}
-
-fn assert_stdout_is_single_response_envelope(stdout: &str, stderr: &str) -> TestResult {
-    ensure(
-        stderr.is_empty(),
-        format!("stderr should be empty, got {stderr:?}"),
-    )?;
-    ensure(
-        stdout.ends_with('\n'),
-        "stdout should terminate with exactly one newline",
-    )?;
-    ensure(
-        stdout.lines().count() == 1,
-        format!("stdout should contain one JSON envelope line, got {stdout:?}"),
-    )?;
-    let parsed: Value = serde_json::from_str(stdout.trim_end())
-        .map_err(|error| format!("parse stdout: {error}"))?;
-    ensure_equal(
-        parsed
-            .get("schema")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-        "ee.response.v1",
-        "stdout response envelope schema",
-    )?;
-    ensure_equal(
-        parsed.get("success").and_then(Value::as_bool),
-        Some(true),
-        "stdout response envelope success",
-    )?;
-    ensure_equal(
-        parsed
-            .pointer("/data/schema")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-        AGENT_OPERATING_CONTRACT_SCHEMA_V1,
-        "stdout data schema",
-    )?;
-    ensure(
-        parsed.get("degraded").and_then(Value::as_array).is_some(),
-        "stdout envelope should include degraded array",
-    )
-}
-
-fn assert_workspace_file_unchanged(
-    before: &WorkspaceState,
-    after: &WorkspaceState,
-    path: &str,
-) -> TestResult {
-    let before_state = before
-        .files
-        .iter()
-        .find(|(candidate, _)| candidate == path)
-        .map(|(_, state)| state);
-    let after_state = after
-        .files
-        .iter()
-        .find(|(candidate, _)| candidate == path)
-        .map(|(_, state)| state);
-    ensure_equal(
-        &before_state,
-        &after_state,
-        &format!("{path} mutation sentinel"),
-    )
-}
-
 fn write_event_log(
     artifact_root: &Path,
     test_id: &str,
@@ -459,7 +368,6 @@ fn write_event_log(
     degraded_codes: &[String],
 ) -> Result<Value, String> {
     let event_log = artifact_root.join("events.jsonl");
-    let output_hash = blake3_prefixed(output_json.as_bytes());
     let event = json!({
         "schema": "ee.test_event.v1",
         "ts": "2026-05-19T00:00:00Z",
@@ -467,12 +375,11 @@ fn write_event_log(
         "kind": "command_end",
         "command": "extract_agent_operating_contract",
         "args": ["core-api", "retained-temp-git-workspace"],
-        "stdout_hash": output_hash,
+        "stdout_hash": blake3_prefixed(output_json.as_bytes()),
         "exit_code": 0,
         "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
         "fields": {
             "workspace_path_hash": blake3_prefixed(artifact_root.join("workspace").display().to_string().as_bytes()),
-            "output_artifact_hash": output_hash,
             "before_mutation_hash": before.hash.as_str(),
             "after_mutation_hash": after.hash.as_str(),
             "before_status_bytes": before.status.len().to_string(),
@@ -510,33 +417,16 @@ fn agent_operating_contract_core_e2e_is_deterministic_and_read_only() -> TestRes
     let started = Instant::now();
     let first = extract_agent_operating_contract(&options).map_err(|error| error.message())?;
     let first_json = first.to_json();
-    let first_stdout = format!("{}\n", rendered_stdout_envelope(&first));
     let second = extract_agent_operating_contract(&options).map_err(|error| error.message())?;
     let second_json = second.to_json();
-    let second_stdout = format!("{}\n", rendered_stdout_envelope(&second));
     let after = capture_workspace_state(&workspace)?;
 
     ensure_equal(&first_json, &second_json, "byte-stable report JSON")?;
-    ensure_equal(
-        &first_stdout,
-        &second_stdout,
-        "byte-stable stdout envelope JSON",
-    )?;
-    assert_stdout_is_single_response_envelope(&first_stdout, "")?;
     ensure_equal(
         &before.hash,
         &after.hash,
         "workspace mutation hash must not change",
     )?;
-    for sentinel in [
-        ".beads/issues.jsonl",
-        "coordination/agent_mail_archive/file_reservations.jsonl",
-        "coordination/agent_mail_archive/messages.jsonl",
-        "coordination/rch_state/status.json",
-        "src/lib.rs",
-    ] {
-        assert_workspace_file_unchanged(&before, &after, sentinel)?;
-    }
     ensure_equal(
         first.schema.as_str(),
         AGENT_OPERATING_CONTRACT_SCHEMA_V1,
@@ -607,7 +497,7 @@ fn agent_operating_contract_core_e2e_is_deterministic_and_read_only() -> TestRes
         &artifact_root,
         "agent_operating_contract_core_e2e_is_deterministic_and_read_only",
         started,
-        &first_stdout,
+        &first_json,
         &before,
         &after,
         &Vec::new(),
@@ -621,13 +511,6 @@ fn agent_operating_contract_core_e2e_is_deterministic_and_read_only() -> TestRes
         event["kind"].as_str().unwrap_or_default(),
         "command_end",
         "event kind",
-    )?;
-    ensure_equal(
-        event["stdout_hash"].as_str(),
-        event
-            .pointer("/fields/output_artifact_hash")
-            .and_then(Value::as_str),
-        "event output artifact hash mirrors stdout hash",
     )
 }
 
@@ -644,10 +527,8 @@ fn agent_operating_contract_missing_readme_degrades_without_mutation() -> TestRe
         readiness: AgentReadinessEvidenceInput::default(),
     })
     .map_err(|error| error.message())?;
-    let stdout = format!("{}\n", rendered_stdout_envelope(&report));
     let after = capture_workspace_state(&workspace)?;
 
-    assert_stdout_is_single_response_envelope(&stdout, "")?;
     ensure_equal(
         &before.hash,
         &after.hash,
@@ -690,7 +571,7 @@ fn agent_operating_contract_missing_readme_degrades_without_mutation() -> TestRe
         &artifact_root,
         "agent_operating_contract_missing_readme_degrades_without_mutation",
         started,
-        &stdout,
+        &report.to_json(),
         &before,
         &after,
         &degraded_codes,

@@ -1,9 +1,0 @@
-{
-  "schema": "ee.tailscale.autodiscovery.fixture.v1",
-  "scenario": "fifty_peers_budget",
-  "peerCount": 50,
-  "expectedDegraded": [
-    "tailscale_peer_probe_timeout",
-    "peer_discovery_budget_exhausted"
-  ]
-}

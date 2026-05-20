@@ -9140,6 +9140,24 @@ const GLOBAL_OPTIONS: &[GlobalOption] = &[
         description: "Policy ID to use for decision plane operations",
         opt_type: "string",
     },
+    GlobalOption {
+        name: "--cards",
+        short: "",
+        description: "Control cards output verbosity (none|summary|math|full)",
+        opt_type: "enum",
+    },
+    GlobalOption {
+        name: "--schema-version",
+        short: "",
+        description: "Select the response envelope schema version (v0|v1)",
+        opt_type: "enum",
+    },
+    GlobalOption {
+        name: "--legacy-schema",
+        short: "",
+        description: "Shortcut for `--schema-version v0` during the v0 compatibility window",
+        opt_type: "flag",
+    },
 ];
 
 struct CommandArg {

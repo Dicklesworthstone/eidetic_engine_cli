@@ -13,7 +13,6 @@
 
 pub mod admission;
 pub mod audit;
-pub mod auto_enrollment;
 pub mod auto_enrollment_safety;
 pub mod cache;
 pub mod discovery_cache;
@@ -21,7 +20,6 @@ pub mod discovery_policy;
 pub mod emergency_disable;
 pub mod foreground_cli;
 pub mod hello;
-pub mod hello_responder;
 pub mod identity_change_guard;
 pub mod lane_grant_preview;
 pub mod peer;
@@ -31,5 +29,3 @@ pub mod remote_evidence;
 pub mod repair_action_graph;
 pub mod steward_decision;
 pub mod sync;
-pub mod tailscale_autodiscovery;
-pub mod tailscale_transport;

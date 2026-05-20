@@ -46,10 +46,6 @@ in the same commit, keeping the catalog complete by construction.
 | `memory_drift_source_changed` | search, context | medium | bd-1z1fd.3 |
 | `memory_drift_source_missing` | search, context | high | bd-1z1fd.3 |
 | `memory_drift_source_unverifiable` | search, context | medium | bd-1z1fd.3 |
-| `source_unparsable` | symbol snapshot, context, why | medium | bd-2xuu7.6 |
-| `symbol_index_stale` | symbol snapshot, context, why | warning | bd-2xuu7.6 |
-| `ambiguous_containing_symbols` | symbol evidence links, context, why | warning | bd-2xuu7.6 |
-| `stale_line_span` | symbol evidence links, context, why | warning | bd-2xuu7.6 |
 | `policy_bypass_used` | remember, note | info | bd-17c65.3.2 (C2) |
 | `policy_tag_rejected_with_details` | remember, note | low | bd-17c65.3.4 (C4) |
 | `policy_secret_detected_with_offsets` | remember, note | medium | bd-17c65.3.4 (C4) |
