@@ -268,13 +268,14 @@ memory bodies in `sources[]`.
 |------|----------|------|
 | `qos_registry_unavailable` | medium | bd-1zb7k.20.2 |
 
-#### Storage and runtime state (24)
+#### Storage and runtime state (25)
 | Code | Severity | Bead |
 |------|----------|------|
 | `db_migration_pending` | medium | bd-3usjw.1 (db inspect) |
 | `db_wal_stale` | medium | bd-3usjw.1 (db inspect) |
 | `wal_growth_exceeds_threshold` | warning | bd-2caru.8 |
 | `wal_growth_no_writer` | medium | bd-2caru.8 |
+| `shard_chain_mismatch` | high | bd-f6jfs.6 |
 | `shard_fanout_catalog_missing` | warning | bd-f6jfs.2 |
 | `shard_fanout_home_unavailable` | warning | bd-f6jfs.2 |
 | `shard_fanout_root_unsafe` | high | bd-f6jfs.2 |

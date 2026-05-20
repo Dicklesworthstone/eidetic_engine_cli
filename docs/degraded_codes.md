@@ -7153,6 +7153,37 @@ ee serve --foreground --json
 
 ---
 
+## `shard_chain_mismatch`
+
+**Severity:** high
+
+**Surfaces:** audit verify, audit timeline
+
+**Introduced by:** bd-f6jfs.6 (epic SHARD_FANOUT)
+
+**Trigger.** One shard-local audit chain points at an unexpected previous hash while other shard chains remain independently verifiable.
+
+**Setup.**
+
+```bash
+ee init --workspace . --json
+ee migrate shard-fanout --workspace . --json
+```
+
+**Invocation.**
+
+```bash
+ee audit verify --workspace . --json
+```
+
+**Expected emission.** Message contains: `shard ... audit chain ... mismatch`
+
+**Repair hint.** `ee audit timeline`
+
+**Fixture.** [`tests/fixtures/failure_modes/shard_chain_mismatch.json`](../tests/fixtures/failure_modes/shard_chain_mismatch.json)
+
+---
+
 ## `shard_fanout_catalog_missing`
 
 **Severity:** warning

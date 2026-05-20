@@ -12,7 +12,6 @@ use serde_json::{Value as JsonValue, json};
 
 use crate::db::{DbConnection, StoredAuditEntry, compute_audit_row_hash};
 use crate::models::{DomainError, ProducerMetadata};
-use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 /// Schema for audit timeline response.
 pub const AUDIT_TIMELINE_SCHEMA_V1: &str = "ee.audit.timeline.v1";
@@ -25,6 +24,9 @@ pub const AUDIT_DIFF_SCHEMA_V1: &str = "ee.audit.diff.v1";
 
 /// Schema for audit verify response.
 pub const AUDIT_VERIFY_SCHEMA_V1: &str = "ee.audit.verify.v1";
+
+/// Degraded-code emitted when one shard-local audit chain is broken.
+pub const SHARD_CHAIN_MISMATCH_CODE: &str = "shard_chain_mismatch";
 
 /// Options for listing the audit timeline.
 #[derive(Clone, Debug, Default)]
@@ -63,6 +65,31 @@ pub struct AuditVerifyOptions {
     pub until: Option<String>,
 }
 
+/// Audit rows read from one shard database.
+#[derive(Clone, Debug, Default)]
+pub struct AuditShardEntries {
+    pub shard_id: String,
+    pub entries: Vec<StoredAuditEntry>,
+}
+
+/// Options for merging multiple shard-local audit chains into one timeline.
+#[derive(Clone, Debug, Default)]
+pub struct ShardedAuditTimelineOptions {
+    pub shards: Vec<AuditShardEntries>,
+    pub since: Option<String>,
+    pub surface: Option<String>,
+    pub limit: u32,
+    pub cursor: Option<String>,
+}
+
+/// Options for verifying multiple shard-local audit chains.
+#[derive(Clone, Debug, Default)]
+pub struct ShardedAuditVerifyOptions {
+    pub shards: Vec<AuditShardEntries>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+}
+
 /// Summary of a persisted audit row.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditTimelineEntry {
@@ -76,6 +103,8 @@ pub struct AuditTimelineEntry {
     pub prev_row_hash: Option<String>,
     pub this_row_hash: Option<String>,
     pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_id: Option<String>,
     pub target_type: Option<String>,
     pub target_id: Option<String>,
     pub producer: ProducerMetadata,
@@ -154,7 +183,20 @@ impl AuditDiffReport {
 pub struct VerificationIssue {
     pub code: String,
     pub audit_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_id: Option<String>,
     pub message: String,
+}
+
+/// Per-shard verification summary embedded in sharded audit reports.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuditShardVerifyReport {
+    pub shard_id: String,
+    pub integrity_ok: bool,
+    pub rows: u32,
+    pub last_hash: Option<String>,
+    pub first_break: Option<String>,
+    pub issues: Vec<VerificationIssue>,
 }
 
 /// Report from verifying audit integrity.
@@ -166,6 +208,12 @@ pub struct AuditVerifyReport {
     pub last_hash: Option<String>,
     pub first_break: Option<String>,
     pub issues: Vec<VerificationIssue>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub shard_count: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub broken_shard_count: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shards: Vec<AuditShardVerifyReport>,
 }
 
 impl AuditVerifyReport {
@@ -196,6 +244,36 @@ pub fn list_timeline(options: &AuditTimelineOptions) -> Result<AuditTimelineRepo
             next_cursor: has_more.then(|| next_offset.to_string()),
         },
         entries: page.into_iter().map(AuditTimelineEntry::from).collect(),
+    })
+}
+
+/// Merge persisted operations from shard-local audit chains.
+pub fn list_sharded_timeline(
+    options: &ShardedAuditTimelineOptions,
+) -> Result<AuditTimelineReport, DomainError> {
+    let since = parse_optional_instant(options.since.as_deref(), "since")?;
+    let offset = parse_cursor(options.cursor.as_deref())?;
+    let mut entries = sharded_entries(options.shards.as_slice());
+    sort_sharded_entries_chronological(&mut entries);
+    let filtered = filter_sharded_entries(entries, since, None, options.surface.as_deref())?;
+    let total_count = u32::try_from(filtered.len()).unwrap_or(u32::MAX);
+    let limit = usize::try_from(options.limit.max(1)).unwrap_or(usize::MAX);
+    let page: Vec<_> = filtered.into_iter().skip(offset).take(limit).collect();
+    let next_offset = offset.saturating_add(page.len());
+    let has_more = next_offset < usize::try_from(total_count).unwrap_or(usize::MAX);
+
+    Ok(AuditTimelineReport {
+        schema: AUDIT_TIMELINE_SCHEMA_V1.to_owned(),
+        pagination: TimelinePagination {
+            total_count,
+            returned_count: u32::try_from(page.len()).unwrap_or(u32::MAX),
+            has_more,
+            next_cursor: has_more.then(|| next_offset.to_string()),
+        },
+        entries: page
+            .into_iter()
+            .map(|entry| AuditTimelineEntry::from_sharded(entry.entry, entry.shard_id))
+            .collect(),
     })
 }
 
@@ -280,10 +358,98 @@ pub fn verify_audit(options: &AuditVerifyOptions) -> Result<AuditVerifyReport, D
     verify_entries(&entries, since, until)
 }
 
+/// Verify each shard-local audit chain independently.
+pub fn verify_sharded_audit(
+    options: &ShardedAuditVerifyOptions,
+) -> Result<AuditVerifyReport, DomainError> {
+    let since = parse_optional_instant(options.since.as_deref(), "since")?;
+    let until = parse_optional_instant(options.until.as_deref(), "until")?;
+    if let (Some(since), Some(until)) = (since, until) {
+        if since > until {
+            return Err(DomainError::Usage {
+                message: "audit verify requires --since to be earlier than or equal to --until"
+                    .to_owned(),
+                repair: Some("Use `ee audit verify --since 2026-05-01T00:00:00Z --until 2026-05-02T00:00:00Z --json`.".to_owned()),
+            });
+        }
+    }
+
+    let mut shards = options.shards.clone();
+    shards.sort_by(|left, right| left.shard_id.cmp(&right.shard_id));
+
+    let mut shard_reports = Vec::with_capacity(shards.len());
+    let mut aggregate_issues = Vec::new();
+    let mut first_break = None;
+    let mut rows = 0_u32;
+
+    for shard in shards {
+        let report =
+            verify_entries_with_shard(&shard.entries, since, until, Some(shard.shard_id.as_str()))?;
+        rows = rows.saturating_add(report.rows);
+        if !report.integrity_ok {
+            if first_break.is_none() {
+                first_break = report.first_break.clone();
+            }
+            aggregate_issues.push(VerificationIssue {
+                code: SHARD_CHAIN_MISMATCH_CODE.to_owned(),
+                audit_id: report.first_break.clone(),
+                shard_id: Some(shard.shard_id.clone()),
+                message: match report.first_break.as_deref() {
+                    Some(audit_id) => format!(
+                        "shard {} audit chain mismatch at row {audit_id}; inspect shards[] for row-level issues",
+                        shard.shard_id
+                    ),
+                    None => format!(
+                        "shard {} audit chain mismatch; inspect shards[] for row-level issues",
+                        shard.shard_id
+                    ),
+                },
+            });
+        }
+        shard_reports.push(AuditShardVerifyReport {
+            shard_id: shard.shard_id,
+            integrity_ok: report.integrity_ok,
+            rows: report.rows,
+            last_hash: report.last_hash,
+            first_break: report.first_break,
+            issues: report.issues,
+        });
+    }
+
+    let broken_shard_count = u32::try_from(
+        shard_reports
+            .iter()
+            .filter(|report| !report.integrity_ok)
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+
+    Ok(AuditVerifyReport {
+        schema: AUDIT_VERIFY_SCHEMA_V1.to_owned(),
+        integrity_ok: broken_shard_count == 0,
+        rows,
+        last_hash: None,
+        first_break,
+        issues: aggregate_issues,
+        shard_count: u32::try_from(shard_reports.len()).unwrap_or(u32::MAX),
+        broken_shard_count,
+        shards: shard_reports,
+    })
+}
+
 fn verify_entries(
     entries: &[StoredAuditEntry],
     since: Option<DateTime<Utc>>,
     until: Option<DateTime<Utc>>,
+) -> Result<AuditVerifyReport, DomainError> {
+    verify_entries_with_shard(entries, since, until, None)
+}
+
+fn verify_entries_with_shard(
+    entries: &[StoredAuditEntry],
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+    shard_id: Option<&str>,
 ) -> Result<AuditVerifyReport, DomainError> {
     let mut ordered = entries.to_vec();
     sort_entries_chronological(&mut ordered);
@@ -306,6 +472,7 @@ fn verify_entries(
                 &mut first_break,
                 "prev_hash_mismatch",
                 entry.id.clone(),
+                shard_id,
                 format!(
                     "row {} points to {:?}, expected {:?}",
                     entry.id, entry.prev_row_hash, expected_prev_hash
@@ -322,6 +489,7 @@ fn verify_entries(
                         &mut first_break,
                         "row_hash_mismatch",
                         entry.id.clone(),
+                        shard_id,
                         format!(
                             "row {} hash mismatch: stored {}, recomputed {}",
                             entry.id, stored_hash, computed
@@ -337,6 +505,7 @@ fn verify_entries(
                     &mut first_break,
                     "missing_row_hash",
                     entry.id.clone(),
+                    shard_id,
                     format!("row {} is missing this_row_hash", entry.id),
                 );
                 expected_prev_hash = None;
@@ -352,6 +521,9 @@ fn verify_entries(
         last_hash,
         first_break,
         issues,
+        shard_count: 0,
+        broken_shard_count: 0,
+        shards: vec![],
     })
 }
 
@@ -360,6 +532,7 @@ fn push_first_issue(
     first_break: &mut Option<String>,
     code: &str,
     audit_id: String,
+    shard_id: Option<&str>,
     message: String,
 ) {
     if first_break.is_none() {
@@ -368,6 +541,7 @@ fn push_first_issue(
     issues.push(VerificationIssue {
         code: code.to_owned(),
         audit_id: Some(audit_id),
+        shard_id: shard_id.map(str::to_owned),
         message,
     });
 }
@@ -411,9 +585,73 @@ fn filter_entries(
     Ok(filtered)
 }
 
+#[derive(Clone, Debug)]
+struct ShardedStoredAuditEntry {
+    shard_id: String,
+    entry: StoredAuditEntry,
+}
+
+fn sharded_entries(shards: &[AuditShardEntries]) -> Vec<ShardedStoredAuditEntry> {
+    let mut entries = Vec::new();
+    for shard in shards {
+        entries.extend(
+            shard
+                .entries
+                .iter()
+                .cloned()
+                .map(|entry| ShardedStoredAuditEntry {
+                    shard_id: shard.shard_id.clone(),
+                    entry,
+                }),
+        );
+    }
+    entries
+}
+
+fn filter_sharded_entries(
+    entries: Vec<ShardedStoredAuditEntry>,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+    surface: Option<&str>,
+) -> Result<Vec<ShardedStoredAuditEntry>, DomainError> {
+    let surface = surface.map(str::trim).filter(|value| !value.is_empty());
+    let mut filtered = Vec::new();
+
+    for entry in entries {
+        let timestamp = parse_required_instant(&entry.entry.timestamp, "audit_log.timestamp")?;
+        if since.is_some_and(|bound| timestamp < bound) {
+            continue;
+        }
+        if until.is_some_and(|bound| timestamp > bound) {
+            continue;
+        }
+        if surface.is_some_and(|wanted| entry.entry.surface != wanted) {
+            continue;
+        }
+        filtered.push(entry);
+    }
+
+    Ok(filtered)
+}
+
 fn sort_entries_chronological(entries: &mut Vec<StoredAuditEntry>) {
-    sort_by_ulid_payload_or_lexical(entries, |entry| entry.id.as_str());
-    entries.sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
+    entries.sort_by(|left, right| {
+        left.timestamp
+            .cmp(&right.timestamp)
+            .then_with(|| left.workspace_id.cmp(&right.workspace_id))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn sort_sharded_entries_chronological(entries: &mut [ShardedStoredAuditEntry]) {
+    entries.sort_by(|left, right| {
+        left.entry
+            .timestamp
+            .cmp(&right.entry.timestamp)
+            .then_with(|| left.entry.workspace_id.cmp(&right.entry.workspace_id))
+            .then_with(|| left.shard_id.cmp(&right.shard_id))
+            .then_with(|| left.entry.id.cmp(&right.entry.id))
+    });
 }
 
 fn linked_snapshot(
@@ -561,6 +799,12 @@ fn storage_error(context: &str, error: crate::db::DbError) -> DomainError {
 
 impl From<StoredAuditEntry> for AuditTimelineEntry {
     fn from(entry: StoredAuditEntry) -> Self {
+        Self::from_sharded(entry, None)
+    }
+}
+
+impl AuditTimelineEntry {
+    fn from_sharded(entry: StoredAuditEntry, shard_id: Option<String>) -> Self {
         let producer =
             ProducerMetadata::audit_actor(entry.actor.as_deref(), Some(&entry.timestamp));
         Self {
@@ -574,6 +818,7 @@ impl From<StoredAuditEntry> for AuditTimelineEntry {
             prev_row_hash: entry.prev_row_hash,
             this_row_hash: entry.this_row_hash,
             workspace_id: entry.workspace_id,
+            shard_id,
             target_type: entry.target_type,
             target_id: entry.target_id,
             producer,
@@ -583,6 +828,10 @@ impl From<StoredAuditEntry> for AuditTimelineEntry {
                 .and_then(|details| serde_json::from_str(details).ok()),
         }
     }
+}
+
+const fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[cfg(test)]
@@ -635,6 +884,185 @@ mod tests {
             .map(|entry| entry.id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(ids, vec![lower, higher, later]);
+    }
+
+    fn shard_timeline_entry(id: &str, timestamp: &str, workspace_id: &str) -> StoredAuditEntry {
+        let mut entry = audit_entry_for_sort(id, timestamp);
+        entry.workspace_id = Some(workspace_id.to_owned());
+        entry
+    }
+
+    fn hashed_chain_entry(
+        id: &str,
+        timestamp: &str,
+        workspace_id: &str,
+        prev_row_hash: Option<String>,
+    ) -> StoredAuditEntry {
+        let mut entry = audit_entry_for_sort(id, timestamp);
+        entry.workspace_id = Some(workspace_id.to_owned());
+        entry.prev_row_hash = prev_row_hash;
+        entry.this_row_hash = Some(compute_audit_row_hash(&entry));
+        entry
+    }
+
+    #[test]
+    fn sharded_timeline_orders_by_timestamp_workspace_shard_and_audit_id() -> TestResult {
+        let report = list_sharded_timeline(&ShardedAuditTimelineOptions {
+            shards: vec![
+                AuditShardEntries {
+                    shard_id: "shard_b".to_owned(),
+                    entries: vec![
+                        shard_timeline_entry(
+                            "audit_00000000000000000000000001",
+                            "2026-05-19T08:00:00Z",
+                            "wsp_b",
+                        ),
+                        shard_timeline_entry(
+                            "audit_00000000000000000000000004",
+                            "2026-05-19T08:00:01Z",
+                            "wsp_a",
+                        ),
+                    ],
+                },
+                AuditShardEntries {
+                    shard_id: "shard_a".to_owned(),
+                    entries: vec![
+                        shard_timeline_entry(
+                            "audit_00000000000000000000000003",
+                            "2026-05-19T08:00:00Z",
+                            "wsp_a",
+                        ),
+                        shard_timeline_entry(
+                            "audit_00000000000000000000000002",
+                            "2026-05-19T08:00:00Z",
+                            "wsp_a",
+                        ),
+                    ],
+                },
+            ],
+            limit: 20,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        let keys = report
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.timestamp.as_str(),
+                    entry.workspace_id.as_deref(),
+                    entry.shard_id.as_deref(),
+                    entry.id.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            keys,
+            vec![
+                (
+                    "2026-05-19T08:00:00Z",
+                    Some("wsp_a"),
+                    Some("shard_a"),
+                    "audit_00000000000000000000000002",
+                ),
+                (
+                    "2026-05-19T08:00:00Z",
+                    Some("wsp_a"),
+                    Some("shard_a"),
+                    "audit_00000000000000000000000003",
+                ),
+                (
+                    "2026-05-19T08:00:00Z",
+                    Some("wsp_b"),
+                    Some("shard_b"),
+                    "audit_00000000000000000000000001",
+                ),
+                (
+                    "2026-05-19T08:00:01Z",
+                    Some("wsp_a"),
+                    Some("shard_b"),
+                    "audit_00000000000000000000000004",
+                ),
+            ]
+        );
+        assert_eq!(report.pagination.total_count, 4);
+        Ok(())
+    }
+
+    #[test]
+    fn sharded_verify_reports_one_broken_shard_without_poisoning_other_shards() -> TestResult {
+        let alpha_first = hashed_chain_entry(
+            "audit_00000000000000000000000001",
+            "2026-05-19T08:00:00Z",
+            "wsp_alpha",
+            None,
+        );
+        let alpha_second = hashed_chain_entry(
+            "audit_00000000000000000000000002",
+            "2026-05-19T08:00:01Z",
+            "wsp_alpha",
+            alpha_first.this_row_hash.clone(),
+        );
+        let beta_first = hashed_chain_entry(
+            "audit_00000000000000000000000003",
+            "2026-05-19T08:00:00Z",
+            "wsp_beta",
+            None,
+        );
+        let beta_second = hashed_chain_entry(
+            "audit_00000000000000000000000004",
+            "2026-05-19T08:00:01Z",
+            "wsp_beta",
+            Some("blake3:not-the-beta-tip".to_owned()),
+        );
+
+        let report = verify_sharded_audit(&ShardedAuditVerifyOptions {
+            shards: vec![
+                AuditShardEntries {
+                    shard_id: "shard_beta".to_owned(),
+                    entries: vec![beta_first, beta_second],
+                },
+                AuditShardEntries {
+                    shard_id: "shard_alpha".to_owned(),
+                    entries: vec![alpha_first, alpha_second],
+                },
+            ],
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert!(!report.integrity_ok);
+        assert_eq!(report.rows, 4);
+        assert_eq!(report.last_hash, None);
+        assert_eq!(report.shard_count, 2);
+        assert_eq!(report.broken_shard_count, 1);
+        assert_eq!(report.issues.len(), 1);
+        assert_eq!(report.issues[0].code, SHARD_CHAIN_MISMATCH_CODE);
+        assert_eq!(report.issues[0].shard_id.as_deref(), Some("shard_beta"));
+        assert_eq!(
+            report.issues[0].audit_id.as_deref(),
+            Some("audit_00000000000000000000000004")
+        );
+
+        let alpha = report
+            .shards
+            .iter()
+            .find(|shard| shard.shard_id == "shard_alpha")
+            .ok_or_else(|| "missing shard_alpha report".to_owned())?;
+        let beta = report
+            .shards
+            .iter()
+            .find(|shard| shard.shard_id == "shard_beta")
+            .ok_or_else(|| "missing shard_beta report".to_owned())?;
+        assert!(alpha.integrity_ok);
+        assert!(alpha.issues.is_empty());
+        assert!(!beta.integrity_ok);
+        assert_eq!(beta.issues.len(), 1);
+        assert_eq!(beta.issues[0].code, "prev_hash_mismatch");
+        assert_eq!(beta.issues[0].shard_id.as_deref(), Some("shard_beta"));
+        Ok(())
     }
 
     fn fixture_workspace(name: &str) -> Result<PathBuf, String> {

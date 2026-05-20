@@ -13092,13 +13092,23 @@ pub fn render_audit_verify_human(report: &AuditVerifyReport) -> String {
         "First break: {}\n",
         report.first_break.as_deref().unwrap_or("<none>")
     ));
+    if report.shard_count > 0 {
+        out.push_str(&format!("Shards checked: {}\n", report.shard_count));
+        out.push_str(&format!("Broken shards: {}\n", report.broken_shard_count));
+    }
 
     if !report.issues.is_empty() {
         out.push_str("\nIssues:\n");
         for issue in &report.issues {
+            let shard = issue
+                .shard_id
+                .as_deref()
+                .map(|value| format!(" shard={value}"))
+                .unwrap_or_default();
             out.push_str(&format!(
-                "  [{}] {}: {}\n",
+                "  [{}{}] {}: {}\n",
                 issue.audit_id.as_deref().unwrap_or("<unknown>"),
+                shard,
                 issue.code,
                 issue.message
             ));

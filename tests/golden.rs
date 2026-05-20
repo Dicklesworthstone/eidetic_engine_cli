@@ -788,6 +788,7 @@ mod tests {
             prev_row_hash: prev_row_hash.map(str::to_owned),
             this_row_hash: Some(this_row_hash.to_owned()),
             workspace_id: Some("wsp_auditgolden0000000000001".to_owned()),
+            shard_id: None,
             target_type: Some(surface.to_owned()),
             target_id: Some(format!("{surface}_auditgolden0000000001")),
             producer: ProducerMetadata::audit_actor(Some("cod_2"), Some(timestamp)),
@@ -1504,6 +1505,9 @@ mod tests {
                 last_hash: None,
                 first_break: None,
                 issues: vec![],
+                shard_count: 0,
+                broken_shard_count: 0,
+                shards: vec![],
             }
             .to_json(),
         )?;
@@ -1584,6 +1588,9 @@ mod tests {
                 last_hash: Some("blake3:row-2".to_owned()),
                 first_break: None,
                 issues: vec![],
+                shard_count: 0,
+                broken_shard_count: 0,
+                shards: vec![],
             }
             .to_json(),
         )?;
@@ -1600,8 +1607,12 @@ mod tests {
                 issues: vec![VerificationIssue {
                     code: "row_hash_mismatch".to_owned(),
                     audit_id: Some("audit_golden_000000000000000002".to_owned()),
+                    shard_id: None,
                     message: "row audit_golden_000000000000000002 hash mismatch: stored blake3:row-2, recomputed blake3:tampered".to_owned(),
                 }],
+                shard_count: 0,
+                broken_shard_count: 0,
+                shards: vec![],
             }
             .to_json(),
         )
