@@ -40674,18 +40674,14 @@ mod tests {
         AgentCommand, AnalyzeCommand, ArtifactCommand, BackupCommand, BackupRedaction,
         COORDINATION_FALLBACK_INGEST_SCHEMA_V1, COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command,
         CurateCommand, DaemonCommand, DiagCommand, DiagQuarantineCommand, DomainError,
-        EconomyCommand, EffectiveRedactionLevel, FieldsLevel, FocusCommand,
-        GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY,
-        GraphCommand, GraphSnapshotCommand, HandoffCommand, HealthArgs, HookCommand, ImportCommand,
-        JobCommand, LearnCommand, LearnExperimentCommand, MaintenanceCommand,
-        MaintenanceGraphWitnessesPruneArgs, MaintenanceWalCheckpointArgs,
-        MaintenanceWalCheckpointMode, McpCommand, MemoryCommand, OutcomeQuarantineCommand,
-        OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand, RedactionLevelSource,
-        RuleCommand, ShadowMode, SituationCommand, StatusArgs, SupportCommand, SwarmBriefArgs,
-        SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand, VerifyCommand, WorkflowCommand,
-        WorkspaceCommand, WorkspaceHygieneArgs, db_inspect_redact_source_uri,
-        decay_settings_from_config, hook_git_readiness_response_json,
-        load_maintenance_decay_settings, load_witness_retention_policy,
+        EconomyCommand, EffectiveRedactionLevel, FieldsLevel, FocusCommand, GraphCommand,
+        GraphSnapshotCommand, HandoffCommand, HookCommand, LearnCommand, LearnExperimentCommand,
+        MaintenanceCommand, MaintenanceWalCheckpointArgs, MaintenanceWalCheckpointMode,
+        MemoryCommand, OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand,
+        RedactionLevelSource, RuleCommand, ShadowMode, SituationCommand, StatusArgs,
+        SupportCommand, SwarmBriefArgs, SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand,
+        VerifyCommand, WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs,
+        db_inspect_redact_source_uri, hook_git_readiness_response_json,
         parse_completion_audit_evidence_input, parse_verification_evidence_record_input,
         plan_cache_diag_degraded, plan_cache_diag_response_json, run, write_index_rebuild_error,
     };
@@ -40709,7 +40705,6 @@ mod tests {
     use crate::output;
     use crate::pack::PackResourceProfile;
     use crate::search::plan_cache::{DEFAULT_PLAN_CACHE_ENTRIES, EnvVarValueSource, PlanCache};
-    use crate::steward::JobType;
 
     type TestResult = Result<(), String>;
 

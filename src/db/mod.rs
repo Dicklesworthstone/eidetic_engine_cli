@@ -294,7 +294,7 @@ fn file_write_owner_gate(key: &WriteOwnerKey) -> &'static Mutex<()> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(gate) = gates.get(key) {
-        return *gate;
+        return gate;
     }
     let gate = Box::leak(Box::new(Mutex::new(())));
     gates.insert(key.clone(), gate);
@@ -310,7 +310,7 @@ fn write_owner_key(location: &DatabaseLocation) -> WriteOwnerKey {
 
 thread_local! {
     static FILE_WRITE_OWNER_DEPTHS: RefCell<BTreeMap<WriteOwnerKey, usize>> =
-        RefCell::new(BTreeMap::new());
+        const { RefCell::new(BTreeMap::new()) };
 }
 
 struct FileWriteOwnerGuard {

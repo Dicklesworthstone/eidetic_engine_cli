@@ -121,10 +121,8 @@ where
         }
 
         rows = Vec::with_capacity(len);
-        for slot in distributed {
-            if let Some(row) = slot {
-                rows.push(row);
-            }
+        for row in distributed.into_iter().flatten() {
+            rows.push(row);
         }
         debug_assert_eq!(rows.len(), len);
     }

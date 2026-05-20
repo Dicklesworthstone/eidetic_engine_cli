@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, Parser, Subcommand};
 use serde_json::{Value as JsonValue, json};
@@ -144,17 +144,17 @@ where
         None
     };
 
-    write_share_preview_report(
-        cli,
-        &workspace_path,
-        &database_path,
-        &workspace_id,
+    let render_input = SharePreviewRenderInput {
+        workspace_path: &workspace_path,
+        database_path: &database_path,
+        workspace_id: &workspace_id,
         args,
-        &report,
-        &preview_hash,
-        consent_record.as_ref(),
-        stdout,
-    )
+        report: &report,
+        preview_hash: &preview_hash,
+        consent_record: consent_record.as_ref(),
+    };
+
+    write_share_preview_report(cli, &render_input, stdout)
 }
 
 fn share_preview_candidates<'a>(
@@ -259,6 +259,16 @@ struct ShareConsentRecord {
     audit: SharePreviewConsentAudit,
 }
 
+struct SharePreviewRenderInput<'a> {
+    workspace_path: &'a Path,
+    database_path: &'a Path,
+    workspace_id: &'a str,
+    args: &'a SharePreviewArgs,
+    report: &'a SharePreviewReport,
+    preview_hash: &'a str,
+    consent_record: Option<&'a ShareConsentRecord>,
+}
+
 fn record_share_consent(
     connection: &DbConnection,
     workspace_id: &str,
@@ -299,13 +309,7 @@ fn record_share_consent(
 
 fn write_share_preview_report<W>(
     cli: &Cli,
-    workspace_path: &std::path::Path,
-    database_path: &std::path::Path,
-    workspace_id: &str,
-    args: &SharePreviewArgs,
-    report: &SharePreviewReport,
-    preview_hash: &str,
-    consent_record: Option<&ShareConsentRecord>,
+    input: &SharePreviewRenderInput<'_>,
     stdout: &mut W,
 ) -> ProcessExitCode
 where
@@ -314,18 +318,10 @@ where
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => write_stdout(
             stdout,
-            &render_share_preview_human(report, preview_hash, consent_record),
+            &render_share_preview_human(input.report, input.preview_hash, input.consent_record),
         ),
         output::Renderer::Toon => {
-            let data = share_preview_data_json(
-                workspace_path,
-                database_path,
-                workspace_id,
-                args,
-                report,
-                preview_hash,
-                consent_record,
-            );
+            let data = share_preview_data_json(input);
             write_stdout(
                 stdout,
                 &(output::render_toon_from_json(&data.to_string()) + "\n"),
@@ -338,44 +334,31 @@ where
             let json = json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V1,
                 "success": true,
-                "data": share_preview_data_json(
-                    workspace_path,
-                    database_path,
-                    workspace_id,
-                    args,
-                    report,
-                    preview_hash,
-                    consent_record,
-                ),
+                "data": share_preview_data_json(input),
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
     }
 }
 
-fn share_preview_data_json(
-    workspace_path: &std::path::Path,
-    database_path: &std::path::Path,
-    workspace_id: &str,
-    args: &SharePreviewArgs,
-    report: &SharePreviewReport,
-    preview_hash: &str,
-    consent_record: Option<&ShareConsentRecord>,
-) -> JsonValue {
+fn share_preview_data_json(input: &SharePreviewRenderInput<'_>) -> JsonValue {
     json!({
-        "schema": report.schema,
+        "schema": input.report.schema,
         "command": SHARE_PREVIEW_COMMAND,
-        "workspacePath": workspace_path.display().to_string(),
-        "workspaceId": workspace_id,
-        "databasePath": database_path.display().to_string(),
+        "workspacePath": input.workspace_path.display().to_string(),
+        "workspaceId": input.workspace_id,
+        "databasePath": input.database_path.display().to_string(),
         "dryRun": true,
         "exportPerformed": false,
-        "includeBody": args.include_body,
-        "includeEmbeddings": args.include_embeddings,
-        "previewHash": preview_hash,
-        "preview": report,
-        "consentAudit": consent_record.map(consent_audit_json).unwrap_or(JsonValue::Null),
-        "events": share_preview_events(preview_hash, consent_record),
+        "includeBody": input.args.include_body,
+        "includeEmbeddings": input.args.include_embeddings,
+        "previewHash": input.preview_hash,
+        "preview": input.report,
+        "consentAudit": input
+            .consent_record
+            .map(consent_audit_json)
+            .unwrap_or(JsonValue::Null),
+        "events": share_preview_events(input.preview_hash, input.consent_record),
     })
 }
 

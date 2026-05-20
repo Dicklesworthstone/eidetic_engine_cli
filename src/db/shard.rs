@@ -990,7 +990,6 @@ mod tests {
         plan_shard_fanout_migration, preserved_legacy_database_path, resolve_shard_fanout_status,
         shard_fanout_enabled_from_env_value, shard_file_path,
     };
-    use std::ffi::OsString;
     use std::path::{Path, PathBuf};
 
     type TestResult = Result<(), String>;

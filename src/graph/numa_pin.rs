@@ -108,16 +108,11 @@ impl NumaPinPlatform {
 /// (validated lazily by the syscall slice). Validation deliberately stays
 /// platform-agnostic at the scaffold layer because non-Linux platforms have
 /// no node space to validate against.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum NumaPinPreference {
+    #[default]
     Auto,
     Node(i32),
-}
-
-impl Default for NumaPinPreference {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl NumaPinPreference {
@@ -452,12 +447,6 @@ impl NumaPinResult {
             degraded_codes: Vec::new(),
         }
     }
-
-    fn push_unique_code(&mut self, code: &str) {
-        if !self.degraded_codes.iter().any(|existing| existing == code) {
-            self.degraded_codes.push(code.to_string());
-        }
-    }
 }
 
 /// Probe for the NUMA node the calling thread is currently scheduled on.
@@ -538,11 +527,11 @@ mod tests {
     use super::{
         GRAPH_SNAPSHOT_NUMA_HINT_SCHEMA_V1, GraphSnapshotNumaHintInput, NUMA_PIN_DISABLE_ENV,
         NUMA_PIN_DISABLED_CODE, NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE, NUMA_PIN_NODE_ENV,
-        NUMA_PIN_POPULATE_ENV, NUMA_PIN_PREFERRED_NODE_AUTO, NUMA_PIN_UNSUPPORTED_PLATFORM_CODE,
-        NumaPinConfig, NumaPinFallbackPath, NumaPinMappingKind, NumaPinPlan, NumaPinPlatform,
-        NumaPinPreference, NumaPinResult, STATUS_GRAPH_NUMA_PIN_SCHEMA_V1, detect_preferred_node,
-        graph_snapshot_numa_hint, parse_env_bool, parse_env_preferred_node, pin_snapshot_blob,
-        plan_snapshot_pin, platform_support,
+        NUMA_PIN_POPULATE_ENV, NUMA_PIN_PREFERRED_NODE_AUTO, NumaPinConfig, NumaPinFallbackPath,
+        NumaPinMappingKind, NumaPinPlan, NumaPinPlatform, NumaPinPreference, NumaPinResult,
+        STATUS_GRAPH_NUMA_PIN_SCHEMA_V1, detect_preferred_node, graph_snapshot_numa_hint,
+        parse_env_bool, parse_env_preferred_node, pin_snapshot_blob, plan_snapshot_pin,
+        platform_support,
     };
 
     fn fake_snapshot_path() -> &'static Path {

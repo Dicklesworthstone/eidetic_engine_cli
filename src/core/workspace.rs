@@ -1107,19 +1107,13 @@ fn workspace_hygiene_next_actions(
             "Leave doNotCommit paths unstaged unless a human explicitly overrides.".to_string(),
         );
     }
-    if degraded_codes
-        .iter()
-        .any(|code| *code == WORKSPACE_HYGIENE_AGENT_MAIL_UNAVAILABLE_CODE)
-    {
+    if degraded_codes.contains(&WORKSPACE_HYGIENE_AGENT_MAIL_UNAVAILABLE_CODE) {
         actions.push(
             "Refresh Agent Mail reservations before committing coordination-sensitive paths."
                 .to_string(),
         );
     }
-    if degraded_codes
-        .iter()
-        .any(|code| *code == WORKSPACE_HYGIENE_OUTPUT_TRUNCATED_CODE)
-    {
+    if degraded_codes.contains(&WORKSPACE_HYGIENE_OUTPUT_TRUNCATED_CODE) {
         actions.push(
             "Narrow the dirty path set or inspect JSON outputTruncation before staging large changes."
                 .to_string(),

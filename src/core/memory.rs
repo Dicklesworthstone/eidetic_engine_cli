@@ -4,6 +4,7 @@
 //! - `get_memory_details`: retrieve a single memory with its tags and metadata
 //! - `revise_memory`: create an immutable revision of an existing memory
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -3390,7 +3391,7 @@ fn build_suggested_links_from_matches(
         .collect();
 
     sort_by_ulid_payload_or_lexical(&mut candidates, |(memory_id, _)| memory_id.as_str());
-    candidates.sort_by(|(_, left_tags), (_, right_tags)| right_tags.len().cmp(&left_tags.len()));
+    candidates.sort_by_key(|(_, tags)| Reverse(tags.len()));
 
     candidates
         .into_iter()

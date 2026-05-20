@@ -348,6 +348,16 @@ struct DeclarationBoundary {
     body: Option<(usize, usize)>,
 }
 
+struct SymbolAddInput<'a> {
+    kind: SymbolKind,
+    start_idx: usize,
+    name_idx: Option<usize>,
+    local_name: &'a str,
+    boundary: DeclarationBoundary,
+    namespace: &'a [String],
+    visibility: SymbolVisibility,
+}
+
 struct RustSymbolScanner<'a> {
     path: &'a str,
     source: &'a str,
@@ -451,15 +461,15 @@ impl<'a> RustSymbolScanner<'a> {
                 "impl" => {
                     let boundary = self.declaration_boundary(idx, end);
                     let impl_name = self.impl_name(idx, boundary.signature_end);
-                    self.add_symbol(
-                        SymbolKind::Impl,
-                        idx,
-                        None,
-                        &impl_name,
+                    self.add_symbol(SymbolAddInput {
+                        kind: SymbolKind::Impl,
+                        start_idx: idx,
+                        name_idx: None,
+                        local_name: &impl_name,
                         boundary,
                         namespace,
-                        SymbolVisibility::Private,
-                    );
+                        visibility: SymbolVisibility::Private,
+                    });
                     if let Some((body_start, body_end)) = boundary.body {
                         let mut child_namespace = namespace.to_vec();
                         child_namespace.push(impl_name);
@@ -516,15 +526,15 @@ impl<'a> RustSymbolScanner<'a> {
                     if self.is_macro_invocation(idx, end) {
                         let boundary = self.macro_boundary(idx, end);
                         let name = self.macro_name(idx, end);
-                        self.add_symbol(
-                            SymbolKind::MacroInvocation,
-                            idx,
-                            Some(idx),
-                            &name,
+                        self.add_symbol(SymbolAddInput {
+                            kind: SymbolKind::MacroInvocation,
+                            start_idx: idx,
+                            name_idx: Some(idx),
+                            local_name: &name,
                             boundary,
                             namespace,
-                            self.visibility_before(idx),
-                        );
+                            visibility: self.visibility_before(idx),
+                        });
                         idx = boundary.end_idx.saturating_add(1);
                         continue;
                     }
@@ -545,27 +555,28 @@ impl<'a> RustSymbolScanner<'a> {
         visibility: SymbolVisibility,
     ) {
         let name = self.tokens[name_idx].text.clone();
-        self.add_symbol(
+        self.add_symbol(SymbolAddInput {
             kind,
             start_idx,
-            Some(name_idx),
-            &name,
+            name_idx: Some(name_idx),
+            local_name: &name,
             boundary,
             namespace,
             visibility,
-        );
+        });
     }
 
-    fn add_symbol(
-        &mut self,
-        kind: SymbolKind,
-        start_idx: usize,
-        name_idx: Option<usize>,
-        local_name: &str,
-        boundary: DeclarationBoundary,
-        namespace: &[String],
-        visibility: SymbolVisibility,
-    ) {
+    fn add_symbol(&mut self, input: SymbolAddInput<'_>) {
+        let SymbolAddInput {
+            kind,
+            start_idx,
+            name_idx,
+            local_name,
+            boundary,
+            namespace,
+            visibility,
+        } = input;
+
         if self.tokens.is_empty() || start_idx >= self.tokens.len() {
             return;
         }
@@ -575,7 +586,7 @@ impl<'a> RustSymbolScanner<'a> {
         let end_byte = self.tokens[end_idx].end.min(self.source.len());
         let namespace_vec = namespace.to_vec();
         let canonical_name = canonical_name(namespace, local_name);
-        let declaration_hash = blake3_hex(self.source[start_byte..end_byte].as_bytes());
+        let declaration_hash = blake3_hex(&self.source.as_bytes()[start_byte..end_byte]);
         let signature_shape = self.signature_shape(start_idx, boundary.signature_end, name_idx);
         let rename_fingerprint = rename_fingerprint(kind, namespace, &signature_shape);
         let id = symbol_id(

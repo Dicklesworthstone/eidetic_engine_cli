@@ -1370,7 +1370,7 @@ pub fn hash_bounded_source_window(
 
 #[must_use]
 pub fn classify_source_bytes(bytes: &[u8], max_window_bytes: usize) -> MemoryDriftAnchorStatus {
-    if bytes.iter().any(|byte| *byte == 0) {
+    if bytes.contains(&0) {
         MemoryDriftAnchorStatus::BinarySource
     } else if bytes.len() > max_window_bytes {
         MemoryDriftAnchorStatus::TooLarge

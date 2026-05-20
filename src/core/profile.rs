@@ -246,10 +246,11 @@ impl Serialize for HostClass {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum HostCalibrationFreshness {
     Fresh,
     Stale,
+    #[default]
     Missing,
     Unavailable,
 }
@@ -263,12 +264,6 @@ impl HostCalibrationFreshness {
             Self::Missing => "missing",
             Self::Unavailable => "unavailable",
         }
-    }
-}
-
-impl Default for HostCalibrationFreshness {
-    fn default() -> Self {
-        Self::Missing
     }
 }
 

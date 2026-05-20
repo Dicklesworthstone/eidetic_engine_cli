@@ -563,10 +563,11 @@ mod tests {
         input.index_generation = Some(11);
         input.graph_generation = Some(13);
         input.query_text = Some(raw_query);
-        input.option_pairs = &[
+        let option_pairs = [
             ("memoryBody", raw_memory),
             ("sourcePath", "/private/source/path.md"),
         ];
+        input.option_pairs = &option_pairs;
 
         let key = SingleFlightKey::from_input(&input);
         let report =

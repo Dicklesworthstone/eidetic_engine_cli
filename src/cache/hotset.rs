@@ -456,7 +456,7 @@ impl HotsetManifest {
 mod tests {
     use super::*;
     use crate::pack::{PackHotsetEntry, PackHotsetEntryKind};
-    use crate::search::{SearchHotsetEntry, SearchHotsetEntryKind};
+    use crate::search::SearchHotsetEntry;
 
     type TestResult = Result<(), String>;
 

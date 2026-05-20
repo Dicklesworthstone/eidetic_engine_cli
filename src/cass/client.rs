@@ -108,22 +108,14 @@ pub fn discover_with_override(
     // Check EE_CASS_BINARY env var first
     if let Some(env_path) = read(EnvVar::CassBinary) {
         let path = PathBuf::from(&env_path);
-        match validate_discovery_binary_path(&path) {
-            Ok(canonical) => {
-                return Ok(DiscoveredBinary::new(canonical, DiscoverySource::EnvVar));
-            }
-            Err(error) => return Err(error),
-        }
+        let canonical = validate_discovery_binary_path(&path)?;
+        return Ok(DiscoveredBinary::new(canonical, DiscoverySource::EnvVar));
     }
 
     // Check config override
     if let Some(override_path) = config_override {
-        match validate_discovery_binary_path(override_path) {
-            Ok(canonical) => {
-                return Ok(DiscoveredBinary::new(canonical, DiscoverySource::Config));
-            }
-            Err(error) => return Err(error),
-        }
+        let canonical = validate_discovery_binary_path(override_path)?;
+        return Ok(DiscoveredBinary::new(canonical, DiscoverySource::Config));
     }
 
     // Search $PATH
