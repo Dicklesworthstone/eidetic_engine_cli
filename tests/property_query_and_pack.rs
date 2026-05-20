@@ -454,8 +454,47 @@ fn regression_fixture_for_mismatch(
 }
 
 fn regression_input_payload(input: &[u8]) -> serde_json::Value {
-    serde_json::from_slice(input)
-        .unwrap_or_else(|_| serde_json::json!({ "raw": String::from_utf8_lossy(input) }))
+    serde_json::from_slice(input).unwrap_or_else(|_| {
+        serde_json::json!({
+            "raw": String::from_utf8_lossy(input),
+            "raw_hex": hex_encode(input),
+        })
+    })
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn hex_decode(value: &str) -> Result<Vec<u8>, String> {
+    if value.len() % 2 != 0 {
+        return Err(format!("hex value {value:?} has odd length"));
+    }
+
+    let mut output = Vec::with_capacity(value.len() / 2);
+    for pair in value.as_bytes().chunks_exact(2) {
+        let high = hex_value(pair[0])
+            .ok_or_else(|| format!("hex value {value:?} contains non-hex digit"))?;
+        let low = hex_value(pair[1])
+            .ok_or_else(|| format!("hex value {value:?} contains non-hex digit"))?;
+        output.push((high << 4) | low);
+    }
+    Ok(output)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn regression_input_for_pack_case(
@@ -837,17 +876,10 @@ fn validate_regression_fixture_metadata(
             "parse {file_name}: observed_hash_run2 must differ from expected_hash for a persisted mismatch"
         ));
     }
-    if fixture.input.get("raw").is_none() {
-        let input_bytes = serde_json::to_vec(&fixture.input).map_err(|error| {
-            format!("parse {file_name}: serialize regression input for hash check: {error}")
-        })?;
-        let actual_input_hash = hash_bytes(&input_bytes);
-        if fixture.input_hash != actual_input_hash {
-            return Err(format!(
-                "parse {file_name}: input_hash {} does not match stored input hash {}",
-                fixture.input_hash, actual_input_hash
-            ));
-        }
+    if fixture.input.get("raw").is_some() {
+        validate_raw_regression_input_hash(file_name, fixture)?;
+    } else {
+        validate_structured_regression_input_hash(file_name, fixture)?;
     }
     if let Some(input_seed) = fixture
         .input
@@ -860,6 +892,59 @@ fn validate_regression_fixture_metadata(
                 fixture.seed, input_seed
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_structured_regression_input_hash(
+    file_name: &str,
+    fixture: &DeterminismRegressionFixture,
+) -> Result<(), String> {
+    let input_bytes = serde_json::to_vec(&fixture.input).map_err(|error| {
+        format!("parse {file_name}: serialize regression input for hash check: {error}")
+    })?;
+    let actual_input_hash = hash_bytes(&input_bytes);
+    if fixture.input_hash != actual_input_hash {
+        return Err(format!(
+            "parse {file_name}: input_hash {} does not match stored input hash {}",
+            fixture.input_hash, actual_input_hash
+        ));
+    }
+    Ok(())
+}
+
+fn validate_raw_regression_input_hash(
+    file_name: &str,
+    fixture: &DeterminismRegressionFixture,
+) -> Result<(), String> {
+    let raw = fixture
+        .input
+        .get("raw")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("parse {file_name}: raw regression input must be a string"))?;
+    let raw_bytes = if let Some(raw_hex) = fixture.input.get("raw_hex") {
+        let raw_hex = raw_hex.as_str().ok_or_else(|| {
+            format!("parse {file_name}: raw regression input raw_hex must be a string")
+        })?;
+        let decoded = hex_decode(raw_hex)
+            .map_err(|error| format!("parse {file_name}: invalid raw_hex: {error}"))?;
+        let decoded_preview = String::from_utf8_lossy(&decoded);
+        if decoded_preview.as_ref() != raw {
+            return Err(format!(
+                "parse {file_name}: raw regression input preview does not match raw_hex bytes"
+            ));
+        }
+        decoded
+    } else {
+        raw.as_bytes().to_vec()
+    };
+
+    let actual_input_hash = hash_bytes(&raw_bytes);
+    if fixture.input_hash != actual_input_hash {
+        return Err(format!(
+            "parse {file_name}: input_hash {} does not match raw input hash {}",
+            fixture.input_hash, actual_input_hash
+        ));
     }
     Ok(())
 }
@@ -1529,6 +1614,34 @@ fn determinism_regression_fixture_loader_rejects_missing_input_hash_scheme() -> 
 
     assert!(error.contains("must start with blake3:"));
     assert!(error.contains(&fixture.input_hash));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_loader_rejects_raw_input_hash_drift() -> Result<(), String> {
+    let mut fixture = regression_fixture_for_mismatch(6, b"raw-hash", b"expected", b"observed")
+        .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    let file_name = regression_fixture_file_name(&fixture.input_hash)?;
+
+    assert_eq!(fixture.input["raw"], "raw-hash");
+    assert_eq!(fixture.input["raw_hex"], hex_encode(b"raw-hash"));
+
+    fixture.input["raw_hex"] = serde_json::json!(hex_encode(b"tampered"));
+    let hash_error = parse_regression_fixture_entries(vec![(
+        file_name.clone(),
+        serialize_regression_fixture(&fixture)?,
+    )])
+    .expect_err("raw fixture bytes must match the recorded input hash");
+    assert!(hash_error.contains("raw input hash"));
+
+    fixture.input["raw_hex"] = serde_json::json!(hex_encode(b"raw-hash"));
+    fixture.input["raw"] = serde_json::json!("tampered raw preview");
+    let preview_error = parse_regression_fixture_entries(vec![(
+        file_name,
+        serialize_regression_fixture(&fixture)?,
+    )])
+    .expect_err("raw fixture preview must match raw_hex bytes");
+    assert!(preview_error.contains("preview does not match raw_hex"));
     Ok(())
 }
 
