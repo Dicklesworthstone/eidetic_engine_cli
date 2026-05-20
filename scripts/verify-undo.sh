@@ -39,7 +39,9 @@ fi
 mkdir -p "$FIXTURE_ROOT"
 PASS=0
 FAIL=0
+SKIP=0
 FAILED_FMS=""
+SKIPPED_FMS=""
 
 shopt -s nullglob
 for fm_dir in "$FIXTURES_SRC"/fm-*; do
@@ -47,9 +49,14 @@ for fm_dir in "$FIXTURES_SRC"/fm-*; do
     target="$FIXTURE_ROOT/$fm_id"
     mkdir -p "$target"
 
-    # Build corrupted state.
+    # Build corrupted state. Round-6 self-review: previously a corrupt.sh
+    # failure silently `continue`d, so `passed=24 failed=0` would look like
+    # a successful run despite a missing fixture. Count it as SKIP and
+    # refuse to exit clean if any fixture was skipped.
     if ! EE_DOCTOR_FIXTURE_TARGET="$target" "$fm_dir/corrupt.sh" >/dev/null 2>&1; then
-        echo "verify-undo[$fm_id]: corrupt.sh failed; skipping" >&2
+        SKIP=$((SKIP + 1))
+        SKIPPED_FMS="$SKIPPED_FMS $fm_id"
+        echo "verify-undo[$fm_id]: corrupt.sh failed; counted as SKIP" >&2
         continue
     fi
 
@@ -69,9 +76,13 @@ for fm_dir in "$FIXTURES_SRC"/fm-*; do
 done
 shopt -u nullglob
 
-echo "verify-undo: passed=$PASS failed=$FAIL fixture_root=$FIXTURE_ROOT" >&2
+echo "verify-undo: passed=$PASS failed=$FAIL skipped=$SKIP fixture_root=$FIXTURE_ROOT" >&2
 if [ "$FAIL" -gt 0 ]; then
     echo "verify-undo: failed FMs:$FAILED_FMS" >&2
+    exit 1
+fi
+if [ "$SKIP" -gt 0 ]; then
+    echo "verify-undo: skipped FMs:$SKIPPED_FMS (corrupt.sh broken — refusing to declare success)" >&2
     exit 1
 fi
 exit 0

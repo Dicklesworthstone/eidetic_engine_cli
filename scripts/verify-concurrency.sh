@@ -36,7 +36,11 @@ mkdir -p "$target/.ee"
 printf 'verify-concurrency-fake-holder\n%d\n' "$$" > "$target/.ee/.doctor.lock"
 
 # Run --fix; expect a refusal (the chokepoint can't acquire the lock).
-"$EE_BIN" doctor --workspace "$target" --fix --json > "$target/.run.json" 2>&1
+# Round-6 self-review: trail with `|| true` so a future correct exit-code
+# translation (ConcurrencyLost → exit 5) doesn't trip `set -e` before we
+# can inspect the JSON envelope. The JSON contract is the authoritative
+# signal; the exit code is just an additional observation.
+"$EE_BIN" doctor --workspace "$target" --fix --json > "$target/.run.json" 2>&1 || true
 rc=$?
 echo "verify-concurrency: rc=$rc" >&2
 
