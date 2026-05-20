@@ -6188,6 +6188,29 @@ pub struct DoctorArgs {
         ],
     )]
     pub diff: Vec<String>,
+
+    /// Apply auto-fixers for detected P0/P1 failure modes, routing every
+    /// mutation through the `src/core/doctor_runtime::mutate` chokepoint.
+    /// Opens a `<workspace>/.doctor/runs/<run-id>/` directory under the
+    /// `RunContext` lock, runs the fixer dispatch table (per-FM fixers
+    /// land via `bd-tu4s8`), and finishes the run with a `RunSummary`
+    /// emitted as `ee.doctor.fix_summary.v1`. Until the fixer dispatch
+    /// table is fully populated by `bd-tu4s8`, the surface is a no-op
+    /// chokepoint scaffold: it acquires the run lock, allocates the
+    /// run dir, finishes with `RunStatus::CompletedOk` and zero
+    /// actions, and emits the run summary so the caller can verify
+    /// runtime reachability + lock semantics from the CLI without any
+    /// file mutations. Pair with `--undo <RUN_ID>` to release the
+    /// run-dir / lock cycle.
+    #[arg(
+        long = "fix",
+        action = ArgAction::SetTrue,
+        conflicts_with_all = [
+            "fix_plan", "franken_health", "capabilities", "robot_docs", "undo",
+            "quick", "only", "since", "list_runs", "gc_plan", "robot_triage", "diff",
+        ],
+    )]
+    pub fix: bool,
 }
 
 /// Arguments for `ee init`.
@@ -9127,6 +9150,13 @@ where
                     stdout,
                     &(doctor_run_diff_json(&workspace, baseline, comparison) + "\n"),
                 );
+                return ProcessExitCode::Success;
+            }
+            if args.fix {
+                let workspace = cli.workspace.clone().unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                });
+                write_stdout(stdout, &(doctor_fix_json(&workspace) + "\n"));
                 return ProcessExitCode::Success;
             }
             if let Some(run_id) = args.undo.as_deref() {
@@ -14358,6 +14388,67 @@ fn doctor_run_diff_json(workspace: &Path, baseline_id: &str, comparison_id: &str
         "configMutation": "never",
     })
     .to_string()
+}
+
+/// Wire the agent-facing `ee doctor --fix` surface onto the runtime
+/// chokepoint. Per bd-3boan pass-2 + AGENTS.md RULE 1, this surface
+/// MUST route every file mutation through
+/// `src/core/doctor_runtime::mutate`. Until the per-FM fixer dispatch
+/// table lands via bd-tu4s8, this scaffold:
+///
+/// * acquires the doctor run lock via `RunContext::start`,
+/// * allocates the `<workspace>/.doctor/runs/<run-id>/` directory,
+/// * finishes the run with `RunStatus::CompletedOk` and zero actions,
+/// * emits the resulting `RunSummary` as `ee.doctor.fix_summary.v1`
+///   with `actionCount=0`, `fixerDispatchPending=true`, and the
+///   `repair` hint pointing at bd-tu4s8.
+///
+/// The chokepoint reachability is the contract this slice closes; the
+/// actual per-FM repairs come from bd-tu4s8's fixer dispatch.
+fn doctor_fix_json(workspace: &Path) -> String {
+    use crate::core::doctor_runtime::{RunContext, RunStatus, default_blast_radius_roots};
+    let blast_radius = default_blast_radius_roots(workspace);
+    let target_sha = format!("scaffold-{}", chrono::Utc::now().timestamp());
+    match RunContext::start(workspace, target_sha.as_str(), blast_radius, false) {
+        Ok(ctx) => match ctx.finish(RunStatus::CompletedOk) {
+            Ok(summary) => {
+                let status_str = serde_json::to_value(&summary.status)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "unknown".to_owned());
+                serde_json::json!({
+                    "schema": "ee.doctor.fix_summary.v1",
+                    "doctor_version": env!("CARGO_PKG_VERSION"),
+                    "workspace": workspace.display().to_string(),
+                    "runId": summary.run_id,
+                    "runDir": summary.run_dir.display().to_string(),
+                    "actionCount": summary.action_count,
+                    "status": status_str,
+                    "fixerDispatchPending": true,
+                    "repair": "Per-FM fixer dispatch lands via bd-tu4s8; this surface currently only exercises the RunContext lock + run-dir + finish path. Pair with `ee doctor --undo <runId>` to release the run state.",
+                    "sideEffectFree": false,
+                    "configMutation": "never",
+                })
+                .to_string()
+            }
+            Err(error) => serde_json::json!({
+                "schema": "ee.doctor.fix_summary.v1",
+                "error": error.to_string(),
+                "phase": "finish",
+                "repair": "Inspect <workspace>/.ee/.doctor.lock and <workspace>/.doctor/runs/ for partial state.",
+                "fixerDispatchPending": true,
+            })
+            .to_string(),
+        },
+        Err(error) => serde_json::json!({
+            "schema": "ee.doctor.fix_summary.v1",
+            "error": error.to_string(),
+            "phase": "start",
+            "repair": "Concurrency lock at <workspace>/.ee/.doctor.lock blocks a fresh run; release the prior holder or wait for it to finish.",
+            "fixerDispatchPending": true,
+        })
+        .to_string(),
+    }
 }
 
 fn clap_error_message(error: &clap::Error) -> String {
