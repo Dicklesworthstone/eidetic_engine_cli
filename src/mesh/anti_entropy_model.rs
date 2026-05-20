@@ -25,7 +25,15 @@ pub const ANTI_ENTROPY_MODEL_SCENARIOS: &[&str] = &[
     "withdrawal_propagates_as_provenance_tombstone",
     "validity_expiry_filters_without_peer_cache_purge",
     "tombstone_hides_from_search_without_body_purge",
+    "withdrawal_wins_over_tombstone_and_validity_expiry",
 ];
+
+pub const WITHDRAWAL_VISIBILITY_REASON: &str =
+    "withdrawal_preserves_metadata_tombstone_and_requests_peer_cache_purge";
+pub const TOMBSTONE_VISIBILITY_REASON: &str =
+    "tombstone_preserves_provenance_without_peer_cache_purge";
+pub const VALIDITY_EXPIRY_VISIBILITY_REASON: &str =
+    "validity_expiry_filters_reads_without_peer_cache_purge";
 
 /// Stream position for one origin node.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -397,9 +405,7 @@ impl ModelNode {
                         context_visible: false,
                         why_provenance_visible: true,
                         body_cache_purge_required: true,
-                        residual_metadata_reason: Some(
-                            "withdrawal_preserves_metadata_tombstone_and_requests_peer_cache_purge",
-                        ),
+                        residual_metadata_reason: Some(WITHDRAWAL_VISIBILITY_REASON),
                     };
                 }
                 if !tombstoned.is_empty() {
@@ -412,9 +418,7 @@ impl ModelNode {
                         context_visible: false,
                         why_provenance_visible: true,
                         body_cache_purge_required: false,
-                        residual_metadata_reason: Some(
-                            "tombstone_preserves_provenance_without_peer_cache_purge",
-                        ),
+                        residual_metadata_reason: Some(TOMBSTONE_VISIBILITY_REASON),
                     };
                 }
                 if !expired.is_empty() {
@@ -427,9 +431,7 @@ impl ModelNode {
                         context_visible: false,
                         why_provenance_visible: true,
                         body_cache_purge_required: false,
-                        residual_metadata_reason: Some(
-                            "validity_expiry_filters_reads_without_peer_cache_purge",
-                        ),
+                        residual_metadata_reason: Some(VALIDITY_EXPIRY_VISIBILITY_REASON),
                     };
                 }
 
@@ -534,7 +536,8 @@ impl ModelNode {
 mod tests {
     use super::{
         ANTI_ENTROPY_MODEL_SCENARIOS, EventRange, LogicalVisibilityStatus, ModelEvent,
-        ModelEventKind, ModelNode, ReplayOutcome,
+        ModelEventKind, ModelNode, ReplayOutcome, TOMBSTONE_VISIBILITY_REASON,
+        VALIDITY_EXPIRY_VISIBILITY_REASON, WITHDRAWAL_VISIBILITY_REASON,
     };
 
     fn event(
@@ -754,7 +757,7 @@ mod tests {
         assert!(decision.body_cache_purge_required);
         assert_eq!(
             decision.residual_metadata_reason,
-            Some("withdrawal_preserves_metadata_tombstone_and_requests_peer_cache_purge")
+            Some(WITHDRAWAL_VISIBILITY_REASON)
         );
     }
 
@@ -788,7 +791,7 @@ mod tests {
         assert!(!expired[0].body_cache_purge_required);
         assert_eq!(
             expired[0].residual_metadata_reason,
-            Some("validity_expiry_filters_reads_without_peer_cache_purge")
+            Some(VALIDITY_EXPIRY_VISIBILITY_REASON)
         );
     }
 
@@ -817,7 +820,59 @@ mod tests {
         assert!(!visibility[0].body_cache_purge_required);
         assert_eq!(
             visibility[0].residual_metadata_reason,
-            Some("tombstone_preserves_provenance_without_peer_cache_purge")
+            Some(TOMBSTONE_VISIBILITY_REASON)
+        );
+    }
+
+    #[test]
+    fn withdrawal_wins_over_tombstone_and_validity_expiry() {
+        let scenario = "withdrawal_wins_over_tombstone_and_validity_expiry";
+        assert!(ANTI_ENTROPY_MODEL_SCENARIOS.contains(&scenario));
+
+        let create = event("node_a", 1, "mem_lifecycle", None, "hash_create");
+        let expired_validity = event_kind(
+            "node_a",
+            2,
+            "mem_lifecycle",
+            Some(create.event_id.as_str()),
+            "hash_validity",
+            ModelEventKind::Validity,
+        )
+        .with_valid_until_epoch_ms(5_000);
+        let tombstone = event_kind(
+            "node_a",
+            3,
+            "mem_lifecycle",
+            Some(expired_validity.event_id.as_str()),
+            "hash_tombstone",
+            ModelEventKind::Tombstone,
+        );
+        let withdraw = event_kind(
+            "node_a",
+            4,
+            "mem_lifecycle",
+            Some(tombstone.event_id.as_str()),
+            "hash_withdraw",
+            ModelEventKind::ShareWithdraw,
+        );
+        let node = ModelNode::replay_deterministically([
+            tombstone,
+            withdraw.clone(),
+            create,
+            expired_validity,
+        ]);
+
+        let visibility = node.logical_visibility_at(10_000);
+        assert_eq!(visibility.len(), 1);
+        assert_eq!(visibility[0].status, LogicalVisibilityStatus::Withdrawn);
+        assert_eq!(visibility[0].provenance_event_ids, vec![withdraw.event_id]);
+        assert!(!visibility[0].search_visible);
+        assert!(!visibility[0].context_visible);
+        assert!(visibility[0].why_provenance_visible);
+        assert!(visibility[0].body_cache_purge_required);
+        assert_eq!(
+            visibility[0].residual_metadata_reason,
+            Some(WITHDRAWAL_VISIBILITY_REASON)
         );
     }
 }

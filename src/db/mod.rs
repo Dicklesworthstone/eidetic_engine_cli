@@ -4685,6 +4685,83 @@ CREATE INDEX idx_memories_workspace_content_simhash
     "blake3:v056_memory_content_simhash_2026_05_19",
 );
 
+/// V057: Allow mesh share-withdrawal events in the import replay ledger.
+pub const V057_MESH_IMPORT_LEDGER_SHARE_WITHDRAW: Migration = Migration::new(
+    57,
+    "mesh_import_ledger_share_withdraw",
+    r#"
+DROP INDEX IF EXISTS idx_mesh_import_ledger_origin_tip;
+DROP INDEX IF EXISTS idx_mesh_import_ledger_content_hash;
+DROP INDEX IF EXISTS idx_mesh_import_ledger_local_memory;
+DROP INDEX IF EXISTS idx_mesh_import_ledger_import_decision;
+
+ALTER TABLE mesh_import_ledger RENAME TO mesh_import_ledger_v056;
+
+CREATE TABLE mesh_import_ledger (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    event_id TEXT NOT NULL CHECK (event_id GLOB 'mesh_evt_*' AND length(trim(event_id)) > 9),
+    origin_node_id TEXT NOT NULL CHECK (origin_node_id GLOB 'node_*' AND length(trim(origin_node_id)) > 6),
+    origin_workspace_id TEXT NOT NULL CHECK (origin_workspace_id GLOB 'wsp_*' AND length(trim(origin_workspace_id)) > 6),
+    producer_peer_id TEXT CHECK (producer_peer_id IS NULL OR (producer_peer_id GLOB 'peer_*' AND length(trim(producer_peer_id)) > 6)),
+    seq INTEGER NOT NULL CHECK (seq > 0),
+    prev_event_hash TEXT CHECK (prev_event_hash IS NULL OR prev_event_hash GLOB 'blake3:*'),
+    event_hash TEXT NOT NULL CHECK (event_hash GLOB 'blake3:*'),
+    event_kind TEXT NOT NULL CHECK (
+        event_kind IN ('create', 'revise', 'tombstone', 'shareWithdraw', 'trust', 'validity', 'bodyAvailable')
+    ),
+    logical_memory_id TEXT NOT NULL CHECK (logical_memory_id GLOB 'mem_*' AND length(trim(logical_memory_id)) > 6),
+    content_hash TEXT NOT NULL CHECK (content_hash GLOB 'blake3:*'),
+    material_lane TEXT NOT NULL CHECK (
+        material_lane IN ('metadata', 'body', 'embedding', 'graphLink', 'revisionNotice', 'curationSignal')
+    ),
+    redaction_class TEXT NOT NULL CHECK (
+        redaction_class IN ('metadataOnly', 'preview', 'body', 'embedding', 'secretDenied')
+    ),
+    trust_lane TEXT NOT NULL CHECK (
+        trust_lane IN ('localHuman', 'peerHumanViaPeer', 'peerAgent', 'peerDerived', 'untrusted')
+    ),
+    import_decision TEXT NOT NULL CHECK (import_decision IN ('allow', 'quarantine', 'deny', 'reject')),
+    local_memory_id TEXT REFERENCES memories(id) ON DELETE SET NULL,
+    body_cache_key TEXT CHECK (body_cache_key IS NULL OR length(trim(body_cache_key)) > 0),
+    policy_failure_surface_json TEXT CHECK (policy_failure_surface_json IS NULL OR json_valid(policy_failure_surface_json)),
+    policy_decision_json TEXT CHECK (policy_decision_json IS NULL OR json_valid(policy_decision_json)),
+    event_json TEXT NOT NULL CHECK (json_valid(event_json)),
+    imported_at TEXT NOT NULL CHECK (length(trim(imported_at)) > 0),
+    PRIMARY KEY (workspace_id, origin_node_id, origin_workspace_id, seq),
+    UNIQUE (workspace_id, event_hash),
+    UNIQUE (workspace_id, event_id)
+);
+
+INSERT INTO mesh_import_ledger (
+    workspace_id, event_id, origin_node_id, origin_workspace_id,
+    producer_peer_id, seq, prev_event_hash, event_hash, event_kind,
+    logical_memory_id, content_hash, material_lane, redaction_class,
+    trust_lane, import_decision, local_memory_id, body_cache_key,
+    policy_failure_surface_json, policy_decision_json, event_json, imported_at
+)
+SELECT
+    workspace_id, event_id, origin_node_id, origin_workspace_id,
+    producer_peer_id, seq, prev_event_hash, event_hash, event_kind,
+    logical_memory_id, content_hash, material_lane, redaction_class,
+    trust_lane, import_decision, local_memory_id, body_cache_key,
+    policy_failure_surface_json, policy_decision_json, event_json, imported_at
+FROM mesh_import_ledger_v056;
+
+DROP TABLE mesh_import_ledger_v056;
+
+CREATE INDEX idx_mesh_import_ledger_origin_tip
+    ON mesh_import_ledger(workspace_id, origin_node_id, origin_workspace_id, seq);
+CREATE INDEX idx_mesh_import_ledger_content_hash
+    ON mesh_import_ledger(workspace_id, content_hash);
+CREATE INDEX idx_mesh_import_ledger_local_memory
+    ON mesh_import_ledger(local_memory_id)
+    WHERE local_memory_id IS NOT NULL;
+CREATE INDEX idx_mesh_import_ledger_import_decision
+    ON mesh_import_ledger(workspace_id, import_decision, imported_at);
+"#,
+    "blake3:v057_mesh_import_ledger_share_withdraw_2026_05_20",
+);
+
 /// V042: Allow every pack omission reason emitted by the packer.
 pub const V042_PACK_OMISSION_REASONS: Migration = Migration::new(
     42,
@@ -4857,6 +4934,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V054_MESH_IMPORT_LEDGER_REJECT_DECISION,
     V055_MESH_IMPORT_LEDGER_POLICY_DECISION,
     V056_MEMORY_CONTENT_SIMHASH,
+    V057_MESH_IMPORT_LEDGER_SHARE_WITHDRAW,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -21040,6 +21118,68 @@ mod tests {
         )?;
         ensure_equal(&rows.len(), &1_usize, "conflict preserves one ledger row")?;
         ensure_equal(&rows[0].seq, &1, "ledger list ordered by seq")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_import_ledger_accepts_share_withdrawal_events_for_replay() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let create = mesh_import_event_input(1, hash('b'), hash('c'));
+        let withdrawal = super::InsertMeshImportLedgerEventInput {
+            seq: 2,
+            event_id: "mesh_evt_0000000000000000000000000000000000000000000000000000000000000002"
+                .to_string(),
+            prev_event_hash: Some(create.event_hash.clone()),
+            event_hash: hash('d'),
+            event_kind: "shareWithdraw".to_string(),
+            content_hash: hash('e'),
+            body_cache_key: Some("mesh-body-withdrawn-001".to_string()),
+            event_json: r#"{"schema":"ee.mesh.event.v1","eventKind":"shareWithdraw"}"#.to_string(),
+            imported_at: Some("2026-05-16T15:23:00Z".to_string()),
+            ..create.clone()
+        };
+
+        let inserted_create = connection.insert_mesh_import_ledger_event(&create)?;
+        let inserted_withdrawal = connection.insert_mesh_import_ledger_event(&withdrawal)?;
+        ensure_equal(
+            &inserted_withdrawal.event_kind.as_str(),
+            &"shareWithdraw",
+            "share-withdraw event kind persists",
+        )?;
+        ensure_equal(
+            &inserted_withdrawal.prev_event_hash,
+            &Some(inserted_create.event_hash.clone()),
+            "share-withdraw replay row links previous event hash",
+        )?;
+
+        let rows = connection.list_mesh_import_ledger_events(
+            "wsp_01234567890123456789012345",
+            "node_alpha_000001",
+            "wsp_remote_000001",
+        )?;
+        ensure_equal(&rows.len(), &2_usize, "create plus withdrawal replay rows")?;
+        ensure_equal(&rows[0].event_kind.as_str(), &"create", "create first")?;
+        ensure_equal(
+            &rows[1].event_kind.as_str(),
+            &"shareWithdraw",
+            "withdrawal follows by seq",
+        )?;
+
+        let workspace_rows = connection
+            .list_mesh_import_ledger_events_for_workspace("wsp_01234567890123456789012345")?;
+        ensure_equal(
+            &workspace_rows
+                .iter()
+                .map(|row| row.event_kind.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["create", "shareWithdraw"],
+            "workspace replay order includes share withdrawal",
+        )?;
 
         connection.close()?;
         Ok(())
