@@ -761,6 +761,111 @@ fn workspace_hygiene_public_surfaces_do_not_leak_secret_file_content() -> TestRe
     assert_no_synthetic_secret("workspace hygiene human", &human_stdout)
 }
 
+#[test]
+fn workspace_hygiene_precommit_advisory_reports_strict_reasons() -> TestResult {
+    let workspace = init_dirty_git_workspace()?;
+    write_synthetic_secret_fixture(&workspace)?;
+
+    let advisory_output = run_ee(
+        &[
+            "--json",
+            "workspace",
+            "hygiene",
+            "--mode",
+            "precommit",
+            "--agent-name",
+            "IvoryCondor",
+        ],
+        &workspace,
+        "workspace hygiene precommit advisory",
+    )?;
+    ensure_success(&advisory_output, "workspace hygiene precommit advisory")?;
+    let advisory_value = parse_json(&advisory_output, "workspace hygiene precommit advisory")?;
+    assert_eq!(
+        advisory_value
+            .pointer("/data/agentHarnessAdvisory/status")
+            .and_then(Value::as_str),
+        Some("would_fail_strict")
+    );
+    assert_eq!(
+        advisory_value
+            .pointer("/data/agentHarnessAdvisory/recommendedExitCode")
+            .and_then(Value::as_u64),
+        Some(0)
+    );
+
+    let strict_output = run_ee(
+        &[
+            "--json",
+            "workspace",
+            "hygiene",
+            "--mode",
+            "precommit",
+            "--strict-advisory",
+            "--agent-name",
+            "IvoryCondor",
+        ],
+        &workspace,
+        "workspace hygiene precommit strict advisory",
+    )?;
+    if strict_output.status.code() != Some(6) {
+        return Err(format!(
+            "strict advisory should exit 6; got {:?}; stdout: {}; stderr: {}",
+            strict_output.status.code(),
+            String::from_utf8_lossy(&strict_output.stdout).trim_end(),
+            String::from_utf8_lossy(&strict_output.stderr).trim_end()
+        ));
+    }
+    let strict_stdout = String::from_utf8(strict_output.stdout)
+        .map_err(|error| format!("workspace hygiene strict stdout UTF-8: {error}"))?;
+    assert_no_synthetic_secret("workspace hygiene strict advisory", &strict_stdout)?;
+    let strict_value: Value = serde_json::from_str(&strict_stdout)
+        .map_err(|error| format!("workspace hygiene strict JSON parse: {error}"))?;
+
+    assert_eq!(
+        strict_value.pointer("/data/schema").and_then(Value::as_str),
+        Some("ee.workspace_hygiene.v1")
+    );
+    assert_eq!(
+        strict_value
+            .pointer("/data/agentHarnessAdvisory/schema")
+            .and_then(Value::as_str),
+        Some("ee.workspace_hygiene.v1")
+    );
+    assert_eq!(
+        strict_value
+            .pointer("/data/agentHarnessAdvisory/strict")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        strict_value
+            .pointer("/data/agentHarnessAdvisory/status")
+            .and_then(Value::as_str),
+        Some("strict_failed")
+    );
+    assert_eq!(
+        strict_value
+            .pointer("/data/agentHarnessAdvisory/recommendedExitCode")
+            .and_then(Value::as_u64),
+        Some(6)
+    );
+    if !strict_value
+        .pointer("/data/agentHarnessAdvisory/reasons")
+        .and_then(Value::as_array)
+        .is_some_and(|reasons| {
+            reasons.iter().any(|reason| {
+                reason.pointer("/code").and_then(Value::as_str) == Some("secret_risk")
+            })
+        })
+    {
+        return Err(format!(
+            "strict advisory missing secret_risk reason; response={strict_value}"
+        ));
+    }
+    Ok(())
+}
+
 fn assert_no_synthetic_secret(surface: &str, rendered: &str) -> TestResult {
     if rendered.contains(SYNTHETIC_RAW_SECRET) {
         return Err(format!("{surface} leaked the raw synthetic secret"));

@@ -21,8 +21,9 @@ use crate::config::{
     diagnose_workspace_resolution, read_env_var, resolve_workspace,
 };
 use crate::core::hygiene_beads_state::{
-    BEADS_JSONL_MAX_INSPECT_BYTES, BEADS_JSONL_RELATIVE_PATH, BeadsHygieneInputs,
-    BeadsHygieneState, BeadsMetadataSignal, BeadsReservationHolder, classify_beads_state,
+    BEADS_JSONL_MAX_INSPECT_BYTES, BEADS_JSONL_RELATIVE_PATH, BeadsClassification,
+    BeadsHygieneInputs, BeadsHygieneState, BeadsMetadataSignal, BeadsReservationHolder,
+    classify_beads_state,
 };
 use crate::core::hygiene_classifier::{
     Bucket, ClassificationRow, HygieneClassifierConfig, Kind, SecretEvidenceLookup,
@@ -60,6 +61,7 @@ pub const WORKSPACE_HYGIENE_MAX_PATHS_PER_LIST: usize = 10_000;
 pub const WORKSPACE_HYGIENE_MAX_PATHS_PER_STAGING_GROUP: usize = 10_000;
 pub const WORKSPACE_HYGIENE_SECRET_SCAN_MAX_FILES: usize = 1_000;
 pub const WORKSPACE_HYGIENE_SECRET_SCAN_MAX_TOTAL_BYTES: usize = 1_000_000;
+pub const WORKSPACE_HYGIENE_AGENT_ADVISORY_TARGET_PRECOMMIT: &str = "precommit";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceListOptions {
@@ -204,6 +206,35 @@ pub struct WorkspaceHygieneReport {
     pub degraded_codes: Vec<&'static str>,
     #[serde(rename = "nextActions")]
     pub next_actions: Vec<String>,
+    #[serde(
+        rename = "agentHarnessAdvisory",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub agent_harness_advisory: Option<WorkspaceHygieneAgentHarnessAdvisory>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceHygieneAgentHarnessAdvisory {
+    pub schema: &'static str,
+    pub payload_schema: &'static str,
+    pub target: &'static str,
+    pub read_only: bool,
+    pub strict: bool,
+    pub status: &'static str,
+    pub recommended_exit_code: u8,
+    pub reason_count: usize,
+    pub reasons: Vec<WorkspaceHygieneAgentHarnessReason>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceHygieneAgentHarnessReason {
+    pub code: &'static str,
+    pub category: &'static str,
+    pub message: String,
+    pub paths: Vec<String>,
+    pub repair: &'static str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -567,7 +598,169 @@ fn build_workspace_hygiene_report_from_inputs(
         coordination,
         degraded_codes,
         next_actions,
+        agent_harness_advisory: None,
     }
+}
+
+pub fn build_workspace_hygiene_agent_harness_report(
+    options: &WorkspaceHygieneOptions,
+    strict: bool,
+) -> Result<WorkspaceHygieneReport, DomainError> {
+    let mut report = build_workspace_hygiene_report(options)?;
+    attach_workspace_hygiene_agent_harness_advisory(&mut report, strict);
+    Ok(report)
+}
+
+pub fn attach_workspace_hygiene_agent_harness_advisory(
+    report: &mut WorkspaceHygieneReport,
+    strict: bool,
+) {
+    report.agent_harness_advisory = Some(workspace_hygiene_agent_harness_advisory(report, strict));
+}
+
+#[must_use]
+pub fn workspace_hygiene_agent_harness_advisory(
+    report: &WorkspaceHygieneReport,
+    strict: bool,
+) -> WorkspaceHygieneAgentHarnessAdvisory {
+    let reasons = workspace_hygiene_agent_harness_reasons(report);
+    let recommended_exit_code = if strict && !reasons.is_empty() { 6 } else { 0 };
+    let status = match (strict, reasons.is_empty()) {
+        (_, true) => "ok",
+        (false, false) => "would_fail_strict",
+        (true, false) => "strict_failed",
+    };
+    WorkspaceHygieneAgentHarnessAdvisory {
+        schema: WORKSPACE_HYGIENE_SCHEMA_V1,
+        payload_schema: WORKSPACE_HYGIENE_SCHEMA_V1,
+        target: WORKSPACE_HYGIENE_AGENT_ADVISORY_TARGET_PRECOMMIT,
+        read_only: true,
+        strict,
+        status,
+        recommended_exit_code,
+        reason_count: reasons.len(),
+        reasons,
+    }
+}
+
+fn workspace_hygiene_agent_harness_reasons(
+    report: &WorkspaceHygieneReport,
+) -> Vec<WorkspaceHygieneAgentHarnessReason> {
+    let mut reasons = Vec::new();
+
+    let secret_paths = workspace_hygiene_paths_for_kind(report, Kind::SecretRisk);
+    if !secret_paths.is_empty() {
+        reasons.push(WorkspaceHygieneAgentHarnessReason {
+            code: "secret_risk",
+            category: "secret-risk",
+            message: "Workspace hygiene found dirty paths with secret-risk evidence.".to_string(),
+            paths: secret_paths,
+            repair: "Remove secrets, rotate exposed credentials if needed, and rerun `ee workspace hygiene --json`.",
+        });
+    }
+
+    if workspace_hygiene_is_scratch_only(report) {
+        reasons.push(WorkspaceHygieneAgentHarnessReason {
+            code: "scratch_only_commit",
+            category: "scratch-only commit",
+            message: "The dirty set contains only scratch artifacts and has no commit-ready staging group.".to_string(),
+            paths: report.do_not_commit.clone(),
+            repair: "Leave scratch artifacts unstaged or get explicit human approval before committing them.",
+        });
+    }
+
+    let active_reservation_paths = workspace_hygiene_active_reservation_paths(report);
+    if !active_reservation_paths.is_empty() {
+        reasons.push(WorkspaceHygieneAgentHarnessReason {
+            code: "active_reservation",
+            category: "active reservation",
+            message: "One or more dirty paths are covered by an active exclusive reservation held by another agent.".to_string(),
+            paths: active_reservation_paths,
+            repair: "Coordinate through Agent Mail, wait for the reservation to expire, or choose a disjoint commit slice.",
+        });
+    }
+
+    if workspace_hygiene_has_beads_conflict(report) {
+        reasons.push(WorkspaceHygieneAgentHarnessReason {
+            code: "beads_conflict",
+            category: "Beads conflict",
+            message: format!(
+                "Beads metadata is not commit-ready: {}.",
+                report.beads_state.classification.as_str()
+            ),
+            paths: vec![BEADS_JSONL_RELATIVE_PATH.to_string()],
+            repair: "Run `br sync --flush-only` or resolve the Beads import/export conflict before committing metadata.",
+        });
+    }
+
+    if let Some(line) = report.beads_state.parse_error_line {
+        reasons.push(WorkspaceHygieneAgentHarnessReason {
+            code: "parse_error",
+            category: "parse error",
+            message: format!(
+                "Workspace hygiene could not parse Beads JSONL metadata near line {line}."
+            ),
+            paths: vec![BEADS_JSONL_RELATIVE_PATH.to_string()],
+            repair: "Inspect `.beads/issues.jsonl` for malformed JSONL or conflict markers before committing.",
+        });
+    }
+
+    let binary_paths = workspace_hygiene_paths_for_kind(report, Kind::Binary);
+    if !binary_paths.is_empty() {
+        reasons.push(WorkspaceHygieneAgentHarnessReason {
+            code: "unknown_high_risk_binary",
+            category: "unknown high-risk binary",
+            message: "Workspace hygiene found dirty binary or oversized paths that need human review.".to_string(),
+            paths: binary_paths,
+            repair: "Inspect the binary artifacts manually and keep them out of the commit unless they are intentional.",
+        });
+    }
+
+    reasons
+}
+
+fn workspace_hygiene_paths_for_kind(report: &WorkspaceHygieneReport, kind: Kind) -> Vec<String> {
+    report
+        .classifications
+        .iter()
+        .filter(|row| row.kind == kind)
+        .map(|row| row.path.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn workspace_hygiene_is_scratch_only(report: &WorkspaceHygieneReport) -> bool {
+    report.dirty_path_count > 0
+        && report.classifications.len() == report.dirty_path_count
+        && !report.classifications.is_empty()
+        && report
+            .classifications
+            .iter()
+            .all(|row| row.kind == Kind::Scratch)
+        && report.staging_groups.is_empty()
+}
+
+fn workspace_hygiene_active_reservation_paths(report: &WorkspaceHygieneReport) -> Vec<String> {
+    let mut paths = report
+        .coordination
+        .blocked_by_coordination
+        .iter()
+        .map(|blocked| blocked.path.clone())
+        .collect::<BTreeSet<_>>();
+    if report.beads_state.classification == BeadsClassification::BeadsReservedByOtherAgent {
+        paths.insert(BEADS_JSONL_RELATIVE_PATH.to_string());
+    }
+    paths.into_iter().collect()
+}
+
+fn workspace_hygiene_has_beads_conflict(report: &WorkspaceHygieneReport) -> bool {
+    matches!(
+        report.beads_state.classification,
+        BeadsClassification::BeadsConflictOrParseError
+            | BeadsClassification::BeadsDbDirtyPendingFlush
+            | BeadsClassification::BeadsExternalChangesPendingImport
+    )
 }
 
 fn load_agent_mail_coordination_input(path: Option<&Path>) -> AgentMailCoordinationInput {
@@ -1887,11 +2080,27 @@ mod tests {
         beads_metadata_signal: BeadsMetadataSignal,
         beads_reservations: &[BeadsReservationHolder],
     ) -> WorkspaceHygieneReport {
+        hygiene_report_from_parts_with_jsonl(
+            snapshot,
+            agent_mail_input,
+            beads_metadata_signal,
+            beads_reservations,
+            Some(b"{\"id\":\"bd-test\",\"title\":\"test\"}\n"),
+        )
+    }
+
+    fn hygiene_report_from_parts_with_jsonl(
+        snapshot: WorkspaceGitSnapshot,
+        agent_mail_input: &AgentMailCoordinationInput,
+        beads_metadata_signal: BeadsMetadataSignal,
+        beads_reservations: &[BeadsReservationHolder],
+        jsonl_content: Option<&[u8]>,
+    ) -> WorkspaceHygieneReport {
         build_workspace_hygiene_report_from_inputs(WorkspaceHygieneReportInputs {
             workspace_path: Path::new("/repo"),
             snapshot,
             classifier_config: &HygieneClassifierConfig::default(),
-            jsonl_content: Some(b"{\"id\":\"bd-test\",\"title\":\"test\"}\n"),
+            jsonl_content,
             self_agent_name: Some("IvoryCondor"),
             beads_metadata_signal,
             beads_reservations,
@@ -3277,6 +3486,164 @@ mod tests {
         assert!(
             !pretty.contains("\"truncated\": true"),
             "clean fixture must not flip any truncated=true flag: {pretty}"
+        );
+    }
+
+    #[test]
+    fn hygiene_agent_harness_advisory_is_success_by_default() {
+        let mut large_binary = status_entry("artifacts/result.bin", ".", "M");
+        large_binary.metadata = Some(WorkspaceGitPathMetadata {
+            exists: true,
+            file_type: "file".to_owned(),
+            size_bytes: Some(2_000_000),
+            large_file: true,
+            skip_reason: Some("binary".to_owned()),
+        });
+        let report = hygiene_report_from_parts(
+            hygiene_snapshot(vec![untracked_status_entry(".env"), large_binary]),
+            &AgentMailCoordinationInput::Unavailable,
+            BeadsMetadataSignal::Unknown,
+            &[],
+        );
+
+        let advisory = workspace_hygiene_agent_harness_advisory(&report, false);
+
+        assert_eq!(advisory.schema, WORKSPACE_HYGIENE_SCHEMA_V1);
+        assert_eq!(advisory.payload_schema, WORKSPACE_HYGIENE_SCHEMA_V1);
+        assert_eq!(
+            advisory.target,
+            WORKSPACE_HYGIENE_AGENT_ADVISORY_TARGET_PRECOMMIT
+        );
+        assert!(advisory.read_only);
+        assert!(!advisory.strict);
+        assert_eq!(advisory.status, "would_fail_strict");
+        assert_eq!(advisory.recommended_exit_code, 0);
+        let codes = advisory
+            .reasons
+            .iter()
+            .map(|reason| reason.code)
+            .collect::<Vec<_>>();
+        assert_eq!(codes, vec!["secret_risk", "unknown_high_risk_binary"]);
+    }
+
+    #[test]
+    fn hygiene_agent_harness_strict_mode_reports_failure_reasons() {
+        let agent_mail = AgentMailCoordinationInput::Available {
+            reservations: vec![AgentMailReservation {
+                path_pattern: "src/core/workspace.rs".to_owned(),
+                holder_agent: "OtherAgent".to_owned(),
+                exclusive: true,
+                expires_at: Some("2026-05-18T09:00:00Z".to_owned()),
+                reservation_id: Some("reservation-1".to_owned()),
+                bead_id: Some("bd-1eq3l.12".to_owned()),
+                thread_id: Some("bd-1eq3l.12".to_owned()),
+            }],
+            active_agents: Vec::new(),
+        };
+        let report = hygiene_report_from_parts_with_jsonl(
+            hygiene_snapshot(vec![
+                status_entry("src/core/workspace.rs", ".", "M"),
+                status_entry(BEADS_JSONL_RELATIVE_PATH, ".", "M"),
+            ]),
+            &agent_mail,
+            BeadsMetadataSignal::DbDirtyPendingFlush,
+            &[],
+            Some(b"{\"id\":\"bd-test\"}\nnot-json\n"),
+        );
+
+        let advisory = workspace_hygiene_agent_harness_advisory(&report, true);
+
+        assert!(advisory.strict);
+        assert_eq!(advisory.status, "strict_failed");
+        assert_eq!(advisory.recommended_exit_code, 6);
+        let codes = advisory
+            .reasons
+            .iter()
+            .map(|reason| reason.code)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            codes,
+            vec!["active_reservation", "beads_conflict", "parse_error"]
+        );
+        assert!(
+            advisory
+                .reasons
+                .iter()
+                .all(|reason| !reason.paths.is_empty()),
+            "strict failure reasons must be machine-actionable: {advisory:#?}"
+        );
+    }
+
+    #[test]
+    fn hygiene_agent_harness_detects_scratch_only_commit() {
+        let report = hygiene_report_from_parts(
+            hygiene_snapshot(vec![
+                status_entry("drift-report.txt", ".", "M"),
+                status_entry("line-length-probe-output.txt", ".", "M"),
+            ]),
+            &AgentMailCoordinationInput::Available {
+                reservations: Vec::new(),
+                active_agents: Vec::new(),
+            },
+            BeadsMetadataSignal::Unknown,
+            &[],
+        );
+
+        let advisory = workspace_hygiene_agent_harness_advisory(&report, true);
+
+        assert_eq!(advisory.recommended_exit_code, 6);
+        assert_eq!(advisory.reason_count, 1);
+        assert_eq!(advisory.reasons[0].code, "scratch_only_commit");
+        assert_eq!(
+            advisory.reasons[0].paths,
+            vec![
+                "drift-report.txt".to_owned(),
+                "line-length-probe-output.txt".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn hygiene_report_can_embed_agent_harness_advisory_without_mutation() {
+        let mut report = hygiene_report_from_parts(
+            hygiene_snapshot(vec![status_entry("src/core/workspace.rs", ".", "M")]),
+            &AgentMailCoordinationInput::Available {
+                reservations: Vec::new(),
+                active_agents: Vec::new(),
+            },
+            BeadsMetadataSignal::Unknown,
+            &[],
+        );
+
+        attach_workspace_hygiene_agent_harness_advisory(&mut report, true);
+        let envelope = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "success": true,
+            "data": report,
+        });
+
+        assert_eq!(
+            envelope.pointer("/data/schema").and_then(Value::as_str),
+            Some(WORKSPACE_HYGIENE_SCHEMA_V1),
+            "adapter keeps the same core workspace hygiene schema"
+        );
+        assert_eq!(
+            envelope
+                .pointer("/data/agentHarnessAdvisory/schema")
+                .and_then(Value::as_str),
+            Some(WORKSPACE_HYGIENE_SCHEMA_V1)
+        );
+        assert_eq!(
+            envelope
+                .pointer("/data/agentHarnessAdvisory/recommendedExitCode")
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            envelope
+                .pointer("/data/agentHarnessAdvisory/reasonCount")
+                .and_then(Value::as_u64),
+            Some(0)
         );
     }
 }

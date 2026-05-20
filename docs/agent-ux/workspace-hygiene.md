@@ -12,6 +12,8 @@ Initial CLI usage:
 ee workspace hygiene --workspace . --json
 ee workspace hygiene --workspace . --agent-name IvoryCondor --json
 ee workspace hygiene --workspace . --agent-name IvoryCondor --agent-mail-snapshot agent-mail.json --json
+ee workspace hygiene --workspace . --mode precommit --json
+ee workspace hygiene --workspace . --mode precommit --strict-advisory --json
 ```
 
 The machine report uses schema `ee.workspace_hygiene.v1` and sets
@@ -26,6 +28,31 @@ Key agent-facing fields are `workspace`, `gitSummary`, `pathClassifications`,
 The diagnostic exists to help agents decide what is safe to include in a commit
 slice. It does not replace human review, Beads ownership, or Agent Mail file
 reservations.
+
+## Agent Harness Advisory
+
+Agent harnesses that need a pre-commit hint can request the optional precommit
+adapter with `--mode precommit --json`. The response keeps the same
+`ee.workspace_hygiene.v1` payload and adds `agentHarnessAdvisory`, a read-only
+summary derived from the same classifier, Beads, Agent Mail, and secret-scan
+report. The adapter does not stage, unstage, delete, stash, reset, checkout, or
+commit anything.
+
+Default precommit mode is advisory only and exits 0 even when
+`agentHarnessAdvisory.reasons[]` is non-empty. Harnesses that explicitly want a
+failing advisory can add `--strict-advisory`; in that mode the command returns
+exit code 6 when a strict failure reason is present.
+
+Strict failure reasons are stable machine-readable codes:
+
+| Code | Meaning |
+| --- | --- |
+| `secret_risk` | Dirty paths include redacted secret-risk evidence. |
+| `scratch_only_commit` | The dirty set is only scratch artifacts with no commit-ready staging group. |
+| `active_reservation` | A dirty path is covered by another agent's active exclusive reservation. |
+| `beads_conflict` | Beads metadata is not commit-ready because of export/import freshness or conflict state. |
+| `parse_error` | Workspace hygiene could not parse metadata needed for a safe advisory. |
+| `unknown_high_risk_binary` | Dirty binary or oversized paths require human review. |
 
 ## Buckets
 

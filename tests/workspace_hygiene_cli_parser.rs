@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use clap::error::ErrorKind;
-use ee::cli::{Cli, Command, WorkspaceCommand, WorkspaceHygieneArgs};
+use ee::cli::{Cli, Command, WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode};
 
 type TestResult = Result<(), String>;
 
@@ -70,6 +70,8 @@ fn workspace_hygiene_accepts_agent_name_and_snapshot_together() -> TestResult {
         WorkspaceHygieneArgs {
             agent_name: Some("GrayForest".to_string()),
             agent_mail_snapshot: Some(PathBuf::from("tmp/agent-mail.json")),
+            mode: WorkspaceHygieneMode::Report,
+            strict_advisory: false,
         },
     )
 }
@@ -113,8 +115,47 @@ fn workspace_hygiene_combines_with_top_level_workspace_and_json() -> TestResult 
         WorkspaceHygieneArgs {
             agent_name: Some("GrayForest".to_string()),
             agent_mail_snapshot: None,
+            mode: WorkspaceHygieneMode::Report,
+            strict_advisory: false,
         },
     )
+}
+
+#[test]
+fn workspace_hygiene_accepts_precommit_advisory_mode() -> TestResult {
+    let cli = parse(&[
+        "ee",
+        "--json",
+        "workspace",
+        "hygiene",
+        "--mode",
+        "precommit",
+        "--strict-advisory",
+    ])
+    .map_err(|error| format!("parse failed: {:?}", error.kind()))?;
+    ensure_hygiene_command(
+        &cli,
+        WorkspaceHygieneArgs {
+            agent_name: None,
+            agent_mail_snapshot: None,
+            mode: WorkspaceHygieneMode::Precommit,
+            strict_advisory: true,
+        },
+    )
+}
+
+#[test]
+fn workspace_hygiene_rejects_unknown_advisory_mode() {
+    let err = parse(&["ee", "workspace", "hygiene", "--mode", "destructive"])
+        .expect_err("unknown mode must fail parsing");
+    assert!(
+        matches!(
+            err.kind(),
+            ErrorKind::InvalidValue | ErrorKind::ValueValidation
+        ),
+        "unknown mode should produce a clap value error, got {:?}",
+        err.kind()
+    );
 }
 
 #[test]

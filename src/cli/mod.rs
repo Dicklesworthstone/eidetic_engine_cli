@@ -5961,6 +5961,21 @@ pub struct WorkspaceHygieneArgs {
     /// Redacted Agent Mail snapshot JSON to apply as a read-only coordination overlay.
     #[arg(long = "agent-mail-snapshot", value_name = "PATH")]
     pub agent_mail_snapshot: Option<PathBuf>,
+
+    /// Optional agent-harness adapter mode.
+    #[arg(long, value_enum, default_value_t = WorkspaceHygieneMode::Report)]
+    pub mode: WorkspaceHygieneMode,
+
+    /// Return exit code 6 when precommit advisory reasons are present.
+    #[arg(long = "strict-advisory", action = ArgAction::SetTrue)]
+    pub strict_advisory: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum WorkspaceHygieneMode {
+    #[default]
+    Report,
+    Precommit,
 }
 
 /// Arguments for `ee workspace alias`.
@@ -12942,8 +12957,32 @@ where
                 self_agent_name: args.agent_name.clone(),
                 agent_mail_snapshot_path: args.agent_mail_snapshot.clone(),
             };
-            match workspace_core::build_workspace_hygiene_report(&options) {
-                Ok(report) => render_workspace_hygiene(cli, &report, stdout),
+            let strict_advisory = args.strict_advisory;
+            let include_advisory =
+                strict_advisory || matches!(args.mode, WorkspaceHygieneMode::Precommit);
+            let report = if include_advisory {
+                workspace_core::build_workspace_hygiene_agent_harness_report(
+                    &options,
+                    strict_advisory,
+                )
+            } else {
+                workspace_core::build_workspace_hygiene_report(&options)
+            };
+            match report {
+                Ok(report) => {
+                    let rendered = render_workspace_hygiene(cli, &report, stdout);
+                    if rendered == ProcessExitCode::Success
+                        && strict_advisory
+                        && report
+                            .agent_harness_advisory
+                            .as_ref()
+                            .is_some_and(|advisory| advisory.recommended_exit_code != 0)
+                    {
+                        ProcessExitCode::UnsatisfiedDegradedMode
+                    } else {
+                        rendered
+                    }
+                }
                 Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
             }
         }
@@ -13130,6 +13169,15 @@ where
                 out.push_str("\nDegraded:\n");
                 for code in &report.degraded_codes {
                     out.push_str(&format!("  {code}\n"));
+                }
+            }
+            if let Some(advisory) = report.agent_harness_advisory.as_ref() {
+                out.push_str(&format!(
+                    "\nAgent harness advisory: {} (strict={}, recommendedExitCode={})\n",
+                    advisory.status, advisory.strict, advisory.recommended_exit_code
+                ));
+                for reason in advisory.reasons.iter().take(5) {
+                    out.push_str(&format!("  {}: {}\n", reason.code, reason.message));
                 }
             }
             write_stdout(stdout, &out)
@@ -44944,6 +44992,8 @@ mod tests {
                 WorkspaceHygieneArgs {
                     agent_name: Some("IvoryCondor".to_string()),
                     agent_mail_snapshot: None,
+                    mode: WorkspaceHygieneMode::Report,
+                    strict_advisory: false,
                 },
             ))),
             "workspace hygiene command",
@@ -44974,6 +45024,8 @@ mod tests {
                 WorkspaceHygieneArgs {
                     agent_name: None,
                     agent_mail_snapshot: Some(PathBuf::from("agent-mail.json")),
+                    mode: WorkspaceHygieneMode::Report,
+                    strict_advisory: false,
                 },
             ))),
             "workspace hygiene command",
@@ -45008,6 +45060,8 @@ mod tests {
                 WorkspaceHygieneArgs {
                     agent_name: None,
                     agent_mail_snapshot: None,
+                    mode: WorkspaceHygieneMode::Report,
+                    strict_advisory: false,
                 },
             ))),
             "workspace hygiene human command",
