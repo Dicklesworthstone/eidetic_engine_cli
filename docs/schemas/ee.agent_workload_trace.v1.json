@@ -1,0 +1,243 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.agent_workload_trace.v1.json",
+  "title": "ee.agent_workload_trace.v1",
+  "description": "Redacted, local-only flight-recorder trace row for one agent-facing ee command invocation. Captures SHAPE and POSTURE so a future replay/diet/playback bead can analyse workload patterns without seeing raw task strings, raw query text, raw memory bodies, raw provenance text, raw mail bodies, secrets, environment dumps, or full file listings. The recorder is opt-in via `[obs.flight_recorder] enabled=true` and the schema is the contract that downstream consumers (bd-1zb7k.19.2 replay, bd-1zb7k.19.3 diet report, bd-1zb7k.19.5 playback) compose on. Default-deny applies to every redaction-sensitive field.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "sideEffectFree",
+    "redactionLevel",
+    "traceId",
+    "recordedAt",
+    "command",
+    "exitCode",
+    "elapsedMs",
+    "responseByteCount",
+    "harnessIdentity",
+    "memoryReferences",
+    "degradedCodes"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.agent_workload_trace.v1"
+    },
+    "sideEffectFree": {
+      "description": "Recorder rows are write-once observations of completed commands; they cannot replay or mutate any source-of-truth state.",
+      "type": "boolean",
+      "const": true
+    },
+    "redactionLevel": {
+      "description": "Redaction posture under which this row was recorded. `strict` is the default and the only level that omits all raw text. `audit` allows hashed memory IDs alongside the shape; raw text is never present at any level.",
+      "type": "string",
+      "enum": ["strict", "audit"]
+    },
+    "traceId": {
+      "$ref": "#/$defs/traceId"
+    },
+    "recordedAt": {
+      "$ref": "#/$defs/rfc3339"
+    },
+    "command": {
+      "$ref": "#/$defs/commandShape"
+    },
+    "exitCode": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "elapsedMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "responseByteCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "responseTokenEstimate": {
+      "description": "Optional cheap token estimate (e.g. byte_count / 4). Pin the estimator family in `tokenEstimatorId` if present.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "tokenEstimatorId": {
+      "type": "string",
+      "enum": ["bytes_div_4", "tiktoken_cl100k_base", "approximate"]
+    },
+    "harnessIdentity": {
+      "$ref": "#/$defs/harnessIdentity"
+    },
+    "memoryReferences": {
+      "description": "Memory rows selected for the response, by hashed reference. Raw memory ID strings are not included; only stable BLAKE3 hashes that downstream consumers can join against a separately exported hash table. Empty when the command did not select memories.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/memoryHashRef"
+      }
+    },
+    "degradedCodes": {
+      "description": "Degraded codes the command emitted in its response envelope. The recorder copies them by literal so workload analysis can correlate posture without re-running the command.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]*$"
+      }
+    },
+    "redactionPosture": {
+      "$ref": "#/$defs/redactionPosture"
+    },
+    "retentionPosture": {
+      "$ref": "#/$defs/retentionPosture"
+    }
+  },
+  "$defs": {
+    "traceId": {
+      "description": "Stable BLAKE3-derived trace identifier; does not embed the input task string.",
+      "type": "string",
+      "pattern": "^trc_[A-Fa-f0-9]{16,64}$"
+    },
+    "rfc3339": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "commandShape": {
+      "description": "Command shape captured WITHOUT raw arguments. Only the verb chain (e.g. `context`, `pack build`, `why`, `search`), the arity-shape of positional args (e.g. `query_present=true`), and the names of boolean/enum flags actually set. NEVER the raw argument values.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verbs", "flagNames"],
+      "properties": {
+        "verbs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$"
+          }
+        },
+        "positionalArity": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "flagNames": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^--[a-z][a-z0-9-]*$"
+          }
+        },
+        "outputFormat": {
+          "type": "string",
+          "enum": ["json", "human", "markdown", "toon", "jsonl", "compact", "hook"]
+        }
+      }
+    },
+    "harnessIdentity": {
+      "description": "High-level harness identity for workload analysis. Names a known agent program family; never an individual user identity.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["program"],
+      "properties": {
+        "program": {
+          "type": "string",
+          "enum": [
+            "claude-code",
+            "codex-cli",
+            "gemini-cli",
+            "cursor",
+            "windsurf",
+            "ee-cli-direct",
+            "unknown"
+          ]
+        },
+        "modelFamily": {
+          "type": "string",
+          "enum": [
+            "claude-opus",
+            "claude-sonnet",
+            "claude-haiku",
+            "gpt-5",
+            "gpt-4",
+            "gemini-pro",
+            "other",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "memoryHashRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hash"],
+      "properties": {
+        "hash": {
+          "type": "string",
+          "pattern": "^blake3:[A-Fa-f0-9]{32,128}$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["fact", "decision", "rule", "anti_pattern", "workflow_hint", "session_evidence", "other"]
+        }
+      }
+    },
+    "redactionPosture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rawTaskStringPresent", "rawQueryTextPresent", "rawMemoryBodyPresent"],
+      "properties": {
+        "rawTaskStringPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "rawQueryTextPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "rawMemoryBodyPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "rawProvenanceTextPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "rawMailBodyPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "secretsPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "environmentDumpPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "fullFileListingPresent": {
+          "type": "boolean",
+          "const": false
+        }
+      }
+    },
+    "retentionPosture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["retainedUntil"],
+      "properties": {
+        "retainedUntil": {
+          "$ref": "#/$defs/rfc3339"
+        },
+        "retentionDays": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "quotaBytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

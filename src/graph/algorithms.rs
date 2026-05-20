@@ -12,6 +12,9 @@ use fnx_runtime::{CgsePolicyEngine, CgseValue, CompatibilityMode};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::core::graph_memory_budget::{
+    AlgorithmAdmissionDecision, MemoryBudgetPolicy, MemoryBudgetRefusal, check_algorithm_admission,
+};
 use crate::core::graph_telemetry::{
     AlgorithmCancelledEvent, AlgorithmComputeEvent, AlgorithmTimeoutEvent, CacheEvictEvent,
     CacheEvictReason, CacheOutcomeEvent, emit_algorithm_cancelled, emit_algorithm_compute,
@@ -55,6 +58,91 @@ where
         },
         f,
     )
+}
+
+/// Outcome of [`run_with_memory_admission`].
+///
+/// When the memory budget refuses the algorithm before it allocates,
+/// callers receive the refusal payload and MUST NOT invoke the underlying
+/// algorithm. When the admission succeeds, the caller gets back the
+/// algorithm result and the running combined-bytes total the
+/// [`AlgorithmAdmissionDecision::Admit`] arm produced so the call site can
+/// update its process-local accounting.
+#[derive(Clone, Debug)]
+pub enum MemoryAdmitted<R> {
+    /// Algorithm ran inside the budget and returned a result. The
+    /// `combined_bytes` value is the total active resident bytes after
+    /// the algorithm landed; the caller can subtract `requested_working_set`
+    /// when the algorithm releases its allocation.
+    Admitted { result: R, combined_bytes: u64 },
+    /// Algorithm was refused before the budget runtime spun up. Caller
+    /// should surface the refusal in the response envelope's `degraded[]`
+    /// row and decline to invoke the underlying algorithm.
+    Refused(MemoryBudgetRefusal),
+}
+
+impl<R> MemoryAdmitted<R> {
+    /// Convenience: true iff the algorithm was admitted.
+    #[must_use]
+    pub fn is_admitted(&self) -> bool {
+        matches!(self, Self::Admitted { .. })
+    }
+
+    /// Map the admitted-result variant in place. No-op on refused.
+    #[must_use]
+    pub fn map<T, M>(self, mapper: M) -> MemoryAdmitted<T>
+    where
+        M: FnOnce(R) -> T,
+    {
+        match self {
+            Self::Admitted {
+                result,
+                combined_bytes,
+            } => MemoryAdmitted::Admitted {
+                result: mapper(result),
+                combined_bytes,
+            },
+            Self::Refused(refusal) => MemoryAdmitted::Refused(refusal),
+        }
+    }
+}
+
+/// F2 admission wrapper around [`run_with_budget`] (bd-ryzpw).
+///
+/// Consults [`check_algorithm_admission`] BEFORE spinning up the budget
+/// runtime: if the requested working set or combined load would cross
+/// the per-algorithm cap or the snapshot pressure ceiling, the algorithm
+/// closure is NOT invoked and the caller receives a
+/// [`MemoryAdmitted::Refused`] payload carrying the
+/// [`MemoryBudgetRefusal`] (code/severity/message/repair/observed/limit).
+///
+/// On admission success the closure runs inside [`run_with_budget`] with
+/// the same cancellation / time-budget semantics as direct callers; the
+/// returned `combined_bytes` value lets the caller update its
+/// process-local active-resident counter.
+pub fn run_with_memory_admission<R, F>(
+    cx: &Cx,
+    name: &'static str,
+    budget: Duration,
+    policy: &MemoryBudgetPolicy,
+    active_resident_bytes: u64,
+    requested_working_set: u64,
+    f: F,
+) -> GraphResult<MemoryAdmitted<R>>
+where
+    R: Send + 'static,
+    F: FnOnce() -> R + Send + 'static,
+{
+    match check_algorithm_admission(active_resident_bytes, requested_working_set, policy) {
+        AlgorithmAdmissionDecision::Refuse(refusal) => Ok(MemoryAdmitted::Refused(refusal)),
+        AlgorithmAdmissionDecision::Admit { combined_bytes } => {
+            let result = run_with_budget(cx, name, budget, f)?;
+            Ok(MemoryAdmitted::Admitted {
+                result,
+                combined_bytes,
+            })
+        }
+    }
 }
 
 fn run_with_budget_observed<R, F>(
@@ -1071,6 +1159,120 @@ mod tests {
 
         assert_eq!(result, 42);
         Ok(())
+    }
+
+    #[test]
+    fn run_with_memory_admission_admits_under_cap() -> TestResult {
+        let cx = Cx::for_testing();
+        let policy = MemoryBudgetPolicy::defaults();
+        let outcome = graph_result(run_with_memory_admission(
+            &cx,
+            "memory_admit_under_cap",
+            DEFAULT_FOREGROUND_BUDGET,
+            &policy,
+            0,
+            1024,
+            || 7_u64,
+        ))?;
+        match outcome {
+            MemoryAdmitted::Admitted {
+                result,
+                combined_bytes,
+            } => {
+                assert_eq!(result, 7);
+                assert_eq!(combined_bytes, 1024);
+            }
+            MemoryAdmitted::Refused(refusal) => panic!("expected admitted, got {refusal:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn run_with_memory_admission_refuses_above_per_algorithm_cap() -> TestResult {
+        let cx = Cx::for_testing();
+        let policy = MemoryBudgetPolicy::defaults();
+        // Per-algorithm cap defaults to 100 MiB = 100 * 1024 * 1024 bytes.
+        let requested = policy.per_algorithm_cap_bytes + 1;
+        let outcome = graph_result(run_with_memory_admission(
+            &cx,
+            "memory_admit_refuse_per_algorithm",
+            DEFAULT_FOREGROUND_BUDGET,
+            &policy,
+            0,
+            requested,
+            || -> u64 { panic!("closure must not run on refusal") },
+        ))?;
+        match outcome {
+            MemoryAdmitted::Refused(refusal) => {
+                assert_eq!(
+                    refusal.code,
+                    crate::core::graph_memory_budget::ALGORITHM_MEMORY_CAP_CODE
+                );
+                assert_eq!(refusal.observed_bytes, requested);
+                assert_eq!(refusal.limit_bytes, policy.per_algorithm_cap_bytes);
+            }
+            MemoryAdmitted::Admitted { .. } => panic!("expected refusal"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn run_with_memory_admission_refuses_above_combined_pressure_ceiling() -> TestResult {
+        let cx = Cx::for_testing();
+        let policy = MemoryBudgetPolicy::defaults();
+        // Active load just under cap + requested just under per-algorithm cap
+        // adds up past snapshot_cap_bytes, triggering MEMORY_PRESSURE_CODE.
+        let active = policy.snapshot_cap_bytes - 1;
+        let requested = policy.per_algorithm_cap_bytes - 1;
+        let outcome = graph_result(run_with_memory_admission(
+            &cx,
+            "memory_admit_refuse_pressure",
+            DEFAULT_FOREGROUND_BUDGET,
+            &policy,
+            active,
+            requested,
+            || -> u64 { panic!("closure must not run on refusal") },
+        ))?;
+        match outcome {
+            MemoryAdmitted::Refused(refusal) => {
+                assert_eq!(
+                    refusal.code,
+                    crate::core::graph_memory_budget::MEMORY_PRESSURE_CODE
+                );
+            }
+            MemoryAdmitted::Admitted { .. } => panic!("expected refusal"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn memory_admitted_map_preserves_combined_bytes_and_skips_refused() {
+        let admitted: MemoryAdmitted<u8> = MemoryAdmitted::Admitted {
+            result: 3,
+            combined_bytes: 4_096,
+        };
+        let mapped = admitted.map(|value| value as u64 * 2);
+        match mapped {
+            MemoryAdmitted::Admitted {
+                result,
+                combined_bytes,
+            } => {
+                assert_eq!(result, 6_u64);
+                assert_eq!(combined_bytes, 4_096);
+            }
+            MemoryAdmitted::Refused(refusal) => panic!("expected admitted, got {refusal:?}"),
+        }
+
+        let refused: MemoryAdmitted<u8> = MemoryAdmitted::Refused(MemoryBudgetRefusal {
+            code: crate::core::graph_memory_budget::ALGORITHM_MEMORY_CAP_CODE,
+            severity: "high",
+            message: "test refusal",
+            repair: "test repair",
+            observed_bytes: 1,
+            limit_bytes: 0,
+        });
+        let mapped_refused = refused.map(|v| v as u64);
+        assert!(!mapped_refused.is_admitted());
     }
 
     #[test]
