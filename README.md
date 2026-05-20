@@ -50,7 +50,7 @@ It returns a Markdown pack of project release rules, prior release incidents fro
 | **Anti-patterns first-class** | Trauma-guard surfaces high-severity risk memories before destructive actions |
 | **Graph-aware** | PageRank, communities, shortest paths, and link prediction over memory/session/decision graphs |
 | **CASS session import** | Mines your existing `cass` corpus (Claude Code, Codex, Cursor, Gemini, ChatGPT) for evidence |
-| **Context profiles** | `compact`, `balanced`, `grounding`, `orientation`, `thorough`, and `submodular` quota/objective mixes |
+| **Context profiles** | `compact`, `balanced`, `thorough`, and `submodular` quota/objective mixes |
 | **Local-first** | No cloud. No paid LLM APIs required. Embeddings run locally through Frankensearch |
 | **Stable JSON contract** | Every machine-facing command emits versioned JSON with `schema` field for parsing and validation |
 | **Deterministic** | Same DB + indexes + config + query → identical pack hash |
@@ -865,8 +865,6 @@ Different tasks need different memory mixes. `--profile` currently selects one o
 |---|---|
 | `compact` | Prioritizes procedural rules and known failure modes in a tight budget |
 | `balanced` | Default mix across rules, decisions, failures, evidence, and artifacts |
-| `grounding` | Uses balanced quotas and boosts HITS authority evidence when graph scores are available |
-| `orientation` | Uses balanced quotas and boosts HITS hub memories when graph scores are available |
 | `thorough` | Expands evidence and artifact coverage for higher-recall work |
 | `submodular` | Uses the facility-location objective with thorough section quotas for deterministic diversity |
 

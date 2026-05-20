@@ -46,8 +46,6 @@ fn readme_context_profiles_match_shipped_cli_profiles() -> TestResult {
     let expected_profiles = [
         (ContextProfileName::Compact, "`compact`"),
         (ContextProfileName::Balanced, "`balanced`"),
-        (ContextProfileName::Grounding, "`grounding`"),
-        (ContextProfileName::Orientation, "`orientation`"),
         (ContextProfileName::Thorough, "`thorough`"),
         (ContextProfileName::Submodular, "`submodular`"),
     ];

@@ -57,12 +57,6 @@ ee context "prepare release" --workspace . \
 ee context "prepare release" --workspace . \
   --profile thorough --ppr-weight 0.7 --explain --json
 
-ee context "ground release evidence" --workspace . \
-  --profile grounding --ppr-weight 0.4 --json
-
-ee context "map release dependencies" --workspace . \
-  --profile orientation --json
-
 ee pack build --workspace . --query-file release.eeq.json \
   --profile compact --no-coverage-fill=false \
   --no-rendered-text --no-skipped --json
@@ -74,9 +68,6 @@ Precedence:
   leaving the selected `--profile` active for other pack and retrieval choices.
 - `--ppr-weight 0.7` composes with `--profile`; it does not replace profile
   behavior such as candidate budgets or section strategy.
-- `--profile grounding` and `--profile orientation` keep balanced section
-  quotas while selecting the HITS authority or hub boost policy. `balanced`
-  applies both HITS axes at half strength.
 - `--explain --no-pack-dna` means "run context with explain mode, but omit
   `data.pack.packDna` from the emitted JSON."
 - `--no-coverage-fill`, `--no-rendered-text`, `--no-skipped`, and `--no-meta`

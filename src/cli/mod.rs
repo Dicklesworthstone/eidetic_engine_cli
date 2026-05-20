@@ -583,6 +583,9 @@ pub enum Command {
     #[command(subcommand)]
     Analyze(AnalyzeCommand),
     /// Agent-oriented documentation for ee commands, contracts, and usage.
+    /// Accepts `robot-docs` as an alias to match cass/bv naming conventions
+    /// that other agent harnesses learn first.
+    #[command(visible_alias = "robot-docs")]
     AgentDocs(AgentDocsArgs),
     /// Operation audit timeline and inspection commands.
     #[command(subcommand)]
@@ -54166,6 +54169,19 @@ mod tests {
         let (exit, stdout, _) = invoke(&["ee", "help"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "exit Success")?;
         ensure_contains(&stdout, "Most-used commands", "top-level help prelude")
+    }
+
+    #[test]
+    fn ee_robot_docs_alias_routes_to_agent_docs() -> TestResult {
+        // R-008: agents trained on cass/bv reach for `robot-docs guide` first.
+        // The alias must produce the same output as `agent-docs guide`.
+        let (exit, stdout, _) = invoke(&["ee", "robot-docs"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "exit Success")?;
+        ensure_contains(
+            &stdout,
+            "agent-oriented",
+            "robot-docs alias surfaces agent-docs content",
+        )
     }
 
     #[test]

@@ -152,8 +152,6 @@ pub fn decay_factor(age_days: f64, half_life_days: f64) -> f64 {
 pub enum ContextProfileName {
     Compact,
     Balanced,
-    Grounding,
-    Orientation,
     Thorough,
     Submodular,
 }
@@ -164,44 +162,19 @@ impl ContextProfileName {
         match self {
             Self::Compact => "compact",
             Self::Balanced => "balanced",
-            Self::Grounding => "grounding",
-            Self::Orientation => "orientation",
             Self::Thorough => "thorough",
             Self::Submodular => "submodular",
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 6] {
+    pub const fn all() -> [Self; 4] {
         [
             Self::Compact,
             Self::Balanced,
-            Self::Grounding,
-            Self::Orientation,
             Self::Thorough,
             Self::Submodular,
         ]
-    }
-
-    #[must_use]
-    pub const fn hits_boost_weights(self) -> ContextProfileHitsBoostWeights {
-        match self {
-            Self::Grounding => ContextProfileHitsBoostWeights {
-                authority: 0.5,
-                hub: 0.0,
-            },
-            Self::Orientation => ContextProfileHitsBoostWeights {
-                authority: 0.0,
-                hub: 0.5,
-            },
-            Self::Balanced => ContextProfileHitsBoostWeights {
-                authority: 0.25,
-                hub: 0.25,
-            },
-            Self::Compact | Self::Thorough | Self::Submodular => {
-                ContextProfileHitsBoostWeights::NONE
-            }
-        }
     }
 
     #[must_use]
@@ -209,34 +182,10 @@ impl ContextProfileName {
         match value.trim().to_ascii_lowercase().as_str() {
             "compact" => Some(Self::Compact),
             "balanced" => Some(Self::Balanced),
-            "grounding" => Some(Self::Grounding),
-            "orientation" => Some(Self::Orientation),
             "thorough" => Some(Self::Thorough),
             "submodular" => Some(Self::Submodular),
             _ => None,
         }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ContextProfileHitsBoostWeights {
-    pub authority: f32,
-    pub hub: f32,
-}
-
-impl ContextProfileHitsBoostWeights {
-    pub const NONE: Self = Self {
-        authority: 0.0,
-        hub: 0.0,
-    };
-
-    #[must_use]
-    pub fn data_json(self) -> JsonValue {
-        json!({
-            "authority": self.authority,
-            "hub": self.hub,
-        })
     }
 }
 
@@ -443,24 +392,6 @@ impl ContextProfile {
                 default_candidate_pool: 64,
                 description: "Balances rules, decisions, failures, evidence, and artifacts.",
             },
-            ContextProfileName::Grounding => Self {
-                schema: CONTEXT_PROFILE_SCHEMA_V1,
-                name,
-                display_name: "Grounding",
-                objective: ContextProfileObjective::MmrRedundancy,
-                section_mix: ContextProfileSectionMix::new(3_000, 2_000, 2_000, 2_000, 1_000),
-                default_candidate_pool: 64,
-                description: "Uses balanced quotas and applies HITS authority boosts when graph profile scores are available.",
-            },
-            ContextProfileName::Orientation => Self {
-                schema: CONTEXT_PROFILE_SCHEMA_V1,
-                name,
-                display_name: "Orientation",
-                objective: ContextProfileObjective::MmrRedundancy,
-                section_mix: ContextProfileSectionMix::new(3_000, 2_000, 2_000, 2_000, 1_000),
-                default_candidate_pool: 64,
-                description: "Uses balanced quotas and applies HITS hub boosts when graph profile scores are available.",
-            },
             ContextProfileName::Thorough => Self {
                 schema: CONTEXT_PROFILE_SCHEMA_V1,
                 name,
@@ -483,12 +414,10 @@ impl ContextProfile {
     }
 
     #[must_use]
-    pub const fn builtins() -> [Self; 6] {
+    pub const fn builtins() -> [Self; 4] {
         [
             Self::builtin(ContextProfileName::Compact),
             Self::builtin(ContextProfileName::Balanced),
-            Self::builtin(ContextProfileName::Grounding),
-            Self::builtin(ContextProfileName::Orientation),
             Self::builtin(ContextProfileName::Thorough),
             Self::builtin(ContextProfileName::Submodular),
         ]
@@ -523,7 +452,6 @@ impl ContextProfile {
             "displayName": self.display_name,
             "objective": self.objective.as_str(),
             "sectionMix": self.section_mix.data_json(),
-            "hitsBoostWeights": self.name.hits_boost_weights().data_json(),
             "defaultCandidatePool": self.default_candidate_pool,
             "builtin": true,
             "description": self.description,
@@ -631,12 +559,6 @@ const CONTEXT_PROFILE_FIELDS: &[ContextProfileFieldSchema] = &[
         "object",
         true,
         "Section quota mix expressed in basis points.",
-    ),
-    ContextProfileFieldSchema::new(
-        "hitsBoostWeights",
-        "object",
-        true,
-        "HITS authority and hub boost weights used by profile-aware graph ranking.",
     ),
     ContextProfileFieldSchema::new(
         "defaultCandidatePool",
@@ -778,14 +700,7 @@ mod tests {
     fn context_profile_names_parse_stable_wire_names() -> TestResult {
         ensure(
             ContextProfileName::all().map(ContextProfileName::as_str),
-            [
-                "compact",
-                "balanced",
-                "grounding",
-                "orientation",
-                "thorough",
-                "submodular",
-            ],
+            ["compact", "balanced", "thorough", "submodular"],
             "profile names",
         )?;
         ensure(
@@ -901,7 +816,7 @@ mod tests {
     #[test]
     fn builtin_context_profiles_are_normalized_and_ordered() -> TestResult {
         let profiles = ContextProfile::builtins();
-        ensure(profiles.len(), 6, "builtin count")?;
+        ensure(profiles.len(), 4, "builtin count")?;
         ensure(
             profiles.map(|profile| profile.name),
             ContextProfileName::all(),
@@ -939,39 +854,6 @@ mod tests {
             submodular.objective,
             ContextProfileObjective::FacilityLocation,
             "submodular objective",
-        )
-    }
-
-    #[test]
-    fn hits_profile_weights_are_stable() -> TestResult {
-        ensure(
-            ContextProfileName::Grounding.hits_boost_weights(),
-            ContextProfileHitsBoostWeights {
-                authority: 0.5,
-                hub: 0.0,
-            },
-            "grounding HITS weights",
-        )?;
-        ensure(
-            ContextProfileName::Orientation.hits_boost_weights(),
-            ContextProfileHitsBoostWeights {
-                authority: 0.0,
-                hub: 0.5,
-            },
-            "orientation HITS weights",
-        )?;
-        ensure(
-            ContextProfileName::Balanced.hits_boost_weights(),
-            ContextProfileHitsBoostWeights {
-                authority: 0.25,
-                hub: 0.25,
-            },
-            "balanced HITS weights",
-        )?;
-        ensure(
-            ContextProfileName::Thorough.hits_boost_weights(),
-            ContextProfileHitsBoostWeights::NONE,
-            "non-HITS profile weights",
         )
     }
 
@@ -1031,12 +913,6 @@ mod tests {
                 .and_then(JsonValue::as_u64),
             Some(10_000),
             "section mix total",
-        )?;
-        ensure(
-            json.pointer("/hitsBoostWeights/authority")
-                .and_then(JsonValue::as_f64),
-            Some(0.0),
-            "submodular authority boost",
         )
     }
 

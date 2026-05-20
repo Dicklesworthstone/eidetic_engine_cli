@@ -15,7 +15,6 @@
         "displayName",
         "objective",
         "sectionMix",
-        "hitsBoostWeights",
         "defaultCandidatePool",
         "builtin",
         "description"
@@ -26,7 +25,6 @@
         {"name": "displayName", "type": "string", "required": true, "description": "Human-readable profile name."},
         {"name": "objective", "type": "string", "required": true, "description": "Selection objective used by the profile."},
         {"name": "sectionMix", "type": "object", "required": true, "description": "Section quota mix expressed in basis points."},
-        {"name": "hitsBoostWeights", "type": "object", "required": true, "description": "HITS authority and hub boost weights used by profile-aware graph ranking."},
         {"name": "defaultCandidatePool", "type": "integer", "required": true, "description": "Default candidate pool size for profile-aware request builders."},
         {"name": "builtin", "type": "boolean", "required": true, "description": "Whether the profile is shipped by ee."},
         {"name": "description", "type": "string", "required": true, "description": "Profile purpose."}
