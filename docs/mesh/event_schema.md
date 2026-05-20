@@ -83,7 +83,8 @@ the same commit that first emits them.
 | --- | --- |
 | `create` | Introduces a logical memory identity and metadata. |
 | `revise` | Points a logical memory identity at revised content or metadata. |
-| `tombstone` | Withdraws a logical memory identity from future import/search use. |
+| `tombstone` | Marks a logical memory identity as a provenance/audit tombstone without implying peer cache body purge. |
+| `shareWithdraw` | Stops future sharing and asks peers to purge cached bodies while retaining residual metadata tombstones. |
 | `trust` | Updates trust posture without changing body content. |
 | `validity` | Updates validity windows for time-bounded evidence. |
 | `bodyAvailable` | Announces policy-gated body availability for a previously metadata-only item. |

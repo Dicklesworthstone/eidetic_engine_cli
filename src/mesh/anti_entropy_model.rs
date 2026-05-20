@@ -22,6 +22,9 @@ pub const ANTI_ENTROPY_MODEL_SCENARIOS: &[&str] = &[
     "conflicting_revisions_are_visible",
     "stale_tier1_read_gets_revision_notice",
     "deterministic_replay_order_independent",
+    "withdrawal_propagates_as_provenance_tombstone",
+    "validity_expiry_filters_without_peer_cache_purge",
+    "tombstone_hides_from_search_without_body_purge",
 ];
 
 /// Stream position for one origin node.
@@ -41,14 +44,43 @@ impl EventKey {
     }
 }
 
+/// Mesh event kinds that affect deterministic replay visibility.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModelEventKind {
+    Create,
+    Revise,
+    Tombstone,
+    Trust,
+    Validity,
+    BodyAvailable,
+    ShareWithdraw,
+}
+
+impl ModelEventKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Revise => "revise",
+            Self::Tombstone => "tombstone",
+            Self::Trust => "trust",
+            Self::Validity => "validity",
+            Self::BodyAvailable => "bodyAvailable",
+            Self::ShareWithdraw => "shareWithdraw",
+        }
+    }
+}
+
 /// Append-only mesh event facts relevant to the SRR6.25 model.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelEvent {
     pub key: EventKey,
     pub event_id: String,
+    pub kind: ModelEventKind,
     pub logical_memory_id: String,
     pub base_event_id: Option<String>,
     pub content_hash: String,
+    pub valid_until_epoch_ms: Option<u64>,
 }
 
 impl ModelEvent {
@@ -60,18 +92,83 @@ impl ModelEvent {
         base_event_id: Option<impl Into<String>>,
         content_hash: impl Into<String>,
     ) -> Self {
+        Self::new_with_kind(
+            origin_node_id,
+            seq,
+            logical_memory_id,
+            base_event_id,
+            content_hash,
+            ModelEventKind::Create,
+        )
+    }
+
+    #[must_use]
+    pub fn new_with_kind(
+        origin_node_id: impl Into<String>,
+        seq: u64,
+        logical_memory_id: impl Into<String>,
+        base_event_id: Option<impl Into<String>>,
+        content_hash: impl Into<String>,
+        kind: ModelEventKind,
+    ) -> Self {
         let origin_node_id = origin_node_id.into();
         let logical_memory_id = logical_memory_id.into();
         let content_hash = content_hash.into();
-        let event_id = format!("evt:{origin_node_id}:{seq}:{logical_memory_id}:{content_hash}");
+        let event_id = format!(
+            "evt:{origin_node_id}:{seq}:{logical_memory_id}:{}:{content_hash}",
+            kind.as_str()
+        );
         Self {
             key: EventKey::new(origin_node_id, seq),
             event_id,
+            kind,
             logical_memory_id,
             base_event_id: base_event_id.map(Into::into),
             content_hash,
+            valid_until_epoch_ms: None,
         }
     }
+
+    #[must_use]
+    pub fn with_valid_until_epoch_ms(mut self, valid_until_epoch_ms: u64) -> Self {
+        self.valid_until_epoch_ms = Some(valid_until_epoch_ms);
+        self
+    }
+}
+
+/// Effective visibility of one logical memory after replay.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LogicalVisibilityStatus {
+    Active,
+    Withdrawn,
+    Tombstoned,
+    Expired,
+}
+
+impl LogicalVisibilityStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Withdrawn => "withdrawn",
+            Self::Tombstoned => "tombstoned",
+            Self::Expired => "expired",
+        }
+    }
+}
+
+/// Context/search/why rendering contract for replayed mesh material.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogicalVisibility {
+    pub logical_memory_id: String,
+    pub status: LogicalVisibilityStatus,
+    pub active_head_event_ids: Vec<String>,
+    pub provenance_event_ids: Vec<String>,
+    pub search_visible: bool,
+    pub context_visible: bool,
+    pub why_provenance_visible: bool,
+    pub body_cache_purge_required: bool,
+    pub residual_metadata_reason: Option<&'static str>,
 }
 
 /// Replay result for one delivered event.
@@ -252,6 +349,109 @@ impl ModelNode {
     }
 
     #[must_use]
+    pub fn logical_visibility_at(&self, now_epoch_ms: u64) -> Vec<LogicalVisibility> {
+        let mut events_by_logical: BTreeMap<String, Vec<&ModelEvent>> = BTreeMap::new();
+        for event in self.accepted.values() {
+            events_by_logical
+                .entry(event.logical_memory_id.clone())
+                .or_default()
+                .push(event);
+        }
+
+        let heads = self.logical_heads();
+        events_by_logical
+            .into_iter()
+            .map(|(logical_memory_id, mut events)| {
+                events.sort_by(|left, right| {
+                    left.key
+                        .cmp(&right.key)
+                        .then_with(|| left.event_id.cmp(&right.event_id))
+                });
+                let withdrawn = events
+                    .iter()
+                    .filter(|event| event.kind == ModelEventKind::ShareWithdraw)
+                    .map(|event| event.event_id.clone())
+                    .collect::<Vec<_>>();
+                let tombstoned = events
+                    .iter()
+                    .filter(|event| event.kind == ModelEventKind::Tombstone)
+                    .map(|event| event.event_id.clone())
+                    .collect::<Vec<_>>();
+                let expired = events
+                    .iter()
+                    .filter(|event| {
+                        event
+                            .valid_until_epoch_ms
+                            .is_some_and(|valid_until| valid_until <= now_epoch_ms)
+                    })
+                    .map(|event| event.event_id.clone())
+                    .collect::<Vec<_>>();
+
+                if !withdrawn.is_empty() {
+                    return LogicalVisibility {
+                        logical_memory_id,
+                        status: LogicalVisibilityStatus::Withdrawn,
+                        active_head_event_ids: Vec::new(),
+                        provenance_event_ids: withdrawn,
+                        search_visible: false,
+                        context_visible: false,
+                        why_provenance_visible: true,
+                        body_cache_purge_required: true,
+                        residual_metadata_reason: Some(
+                            "withdrawal_preserves_metadata_tombstone_and_requests_peer_cache_purge",
+                        ),
+                    };
+                }
+                if !tombstoned.is_empty() {
+                    return LogicalVisibility {
+                        logical_memory_id,
+                        status: LogicalVisibilityStatus::Tombstoned,
+                        active_head_event_ids: Vec::new(),
+                        provenance_event_ids: tombstoned,
+                        search_visible: false,
+                        context_visible: false,
+                        why_provenance_visible: true,
+                        body_cache_purge_required: false,
+                        residual_metadata_reason: Some(
+                            "tombstone_preserves_provenance_without_peer_cache_purge",
+                        ),
+                    };
+                }
+                if !expired.is_empty() {
+                    return LogicalVisibility {
+                        logical_memory_id,
+                        status: LogicalVisibilityStatus::Expired,
+                        active_head_event_ids: Vec::new(),
+                        provenance_event_ids: expired,
+                        search_visible: false,
+                        context_visible: false,
+                        why_provenance_visible: true,
+                        body_cache_purge_required: false,
+                        residual_metadata_reason: Some(
+                            "validity_expiry_filters_reads_without_peer_cache_purge",
+                        ),
+                    };
+                }
+
+                LogicalVisibility {
+                    logical_memory_id: logical_memory_id.clone(),
+                    status: LogicalVisibilityStatus::Active,
+                    active_head_event_ids: heads
+                        .get(&logical_memory_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    provenance_event_ids: Vec::new(),
+                    search_visible: true,
+                    context_visible: true,
+                    why_provenance_visible: true,
+                    body_cache_purge_required: false,
+                    residual_metadata_reason: None,
+                }
+            })
+            .collect()
+    }
+
+    #[must_use]
     pub fn convergence_digest(&self) -> String {
         let events = self.accepted_event_ids().join(",");
         let frontier = self
@@ -332,7 +532,10 @@ impl ModelNode {
 
 #[cfg(test)]
 mod tests {
-    use super::{ANTI_ENTROPY_MODEL_SCENARIOS, EventRange, ModelEvent, ModelNode, ReplayOutcome};
+    use super::{
+        ANTI_ENTROPY_MODEL_SCENARIOS, EventRange, LogicalVisibilityStatus, ModelEvent,
+        ModelEventKind, ModelNode, ReplayOutcome,
+    };
 
     fn event(
         origin: &str,
@@ -342,6 +545,24 @@ mod tests {
         content_hash: &str,
     ) -> ModelEvent {
         ModelEvent::new(origin, seq, logical_memory_id, base_event_id, content_hash)
+    }
+
+    fn event_kind(
+        origin: &str,
+        seq: u64,
+        logical_memory_id: &str,
+        base_event_id: Option<&str>,
+        content_hash: &str,
+        kind: ModelEventKind,
+    ) -> ModelEvent {
+        ModelEvent::new_with_kind(
+            origin,
+            seq,
+            logical_memory_id,
+            base_event_id,
+            content_hash,
+            kind,
+        )
     }
 
     #[test]
@@ -502,5 +723,101 @@ mod tests {
             shuffled.convergence_digest()
         );
         assert_eq!(canonical.logical_conflicts().len(), 1);
+    }
+
+    #[test]
+    fn withdrawal_propagates_as_provenance_tombstone() {
+        let scenario = "withdrawal_propagates_as_provenance_tombstone";
+        assert!(ANTI_ENTROPY_MODEL_SCENARIOS.contains(&scenario));
+
+        let create = event("node_a", 1, "mem_shared_body", None, "hash_body");
+        let withdraw = event_kind(
+            "node_a",
+            2,
+            "mem_shared_body",
+            Some(create.event_id.as_str()),
+            "hash_withdraw",
+            ModelEventKind::ShareWithdraw,
+        );
+        let node = ModelNode::replay_deterministically([withdraw.clone(), create]);
+
+        let visibility = node.logical_visibility_at(10_000);
+        assert_eq!(visibility.len(), 1);
+        let decision = &visibility[0];
+        assert_eq!(decision.status, LogicalVisibilityStatus::Withdrawn);
+        assert_eq!(decision.status.as_str(), "withdrawn");
+        assert!(decision.active_head_event_ids.is_empty());
+        assert_eq!(decision.provenance_event_ids, vec![withdraw.event_id]);
+        assert!(!decision.search_visible);
+        assert!(!decision.context_visible);
+        assert!(decision.why_provenance_visible);
+        assert!(decision.body_cache_purge_required);
+        assert_eq!(
+            decision.residual_metadata_reason,
+            Some("withdrawal_preserves_metadata_tombstone_and_requests_peer_cache_purge")
+        );
+    }
+
+    #[test]
+    fn validity_expiry_filters_without_peer_cache_purge() {
+        let scenario = "validity_expiry_filters_without_peer_cache_purge";
+        assert!(ANTI_ENTROPY_MODEL_SCENARIOS.contains(&scenario));
+
+        let validity = event_kind(
+            "node_a",
+            1,
+            "mem_timeboxed",
+            None,
+            "hash_validity",
+            ModelEventKind::Validity,
+        )
+        .with_valid_until_epoch_ms(5_000);
+        let node = ModelNode::replay_deterministically([validity.clone()]);
+
+        let active = node.logical_visibility_at(4_999);
+        assert_eq!(active[0].status, LogicalVisibilityStatus::Active);
+        assert!(active[0].search_visible);
+        assert!(!active[0].body_cache_purge_required);
+
+        let expired = node.logical_visibility_at(5_000);
+        assert_eq!(expired[0].status, LogicalVisibilityStatus::Expired);
+        assert_eq!(expired[0].provenance_event_ids, vec![validity.event_id]);
+        assert!(!expired[0].search_visible);
+        assert!(!expired[0].context_visible);
+        assert!(expired[0].why_provenance_visible);
+        assert!(!expired[0].body_cache_purge_required);
+        assert_eq!(
+            expired[0].residual_metadata_reason,
+            Some("validity_expiry_filters_reads_without_peer_cache_purge")
+        );
+    }
+
+    #[test]
+    fn tombstone_hides_from_search_without_body_purge() {
+        let scenario = "tombstone_hides_from_search_without_body_purge";
+        assert!(ANTI_ENTROPY_MODEL_SCENARIOS.contains(&scenario));
+
+        let create = event("node_a", 1, "mem_tombstoned", None, "hash_body");
+        let tombstone = event_kind(
+            "node_a",
+            2,
+            "mem_tombstoned",
+            Some(create.event_id.as_str()),
+            "hash_tombstone",
+            ModelEventKind::Tombstone,
+        );
+        let node = ModelNode::replay_deterministically([create, tombstone.clone()]);
+
+        let visibility = node.logical_visibility_at(10_000);
+        assert_eq!(visibility[0].status, LogicalVisibilityStatus::Tombstoned);
+        assert_eq!(visibility[0].provenance_event_ids, vec![tombstone.event_id]);
+        assert!(!visibility[0].search_visible);
+        assert!(!visibility[0].context_visible);
+        assert!(visibility[0].why_provenance_visible);
+        assert!(!visibility[0].body_cache_purge_required);
+        assert_eq!(
+            visibility[0].residual_metadata_reason,
+            Some("tombstone_preserves_provenance_without_peer_cache_purge")
+        );
     }
 }

@@ -65,6 +65,7 @@
         "create",
         "revise",
         "tombstone",
+        "shareWithdraw",
         "trust",
         "validity",
         "bodyAvailable"

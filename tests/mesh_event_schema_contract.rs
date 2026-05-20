@@ -199,6 +199,22 @@ fn mesh_event_hash_and_event_id_are_canonical_and_stable() -> TestResult {
 }
 
 #[test]
+fn mesh_event_schema_accepts_share_withdrawal_kind() -> TestResult {
+    let schema = read_json("docs/schemas/ee.mesh.event.v1.json")?;
+    let event_kinds = schema
+        .pointer("/properties/eventKind/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "eventKind enum missing".to_owned())?;
+
+    ensure(
+        event_kinds
+            .iter()
+            .any(|kind| kind.as_str() == Some("shareWithdraw")),
+        "eventKind enum must include shareWithdraw for withdrawal propagation",
+    )
+}
+
+#[test]
 fn mesh_event_unknown_required_features_are_rejected_before_replay() -> TestResult {
     let mut event = sample_event()?;
     event
