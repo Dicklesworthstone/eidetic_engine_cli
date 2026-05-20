@@ -1270,9 +1270,16 @@ fn hook_invokes_preflight_guard(content: &str) -> bool {
 
 fn hook_invokes_rch(content: &str) -> bool {
     content.contains("RCH_")
-        || content.contains(" rch ")
         || content.contains("/rch ")
         || content.contains("rch_verify")
+        || content.lines().any(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with('#')
+                && (trimmed == "rch"
+                    || trimmed.starts_with("rch ")
+                    || trimmed.starts_with("exec rch ")
+                    || trimmed.contains(" rch "))
+        })
 }
 
 fn hook_invokes_local_rust_toolchain(content: &str) -> bool {
@@ -2155,6 +2162,42 @@ if not AGENT_NAME:
                 .iter()
                 .any(|finding| finding.code == "rch_hook_mismatch"),
             "local Cargo hook must be flagged when RCH is absent"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn git_readiness_recognizes_direct_rch_wrapper() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_dir = temp.path().join(".git").join("hooks");
+        fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
+        fs::write(
+            hook_dir.join("pre-commit"),
+            "#!/bin/sh\nrch exec -- cargo check --all-targets\n",
+        )
+        .map_err(|e| e.to_string())?;
+
+        let report = check_git_hook_readiness(&GitHookReadinessOptions {
+            repository_root: temp.path().to_path_buf(),
+            agent_name: Some("SapphireHill".to_owned()),
+        })
+        .map_err(|e| e.message())?;
+
+        let pre_commit = report
+            .hooks
+            .iter()
+            .find(|hook| hook.name == "pre-commit")
+            .ok_or_else(|| "missing pre-commit hook row".to_owned())?;
+        assert!(pre_commit.invokes_local_rust_toolchain);
+        assert!(pre_commit.invokes_rch);
+        assert!(report.summary.rch_hook_reachable);
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|finding| finding.code != "rch_hook_mismatch"),
+            "direct rch exec wrapper must not be reported as local Cargo"
         );
 
         Ok(())

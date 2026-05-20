@@ -266,6 +266,16 @@ assert_jq "$rch_json" '.data.report.hooks[] | select(.name == "pre-commit") | .i
 assert_jq "$rch_json" '.data.report.hooks[] | select(.name == "pre-commit") | .invokesRch' "false" "rch_mismatch_no_rch"
 assert_jq "$rch_json" '[.data.report.findings[].code] | index("rch_hook_mismatch") != null' "true" "rch_mismatch_finding"
 
+rch_wrapped_repo="$(init_fixture_repo rch_wrapped)"
+write_file "$rch_wrapped_repo/.git/hooks/pre-commit" '#!/bin/sh
+rch exec -- cargo check --all-targets
+'
+rch_wrapped_json="$(run_readiness rch_wrapped "$rch_wrapped_repo" "LilacLake")"
+assert_jq "$rch_wrapped_json" '.data.report.hooks[] | select(.name == "pre-commit") | .invokesLocalRustToolchain' "true" "rch_wrapped_local_rust_detected"
+assert_jq "$rch_wrapped_json" '.data.report.hooks[] | select(.name == "pre-commit") | .invokesRch' "true" "rch_wrapped_rch_detected"
+assert_jq "$rch_wrapped_json" '.data.report.summary.rchHookReachable' "true" "rch_wrapped_summary_reachable"
+assert_jq "$rch_wrapped_json" '[.data.report.findings[].code] | index("rch_hook_mismatch") == null' "true" "rch_wrapped_no_mismatch"
+
 AFTER_REPO_HASH="$(repo_status_hash)"
 if [ "$BEFORE_REPO_HASH" = "$AFTER_REPO_HASH" ]; then
     ASSERTS_PASS=$((ASSERTS_PASS + 1))
