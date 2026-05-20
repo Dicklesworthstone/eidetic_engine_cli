@@ -1539,7 +1539,7 @@ mod tests {
         assert_eq!(plan.metadata_entry.lane, MeshCacheLane::Metadata);
         assert_eq!(
             plan.metadata_entry.content_hash.as_deref(),
-            Some(&content_hash)
+            Some(content_hash.as_str())
         );
         assert_eq!(plan.cache_status, MeshCacheStatus::MetadataOnly);
         assert!(plan.metadata_index_allowed);

@@ -3320,8 +3320,8 @@ mod tests {
         let recomputed = DoctorMeshAutoEnrollmentSummary::from_checks(&report.checks);
 
         ensure(
-            report.categorized_summary,
-            recomputed,
+            &report.categorized_summary,
+            &recomputed,
             "summary matches checks",
         )?;
         ensure(report.categorized_summary.total, 15, "summary total")

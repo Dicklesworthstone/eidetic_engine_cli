@@ -3285,6 +3285,7 @@ mod tests {
                     &[],
                     &[],
                 ),
+                load_bearing: None,
                 degraded: Vec::new(),
                 agent_profile: None,
                 dedup_link: None,

@@ -8000,9 +8000,9 @@ mod tests {
             "graphSignal",
             true,
         ));
-        let centrality = CentralityRefreshReport {
+        let centrality = super::CentralityRefreshReport {
             version: env!("CARGO_PKG_VERSION"),
-            status: CentralityRefreshStatus::Refreshed,
+            status: super::CentralityRefreshStatus::Refreshed,
             dry_run: false,
             node_count: 2,
             edge_count: 1,
@@ -8012,14 +8012,14 @@ mod tests {
             hits_ms: 0.0,
             total_ms: 0.0,
             scores: vec![
-                MemoryCentralityScore {
+                super::MemoryCentralityScore {
                     memory_id: MEMORY_A.to_owned(),
                     pagerank: 0.5,
                     betweenness: 0.0,
                     hub: 0.0,
                     authority: 0.0,
                 },
-                MemoryCentralityScore {
+                super::MemoryCentralityScore {
                     memory_id: MEMORY_B.to_owned(),
                     pagerank: 0.5,
                     betweenness: 0.0,

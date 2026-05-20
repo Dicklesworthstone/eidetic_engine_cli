@@ -1045,7 +1045,7 @@ mod tests {
     #[test]
     fn derived_asset_keys_are_deterministic_and_include_all_identity_parts() -> TestResult {
         let body_hash = blake3_body_hash(b"graph-snapshot");
-        let descriptor = descriptor(
+        let base_descriptor = descriptor(
             "graph_snapshot",
             "schema-a",
             "source-a",
@@ -1070,17 +1070,17 @@ mod tests {
             &body_hash,
         );
 
-        ensure_equal(&descriptor.key(), &same.key(), "same descriptor key")?;
+        ensure_equal(&base_descriptor.key(), &same.key(), "same descriptor key")?;
         ensure_not_equal(
-            &descriptor.key(),
+            &base_descriptor.key(),
             &different_config.key(),
             "config hash participates in key",
         )?;
         ensure(
-            descriptor.key().starts_with("da_"),
+            base_descriptor.key().starts_with("da_"),
             "key carries derived asset prefix",
         )?;
-        ensure_equal(&descriptor.key().len(), &67usize, "key length")?;
+        ensure_equal(&base_descriptor.key().len(), &67usize, "key length")?;
         Ok(())
     }
 
@@ -1139,9 +1139,10 @@ mod tests {
             "referenced object has no cleanup proposal",
         )?;
         let rendered = summary.data_json();
+        let automatic_deletion = rendered.pointer("/cleanup/automaticDeletion");
         ensure_equal(
-            rendered.pointer("/cleanup/automaticDeletion"),
-            Some(&Value::Bool(false)),
+            &automatic_deletion,
+            &Some(&Value::Bool(false)),
             "cleanup is proposal-only",
         )?;
         Ok(())

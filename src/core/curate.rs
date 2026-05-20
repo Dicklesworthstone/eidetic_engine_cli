@@ -6921,18 +6921,19 @@ mod tests {
         REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY, REVIEW_SESSION_SCHEMA_V1,
         REVIEW_WORKSPACE_SCHEMA_V1, ReviewSessionCandidate, ReviewSessionOptions,
         ReviewSessionReport, apply_curation_candidate, build_bootstrap_session_candidates,
-        build_review_session_candidates, candidate_summary_from_stored, list_curation_candidates,
-        review_curation_candidate, review_session_proposals, run_curation_disposition,
-        stable_workspace_id, validate_curation_candidate,
+        build_review_session_candidates, candidate_summary_from_stored,
+        evaluate_candidate_for_validation, list_curation_candidates, review_curation_candidate,
+        review_session_proposals, run_curation_disposition, stable_workspace_id,
+        validate_curation_candidate,
     };
     use crate::db::{
         CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateFeedbackEventInput,
-        CreateMemoryInput, CreateMemoryLinkInput, CreateSessionInput, CreateWorkspaceInput,
-        DbConnection, MemoryLinkRelation, MemoryLinkSource, StoredCurationCandidate,
-        StoredEvidenceSpan, StoredSession, audit_actions,
+        CreateMemoryInput, CreateMemoryLinkInput, CreateProceduralRuleInput, CreateSessionInput,
+        CreateWorkspaceInput, DbConnection, MemoryLinkRelation, MemoryLinkSource,
+        StoredCurationCandidate, StoredEvidenceSpan, StoredSession, audit_actions,
     };
     use crate::models::degradation::GRAPH_CURATE_DISCONNECTED_GRAPH_CODE;
-    use crate::models::{CandidateId, EvidenceId, MemoryId, SessionId};
+    use crate::models::{CandidateId, EvidenceId, MemoryId, RuleId, SessionId};
 
     type TestResult = Result<(), String>;
 
@@ -10121,6 +10122,7 @@ mod tests {
             content_hash: format!("blake3:span-{id}"),
             metadata_json: None,
             created_at: "2026-05-20T03:05:00Z".to_owned(),
+            updated_at: "2026-05-20T03:05:00Z".to_owned(),
         }
     }
 

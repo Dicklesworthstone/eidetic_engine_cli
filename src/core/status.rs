@@ -4827,6 +4827,18 @@ mod tests {
         }
     }
 
+    fn unique_test_dir(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join("ee-status-tests").join(format!(
+            "{}-{}-{nanos}",
+            label,
+            std::process::id()
+        ))
+    }
+
     struct FakeRchRunner {
         output: Result<SwarmBriefCommandOutput, SwarmBriefCommandError>,
     }
@@ -4881,6 +4893,7 @@ mod tests {
 
         ensure(
             flight_recorder_directory_writable(&trace_dir),
+            true,
             "missing trace leaf should be writable when an ancestor directory is writable",
         )
     }

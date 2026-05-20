@@ -2888,7 +2888,7 @@ mod tests {
             second.trace.trace_hash,
             "trace_hash",
         )?;
-        ensure(first.replay_hash, second.replay_hash, "replay_hash")?;
+        ensure(&first.replay_hash, &second.replay_hash, "replay_hash")?;
         ensure(first.to_json(), second.to_json(), "json output")
     }
 
@@ -3355,13 +3355,13 @@ mod tests {
             "memory content swap type",
         )?;
         ensure(
-            memory_swap.memory_id,
-            Some("mem_release_rule".to_string()),
+            memory_swap.memory_id.as_deref(),
+            Some("mem_release_rule"),
             "memory content swap target",
         )?;
         ensure(
-            memory_swap.swap_revision,
-            Some(SwapRevisionMode::Current),
+            memory_swap.swap_revision.as_ref(),
+            Some(&SwapRevisionMode::Current),
             "memory content swap revision mode",
         )?;
         ensure(
