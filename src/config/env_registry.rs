@@ -98,6 +98,10 @@ pub enum EnvVar {
     MeshDriftHardStaleAfterSeconds,
     /// `EE_MESH_ENABLED`
     MeshEnabled,
+    /// `EE_MESH_HELLO_PORT`
+    MeshHelloPort,
+    /// `EE_MESH_HELLO_RESPONDER_DISABLED`
+    MeshHelloResponderDisabled,
     /// `EE_MESH_MODE`
     MeshMode,
     /// `EE_NO_COLOR`
@@ -215,6 +219,8 @@ impl EnvVar {
             Self::MeshDriftHardStaleAfter,
             Self::MeshDriftHardStaleAfterSeconds,
             Self::MeshEnabled,
+            Self::MeshHelloPort,
+            Self::MeshHelloResponderDisabled,
             Self::MeshMode,
             Self::NoColor,
             Self::OutputFormat,
@@ -301,6 +307,8 @@ impl EnvVar {
             Self::MeshDriftHardStaleAfter => "EE_MESH_DRIFT_HARD_STALE_AFTER",
             Self::MeshDriftHardStaleAfterSeconds => "EE_MESH_DRIFT_HARD_STALE_AFTER_SECONDS",
             Self::MeshEnabled => "EE_MESH_ENABLED",
+            Self::MeshHelloPort => "EE_MESH_HELLO_PORT",
+            Self::MeshHelloResponderDisabled => "EE_MESH_HELLO_RESPONDER_DISABLED",
             Self::MeshMode => "EE_MESH_MODE",
             Self::NoColor => "EE_NO_COLOR",
             Self::OutputFormat => "EE_OUTPUT_FORMAT",
@@ -436,6 +444,12 @@ impl EnvVar {
                 "Override seconds since last successful mesh probe before hard-stale drift."
             }
             Self::MeshEnabled => "Enable optional mesh-memory surfaces.",
+            Self::MeshHelloPort => {
+                "Override the mesh hello responder bind port on the local Tailscale address."
+            }
+            Self::MeshHelloResponderDisabled => {
+                "Disable the mesh hello responder lifecycle job while leaving other mesh surfaces enabled."
+            }
             Self::MeshMode => "Select the default mesh command mode.",
             Self::NoColor => "Disable colored diagnostics.",
             Self::OutputFormat => "Select the default output renderer.",
@@ -521,6 +535,8 @@ impl EnvVar {
             Self::MeshDriftSoftStaleAfterSeconds => Some("300"),
             Self::MeshDriftHardStaleAfter => Some("3"),
             Self::MeshDriftHardStaleAfterSeconds => Some("3600"),
+            Self::MeshHelloPort => Some("41888"),
+            Self::MeshHelloResponderDisabled => Some("false"),
             Self::TailscaleDiscoveryMode => Some("service_tag"),
             Self::TailscaleRespondMode => Some("service_tag"),
             Self::EmbedDedupCosineFloor => Some("0.97"),
@@ -593,6 +609,8 @@ impl EnvVar {
             | Self::MeshDriftSoftStaleAfterSeconds
             | Self::MeshDriftHardStaleAfter
             | Self::MeshDriftHardStaleAfterSeconds
+            | Self::MeshHelloPort
+            | Self::MeshHelloResponderDisabled
             | Self::TailscaleBinaryOverride
             | Self::TailscaleProbeTimeoutMs
             | Self::TailscaleProbeSocketOverride

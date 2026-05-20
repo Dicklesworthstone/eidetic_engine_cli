@@ -20,6 +20,7 @@ pub mod discovery_policy;
 pub mod emergency_disable;
 pub mod foreground_cli;
 pub mod hello;
+pub mod hello_responder;
 pub mod identity_change_guard;
 pub mod lane_grant_preview;
 pub mod peer;

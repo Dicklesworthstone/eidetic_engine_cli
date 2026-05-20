@@ -23,6 +23,7 @@ use crate::mesh::foreground_cli::{
     MeshSyncSupervisorOptions, MeshSyncSupervisorReport, foreground_degradations,
     run_mesh_sync_supervisor_supervised,
 };
+use crate::mesh::hello_responder::HelloResponderStatusReport;
 use crate::mesh::peer::{
     MeshPeerCapabilityProfile, MeshPeerCommandReport, MeshPeerEndpoint, MeshPeerEnrollInput,
     MeshPeerHandshake, MeshPeerRecord, MeshPeerRotateInput, build_peer_origin_node_id, enroll_peer,
@@ -47,6 +48,8 @@ pub enum MeshCommand {
     Peer(MeshPeerArgs),
     /// Report local mesh posture, cache counts, and repair commands.
     Status(MeshStatusArgs),
+    /// Inspect the local mesh hello responder lifecycle job.
+    HelloResponder(MeshHelloResponderArgs),
     /// Export redaction-safe foreground mesh rows to a JSON artifact.
     Export(MeshExportArgs),
     /// Import a foreground mesh JSON artifact from a local file.
@@ -55,6 +58,28 @@ pub enum MeshCommand {
     Sync(MeshSyncArgs),
     /// Preview the effect of granting one lane to a peer without mutating policy.
     PreviewGrant(MeshPreviewGrantArgs),
+}
+
+/// Arguments for `ee mesh hello-responder`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshHelloResponderArgs {
+    #[command(subcommand)]
+    pub command: MeshHelloResponderCommand,
+}
+
+/// Subcommands for `ee mesh hello-responder`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum MeshHelloResponderCommand {
+    /// Report whether the local hello responder lifecycle job is running.
+    Status(MeshHelloResponderStatusArgs),
+}
+
+/// Arguments for `ee mesh hello-responder status`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshHelloResponderStatusArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee mesh preview-grant`.
@@ -409,6 +434,7 @@ where
         MeshCommand::Peers(args) => handle_mesh_peers(cli, args, stdout, stderr),
         MeshCommand::Peer(args) => handle_mesh_peer(cli, args, stdout, stderr),
         MeshCommand::Status(args) => handle_mesh_status(cli, args, stdout, stderr),
+        MeshCommand::HelloResponder(args) => handle_mesh_hello_responder(cli, args, stdout, stderr),
         MeshCommand::Export(args) => handle_mesh_export(cli, args, stdout, stderr),
         MeshCommand::Import(args) => handle_mesh_import(cli, args, stdout, stderr),
         MeshCommand::Sync(args) => handle_mesh_sync(cli, args, stdout, stderr),
@@ -585,6 +611,58 @@ where
     };
     let report = snapshot.status_report();
     write_mesh_report(cli, &report, &render_mesh_status_human(&report), stdout)
+}
+
+fn handle_mesh_hello_responder<W, E>(
+    cli: &Cli,
+    args: &MeshHelloResponderArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match &args.command {
+        MeshHelloResponderCommand::Status(args) => {
+            handle_mesh_hello_responder_status(cli, args, stdout, stderr)
+        }
+    }
+}
+
+fn handle_mesh_hello_responder_status<W, E>(
+    cli: &Cli,
+    args: &MeshHelloResponderStatusArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let snapshot = match build_snapshot(cli, args.database.as_deref()) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let report = match HelloResponderStatusReport::from_environment(snapshot.mesh_enabled) {
+        Ok(report) => report,
+        Err(error) => {
+            let domain_error = DomainError::Configuration {
+                message: error.to_string(),
+                repair: Some(
+                    "Use EE_MESH_HELLO_PORT=41888 or EE_MESH_HELLO_RESPONDER_DISABLED=true."
+                        .to_owned(),
+                ),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    write_mesh_report(
+        cli,
+        &report,
+        &render_mesh_hello_responder_status_human(&report),
+        stdout,
+    )
 }
 
 fn handle_mesh_peers<W, E>(
@@ -1653,6 +1731,38 @@ fn render_mesh_status_human(report: &MeshCliStatusReport) -> String {
         }
     }
     append_degradations(&mut output, &report.degraded);
+    output
+}
+
+fn render_mesh_hello_responder_status_human(report: &HelloResponderStatusReport) -> String {
+    let mut output = format!(
+        "Mesh hello responder: {state}\n  Listen address: {listen}\n  Requests accepted 1h: {accepted}\n  Requests denied 1h: {denied}\n  Requests rate-limited 1h: {rate_limited}\n  Crash count 24h: {crashes}\n",
+        state = if report.running {
+            "running"
+        } else {
+            "not running"
+        },
+        listen = report.listen_address.as_deref().unwrap_or("not bound"),
+        accepted = report.accepted_requests_1h,
+        denied = report.denied_requests_1h,
+        rate_limited = report.rate_limited_requests_1h,
+        crashes = report.crash_count_24h,
+    );
+    if let Some(last_request_at) = &report.last_request_at {
+        output.push_str(&format!("  Last request: {last_request_at}\n"));
+    }
+    if let Some(last_restart_at) = &report.last_restart_at {
+        output.push_str(&format!("  Last restart: {last_restart_at}\n"));
+    }
+    if !report.degraded.is_empty() {
+        output.push_str("  Degraded:\n");
+        for item in &report.degraded {
+            output.push_str(&format!(
+                "    - {} [{}]: {} Repair: {}\n",
+                item.code, item.severity, item.message, item.repair
+            ));
+        }
+    }
     output
 }
 

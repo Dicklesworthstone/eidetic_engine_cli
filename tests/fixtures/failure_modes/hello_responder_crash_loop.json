@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "hello_responder_crash_loop",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.12",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "mesh hello-responder status",
+    "daemon"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "The supervised hello responder lifecycle job has repeatedly crashed and restarted within the 24 hour window.",
+    "setup_commands": [
+      "simulate repeated mesh.hello_responder_crashed_restarted lifecycle events"
+    ],
+    "invocation": "ee mesh hello-responder status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "hello_responder_crash_loop",
+    "severity": "high",
+    "message_contains": [
+      "hello responder",
+      "restarted"
+    ],
+    "repair_contains": "mesh.hello_responder_crashed_restarted"
+  }
+}

@@ -255,6 +255,11 @@ memory bodies in `sources[]`.
 | `discovery_cache_invalidated_tailnet_changed` | info | bd-36bbk.1.13 |
 | `discovery_cache_stale_due_to_workspace_mismatch` | info | bd-36bbk.1.13 |
 | `drift_grace_soft_stale_peer_count_high` | warning | bd-36bbk.1.13 |
+| `hello_responder_not_running` | medium | bd-36bbk.1.12 |
+| `hello_responder_port_in_use` | medium | bd-36bbk.1.12 |
+| `hello_responder_no_tailscale_ip` | medium | bd-36bbk.1.12 |
+| `hello_responder_crash_loop` | high | bd-36bbk.1.12 |
+| `hello_responder_rate_limited_storm` | warning | bd-36bbk.1.12 |
 | `perf_latency_evidence_missing` | medium | bd-1zb7k.11 (P) |
 | `perf_latency_evidence_partial` | warning | bd-1zb7k.11 (P) |
 

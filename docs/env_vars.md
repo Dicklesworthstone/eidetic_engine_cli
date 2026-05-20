@@ -47,6 +47,8 @@ must not expose their current value.
 | `EE_MESH_DRIFT_HARD_STALE_AFTER` | mesh | integer count | `3` | Override missed mesh hello probes before hard-stale drift. | Hard-stale peers may be reported in `stalePeersInConfig` with reason `consecutive_probes_missed`. |
 | `EE_MESH_DRIFT_HARD_STALE_AFTER_SECONDS` | mesh | integer seconds | `3600` | Override seconds since last successful mesh probe before hard-stale drift. | Defaults to one hour so transient reachability failures can self-resolve first. |
 | `EE_MESH_ENABLED` | mesh | boolean flag | `false` | Enable optional mesh-memory surfaces. | Disabled by default; ordinary local-first commands must not open network listeners or require peer configuration when unset. |
+| `EE_MESH_HELLO_PORT` | mesh | integer port | `41888` | Override the mesh hello responder bind port on the local Tailscale address. | The responder lifecycle job binds only when mesh is enabled and `EE_MESH_HELLO_RESPONDER_DISABLED` is false. |
+| `EE_MESH_HELLO_RESPONDER_DISABLED` | mesh | boolean flag | `false` | Disable the mesh hello responder lifecycle job while leaving other mesh surfaces enabled. | Use this off-switch when discovery should remain caller-only or the daemon lane is being repaired. |
 | `EE_MESH_MODE` | mesh | enum | `off` | Select the default mesh command mode. | Accepted values are `off`, `cache`, `revisable`, and `blocking`; explicit `--mesh` command flags take precedence. |
 | `EE_NO_COLOR` | output | boolean flag | none | Disable colored diagnostics. | Mirrors the behavior of `NO_COLOR` for ee-specific control. |
 | `EE_OUTPUT_FORMAT` | output | output format | none | Select the default output renderer. | Highest-priority environment output format selector. |
