@@ -10,7 +10,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::core::curate::{
-    ClusterCoherenceCluster, ClusterCoherenceInput, silhouette_agglomerative_clusters,
+    ClusterCoherenceCluster, ClusterCoherenceInput, is_peer_evidence_source_ref,
+    silhouette_agglomerative_clusters,
 };
 use crate::core::outcome::{OutcomeRecordOptions, OutcomeRecordReport, record_outcome};
 use crate::db::{
@@ -2209,6 +2210,13 @@ pub fn propose_experiments(
             })?
             .is_some();
         if !already_exists {
+            let uses_peer_evidence = source_ids.iter().any(|id| is_peer_evidence_source_ref(id));
+            let mut reason = cluster.proposal_reason();
+            if uses_peer_evidence {
+                reason.push_str(
+                    " Peer-origin evidence contributed to this proposal; the candidate is capped at agent_assertion until local review or outcome feedback validates it.",
+                );
+            }
             connection
                 .insert_curation_candidate(
                     &candidate_id,
@@ -2218,10 +2226,21 @@ pub fn propose_experiments(
                         target_memory_id: target_memory_id.clone(),
                         proposed_content: Some(proposed_content),
                         proposed_confidence: Some(cluster.proposed_confidence()),
-                        proposed_trust_class: Some("agent_validated".to_string()),
-                        source_type: "feedback_event".to_string(),
+                        proposed_trust_class: Some(
+                            if uses_peer_evidence {
+                                "agent_assertion"
+                            } else {
+                                "agent_validated"
+                            }
+                            .to_string(),
+                        ),
+                        source_type: if uses_peer_evidence {
+                            "agent_inference".to_string()
+                        } else {
+                            "feedback_event".to_string()
+                        },
                         source_id: Some(source_ids.join(",")),
-                        reason: cluster.proposal_reason(),
+                        reason,
                         confidence: cluster.proposed_confidence(),
                         status: Some("pending".to_string()),
                         created_at: Some(stable_learning_generated_at()),
@@ -2714,7 +2733,28 @@ impl LearningCluster {
     }
 
     fn sample_ids_vec(&self) -> Vec<String> {
-        self.sample_ids.iter().take(12).cloned().collect()
+        let mut selected = BTreeSet::new();
+        for id in self
+            .sample_ids
+            .iter()
+            .filter(|id| is_peer_evidence_source_ref(id))
+        {
+            if selected.len() >= 12 {
+                break;
+            }
+            selected.insert(id.clone());
+        }
+        for id in self
+            .sample_ids
+            .iter()
+            .filter(|id| !is_peer_evidence_source_ref(id))
+        {
+            if selected.len() >= 12 {
+                break;
+            }
+            selected.insert(id.clone());
+        }
+        selected.into_iter().collect()
     }
 
     fn proposed_confidence(&self) -> f32 {
@@ -4002,6 +4042,87 @@ mod tests {
             .map_err(|error| error.to_string())?;
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].source_type, "feedback_event");
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn learn_experiment_proposals_preserve_peer_evidence_provenance() -> TestResult {
+        let (dir, database, workspace_id) = seed_learning_workspace("ee-learn-peer-propose")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let memory_id = "mem_peerlearn0000000000000001";
+        seed_memory(
+            &connection,
+            &workspace_id,
+            memory_id,
+            "peer_cluster",
+            "Run remote-cache evidence through local review before promoting peer rules.",
+        )?;
+        for (index, peer_id) in ["peer_alpha01", "peer_beta002"].into_iter().enumerate() {
+            connection
+                .insert_feedback_event(
+                    &format!("fb_peerlearn{index:018}"),
+                    &CreateFeedbackEventInput {
+                        workspace_id: workspace_id.clone(),
+                        target_type: "memory".to_string(),
+                        target_id: memory_id.to_string(),
+                        signal: "confirmation".to_string(),
+                        weight: 1.0,
+                        source_type: "cached_peer_evidence".to_string(),
+                        source_id: Some(format!(
+                            "peer_evidence|{peer_id}|mem_remote_peer_{index}|0.125|2026-05-01T00:0{index}:00Z|0.8"
+                        )),
+                        reason: Some("Cached peer evidence supported the workflow.".to_string()),
+                        evidence_json: Some(
+                            serde_json::json!({
+                                "evidenceIds": [memory_id],
+                                "peerEvidence": peer_id,
+                            })
+                            .to_string(),
+                        ),
+                        session_id: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = propose_experiments(&LearnExperimentProposeOptions {
+            workspace: dir.path().to_path_buf(),
+            limit: 5,
+            topic: Some("peer_cluster".to_string()),
+            min_expected_value: 0.0,
+            max_attention_tokens: 900,
+            max_runtime_seconds: 180,
+            safety_boundary: ExperimentSafetyBoundary::DryRunOnly,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.proposals.len(), 1);
+        assert!(
+            report.proposals[0]
+                .evidence_ids
+                .iter()
+                .any(|id| id.starts_with("peer_evidence|peer_alpha01|")),
+            "peer evidence refs must survive the capped sample list"
+        );
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let candidates = connection
+            .list_curation_candidates(&workspace_id, Some("rule"), Some("pending"), None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].source_type, "agent_inference");
+        assert_eq!(
+            candidates[0].proposed_trust_class.as_deref(),
+            Some("agent_assertion")
+        );
+        assert!(
+            candidates[0]
+                .source_id
+                .as_deref()
+                .is_some_and(|source_id| source_id.contains("peer_evidence|peer_alpha01|"))
+        );
+        assert!(candidates[0].reason.contains("Peer-origin evidence"));
         connection.close().map_err(|error| error.to_string())
     }
 

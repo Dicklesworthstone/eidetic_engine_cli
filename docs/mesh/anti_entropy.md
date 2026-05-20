@@ -54,6 +54,21 @@ replay it idempotently without trusting any positional information.
 A batch that includes a hole (e.g. `seq=5` then `seq=7` with no `seq=6`)
 is rejected as a protocol error. The receiver does not skip the hole.
 
+### Learn/curate peer evidence boundary
+
+Cached peer evidence can inform `ee learn` and the curation queue, but it
+does not become local procedural truth by itself. Peer-origin references
+are carried as `peer_evidence|peer_id|memory_ref|score_delta|recorded_at`
+tokens and surfaced through `ee.curate.peer_evidence.v1`; the body of the
+remote memory is not embedded in the candidate summary. Peer-only
+candidates are capped at `agent_assertion` or `agent_validated` and carry a
+`promotionBlockReason` until local review or local outcome feedback supplies
+the missing trust boundary.
+
+Operators who want local-only learning should exclude peer-evidence tokens
+before calling `ee learn experiment propose`; normal cached search can stay
+enabled because searchability and promotion trust are separate decisions.
+
 ### 4. `RevisionNotice { advanced_origins: [...] }`
 
 When the receiver's frontier advances after replay, it emits a revision

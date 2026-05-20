@@ -47,6 +47,8 @@ pub const CURATE_CANDIDATES_SCHEMA_V1: &str = "ee.curate.candidates.v1";
 pub const CURATE_VALIDATE_SCHEMA_V1: &str = "ee.curate.validate.v1";
 /// Stable schema for `ee curate apply` response data.
 pub const CURATE_APPLY_SCHEMA_V1: &str = "ee.curate.apply.v1";
+/// Stable schema for peer-origin evidence folded into curation candidates.
+pub const CURATE_PEER_EVIDENCE_SCHEMA_V1: &str = "ee.curate.peer_evidence.v1";
 /// Stable schema for explicit curation lifecycle review commands.
 pub const CURATE_REVIEW_SCHEMA_V1: &str = "ee.curate.review.v1";
 /// Stable schema for deterministic TTL disposition reports.
@@ -59,10 +61,17 @@ pub const CURATE_TOMBSTONE_SCHEMA_V1: &str = "ee.curate.tombstone.v1";
 pub const CURATE_UNTOMBSTONE_SCHEMA_V1: &str = "ee.curate.untombstone.v1";
 /// Stable schema for review workspace reports.
 pub const REVIEW_WORKSPACE_SCHEMA_V1: &str = "ee.review.workspace.v1";
+pub const CURATE_PEER_EVIDENCE_SOURCE_PREFIX: &str = "peer_evidence|";
 const MAX_CANDIDATE_LIST_LIMIT: u32 = 1000;
 const MAX_REVIEW_SESSION_LIMIT: u32 = 100;
 const DEFAULT_SNOOZE_SECONDS: u64 = 90 * 24 * 60 * 60;
 const REVIEW_SESSION_CREATED_AT: &str = "1970-01-01T00:00:00Z";
+const PEER_TRUST_CAP_AGENT_ASSERTION: &str = "agent_assertion";
+const PEER_TRUST_CAP_AGENT_VALIDATED: &str = "agent_validated";
+const PEER_PROMOTION_BLOCK_BELOW_TRUST_CAP: &str = "peer_evidence_only_below_trust_cap";
+const PEER_PROMOTION_BLOCK_CONTRADICTING: &str = "contradicting_peer_evidence";
+const PEER_PROMOTION_BLOCK_OUTCOME_PENDING: &str = "peer_outcome_feedback_pending";
+const PEER_PROMOTION_BLOCK_HUMAN_REVIEW_RULE: &str = "human_review_required_for_rule_kind";
 
 /// Options for listing curation candidates through `ee curate candidates`.
 #[derive(Clone, Debug)]
@@ -1242,6 +1251,8 @@ pub struct CurateCandidateSummary {
     pub producer: ProducerMetadata,
     pub evidence: Vec<CurateCandidateEvidence>,
     pub evidence_summary: CurateCandidateEvidenceSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_evidence: Option<CuratePeerEvidenceEnvelope>,
     pub member_memory_ids: Vec<String>,
     pub tombstoned_member_count: usize,
     pub priority: String,
@@ -1279,6 +1290,35 @@ pub struct CurateCandidateEvidence {
     #[serde(rename = "type")]
     pub evidence_type: String,
     pub id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CuratePeerEvidenceEnvelope {
+    pub schema: &'static str,
+    pub candidate_id: String,
+    pub candidate_kind: String,
+    pub score: f32,
+    pub trust_class: String,
+    pub peer_evidence: Vec<CuratePeerEvidenceEntry>,
+    pub contributing_peer_count: usize,
+    pub trust_cap: String,
+    pub promotable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub promotion_block_reason: Option<String>,
+    pub contradicts_candidates: Vec<String>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CuratePeerEvidenceEntry {
+    pub peer_id: String,
+    pub memory_ref: String,
+    pub score_delta: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome_weight: Option<f32>,
+    pub recorded_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -3401,6 +3441,9 @@ fn evaluate_candidate_for_validation(
     }
 
     validate_target_memory(stored, target_memory, &mut errors);
+    if let Some(issue) = peer_evidence_promotion_issue(stored) {
+        errors.push(issue);
+    }
 
     let candidate_type = CandidateType::from_str(&stored.candidate_type).map_err(|error| {
         validation_issue(
@@ -3654,6 +3697,9 @@ fn evaluate_candidate_for_apply(
                 ));
             }
         }
+    }
+    if let Some(issue) = peer_evidence_promotion_issue(stored) {
+        errors.push(issue);
     }
 
     let Some(target_memory) = target_memory else {
@@ -5817,6 +5863,7 @@ fn candidate_summary_from_parts(
     let source_type = stored.source_type.clone();
     let source_id = stored.source_id.clone();
     let created_at = stored.created_at.clone();
+    let peer_evidence = curate_peer_evidence_summary(&stored);
     let trust_class = effective_candidate_trust_class(&stored, &proposal_source);
 
     CurateCandidateSummary {
@@ -5849,6 +5896,7 @@ fn candidate_summary_from_parts(
             contradiction_count: facts.contradiction_count,
             cluster_coherence: facts.cluster_coherence,
         },
+        peer_evidence,
         member_memory_ids: facts.member_memory_ids,
         tombstoned_member_count: facts.tombstoned_member_count,
         priority,
@@ -5890,11 +5938,238 @@ fn candidate_evidence_from_source(
             .map(str::trim)
             .filter(|part| !part.is_empty())
             .map(|part| CurateCandidateEvidence {
-                evidence_type: source_type.to_owned(),
+                evidence_type: if is_peer_evidence_source_ref(part) {
+                    "peer_evidence".to_owned()
+                } else {
+                    source_type.to_owned()
+                },
                 id: part.to_owned(),
             })
             .collect()
     })
+}
+
+#[must_use]
+pub fn is_peer_evidence_source_ref(source_ref: &str) -> bool {
+    source_ref
+        .trim()
+        .starts_with(CURATE_PEER_EVIDENCE_SOURCE_PREFIX)
+}
+
+fn source_contains_peer_evidence(source_id: Option<&str>) -> bool {
+    source_id.is_some_and(|source_id| {
+        source_id
+            .split(',')
+            .map(str::trim)
+            .any(is_peer_evidence_source_ref)
+    })
+}
+
+fn peer_only_candidate(stored: &StoredCurationCandidate) -> bool {
+    let Some(source_id) = stored.source_id.as_deref() else {
+        return false;
+    };
+    let parts = source_id
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    !parts.is_empty() && parts.iter().all(|part| is_peer_evidence_source_ref(part))
+}
+
+fn peer_evidence_entries_from_source(source_id: Option<&str>) -> Vec<CuratePeerEvidenceEntry> {
+    let mut entries = source_id
+        .into_iter()
+        .flat_map(|source_id| source_id.split(','))
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .filter_map(parse_peer_evidence_source_ref)
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        left.peer_id
+            .cmp(&right.peer_id)
+            .then_with(|| left.memory_ref.cmp(&right.memory_ref))
+            .then_with(|| left.recorded_at.cmp(&right.recorded_at))
+            .then_with(|| left.score_delta.total_cmp(&right.score_delta))
+    });
+    entries.dedup_by(|left, right| {
+        left.peer_id == right.peer_id
+            && left.memory_ref == right.memory_ref
+            && left.recorded_at == right.recorded_at
+    });
+    entries
+}
+
+fn parse_peer_evidence_source_ref(raw: &str) -> Option<CuratePeerEvidenceEntry> {
+    let mut parts = raw.split('|');
+    let prefix = parts.next()?.trim();
+    if format!("{prefix}|") != CURATE_PEER_EVIDENCE_SOURCE_PREFIX {
+        return None;
+    }
+    let peer_id = parts.next()?.trim();
+    let memory_ref = parts.next()?.trim();
+    let score_delta = parse_peer_score(parts.next()?.trim())?;
+    let recorded_at = parts.next()?.trim();
+    if !peer_id.starts_with("peer_") || peer_id.len() < 11 || memory_ref.is_empty() {
+        return None;
+    }
+    DateTime::parse_from_rfc3339(recorded_at).ok()?;
+    let outcome_weight = parts.next().and_then(|raw| parse_peer_weight(raw.trim()));
+    Some(CuratePeerEvidenceEntry {
+        peer_id: peer_id.to_owned(),
+        memory_ref: memory_ref.to_owned(),
+        score_delta,
+        outcome_weight,
+        recorded_at: recorded_at.to_owned(),
+    })
+}
+
+fn parse_peer_score(raw: &str) -> Option<f32> {
+    let value = raw.parse::<f32>().ok()?;
+    value
+        .is_finite()
+        .then(|| round_peer_metric(value.clamp(-1.0, 1.0)))
+}
+
+fn parse_peer_weight(raw: &str) -> Option<f32> {
+    let value = raw.parse::<f32>().ok()?;
+    value
+        .is_finite()
+        .then(|| round_peer_metric(value.clamp(0.0, 1.0)))
+}
+
+fn round_peer_metric(value: f32) -> f32 {
+    (value * 1_000.0).round() / 1_000.0
+}
+
+fn curate_peer_evidence_summary(
+    stored: &StoredCurationCandidate,
+) -> Option<CuratePeerEvidenceEnvelope> {
+    let entries = peer_evidence_entries_from_source(stored.source_id.as_deref());
+    if entries.is_empty() {
+        return None;
+    }
+    let contributing_peer_count = entries
+        .iter()
+        .map(|entry| entry.peer_id.clone())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let trust_cap = peer_evidence_trust_cap(&entries);
+    let peer_only = peer_only_candidate(stored);
+    let promotion_block_reason =
+        peer_evidence_promotion_block_reason(stored, &entries, peer_only).map(str::to_owned);
+    let promotable = !peer_only && promotion_block_reason.is_none();
+    let trust_class = if peer_only {
+        trust_cap.to_owned()
+    } else {
+        stored
+            .proposed_trust_class
+            .clone()
+            .unwrap_or_else(|| trust_cap.to_owned())
+    };
+
+    Some(CuratePeerEvidenceEnvelope {
+        schema: CURATE_PEER_EVIDENCE_SCHEMA_V1,
+        candidate_id: peer_evidence_candidate_id(&stored.id),
+        candidate_kind: peer_evidence_candidate_kind(&stored.candidate_type).to_owned(),
+        score: peer_evidence_score(stored.confidence, &entries),
+        trust_class,
+        peer_evidence: entries,
+        contributing_peer_count,
+        trust_cap: trust_cap.to_owned(),
+        promotable,
+        promotion_block_reason,
+        contradicts_candidates: Vec::new(),
+        created_at: stored.created_at.clone(),
+    })
+}
+
+fn peer_evidence_candidate_id(stored_id: &str) -> String {
+    if stored_id.starts_with("cand_") {
+        stored_id.to_owned()
+    } else {
+        format!("cand_{stored_id}")
+    }
+}
+
+fn peer_evidence_candidate_kind(candidate_type: &str) -> &'static str {
+    match candidate_type {
+        "rule" => "rule",
+        "tombstone" | "retract" | "deprecate" => "anti_pattern",
+        _ => "workflow_hint",
+    }
+}
+
+fn peer_evidence_score(base_confidence: f32, entries: &[CuratePeerEvidenceEntry]) -> f32 {
+    let base = if base_confidence.is_finite() {
+        base_confidence
+    } else {
+        0.0
+    };
+    let delta = entries
+        .iter()
+        .map(|entry| entry.score_delta * entry.outcome_weight.unwrap_or(1.0))
+        .sum::<f32>();
+    round_peer_metric((base + delta).clamp(0.0, 1.0))
+}
+
+fn peer_evidence_trust_cap(entries: &[CuratePeerEvidenceEntry]) -> &'static str {
+    if !entries.is_empty()
+        && entries.iter().all(|entry| {
+            entry.score_delta >= 0.0 && entry.outcome_weight.is_some_and(|weight| weight >= 0.5)
+        })
+    {
+        PEER_TRUST_CAP_AGENT_VALIDATED
+    } else {
+        PEER_TRUST_CAP_AGENT_ASSERTION
+    }
+}
+
+fn peer_evidence_promotion_block_reason(
+    stored: &StoredCurationCandidate,
+    entries: &[CuratePeerEvidenceEntry],
+    peer_only: bool,
+) -> Option<&'static str> {
+    if entries.iter().any(|entry| entry.score_delta < 0.0) {
+        return Some(PEER_PROMOTION_BLOCK_CONTRADICTING);
+    }
+    if peer_only && stored.candidate_type == CandidateType::Rule.as_str() {
+        return Some(PEER_PROMOTION_BLOCK_HUMAN_REVIEW_RULE);
+    }
+    if entries.iter().any(|entry| entry.outcome_weight.is_none()) {
+        return Some(PEER_PROMOTION_BLOCK_OUTCOME_PENDING);
+    }
+    peer_only.then_some(PEER_PROMOTION_BLOCK_BELOW_TRUST_CAP)
+}
+
+fn peer_evidence_promotion_issue(
+    stored: &StoredCurationCandidate,
+) -> Option<CurateValidationIssue> {
+    if !peer_only_candidate(stored) {
+        return None;
+    }
+    let entries = peer_evidence_entries_from_source(stored.source_id.as_deref());
+    if entries.is_empty() {
+        return None;
+    }
+    let trust_cap = peer_evidence_trust_cap(&entries);
+    let reason = peer_evidence_promotion_block_reason(stored, &entries, true)
+        .unwrap_or(PEER_PROMOTION_BLOCK_BELOW_TRUST_CAP);
+    Some(validation_issue(
+        reason,
+        format!(
+            "Peer-only curation candidate is blocked from promotion: candidate_id={}, contributing_peer_count={}, trust_cap={}, promotion_block_reason={}.",
+            peer_evidence_candidate_id(&stored.id),
+            entries
+                .iter()
+                .map(|entry| entry.peer_id.clone())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            trust_cap,
+            reason
+        ),
+        "Add local reviewed evidence or recreate the candidate from local feedback before validating or applying it.",
+    ))
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -6014,7 +6289,9 @@ fn proposed_kind_for_candidate_type(candidate_type: &str) -> Option<String> {
 }
 
 fn proposal_source_for_candidate(stored: &StoredCurationCandidate) -> String {
-    if stored.candidate_type == CandidateType::Rule.as_str()
+    if source_contains_peer_evidence(stored.source_id.as_deref()) {
+        "peer_evidence".to_owned()
+    } else if stored.candidate_type == CandidateType::Rule.as_str()
         && stored.source_type == CandidateSource::FeedbackEvent.as_str()
     {
         "auto_propose_from_cluster".to_owned()
@@ -6037,6 +6314,7 @@ fn proposed_by_for_candidate(proposal_source: &str) -> String {
         "auto_propose_from_cluster" => "auto_proposer:v1".to_owned(),
         "playbook_rule_extraction" => "rule_engine:v1".to_owned(),
         "session_review_proposal" => "review_session:v1".to_owned(),
+        "peer_evidence" => "peer_evidence:v1".to_owned(),
         "human_request" => "human".to_owned(),
         other => format!("curation:{other}"),
     }
@@ -6046,7 +6324,10 @@ fn effective_candidate_trust_class(
     stored: &StoredCurationCandidate,
     proposal_source: &str,
 ) -> Option<String> {
-    if proposal_source == "auto_propose_from_cluster" {
+    if peer_only_candidate(stored) {
+        let entries = peer_evidence_entries_from_source(stored.source_id.as_deref());
+        Some(peer_evidence_trust_cap(&entries).to_owned())
+    } else if proposal_source == "auto_propose_from_cluster" {
         Some("derived".to_owned())
     } else {
         stored.proposed_trust_class.clone()
@@ -6785,6 +7066,162 @@ mod tests {
         assert!(summary.proposed_tags.contains(&"cargo".to_owned()));
         assert!(summary.proposed_tags.contains(&"release".to_owned()));
         assert!(summary.proposed_tags.contains(&"rule".to_owned()));
+    }
+
+    #[test]
+    fn peer_evidence_summary_caps_trust_and_keeps_remote_bodies_out() {
+        let stored = StoredCurationCandidate {
+            id: "curate_peer0000000000000001".to_owned(),
+            workspace_id: "wsp_00000000000000000000000000".to_owned(),
+            candidate_type: "rule".to_owned(),
+            target_memory_id: "mem_peer_target".to_owned(),
+            proposed_content: Some("Prefer remote-validated RCH proof before closing.".to_owned()),
+            proposed_confidence: Some(0.82),
+            proposed_trust_class: Some("human_explicit".to_owned()),
+            source_type: "agent_inference".to_owned(),
+            source_id: Some(
+                "peer_evidence|peer_alpha01|mem_remote_alpha|0.125|2026-05-01T00:00:00Z|0.8,peer_evidence|peer_beta002|mem_remote_beta|0.075|2026-05-01T00:01:00Z"
+                    .to_owned(),
+            ),
+            reason: "Peer-origin memories repeatedly supported this workflow.".to_owned(),
+            confidence: 0.60,
+            status: "pending".to_owned(),
+            created_at: "2026-05-01T00:02:00Z".to_owned(),
+            reviewed_at: None,
+            reviewed_by: None,
+            applied_at: None,
+            ttl_expires_at: None,
+            review_state: "new".to_owned(),
+            snoozed_until: None,
+            merged_into_candidate_id: None,
+            state_entered_at: Some("2026-05-01T00:02:00Z".to_owned()),
+            last_action_at: None,
+            ttl_policy_id: None,
+        };
+
+        let summary = candidate_summary_from_stored(stored, std::path::Path::new("/repo"));
+        let peer = summary.peer_evidence.as_ref().expect("peer evidence");
+
+        assert_eq!(summary.proposal_source, "peer_evidence");
+        assert_eq!(summary.audit.proposed_by, "peer_evidence:v1");
+        assert_eq!(summary.trust_class.as_deref(), Some("agent_assertion"));
+        assert_eq!(summary.evidence.len(), 2);
+        assert!(
+            summary
+                .evidence
+                .iter()
+                .all(|item| item.evidence_type == "peer_evidence")
+        );
+        assert_eq!(peer.schema, super::CURATE_PEER_EVIDENCE_SCHEMA_V1);
+        assert_eq!(peer.candidate_id, "cand_curate_peer0000000000000001");
+        assert_eq!(peer.candidate_kind, "rule");
+        assert_eq!(peer.contributing_peer_count, 2);
+        assert_eq!(peer.trust_cap, "agent_assertion");
+        assert!(!peer.promotable);
+        assert_eq!(
+            peer.promotion_block_reason.as_deref(),
+            Some("human_review_required_for_rule_kind")
+        );
+        let rendered = serde_json::to_string(&summary).expect("summary json");
+        assert!(!rendered.contains("full remote memory body"));
+    }
+
+    #[test]
+    fn peer_evidence_scoring_is_deterministic_and_trust_capped() {
+        let stored = StoredCurationCandidate {
+            id: "curate_peer0000000000000002".to_owned(),
+            workspace_id: "wsp_00000000000000000000000000".to_owned(),
+            candidate_type: "procedure".to_owned(),
+            target_memory_id: "mem_peer_target".to_owned(),
+            proposed_content: Some("Replay remote evidence before adopting it.".to_owned()),
+            proposed_confidence: Some(0.66),
+            proposed_trust_class: Some("agent_validated".to_owned()),
+            source_type: "agent_inference".to_owned(),
+            source_id: Some(
+                "peer_evidence|peer_alpha01|mem_remote_alpha|0.1004|2026-05-01T00:00:00Z|1.0,peer_evidence|peer_beta002|mem_remote_beta|0.0995|2026-05-01T00:01:00Z|0.5"
+                    .to_owned(),
+            ),
+            reason: "Peer-origin procedure evidence was cached locally.".to_owned(),
+            confidence: 0.50,
+            status: "pending".to_owned(),
+            created_at: "2026-05-01T00:02:00Z".to_owned(),
+            reviewed_at: None,
+            reviewed_by: None,
+            applied_at: None,
+            ttl_expires_at: None,
+            review_state: "new".to_owned(),
+            snoozed_until: None,
+            merged_into_candidate_id: None,
+            state_entered_at: Some("2026-05-01T00:02:00Z".to_owned()),
+            last_action_at: None,
+            ttl_policy_id: None,
+        };
+
+        let first = candidate_summary_from_stored(stored.clone(), std::path::Path::new("/repo"));
+        let second = candidate_summary_from_stored(stored, std::path::Path::new("/repo"));
+        let first_peer = first.peer_evidence.as_ref().expect("peer evidence");
+        let second_peer = second.peer_evidence.as_ref().expect("peer evidence");
+
+        assert_eq!(first_peer, second_peer);
+        assert_eq!(first_peer.trust_cap, "agent_validated");
+        assert_eq!(first_peer.trust_class, "agent_validated");
+        assert_eq!(first_peer.score, 0.65);
+        assert!(!first_peer.promotable);
+        assert_eq!(
+            first_peer.promotion_block_reason.as_deref(),
+            Some("peer_evidence_only_below_trust_cap")
+        );
+    }
+
+    #[test]
+    fn peer_only_candidate_validation_blocks_promotion() {
+        let stored = StoredCurationCandidate {
+            id: "curate_peer0000000000000003".to_owned(),
+            workspace_id: "wsp_00000000000000000000000000".to_owned(),
+            candidate_type: "rule".to_owned(),
+            target_memory_id: "mem_peer_target".to_owned(),
+            proposed_content: Some(
+                "Do not promote peer-only evidence without local review.".to_owned(),
+            ),
+            proposed_confidence: Some(0.80),
+            proposed_trust_class: Some("agent_assertion".to_owned()),
+            source_type: "agent_inference".to_owned(),
+            source_id: Some(
+                "peer_evidence|peer_alpha01|mem_remote_alpha|0.200|2026-05-01T00:00:00Z|0.9"
+                    .to_owned(),
+            ),
+            reason: "Remote cached evidence only.".to_owned(),
+            confidence: 0.70,
+            status: "pending".to_owned(),
+            created_at: "2026-05-01T00:02:00Z".to_owned(),
+            reviewed_at: None,
+            reviewed_by: None,
+            applied_at: None,
+            ttl_expires_at: None,
+            review_state: "new".to_owned(),
+            snoozed_until: None,
+            merged_into_candidate_id: None,
+            state_entered_at: Some("2026-05-01T00:02:00Z".to_owned()),
+            last_action_at: None,
+            ttl_policy_id: None,
+        };
+
+        let decision = evaluate_candidate_for_validation(&stored, None, "2026-05-01T00:03:00Z");
+
+        assert_eq!(decision.validation.status, "failed");
+        assert!(
+            decision.validation.errors.iter().any(|issue| {
+                issue.code == "human_review_required_for_rule_kind"
+                    && issue.message.contains("candidate_id=cand_curate_peer")
+                    && issue.message.contains("contributing_peer_count=1")
+                    && issue.message.contains("trust_cap=agent_validated")
+                    && issue
+                        .message
+                        .contains("promotion_block_reason=human_review_required_for_rule_kind")
+            }),
+            "validation errors should include structured peer evidence block fields: {:?}",
+            decision.validation.errors
+        );
     }
 
     #[test]
