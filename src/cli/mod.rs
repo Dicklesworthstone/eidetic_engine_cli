@@ -249,7 +249,7 @@ use crate::models::{
 use crate::output;
 use crate::pack::{
     ContextPackProfile, ContextResponse, ContextResponseDegradation, ContextResponseSeverity,
-    PackResourceProfile,
+    PackResourceProfile, PackRevisionMeshMetadata,
 };
 use crate::search::plan_cache::{
     DEFAULT_PLAN_CACHE_ENTRIES, EnvVarValueSource, process_plan_cache_diag_report,
@@ -26867,6 +26867,7 @@ where
             && !args.explain_performance
             && !args.stream
             && !include_deprecated_alias
+            && args.mesh_mode == MeshCommandMode::Off
             && args.changed_symbols.is_empty()
             && !args.changed_symbols_from_git,
     );
@@ -26930,6 +26931,7 @@ where
                     .degraded
                     .push(deprecated_context_alias_degradation());
             }
+            attach_revisable_pack_metadata(&mut response, args.mesh_mode, "context");
             if args.stream {
                 return match write_context_stream_response(&response, &workspace_path, stdout) {
                     Ok(exit) => exit,
@@ -26977,6 +26979,15 @@ fn deprecated_context_alias_degradation() -> ContextResponseDegradation {
             repair: Some("Use `ee pack \"<task>\"`.".to_string()),
         },
     }
+}
+
+fn attach_revisable_pack_metadata(
+    response: &mut ContextResponse,
+    mesh_mode: MeshCommandMode,
+    surface_command: &str,
+) {
+    let mesh = PackRevisionMeshMetadata::for_context_response(response, mesh_mode, surface_command);
+    response.data.mesh = mesh;
 }
 
 const QUERY_FILE_MAX_BYTES: u64 = 256 * 1024;
@@ -29521,6 +29532,7 @@ where
     match run_context_pack(&options) {
         Ok(mut response) => {
             response.data.degraded.extend(request.degraded);
+            attach_revisable_pack_metadata(&mut response, args.mesh_mode, "pack");
             write_context_response(
                 renderer,
                 cli.format,
@@ -31475,11 +31487,17 @@ where
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &report.human_summary())
             }
-            output::Renderer::Toon => write_stdout(stdout, &(format_search_toon(&report) + "\n")),
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(format_search_toon_with_mesh(&report, args.mesh_mode) + "\n"),
+            ),
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(stdout, &(format_search_json(&report) + "\n")),
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(format_search_json_with_mesh(&report, args.mesh_mode) + "\n"),
+            ),
         },
         Err(error) => {
             let domain_error = DomainError::SearchIndex {
@@ -31497,16 +31515,31 @@ where
 }
 
 fn format_search_json(report: &SearchReport) -> String {
+    format_search_json_with_mesh(report, MeshCommandMode::Off)
+}
+
+fn format_search_json_with_mesh(report: &SearchReport, mesh_mode: MeshCommandMode) -> String {
+    let mut data = report.data_json();
+    if let Some(revision) =
+        crate::core::search::SearchRevisionMetadata::for_report(report, mesh_mode)
+        && let Some(data_object) = data.as_object_mut()
+    {
+        data_object.insert("revision".to_owned(), revision.data_json());
+    }
     serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V1,
         "success": true,
-        "data": report.data_json(),
+        "data": data,
     })
     .to_string()
 }
 
 fn format_search_toon(report: &SearchReport) -> String {
-    output::render_toon_from_json(&format_search_json(report))
+    format_search_toon_with_mesh(report, MeshCommandMode::Off)
+}
+
+fn format_search_toon_with_mesh(report: &SearchReport, mesh_mode: MeshCommandMode) -> String {
+    output::render_toon_from_json(&format_search_json_with_mesh(report, mesh_mode))
 }
 
 fn handle_outcome<W, E>(

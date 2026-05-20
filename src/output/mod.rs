@@ -2211,6 +2211,11 @@ pub fn render_context_response_json_with_options(
                     pack.field_raw("coordination", &coordination_json);
                 }
             }
+            if let Some(mesh) = &response.data.mesh {
+                if let Ok(mesh_json) = serde_json::to_string(mesh) {
+                    pack.field_raw("mesh", &mesh_json);
+                }
+            }
             if let Some(pack_dna) = &response.data.pack_dna {
                 pack.field_raw("packDna", &pack_dna.to_string());
             }
