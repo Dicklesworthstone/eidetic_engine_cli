@@ -2787,6 +2787,20 @@ fn aggregate_tailscale_status_degradations(
     }))
 }
 
+fn aggregate_shard_fanout_status_degradations(
+    degraded: &[crate::db::shard::ShardFanoutDegradation],
+) -> Vec<AggregatedDegradation> {
+    aggregate_degraded_entries(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            "shard_fanout",
+            entry.code,
+            entry.severity,
+            entry.message,
+            entry.repair,
+        )
+    }))
+}
+
 fn aggregate_qos_status_degradations(
     degraded: &[crate::core::qos::QosRegistryDegradation],
 ) -> Vec<AggregatedDegradation> {
@@ -3632,12 +3646,12 @@ fn render_shard_fanout_status_json(
             obj.field_str("kind", action.kind);
             obj.field_str("command", action.command);
         });
-        shard.field_array_of_objects("degraded", &report.degraded, |obj, entry| {
-            obj.field_str("code", entry.code);
-            obj.field_str("severity", entry.severity);
-            obj.field_str("message", entry.message);
-            obj.field_str("repair", entry.repair);
-        });
+        let aggregated_degraded = aggregate_shard_fanout_status_degradations(&report.degraded);
+        shard.field_array_of_objects(
+            "degraded",
+            &aggregated_degraded,
+            build_aggregated_degradation,
+        );
     });
 }
 
