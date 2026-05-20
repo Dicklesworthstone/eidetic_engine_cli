@@ -22026,7 +22026,7 @@ fn graph_filter_tombstoned_links(
         .iter()
         .flat_map(|link| [link.src_memory_id.as_str(), link.dst_memory_id.as_str()])
         .collect::<BTreeSet<_>>();
-    let memory_refs = memory_ids.iter().copied().collect::<Vec<_>>();
+    let memory_refs = memory_ids.into_iter().collect::<Vec<_>>();
     let memories = conn
         .get_memories_batch(&memory_refs)
         .map_err(|error| DomainError::Storage {

@@ -409,7 +409,7 @@ fn mesh_secret_redacted_preview(content: &str) -> String {
 
 #[must_use]
 pub fn build_share_preview(input: &SharePreviewInput<'_>) -> SharePreviewReport {
-    let mut candidates = input.candidates.iter().copied().collect::<Vec<_>>();
+    let mut candidates = input.candidates.to_vec();
     candidates.sort_by(|left, right| {
         left.memory_id
             .cmp(right.memory_id)
