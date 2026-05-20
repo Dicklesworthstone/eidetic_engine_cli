@@ -33,6 +33,7 @@ const PARITY_TESTED_TOOLS: &[&str] = &[
     "ee_why",
     "ee_remember",
     "ee_outcome",
+    "ee_mesh_discovery_policy",
 ];
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
@@ -643,6 +644,29 @@ fn mcp_parity_outcome_dry_run_command() -> TestResult {
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "outcome --dry-run")
+}
+
+/// Parity test: `ee mesh discovery-policy --json` vs `ee_mesh_discovery_policy` MCP tool.
+#[test]
+fn mcp_parity_mesh_discovery_policy_command() -> TestResult {
+    let fixture = load_parity_fixture("mesh_discovery_policy", "inspect")?;
+    let dir = scenario_dir("mesh_discovery_policy")?;
+    init_workspace(&dir)?;
+
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
+    ensure(
+        cli_exit == ee::models::ProcessExitCode::Success,
+        "CLI mesh discovery-policy failed",
+    )?;
+
+    let mcp_response = run_mcp_tool_call(
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, None, None)?,
+    )?;
+    let mcp_text = extract_mcp_tool_text(&mcp_response)?;
+
+    assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "mesh discovery-policy")
 }
 
 /// Verify MCP manifest lists all walking-skeleton CLI commands

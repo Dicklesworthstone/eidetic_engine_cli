@@ -6,14 +6,23 @@ use asupersync::{Cx, Outcome};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use serde_json::json;
+use toml_edit::{DocumentMut, value};
 
 use crate::config::{EnvVar, MeshCommandMode, read_env_var, workspace_config};
 use crate::db::{
-    DbConnection, InsertMeshImportLedgerEventInput, UpsertMeshPeerCursorInput, UpsertMeshPeerInput,
+    CreateAuditInput, DbConnection, InsertMeshImportLedgerEventInput, UpsertMeshPeerCursorInput,
+    UpsertMeshPeerInput, audit_actions, generate_audit_id,
 };
 use crate::mesh::audit::{
     MeshAuditDetails, MeshAuditEventInput, MeshAuditEventKind, MeshAuditLedgerError,
     append_mesh_audit_event, compute_mesh_audit_event,
+};
+use crate::mesh::discovery_policy::{
+    DISCOVERY_ALLOWLIST_FILE, DISCOVERY_DENYLIST_FILE, DISCOVERY_POLICY_SCHEMA_V1,
+    DiscoveryConsent, DiscoveryDecision, DiscoveryDecisionInput, DiscoveryMode,
+    EE_MESH_SERVICE_TAG, RESPOND_ALLOWLIST_FILE, RespondDecisionInput, WorkspaceLists,
+    decide_discovery, decide_respond, evaluate_policy_degradations, load_node_key_list,
+    load_workspace_lists, validate_node_key,
 };
 use crate::mesh::foreground_cli::{
     MESH_CLI_EXPORT_SCHEMA_V1, MESH_CLI_IMPORT_SCHEMA_V1, MESH_CLI_SYNC_SCHEMA_V1,
@@ -36,6 +45,7 @@ use crate::policy::{MESH_SECRET_EXPORT_DENIED_CODE, MeshExportSecretScanReport};
 use super::{Cli, write_domain_error, write_stdout};
 
 const MESH_CLI_INIT_SCHEMA_V1: &str = "ee.mesh.cli.init.v1";
+const DISCOVERY_POLICY_CONFIG_FILE: &str = "discovery_policy.toml";
 
 /// Subcommands for foreground `ee mesh` operations.
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -48,6 +58,8 @@ pub enum MeshCommand {
     Peer(MeshPeerArgs),
     /// Report local mesh posture, cache counts, and repair commands.
     Status(MeshStatusArgs),
+    /// Inspect or update Tailscale peer discovery policy.
+    DiscoveryPolicy(MeshDiscoveryPolicyArgs),
     /// Inspect the local mesh hello responder lifecycle job.
     HelloResponder(MeshHelloResponderArgs),
     /// Export redaction-safe foreground mesh rows to a JSON artifact.
@@ -58,6 +70,70 @@ pub enum MeshCommand {
     Sync(MeshSyncArgs),
     /// Preview the effect of granting one lane to a peer without mutating policy.
     PreviewGrant(MeshPreviewGrantArgs),
+}
+
+/// Arguments for `ee mesh discovery-policy`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshDiscoveryPolicyArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Include a deterministic caller/responder decision preview.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub explain: bool,
+
+    #[command(subcommand)]
+    pub command: Option<MeshDiscoveryPolicyCommand>,
+}
+
+/// Subcommands for `ee mesh discovery-policy`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum MeshDiscoveryPolicyCommand {
+    /// Persist workspace discovery/respond modes.
+    Set(MeshDiscoveryPolicySetArgs),
+    /// Add a node key to both discovery and responder allowlists.
+    Allow(MeshDiscoveryPolicyNodeArgs),
+    /// Add a node key to the discovery denylist.
+    Deny(MeshDiscoveryPolicyNodeArgs),
+}
+
+/// Arguments for `ee mesh discovery-policy set`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshDiscoveryPolicySetArgs {
+    /// Workspace discovery mode.
+    #[arg(long = "discovery-mode", value_enum)]
+    pub discovery_mode: Option<MeshDiscoveryPolicyModeArg>,
+
+    /// Workspace responder mode.
+    #[arg(long = "respond-mode", value_enum)]
+    pub respond_mode: Option<MeshDiscoveryPolicyModeArg>,
+}
+
+/// Arguments for `ee mesh discovery-policy allow|deny`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshDiscoveryPolicyNodeArgs {
+    /// Tailscale node key formatted as nodekey: plus 64 lowercase hex characters.
+    #[arg(value_name = "NODE_KEY")]
+    pub node_key: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum MeshDiscoveryPolicyModeArg {
+    ServiceTag,
+    AutoAdmit,
+    Allowlist,
+}
+
+impl From<MeshDiscoveryPolicyModeArg> for DiscoveryMode {
+    fn from(value: MeshDiscoveryPolicyModeArg) -> Self {
+        match value {
+            MeshDiscoveryPolicyModeArg::ServiceTag => Self::ServiceTag,
+            MeshDiscoveryPolicyModeArg::AutoAdmit => Self::AutoAdmit,
+            MeshDiscoveryPolicyModeArg::Allowlist => Self::Allowlist,
+        }
+    }
 }
 
 /// Arguments for `ee mesh hello-responder`.
@@ -419,6 +495,59 @@ struct MeshCliInitReport {
     degraded: Vec<MeshCliDegradation>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MeshDiscoveryPolicyReport {
+    schema: &'static str,
+    command: &'static str,
+    workspace_id: String,
+    workspace_path: String,
+    discovery_mode: String,
+    respond_mode: String,
+    allowlisted_node_keys: Vec<String>,
+    respond_allowlisted_node_keys: Vec<String>,
+    denied_node_keys: Vec<String>,
+    degraded: Vec<MeshCliDegradation>,
+    effective_decision_preview: Vec<MeshDiscoveryPolicyDecisionPreview>,
+    mutation: Option<MeshDiscoveryPolicyMutation>,
+    audit_id: Option<String>,
+    next_commands: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MeshDiscoveryPolicyDecisionPreview {
+    direction: &'static str,
+    node_key: String,
+    advertised_tags: Vec<String>,
+    decision: String,
+    reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MeshDiscoveryPolicyMutation {
+    operation: &'static str,
+    changed: bool,
+    node_key_hash: Option<String>,
+    config_path: Option<String>,
+    list_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct WorkspacePolicyModes {
+    discovery_mode: Option<DiscoveryMode>,
+    respond_mode: Option<DiscoveryMode>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DiscoveryPolicyState {
+    discovery_mode: DiscoveryMode,
+    respond_mode: DiscoveryMode,
+    lists: WorkspaceLists,
+    degraded: Vec<MeshCliDegradation>,
+}
+
 pub fn handle_mesh<W, E>(
     cli: &Cli,
     command: &MeshCommand,
@@ -434,6 +563,9 @@ where
         MeshCommand::Peers(args) => handle_mesh_peers(cli, args, stdout, stderr),
         MeshCommand::Peer(args) => handle_mesh_peer(cli, args, stdout, stderr),
         MeshCommand::Status(args) => handle_mesh_status(cli, args, stdout, stderr),
+        MeshCommand::DiscoveryPolicy(args) => {
+            handle_mesh_discovery_policy(cli, args, stdout, stderr)
+        }
         MeshCommand::HelloResponder(args) => handle_mesh_hello_responder(cli, args, stdout, stderr),
         MeshCommand::Export(args) => handle_mesh_export(cli, args, stdout, stderr),
         MeshCommand::Import(args) => handle_mesh_import(cli, args, stdout, stderr),
@@ -611,6 +743,163 @@ where
     };
     let report = snapshot.status_report();
     write_mesh_report(cli, &report, &render_mesh_status_human(&report), stdout)
+}
+
+fn handle_mesh_discovery_policy<W, E>(
+    cli: &Cli,
+    args: &MeshDiscoveryPolicyArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let snapshot = match build_snapshot(cli, args.database.as_deref()) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    let mutation = match &args.command {
+        None => Ok(None),
+        Some(MeshDiscoveryPolicyCommand::Set(set_args)) => {
+            apply_mesh_discovery_policy_set(cli, args.database.as_deref(), set_args)
+        }
+        Some(MeshDiscoveryPolicyCommand::Allow(node_args)) => {
+            apply_mesh_discovery_policy_allow(cli, args.database.as_deref(), &node_args.node_key)
+        }
+        Some(MeshDiscoveryPolicyCommand::Deny(node_args)) => {
+            apply_mesh_discovery_policy_deny(cli, args.database.as_deref(), &node_args.node_key)
+        }
+    };
+    let (mutation, audit_id) = match mutation {
+        Ok(value) => value.map_or((None, None), |(mutation, audit_id)| {
+            (Some(mutation), Some(audit_id))
+        }),
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    let state = match load_discovery_policy_state(&workspace_path, None, None) {
+        Ok(state) => state,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let report = build_discovery_policy_report(&snapshot, &state, args.explain, mutation, audit_id);
+    write_mesh_report(
+        cli,
+        &report,
+        &render_mesh_discovery_policy_human(&report),
+        stdout,
+    )
+}
+
+fn apply_mesh_discovery_policy_set(
+    cli: &Cli,
+    database_override: Option<&Path>,
+    args: &MeshDiscoveryPolicySetArgs,
+) -> Result<Option<(MeshDiscoveryPolicyMutation, String)>, DomainError> {
+    let (snapshot, connection) = open_mesh_policy_store(cli, database_override)?;
+    let workspace_path = cli.resolve_workspace();
+    let config_modes = load_workspace_policy_modes(&workspace_path)?;
+    let discovery_mode = args
+        .discovery_mode
+        .map(DiscoveryMode::from)
+        .or(config_modes.discovery_mode)
+        .unwrap_or_default();
+    let respond_mode = args
+        .respond_mode
+        .map(DiscoveryMode::from)
+        .or(config_modes.respond_mode)
+        .unwrap_or_default();
+    let config_path = discovery_policy_config_path(&workspace_path);
+    write_workspace_policy_modes(&config_path, discovery_mode, respond_mode)?;
+    let mutation = MeshDiscoveryPolicyMutation {
+        operation: "set",
+        changed: true,
+        node_key_hash: None,
+        config_path: Some(config_path.display().to_string()),
+        list_path: None,
+    };
+    let audit_id = record_discovery_policy_changed_audit(
+        &connection,
+        &snapshot.workspace_id,
+        "set",
+        &mutation,
+        discovery_mode,
+        respond_mode,
+    )?;
+    Ok(Some((mutation, audit_id)))
+}
+
+fn apply_mesh_discovery_policy_allow(
+    cli: &Cli,
+    database_override: Option<&Path>,
+    node_key: &str,
+) -> Result<Option<(MeshDiscoveryPolicyMutation, String)>, DomainError> {
+    validate_node_key_for_cli(node_key)?;
+    let (snapshot, connection) = open_mesh_policy_store(cli, database_override)?;
+    let workspace_path = cli.resolve_workspace();
+    let ee_dir = workspace_path.join(".ee");
+    let discovery_path = ee_dir.join(DISCOVERY_ALLOWLIST_FILE);
+    let respond_path = ee_dir.join(RESPOND_ALLOWLIST_FILE);
+    let mut discovery_allowlist = load_node_key_list_for_cli(&discovery_path)?;
+    let mut respond_allowlist = load_node_key_list_for_cli(&respond_path)?;
+    let changed = discovery_allowlist.insert(node_key.to_owned())
+        | respond_allowlist.insert(node_key.to_owned());
+    write_node_key_list(&discovery_path, &discovery_allowlist)?;
+    write_node_key_list(&respond_path, &respond_allowlist)?;
+    let state = load_discovery_policy_state(&workspace_path, None, None)?;
+    let mutation = MeshDiscoveryPolicyMutation {
+        operation: "allow",
+        changed,
+        node_key_hash: Some(redacted_node_key_hash(node_key)),
+        config_path: None,
+        list_path: Some(format!(
+            "{},{}",
+            discovery_path.display(),
+            respond_path.display()
+        )),
+    };
+    let audit_id = record_discovery_policy_changed_audit(
+        &connection,
+        &snapshot.workspace_id,
+        "allow",
+        &mutation,
+        state.discovery_mode,
+        state.respond_mode,
+    )?;
+    Ok(Some((mutation, audit_id)))
+}
+
+fn apply_mesh_discovery_policy_deny(
+    cli: &Cli,
+    database_override: Option<&Path>,
+    node_key: &str,
+) -> Result<Option<(MeshDiscoveryPolicyMutation, String)>, DomainError> {
+    validate_node_key_for_cli(node_key)?;
+    let (snapshot, connection) = open_mesh_policy_store(cli, database_override)?;
+    let workspace_path = cli.resolve_workspace();
+    let deny_path = workspace_path.join(".ee").join(DISCOVERY_DENYLIST_FILE);
+    let mut denylist = load_node_key_list_for_cli(&deny_path)?;
+    let changed = denylist.insert(node_key.to_owned());
+    write_node_key_list(&deny_path, &denylist)?;
+    let state = load_discovery_policy_state(&workspace_path, None, None)?;
+    let mutation = MeshDiscoveryPolicyMutation {
+        operation: "deny",
+        changed,
+        node_key_hash: Some(redacted_node_key_hash(node_key)),
+        config_path: None,
+        list_path: Some(deny_path.display().to_string()),
+    };
+    let audit_id = record_discovery_policy_changed_audit(
+        &connection,
+        &snapshot.workspace_id,
+        "deny",
+        &mutation,
+        state.discovery_mode,
+        state.respond_mode,
+    )?;
+    Ok(Some((mutation, audit_id)))
 }
 
 fn handle_mesh_hello_responder<W, E>(
@@ -1340,6 +1629,312 @@ fn open_mesh_peer_store(
     Ok((snapshot, connection))
 }
 
+fn open_mesh_policy_store(
+    cli: &Cli,
+    database_override: Option<&Path>,
+) -> Result<(MeshForegroundSnapshot, DbConnection), DomainError> {
+    let snapshot = build_snapshot(cli, database_override)?;
+    if !snapshot.initialized {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Cannot mutate mesh discovery policy because {} does not exist",
+                snapshot.database_path
+            ),
+            repair: Some(format!(
+                "Run `ee init --workspace \"{}\" --json` first.",
+                snapshot.workspace_path
+            )),
+        });
+    }
+    let connection = open_mesh_connection(Path::new(&snapshot.database_path))?;
+    Ok((snapshot, connection))
+}
+
+fn load_discovery_policy_state(
+    workspace_path: &Path,
+    discovery_override: Option<DiscoveryMode>,
+    respond_override: Option<DiscoveryMode>,
+) -> Result<DiscoveryPolicyState, DomainError> {
+    let config_modes = load_workspace_policy_modes(workspace_path)?;
+    let discovery_mode = discovery_override
+        .or(optional_env_discovery_mode(EnvVar::TailscaleDiscoveryMode)?)
+        .or(config_modes.discovery_mode)
+        .unwrap_or_default();
+    let respond_mode = respond_override
+        .or(optional_env_discovery_mode(EnvVar::TailscaleRespondMode)?)
+        .or(config_modes.respond_mode)
+        .unwrap_or_default();
+    let lists = load_workspace_lists(workspace_path).map_err(discovery_list_domain_error)?;
+    let self_advertised_tags = Vec::new();
+    let degraded = evaluate_policy_degradations(
+        discovery_mode,
+        respond_mode,
+        &self_advertised_tags,
+        &lists.allowlist,
+    )
+    .into_iter()
+    .map(|item| MeshCliDegradation {
+        code: item.code,
+        severity: item.severity,
+        message: item.message,
+        repair: item.repair.to_owned(),
+    })
+    .collect();
+    Ok(DiscoveryPolicyState {
+        discovery_mode,
+        respond_mode,
+        lists,
+        degraded,
+    })
+}
+
+fn optional_env_discovery_mode(variable: EnvVar) -> Result<Option<DiscoveryMode>, DomainError> {
+    let Some(raw) = read_env_var(variable) else {
+        return Ok(None);
+    };
+    raw.trim()
+        .parse::<DiscoveryMode>()
+        .map(Some)
+        .map_err(|error| DomainError::Configuration {
+            message: format!(
+                "{} has invalid discovery policy mode: {error}",
+                variable.name()
+            ),
+            repair: Some("Use service_tag, auto_admit, or allowlist.".to_owned()),
+        })
+}
+
+fn load_workspace_policy_modes(workspace_path: &Path) -> Result<WorkspacePolicyModes, DomainError> {
+    let path = discovery_policy_config_path(workspace_path);
+    let body = match fs::read_to_string(&path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(WorkspacePolicyModes::default());
+        }
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Failed to read mesh discovery policy config {}: {error}",
+                    path.display()
+                ),
+                repair: Some(
+                    "Check workspace .ee permissions or re-run `ee mesh discovery-policy set`."
+                        .to_owned(),
+                ),
+            });
+        }
+    };
+    let document = body
+        .parse::<DocumentMut>()
+        .map_err(|error| DomainError::Configuration {
+            message: format!(
+                "Failed to parse mesh discovery policy config {}: {error}",
+                path.display()
+            ),
+            repair: Some("Re-run `ee mesh discovery-policy set` to rewrite the config.".to_owned()),
+        })?;
+    Ok(WorkspacePolicyModes {
+        discovery_mode: optional_policy_mode_from_document(&document, "discovery_mode")?,
+        respond_mode: optional_policy_mode_from_document(&document, "respond_mode")?,
+    })
+}
+
+fn optional_policy_mode_from_document(
+    document: &DocumentMut,
+    key: &'static str,
+) -> Result<Option<DiscoveryMode>, DomainError> {
+    let Some(item) = document.get(key) else {
+        return Ok(None);
+    };
+    let Some(raw) = item.as_str() else {
+        return Err(DomainError::Configuration {
+            message: format!("mesh discovery policy `{key}` must be a string"),
+            repair: Some("Use service_tag, auto_admit, or allowlist.".to_owned()),
+        });
+    };
+    raw.parse::<DiscoveryMode>()
+        .map(Some)
+        .map_err(|error| DomainError::Configuration {
+            message: format!("mesh discovery policy `{key}` is invalid: {error}"),
+            repair: Some("Use service_tag, auto_admit, or allowlist.".to_owned()),
+        })
+}
+
+fn discovery_policy_config_path(workspace_path: &Path) -> PathBuf {
+    workspace_path
+        .join(".ee")
+        .join(DISCOVERY_POLICY_CONFIG_FILE)
+}
+
+fn write_workspace_policy_modes(
+    path: &Path,
+    discovery_mode: DiscoveryMode,
+    respond_mode: DiscoveryMode,
+) -> Result<(), DomainError> {
+    ensure_writable_regular_file(path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
+            message: format!("Failed to create mesh discovery policy directory: {error}"),
+            repair: Some("Check workspace .ee directory permissions.".to_owned()),
+        })?;
+    }
+    let mut document = if path.is_file() {
+        fs::read_to_string(path)
+            .map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to read mesh discovery policy config {}: {error}",
+                    path.display()
+                ),
+                repair: Some("Check workspace .ee directory permissions.".to_owned()),
+            })?
+            .parse::<DocumentMut>()
+            .map_err(|error| DomainError::Configuration {
+                message: format!(
+                    "Failed to parse mesh discovery policy config {}: {error}",
+                    path.display()
+                ),
+                repair: Some(
+                    "Fix or remove the invalid discovery policy config before retrying.".to_owned(),
+                ),
+            })?
+    } else {
+        DocumentMut::new()
+    };
+    document["discovery_mode"] = value(discovery_mode.as_str());
+    document["respond_mode"] = value(respond_mode.as_str());
+    fs::write(path, document.to_string()).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to write mesh discovery policy config {}: {error}",
+            path.display()
+        ),
+        repair: Some("Check workspace .ee directory permissions and retry.".to_owned()),
+    })
+}
+
+fn load_node_key_list_for_cli(
+    path: &Path,
+) -> Result<std::collections::BTreeSet<String>, DomainError> {
+    load_node_key_list(path).map_err(discovery_list_domain_error)
+}
+
+fn write_node_key_list(
+    path: &Path,
+    node_keys: &std::collections::BTreeSet<String>,
+) -> Result<(), DomainError> {
+    ensure_writable_regular_file(path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
+            message: format!("Failed to create mesh discovery list directory: {error}"),
+            repair: Some("Check workspace .ee directory permissions.".to_owned()),
+        })?;
+    }
+    let mut body = String::from("node_keys = [\n");
+    for node_key in node_keys {
+        body.push_str(&format!("  \"{node_key}\",\n"));
+    }
+    body.push_str("]\n");
+    fs::write(path, body).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to write mesh discovery list {}: {error}",
+            path.display()
+        ),
+        repair: Some("Check workspace .ee directory permissions and retry.".to_owned()),
+    })
+}
+
+fn ensure_writable_regular_file(path: &Path) -> Result<(), DomainError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(DomainError::PolicyDenied {
+            message: format!(
+                "Refusing to write mesh discovery policy through symlink {}",
+                path.display()
+            ),
+            repair: Some(
+                "Replace the symlink with a regular file owned by this workspace.".to_owned(),
+            ),
+        }),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write mesh discovery policy because {} is not a regular file",
+                path.display()
+            ),
+            repair: Some("Replace the path with a regular TOML file.".to_owned()),
+        }),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect mesh discovery policy path {}: {error}",
+                path.display()
+            ),
+            repair: Some("Check workspace .ee directory permissions.".to_owned()),
+        }),
+    }
+}
+
+fn validate_node_key_for_cli(node_key: &str) -> Result<(), DomainError> {
+    validate_node_key(node_key).map_err(discovery_list_domain_error)
+}
+
+fn discovery_list_domain_error(error: crate::mesh::discovery_policy::LoadListError) -> DomainError {
+    DomainError::Configuration {
+        message: error.to_string(),
+        repair: Some(
+            "Use nodekey: plus 64 lowercase hex characters in discovery policy lists.".to_owned(),
+        ),
+    }
+}
+
+fn redacted_node_key_hash(node_key: &str) -> String {
+    format!("blake3:{}", blake3::hash(node_key.as_bytes()).to_hex())
+}
+
+fn record_discovery_policy_changed_audit(
+    connection: &DbConnection,
+    workspace_id: &str,
+    operation: &'static str,
+    mutation: &MeshDiscoveryPolicyMutation,
+    discovery_mode: DiscoveryMode,
+    respond_mode: DiscoveryMode,
+) -> Result<String, DomainError> {
+    let details = json!({
+        "schema": "ee.mesh.discovery_policy_changed.v1",
+        "operation": operation,
+        "changed": mutation.changed,
+        "discoveryMode": discovery_mode.as_str(),
+        "respondMode": respond_mode.as_str(),
+        "nodeKeyHash": mutation.node_key_hash,
+        "configPath": mutation.config_path,
+        "listPath": mutation.list_path,
+    });
+    let details_json = serde_json::to_string(&details).map_err(|error| DomainError::Usage {
+        message: format!("Failed to serialize mesh discovery policy audit details: {error}"),
+        repair: Some("Retry the command or report the serialization failure.".to_owned()),
+    })?;
+    let audit_id = generate_audit_id();
+    connection
+        .insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.to_owned()),
+                actor: Some("ee mesh discovery-policy".to_owned()),
+                action: audit_actions::MESH_DISCOVERY_POLICY_CHANGED.to_owned(),
+                target_type: Some("mesh".to_owned()),
+                target_id: Some("discovery_policy".to_owned()),
+                details: Some(details_json),
+            },
+        )
+        .map_err(|error| storage_error("Failed to write mesh discovery policy audit", error))?;
+    Ok(audit_id)
+}
+
 fn persist_mesh_peer_record(
     connection: &DbConnection,
     workspace_id: &str,
@@ -1680,6 +2275,130 @@ where
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
     }
+}
+
+fn build_discovery_policy_report(
+    snapshot: &MeshForegroundSnapshot,
+    state: &DiscoveryPolicyState,
+    explain: bool,
+    mutation: Option<MeshDiscoveryPolicyMutation>,
+    audit_id: Option<String>,
+) -> MeshDiscoveryPolicyReport {
+    MeshDiscoveryPolicyReport {
+        schema: DISCOVERY_POLICY_SCHEMA_V1,
+        command: "mesh discovery-policy",
+        workspace_id: snapshot.workspace_id.clone(),
+        workspace_path: snapshot.workspace_path.clone(),
+        discovery_mode: state.discovery_mode.as_str().to_owned(),
+        respond_mode: state.respond_mode.as_str().to_owned(),
+        allowlisted_node_keys: state.lists.allowlist.iter().cloned().collect(),
+        respond_allowlisted_node_keys: state.lists.respond_allowlist.iter().cloned().collect(),
+        denied_node_keys: state.lists.denylist.iter().cloned().collect(),
+        degraded: state.degraded.clone(),
+        effective_decision_preview: if explain {
+            discovery_policy_decision_preview(state)
+        } else {
+            Vec::new()
+        },
+        mutation,
+        audit_id,
+        next_commands: vec![
+            "ee mesh discovery-policy --explain --json".to_owned(),
+            "ee mesh discovery-policy set --discovery-mode allowlist --respond-mode allowlist --json"
+                .to_owned(),
+            "ee mesh discovery-policy allow <node-key> --json".to_owned(),
+            "ee mesh discovery-policy deny <node-key> --json".to_owned(),
+        ],
+    }
+}
+
+fn discovery_policy_decision_preview(
+    state: &DiscoveryPolicyState,
+) -> Vec<MeshDiscoveryPolicyDecisionPreview> {
+    const TAGGED_NODE: &str =
+        "nodekey:00000000000000000000000000000000000000000000000000000000000000aa";
+    const UNTAGGED_NODE: &str =
+        "nodekey:00000000000000000000000000000000000000000000000000000000000000bb";
+    const SELF_NODE: &str =
+        "nodekey:00000000000000000000000000000000000000000000000000000000000000ff";
+
+    let tagged = vec![EE_MESH_SERVICE_TAG.to_owned()];
+    let no_tags = Vec::new();
+    let mut out = Vec::new();
+    for (node_key, advertised_tags) in [(TAGGED_NODE, &tagged), (UNTAGGED_NODE, &no_tags)] {
+        let (decision, reason) = decide_discovery(&DiscoveryDecisionInput {
+            mode: state.discovery_mode,
+            peer_node_key: node_key,
+            peer_advertised_tags: advertised_tags,
+            self_node_key: SELF_NODE,
+            allowlist: &state.lists.allowlist,
+            denylist: &state.lists.denylist,
+        });
+        out.push(MeshDiscoveryPolicyDecisionPreview {
+            direction: "discovery",
+            node_key: node_key.to_owned(),
+            advertised_tags: advertised_tags.clone(),
+            decision: match decision {
+                DiscoveryDecision::Probe => "probe",
+                DiscoveryDecision::Skip => "skip",
+            }
+            .to_owned(),
+            reason: reason.as_str().to_owned(),
+        });
+    }
+
+    let (consent, reason) = decide_respond(&RespondDecisionInput {
+        mode: state.respond_mode,
+        requester_node_key: TAGGED_NODE,
+        requester_advertised_tags: &tagged,
+        self_advertised_tags: &no_tags,
+        respond_allowlist: &state.lists.respond_allowlist,
+        denylist: &state.lists.denylist,
+    });
+    out.push(MeshDiscoveryPolicyDecisionPreview {
+        direction: "respond",
+        node_key: TAGGED_NODE.to_owned(),
+        advertised_tags: tagged,
+        decision: match consent {
+            DiscoveryConsent::Granted => "granted",
+            DiscoveryConsent::Denied => "denied",
+        }
+        .to_owned(),
+        reason: reason.as_str().to_owned(),
+    });
+    out
+}
+
+fn render_mesh_discovery_policy_human(report: &MeshDiscoveryPolicyReport) -> String {
+    let mut output = format!(
+        "Mesh discovery policy\n  Workspace: {}\n  discoveryMode: {}\n  respondMode: {}\n  Allowlist: {} discovery, {} responder\n  Denylist: {}\n",
+        report.workspace_path,
+        report.discovery_mode,
+        report.respond_mode,
+        report.allowlisted_node_keys.len(),
+        report.respond_allowlisted_node_keys.len(),
+        report.denied_node_keys.len(),
+    );
+    if let Some(mutation) = &report.mutation {
+        output.push_str(&format!(
+            "  Mutation: {} changed={}\n",
+            mutation.operation, mutation.changed
+        ));
+    }
+    if let Some(audit_id) = &report.audit_id {
+        output.push_str(&format!("  Audit: {audit_id}\n"));
+    }
+    if !report.effective_decision_preview.is_empty() {
+        output.push_str("  Decision preview:\n");
+        for preview in &report.effective_decision_preview {
+            output.push_str(&format!(
+                "    - {} {} => {} ({})\n",
+                preview.direction, preview.node_key, preview.decision, preview.reason
+            ));
+        }
+    }
+    append_degradations(&mut output, &report.degraded);
+    output
 }
 
 fn render_mesh_init_human(report: &MeshCliInitReport) -> String {

@@ -24,9 +24,9 @@
 //! allowlist/denylist file loaders, and the env-var reader for
 //! `EE_TAILSCALE_DISCOVERY_MODE` / `EE_TAILSCALE_RESPOND_MODE`
 //! (registered in `src/config/env_registry.rs`). The CLI surface
-//! (`ee mesh discovery-policy [set|allow|deny|--explain]`) lands in
-//! a follow-up slice to avoid touching `src/cli/mod.rs` while other
-//! agents hold reservations.
+//! (`ee mesh discovery-policy [set|allow|deny|--explain]`) consumes
+//! these pure helpers and keeps file writes/audit emission in the CLI
+//! layer.
 //!
 //! The SRR6.46.6 hello-handshake responder integration and the
 //! SRR6.46.2 autodiscovery integration both consume this module's
@@ -503,6 +503,15 @@ pub fn load_node_key_list(path: &Path) -> Result<BTreeSet<String>, LoadListError
         }
     }
     Ok(out)
+}
+
+/// Validate one Tailscale node key using the discovery-list contract.
+///
+/// Public so CLI mutation surfaces can reject invalid `allow` / `deny`
+/// arguments before writing `.ee/*_allowlist.toml` or
+/// `.ee/*_denylist.toml`.
+pub fn validate_node_key(value: &str) -> Result<(), LoadListError> {
+    validate_node_key_list_entry(0, value)
 }
 
 fn validate_node_key_list_entry(index: usize, value: &str) -> Result<(), LoadListError> {

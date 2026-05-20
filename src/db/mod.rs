@@ -162,6 +162,11 @@ pub mod audit_actions {
     pub const MESH_AUTO_ENROLLMENT_INTENDED: &str = "mesh.auto_enrollment_intended";
     pub const MESH_AUTO_ENROLLMENT_OUTCOME_RECORDED: &str = "mesh.auto_enrollment_outcome_recorded";
 
+    /// Operator changed the workspace's mesh discovery policy through
+    /// `ee mesh discovery-policy set|allow|deny`. Details carry
+    /// `ee.mesh.discovery_policy_changed.v1`.
+    pub const MESH_DISCOVERY_POLICY_CHANGED: &str = "mesh.discovery_policy_changed";
+
     // ----------------------------------------------------------------------
     // Mesh hello responder lifecycle actions (SRR6.46.12 / bd-36bbk.1.12).
     //
