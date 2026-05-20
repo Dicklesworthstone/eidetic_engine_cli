@@ -370,6 +370,7 @@ fn stage_5_score(fixtures: &[RetrievalFixture]) -> Vec<ScoredFixture> {
                 scope_match: true,
                 graph_centrality: Some(0.25),
                 redundancy: None,
+                bead_affinity: None,
             };
             let score = SearchScoreComponents::from_signals(signals, config).final_score;
             (score > 0.0).then(|| ScoredFixture {
