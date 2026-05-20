@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
+use crate::config::MeshCommandMode;
 use crate::config::env_registry::{EnvVar, read};
 use crate::core::why::{DedupLinkEvidence, find_embed_dedup_link};
 use crate::db::{
@@ -54,6 +55,7 @@ use frankensearch::LexicalSearch;
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
 pub const DIAG_SEARCH_SCHEMA_V1: &str = "ee.diag.search.v1";
 pub const PERFORMANCE_EXPLAIN_SCHEMA_V1: &str = "ee.explain.performance.v1";
+pub const SEARCH_REVISION_TOKEN_SCHEMA_V1: &str = "ee.search.revision_token.v1";
 pub const SEARCH_SCORE_INTERVAL_SCHEMA_V1: &str = "ee.search.score_interval.v1";
 const INDEX_STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
 const SEARCH_SCORE_COVERAGE_GUARANTEE: f32 = 0.95;
@@ -247,6 +249,92 @@ pub struct SearchReport {
     pub memory_scope: MemoryScope,
     pub strict_scope: bool,
     pub scope_stats: MemoryScopeStats,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchRevisionMetadata {
+    pub schema: &'static str,
+    pub mode: &'static str,
+    pub token: String,
+    pub tier1_usable: bool,
+    pub revision_available: bool,
+    pub reason: &'static str,
+    pub query_hash: String,
+    pub result_fingerprint: String,
+    pub result_doc_ids: Vec<String>,
+    pub local_mesh_tip_status: &'static str,
+    pub local_mesh_tip_basis: &'static str,
+    pub rerun_command: String,
+}
+
+impl SearchRevisionMetadata {
+    #[must_use]
+    pub fn for_report(report: &SearchReport, mode: MeshCommandMode) -> Option<Self> {
+        if mode != MeshCommandMode::Revisable {
+            return None;
+        }
+        let result_doc_ids = search_display_visible_hits(&report.results)
+            .iter()
+            .map(|hit| hit.doc_id.clone())
+            .collect::<Vec<_>>();
+        let result_ids = result_doc_ids.join("\n");
+        let query_hash = crate::pack::revision_hash_with_prefix(&["query", &report.query]);
+        let result_fingerprint =
+            crate::pack::revision_hash_with_prefix(&["searchResults", &result_ids]);
+        let token_digest = crate::pack::revision_hash(&[
+            SEARCH_REVISION_TOKEN_SCHEMA_V1,
+            mode.as_str(),
+            &query_hash,
+            &result_fingerprint,
+            "not_checked",
+            "no_async_peer_freshness_probe_attached",
+        ]);
+        let token = format!("searchrev_{}", &token_digest[..32]);
+        Some(Self {
+            schema: SEARCH_REVISION_TOKEN_SCHEMA_V1,
+            mode: mode.as_str(),
+            token,
+            tier1_usable: true,
+            revision_available: false,
+            reason: "no_fresher_peer_material_known",
+            query_hash,
+            result_fingerprint,
+            result_doc_ids,
+            local_mesh_tip_status: "not_checked",
+            local_mesh_tip_basis: "no_async_peer_freshness_probe_attached",
+            rerun_command: format!(
+                "ee search {} --mesh revisable --json",
+                shell_quote(&report.query)
+            ),
+        })
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": self.schema,
+            "mode": self.mode,
+            "token": self.token,
+            "tier1Usable": self.tier1_usable,
+            "revisionAvailable": self.revision_available,
+            "reason": self.reason,
+            "queryHash": self.query_hash,
+            "resultFingerprint": self.result_fingerprint,
+            "resultDocIds": self.result_doc_ids,
+            "localMeshTipState": {
+                "status": self.local_mesh_tip_status,
+                "basis": self.local_mesh_tip_basis,
+            },
+            "rerunCommand": self.rerun_command,
+        })
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_owned();
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[derive(Clone, Debug)]
@@ -4868,6 +4956,61 @@ mod tests {
     }
 
     #[test]
+    fn search_revision_metadata_is_absent_by_default_and_stable_when_revisable() {
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "format before release".to_string(),
+            requested_limit: 10,
+            results: vec![SearchHit {
+                doc_id: "mem_00000000000000000000000001".to_string(),
+                score: 0.95,
+                source: ScoreSource::SemanticFast,
+                fast_score: Some(0.95),
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                metadata: None,
+                explanation: None,
+            }],
+            elapsed_ms: 12.3,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
+        };
+
+        assert!(
+            SearchRevisionMetadata::for_report(&report, MeshCommandMode::Off).is_none(),
+            "off mode must not change strict search output"
+        );
+        let first = SearchRevisionMetadata::for_report(&report, MeshCommandMode::Revisable)
+            .expect("revisable search should emit explicit revision metadata");
+        let replay = SearchRevisionMetadata::for_report(&report, MeshCommandMode::Revisable)
+            .expect("revisable search replay should emit revision metadata");
+
+        assert_eq!(first, replay);
+        assert_eq!(first.schema, SEARCH_REVISION_TOKEN_SCHEMA_V1);
+        assert!(first.token.starts_with("searchrev_"));
+        assert!(first.tier1_usable);
+        assert!(!first.revision_available);
+        assert_eq!(first.local_mesh_tip_status, "not_checked");
+        assert_eq!(
+            first.result_doc_ids,
+            vec!["mem_00000000000000000000000001".to_string()]
+        );
+        assert!(first.query_hash.starts_with("blake3:"));
+        assert!(first.result_fingerprint.starts_with("blake3:"));
+    }
+
+    #[test]
     fn search_report_data_json_has_required_fields() {
         let report = SearchReport {
             status: SearchStatus::Success,
@@ -4983,6 +5126,76 @@ mod tests {
         assert!(
             (high[1] - high[0]) <= (low[1] - low[0]),
             "higher scores should have tighter or equal score intervals"
+        );
+        Ok(())
+    }
+
+    /// Deterministic split-conformal backtest: build a calibration JSONL
+    /// from an exchangeable synthetic (score, truth) distribution, hold
+    /// out the second half as the test split, and confirm empirical
+    /// coverage on the held-out split clears a conservative floor
+    /// (0.80) well below the 0.95 nominal guarantee to absorb
+    /// finite-sample variance with 100 held-out samples. Pins the DoD
+    /// item "backtest fixture demonstrates empirical coverage falls in
+    /// the interval" for bd-17c65.14.2.
+    #[test]
+    fn search_score_calibration_empirical_coverage_backtest() -> TestResult {
+        let workspace = unique_test_dir("score-calibration-empirical-backtest");
+        let calibration_dir = workspace.join(".ee").join("search");
+        std::fs::create_dir_all(&calibration_dir).map_err(|error| error.to_string())?;
+
+        // Deterministic exchangeable sampler. Score sweeps 0.10..0.89 via
+        // a coprime stride so the same score occurs in both splits with
+        // distinct noise draws; noise is one of 13 discrete levels in
+        // [-0.15, +0.15] selected by a different coprime index. Both
+        // splits draw from the same generator, so the cal/test split is
+        // exchangeable by construction.
+        fn sample(index: usize) -> (f32, f32) {
+            let score = 0.10 + ((index * 7) % 80) as f32 * 0.01;
+            let noise_index = (index * 11) % 13;
+            let noise = (noise_index as f32 - 6.0) * 0.025;
+            let truth = (score + noise).clamp(0.0, 1.0);
+            (score, truth)
+        }
+
+        let total = 200usize;
+        let cal_count = 100usize;
+        let cal_rows = (0..cal_count)
+            .map(|index| {
+                let (score, truth) = sample(index);
+                format!(r#"{{"score":{score:.6},"groundTruthRelevance":{truth:.6}}}"#)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(calibration_dir.join("calibration.jsonl"), cal_rows)
+            .map_err(|error| error.to_string())?;
+
+        let calibration = SearchScoreCalibration::for_workspace(&workspace);
+        assert_eq!(calibration.status, SearchScoreCalibrationStatus::Calibrated);
+        assert_eq!(calibration.sample_count, cal_count);
+
+        let mut covered = 0usize;
+        let mut test_count = 0usize;
+        for index in cal_count..total {
+            let (score, truth) = sample(index);
+            let [lo, hi] = calibration.interval_for_score(score);
+            if truth >= lo && truth <= hi {
+                covered += 1;
+            }
+            test_count += 1;
+        }
+        let empirical_coverage = covered as f32 / test_count as f32;
+        assert!(
+            empirical_coverage >= 0.80,
+            "empirical coverage {empirical_coverage:.3} fell below 0.80 floor on N={test_count} held-out samples (nominal target {SEARCH_SCORE_COVERAGE_GUARANTEE})"
+        );
+
+        // Determinism contract from the bead DoD: identical calibration
+        // input must produce the same residual quantile across reloads.
+        let reloaded = SearchScoreCalibration::for_workspace(&workspace);
+        assert_eq!(
+            calibration.residual_quantile, reloaded.residual_quantile,
+            "split-conformal quantile must be byte-identical across reloads of the same calibration file"
         );
         Ok(())
     }
