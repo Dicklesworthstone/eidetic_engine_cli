@@ -22,6 +22,10 @@ pub const EVAL_REPORT_SCHEMA_V1: &str = "ee.eval.report.v1";
 /// Schema version for pack-quality expectations embedded in eval fixtures.
 pub const PACK_QUALITY_EXPECTATIONS_SCHEMA_V1: &str = "ee.eval.pack_quality_expectations.v1";
 
+/// Schema version for structural-recall expectations embedded in eval fixtures.
+pub const STRUCTURAL_RECALL_EXPECTATIONS_SCHEMA_V1: &str =
+    "ee.eval.structural_recall_expectations.v1";
+
 /// Default fixture directory relative to project root.
 pub const DEFAULT_FIXTURE_DIR: &str = "tests/fixtures/eval";
 
@@ -62,6 +66,8 @@ pub struct FixtureScenario {
     pub expected_outputs: Vec<ExpectedOutput>,
     #[serde(default)]
     pub pack_quality_expectations: Option<PackQualityExpectations>,
+    #[serde(default)]
+    pub structural_recall_expectations: Option<StructuralRecallExpectations>,
     #[serde(default)]
     pub degraded_branches: Vec<DegradedBranch>,
     pub agent_success_signal: String,
@@ -187,6 +193,18 @@ pub struct PackQualityTokenBudget {
     pub expect_truncation: bool,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct StructuralRecallExpectations {
+    pub schema: String,
+    pub baseline_report_path: String,
+    pub post_g1_report_path: String,
+    pub ndcg_at_10_baseline: f64,
+    pub allowed_ndcg_drop_pp: f64,
+    pub structural_recall_at_10_min: f64,
+    #[serde(default)]
+    pub required_scenario_ids: Vec<String>,
+}
+
 /// Source memory definition (parsed from source_memory.json).
 #[derive(Clone, Debug, Deserialize)]
 pub struct SourceMemoryFile {
@@ -203,7 +221,17 @@ pub struct SourceMemoryFile {
     #[serde(default)]
     pub tiers: Vec<SourceMemoryTier>,
     #[serde(default)]
+    pub structural_edges: Vec<StructuralEdge>,
+    #[serde(default)]
     pub secret_policy: SecretPolicy,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct StructuralEdge {
+    pub source_id: String,
+    pub target_id: String,
+    pub relation: String,
+    pub weight: f64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -549,7 +577,246 @@ pub fn validate_fixture_scenario(
         )));
     }
 
-    validate_pack_quality_expectations(scenario, source)
+    validate_structural_edges(source)?;
+    validate_pack_quality_expectations(scenario, source)?;
+    validate_structural_recall_expectations(scenario, source)
+}
+
+fn validate_structural_edges(source: &SourceMemoryFile) -> Result<(), DomainError> {
+    if source.structural_edges.is_empty() {
+        return Ok(());
+    }
+
+    let source_ids = source_memory_ids(source)?;
+    let mut seen = HashSet::new();
+    for edge in &source.structural_edges {
+        validate_required_structural_field(&edge.source_id, "source_id")?;
+        validate_required_structural_field(&edge.target_id, "target_id")?;
+        validate_required_structural_field(&edge.relation, "relation")?;
+
+        if edge.source_id == edge.target_id {
+            return Err(fixture_validation_error(format!(
+                "structural edge `{}` -> `{}` must not be a self-edge",
+                edge.source_id, edge.target_id
+            )));
+        }
+        if !source_ids.contains(&edge.source_id) {
+            return Err(fixture_validation_error(format!(
+                "structural edge references unknown source_id `{}`",
+                edge.source_id
+            )));
+        }
+        if !source_ids.contains(&edge.target_id) {
+            return Err(fixture_validation_error(format!(
+                "structural edge references unknown target_id `{}`",
+                edge.target_id
+            )));
+        }
+        if !edge.weight.is_finite() || !(0.0..=1.0).contains(&edge.weight) || edge.weight == 0.0 {
+            return Err(fixture_validation_error(format!(
+                "structural edge `{}` -> `{}` weight must be > 0.0 and <= 1.0",
+                edge.source_id, edge.target_id
+            )));
+        }
+
+        let key = format!("{}:{}:{}", edge.source_id, edge.target_id, edge.relation);
+        if !seen.insert(key) {
+            return Err(fixture_validation_error(format!(
+                "duplicate structural edge `{}` -> `{}` relation `{}`",
+                edge.source_id, edge.target_id, edge.relation
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_required_structural_field(value: &str, field: &str) -> Result<(), DomainError> {
+    if value.trim().is_empty() {
+        return Err(fixture_validation_error(format!(
+            "structural edge field `{field}` must not be empty"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_structural_recall_expectations(
+    scenario: &FixtureScenario,
+    source: &SourceMemoryFile,
+) -> Result<(), DomainError> {
+    let Some(expectations) = &scenario.structural_recall_expectations else {
+        return Ok(());
+    };
+
+    if expectations.schema != STRUCTURAL_RECALL_EXPECTATIONS_SCHEMA_V1 {
+        return Err(fixture_validation_error(format!(
+            "structural_recall_expectations schema `{}` must be `{}`",
+            expectations.schema, STRUCTURAL_RECALL_EXPECTATIONS_SCHEMA_V1
+        )));
+    }
+
+    if expectations.required_scenario_ids.is_empty() {
+        return Err(fixture_validation_error(
+            "structural_recall_expectations required_scenario_ids must not be empty",
+        ));
+    }
+
+    let scenario_ids: HashSet<&str> = scenario.scenario_ids.iter().map(String::as_str).collect();
+    let mut seen = HashSet::new();
+    for scenario_id in &expectations.required_scenario_ids {
+        validate_required_label(scenario_id, "required_scenario_ids", "<structural_recall>")?;
+        if !seen.insert(scenario_id.as_str()) {
+            return Err(fixture_validation_error(format!(
+                "duplicate structural recall scenario_id `{scenario_id}`"
+            )));
+        }
+        if !scenario_ids.contains(scenario_id.as_str()) {
+            return Err(fixture_validation_error(format!(
+                "structural recall expects unknown scenario_id `{scenario_id}`"
+            )));
+        }
+    }
+
+    validate_score01(
+        expectations.ndcg_at_10_baseline,
+        "structural_recall_expectations.ndcg_at_10_baseline",
+    )?;
+    validate_score01(
+        expectations.structural_recall_at_10_min,
+        "structural_recall_expectations.structural_recall_at_10_min",
+    )?;
+    if expectations.structural_recall_at_10_min <= 0.0 {
+        return Err(fixture_validation_error(
+            "structural_recall_expectations.structural_recall_at_10_min must be positive",
+        ));
+    }
+    if !expectations.allowed_ndcg_drop_pp.is_finite()
+        || !(0.0..=100.0).contains(&expectations.allowed_ndcg_drop_pp)
+    {
+        return Err(fixture_validation_error(
+            "structural_recall_expectations.allowed_ndcg_drop_pp must be between 0.0 and 100.0",
+        ));
+    }
+
+    validate_snapshot_report_path(&expectations.baseline_report_path)?;
+    validate_snapshot_report_path(&expectations.post_g1_report_path)?;
+
+    if scenario.fixture_family == "structural_recall"
+        || scenario
+            .owning_bead_ids
+            .iter()
+            .any(|bead| bead == "bd-bife.11")
+    {
+        validate_bd_bife_11_structural_recall_contract(scenario, source, expectations)?;
+    }
+
+    Ok(())
+}
+
+fn validate_score01(value: f64, field: &str) -> Result<(), DomainError> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(fixture_validation_error(format!(
+            "{field} must be between 0.0 and 1.0"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_snapshot_report_path(path: &str) -> Result<(), DomainError> {
+    if path.trim().is_empty() {
+        return Err(fixture_validation_error(
+            "structural recall report paths must not be empty",
+        ));
+    }
+    let report_path = Path::new(path);
+    if report_path.is_absolute() {
+        return Err(fixture_validation_error(format!(
+            "structural recall report path `{path}` must be relative"
+        )));
+    }
+    if report_path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(fixture_validation_error(format!(
+            "structural recall report path `{path}` must not escape the repository"
+        )));
+    }
+    if !path.starts_with("tests/snapshots/") || !path.ends_with(".snap") {
+        return Err(fixture_validation_error(format!(
+            "structural recall report path `{path}` must live under tests/snapshots/*.snap"
+        )));
+    }
+    Ok(())
+}
+
+const BD_BIFE_11_STRUCTURAL_SCENARIOS: &[&str] = &[
+    "orphan_query",
+    "over_grounding",
+    "related_concept",
+    "contradicted_belief",
+    "fresh_workspace",
+    "derived_revision",
+];
+
+fn validate_bd_bife_11_structural_recall_contract(
+    scenario: &FixtureScenario,
+    source: &SourceMemoryFile,
+    expectations: &StructuralRecallExpectations,
+) -> Result<(), DomainError> {
+    let scenario_ids: HashSet<&str> = scenario.scenario_ids.iter().map(String::as_str).collect();
+    let required_ids: HashSet<&str> = expectations
+        .required_scenario_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let pack_quality_ids: HashSet<&str> = scenario
+        .pack_quality_expectations
+        .as_ref()
+        .map(|expectations| {
+            expectations
+                .cases
+                .iter()
+                .map(|case| case.scenario_id.as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for required in BD_BIFE_11_STRUCTURAL_SCENARIOS {
+        if !scenario_ids.contains(required) {
+            return Err(fixture_validation_error(format!(
+                "bd-bife.11 structural recall fixture must include scenario_id `{required}`"
+            )));
+        }
+        if !required_ids.contains(required) {
+            return Err(fixture_validation_error(format!(
+                "bd-bife.11 structural recall expectations must require scenario_id `{required}`"
+            )));
+        }
+        if !pack_quality_ids.contains(required) {
+            return Err(fixture_validation_error(format!(
+                "bd-bife.11 structural recall fixture must include a pack-quality case for `{required}`"
+            )));
+        }
+    }
+
+    if expectations.structural_recall_at_10_min < 0.75 {
+        return Err(fixture_validation_error(
+            "bd-bife.11 structural_recall_at_10_min must be at least 0.75",
+        ));
+    }
+    if expectations.allowed_ndcg_drop_pp > 2.0 {
+        return Err(fixture_validation_error(
+            "bd-bife.11 allowed_ndcg_drop_pp must be no more than 2.0",
+        ));
+    }
+    if source.structural_edges.is_empty() {
+        return Err(fixture_validation_error(
+            "bd-bife.11 structural recall fixture must declare structural_edges",
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_pack_quality_expectations(

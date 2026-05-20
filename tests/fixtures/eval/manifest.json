@@ -34,6 +34,10 @@
     {
       "id": "fx.semantic_model_admissibility.v1",
       "path": "tests/fixtures/eval/semantic_model_admissibility"
+    },
+    {
+      "id": "fx.structural_recall.v1",
+      "path": "tests/fixtures/eval/structural_recall"
     }
   ]
 }

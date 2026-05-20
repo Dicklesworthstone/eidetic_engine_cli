@@ -1,0 +1,243 @@
+{
+  "schema": "ee.eval_source_memory.v1",
+  "fixture_id": "fx.structural_recall.v1",
+  "source_kind": "synthetic",
+  "fixed_clock": "2026-05-20T00:00:00Z",
+  "memories": [
+    {
+      "id": "mem_00000000000000000000001101",
+      "level": "procedural",
+      "kind": "rule",
+      "trust_class": "human_explicit",
+      "confidence": 0.92,
+      "utility": 0.88,
+      "importance": 0.9,
+      "tags": [
+        "structural_recall",
+        "orphan_query",
+        "graph_central"
+      ],
+      "content": "When a memory is textually sparse but has repeated verified incident links, PPR should allow the graph-central release compass to appear in the top ten for the thin-thread query.",
+      "provenance_uri": "file://tests/fixtures/eval/structural_recall/source_memory.json#orphan-query",
+      "expected_query_match": [
+        "thin-thread concurrency release compass"
+      ]
+    },
+    {
+      "id": "mem_00000000000000000000001102",
+      "level": "procedural",
+      "kind": "rule",
+      "trust_class": "human_explicit",
+      "confidence": 0.98,
+      "utility": 0.95,
+      "importance": 0.94,
+      "tags": [
+        "structural_recall",
+        "authority",
+        "rch"
+      ],
+      "content": "The authoritative RCH queue backpressure rule is explicit: check `rch queue` before heavy verification and never run local Cargo as a fallback when remote execution is required.",
+      "provenance_uri": "file://tests/fixtures/eval/structural_recall/source_memory.json#over-grounding",
+      "expected_query_match": [
+        "RCH queue backpressure authority"
+      ]
+    },
+    {
+      "id": "mem_00000000000000000000001103",
+      "level": "episodic",
+      "kind": "decision",
+      "trust_class": "agent_observed",
+      "confidence": 0.84,
+      "utility": 0.74,
+      "importance": 0.68,
+      "tags": [
+        "structural_recall",
+        "completion_audit",
+        "dominance"
+      ],
+      "content": "Completion audit dominance aggregation was fixed by routing revision-lineage degradations through the shared dominance accumulator.",
+      "provenance_uri": "file://tests/fixtures/eval/structural_recall/source_memory.json#related-concept-anchor",
+      "expected_query_match": [
+        "completion audit dominance alias"
+      ]
+    },
+    {
+      "id": "mem_00000000000000000000001104",
+      "level": "episodic",
+      "kind": "decision",
+      "trust_class": "agent_observed",
+      "confidence": 0.86,
+      "utility": 0.8,
+      "importance": 0.72,
+      "tags": [
+        "structural_recall",
+        "revision_lineage",
+        "dominance"
+      ],
+      "content": "The related revision-lineage memory uses different words but shares the dominance alias through co-tag evidence, so a PPR pass should surface it within top ten.",
+      "provenance_uri": "file://tests/fixtures/eval/structural_recall/source_memory.json#related-concept-target",
+      "expected_query_match": []
+    },
+    {
+      "id": "mem_00000000000000000000001105",
+      "level": "episodic",
+      "kind": "failure",
+      "trust_class": "agent_inferred",
+      "confidence": 0.35,
+      "utility": 0.3,
+      "importance": 0.42,
+      "tags": [
+        "structural_recall",
+        "contradicted",
+        "cargo"
+      ],
+      "content": "Local cargo fallback is acceptable when RCH is busy, because it keeps agents moving even when the worker pool is saturated.",
+      "provenance_uri": "file://tests/fixtures/eval/structural_recall/source_memory.json#contradicted-text-hit",
+      "expected_query_match": [
+        "local cargo fallback is acceptable when RCH is busy"
+      ]
+    },
+    {
+      "id": "mem_00000000000000000000001106",
+      "level": "procedural",
+      "kind": "rule",
+      "trust_class": "human_explicit",
+      "confidence": 0.99,
+      "utility": 0.97,
+      "importance": 0.96,
+      "tags": [
+        "structural_recall",
+        "cited",
+        "rch"
+      ],
+      "content": "RCH-only verification means local Cargo attempts are blocked; if remote workers cannot run the build, surface the fail-open reason and stop Cargo verification.",
+      "provenance_uri": "file://tests/fixtures/eval/structural_recall/source_memory.json#contradicted-cited-rule",
+      "expected_query_match": []
+    },
+    {
+      "id": "mem_00000000000000000000001107",
+      "level": "procedural",
+      "kind": "rule",
+      "trust_class": "human_explicit",
+      "confidence": 0.9,
+      "utility": 0.82,
+      "importance": 0.78,
+      "tags": [
+        "structural_recall",
+        "fresh_workspace"
+      ],
+      "content": "Fresh workspace init status should remain a lexical match when there is no graph neighborhood for PPR to amplify.",
+      "provenance_uri": "file://tests/fixtures/eval/structural_recall/source_memory.json#fresh-workspace",
+      "expected_query_match": [
+        "fresh workspace init status"
+      ]
+    },
+    {
+      "id": "mem_00000000000000000000001108",
+      "level": "episodic",
+      "kind": "decision",
+      "trust_class": "agent_observed",
+      "confidence": 0.9,
+      "utility": 0.86,
+      "importance": 0.82,
+      "tags": [
+        "structural_recall",
+        "derived_revision",
+        "why"
+      ],
+      "content": "The current revision lineage aggregate dominance fix records the final derived memory that should anchor the pack for why-output debugging.",
+      "provenance_uri": "file://tests/fixtures/eval/structural_recall/source_memory.json#derived-current",
+      "expected_query_match": [
+        "revision lineage aggregate dominance"
+      ]
+    },
+    {
+      "id": "mem_00000000000000000000001109",
+      "level": "episodic",
+      "kind": "decision",
+      "trust_class": "agent_observed",
+      "confidence": 0.84,
+      "utility": 0.78,
+      "importance": 0.74,
+      "tags": [
+        "structural_recall",
+        "derived_revision",
+        "ancestor"
+      ],
+      "content": "The parent revision captured the graph dominance accumulator before the final aggregation behavior was attached.",
+      "provenance_uri": "file://tests/fixtures/eval/structural_recall/source_memory.json#derived-parent",
+      "expected_query_match": []
+    },
+    {
+      "id": "mem_00000000000000000000001110",
+      "level": "episodic",
+      "kind": "decision",
+      "trust_class": "agent_observed",
+      "confidence": 0.8,
+      "utility": 0.72,
+      "importance": 0.7,
+      "tags": [
+        "structural_recall",
+        "derived_revision",
+        "ancestor"
+      ],
+      "content": "The grandparent revision recorded the degraded dominance lineage that explains why the later aggregate fix was needed.",
+      "provenance_uri": "file://tests/fixtures/eval/structural_recall/source_memory.json#derived-grandparent",
+      "expected_query_match": []
+    }
+  ],
+  "structural_edges": [
+    {
+      "source_id": "mem_00000000000000000000001102",
+      "target_id": "mem_00000000000000000000001101",
+      "relation": "cites",
+      "weight": 0.8
+    },
+    {
+      "source_id": "mem_00000000000000000000001103",
+      "target_id": "mem_00000000000000000000001104",
+      "relation": "co_tag",
+      "weight": 0.75
+    },
+    {
+      "source_id": "mem_00000000000000000000001106",
+      "target_id": "mem_00000000000000000000001105",
+      "relation": "contradicts",
+      "weight": 0.95
+    },
+    {
+      "source_id": "mem_00000000000000000000001106",
+      "target_id": "mem_00000000000000000000001102",
+      "relation": "cites",
+      "weight": 0.9
+    },
+    {
+      "source_id": "mem_00000000000000000000001108",
+      "target_id": "mem_00000000000000000000001109",
+      "relation": "derived_from",
+      "weight": 0.85
+    },
+    {
+      "source_id": "mem_00000000000000000000001109",
+      "target_id": "mem_00000000000000000000001110",
+      "relation": "derived_from",
+      "weight": 0.85
+    },
+    {
+      "source_id": "mem_00000000000000000000001110",
+      "target_id": "mem_00000000000000000000001101",
+      "relation": "incident_supports",
+      "weight": 0.65
+    }
+  ],
+  "secret_policy": {
+    "synthetic_secret_policy": "none",
+    "secret_like_values_present": false,
+    "blocked_classes": [
+      "api_token",
+      "github_token",
+      "cloud_access_key",
+      "private_key"
+    ]
+  }
+}

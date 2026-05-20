@@ -1,0 +1,302 @@
+{
+  "schema": "ee.eval_fixture.v1",
+  "fixture_id": "fx.structural_recall.v1",
+  "scenario_ids": [
+    "orphan_query",
+    "over_grounding",
+    "related_concept",
+    "contradicted_belief",
+    "fresh_workspace",
+    "derived_revision"
+  ],
+  "fixture_family": "structural_recall",
+  "coverage_state": "implemented",
+  "journey": "PPR pack-quality regression coverage keeps structurally useful memories visible without degrading lexical authority results.",
+  "owning_bead_ids": [
+    "bd-bife.11",
+    "bd-ov09"
+  ],
+  "owning_gate_ids": [
+    "gate.graph.ppr_pack_quality",
+    "gate.eval.structural_recall"
+  ],
+  "deterministic": {
+    "fixed_clock": "2026-05-20T00:00:00Z",
+    "deterministic_seed": "seed.structural_recall.v1",
+    "stable_ids": [
+      "mem_00000000000000000000001101",
+      "mem_00000000000000000000001102",
+      "mem_00000000000000000000001103",
+      "mem_00000000000000000000001104",
+      "mem_00000000000000000000001105",
+      "mem_00000000000000000000001106",
+      "mem_00000000000000000000001107",
+      "mem_00000000000000000000001108",
+      "mem_00000000000000000000001109",
+      "mem_00000000000000000000001110",
+      "pack_00000000000000000000001101"
+    ],
+    "workspace_fingerprints": [
+      "workspace.structural_recall.v1"
+    ]
+  },
+  "source": {
+    "kind": "synthetic",
+    "path": "tests/fixtures/eval/structural_recall/source_memory.json",
+    "source_hash": "staged:bd-bife.11",
+    "synthetic_secret_policy": "none"
+  },
+  "redaction": {
+    "classes_expected": [],
+    "secret_leak_assertions": [
+      "stdout does not contain token-like prefixes",
+      "stderr does not contain token-like prefixes",
+      "artifacts contain no synthetic secrets"
+    ]
+  },
+  "command_sequence": [
+    {
+      "step": 1,
+      "argv": [
+        "ee",
+        "context",
+        "PPR structural recall regression",
+        "--workspace",
+        "<workspace>",
+        "--max-tokens",
+        "4000",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v1",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/structural_recall/<run-id>/01-context.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/structural_recall/<run-id>/01-context.stderr.txt"
+    }
+  ],
+  "expected_outputs": [
+    {
+      "step": 1,
+      "schema": "ee.response.v1",
+      "required_fields": [
+        "data.command",
+        "data.pack.items",
+        "data.pack.provenance",
+        "data.pack.hash"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    }
+  ],
+  "pack_quality_expectations": {
+    "schema": "ee.eval.pack_quality_expectations.v1",
+    "cases": [
+      {
+        "case_id": "pq.structural_recall.orphan_query.v1",
+        "scenario_id": "orphan_query",
+        "command_step": 1,
+        "query_surface": {
+          "kind": "inline_query",
+          "query": "thin-thread concurrency release compass"
+        },
+        "expected_selected_memory_ids": [
+          "mem_00000000000000000000001101"
+        ],
+        "critical_omitted_memory_ids": [],
+        "min_provenance_density": 1.0,
+        "allowed_degradation_codes": [
+          "semantic_disabled",
+          "graph_snapshot_stale"
+        ],
+        "forbidden_redaction_leaks": [
+          "secret",
+          "token"
+        ],
+        "token_budget": {
+          "max_tokens": 4000,
+          "expected_used_tokens_max": 900,
+          "expect_truncation": false
+        },
+        "stable_first_failure_label": "missing_orphan_structural_memory"
+      },
+      {
+        "case_id": "pq.structural_recall.over_grounding.v1",
+        "scenario_id": "over_grounding",
+        "command_step": 1,
+        "query_surface": {
+          "kind": "inline_query",
+          "query": "RCH queue backpressure authority"
+        },
+        "expected_selected_memory_ids": [
+          "mem_00000000000000000000001102"
+        ],
+        "critical_omitted_memory_ids": [],
+        "min_provenance_density": 1.0,
+        "allowed_degradation_codes": [
+          "semantic_disabled",
+          "graph_snapshot_stale"
+        ],
+        "forbidden_redaction_leaks": [
+          "secret",
+          "token"
+        ],
+        "token_budget": {
+          "max_tokens": 4000,
+          "expected_used_tokens_max": 900,
+          "expect_truncation": false
+        },
+        "stable_first_failure_label": "authority_memory_displaced"
+      },
+      {
+        "case_id": "pq.structural_recall.related_concept.v1",
+        "scenario_id": "related_concept",
+        "command_step": 1,
+        "query_surface": {
+          "kind": "inline_query",
+          "query": "completion audit dominance alias"
+        },
+        "expected_selected_memory_ids": [
+          "mem_00000000000000000000001104"
+        ],
+        "critical_omitted_memory_ids": [],
+        "min_provenance_density": 1.0,
+        "allowed_degradation_codes": [
+          "semantic_disabled",
+          "graph_snapshot_stale"
+        ],
+        "forbidden_redaction_leaks": [
+          "secret",
+          "token"
+        ],
+        "token_budget": {
+          "max_tokens": 4000,
+          "expected_used_tokens_max": 900,
+          "expect_truncation": false
+        },
+        "stable_first_failure_label": "missing_cotag_related_memory"
+      },
+      {
+        "case_id": "pq.structural_recall.contradicted_belief.v1",
+        "scenario_id": "contradicted_belief",
+        "command_step": 1,
+        "query_surface": {
+          "kind": "inline_query",
+          "query": "local cargo fallback is acceptable when RCH is busy"
+        },
+        "expected_selected_memory_ids": [
+          "mem_00000000000000000000001106"
+        ],
+        "critical_omitted_memory_ids": [
+          "mem_00000000000000000000001105"
+        ],
+        "min_provenance_density": 1.0,
+        "allowed_degradation_codes": [
+          "semantic_disabled",
+          "graph_snapshot_stale"
+        ],
+        "forbidden_redaction_leaks": [
+          "secret",
+          "token"
+        ],
+        "token_budget": {
+          "max_tokens": 4000,
+          "expected_used_tokens_max": 900,
+          "expect_truncation": false
+        },
+        "stable_first_failure_label": "contradicted_memory_ranked"
+      },
+      {
+        "case_id": "pq.structural_recall.fresh_workspace.v1",
+        "scenario_id": "fresh_workspace",
+        "command_step": 1,
+        "query_surface": {
+          "kind": "inline_query",
+          "query": "fresh workspace init status"
+        },
+        "expected_selected_memory_ids": [
+          "mem_00000000000000000000001107"
+        ],
+        "critical_omitted_memory_ids": [],
+        "min_provenance_density": 1.0,
+        "allowed_degradation_codes": [
+          "semantic_disabled",
+          "graph_snapshot_stale"
+        ],
+        "forbidden_redaction_leaks": [
+          "secret",
+          "token"
+        ],
+        "token_budget": {
+          "max_tokens": 4000,
+          "expected_used_tokens_max": 900,
+          "expect_truncation": false
+        },
+        "stable_first_failure_label": "fresh_workspace_ranking_changed"
+      },
+      {
+        "case_id": "pq.structural_recall.derived_revision.v1",
+        "scenario_id": "derived_revision",
+        "command_step": 1,
+        "query_surface": {
+          "kind": "inline_query",
+          "query": "revision lineage aggregate dominance"
+        },
+        "expected_selected_memory_ids": [
+          "mem_00000000000000000000001108",
+          "mem_00000000000000000000001109",
+          "mem_00000000000000000000001110"
+        ],
+        "critical_omitted_memory_ids": [],
+        "min_provenance_density": 1.0,
+        "allowed_degradation_codes": [
+          "semantic_disabled",
+          "graph_snapshot_stale"
+        ],
+        "forbidden_redaction_leaks": [
+          "secret",
+          "token"
+        ],
+        "token_budget": {
+          "max_tokens": 4000,
+          "expected_used_tokens_max": 1200,
+          "expect_truncation": false
+        },
+        "stable_first_failure_label": "missing_revision_ancestors"
+      }
+    ]
+  },
+  "structural_recall_expectations": {
+    "schema": "ee.eval.structural_recall_expectations.v1",
+    "baseline_report_path": "tests/snapshots/eval_ppr_pack_quality_pre_g1_baseline.snap",
+    "post_g1_report_path": "tests/snapshots/eval_ppr_pack_quality_post_g1_comparison.snap",
+    "ndcg_at_10_baseline": 0.82,
+    "allowed_ndcg_drop_pp": 2.0,
+    "structural_recall_at_10_min": 0.75,
+    "required_scenario_ids": [
+      "orphan_query",
+      "over_grounding",
+      "related_concept",
+      "contradicted_belief",
+      "fresh_workspace",
+      "derived_revision"
+    ]
+  },
+  "degraded_branches": [
+    {
+      "code": "semantic_disabled",
+      "description": "Semantic retrieval unavailable; lexical expectations still exercise pack-quality report plumbing.",
+      "repair_action": "ee index rebuild --workspace <workspace>",
+      "preserves_success_signal": true
+    },
+    {
+      "code": "graph_snapshot_stale",
+      "description": "Graph boosts unavailable or stale; the structural recall snapshot reports the blocked PPR contract instead of claiming a pass.",
+      "repair_action": "ee graph refresh --workspace <workspace>",
+      "preserves_success_signal": true
+    }
+  ],
+  "agent_success_signal": "A PPR-enabled context pack keeps graph-central, co-tagged, cited, and derived memories in the top ten while preserving authority and empty-graph behavior."
+}

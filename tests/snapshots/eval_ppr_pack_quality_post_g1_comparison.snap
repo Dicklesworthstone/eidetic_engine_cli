@@ -1,0 +1,67 @@
+{
+  "schema": "ee.eval.ppr_pack_quality_snapshot.v1",
+  "phase": "post_g1_comparison_contract",
+  "fixtureId": "fx.structural_recall.v1",
+  "owningBeadId": "bd-bife.11",
+  "scenarioCount": 6,
+  "metrics": {
+    "ndcgAt10Minimum": 0.8,
+    "structuralRecallAt10Minimum": 0.75,
+    "baselineNdcgAt10": 0.82,
+    "allowedNdcgDropPp": 2.0
+  },
+  "regressionGate": {
+    "failWhenNdcgDropPpGreaterThan": 2.0,
+    "failWhenStructuralRecallAt10Below": 0.75,
+    "requiredScenarioCount": 6
+  },
+  "scenarios": [
+    {
+      "scenarioId": "orphan_query",
+      "targetMemoryIds": [
+        "mem_00000000000000000000001101"
+      ],
+      "requiredTopK": 3
+    },
+    {
+      "scenarioId": "over_grounding",
+      "targetMemoryIds": [
+        "mem_00000000000000000000001102"
+      ],
+      "requiredTopK": 1
+    },
+    {
+      "scenarioId": "related_concept",
+      "targetMemoryIds": [
+        "mem_00000000000000000000001104"
+      ],
+      "requiredTopK": 10
+    },
+    {
+      "scenarioId": "contradicted_belief",
+      "targetMemoryIds": [
+        "mem_00000000000000000000001106"
+      ],
+      "forbiddenTopKMemoryIds": [
+        "mem_00000000000000000000001105"
+      ],
+      "requiredTopK": 10
+    },
+    {
+      "scenarioId": "fresh_workspace",
+      "targetMemoryIds": [
+        "mem_00000000000000000000001107"
+      ],
+      "requiredTopK": 1
+    },
+    {
+      "scenarioId": "derived_revision",
+      "targetMemoryIds": [
+        "mem_00000000000000000000001108",
+        "mem_00000000000000000000001109",
+        "mem_00000000000000000000001110"
+      ],
+      "requiredTopK": 10
+    }
+  ]
+}

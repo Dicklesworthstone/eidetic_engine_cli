@@ -1,7 +1,7 @@
 use ee::eval::{
     CommandStep, DegradedBranch, EVAL_FIXTURE_SCHEMA_V1, EvaluationScenario, ExpectedOutput,
     FixtureScenario, PACK_QUALITY_EXPECTATIONS_SCHEMA_V1, RedactionClass, RedactionLeakDetector,
-    SourceMemoryFile, validate_fixture_scenario,
+    STRUCTURAL_RECALL_EXPECTATIONS_SCHEMA_V1, SourceMemoryFile, validate_fixture_scenario,
 };
 use ee::models::model_registry::{
     EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
@@ -10,6 +10,7 @@ use ee::models::model_registry::{
 };
 use ee::policy::detect_instruction_like_content;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
 const RELEASE_FAILURE_SCENARIO: &str = include_str!("fixtures/eval/release_failure/scenario.json");
 const RELEASE_FAILURE_SOURCE: &str =
@@ -53,6 +54,15 @@ const METAMORPHIC_EVALUATION_SOURCE: &str =
     include_str!("fixtures/eval/metamorphic_evaluation/source_memory.json");
 const METAMORPHIC_EVALUATION_README: &str =
     include_str!("fixtures/eval/metamorphic_evaluation/README.md");
+const STRUCTURAL_RECALL_SCENARIO: &str =
+    include_str!("fixtures/eval/structural_recall/scenario.json");
+const STRUCTURAL_RECALL_SOURCE: &str =
+    include_str!("fixtures/eval/structural_recall/source_memory.json");
+const STRUCTURAL_RECALL_README: &str = include_str!("fixtures/eval/structural_recall/README.md");
+const EVAL_PPR_PRE_G1_BASELINE: &str =
+    include_str!("snapshots/eval_ppr_pack_quality_pre_g1_baseline.snap");
+const EVAL_PPR_POST_G1_COMPARISON: &str =
+    include_str!("snapshots/eval_ppr_pack_quality_post_g1_comparison.snap");
 
 type TestResult = Result<(), String>;
 
@@ -164,6 +174,10 @@ fn string_array_field<'a>(value: &'a Value, name: &str) -> Result<Vec<&'a str>, 
         .collect()
 }
 
+fn string_set_field(value: &Value, name: &str) -> Result<BTreeSet<String>, String> {
+    string_array_field(value, name).map(|values| values.into_iter().map(str::to_owned).collect())
+}
+
 fn case_by_id<'a>(cases: &'a [Value], case_id: &str) -> Result<&'a Value, String> {
     cases
         .iter()
@@ -197,6 +211,11 @@ fn pack_quality_expectations_validate_required_fixture_set() -> TestResult {
             "data_size_tiers",
             DATA_SIZE_TIERS_SCENARIO,
             DATA_SIZE_TIERS_SOURCE,
+        ),
+        (
+            "structural_recall",
+            STRUCTURAL_RECALL_SCENARIO,
+            STRUCTURAL_RECALL_SOURCE,
         ),
     ] {
         let scenario = parse_scenario_model(scenario_source, label)?;
@@ -311,6 +330,168 @@ fn pack_quality_validation_rejects_malformed_expectations() -> TestResult {
         },
         "ambiguous scenario/query reference",
     )
+}
+
+#[test]
+fn structural_recall_ppr_fixture_contract_is_complete() -> TestResult {
+    let scenario_value = parse_json(STRUCTURAL_RECALL_SCENARIO, "structural_recall scenario")?;
+    let source_value = parse_json(STRUCTURAL_RECALL_SOURCE, "structural_recall source")?;
+    let scenario = parse_scenario_model(STRUCTURAL_RECALL_SCENARIO, "structural_recall")?;
+    let source = parse_source_model(STRUCTURAL_RECALL_SOURCE, "structural_recall")?;
+    validate_fixture_scenario(&scenario, &source).map_err(|error| error.to_string())?;
+
+    ensure_equal(
+        string_field(&scenario_value, "schema")?,
+        EVAL_FIXTURE_SCHEMA_V1,
+        "scenario schema",
+    )?;
+    ensure_equal(
+        string_field(&scenario_value, "fixture_id")?,
+        "fx.structural_recall.v1",
+        "fixture id",
+    )?;
+    ensure_equal(
+        string_field(&scenario_value, "fixture_family")?,
+        "structural_recall",
+        "fixture family",
+    )?;
+    ensure(
+        array_contains_string(
+            array_field(&scenario_value, "owning_bead_ids")?,
+            "bd-bife.11",
+        ),
+        "structural recall fixture must be owned by bd-bife.11",
+    )?;
+
+    let required_scenarios = BTreeSet::from([
+        "contradicted_belief".to_string(),
+        "derived_revision".to_string(),
+        "fresh_workspace".to_string(),
+        "orphan_query".to_string(),
+        "over_grounding".to_string(),
+        "related_concept".to_string(),
+    ]);
+    ensure_equal(
+        string_set_field(&scenario_value, "scenario_ids")?,
+        required_scenarios.clone(),
+        "six structural recall scenario ids",
+    )?;
+
+    let pack_quality = field(&scenario_value, "pack_quality_expectations")?;
+    let cases = array_field(pack_quality, "cases")?;
+    ensure_equal(cases.len(), 6, "pack-quality case count")?;
+    let case_scenarios: BTreeSet<String> = cases
+        .iter()
+        .map(|case| string_field(case, "scenario_id").map(str::to_owned))
+        .collect::<Result<_, _>>()?;
+    ensure_equal(
+        case_scenarios,
+        required_scenarios.clone(),
+        "pack-quality cases cover all structural recall scenarios",
+    )?;
+
+    let structural = field(&scenario_value, "structural_recall_expectations")?;
+    ensure_equal(
+        string_field(structural, "schema")?,
+        STRUCTURAL_RECALL_EXPECTATIONS_SCHEMA_V1,
+        "structural recall schema",
+    )?;
+    ensure_equal(
+        string_field(structural, "baseline_report_path")?,
+        "tests/snapshots/eval_ppr_pack_quality_pre_g1_baseline.snap",
+        "baseline snapshot path",
+    )?;
+    ensure_equal(
+        string_field(structural, "post_g1_report_path")?,
+        "tests/snapshots/eval_ppr_pack_quality_post_g1_comparison.snap",
+        "post-G1 snapshot path",
+    )?;
+    ensure_equal(
+        string_set_field(structural, "required_scenario_ids")?,
+        required_scenarios.clone(),
+        "required structural recall scenarios",
+    )?;
+    ensure_equal(
+        field(structural, "structural_recall_at_10_min")?.as_f64(),
+        Some(0.75),
+        "structural recall threshold",
+    )?;
+    ensure_equal(
+        field(structural, "allowed_ndcg_drop_pp")?.as_f64(),
+        Some(2.0),
+        "allowed NDCG drop",
+    )?;
+
+    let edges = array_field(&source_value, "structural_edges")?;
+    ensure(
+        edges.len() >= 6,
+        "structural edges must encode graph evidence",
+    )?;
+    let relations: BTreeSet<String> = edges
+        .iter()
+        .map(|edge| string_field(edge, "relation").map(str::to_owned))
+        .collect::<Result<_, _>>()?;
+    for relation in ["cites", "co_tag", "contradicts", "derived_from"] {
+        ensure(
+            relations.contains(relation),
+            &format!("structural edge relation `{relation}` must exist"),
+        )?;
+    }
+
+    let baseline = parse_json(EVAL_PPR_PRE_G1_BASELINE, "pre-G1 PPR baseline snapshot")?;
+    let post_g1 = parse_json(
+        EVAL_PPR_POST_G1_COMPARISON,
+        "post-G1 PPR comparison snapshot",
+    )?;
+    for (label, snapshot) in [("baseline", &baseline), ("post_g1", &post_g1)] {
+        ensure_equal(
+            string_field(snapshot, "schema")?,
+            "ee.eval.ppr_pack_quality_snapshot.v1",
+            &format!("{label} snapshot schema"),
+        )?;
+        ensure_equal(
+            string_field(snapshot, "fixtureId")?,
+            "fx.structural_recall.v1",
+            &format!("{label} fixture id"),
+        )?;
+        ensure_equal(
+            u64_field(snapshot, "scenarioCount")?,
+            6,
+            &format!("{label} scenario count"),
+        )?;
+        let snapshot_scenarios: BTreeSet<String> = array_field(snapshot, "scenarios")?
+            .iter()
+            .map(|case| string_field(case, "scenarioId").map(str::to_owned))
+            .collect::<Result<_, _>>()?;
+        ensure_equal(
+            snapshot_scenarios,
+            required_scenarios.clone(),
+            &format!("{label} scenarios align with fixture"),
+        )?;
+    }
+
+    ensure_equal(
+        post_g1.pointer("/regressionGate/failWhenNdcgDropPpGreaterThan"),
+        Some(&json!(2.0)),
+        "post-G1 NDCG regression gate",
+    )?;
+    ensure_equal(
+        post_g1.pointer("/regressionGate/failWhenStructuralRecallAt10Below"),
+        Some(&json!(0.75)),
+        "post-G1 structural recall gate",
+    )?;
+
+    let all_fixture_text = format!(
+        "{STRUCTURAL_RECALL_SCENARIO}\n{STRUCTURAL_RECALL_SOURCE}\n{STRUCTURAL_RECALL_README}"
+    );
+    for forbidden in ["sk-", "ghp_", "AKIA", "-----BEGIN PRIVATE KEY-----"] {
+        ensure(
+            !all_fixture_text.contains(forbidden),
+            &format!("structural recall fixture must not contain secret marker `{forbidden}`"),
+        )?;
+    }
+
+    Ok(())
 }
 
 #[test]

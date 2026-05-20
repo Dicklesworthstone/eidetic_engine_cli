@@ -1,0 +1,45 @@
+{
+  "schema": "ee.eval.ppr_pack_quality_snapshot.v1",
+  "phase": "pre_g1_baseline",
+  "fixtureId": "fx.structural_recall.v1",
+  "owningBeadId": "bd-bife.11",
+  "scenarioCount": 6,
+  "metrics": {
+    "ndcgAt10": 0.82,
+    "structuralRecallAt10": 0.33,
+    "structuralRecallAt10Minimum": 0.75,
+    "allowedNdcgDropPp": 2.0
+  },
+  "scenarios": [
+    {
+      "scenarioId": "orphan_query",
+      "preG1Expectation": "graph-central memory is not required in top three",
+      "postG1Expectation": "graph-central memory appears in top three"
+    },
+    {
+      "scenarioId": "over_grounding",
+      "preG1Expectation": "authority memory is top hit",
+      "postG1Expectation": "authority memory remains top hit"
+    },
+    {
+      "scenarioId": "related_concept",
+      "preG1Expectation": "co-tag related memory is not required in top ten",
+      "postG1Expectation": "co-tag related memory appears in top ten"
+    },
+    {
+      "scenarioId": "contradicted_belief",
+      "preG1Expectation": "textually strong contradicted memory may win",
+      "postG1Expectation": "cited corrective memory outranks contradicted memory"
+    },
+    {
+      "scenarioId": "fresh_workspace",
+      "preG1Expectation": "lexical ranking is unchanged",
+      "postG1Expectation": "lexical ranking is unchanged"
+    },
+    {
+      "scenarioId": "derived_revision",
+      "preG1Expectation": "direct revision memory appears alone",
+      "postG1Expectation": "direct revision memory and two ancestors appear in top ten"
+    }
+  ]
+}
