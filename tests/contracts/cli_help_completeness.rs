@@ -35,6 +35,21 @@ fn assert_contains_all(haystack: &str, needles: &[&str], context: &str) -> TestR
     }
 }
 
+fn assert_contains_none(haystack: &str, needles: &[&str], context: &str) -> TestResult {
+    let unexpected: Vec<&str> = needles
+        .iter()
+        .copied()
+        .filter(|needle| haystack.contains(needle))
+        .collect();
+    if unexpected.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{context} unexpectedly documented entries: {unexpected:?}"
+        ))
+    }
+}
+
 fn read_graph_cli_reference() -> Result<String, String> {
     let reference_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("docs")
@@ -365,6 +380,41 @@ fn graph_cli_reference_documents_hits_centrality_examples() -> TestResult {
         ],
         "docs/cli-reference/graph-flags.md",
     )
+}
+
+#[test]
+fn planned_only_graph_flags_stay_out_of_current_help() -> TestResult {
+    let reference = read_graph_cli_reference()?;
+    let planned_only_flags = ["--allow-tombstone-load-bearing"];
+    assert_contains_all(
+        &reference,
+        &[
+            "## Tracked But Not Yet In Current CLI",
+            "--allow-tombstone-load-bearing",
+            "Not present in the current Clap structs",
+        ],
+        "docs/cli-reference/graph-flags.md planned-only section",
+    )?;
+
+    for (context, help) in [
+        ("ee --help", help_for(&["ee", "--help"])?),
+        (
+            "ee curate disposition --help",
+            help_for(&["ee", "curate", "disposition", "--help"])?,
+        ),
+        (
+            "ee insights --help",
+            help_for(&["ee", "insights", "--help"])?,
+        ),
+        (
+            "ee rule provenance --help",
+            help_for(&["ee", "rule", "provenance", "--help"])?,
+        ),
+    ] {
+        assert_contains_none(&help, &planned_only_flags, context)?;
+    }
+
+    Ok(())
 }
 
 #[test]
