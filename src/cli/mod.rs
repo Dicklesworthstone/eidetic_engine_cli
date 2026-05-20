@@ -5921,6 +5921,19 @@ pub struct DoctorArgs {
         conflicts_with_all = ["fix_plan", "franken_health"],
     )]
     pub capabilities: bool,
+
+    /// Emit the agent-facing `ee.doctor.robot_docs.v1` JSON bundle that
+    /// indexes every doctor subcommand/flag with a one-line purpose and a
+    /// canonical invocation example. Read-only; the chokepoint at
+    /// `src/core/doctor_runtime::mutate` is NOT invoked. Designed for
+    /// agent harnesses that want a structured doctor surface index
+    /// without parsing `--help` text. Suppresses the normal report.
+    #[arg(
+        long = "robot-docs",
+        action = ArgAction::SetTrue,
+        conflicts_with_all = ["fix_plan", "franken_health", "capabilities"],
+    )]
+    pub robot_docs: bool,
 }
 
 /// Arguments for `ee init`.
@@ -8801,6 +8814,10 @@ where
                         .to_owned()
                 });
                 write_stdout(stdout, &(json + "\n"));
+                return ProcessExitCode::Success;
+            }
+            if args.robot_docs {
+                write_stdout(stdout, &(doctor_robot_docs_json() + "\n"));
                 return ProcessExitCode::Success;
             }
             let report = cli
@@ -13554,6 +13571,61 @@ where
             domain_error.exit_code()
         }
     }
+}
+
+/// Emit the agent-facing `ee.doctor.robot_docs.v1` JSON bundle. Indexes
+/// every doctor surface flag with a one-line purpose + a canonical
+/// invocation example so an agent can drive `ee doctor` without scraping
+/// `--help` text. Read-only: this function performs no I/O and never
+/// invokes the `src/core/doctor_runtime::mutate` chokepoint.
+///
+/// The bundle is intentionally constructed from string literals so the
+/// content stays in sync with the `DoctorArgs` parser surface; CLI
+/// surface tests pin the schema id + the set of surface entries.
+fn doctor_robot_docs_json() -> String {
+    serde_json::json!({
+        "schema": "ee.doctor.robot_docs.v1",
+        "doctor_version": env!("CARGO_PKG_VERSION"),
+        "doctor_contract_version": "1.0.0",
+        "surfaces": [
+            {
+                "name": "ee doctor",
+                "kind": "subcommand",
+                "purpose": "Run the default doctor health report.",
+                "example": "ee doctor --json"
+            },
+            {
+                "name": "ee doctor --fix-plan",
+                "kind": "flag",
+                "purpose": "Emit a structured fix plan instead of the normal health report.",
+                "example": "ee doctor --fix-plan --json"
+            },
+            {
+                "name": "ee doctor --franken-health",
+                "kind": "flag",
+                "purpose": "Output Franken stack dependency health diagnostics.",
+                "example": "ee doctor --franken-health --json"
+            },
+            {
+                "name": "ee doctor --capabilities",
+                "kind": "flag",
+                "purpose": "Emit the agent-facing ee.doctor.capabilities.v1 JSON contract.",
+                "example": "ee doctor --capabilities"
+            },
+            {
+                "name": "ee doctor --robot-docs",
+                "kind": "flag",
+                "purpose": "Emit the ee.doctor.robot_docs.v1 bundle (this surface index).",
+                "example": "ee doctor --robot-docs"
+            }
+        ],
+        "related_schemas": [
+            "ee.doctor.capabilities.v1",
+            "ee.doctor.run_state.v1",
+            "ee.doctor.action_line.v1"
+        ]
+    })
+    .to_string()
 }
 
 fn clap_error_message(error: &clap::Error) -> String {
