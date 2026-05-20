@@ -30,6 +30,31 @@ pub const BEAD_AFFINITY_SCHEMA_V1: &str = "ee.context.bead_affinity.v1";
 /// failed to load".
 pub const BEAD_AFFINITY_COLD_START_CODE: &str = "bead_affinity_cold_start";
 
+/// Stable degraded code emitted when bead context could not be loaded
+/// (beads.jsonl missing, unreadable, or schema mismatch) so retrieval
+/// falls back to the unbiased baseline. Pinned by
+/// `docs/schemas/ee.context.bead_affinity.v1.json#/$defs/degradation`.
+pub const BEAD_AFFINITY_UNAVAILABLE_CODE: &str = "bead_affinity_unavailable";
+
+/// Stable degraded code emitted when at least one memory's computed
+/// weight saturated the global cap, signalling that the cap is biting.
+pub const BEAD_AFFINITY_CAPPED_CODE: &str = "bead_affinity_capped";
+
+/// Stable degraded code emitted when the bead loader failed to resolve
+/// the requested `--bead-id` (typo, deleted bead, network-only lookup
+/// path) so bead-affinity was skipped entirely for the request.
+pub const BEAD_AFFINITY_LOOKUP_FAILED_CODE: &str = "bead_affinity_lookup_failed";
+
+/// All four degraded codes the schema enumerates, in stable order. The
+/// renderer cycles through this slice when emitting the
+/// `scoreComponents.beadAffinity.degraded` array.
+pub const BEAD_AFFINITY_DEGRADED_CODES: &[&str] = &[
+    BEAD_AFFINITY_COLD_START_CODE,
+    BEAD_AFFINITY_UNAVAILABLE_CODE,
+    BEAD_AFFINITY_CAPPED_CODE,
+    BEAD_AFFINITY_LOOKUP_FAILED_CODE,
+];
+
 /// Maximum absolute weight a bead-affinity score may apply, matching
 /// the swarmx.5 agent-profile cap so the two priors compose cleanly.
 pub const BEAD_AFFINITY_BIAS_CAP: f64 = 0.05;
@@ -398,5 +423,32 @@ mod tests {
         assert_eq!(BEAD_AFFINITY_COLD_START_CODE, "bead_affinity_cold_start");
         assert_eq!(BEAD_AFFINITY_BIAS_CAP, 0.05);
         assert_eq!(BEAD_AFFINITY_COMPONENT_CAP, 0.0125);
+    }
+
+    #[test]
+    fn degraded_codes_match_schema_pinned_vocabulary() {
+        // Mirrors the closed set pinned by
+        // docs/schemas/ee.context.bead_affinity.v1.json and verified by
+        // tests/bead_affinity_schema_unit.rs::degradation_code_enum_lists_documented_codes.
+        let expected: BTreeSet<&'static str> = [
+            "bead_affinity_cold_start",
+            "bead_affinity_unavailable",
+            "bead_affinity_capped",
+            "bead_affinity_lookup_failed",
+        ]
+        .into_iter()
+        .collect();
+        let actual: BTreeSet<&'static str> = BEAD_AFFINITY_DEGRADED_CODES.iter().copied().collect();
+        assert_eq!(
+            actual, expected,
+            "bead-affinity degraded code closed set drifted from schema vocabulary"
+        );
+
+        assert_eq!(BEAD_AFFINITY_UNAVAILABLE_CODE, "bead_affinity_unavailable");
+        assert_eq!(BEAD_AFFINITY_CAPPED_CODE, "bead_affinity_capped");
+        assert_eq!(
+            BEAD_AFFINITY_LOOKUP_FAILED_CODE,
+            "bead_affinity_lookup_failed"
+        );
     }
 }
