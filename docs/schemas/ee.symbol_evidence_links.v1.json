@@ -1,0 +1,271 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.symbol_evidence_links.v1.json",
+  "title": "ee.symbol_evidence_links.v1",
+  "description": "Read-only derived links from memories, CASS evidence, failures, rules, and decisions to stable code symbols. Link metadata stores provenance, confidence, and reasons without source bodies.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "snapshotHash",
+    "generatedBy",
+    "sourceManifestHash",
+    "links",
+    "degraded"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ee.symbol_evidence_links.v1"
+    },
+    "snapshotHash": {
+      "$ref": "#/$defs/blake3Hex"
+    },
+    "generatedBy": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sourceManifestHash": {
+      "$ref": "#/$defs/blake3Hex"
+    },
+    "links": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/link"
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/degradation"
+      }
+    }
+  },
+  "$defs": {
+    "link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "linkId",
+        "sourceKind",
+        "evidenceId",
+        "provenanceUri",
+        "targetPath",
+        "targetRange",
+        "symbolId",
+        "canonicalName",
+        "symbolKind",
+        "symbolRange",
+        "confidence",
+        "resolution",
+        "reason"
+      ],
+      "properties": {
+        "linkId": {
+          "type": "string",
+          "pattern": "^sym_link_v1_[0-9a-f]{24}$"
+        },
+        "sourceKind": {
+          "type": "string",
+          "enum": [
+            "memory",
+            "cass_evidence",
+            "failure",
+            "rule",
+            "decision"
+          ]
+        },
+        "evidenceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provenanceUri": {
+          "type": "string",
+          "minLength": 1
+        },
+        "targetPath": {
+          "$ref": "#/$defs/normalizedPath"
+        },
+        "targetRange": {
+          "$ref": "#/$defs/sourceRange"
+        },
+        "symbolId": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^sym_v1_[0-9a-f]{24}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "canonicalName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "symbolKind": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/symbolKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "symbolRange": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sourceRange"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "resolution": {
+          "type": "string",
+          "enum": [
+            "exact_symbol",
+            "containing_symbol",
+            "file_level",
+            "stale_span",
+            "ambiguous",
+            "renamed_symbol",
+            "deleted_symbol",
+            "source_file_missing"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "exact_symbol_span",
+            "containing_symbol_span",
+            "file_level_no_containing_symbol",
+            "stale_line_span",
+            "source_file_missing",
+            "ambiguous_containing_symbols",
+            "symbol_renamed_by_fingerprint",
+            "symbol_deleted"
+          ]
+        }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "severity",
+        "evidenceId",
+        "path",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "stale_line_span",
+            "source_file_missing",
+            "ambiguous_containing_symbols",
+            "symbol_renamed",
+            "symbol_deleted"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "warning",
+            "medium"
+          ]
+        },
+        "evidenceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "sourceRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "startLine",
+        "startColumn",
+        "endLine",
+        "endColumn"
+      ],
+      "properties": {
+        "startLine": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "startColumn": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "endLine": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "endColumn": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "symbolKind": {
+      "type": "string",
+      "enum": [
+        "module",
+        "function",
+        "method",
+        "struct",
+        "enum",
+        "trait",
+        "impl",
+        "macro_invocation",
+        "json_schema_constant",
+        "cli_command_handler"
+      ]
+    },
+    "normalizedPath": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "pattern": "\\\\"
+      }
+    },
+    "blake3Hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "field_presets": {
+    "compact": [
+      "schema",
+      "snapshotHash",
+      "links",
+      "degraded"
+    ],
+    "full": [
+      "*"
+    ]
+  }
+}

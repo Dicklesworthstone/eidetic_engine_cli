@@ -4,7 +4,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use ee::models::{
-    KNOWN_SCHEMAS, SYMBOL_SNAPSHOT_SCHEMA_V1, SymbolGraphDegradationCode, SymbolKind,
+    KNOWN_SCHEMAS, SYMBOL_EVIDENCE_LINKS_SCHEMA_V1, SYMBOL_SNAPSHOT_SCHEMA_V1,
+    SymbolEvidenceLinkDegradationCode, SymbolEvidenceReasonCode, SymbolEvidenceResolution,
+    SymbolEvidenceSourceKind, SymbolGraphDegradationCode, SymbolKind,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -12,6 +14,7 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 const SCHEMA_PATH: &str = "docs/schemas/ee.symbol_snapshot.v1.json";
+const EVIDENCE_LINKS_SCHEMA_PATH: &str = "docs/schemas/ee.symbol_evidence_links.v1.json";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -78,6 +81,10 @@ fn ensure_schema_registered() -> TestResult {
         KNOWN_SCHEMAS.contains(&SYMBOL_SNAPSHOT_SCHEMA_V1),
         "KNOWN_SCHEMAS missing ee.symbol_snapshot.v1",
     )?;
+    ensure(
+        KNOWN_SCHEMAS.contains(&SYMBOL_EVIDENCE_LINKS_SCHEMA_V1),
+        "KNOWN_SCHEMAS missing ee.symbol_evidence_links.v1",
+    )?;
 
     let supported = ee::core::supported_schemas()
         .into_iter()
@@ -88,6 +95,12 @@ fn ensure_schema_registered() -> TestResult {
             *name == "symbol_snapshot" && *schema == SYMBOL_SNAPSHOT_SCHEMA_V1
         }),
         "supported_schemas missing symbol_snapshot=ee.symbol_snapshot.v1",
+    )?;
+    ensure(
+        supported.iter().any(|(name, schema)| {
+            *name == "symbol_evidence_links" && *schema == SYMBOL_EVIDENCE_LINKS_SCHEMA_V1
+        }),
+        "supported_schemas missing symbol_evidence_links=ee.symbol_evidence_links.v1",
     )
 }
 
@@ -179,30 +192,161 @@ fn symbol_snapshot_schema_matches_model_enum_vocabulary() -> TestResult {
 }
 
 #[test]
-fn symbol_snapshot_schema_stays_redaction_safe() -> TestResult {
-    let schema = read_json(SCHEMA_PATH)?;
-    let serialized =
-        serde_json::to_string(&schema).map_err(|error| format!("serialize schema: {error}"))?;
+fn symbol_evidence_links_schema_is_documented_and_registered() -> TestResult {
+    let schema = read_json(EVIDENCE_LINKS_SCHEMA_PATH)?;
 
-    for forbidden in [
-        "sourceBody",
-        "sourceText",
-        "rawSource",
-        "sourceBytes",
-        "rawBody",
-        "bodyText",
-        "contentText",
-        "secretValue",
-        "tokenValue",
-        "apiKey",
+    ensure_json_str(
+        &schema,
+        "/$schema",
+        "https://json-schema.org/draft/2020-12/schema",
+    )?;
+    ensure_json_str(
+        &schema,
+        "/$id",
+        "https://eidetic-engine/schemas/ee.symbol_evidence_links.v1.json",
+    )?;
+    ensure_json_str(&schema, "/title", SYMBOL_EVIDENCE_LINKS_SCHEMA_V1)?;
+    ensure_json_bool(&schema, "/additionalProperties", false)?;
+    ensure_json_str(
+        &schema,
+        "/properties/schema/const",
+        SYMBOL_EVIDENCE_LINKS_SCHEMA_V1,
+    )?;
+    ensure_json_str(
+        &schema,
+        "/$defs/link/properties/linkId/pattern",
+        "^sym_link_v1_[0-9a-f]{24}$",
+    )?;
+
+    ensure_schema_registered()
+}
+
+#[test]
+fn symbol_evidence_links_schema_matches_model_enum_vocabulary() -> TestResult {
+    let schema = read_json(EVIDENCE_LINKS_SCHEMA_PATH)?;
+
+    let source_kinds = schema_enum(&schema, "/$defs/link/properties/sourceKind/enum")?;
+    for source_kind in [
+        SymbolEvidenceSourceKind::Memory,
+        SymbolEvidenceSourceKind::CassEvidence,
+        SymbolEvidenceSourceKind::Failure,
+        SymbolEvidenceSourceKind::Rule,
+        SymbolEvidenceSourceKind::Decision,
     ] {
         ensure(
-            !serialized.contains(forbidden),
-            format!("symbol snapshot schema exposed forbidden raw-source field {forbidden:?}"),
+            source_kinds.contains(&source_kind.as_str()),
+            format!(
+                "symbol evidence source kind enum missing {}",
+                source_kind.as_str()
+            ),
         )?;
     }
+    ensure(
+        source_kinds.len() == 5,
+        format!("sourceKind enum should have 5 values, got {source_kinds:?}"),
+    )?;
 
+    let resolutions = schema_enum(&schema, "/$defs/link/properties/resolution/enum")?;
+    for resolution in [
+        SymbolEvidenceResolution::ExactSymbol,
+        SymbolEvidenceResolution::ContainingSymbol,
+        SymbolEvidenceResolution::FileLevel,
+        SymbolEvidenceResolution::StaleSpan,
+        SymbolEvidenceResolution::Ambiguous,
+        SymbolEvidenceResolution::RenamedSymbol,
+        SymbolEvidenceResolution::DeletedSymbol,
+        SymbolEvidenceResolution::SourceFileMissing,
+    ] {
+        ensure(
+            resolutions.contains(&resolution.as_str()),
+            format!(
+                "symbol evidence resolution enum missing {}",
+                resolution.as_str()
+            ),
+        )?;
+    }
+    ensure(
+        resolutions.len() == 8,
+        format!("resolution enum should have 8 values, got {resolutions:?}"),
+    )?;
+
+    let reasons = schema_enum(&schema, "/$defs/link/properties/reason/enum")?;
+    for reason in [
+        SymbolEvidenceReasonCode::ExactSymbolSpan,
+        SymbolEvidenceReasonCode::ContainingSymbolSpan,
+        SymbolEvidenceReasonCode::FileLevelNoContainingSymbol,
+        SymbolEvidenceReasonCode::StaleLineSpan,
+        SymbolEvidenceReasonCode::SourceFileMissing,
+        SymbolEvidenceReasonCode::AmbiguousContainingSymbols,
+        SymbolEvidenceReasonCode::SymbolRenamedByFingerprint,
+        SymbolEvidenceReasonCode::SymbolDeleted,
+    ] {
+        ensure(
+            reasons.contains(&reason.as_str()),
+            format!("symbol evidence reason enum missing {}", reason.as_str()),
+        )?;
+    }
+    ensure(
+        reasons.len() == 8,
+        format!("reason enum should have 8 values, got {reasons:?}"),
+    )?;
+
+    let degradation_codes = schema_enum(&schema, "/$defs/degradation/properties/code/enum")?;
+    for code in [
+        SymbolEvidenceLinkDegradationCode::StaleLineSpan,
+        SymbolEvidenceLinkDegradationCode::SourceFileMissing,
+        SymbolEvidenceLinkDegradationCode::AmbiguousContainingSymbols,
+        SymbolEvidenceLinkDegradationCode::SymbolRenamed,
+        SymbolEvidenceLinkDegradationCode::SymbolDeleted,
+    ] {
+        let value = serialized_enum_value(code)?;
+        ensure(
+            degradation_codes.contains(&value.as_str()),
+            format!("symbol evidence degradation enum missing {value}"),
+        )?;
+    }
+    ensure(
+        degradation_codes.len() == 5,
+        format!("degradation code enum should have 5 values, got {degradation_codes:?}"),
+    )
+}
+
+#[test]
+fn symbol_snapshot_schema_stays_redaction_safe() -> TestResult {
+    for path in [SCHEMA_PATH, EVIDENCE_LINKS_SCHEMA_PATH] {
+        let schema = read_json(path)?;
+        let serialized =
+            serde_json::to_string(&schema).map_err(|error| format!("serialize schema: {error}"))?;
+
+        for forbidden in [
+            "sourceBody",
+            "sourceText",
+            "rawSource",
+            "sourceBytes",
+            "rawBody",
+            "bodyText",
+            "contentText",
+            "secretValue",
+            "tokenValue",
+            "apiKey",
+        ] {
+            ensure(
+                !serialized.contains(forbidden),
+                format!("{path} exposed forbidden raw-source field {forbidden:?}"),
+            )?;
+        }
+    }
+
+    let schema = read_json(SCHEMA_PATH)?;
     ensure_json_bool(&schema, "/$defs/symbol/additionalProperties", false)?;
     ensure_json_bool(&schema, "/$defs/sourceFile/additionalProperties", false)?;
-    ensure_json_bool(&schema, "/$defs/degradation/additionalProperties", false)
+    ensure_json_bool(&schema, "/$defs/degradation/additionalProperties", false)?;
+
+    let links_schema = read_json(EVIDENCE_LINKS_SCHEMA_PATH)?;
+    ensure_json_bool(&links_schema, "/$defs/link/additionalProperties", false)?;
+    ensure_json_bool(
+        &links_schema,
+        "/$defs/degradation/additionalProperties",
+        false,
+    )
 }

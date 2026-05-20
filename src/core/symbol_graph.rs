@@ -1,16 +1,20 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::models::{
-    SYMBOL_ID_PREFIX, SYMBOL_SNAPSHOT_SCHEMA_V1, SymbolGraphDegradation,
+    SYMBOL_EVIDENCE_LINK_ID_PREFIX, SYMBOL_EVIDENCE_LINKS_SCHEMA_V1, SYMBOL_ID_PREFIX,
+    SYMBOL_SNAPSHOT_SCHEMA_V1, SymbolEvidenceLink, SymbolEvidenceLinkDegradation,
+    SymbolEvidenceLinkDegradationCode, SymbolEvidenceLinkSet, SymbolEvidenceReasonCode,
+    SymbolEvidenceResolution, SymbolEvidenceSourceKind, SymbolGraphDegradation,
     SymbolGraphDegradationCode, SymbolGraphDegradationSeverity, SymbolKind, SymbolParserKind,
     SymbolRecord, SymbolSnapshot, SymbolSourceFile, SymbolSourceLanguage, SymbolSourceRange,
     SymbolVisibility,
 };
 
 pub const SYMBOL_GRAPH_GENERATOR_V1: &str = "ee.symbol_graph.rust_lexical_scanner.v1";
+pub const SYMBOL_EVIDENCE_LINK_GENERATOR_V1: &str = "ee.symbol_graph.evidence_link_resolver.v1";
 pub const DEFAULT_MAX_RUST_SOURCE_BYTES: u64 = 1_048_576;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -201,6 +205,505 @@ impl SymbolGraphExtractor {
 #[must_use]
 pub fn extract_rust_symbol_snapshot_from_sources(inputs: &[RustSourceInput<'_>]) -> SymbolSnapshot {
     SymbolGraphExtractor::default().extract_sources(inputs)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SymbolEvidenceInput<'a> {
+    pub source_kind: SymbolEvidenceSourceKind,
+    pub evidence_id: Cow<'a, str>,
+    pub provenance_uri: Cow<'a, str>,
+    pub target_path: Cow<'a, str>,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub confidence: f32,
+    pub expected_symbol_id: Option<Cow<'a, str>>,
+    pub expected_rename_fingerprint: Option<Cow<'a, str>>,
+}
+
+impl<'a> SymbolEvidenceInput<'a> {
+    #[must_use]
+    pub fn new(
+        source_kind: SymbolEvidenceSourceKind,
+        evidence_id: impl Into<Cow<'a, str>>,
+        provenance_uri: impl Into<Cow<'a, str>>,
+        target_path: impl Into<Cow<'a, str>>,
+        start_line: u32,
+        end_line: u32,
+        confidence: f32,
+    ) -> Self {
+        Self {
+            source_kind,
+            evidence_id: evidence_id.into(),
+            provenance_uri: provenance_uri.into(),
+            target_path: target_path.into(),
+            start_line,
+            end_line,
+            confidence,
+            expected_symbol_id: None,
+            expected_rename_fingerprint: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_expected_symbol(
+        mut self,
+        symbol_id: impl Into<Cow<'a, str>>,
+        rename_fingerprint: impl Into<Cow<'a, str>>,
+    ) -> Self {
+        self.expected_symbol_id = Some(symbol_id.into());
+        self.expected_rename_fingerprint = Some(rename_fingerprint.into());
+        self
+    }
+}
+
+#[must_use]
+pub fn link_symbol_evidence(
+    snapshot: &SymbolSnapshot,
+    inputs: &[SymbolEvidenceInput<'_>],
+) -> SymbolEvidenceLinkSet {
+    let mut sorted_inputs: Vec<&SymbolEvidenceInput<'_>> = inputs.iter().collect();
+    sorted_inputs.sort_by(|left, right| {
+        (
+            left.source_kind,
+            left.evidence_id.as_ref(),
+            left.provenance_uri.as_ref(),
+            left.target_path.as_ref(),
+            left.start_line,
+            left.end_line,
+        )
+            .cmp(&(
+                right.source_kind,
+                right.evidence_id.as_ref(),
+                right.provenance_uri.as_ref(),
+                right.target_path.as_ref(),
+                right.start_line,
+                right.end_line,
+            ))
+    });
+
+    let mut symbols_by_path: BTreeMap<&str, Vec<&SymbolRecord>> = BTreeMap::new();
+    let mut symbols_by_id: BTreeMap<&str, &SymbolRecord> = BTreeMap::new();
+    for symbol in &snapshot.symbols {
+        symbols_by_path
+            .entry(symbol.path.as_str())
+            .or_default()
+            .push(symbol);
+        symbols_by_id.insert(symbol.id.as_str(), symbol);
+    }
+    for symbols in symbols_by_path.values_mut() {
+        symbols.sort_by(compare_symbol_refs);
+    }
+
+    let mut links = Vec::with_capacity(sorted_inputs.len());
+    let mut degraded = Vec::new();
+    for input in sorted_inputs {
+        let (link, maybe_degraded) =
+            resolve_symbol_evidence_input(snapshot, input, &symbols_by_path, &symbols_by_id);
+        if let Some(item) = maybe_degraded {
+            degraded.push(item);
+        }
+        links.push(link);
+    }
+
+    degraded.sort_by(|left, right| {
+        (
+            left.evidence_id.as_str(),
+            left.path.as_deref().unwrap_or(""),
+            left.code,
+            left.message.as_str(),
+        )
+            .cmp(&(
+                right.evidence_id.as_str(),
+                right.path.as_deref().unwrap_or(""),
+                right.code,
+                right.message.as_str(),
+            ))
+    });
+
+    SymbolEvidenceLinkSet {
+        schema: SYMBOL_EVIDENCE_LINKS_SCHEMA_V1.to_string(),
+        snapshot_hash: snapshot.snapshot_hash.clone(),
+        generated_by: SYMBOL_EVIDENCE_LINK_GENERATOR_V1.to_string(),
+        source_manifest_hash: symbol_evidence_source_manifest_hash(snapshot, &sorted_inputs),
+        links,
+        degraded,
+    }
+}
+
+fn resolve_symbol_evidence_input(
+    snapshot: &SymbolSnapshot,
+    input: &SymbolEvidenceInput<'_>,
+    symbols_by_path: &BTreeMap<&str, Vec<&SymbolRecord>>,
+    symbols_by_id: &BTreeMap<&str, &SymbolRecord>,
+) -> (SymbolEvidenceLink, Option<SymbolEvidenceLinkDegradation>) {
+    let target_path = normalize_path_string(input.target_path.as_ref());
+    let target_range = evidence_target_range(input.start_line, input.end_line);
+    let confidence = normalized_confidence(input.confidence);
+
+    if input.start_line == 0 || input.end_line == 0 || input.end_line < input.start_line {
+        return link_without_symbol(
+            input,
+            target_path,
+            target_range,
+            0.0,
+            SymbolEvidenceResolution::StaleSpan,
+            SymbolEvidenceReasonCode::StaleLineSpan,
+            Some(SymbolEvidenceLinkDegradationCode::StaleLineSpan),
+            "evidence line span is stale or invalid",
+        );
+    }
+
+    if let Some(expected_id) = input.expected_symbol_id.as_ref() {
+        if let Some(symbol) = symbols_by_id.get(expected_id.as_ref()) {
+            return link_with_symbol(
+                input,
+                &target_path,
+                target_range,
+                symbol,
+                confidence,
+                SymbolEvidenceResolution::ExactSymbol,
+                SymbolEvidenceReasonCode::ExactSymbolSpan,
+            );
+        }
+        if let Some(rename_fingerprint) = input.expected_rename_fingerprint.as_ref() {
+            let renamed: Vec<&SymbolRecord> = snapshot
+                .symbols
+                .iter()
+                .filter(|symbol| {
+                    symbol.path == target_path
+                        && symbol.rename_fingerprint == rename_fingerprint.as_ref()
+                })
+                .collect();
+            if renamed.len() == 1 {
+                return (
+                    build_symbol_link(
+                        input,
+                        target_path,
+                        target_range,
+                        Some(renamed[0]),
+                        scaled_confidence(confidence, 0.85),
+                        SymbolEvidenceResolution::RenamedSymbol,
+                        SymbolEvidenceReasonCode::SymbolRenamedByFingerprint,
+                    ),
+                    Some(link_degradation(
+                        SymbolEvidenceLinkDegradationCode::SymbolRenamed,
+                        input,
+                        Some(normalize_path_string(input.target_path.as_ref())),
+                        "expected symbol id was absent but rename fingerprint matched a current symbol",
+                    )),
+                );
+            }
+        }
+        return link_without_symbol(
+            input,
+            target_path,
+            target_range,
+            0.0,
+            SymbolEvidenceResolution::DeletedSymbol,
+            SymbolEvidenceReasonCode::SymbolDeleted,
+            Some(SymbolEvidenceLinkDegradationCode::SymbolDeleted),
+            "expected symbol id was absent from the current snapshot",
+        );
+    }
+
+    let Some(symbols) = symbols_by_path.get(target_path.as_str()) else {
+        return link_without_symbol(
+            input,
+            target_path,
+            target_range,
+            0.0,
+            SymbolEvidenceResolution::SourceFileMissing,
+            SymbolEvidenceReasonCode::SourceFileMissing,
+            Some(SymbolEvidenceLinkDegradationCode::SourceFileMissing),
+            "evidence target file is absent from the current symbol snapshot",
+        );
+    };
+
+    let mut candidates: Vec<&SymbolRecord> = symbols
+        .iter()
+        .copied()
+        .filter(|symbol| symbol_contains_lines(symbol, input.start_line, input.end_line))
+        .collect();
+    candidates.sort_by(|left, right| {
+        (
+            containment_score(left, input.start_line, input.end_line),
+            symbol_line_width(left),
+            left.canonical_name.as_str(),
+            left.id.as_str(),
+        )
+            .cmp(&(
+                containment_score(right, input.start_line, input.end_line),
+                symbol_line_width(right),
+                right.canonical_name.as_str(),
+                right.id.as_str(),
+            ))
+    });
+
+    match candidates.as_slice() {
+        [] => (
+            build_symbol_link(
+                input,
+                target_path,
+                target_range,
+                None,
+                scaled_confidence(confidence, 0.40),
+                SymbolEvidenceResolution::FileLevel,
+                SymbolEvidenceReasonCode::FileLevelNoContainingSymbol,
+            ),
+            None,
+        ),
+        [symbol] => {
+            let exact = symbol.range.start_line == input.start_line
+                && symbol.range.end_line == input.end_line;
+            let (resolution, reason) = if exact {
+                (
+                    SymbolEvidenceResolution::ExactSymbol,
+                    SymbolEvidenceReasonCode::ExactSymbolSpan,
+                )
+            } else {
+                (
+                    SymbolEvidenceResolution::ContainingSymbol,
+                    SymbolEvidenceReasonCode::ContainingSymbolSpan,
+                )
+            };
+            link_with_symbol(
+                input,
+                &target_path,
+                target_range,
+                symbol,
+                confidence,
+                resolution,
+                reason,
+            )
+        }
+        [first, second, ..]
+            if containment_score(first, input.start_line, input.end_line)
+                == containment_score(second, input.start_line, input.end_line)
+                && symbol_line_width(first) == symbol_line_width(second) =>
+        {
+            link_without_symbol(
+                input,
+                target_path,
+                target_range,
+                scaled_confidence(confidence, 0.25),
+                SymbolEvidenceResolution::Ambiguous,
+                SymbolEvidenceReasonCode::AmbiguousContainingSymbols,
+                Some(SymbolEvidenceLinkDegradationCode::AmbiguousContainingSymbols),
+                "multiple symbols matched the evidence span with equal specificity",
+            )
+        }
+        [symbol, ..] => link_with_symbol(
+            input,
+            &target_path,
+            target_range,
+            symbol,
+            confidence,
+            SymbolEvidenceResolution::ContainingSymbol,
+            SymbolEvidenceReasonCode::ContainingSymbolSpan,
+        ),
+    }
+}
+
+fn link_with_symbol(
+    input: &SymbolEvidenceInput<'_>,
+    target_path: &str,
+    target_range: SymbolSourceRange,
+    symbol: &SymbolRecord,
+    confidence: f32,
+    resolution: SymbolEvidenceResolution,
+    reason: SymbolEvidenceReasonCode,
+) -> (SymbolEvidenceLink, Option<SymbolEvidenceLinkDegradation>) {
+    (
+        build_symbol_link(
+            input,
+            target_path.to_owned(),
+            target_range,
+            Some(symbol),
+            confidence,
+            resolution,
+            reason,
+        ),
+        None,
+    )
+}
+
+fn link_without_symbol(
+    input: &SymbolEvidenceInput<'_>,
+    target_path: String,
+    target_range: SymbolSourceRange,
+    confidence: f32,
+    resolution: SymbolEvidenceResolution,
+    reason: SymbolEvidenceReasonCode,
+    degraded_code: Option<SymbolEvidenceLinkDegradationCode>,
+    message: &'static str,
+) -> (SymbolEvidenceLink, Option<SymbolEvidenceLinkDegradation>) {
+    let degraded =
+        degraded_code.map(|code| link_degradation(code, input, Some(target_path.clone()), message));
+    (
+        build_symbol_link(
+            input,
+            target_path,
+            target_range,
+            None,
+            confidence,
+            resolution,
+            reason,
+        ),
+        degraded,
+    )
+}
+
+fn build_symbol_link(
+    input: &SymbolEvidenceInput<'_>,
+    target_path: String,
+    target_range: SymbolSourceRange,
+    symbol: Option<&SymbolRecord>,
+    confidence: f32,
+    resolution: SymbolEvidenceResolution,
+    reason: SymbolEvidenceReasonCode,
+) -> SymbolEvidenceLink {
+    SymbolEvidenceLink {
+        link_id: symbol_evidence_link_id(input, &target_path, symbol, resolution, reason),
+        source_kind: input.source_kind,
+        evidence_id: input.evidence_id.to_string(),
+        provenance_uri: input.provenance_uri.to_string(),
+        target_path,
+        target_range,
+        symbol_id: symbol.map(|symbol| symbol.id.clone()),
+        canonical_name: symbol.map(|symbol| symbol.canonical_name.clone()),
+        symbol_kind: symbol.map(|symbol| symbol.kind),
+        symbol_range: symbol.map(|symbol| symbol.range),
+        confidence: normalized_confidence(confidence),
+        resolution,
+        reason,
+    }
+}
+
+fn link_degradation(
+    code: SymbolEvidenceLinkDegradationCode,
+    input: &SymbolEvidenceInput<'_>,
+    path: Option<String>,
+    message: &'static str,
+) -> SymbolEvidenceLinkDegradation {
+    SymbolEvidenceLinkDegradation {
+        code,
+        severity: SymbolGraphDegradationSeverity::Warning,
+        evidence_id: input.evidence_id.to_string(),
+        path,
+        message: message.to_owned(),
+    }
+}
+
+fn evidence_target_range(start_line: u32, end_line: u32) -> SymbolSourceRange {
+    let safe_start = start_line.max(1);
+    let safe_end = end_line.max(safe_start);
+    SymbolSourceRange {
+        start_line: safe_start,
+        start_column: 1,
+        end_line: safe_end,
+        end_column: 1,
+    }
+}
+
+fn symbol_contains_lines(symbol: &SymbolRecord, start_line: u32, end_line: u32) -> bool {
+    symbol.range.start_line <= start_line && symbol.range.end_line >= end_line
+}
+
+fn containment_score(symbol: &SymbolRecord, start_line: u32, end_line: u32) -> u32 {
+    start_line
+        .saturating_sub(symbol.range.start_line)
+        .saturating_add(symbol.range.end_line.saturating_sub(end_line))
+}
+
+fn symbol_line_width(symbol: &SymbolRecord) -> u32 {
+    symbol
+        .range
+        .end_line
+        .saturating_sub(symbol.range.start_line)
+        .saturating_add(1)
+}
+
+fn compare_symbol_refs(left: &&SymbolRecord, right: &&SymbolRecord) -> std::cmp::Ordering {
+    compare_symbols(left, right)
+}
+
+fn normalized_confidence(value: f32) -> f32 {
+    if value.is_finite() {
+        (value.clamp(0.0, 1.0) * 1000.0).round() / 1000.0
+    } else {
+        0.0
+    }
+}
+
+fn scaled_confidence(value: f32, scale: f32) -> f32 {
+    normalized_confidence(normalized_confidence(value) * scale)
+}
+
+fn symbol_evidence_link_id(
+    input: &SymbolEvidenceInput<'_>,
+    target_path: &str,
+    symbol: Option<&SymbolRecord>,
+    resolution: SymbolEvidenceResolution,
+    reason: SymbolEvidenceReasonCode,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hash_part(&mut hasher, b"ee.symbol_evidence_link.v1");
+    hash_part(&mut hasher, input.source_kind.as_str().as_bytes());
+    hash_part(&mut hasher, input.evidence_id.as_ref().as_bytes());
+    hash_part(&mut hasher, input.provenance_uri.as_ref().as_bytes());
+    hash_part(&mut hasher, target_path.as_bytes());
+    hash_part(&mut hasher, input.start_line.to_string().as_bytes());
+    hash_part(&mut hasher, input.end_line.to_string().as_bytes());
+    hash_part(
+        &mut hasher,
+        symbol.map_or("", |symbol| symbol.id.as_str()).as_bytes(),
+    );
+    hash_part(&mut hasher, resolution.as_str().as_bytes());
+    hash_part(&mut hasher, reason.as_str().as_bytes());
+    format!(
+        "{}{}",
+        SYMBOL_EVIDENCE_LINK_ID_PREFIX,
+        &hasher.finalize().to_hex()[..24]
+    )
+}
+
+fn symbol_evidence_source_manifest_hash(
+    snapshot: &SymbolSnapshot,
+    inputs: &[&SymbolEvidenceInput<'_>],
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hash_part(&mut hasher, b"ee.symbol_evidence_manifest.v1");
+    hash_part(&mut hasher, snapshot.snapshot_hash.as_bytes());
+    for input in inputs {
+        hash_part(&mut hasher, input.source_kind.as_str().as_bytes());
+        hash_part(&mut hasher, input.evidence_id.as_ref().as_bytes());
+        hash_part(&mut hasher, input.provenance_uri.as_ref().as_bytes());
+        hash_part(
+            &mut hasher,
+            normalize_path_string(input.target_path.as_ref()).as_bytes(),
+        );
+        hash_part(&mut hasher, input.start_line.to_string().as_bytes());
+        hash_part(&mut hasher, input.end_line.to_string().as_bytes());
+        hash_part(
+            &mut hasher,
+            normalized_confidence(input.confidence)
+                .to_string()
+                .as_bytes(),
+        );
+        hash_part(
+            &mut hasher,
+            input.expected_symbol_id.as_deref().unwrap_or("").as_bytes(),
+        );
+        hash_part(
+            &mut hasher,
+            input
+                .expected_rename_fingerprint
+                .as_deref()
+                .unwrap_or("")
+                .as_bytes(),
+        );
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 fn finish_snapshot(
@@ -1296,6 +1799,177 @@ command_builder! {
             format!("{}\n", actual),
             include_str!("../../tests/fixtures/golden/symbol_graph/rust_snapshot.json.golden")
         );
+    }
+
+    #[test]
+    fn links_memory_and_cass_evidence_to_nearest_symbols_without_source_body() {
+        let snapshot = extract_rust_symbol_snapshot_from_sources(&[RustSourceInput::new(
+            "src/sample.rs",
+            SAMPLE,
+        )]);
+        let helper = snapshot
+            .symbols
+            .iter()
+            .find(|symbol| symbol.canonical_name == "outer::impl Engine::helper")
+            .expect("helper symbol");
+        let runner = snapshot
+            .symbols
+            .iter()
+            .find(|symbol| symbol.canonical_name == "outer::run_search_command")
+            .expect("run_search_command symbol");
+
+        let link_set = link_symbol_evidence(
+            &snapshot,
+            &[
+                SymbolEvidenceInput::new(
+                    SymbolEvidenceSourceKind::Memory,
+                    "mem_01234567890123456789012345",
+                    "file://src/sample.rs#L1",
+                    "src/sample.rs",
+                    helper.range.start_line,
+                    helper.range.end_line,
+                    0.93,
+                ),
+                SymbolEvidenceInput::new(
+                    SymbolEvidenceSourceKind::CassEvidence,
+                    "ev_cass_session_a_l2",
+                    "cass-session://session-a#L2-L2",
+                    "src/sample.rs",
+                    runner.range.start_line,
+                    runner.range.end_line,
+                    0.81,
+                ),
+            ],
+        );
+
+        assert_eq!(link_set.schema, SYMBOL_EVIDENCE_LINKS_SCHEMA_V1);
+        assert_eq!(link_set.snapshot_hash, snapshot.snapshot_hash);
+        assert_eq!(link_set.links.len(), 2);
+        assert!(link_set.degraded.is_empty(), "{:?}", link_set.degraded);
+
+        let memory_link = link_set
+            .links
+            .iter()
+            .find(|link| link.source_kind == SymbolEvidenceSourceKind::Memory)
+            .expect("memory link");
+        assert_eq!(memory_link.symbol_id.as_deref(), Some(helper.id.as_str()));
+        assert_eq!(
+            memory_link.reason,
+            SymbolEvidenceReasonCode::ExactSymbolSpan
+        );
+
+        let cass_link = link_set
+            .links
+            .iter()
+            .find(|link| link.source_kind == SymbolEvidenceSourceKind::CassEvidence)
+            .expect("cass evidence link");
+        assert_eq!(cass_link.symbol_id.as_deref(), Some(runner.id.as_str()));
+        assert_eq!(cass_link.provenance_uri, "cass-session://session-a#L2-L2");
+
+        let json = serde_json::to_string(&link_set).expect("symbol evidence link JSON");
+        assert!(json.contains("ee.symbol_evidence_links.v1"));
+        assert!(!json.contains("fn helper"));
+        assert!(!json.contains("Self { value: 0 }"));
+    }
+
+    #[test]
+    fn evidence_linker_reports_stale_renamed_deleted_and_ambiguous_spans() {
+        let mut snapshot = extract_rust_symbol_snapshot_from_sources(&[RustSourceInput::new(
+            "src/sample.rs",
+            SAMPLE,
+        )]);
+        let engine = snapshot
+            .symbols
+            .iter()
+            .find(|symbol| symbol.canonical_name == "outer::Engine")
+            .expect("engine symbol")
+            .clone();
+        let helper = snapshot
+            .symbols
+            .iter()
+            .find(|symbol| symbol.canonical_name == "outer::impl Engine::helper")
+            .expect("helper symbol")
+            .clone();
+
+        let mut duplicate_helper = helper.clone();
+        duplicate_helper.id = "sym_v1_aaaaaaaaaaaaaaaaaaaaaaaa".to_owned();
+        duplicate_helper.canonical_name = "outer::impl Engine::helper_duplicate".to_owned();
+        snapshot.symbols.push(duplicate_helper);
+
+        let link_set = link_symbol_evidence(
+            &snapshot,
+            &[
+                SymbolEvidenceInput::new(
+                    SymbolEvidenceSourceKind::Memory,
+                    "stale-span",
+                    "file://src/sample.rs#L10-9",
+                    "src/sample.rs",
+                    10,
+                    9,
+                    1.0,
+                ),
+                SymbolEvidenceInput::new(
+                    SymbolEvidenceSourceKind::Rule,
+                    "renamed-symbol",
+                    "file://src/sample.rs#L1",
+                    "src/sample.rs",
+                    engine.range.start_line,
+                    engine.range.end_line,
+                    0.7,
+                )
+                .with_expected_symbol(
+                    "sym_v1_missingmissingmissing01",
+                    engine.rename_fingerprint.as_str(),
+                ),
+                SymbolEvidenceInput::new(
+                    SymbolEvidenceSourceKind::Decision,
+                    "deleted-symbol",
+                    "file://src/sample.rs#L1",
+                    "src/sample.rs",
+                    engine.range.start_line,
+                    engine.range.end_line,
+                    0.7,
+                )
+                .with_expected_symbol("sym_v1_missingmissingmissing02", "no-match"),
+                SymbolEvidenceInput::new(
+                    SymbolEvidenceSourceKind::CassEvidence,
+                    "ambiguous-symbol",
+                    "cass-session://session-b#L3",
+                    "src/sample.rs",
+                    helper.range.start_line,
+                    helper.range.end_line,
+                    0.9,
+                ),
+            ],
+        );
+
+        let by_id = |evidence_id: &str| {
+            link_set
+                .links
+                .iter()
+                .find(|link| link.evidence_id == evidence_id)
+                .expect("evidence link")
+        };
+        assert_eq!(
+            by_id("stale-span").resolution,
+            SymbolEvidenceResolution::StaleSpan
+        );
+        assert_eq!(
+            by_id("renamed-symbol").resolution,
+            SymbolEvidenceResolution::RenamedSymbol
+        );
+        assert_eq!(
+            by_id("deleted-symbol").resolution,
+            SymbolEvidenceResolution::DeletedSymbol
+        );
+        assert_eq!(
+            by_id("ambiguous-symbol").resolution,
+            SymbolEvidenceResolution::Ambiguous
+        );
+        assert!(link_set.degraded.iter().any(|item| {
+            item.code == SymbolEvidenceLinkDegradationCode::AmbiguousContainingSymbols
+                && item.evidence_id == "ambiguous-symbol"
+        }));
     }
 
     #[derive(Serialize)]
