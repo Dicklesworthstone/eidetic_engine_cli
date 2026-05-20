@@ -83,6 +83,7 @@ fn workspace_hygiene_logged_e2e_self_test_emits_complete_evidence() -> TestResul
     assert_expected_scenario_matrix(&events)?;
     assert_all_events_are_successful(&events)?;
     assert_sanitized_env_shape(&events)?;
+    assert_report_metrics_shape(&events)?;
     assert_no_local_cargo_commands(&events)?;
     assert_artifacts_exist_inside_event_root(&events, &event_root)?;
     assert_scenario_mutation_artifacts_are_hash_linked(&events)?;
@@ -227,6 +228,92 @@ fn assert_sanitized_env_shape(events: &[Value]) -> TestResult {
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+fn assert_report_metrics_shape(events: &[Value]) -> TestResult {
+    let count_fields = [
+        "pathCount",
+        "gitPathCount",
+        "pathClassificationCount",
+        "stagingRecommendationCount",
+        "doNotCommitCount",
+        "needsHumanReviewCount",
+        "omittedPathClassifications",
+        "omittedDoNotCommit",
+        "omittedNeedsHumanReview",
+        "omittedStagingGroupPaths",
+        "secretScanSkippedCount",
+        "secretScanScannedFileCount",
+        "secretScanScannedByteCount",
+    ];
+
+    for event in events {
+        for field in count_fields {
+            let value = event.get(field).unwrap_or(&Value::Null);
+            if !(value.is_null() || value.as_u64().is_some()) {
+                return Err(format!(
+                    "{field} must be null or a non-negative integer: {event}"
+                ));
+            }
+        }
+        let truncated = event.get("truncated").unwrap_or(&Value::Null);
+        if !(truncated.is_null() || truncated.as_bool().is_some()) {
+            return Err(format!("truncated must be null or boolean: {event}"));
+        }
+
+        let scenario = event.get("scenario").and_then(Value::as_str).unwrap_or("");
+        let phase = event.get("phase").and_then(Value::as_str).unwrap_or("");
+        let schema_status = event
+            .get("schemaValidationStatus")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if matches!(phase, "scenario" | "schema_validation")
+            && !scenario.starts_with("human_")
+            && schema_status == "passed"
+            && event.get("pathCount").and_then(Value::as_u64).is_none()
+        {
+            return Err(format!(
+                "machine workspace-hygiene events must carry report path counts: {event}"
+            ));
+        }
+    }
+
+    let source_event = events
+        .iter()
+        .find(|event| {
+            event.get("phase").and_then(Value::as_str) == Some("scenario")
+                && event.get("scenario").and_then(Value::as_str) == Some("source_and_test")
+        })
+        .ok_or_else(|| "missing source_and_test scenario event".to_owned())?;
+    if source_event.get("pathCount").and_then(Value::as_u64) != Some(2)
+        || source_event.get("gitPathCount").and_then(Value::as_u64) != Some(2)
+        || source_event
+            .get("stagingRecommendationCount")
+            .and_then(Value::as_u64)
+            != Some(2)
+    {
+        return Err(format!(
+            "source_and_test event should expose report counts and staging-group count: {source_event}"
+        ));
+    }
+
+    let large_binary_event = events
+        .iter()
+        .find(|event| {
+            event.get("phase").and_then(Value::as_str) == Some("scenario")
+                && event.get("scenario").and_then(Value::as_str) == Some("large_binary_scan_skip")
+        })
+        .ok_or_else(|| "missing large_binary_scan_skip scenario event".to_owned())?;
+    if large_binary_event
+        .get("secretScanSkippedCount")
+        .and_then(Value::as_u64)
+        != Some(2)
+    {
+        return Err(format!(
+            "large_binary_scan_skip event should expose skipped secret-scan count: {large_binary_event}"
+        ));
     }
     Ok(())
 }

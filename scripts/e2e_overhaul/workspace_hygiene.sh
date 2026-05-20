@@ -78,10 +78,70 @@ emit_event() {
     local after_hash="${13:-}"
     local before_artifact="${14:-}"
     local after_artifact="${15:-}"
-    local finished_ns elapsed_ms
+    local finished_ns elapsed_ms report_metrics
     first_failure="$(redact_synthetic_value "$first_failure")"
     finished_ns="$(now_ns)"
     elapsed_ms="$(( (finished_ns - STARTED_NS) / 1000000 ))"
+    report_metrics='{
+      "pathCount": null,
+      "gitPathCount": null,
+      "pathClassificationCount": null,
+      "stagingRecommendationCount": null,
+      "doNotCommitCount": null,
+      "needsHumanReviewCount": null,
+      "truncated": null,
+      "omittedPathClassifications": null,
+      "omittedDoNotCommit": null,
+      "omittedNeedsHumanReview": null,
+      "omittedStagingGroupPaths": null,
+      "secretScanSkippedCount": null,
+      "secretScanScannedFileCount": null,
+      "secretScanScannedByteCount": null
+    }'
+    if [ -n "$stdout_artifact" ] && [ -f "$stdout_artifact" ]; then
+        report_metrics="$(
+            jq -s -c '
+              def empty_metrics:
+                {
+                  pathCount: null,
+                  gitPathCount: null,
+                  pathClassificationCount: null,
+                  stagingRecommendationCount: null,
+                  doNotCommitCount: null,
+                  needsHumanReviewCount: null,
+                  truncated: null,
+                  omittedPathClassifications: null,
+                  omittedDoNotCommit: null,
+                  omittedNeedsHumanReview: null,
+                  omittedStagingGroupPaths: null,
+                  secretScanSkippedCount: null,
+                  secretScanScannedFileCount: null,
+                  secretScanScannedByteCount: null
+                };
+              if length == 1 and .[0].success == true and .[0].data.schema == "ee.workspace_hygiene.v1" then
+                .[0] as $report
+                | {
+                  pathCount: ($report.data.dirtyPathCount // null),
+                  gitPathCount: ($report.data.gitSummary.dirtyPathCount // $report.data.dirtyPathCount // null),
+                  pathClassificationCount: (($report.data.pathClassifications // []) | length),
+                  stagingRecommendationCount: (($report.data.stagingRecommendations // []) | length),
+                  doNotCommitCount: (($report.data.doNotCommit // []) | length),
+                  needsHumanReviewCount: (($report.data.needsHumanReview // []) | length),
+                  truncated: ($report.data.outputTruncation.truncated // false),
+                  omittedPathClassifications: ($report.data.outputTruncation.omittedPathClassifications // 0),
+                  omittedDoNotCommit: ($report.data.outputTruncation.omittedDoNotCommit // 0),
+                  omittedNeedsHumanReview: ($report.data.outputTruncation.omittedNeedsHumanReview // 0),
+                  omittedStagingGroupPaths: (($report.data.outputTruncation.stagingGroups // []) | map(.omittedPathCount // 0) | add // 0),
+                  secretScanSkippedCount: ($report.data.secretScan.skippedContentScanCount // 0),
+                  secretScanScannedFileCount: ($report.data.secretScan.scannedFileCount // 0),
+                  secretScanScannedByteCount: ($report.data.secretScan.scannedByteCount // 0)
+                }
+              else
+                empty_metrics
+              end
+            ' "$stdout_artifact" 2>/dev/null || printf '%s\n' "$report_metrics"
+        )"
+    fi
 
     jq -cn \
         --arg schema "ee.test_event.v1" \
@@ -107,6 +167,7 @@ emit_event() {
         --argjson exit_code "$exit_code" \
         --argjson elapsed_ms "$elapsed_ms" \
         --argjson degraded_codes "$degraded_codes" \
+        --argjson report_metrics "$report_metrics" \
         '{
           schema: $schema,
           beadId: $bead_id,
@@ -118,6 +179,20 @@ emit_event() {
           workspace: (if $workspace == "" then null else $workspace end),
           elapsedMs: $elapsed_ms,
           exitCode: $exit_code,
+          pathCount: $report_metrics.pathCount,
+          gitPathCount: $report_metrics.gitPathCount,
+          pathClassificationCount: $report_metrics.pathClassificationCount,
+          stagingRecommendationCount: $report_metrics.stagingRecommendationCount,
+          doNotCommitCount: $report_metrics.doNotCommitCount,
+          needsHumanReviewCount: $report_metrics.needsHumanReviewCount,
+          truncated: $report_metrics.truncated,
+          omittedPathClassifications: $report_metrics.omittedPathClassifications,
+          omittedDoNotCommit: $report_metrics.omittedDoNotCommit,
+          omittedNeedsHumanReview: $report_metrics.omittedNeedsHumanReview,
+          omittedStagingGroupPaths: $report_metrics.omittedStagingGroupPaths,
+          secretScanSkippedCount: $report_metrics.secretScanSkippedCount,
+          secretScanScannedFileCount: $report_metrics.secretScanScannedFileCount,
+          secretScanScannedByteCount: $report_metrics.secretScanScannedByteCount,
           schemaValidationStatus: $schema_status,
           stdoutArtifact: (if $stdout_artifact == "" then null else $stdout_artifact end),
           stderrArtifact: (if $stderr_artifact == "" then null else $stderr_artifact end),
@@ -224,16 +299,37 @@ jq -cn --arg scenario "$scenario" '
             schema: "ee.workspace_hygiene.v1",
             readOnly: true,
             dirtyPathCount: 0,
+            gitSummary: {
+              dirtyPathCount: 0,
+              bucketCounts: [],
+              kindCounts: []
+            },
             degraded: [],
             stagingRecommendations: [],
             doNotCommit: [],
             pathClassifications: [],
             bucketCounts: [],
             kindCounts: [],
+            outputTruncation: {
+              truncated: false,
+              maxPathClassifications: 10000,
+              maxPathsPerList: 10000,
+              maxPathsPerStagingGroup: 10000,
+              omittedPathClassifications: 0,
+              omittedDoNotCommit: 0,
+              omittedNeedsHumanReview: 0,
+              omittedByBucket: [],
+              omittedByKind: [],
+              stagingGroups: []
+            },
             secretScan: {
               readOnly: true,
+              scannedFileCount: 0,
+              scannedByteCount: 0,
               skippedContentScanCount: 0,
-              maxFileBytes: 65536
+              maxFiles: 1000,
+              maxFileBytes: 65536,
+              maxTotalBytes: 1000000
             },
             coordinationState: {
               agentMailAvailable: false,
@@ -296,8 +392,12 @@ jq -cn --arg scenario "$scenario" '
         (.data.dirtyPathCount = 2)
         | (.data.secretScan = {
             readOnly: true,
+            scannedFileCount: 0,
+            scannedByteCount: 0,
             skippedContentScanCount: 2,
-            maxFileBytes: 65536
+            maxFiles: 1000,
+            maxFileBytes: 65536,
+            maxTotalBytes: 1000000
           })
         | (.data.degraded = ["workspace_hygiene_secret_scan_skipped"])
       elif $scenario == "active_reservation" then
@@ -353,6 +453,9 @@ jq -cn --arg scenario "$scenario" '
       else
         error("unknown self-test scenario: " + $scenario)
       end
+    | (.data.gitSummary.dirtyPathCount = .data.dirtyPathCount)
+    | (.data.gitSummary.bucketCounts = .data.bucketCounts)
+    | (.data.gitSummary.kindCounts = .data.kindCounts)
 '
 FAKE_EE
     chmod +x "$fake_binary"
