@@ -5,8 +5,9 @@ use ee::mesh::peer::{
     MeshPeerCapabilityProfile, MeshPeerEndpoint, MeshPeerEnrollInput, MeshPeerHandshake,
     MeshPeerRotateInput, MeshPeerState, PEER_ENROLLMENT_EXPLICIT_CONSENT_REQUIRED_CODE,
     PEER_ENROLLMENT_HANDSHAKE_DENIED_CODE, PEER_ENROLLMENT_NETWORK_ONLY_DENIED_CODE,
-    PEER_KEY_ROTATION_REVOKED_CODE, PEER_UNKNOWN_ATTEMPT_DENIED_CODE, build_peer_id, enroll_peer,
-    list_peers, revoke_peer, rotate_peer_key, show_peer, unknown_peer_attempt_report,
+    PEER_KEY_ROTATION_REVOKED_CODE, PEER_UNKNOWN_ATTEMPT_DENIED_CODE, build_peer_id,
+    build_peer_origin_node_id, enroll_peer, list_peers, revoke_peer, rotate_peer_key, show_peer,
+    unknown_peer_attempt_report,
 };
 
 const WORKSPACE_ID: &str = "wsp_peer_enroll_00000000000001";
@@ -182,6 +183,15 @@ fn add_show_list_rotate_revoke_reports_are_stable_json_shapes() {
     assert!(serialized.contains("\"schema\":\"ee.mesh.peer_record.v1\""));
     assert!(serialized.contains("\"state\":\"revoked\""));
     assert!(!serialized.contains("private_key"));
+
+    let parsed: peer::MeshPeerRecord =
+        serde_json::from_str(&serialized).expect("stored peer record should parse");
+    assert_eq!(parsed.peer_id, revoked_peer.peer_id);
+    assert_eq!(parsed.endpoint.tailscale_node_key, NODE_KEY);
+
+    let origin_node_id = build_peer_origin_node_id(&parsed.endpoint.tailscale_node_key);
+    assert!(origin_node_id.starts_with("node_"));
+    assert_eq!(origin_node_id.len(), 29);
 }
 
 #[test]

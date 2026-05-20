@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const MESH_PEER_RECORD_SCHEMA_V1: &str = "ee.mesh.peer_record.v1";
 pub const MESH_PEER_COMMAND_REPORT_SCHEMA_V1: &str = "ee.mesh.peer_command_report.v1";
@@ -27,7 +27,7 @@ pub const PEER_UNKNOWN_ATTEMPT_DENIED_CODE: &str = "mesh_peer_unknown_attempt_de
 pub const MESH_PEER_E2E_SURFACE: &str = "mesh_peer_enrollment";
 pub const TEST_EVENT_SCHEMA_V1: &str = "ee.test_event.v1";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MeshPeerCapabilityProfile {
     MetadataOnly,
@@ -95,7 +95,7 @@ impl MeshPeerCapabilityProfile {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshPeerLaneCapabilities {
     pub metadata: bool,
@@ -132,7 +132,7 @@ impl MeshPeerLaneCapabilities {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshPeerCapabilities {
     pub profile: MeshPeerCapabilityProfile,
@@ -169,7 +169,7 @@ impl MeshPeerCapabilities {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MeshPeerState {
     Active,
@@ -186,7 +186,7 @@ impl MeshPeerState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MeshPeerEnrollmentScenario {
     Pair,
@@ -209,7 +209,7 @@ impl MeshPeerEnrollmentScenario {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshPeerEndpoint {
     pub tailscale_node_key: String,
@@ -219,7 +219,7 @@ pub struct MeshPeerEndpoint {
     pub magic_dns_name: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshPeerKey {
     pub generation: u32,
@@ -229,10 +229,10 @@ pub struct MeshPeerKey {
     pub revoked_at: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshPeerHandshake {
-    pub schema: &'static str,
+    pub schema: String,
     pub request_id: String,
     pub granted: bool,
     pub requester_protocol_version: String,
@@ -252,7 +252,7 @@ impl MeshPeerHandshake {
     ) -> Self {
         let protocol_version = protocol_version.into();
         Self {
-            schema: MESH_PEER_HANDSHAKE_SCHEMA_V1,
+            schema: MESH_PEER_HANDSHAKE_SCHEMA_V1.to_owned(),
             request_id: request_id.into(),
             granted: true,
             requester_protocol_version: protocol_version.clone(),
@@ -266,7 +266,7 @@ impl MeshPeerHandshake {
     #[must_use]
     pub fn denied(request_id: impl Into<String>, responder_node_key: impl Into<String>) -> Self {
         Self {
-            schema: MESH_PEER_HANDSHAKE_SCHEMA_V1,
+            schema: MESH_PEER_HANDSHAKE_SCHEMA_V1.to_owned(),
             request_id: request_id.into(),
             granted: false,
             requester_protocol_version: "1.0".to_owned(),
@@ -278,10 +278,10 @@ impl MeshPeerHandshake {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshPeerRecord {
-    pub schema: &'static str,
+    pub schema: String,
     pub peer_id: String,
     pub alias: String,
     pub workspace_id: String,
@@ -427,6 +427,15 @@ pub fn build_peer_id(workspace_id: &str, tailscale_node_key: &str) -> String {
 }
 
 #[must_use]
+pub fn build_peer_origin_node_id(tailscale_node_key: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.mesh.peer.origin_node.v1\n");
+    hasher.update(tailscale_node_key.as_bytes());
+    let digest = hasher.finalize().to_hex().to_string();
+    format!("node_{}", &digest[..24])
+}
+
+#[must_use]
 pub fn enroll_peer(input: MeshPeerEnrollInput) -> MeshPeerCommandReport {
     if !input.explicit_human_consent {
         return MeshPeerCommandReport::denied(
@@ -463,7 +472,7 @@ pub fn enroll_peer(input: MeshPeerEnrollInput) -> MeshPeerCommandReport {
 
     let peer_id = build_peer_id(&input.workspace_id, &input.endpoint.tailscale_node_key);
     let record = MeshPeerRecord {
-        schema: MESH_PEER_RECORD_SCHEMA_V1,
+        schema: MESH_PEER_RECORD_SCHEMA_V1.to_owned(),
         peer_id: peer_id.clone(),
         alias: input.alias,
         workspace_id: input.workspace_id,

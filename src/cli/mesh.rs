@@ -2,7 +2,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use serde_json::json;
 
@@ -20,6 +20,11 @@ use crate::mesh::foreground_cli::{
     MeshCliPeersReport, MeshCliStatusReport, MeshCliSyncReport, MeshExportArtifact,
     MeshForegroundSnapshot, MeshStorageCounts, foreground_degradations,
 };
+use crate::mesh::peer::{
+    MeshPeerCapabilityProfile, MeshPeerCommandReport, MeshPeerEndpoint, MeshPeerEnrollInput,
+    MeshPeerHandshake, MeshPeerRecord, MeshPeerRotateInput, build_peer_origin_node_id, enroll_peer,
+    list_peers, revoke_peer, rotate_peer_key, show_peer, unknown_peer_attempt_report,
+};
 use crate::models::{DomainError, ProcessExitCode};
 use crate::output;
 use crate::policy::{MESH_SECRET_EXPORT_DENIED_CODE, MeshExportSecretScanReport};
@@ -35,6 +40,8 @@ pub enum MeshCommand {
     Init(MeshInitArgs),
     /// List configured peers and anti-entropy cursors from local storage.
     Peers(MeshPeersArgs),
+    /// Deliberately enroll, inspect, rotate, or revoke one app-level mesh peer.
+    Peer(MeshPeerArgs),
     /// Report local mesh posture, cache counts, and repair commands.
     Status(MeshStatusArgs),
     /// Export redaction-safe foreground mesh rows to a JSON artifact.
@@ -59,6 +66,190 @@ pub struct MeshPeersArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee mesh peer`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshPeerArgs {
+    #[command(subcommand)]
+    pub command: MeshPeerCommand,
+}
+
+/// Subcommands for `ee mesh peer`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum MeshPeerCommand {
+    /// Enroll a peer after an explicit capability handshake and human consent.
+    Add(MeshPeerAddArgs),
+    /// List enrolled peers with their app-level capability profiles.
+    List(MeshPeerListArgs),
+    /// Show one enrolled peer.
+    Show(MeshPeerShowArgs),
+    /// Rotate one enrolled peer's public key fingerprint.
+    Rotate(MeshPeerRotateArgs),
+    /// Revoke one enrolled peer and deny all capability lanes.
+    Revoke(MeshPeerRevokeArgs),
+    /// Classify a network-reachable node that has not been explicitly enrolled.
+    UnknownAttempt(MeshPeerUnknownAttemptArgs),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum MeshPeerCapabilityProfileArg {
+    MetadataOnly,
+    BodyAllowed,
+    EmbeddingsDenied,
+    FullyDenied,
+}
+
+impl From<MeshPeerCapabilityProfileArg> for MeshPeerCapabilityProfile {
+    fn from(value: MeshPeerCapabilityProfileArg) -> Self {
+        match value {
+            MeshPeerCapabilityProfileArg::MetadataOnly => Self::MetadataOnly,
+            MeshPeerCapabilityProfileArg::BodyAllowed => Self::BodyAllowed,
+            MeshPeerCapabilityProfileArg::EmbeddingsDenied => Self::EmbeddingsDenied,
+            MeshPeerCapabilityProfileArg::FullyDenied => Self::FullyDenied,
+        }
+    }
+}
+
+/// Arguments for `ee mesh peer add`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshPeerAddArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Local display alias for the peer.
+    #[arg(long, value_name = "ALIAS")]
+    pub alias: String,
+
+    /// Tailscale node key or configured endpoint identity from the responder.
+    #[arg(long = "tailscale-node-key", value_name = "NODE_KEY")]
+    pub tailscale_node_key: String,
+
+    /// Endpoint address associated with the peer.
+    #[arg(long, value_name = "ENDPOINT")]
+    pub endpoint: String,
+
+    /// Tailnet identifier associated with the peer.
+    #[arg(long = "tailnet-id", value_name = "TAILNET_ID")]
+    pub tailnet_id: String,
+
+    /// Human-readable tailnet name.
+    #[arg(long = "tailnet-name", value_name = "NAME")]
+    pub tailnet_display_name: Option<String>,
+
+    /// MagicDNS name associated with the peer.
+    #[arg(long = "magic-dns-name", value_name = "NAME")]
+    pub magic_dns_name: Option<String>,
+
+    /// Requested sharing capability profile.
+    #[arg(long = "profile", value_enum, default_value = "metadata-only")]
+    pub profile: MeshPeerCapabilityProfileArg,
+
+    /// Public key fingerprint to associate with this peer.
+    #[arg(long = "public-key-fingerprint", value_name = "FINGERPRINT")]
+    pub public_key_fingerprint: String,
+
+    /// Capability advertised by the responder handshake. Repeat for multiple lanes.
+    #[arg(long = "responder-capability", value_name = "CAPABILITY", action = ArgAction::Append)]
+    pub responder_capabilities: Vec<String>,
+
+    /// Override the responder node key used in the handshake.
+    #[arg(long = "handshake-node-key", value_name = "NODE_KEY")]
+    pub handshake_node_key: Option<String>,
+
+    /// Stable handshake request ID.
+    #[arg(long = "handshake-request-id", default_value = "hello_req_cli")]
+    pub handshake_request_id: String,
+
+    /// Protocol version reported by both sides in the synthetic handshake.
+    #[arg(long = "protocol-version", default_value = "1.0")]
+    pub protocol_version: String,
+
+    /// Force a denied handshake for dry-run and denial UX testing.
+    #[arg(long = "deny-handshake", action = ArgAction::SetTrue)]
+    pub deny_handshake: bool,
+
+    /// RFC3339 timestamp for deterministic enrollment output.
+    #[arg(long, value_name = "RFC3339")]
+    pub now: Option<String>,
+
+    /// Required explicit human consent flag.
+    #[arg(long = "yes", action = ArgAction::SetTrue)]
+    pub explicit_human_consent: bool,
+}
+
+/// Arguments for `ee mesh peer list`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshPeerListArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee mesh peer show`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshPeerShowArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Peer ID to inspect.
+    #[arg(value_name = "PEER_ID")]
+    pub peer_id: String,
+}
+
+/// Arguments for `ee mesh peer rotate`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshPeerRotateArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Peer ID to rotate.
+    #[arg(value_name = "PEER_ID")]
+    pub peer_id: String,
+
+    /// Replacement public key fingerprint.
+    #[arg(long = "public-key-fingerprint", value_name = "FINGERPRINT")]
+    pub public_key_fingerprint: String,
+
+    /// RFC3339 rotation timestamp.
+    #[arg(long = "rotated-at", value_name = "RFC3339")]
+    pub rotated_at: Option<String>,
+
+    /// Operator-visible rotation reason.
+    #[arg(long, default_value = "operator requested rotation")]
+    pub reason: String,
+}
+
+/// Arguments for `ee mesh peer revoke`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshPeerRevokeArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Peer ID to revoke.
+    #[arg(value_name = "PEER_ID")]
+    pub peer_id: String,
+
+    /// RFC3339 revocation timestamp.
+    #[arg(long = "revoked-at", value_name = "RFC3339")]
+    pub revoked_at: Option<String>,
+}
+
+/// Arguments for `ee mesh peer unknown-attempt`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshPeerUnknownAttemptArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Tailscale node key or configured endpoint identity that contacted us.
+    #[arg(long = "tailscale-node-key", value_name = "NODE_KEY")]
+    pub tailscale_node_key: String,
 }
 
 /// Arguments for `ee mesh status`.
@@ -140,6 +331,7 @@ where
     match command {
         MeshCommand::Init(args) => handle_mesh_init(cli, args, stdout, stderr),
         MeshCommand::Peers(args) => handle_mesh_peers(cli, args, stdout, stderr),
+        MeshCommand::Peer(args) => handle_mesh_peer(cli, args, stdout, stderr),
         MeshCommand::Status(args) => handle_mesh_status(cli, args, stdout, stderr),
         MeshCommand::Export(args) => handle_mesh_export(cli, args, stdout, stderr),
         MeshCommand::Import(args) => handle_mesh_import(cli, args, stdout, stderr),
@@ -230,6 +422,250 @@ where
     };
     let report = snapshot.peers_report();
     write_mesh_report(cli, &report, &render_mesh_peers_human(&report), stdout)
+}
+
+fn handle_mesh_peer<W, E>(
+    cli: &Cli,
+    args: &MeshPeerArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match &args.command {
+        MeshPeerCommand::Add(args) => handle_mesh_peer_add(cli, args, stdout, stderr),
+        MeshPeerCommand::List(args) => handle_mesh_peer_list(cli, args, stdout, stderr),
+        MeshPeerCommand::Show(args) => handle_mesh_peer_show(cli, args, stdout, stderr),
+        MeshPeerCommand::Rotate(args) => handle_mesh_peer_rotate(cli, args, stdout, stderr),
+        MeshPeerCommand::Revoke(args) => handle_mesh_peer_revoke(cli, args, stdout, stderr),
+        MeshPeerCommand::UnknownAttempt(args) => {
+            handle_mesh_peer_unknown_attempt(cli, args, stdout, stderr)
+        }
+    }
+}
+
+fn handle_mesh_peer_add<W, E>(
+    cli: &Cli,
+    args: &MeshPeerAddArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
+        Ok(store) => store,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let now = args
+        .now
+        .clone()
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    let handshake_node_key = args
+        .handshake_node_key
+        .clone()
+        .unwrap_or_else(|| args.tailscale_node_key.clone());
+    let handshake = if args.deny_handshake {
+        MeshPeerHandshake::denied(args.handshake_request_id.clone(), handshake_node_key)
+    } else {
+        MeshPeerHandshake::granted(
+            args.handshake_request_id.clone(),
+            args.protocol_version.clone(),
+            handshake_node_key,
+            args.responder_capabilities.clone(),
+        )
+    };
+    let report = enroll_peer(MeshPeerEnrollInput {
+        workspace_id: snapshot.workspace_id.clone(),
+        alias: args.alias.clone(),
+        endpoint: MeshPeerEndpoint {
+            tailscale_node_key: args.tailscale_node_key.clone(),
+            tailnet_id: args.tailnet_id.clone(),
+            tailnet_display_name: args.tailnet_display_name.clone(),
+            endpoint: args.endpoint.clone(),
+            magic_dns_name: args.magic_dns_name.clone(),
+        },
+        capability_profile: args.profile.into(),
+        handshake,
+        public_key_fingerprint: args.public_key_fingerprint.clone(),
+        now,
+        explicit_human_consent: args.explicit_human_consent,
+    });
+    if let Some(peer) = report.peer.as_ref()
+        && let Err(error) = persist_mesh_peer_record(&connection, &snapshot.workspace_id, peer)
+    {
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    write_mesh_report(
+        cli,
+        &report,
+        &render_mesh_peer_command_human(&report),
+        stdout,
+    )
+}
+
+fn handle_mesh_peer_list<W, E>(
+    cli: &Cli,
+    args: &MeshPeerListArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
+        Ok(store) => store,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let peers = match list_enrolled_peer_records(&connection, &snapshot.workspace_id) {
+        Ok(peers) => peers,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let report = list_peers(&peers);
+    write_mesh_report(
+        cli,
+        &report,
+        &render_mesh_peer_command_human(&report),
+        stdout,
+    )
+}
+
+fn handle_mesh_peer_show<W, E>(
+    cli: &Cli,
+    args: &MeshPeerShowArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
+        Ok(store) => store,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let peer = match get_enrolled_peer_record(&connection, &snapshot.workspace_id, &args.peer_id) {
+        Ok(peer) => peer,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let report = show_peer(&peer);
+    write_mesh_report(
+        cli,
+        &report,
+        &render_mesh_peer_command_human(&report),
+        stdout,
+    )
+}
+
+fn handle_mesh_peer_rotate<W, E>(
+    cli: &Cli,
+    args: &MeshPeerRotateArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
+        Ok(store) => store,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let peer = match get_enrolled_peer_record(&connection, &snapshot.workspace_id, &args.peer_id) {
+        Ok(peer) => peer,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let report = rotate_peer_key(
+        &peer,
+        MeshPeerRotateInput {
+            new_public_key_fingerprint: args.public_key_fingerprint.clone(),
+            rotated_at: args
+                .rotated_at
+                .clone()
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            reason: args.reason.clone(),
+        },
+    );
+    if let Some(peer) = report.peer.as_ref()
+        && let Err(error) = persist_mesh_peer_record(&connection, &snapshot.workspace_id, peer)
+    {
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    write_mesh_report(
+        cli,
+        &report,
+        &render_mesh_peer_command_human(&report),
+        stdout,
+    )
+}
+
+fn handle_mesh_peer_revoke<W, E>(
+    cli: &Cli,
+    args: &MeshPeerRevokeArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
+        Ok(store) => store,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let peer = match get_enrolled_peer_record(&connection, &snapshot.workspace_id, &args.peer_id) {
+        Ok(peer) => peer,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let report = revoke_peer(
+        &peer,
+        args.revoked_at
+            .clone()
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+    );
+    if let Some(peer) = report.peer.as_ref()
+        && let Err(error) = persist_mesh_peer_record(&connection, &snapshot.workspace_id, peer)
+    {
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    write_mesh_report(
+        cli,
+        &report,
+        &render_mesh_peer_command_human(&report),
+        stdout,
+    )
+}
+
+fn handle_mesh_peer_unknown_attempt<W, E>(
+    cli: &Cli,
+    args: &MeshPeerUnknownAttemptArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
+        Ok(store) => store,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let peers = match list_enrolled_peer_records(&connection, &snapshot.workspace_id) {
+        Ok(peers) => peers,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let report =
+        unknown_peer_attempt_report(&peers, &snapshot.workspace_id, &args.tailscale_node_key);
+    write_mesh_report(
+        cli,
+        &report,
+        &render_mesh_peer_command_human(&report),
+        stdout,
+    )
 }
 
 fn handle_mesh_export<W, E>(
@@ -575,6 +1011,126 @@ fn build_snapshot(
     })
 }
 
+fn open_mesh_peer_store(
+    cli: &Cli,
+    database_override: Option<&Path>,
+) -> Result<(MeshForegroundSnapshot, DbConnection), DomainError> {
+    let snapshot = build_snapshot(cli, database_override)?;
+    if !snapshot.initialized {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Cannot use mesh peer enrollment commands because {} does not exist",
+                snapshot.database_path
+            ),
+            repair: Some(format!(
+                "Run `ee init --workspace \"{}\" --json` first.",
+                snapshot.workspace_path
+            )),
+        });
+    }
+    let connection = open_mesh_connection(Path::new(&snapshot.database_path))?;
+    Ok((snapshot, connection))
+}
+
+fn persist_mesh_peer_record(
+    connection: &DbConnection,
+    workspace_id: &str,
+    peer: &MeshPeerRecord,
+) -> Result<(), DomainError> {
+    let policy_summary_json = serde_json::to_string(peer).map_err(|error| DomainError::Usage {
+        message: format!("Failed to serialize mesh peer record: {error}"),
+        repair: Some("Retry the command or report the serialization failure.".to_owned()),
+    })?;
+    let last_seen_at = peer
+        .revoked_at
+        .clone()
+        .or_else(|| peer.key.rotated_at.clone())
+        .unwrap_or_else(|| peer.enrolled_at.clone());
+    connection
+        .upsert_mesh_peer(&UpsertMeshPeerInput {
+            workspace_id: workspace_id.to_owned(),
+            peer_id: peer.peer_id.clone(),
+            origin_node_id: build_peer_origin_node_id(&peer.endpoint.tailscale_node_key),
+            display_name: Some(peer.alias.clone()),
+            policy_summary_json: Some(policy_summary_json),
+            enabled: peer.state == crate::mesh::peer::MeshPeerState::Active,
+            last_seen_at: Some(last_seen_at),
+        })
+        .map_err(|error| storage_error("Failed to persist mesh peer enrollment", error))?;
+    Ok(())
+}
+
+fn list_enrolled_peer_records(
+    connection: &DbConnection,
+    workspace_id: &str,
+) -> Result<Vec<MeshPeerRecord>, DomainError> {
+    let stored = connection
+        .list_mesh_peers(workspace_id)
+        .map_err(|error| storage_error("Failed to list mesh peer enrollments", error))?;
+    let mut peers = Vec::new();
+    for row in stored {
+        if let Some(peer) = enrolled_peer_record_from_policy_summary(
+            row.policy_summary_json.as_deref(),
+            row.peer_id.as_str(),
+        )? {
+            peers.push(peer);
+        }
+    }
+    peers.sort_by(|left, right| left.peer_id.cmp(&right.peer_id));
+    Ok(peers)
+}
+
+fn get_enrolled_peer_record(
+    connection: &DbConnection,
+    workspace_id: &str,
+    peer_id: &str,
+) -> Result<MeshPeerRecord, DomainError> {
+    let row = connection
+        .get_mesh_peer(workspace_id, peer_id)
+        .map_err(|error| storage_error("Failed to load mesh peer enrollment", error))?
+        .ok_or_else(|| unknown_mesh_peer_error(peer_id))?;
+    enrolled_peer_record_from_policy_summary(row.policy_summary_json.as_deref(), peer_id)?
+        .ok_or_else(|| unknown_mesh_peer_error(peer_id))
+}
+
+fn enrolled_peer_record_from_policy_summary(
+    policy_summary_json: Option<&str>,
+    peer_id: &str,
+) -> Result<Option<MeshPeerRecord>, DomainError> {
+    let Some(policy_summary_json) = policy_summary_json else {
+        return Ok(None);
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(policy_summary_json).map_err(|error| DomainError::Usage {
+            message: format!("Stored mesh peer {peer_id} has invalid policy summary JSON: {error}"),
+            repair: Some(
+                "Re-run `ee mesh peer add ... --yes --json` for this peer or revoke the stale row."
+                    .to_owned(),
+            ),
+        })?;
+    if value.get("schema").and_then(serde_json::Value::as_str)
+        != Some(crate::mesh::peer::MESH_PEER_RECORD_SCHEMA_V1)
+    {
+        return Ok(None);
+    }
+    serde_json::from_value::<MeshPeerRecord>(value)
+        .map(Some)
+        .map_err(|error| DomainError::Usage {
+            message: format!("Stored mesh peer {peer_id} record is malformed: {error}"),
+            repair: Some(
+                "Re-run `ee mesh peer add ... --yes --json` for this peer or revoke the stale row."
+                    .to_owned(),
+            ),
+        })
+}
+
+fn unknown_mesh_peer_error(peer_id: &str) -> DomainError {
+    DomainError::Usage {
+        message: format!("No enrolled mesh peer found for {peer_id}"),
+        repair: Some("Run `ee mesh peer list --json` to inspect enrolled peers.".to_owned()),
+    }
+}
+
 fn mesh_config_for_workspace(
     workspace_path: &Path,
 ) -> Result<(bool, MeshCommandMode), DomainError> {
@@ -882,6 +1438,49 @@ fn render_mesh_peers_human(report: &MeshCliPeersReport) -> String {
         ));
     }
     append_degradations(&mut output, &report.degraded);
+    output
+}
+
+fn render_mesh_peer_command_human(report: &MeshPeerCommandReport) -> String {
+    let mut output = format!(
+        "Mesh peer: {command}\n  Success: {success}\n  Message: {message}\n",
+        command = report.command,
+        success = if report.success { "yes" } else { "no" },
+        message = report.message,
+    );
+    if let Some(code) = report.denied_code {
+        output.push_str(&format!("  Denied code: {code}\n"));
+    }
+    if let Some(peer) = &report.peer {
+        output.push_str(&format!(
+            "  Peer: {} alias={} state={} profile={}\n  Endpoint: {} ({})\n  Key generation: {}\n",
+            peer.peer_id,
+            peer.alias,
+            peer.state.as_str(),
+            peer.capabilities.profile.as_str(),
+            peer.endpoint.tailscale_node_key,
+            peer.endpoint.endpoint,
+            peer.key.generation,
+        ));
+    }
+    if !report.peers.is_empty() {
+        output.push_str("  Peers:\n");
+        for peer in &report.peers {
+            output.push_str(&format!(
+                "    - {} alias={} state={} profile={}\n",
+                peer.peer_id,
+                peer.alias,
+                peer.state.as_str(),
+                peer.capabilities.profile.as_str()
+            ));
+        }
+    }
+    if !report.next_commands.is_empty() {
+        output.push_str("  Next commands:\n");
+        for command in &report.next_commands {
+            output.push_str(&format!("    - {command}\n"));
+        }
+    }
     output
 }
 

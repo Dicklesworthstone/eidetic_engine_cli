@@ -39556,7 +39556,11 @@ const MAINTENANCE_SUBCOMMANDS: &[&str] = &[
 ];
 const MEMORY_SUBCOMMANDS: &[&str] = &["expire", "list", "show", "history", "revise", "tags"];
 const MIGRATE_SUBCOMMANDS: &[&str] = &["status", "run"];
-const MESH_SUBCOMMANDS: &[&str] = &["init", "peers", "status", "export", "import", "sync"];
+const MESH_SUBCOMMANDS: &[&str] = &[
+    "init", "peers", "peer", "status", "export", "import", "sync",
+];
+const MESH_PEER_SUBCOMMANDS: &[&str] =
+    &["add", "list", "show", "rotate", "revoke", "unknown-attempt"];
 const MCP_SUBCOMMANDS: &[&str] = &["manifest", "serve-stdio", "validate"];
 const MODEL_SUBCOMMANDS: &[&str] = &["status", "list"];
 const OUTCOME_QUARANTINE_SUBCOMMANDS: &[&str] = &["list", "release"];
@@ -40018,6 +40022,16 @@ impl NormalizedInvocation {
                 Command::Mesh(mesh_cmd) => match mesh_cmd {
                     mesh::MeshCommand::Init(_) => "mesh init".to_string(),
                     mesh::MeshCommand::Peers(_) => "mesh peers".to_string(),
+                    mesh::MeshCommand::Peer(peer) => match &peer.command {
+                        mesh::MeshPeerCommand::Add(_) => "mesh peer add".to_string(),
+                        mesh::MeshPeerCommand::List(_) => "mesh peer list".to_string(),
+                        mesh::MeshPeerCommand::Show(_) => "mesh peer show".to_string(),
+                        mesh::MeshPeerCommand::Rotate(_) => "mesh peer rotate".to_string(),
+                        mesh::MeshPeerCommand::Revoke(_) => "mesh peer revoke".to_string(),
+                        mesh::MeshPeerCommand::UnknownAttempt(_) => {
+                            "mesh peer unknown-attempt".to_string()
+                        }
+                    },
                     mesh::MeshCommand::Status(_) => "mesh status".to_string(),
                     mesh::MeshCommand::Export(_) => "mesh export".to_string(),
                     mesh::MeshCommand::Import(_) => "mesh import".to_string(),
@@ -40189,6 +40203,7 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "memory" => Some(MEMORY_SUBCOMMANDS),
         "migrate" => Some(MIGRATE_SUBCOMMANDS),
         "mesh" => Some(MESH_SUBCOMMANDS),
+        "mesh peer" => Some(MESH_PEER_SUBCOMMANDS),
         "mcp" => Some(MCP_SUBCOMMANDS),
         "model" => Some(MODEL_SUBCOMMANDS),
         "outcome-quarantine" => Some(OUTCOME_QUARANTINE_SUBCOMMANDS),
@@ -47511,6 +47526,51 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn mesh_peer_command_surface_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "mesh",
+            "peer",
+            "add",
+            "--alias",
+            "peer-alpha",
+            "--tailscale-node-key",
+            "nodekey:peer-alpha",
+            "--endpoint",
+            "100.64.10.2:4747",
+            "--tailnet-id",
+            "tn_peer_enroll_001",
+            "--profile",
+            "body-allowed",
+            "--public-key-fingerprint",
+            "blake3:pubkey-alpha",
+            "--responder-capability",
+            "mesh:metadata",
+            "--responder-capability",
+            "mesh:body",
+            "--yes",
+            "--json",
+        ])
+        .map_err(|e| format!("failed to parse mesh peer add: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Mesh(mesh::MeshCommand::Peer(peer))) => match peer.command {
+                mesh::MeshPeerCommand::Add(args) => {
+                    ensure_equal(&args.alias, &"peer-alpha".to_owned(), "peer alias")?;
+                    ensure_equal(
+                        &args.responder_capabilities.len(),
+                        &2,
+                        "responder capability count",
+                    )?;
+                    ensure_equal(&args.explicit_human_consent, &true, "explicit consent")
+                }
+                other => Err(format!("expected mesh peer add, got {other:?}")),
+            },
+            other => Err(format!("expected mesh peer command, got {other:?}")),
+        }
     }
 
     #[test]
