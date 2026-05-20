@@ -164,12 +164,14 @@ fn rch_runbook_cargo_examples_are_rch_routed() -> TestResult {
 fn rch_runbook_beads_comment_template_names_source_attribution_fields() -> TestResult {
     let runbook = read_doc("docs/rch_runbook.md")?;
     // Every field the bd-9ygik source-attribution surface adds to
-    // the ee.rch.verify.v1 proof. An agent pasting the template
-    // must see them all named so they don't accidentally drop the
-    // new evidence on closeout.
+    // the ee.rch.verify.v1 proof, plus the blocker handoff fields
+    // agents need when RCH refuses before remote Cargo. An agent
+    // pasting the template must see them all named so they don't
+    // accidentally drop the new evidence on closeout.
     let required_fields = [
         "command_hash",
         "verification_attribution",
+        "git_head",
         "git_tree",
         "dirty_status_hash",
         "source_manifest_hash",
@@ -178,6 +180,10 @@ fn rch_runbook_beads_comment_template_names_source_attribution_fields() -> TestR
         "degraded_codes",
         "source_state_degraded_codes",
         "worker_state_degraded_codes",
+        "known_blocker",
+        "remediation_bead",
+        "retry_after",
+        "build_admission",
         "first_error",
     ];
     let mut missing: Vec<&str> = Vec::new();
