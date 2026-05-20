@@ -13496,14 +13496,16 @@ where
                 Some(ref hint) => format!("{base_message} ({hint})"),
                 None => base_message,
             };
+            let subcommand_help_repair =
+                extract_usage_subcommand(&error).map(|cmd| format!("ee {cmd} --help"));
             let repair = suggestion
                 .as_ref()
-                .map(|hint| {
+                .and_then(|hint| {
                     hint.strip_prefix("did you mean `")
                         .and_then(|s| s.strip_suffix("`?"))
                         .map(|cmd| format!("ee {cmd}"))
-                        .unwrap_or_else(|| "ee --help".to_string())
                 })
+                .or(subcommand_help_repair)
                 .unwrap_or_else(|| "ee --help".to_string());
 
             let domain_error = DomainError::Usage {
@@ -13530,10 +13532,79 @@ where
 
 fn clap_error_message(error: &clap::Error) -> String {
     let full = error.to_string();
-    full.lines()
-        .find(|line| line.starts_with("error:"))
-        .map(|line| line.trim_start_matches("error:").trim().to_string())
-        .unwrap_or_else(|| full.lines().next().unwrap_or("Unknown error").to_string())
+    let mut lines_iter = full.lines();
+    let mut header: Option<String> = None;
+
+    for line in lines_iter.by_ref() {
+        if let Some(rest) = line.strip_prefix("error:") {
+            header = Some(rest.trim().to_string());
+            break;
+        }
+    }
+    let Some(header) = header else {
+        return full
+            .lines()
+            .next()
+            .unwrap_or("Unknown error")
+            .to_string();
+    };
+
+    // Capture continuation lines that belong to the same error block
+    // (e.g. the `<CONTENT>` line after "the following required arguments were
+    // not provided:"). Stop at the first section boundary so we don't swallow
+    // the Usage block.
+    let mut continuation: Vec<String> = Vec::new();
+    for line in lines_iter {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if continuation.is_empty() {
+                continue;
+            }
+            break;
+        }
+        if trimmed.starts_with("Usage:") || trimmed.starts_with("For more information") {
+            break;
+        }
+        continuation.push(trimmed.to_string());
+    }
+
+    if continuation.is_empty() {
+        header
+    } else {
+        format!("{header} {}", continuation.join(" "))
+    }
+}
+
+/// Parse the subcommand path (e.g. "remember", "memory show") from a clap
+/// error's `Usage:` line. Returns None if the usage line is missing or only
+/// references the bare binary.
+fn extract_usage_subcommand(error: &clap::Error) -> Option<String> {
+    let full = error.to_string();
+    for line in full.lines() {
+        let trimmed = line.trim();
+        let rest = trimmed.strip_prefix("Usage:")?.trim();
+        // `rest` looks like `ee remember [OPTIONS] <CONTENT>` or `ee --json`.
+        let rest = rest.strip_prefix("ee").unwrap_or(rest).trim();
+        let mut path: Vec<&str> = Vec::new();
+        for tok in rest.split_whitespace() {
+            if tok.starts_with('[')
+                || tok.starts_with('<')
+                || tok.starts_with('-')
+                || tok == "OPTIONS"
+                || tok == "COMMAND"
+                || tok == "ARGS"
+                || tok == "..."
+            {
+                break;
+            }
+            path.push(tok);
+        }
+        if path.is_empty() {
+            return None;
+        }
+        return Some(path.join(" "));
+    }
+    None
 }
 
 fn handle_agent_docs<W, E>(
@@ -25474,14 +25545,14 @@ where
 fn deprecated_context_alias_degradation() -> ContextResponseDegradation {
     match ContextResponseDegradation::new(
         "deprecated_alias",
-        ContextResponseSeverity::Low,
+        ContextResponseSeverity::Info,
         "`ee context` is a compatibility alias for the promoted triad command.",
         Some("Use `ee pack \"<task>\"`.".to_string()),
     ) {
         Ok(entry) => entry,
         Err(_) => ContextResponseDegradation {
             code: "deprecated_alias".to_string(),
-            severity: ContextResponseSeverity::Low,
+            severity: ContextResponseSeverity::Info,
             message: "`ee context` is a compatibility alias for the promoted triad command."
                 .to_string(),
             repair: Some("Use `ee pack \"<task>\"`.".to_string()),
@@ -32389,7 +32460,7 @@ fn remember_json_with_deprecated_alias(json: String) -> String {
     };
     degraded.push(serde_json::json!({
         "code": "deprecated_alias",
-        "severity": "low",
+        "severity": "info",
         "message": "`ee remember` is a compatibility alias for the promoted triad command.",
         "repair": "Use `ee note \"<text>\"` when inference is acceptable; keep `ee remember` for explicit level/kind capture."
     }));
@@ -51482,6 +51553,74 @@ mod tests {
     fn did_you_mean_suggests_status_for_statis() -> TestResult {
         let suggestion = super::did_you_mean("statis", None);
         ensure_equal(&suggestion, &Some("status".to_string()), "statis -> status")
+    }
+
+    #[test]
+    fn clap_error_message_captures_required_arg_continuation() -> TestResult {
+        let rendered = concat!(
+            "error: the following required arguments were not provided:\n",
+            "  <CONTENT>\n",
+            "\n",
+            "Usage: ee remember <CONTENT>\n",
+            "\n",
+            "For more information, try '--help'.\n",
+        );
+        let err = clap::Error::raw(clap::error::ErrorKind::MissingRequiredArgument, rendered);
+        let msg = super::clap_error_message(&err);
+        ensure_equal(
+            &msg,
+            &"the following required arguments were not provided: <CONTENT>".to_string(),
+            "continuation captured",
+        )
+    }
+
+    #[test]
+    fn clap_error_message_captures_tip_continuation() -> TestResult {
+        let rendered = concat!(
+            "error: unexpected argument '--jsno' found\n",
+            "\n",
+            "  tip: a similar argument exists: '--json'\n",
+            "\n",
+            "Usage: ee --json\n",
+            "\n",
+            "For more information, try '--help'.\n",
+        );
+        let err = clap::Error::raw(clap::error::ErrorKind::UnknownArgument, rendered);
+        let msg = super::clap_error_message(&err);
+        ensure_equal(
+            &msg,
+            &"unexpected argument '--jsno' found tip: a similar argument exists: '--json'"
+                .to_string(),
+            "tip line captured",
+        )
+    }
+
+    #[test]
+    fn extract_usage_subcommand_parses_remember() -> TestResult {
+        let rendered = "error: oh no\n\nUsage: ee remember <CONTENT>\n";
+        let err = clap::Error::raw(clap::error::ErrorKind::MissingRequiredArgument, rendered);
+        let cmd = super::extract_usage_subcommand(&err);
+        ensure_equal(&cmd, &Some("remember".to_string()), "subcommand parsed")
+    }
+
+    #[test]
+    fn extract_usage_subcommand_parses_nested() -> TestResult {
+        let rendered = "error: nope\n\nUsage: ee memory show <ID>\n";
+        let err = clap::Error::raw(clap::error::ErrorKind::MissingRequiredArgument, rendered);
+        let cmd = super::extract_usage_subcommand(&err);
+        ensure_equal(
+            &cmd,
+            &Some("memory show".to_string()),
+            "nested subcommand parsed",
+        )
+    }
+
+    #[test]
+    fn extract_usage_subcommand_bare_binary_returns_none() -> TestResult {
+        let rendered = "error: bare\n\nUsage: ee --json\n";
+        let err = clap::Error::raw(clap::error::ErrorKind::UnknownArgument, rendered);
+        let cmd = super::extract_usage_subcommand(&err);
+        ensure_equal(&cmd, &None, "bare-binary usage returns None")
     }
 
     #[test]

@@ -30,7 +30,7 @@ expression: context
         "code": "deprecated_alias",
         "message": "`ee context` is a compatibility alias for the promoted triad command.",
         "repair": "Use `ee pack \"<task>\"`.",
-        "severity": "low",
+        "severity": "info",
         "sources": [
           "request"
         ]

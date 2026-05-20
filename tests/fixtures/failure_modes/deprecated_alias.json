@@ -9,7 +9,7 @@
     "remember",
     "context"
   ],
-  "severity": "low",
+  "severity": "info",
   "repair_present": true,
   "trigger": {
     "description": "A promoted triad command keeps the older verbose command available as a compatibility alias and reports the replacement.",
@@ -20,7 +20,7 @@
   },
   "expected_emission": {
     "code": "deprecated_alias",
-    "severity": "low",
+    "severity": "info",
     "message_contains": [
       "compatibility alias",
       "promoted triad command"
