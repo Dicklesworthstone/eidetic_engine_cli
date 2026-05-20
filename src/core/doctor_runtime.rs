@@ -985,8 +985,21 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
                 }
             }
         }
-        "manual" | "emit_diagnostic" => {
-            // No-op for undo (the action didn't touch disk).
+        "manual"
+        | "emit_diagnostic"
+        | "run_index_rebuild"
+        | "run_graph_refresh"
+        | "run_wal_checkpoint"
+        | "run_migration"
+        | "rewrite_jsonl"
+        | "atomic_rewrite_toml"
+        | "snapshot_backup" => {
+            // No-op for undo. These op kinds are advisory: `mutate()`
+            // records planned-mutation evidence in `actions.jsonl` but does
+            // not touch the doctor's blast-radius files itself. The actual
+            // subsystem mutation (when those actor handles land) is undone
+            // via the subsystem's own rollback, not by doctor's
+            // tempfile-rename inverse pair.
         }
         other => {
             return Err(DoctorRuntimeError::ActionsLogCorrupt {
@@ -1049,6 +1062,13 @@ impl CapabilitiesReport {
                 "quarantine_by_rename",
                 "manual",
                 "emit_diagnostic",
+                "run_index_rebuild",
+                "run_graph_refresh",
+                "run_wal_checkpoint",
+                "run_migration",
+                "rewrite_jsonl",
+                "atomic_rewrite_toml",
+                "snapshot_backup",
             ],
             exit_codes: vec![
                 ExitCodeEntry {
