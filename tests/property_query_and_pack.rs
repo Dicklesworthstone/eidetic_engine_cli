@@ -848,13 +848,19 @@ fn stale_regression_fixture_hashes(
             "stale_after_days {stale_after_days} must be non-negative"
         ));
     }
-    let now = parse_fixture_timestamp("now", now)?;
+    let now_timestamp = parse_fixture_timestamp("now", now)?;
     let stale_after = Duration::days(stale_after_days);
     let mut stale = Vec::new();
     for fixture in fixtures {
         let last_verified_at =
             parse_fixture_timestamp(&fixture.input_hash, &fixture.last_verified_at)?;
-        if now.signed_duration_since(last_verified_at) > stale_after {
+        if now_timestamp < last_verified_at {
+            return Err(format!(
+                "now {now} predates fixture {} last_verified_at {}",
+                fixture.input_hash, fixture.last_verified_at
+            ));
+        }
+        if now_timestamp.signed_duration_since(last_verified_at) > stale_after {
             stale.push(fixture.input_hash.clone());
         }
     }
@@ -1798,6 +1804,23 @@ fn determinism_regression_fixture_staleness_rejects_invalid_timestamp() -> Resul
         .expect_err("invalid fixture timestamp should be rejected");
 
     assert!(error.contains("not-a-date"));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_staleness_rejects_clock_regression() -> Result<(), String> {
+    let mut fixture =
+        regression_fixture_for_mismatch(4, b"clock-regression", b"expected", b"observed")
+            .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    fixture.last_verified_at = "2026-05-17T00:00:00Z".to_string();
+
+    let error =
+        stale_regression_fixture_hashes(std::slice::from_ref(&fixture), "2026-05-16T23:59:59Z", 90)
+            .expect_err("staleness checks should reject a regressed runner clock");
+
+    assert!(error.contains("now 2026-05-16T23:59:59Z predates fixture"));
+    assert!(error.contains(&fixture.input_hash));
+    assert!(error.contains("last_verified_at 2026-05-17T00:00:00Z"));
     Ok(())
 }
 
