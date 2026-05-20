@@ -441,7 +441,7 @@ fn annotate_workspace_row_counts(
 fn copy_workspace_to_shard(
     plan: &ShardFanoutMigrationPlan,
     workspace: &ShardFanoutMigrationWorkspacePlan,
-    source: &DbConnection,
+    _source: &DbConnection,
     source_tables: &BTreeSet<String>,
     catalog: &DbConnection,
 ) -> Result<ShardFanoutMigrationWorkspaceOutcome, DomainError> {

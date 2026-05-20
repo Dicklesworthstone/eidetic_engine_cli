@@ -272,7 +272,7 @@ pub fn list_sharded_timeline(
         },
         entries: page
             .into_iter()
-            .map(|entry| AuditTimelineEntry::from_sharded(entry.entry, entry.shard_id))
+            .map(|entry| AuditTimelineEntry::from_sharded(entry.entry, Some(entry.shard_id)))
             .collect(),
     })
 }

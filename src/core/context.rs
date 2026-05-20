@@ -2296,9 +2296,12 @@ fn sort_scored_memory_score_tie_by_workspace_then_memory_id(scored: &mut [(Store
         {
             run_end += 1;
         }
-        sort_by_ulid_payload_or_lexical(&mut scored[run_start..run_end], |(memory, _)| {
-            memory.id.as_str()
-        });
+        let mut run_slice: Vec<(StoredMemory, f32)> = scored[run_start..run_end].to_vec();
+        sort_by_ulid_payload_or_lexical(
+            &mut run_slice,
+            |(memory, _): &(StoredMemory, f32)| memory.id.as_str(),
+        );
+        scored[run_start..run_end].clone_from_slice(&run_slice);
         run_start = run_end;
     }
 }
