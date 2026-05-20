@@ -13573,16 +13573,19 @@ fn clap_error_message(error: &clap::Error) -> String {
 
     // Capture continuation lines that belong to the same error block
     // (e.g. the `<CONTENT>` line after "the following required arguments were
-    // not provided:"). Stop at the first section boundary so we don't swallow
-    // the Usage block.
+    // not provided:", or any number of `tip:` lines clap interleaves with
+    // blank separators). Stop at the first true section boundary so we don't
+    // swallow the Usage block — blank lines alone are NOT a boundary because
+    // clap emits them between consecutive tips and between the header and
+    // the next continuation segment. bd-3794y: previously the first blank
+    // line after the first captured continuation aborted the loop, dropping
+    // every subsequent `tip:` line and additional required-arg list entry
+    // from the JSON envelope.
     let mut continuation: Vec<String> = Vec::new();
     for line in lines_iter {
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            if continuation.is_empty() {
-                continue;
-            }
-            break;
+            continue;
         }
         if trimmed.starts_with("Usage:") || trimmed.starts_with("For more information") {
             break;
@@ -51635,6 +51638,54 @@ mod tests {
             &"unexpected argument '--jsno' found tip: a similar argument exists: '--json'"
                 .to_string(),
             "tip line captured",
+        )
+    }
+
+    #[test]
+    fn clap_error_message_captures_multiple_tip_continuations_separated_by_blanks() -> TestResult {
+        // bd-3794y regression: prior to the fix, the first blank line after
+        // the first captured continuation aborted the loop, dropping every
+        // subsequent tip line from the JSON envelope.
+        let rendered = concat!(
+            "error: unexpected argument '--jsno' found\n",
+            "\n",
+            "  tip: a similar argument exists: '--json'\n",
+            "\n",
+            "  tip: to pass '--jsno' as a value, use '-- --jsno'\n",
+            "\n",
+            "Usage: ee --json\n",
+            "\n",
+            "For more information, try '--help'.\n",
+        );
+        let err = clap::Error::raw(clap::error::ErrorKind::UnknownArgument, rendered);
+        let msg = super::clap_error_message(&err);
+        ensure_equal(
+            &msg,
+            &"unexpected argument '--jsno' found tip: a similar argument exists: '--json' tip: to pass '--jsno' as a value, use '-- --jsno'".to_string(),
+            "all tip lines captured across blank separators",
+        )
+    }
+
+    #[test]
+    fn clap_error_message_captures_multiple_required_args_separated_by_blanks() -> TestResult {
+        // bd-3794y regression: missing-required-arg lists punctuated with
+        // blank lines used to drop every entry past the first.
+        let rendered = concat!(
+            "error: the following required arguments were not provided:\n",
+            "  <CONTENT>\n",
+            "\n",
+            "  <ID>\n",
+            "\n",
+            "Usage: ee remember <CONTENT> <ID>\n",
+            "\n",
+            "For more information, try '--help'.\n",
+        );
+        let err = clap::Error::raw(clap::error::ErrorKind::MissingRequiredArgument, rendered);
+        let msg = super::clap_error_message(&err);
+        ensure_equal(
+            &msg,
+            &"the following required arguments were not provided: <CONTENT> <ID>".to_string(),
+            "all required-arg entries captured across blank separators",
         )
     }
 
