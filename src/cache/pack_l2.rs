@@ -114,7 +114,7 @@ impl PackL2Cache {
         if let Some(expected_body_hash_prefix) = body_hash_prefix_from_path(&path) {
             let actual_body_hash_prefix = body_hash_prefix(&bytes);
             if actual_body_hash_prefix != expected_body_hash_prefix {
-                let _ = fs::remove_file(&path);
+                remove_cache_entry_best_effort(&path);
                 return Ok(PackL2CacheLookup::Miss(PackL2CacheMiss {
                     key: key.to_owned(),
                     path,
@@ -129,6 +129,7 @@ impl PackL2Cache {
         let entry = match serde_json::from_slice::<PackL2CacheEntry>(&bytes) {
             Ok(entry) => entry,
             Err(error) => {
+                remove_cache_entry_best_effort(&path);
                 return Ok(PackL2CacheLookup::Miss(PackL2CacheMiss {
                     key: key.to_owned(),
                     path,
@@ -138,6 +139,7 @@ impl PackL2Cache {
         };
 
         if entry.schema != PACK_L2_CACHE_ENTRY_SCHEMA_V1 {
+            remove_cache_entry_best_effort(&path);
             return Ok(PackL2CacheLookup::Miss(PackL2CacheMiss {
                 key: key.to_owned(),
                 path,
@@ -148,6 +150,7 @@ impl PackL2Cache {
             }));
         }
         if entry.key != key {
+            remove_cache_entry_best_effort(&path);
             return Ok(PackL2CacheLookup::Miss(PackL2CacheMiss {
                 key: key.to_owned(),
                 path,
@@ -308,16 +311,7 @@ impl PackL2Cache {
             if !candidate.expired && bytes_current <= self.options.max_bytes {
                 break;
             }
-            match fs::remove_file(&candidate.path) {
-                Ok(()) => {
-                    report.removed = report.removed.saturating_add(1);
-                    report.bytes_removed = report.bytes_removed.saturating_add(candidate.byte_len);
-                    bytes_current = bytes_current.saturating_sub(candidate.byte_len);
-                }
-                Err(_) => {
-                    report.skipped = report.skipped.saturating_add(1);
-                }
-            }
+            remove_eviction_candidate_file(&candidate, &mut report, &mut bytes_current);
         }
         report.bytes_after = bytes_current;
         Ok(report)
@@ -504,6 +498,40 @@ struct EvictionCandidate {
     byte_len: u64,
     stored_epoch_seconds: u64,
     expired: bool,
+}
+
+fn remove_cache_entry_best_effort(path: &Path) {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => {}
+    }
+}
+
+fn remove_eviction_candidate_file(
+    candidate: &EvictionCandidate,
+    report: &mut PackL2EvictionReport,
+    bytes_current: &mut u64,
+) {
+    match fs::remove_file(&candidate.path) {
+        Ok(()) => record_eviction_candidate_removed(candidate, report, bytes_current),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            record_eviction_candidate_removed(candidate, report, bytes_current);
+        }
+        Err(_) => {
+            report.skipped = report.skipped.saturating_add(1);
+        }
+    }
+}
+
+fn record_eviction_candidate_removed(
+    candidate: &EvictionCandidate,
+    report: &mut PackL2EvictionReport,
+    bytes_current: &mut u64,
+) {
+    report.removed = report.removed.saturating_add(1);
+    report.bytes_removed = report.bytes_removed.saturating_add(candidate.byte_len);
+    *bytes_current = bytes_current.saturating_sub(candidate.byte_len);
 }
 
 fn cache_file_name(key: &str) -> String {
@@ -875,7 +903,7 @@ mod tests {
     #[test]
     fn error_or_invalid_corrupt_entry_returns_corrupt_miss() -> TestResult {
         let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
-        write_raw_entry(&cache, "blake3:corrupt", b"{not-json")?;
+        let path = write_raw_entry(&cache, "blake3:corrupt", b"{not-json")?;
 
         let lookup = cache
             .get_at("blake3:corrupt", 100)
@@ -890,6 +918,10 @@ mod tests {
             }
             PackL2CacheLookup::Hit(_) => return Err("corrupt entry must not hit".to_owned()),
         }
+        assert!(
+            !path.exists(),
+            "corrupt cache entry should be invalidated after a typed miss"
+        );
         Ok(())
     }
 
@@ -930,7 +962,7 @@ mod tests {
     fn error_or_invalid_key_mismatch_returns_miss() -> TestResult {
         let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
         let original = raw_entry_bytes("blake3:original", json!({"hash": "mismatch"}), 100)?;
-        write_raw_entry(&cache, "blake3:other", &original)?;
+        let path = write_raw_entry(&cache, "blake3:other", &original)?;
 
         let lookup = cache
             .get_at("blake3:other", 100)
@@ -945,6 +977,10 @@ mod tests {
             ),
             PackL2CacheLookup::Hit(_) => return Err("mismatched key must not hit".to_owned()),
         }
+        assert!(
+            !path.exists(),
+            "key-mismatched cache entry should be invalidated"
+        );
         Ok(())
     }
 
@@ -1320,6 +1356,42 @@ mod tests {
                 })
             ),
             "oldest entry should be evicted first"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_eviction__enoent_treated_as_success() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let candidate = EvictionCandidate {
+            path: temp.path().join("already-evicted.json"),
+            byte_len: 128,
+            stored_epoch_seconds: 100,
+            expired: true,
+        };
+        let mut report = PackL2EvictionReport {
+            bytes_before: 256,
+            ..PackL2EvictionReport::default()
+        };
+        let mut bytes_current = report.bytes_before;
+
+        remove_eviction_candidate_file(&candidate, &mut report, &mut bytes_current);
+
+        assert_eq!(
+            report.skipped, 0,
+            "peer-removed cache entries should not count as skipped"
+        );
+        assert_eq!(
+            report.removed, 1,
+            "peer-removed cache entries count as logically removed"
+        );
+        assert_eq!(
+            report.bytes_removed, candidate.byte_len,
+            "logical byte accounting should include the raced entry"
+        );
+        assert_eq!(
+            bytes_current, 128,
+            "current byte estimate should shrink after ENOENT"
         );
         Ok(())
     }
