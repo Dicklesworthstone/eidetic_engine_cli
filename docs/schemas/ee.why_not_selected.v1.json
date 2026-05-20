@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.why_not_selected.v1.json",
+  "title": "ee.why_not_selected.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "memoryId",
+    "taskHash",
+    "selected",
+    "retrievalStageReached",
+    "primaryReason",
+    "filtersApplied",
+    "redactionScopeExclusions",
+    "degraded",
+    "scores",
+    "tokenBudgetFrontier",
+    "freshnessPenalty",
+    "trustPenalty",
+    "counterfactualHints",
+    "provenance"
+  ],
+  "properties": {
+    "schema": { "const": "ee.why_not_selected.v1" },
+    "memoryId": { "type": "string", "minLength": 1 },
+    "taskHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "selected": { "type": "boolean" },
+    "retrievalStageReached": {
+      "type": "string",
+      "enum": [
+        "retrieval",
+        "degraded_index",
+        "candidate_filter",
+        "selection",
+        "selected"
+      ]
+    },
+    "primaryReason": {
+      "type": "string",
+      "enum": [
+        "selected",
+        "not_retrieved",
+        "not_retrieved_due_to_degraded_index",
+        "omitted_by_token_budget",
+        "omitted_by_redundancy",
+        "omitted_by_score_floor",
+        "excluded_by_scope",
+        "excluded_by_redaction",
+        "excluded_by_validity_window",
+        "excluded_by_policy",
+        "excluded_by_filter",
+        "not_ranked"
+      ]
+    },
+    "filtersApplied": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/filter" }
+    },
+    "redactionScopeExclusions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/exclusion" }
+    },
+    "degraded": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/degradation" }
+    },
+    "scores": { "$ref": "#/$defs/scores" },
+    "scoreDeltaToLastIncluded": { "type": ["number", "null"] },
+    "tokenBudgetFrontier": { "$ref": "#/$defs/tokenBudgetFrontier" },
+    "freshnessPenalty": { "$ref": "#/$defs/penalty" },
+    "trustPenalty": { "$ref": "#/$defs/trustPenalty" },
+    "counterfactualHints": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/hint" }
+    },
+    "provenance": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/provenance" }
+    }
+  },
+  "$defs": {
+    "filter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "code", "passed", "detail"],
+      "properties": {
+        "stage": { "type": "string", "minLength": 1 },
+        "code": { "type": "string", "minLength": 1 },
+        "passed": { "type": "boolean" },
+        "detail": { "type": "string" }
+      }
+    },
+    "exclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "code", "stage", "message"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["scope", "redaction", "validity_window", "policy", "filter"]
+        },
+        "code": { "type": "string", "minLength": 1 },
+        "stage": { "const": "candidate_filter" },
+        "message": { "type": "string" },
+        "repairAction": { "type": "string" }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "stage", "message"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "severity": { "type": "string", "minLength": 1 },
+        "stage": { "const": "retrieval" },
+        "message": { "type": "string" },
+        "repairAction": { "type": "string" }
+      }
+    },
+    "scores": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetRelevance", "targetUtility", "targetComposite"],
+      "properties": {
+        "targetRelevance": { "type": "number", "minimum": 0, "maximum": 1 },
+        "targetUtility": { "type": "number", "minimum": 0, "maximum": 1 },
+        "targetComposite": { "type": "number", "minimum": 0, "maximum": 1 },
+        "lastIncludedMemoryId": { "type": "string" },
+        "lastIncludedComposite": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "tokenBudgetFrontier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxTokens",
+        "usedTokens",
+        "targetEstimatedTokens",
+        "requiredAdditionalTokens"
+      ],
+      "properties": {
+        "maxTokens": { "type": "integer", "minimum": 1 },
+        "usedTokens": { "type": "integer", "minimum": 0 },
+        "targetEstimatedTokens": { "type": "integer", "minimum": 1 },
+        "requiredAdditionalTokens": { "type": "integer", "minimum": 0 },
+        "couldFitWithBudget": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "penalty": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "signals"],
+      "properties": {
+        "value": { "type": "number", "minimum": 0 },
+        "signals": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "trustPenalty": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "trustClass", "posture"],
+      "properties": {
+        "value": { "type": "number", "minimum": 0 },
+        "trustClass": { "type": "string", "minLength": 1 },
+        "posture": { "type": "string", "minLength": 1 }
+      }
+    },
+    "hint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "action", "rationale"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1 },
+        "action": { "type": "string", "minLength": 1 },
+        "rationale": { "type": "string", "minLength": 1 }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uri", "label", "scheme", "note"],
+      "properties": {
+        "uri": { "type": "string" },
+        "label": { "type": "string" },
+        "scheme": { "type": "string" },
+        "locator": { "type": ["string", "null"] },
+        "note": { "type": "string" }
+      }
+    }
+  }
+}

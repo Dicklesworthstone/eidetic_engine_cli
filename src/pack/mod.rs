@@ -31,6 +31,7 @@ pub const FACILITY_LOCATION_EPSILON: f32 = 0.000_001;
 pub const DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR: f32 = 0.05;
 pub const MAX_PACK_SKIPPED_ITEMS: usize = 50;
 pub const COORDINATION_SNAPSHOT_SCHEMA_V1: &str = "ee.coordination_snapshot.v1";
+pub const WHY_NOT_SELECTED_SCHEMA_V1: &str = "ee.why_not_selected.v1";
 pub const DEFAULT_COORDINATION_STALE_AFTER_MS: u64 = 86_400_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1090,7 +1091,8 @@ impl PackProvenance {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RenderedPackProvenance {
     pub uri: String,
     pub scheme: &'static str,
@@ -1614,6 +1616,657 @@ impl PackDraft {
             item_count,
             used_tokens,
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WhyNotSelectedInput {
+    pub task: String,
+    pub target: PackCandidate,
+    pub candidates: Vec<PackCandidate>,
+    pub budget: TokenBudget,
+    pub profile: ContextPackProfile,
+    pub exclusions: Vec<WhyNotSelectionExclusion>,
+    pub degraded: Vec<WhyNotSelectionDegradation>,
+}
+
+impl WhyNotSelectedInput {
+    #[must_use]
+    pub fn new(
+        task: impl Into<String>,
+        target: PackCandidate,
+        budget: TokenBudget,
+        profile: ContextPackProfile,
+        candidates: Vec<PackCandidate>,
+    ) -> Self {
+        Self {
+            task: task.into(),
+            target,
+            candidates,
+            budget,
+            profile,
+            exclusions: Vec::new(),
+            degraded: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_exclusions(mut self, exclusions: Vec<WhyNotSelectionExclusion>) -> Self {
+        self.exclusions = exclusions;
+        self
+    }
+
+    #[must_use]
+    pub fn with_degraded(mut self, degraded: Vec<WhyNotSelectionDegradation>) -> Self {
+        self.degraded = degraded;
+        self
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WhyNotSelectionExclusion {
+    pub kind: WhyNotSelectionExclusionKind,
+    pub code: String,
+    pub message: String,
+    pub repair_action: Option<String>,
+}
+
+impl WhyNotSelectionExclusion {
+    #[must_use]
+    pub fn new(
+        kind: WhyNotSelectionExclusionKind,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        repair_action: Option<String>,
+    ) -> Self {
+        Self {
+            kind,
+            code: code.into(),
+            message: message.into(),
+            repair_action,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WhyNotSelectionExclusionKind {
+    Scope,
+    Redaction,
+    ValidityWindow,
+    Policy,
+    Filter,
+}
+
+impl WhyNotSelectionExclusionKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Scope => "scope",
+            Self::Redaction => "redaction",
+            Self::ValidityWindow => "validity_window",
+            Self::Policy => "policy",
+            Self::Filter => "filter",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WhyNotSelectionDegradation {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    pub repair_action: Option<String>,
+}
+
+impl WhyNotSelectionDegradation {
+    #[must_use]
+    pub fn new(
+        code: impl Into<String>,
+        severity: impl Into<String>,
+        message: impl Into<String>,
+        repair_action: Option<String>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            severity: severity.into(),
+            message: message.into(),
+            repair_action,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhyNotSelectedReport {
+    pub schema: &'static str,
+    pub memory_id: String,
+    pub task_hash: String,
+    pub selected: bool,
+    pub retrieval_stage_reached: String,
+    pub primary_reason: String,
+    pub filters_applied: Vec<WhyNotSelectionFilterReport>,
+    pub redaction_scope_exclusions: Vec<WhyNotSelectionExclusionReport>,
+    pub degraded: Vec<WhyNotSelectionDegradationReport>,
+    pub scores: WhyNotSelectionScoreReport,
+    pub score_delta_to_last_included: Option<f32>,
+    pub token_budget_frontier: WhyNotTokenBudgetFrontier,
+    pub freshness_penalty: WhyNotFreshnessPenalty,
+    pub trust_penalty: WhyNotTrustPenalty,
+    pub counterfactual_hints: Vec<WhyNotCounterfactualHint>,
+    pub provenance: Vec<RenderedPackProvenance>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhyNotSelectionFilterReport {
+    pub stage: String,
+    pub code: String,
+    pub passed: bool,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhyNotSelectionExclusionReport {
+    pub kind: String,
+    pub code: String,
+    pub stage: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair_action: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhyNotSelectionDegradationReport {
+    pub code: String,
+    pub severity: String,
+    pub stage: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair_action: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhyNotSelectionScoreReport {
+    pub target_relevance: f32,
+    pub target_utility: f32,
+    pub target_composite: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_included_memory_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_included_composite: Option<f32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhyNotTokenBudgetFrontier {
+    pub max_tokens: u32,
+    pub used_tokens: u32,
+    pub target_estimated_tokens: u32,
+    pub required_additional_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub could_fit_with_budget: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhyNotFreshnessPenalty {
+    pub value: f32,
+    pub signals: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhyNotTrustPenalty {
+    pub value: f32,
+    pub trust_class: String,
+    pub posture: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhyNotCounterfactualHint {
+    pub kind: String,
+    pub action: String,
+    pub rationale: String,
+}
+
+/// Explain why a candidate memory was not selected for a context-pack task.
+///
+/// The report is read-only and deliberately omits the target memory content.
+/// Callers provide the exact candidate universe and any pre-selection
+/// exclusion/degradation facts they observed while retrieving candidates.
+///
+/// # Errors
+///
+/// Returns pack validation errors for an empty task or invalid draft assembly.
+pub fn explain_why_not_selected(
+    input: WhyNotSelectedInput,
+) -> Result<WhyNotSelectedReport, PackValidationError> {
+    let task = trim_required(input.task, PackValidationError::EmptyQuery)?;
+    let target = input.target;
+    let target_memory_id = target.memory_id;
+    let target_present = input
+        .candidates
+        .iter()
+        .any(|candidate| candidate.memory_id == target_memory_id);
+    let exclusions = input.exclusions;
+    let degraded = input.degraded;
+
+    let draft = if target_present && exclusions.is_empty() {
+        Some(assemble_draft_with_profile(
+            input.profile,
+            task.clone(),
+            input.budget,
+            input.candidates,
+        )?)
+    } else {
+        None
+    };
+
+    let selected_item = draft.as_ref().and_then(|draft| {
+        draft
+            .items
+            .iter()
+            .find(|item| item.memory_id == target_memory_id)
+    });
+    let omission = draft.as_ref().and_then(|draft| {
+        draft
+            .omitted
+            .iter()
+            .find(|omission| omission.memory_id == target_memory_id)
+    });
+    let last_included = draft
+        .as_ref()
+        .and_then(|draft| draft.items.iter().max_by_key(|item| item.rank));
+    let selected = selected_item.is_some();
+    let primary_reason =
+        why_not_primary_reason(target_present, selected, omission, &exclusions, &degraded);
+    let stage = why_not_stage(target_present, selected, omission, &exclusions, &degraded);
+    let token_frontier = why_not_token_frontier(input.budget, &target, draft.as_ref(), omission);
+    let scores = why_not_scores(&target, last_included);
+    let score_delta = scores
+        .last_included_composite
+        .map(|last| round_metric(scores.target_composite - last));
+    let freshness_penalty = why_not_freshness_penalty(&target);
+    let trust_penalty = why_not_trust_penalty(&target);
+    let filters = why_not_filters(target_present, selected, omission, &exclusions, &degraded);
+    let exclusion_reports = exclusions
+        .into_iter()
+        .map(why_not_exclusion_report)
+        .collect::<Vec<_>>();
+    let degradation_reports = degraded
+        .into_iter()
+        .map(why_not_degradation_report)
+        .collect::<Vec<_>>();
+    let hints = why_not_counterfactual_hints(
+        &primary_reason,
+        &token_frontier,
+        score_delta,
+        &freshness_penalty,
+        &trust_penalty,
+        &exclusion_reports,
+        &degradation_reports,
+    );
+
+    Ok(WhyNotSelectedReport {
+        schema: WHY_NOT_SELECTED_SCHEMA_V1,
+        memory_id: target_memory_id.to_string(),
+        task_hash: blake3::hash(task.as_bytes()).to_hex().to_string(),
+        selected,
+        retrieval_stage_reached: stage,
+        primary_reason,
+        filters_applied: filters,
+        redaction_scope_exclusions: exclusion_reports,
+        degraded: degradation_reports,
+        scores,
+        score_delta_to_last_included: score_delta,
+        token_budget_frontier: token_frontier,
+        freshness_penalty,
+        trust_penalty,
+        counterfactual_hints: hints,
+        provenance: target
+            .provenance
+            .iter()
+            .map(PackProvenance::rendered)
+            .collect(),
+    })
+}
+
+fn why_not_primary_reason(
+    target_present: bool,
+    selected: bool,
+    omission: Option<&PackOmission>,
+    exclusions: &[WhyNotSelectionExclusion],
+    degraded: &[WhyNotSelectionDegradation],
+) -> String {
+    if selected {
+        return "selected".to_string();
+    }
+    if let Some(exclusion) = exclusions.first() {
+        return match exclusion.kind {
+            WhyNotSelectionExclusionKind::Scope => "excluded_by_scope",
+            WhyNotSelectionExclusionKind::Redaction => "excluded_by_redaction",
+            WhyNotSelectionExclusionKind::ValidityWindow => "excluded_by_validity_window",
+            WhyNotSelectionExclusionKind::Policy => "excluded_by_policy",
+            WhyNotSelectionExclusionKind::Filter => "excluded_by_filter",
+        }
+        .to_string();
+    }
+    if !target_present {
+        if degraded.is_empty() {
+            return "not_retrieved".to_string();
+        }
+        return "not_retrieved_due_to_degraded_index".to_string();
+    }
+    if let Some(omission) = omission {
+        return match omission.reason {
+            PackOmissionReason::TokenBudgetExceeded => "omitted_by_token_budget",
+            PackOmissionReason::RedundantCandidate => "omitted_by_redundancy",
+            PackOmissionReason::BelowRelevanceFloor => "omitted_by_score_floor",
+            PackOmissionReason::ExcludedByPolicy => "excluded_by_policy",
+            PackOmissionReason::ExcludedByFilter => "excluded_by_filter",
+        }
+        .to_string();
+    }
+    "not_ranked".to_string()
+}
+
+fn why_not_stage(
+    target_present: bool,
+    selected: bool,
+    omission: Option<&PackOmission>,
+    exclusions: &[WhyNotSelectionExclusion],
+    degraded: &[WhyNotSelectionDegradation],
+) -> String {
+    if selected {
+        return "selected".to_string();
+    }
+    if let Some(exclusion) = exclusions.first() {
+        return match exclusion.kind {
+            WhyNotSelectionExclusionKind::Scope
+            | WhyNotSelectionExclusionKind::Redaction
+            | WhyNotSelectionExclusionKind::ValidityWindow
+            | WhyNotSelectionExclusionKind::Policy
+            | WhyNotSelectionExclusionKind::Filter => "candidate_filter",
+        }
+        .to_string();
+    }
+    if !target_present {
+        if degraded.is_empty() {
+            return "retrieval".to_string();
+        }
+        return "degraded_index".to_string();
+    }
+    omission
+        .map(|omission| omission.rejected_at.as_str().to_string())
+        .unwrap_or_else(|| "selection".to_string())
+}
+
+fn why_not_token_frontier(
+    budget: TokenBudget,
+    target: &PackCandidate,
+    draft: Option<&PackDraft>,
+    omission: Option<&PackOmission>,
+) -> WhyNotTokenBudgetFrontier {
+    let max_tokens = budget.max_tokens();
+    let used_tokens = draft.map_or(0, |draft| draft.used_tokens);
+    let could_fit_with_budget = omission.and_then(|omission| omission.could_fit_with_budget);
+    let required_additional_tokens = could_fit_with_budget
+        .map(|required| required.saturating_sub(max_tokens))
+        .unwrap_or_else(|| {
+            used_tokens
+                .saturating_add(target.estimated_tokens)
+                .saturating_sub(max_tokens)
+        });
+    WhyNotTokenBudgetFrontier {
+        max_tokens,
+        used_tokens,
+        target_estimated_tokens: target.estimated_tokens,
+        required_additional_tokens,
+        could_fit_with_budget,
+    }
+}
+
+fn why_not_scores(
+    target: &PackCandidate,
+    last_included: Option<&PackDraftItem>,
+) -> WhyNotSelectionScoreReport {
+    let target_composite = why_not_candidate_score(target.relevance, target.utility);
+    let last_included_composite =
+        last_included.map(|item| why_not_candidate_score(item.relevance, item.utility));
+    WhyNotSelectionScoreReport {
+        target_relevance: round_metric(target.relevance.into_inner()),
+        target_utility: round_metric(target.utility.into_inner()),
+        target_composite,
+        last_included_memory_id: last_included.map(|item| item.memory_id.to_string()),
+        last_included_composite,
+    }
+}
+
+fn why_not_candidate_score(relevance: UnitScore, utility: UnitScore) -> f32 {
+    round_metric(
+        (DEFAULT_MMR_RELEVANCE_WEIGHT * relevance.into_inner())
+            + ((1.0 - DEFAULT_MMR_RELEVANCE_WEIGHT) * utility.into_inner()),
+    )
+}
+
+fn why_not_freshness_penalty(target: &PackCandidate) -> WhyNotFreshnessPenalty {
+    let mut value = 0.0_f32;
+    let mut signals = Vec::new();
+    if target.tombstoned_at.is_some() {
+        value = value.max(1.0);
+        signals.push("tombstoned".to_string());
+    }
+    if let Some(lifecycle) = &target.lifecycle {
+        if lifecycle.validity_status != "valid" {
+            value = value.max(0.5);
+            signals.push(format!("validity_status:{}", lifecycle.validity_status));
+        }
+        if lifecycle.validity_window_kind != "unbounded" {
+            signals.push(format!(
+                "validity_window_kind:{}",
+                lifecycle.validity_window_kind
+            ));
+        }
+    }
+    WhyNotFreshnessPenalty {
+        value: round_metric(value),
+        signals,
+    }
+}
+
+fn why_not_trust_penalty(target: &PackCandidate) -> WhyNotTrustPenalty {
+    let value = match target.trust.posture() {
+        PackTrustPosture::Authoritative => 0.0,
+        PackTrustPosture::Advisory => 0.1,
+        PackTrustPosture::LegacyEvidence => 0.25,
+    };
+    WhyNotTrustPenalty {
+        value: round_metric(value),
+        trust_class: target.trust.class.as_str().to_string(),
+        posture: target.trust.posture().as_str().to_string(),
+    }
+}
+
+fn why_not_filters(
+    target_present: bool,
+    selected: bool,
+    omission: Option<&PackOmission>,
+    exclusions: &[WhyNotSelectionExclusion],
+    degraded: &[WhyNotSelectionDegradation],
+) -> Vec<WhyNotSelectionFilterReport> {
+    let mut filters = vec![WhyNotSelectionFilterReport {
+        stage: "retrieval".to_string(),
+        code: "retrieval_candidate_present".to_string(),
+        passed: target_present,
+        detail: if target_present {
+            "target memory reached the pack candidate universe"
+        } else {
+            "target memory was absent from the pack candidate universe"
+        }
+        .to_string(),
+    }];
+    for exclusion in exclusions {
+        filters.push(WhyNotSelectionFilterReport {
+            stage: "candidate_filter".to_string(),
+            code: exclusion.code.clone(),
+            passed: false,
+            detail: exclusion.message.clone(),
+        });
+    }
+    for degradation in degraded {
+        filters.push(WhyNotSelectionFilterReport {
+            stage: "retrieval".to_string(),
+            code: degradation.code.clone(),
+            passed: false,
+            detail: degradation.message.clone(),
+        });
+    }
+    if let Some(omission) = omission {
+        filters.push(WhyNotSelectionFilterReport {
+            stage: omission.rejected_at.as_str().to_string(),
+            code: omission.reason.as_str().to_string(),
+            passed: false,
+            detail: format!("target memory was omitted at {}", omission.rejected_at),
+        });
+    } else if target_present && selected {
+        filters.push(WhyNotSelectionFilterReport {
+            stage: "selection".to_string(),
+            code: "selected".to_string(),
+            passed: true,
+            detail: "target memory was selected".to_string(),
+        });
+    }
+    filters
+}
+
+fn why_not_exclusion_report(exclusion: WhyNotSelectionExclusion) -> WhyNotSelectionExclusionReport {
+    WhyNotSelectionExclusionReport {
+        kind: exclusion.kind.as_str().to_string(),
+        code: exclusion.code,
+        stage: "candidate_filter".to_string(),
+        message: exclusion.message,
+        repair_action: exclusion.repair_action,
+    }
+}
+
+fn why_not_degradation_report(
+    degradation: WhyNotSelectionDegradation,
+) -> WhyNotSelectionDegradationReport {
+    WhyNotSelectionDegradationReport {
+        code: degradation.code,
+        severity: degradation.severity,
+        stage: "retrieval".to_string(),
+        message: degradation.message,
+        repair_action: degradation.repair_action,
+    }
+}
+
+fn why_not_counterfactual_hints(
+    primary_reason: &str,
+    token_frontier: &WhyNotTokenBudgetFrontier,
+    score_delta: Option<f32>,
+    freshness_penalty: &WhyNotFreshnessPenalty,
+    trust_penalty: &WhyNotTrustPenalty,
+    exclusions: &[WhyNotSelectionExclusionReport],
+    degraded: &[WhyNotSelectionDegradationReport],
+) -> Vec<WhyNotCounterfactualHint> {
+    let mut hints = Vec::new();
+    match primary_reason {
+        "omitted_by_token_budget" => hints.push(WhyNotCounterfactualHint {
+            kind: "raise_token_budget".to_string(),
+            action: format!(
+                "increase maxTokens by at least {}",
+                token_frontier.required_additional_tokens.max(1)
+            ),
+            rationale: "the target candidate reached selection but did not fit the token frontier"
+                .to_string(),
+        }),
+        "omitted_by_redundancy" => hints.push(WhyNotCounterfactualHint {
+            kind: "inspect_overlap".to_string(),
+            action:
+                "compare selected memories with the same diversity bucket or normalized content"
+                    .to_string(),
+            rationale: "the target candidate overlapped already selected evidence".to_string(),
+        }),
+        "omitted_by_score_floor" => hints.push(WhyNotCounterfactualHint {
+            kind: "improve_retrieval_score".to_string(),
+            action: "add stronger task terms or validate the memory to improve relevance"
+                .to_string(),
+            rationale: "the target candidate was below the deterministic relevance floor"
+                .to_string(),
+        }),
+        "not_retrieved" | "not_retrieved_due_to_degraded_index" => {
+            hints.push(WhyNotCounterfactualHint {
+                kind: "repair_retrieval".to_string(),
+                action: "inspect search filters, scope, and index freshness for the target memory"
+                    .to_string(),
+                rationale: "the target memory did not reach pack selection".to_string(),
+            });
+        }
+        _ => {}
+    }
+    if score_delta.is_some_and(|delta| delta < 0.0) {
+        hints.push(WhyNotCounterfactualHint {
+            kind: "raise_rank_score".to_string(),
+            action: "increase relevance, utility, or trust evidence before expecting inclusion"
+                .to_string(),
+            rationale: "the target score trailed the last included memory".to_string(),
+        });
+    }
+    if freshness_penalty.value > 0.0 {
+        hints.push(WhyNotCounterfactualHint {
+            kind: "repair_freshness".to_string(),
+            action: "revise or revalidate the memory validity window".to_string(),
+            rationale: "freshness signals reduced confidence in the target memory".to_string(),
+        });
+    }
+    if trust_penalty.value > 0.0 {
+        hints.push(WhyNotCounterfactualHint {
+            kind: "raise_trust".to_string(),
+            action: "attach validated outcome evidence to raise the memory trust posture"
+                .to_string(),
+            rationale: "non-authoritative trust posture is tracked as a counterfactual penalty"
+                .to_string(),
+        });
+    }
+    for exclusion in exclusions {
+        hints.push(WhyNotCounterfactualHint {
+            kind: format!("repair_{}", exclusion.kind),
+            action: exclusion
+                .repair_action
+                .clone()
+                .unwrap_or_else(|| format!("repair {}", exclusion.code)),
+            rationale: exclusion.message.clone(),
+        });
+    }
+    for degradation in degraded {
+        hints.push(WhyNotCounterfactualHint {
+            kind: "repair_degraded_index".to_string(),
+            action: degradation
+                .repair_action
+                .clone()
+                .unwrap_or_else(|| format!("repair {}", degradation.code)),
+            rationale: degradation.message.clone(),
+        });
+    }
+    hints.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.action.cmp(&right.action))
+    });
+    hints.dedup_by(|left, right| left.kind == right.kind && left.action == right.action);
+    hints
+}
+
+fn round_metric(value: f32) -> f32 {
+    if value == 0.0 {
+        0.0
+    } else {
+        (value * 1_000_000.0).round() / 1_000_000.0
     }
 }
 
@@ -8112,6 +8765,174 @@ mod tests {
                 &section_usage,
             ),
             "cached usage for one section must not consume another section's quota",
+        )
+    }
+
+    #[test]
+    fn why_not_selected_reports_token_budget_frontier_without_memory_body() -> TestResult {
+        let selected = candidate_with_content(1, 1.0, 0.5, 20, "Run cargo fmt before release.")?;
+        let target = candidate_with_content(
+            2,
+            0.95,
+            0.5,
+            20,
+            "Secret diagnostic api_key=why-not-fixture should never render.",
+        )?;
+        let budget = TokenBudget::new(60).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let report = super::explain_why_not_selected(super::WhyNotSelectedInput::new(
+            "prepare release",
+            target.clone(),
+            budget,
+            ContextPackProfile::Compact,
+            vec![selected, target],
+        ))
+        .map_err(|error| format!("why-not rejected: {error:?}"))?;
+
+        ensure_equal(
+            &report.schema,
+            &super::WHY_NOT_SELECTED_SCHEMA_V1,
+            "why-not schema",
+        )?;
+        ensure_equal(
+            &report.primary_reason.as_str(),
+            &"omitted_by_token_budget",
+            "primary reason",
+        )?;
+        ensure(
+            report.token_budget_frontier.required_additional_tokens > 0,
+            "token frontier should name the additional budget",
+        )?;
+        ensure(
+            report
+                .counterfactual_hints
+                .iter()
+                .any(|hint| hint.kind == "raise_token_budget"),
+            "token-budget omission should include a budget hint",
+        )?;
+        let json = serde_json::to_string(&report).map_err(|error| error.to_string())?;
+        ensure(
+            !json.contains("why-not-fixture"),
+            "why-not report must not serialize raw target memory content",
+        )
+    }
+
+    #[test]
+    fn why_not_selected_reports_below_score_floor() -> TestResult {
+        let selected = candidate_with_content(1, 1.0, 0.5, 10, "identical release checklist")?;
+        let target = candidate_with_content(2, 0.01, 0.5, 10, "identical release checklist")?;
+        let budget =
+            TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?;
+
+        let report = super::explain_why_not_selected(super::WhyNotSelectedInput::new(
+            "prepare release",
+            target.clone(),
+            budget,
+            ContextPackProfile::Balanced,
+            vec![selected, target],
+        ))
+        .map_err(|error| format!("why-not rejected: {error:?}"))?;
+
+        ensure_equal(
+            &report.primary_reason.as_str(),
+            &"omitted_by_score_floor",
+            "score-floor reason",
+        )?;
+        ensure(
+            report
+                .filters_applied
+                .iter()
+                .any(|filter| filter.code == "below_relevance_floor" && !filter.passed),
+            "score-floor filter should be recorded",
+        )
+    }
+
+    #[test]
+    fn why_not_selected_reports_scope_redaction_and_validity_exclusions() -> TestResult {
+        let target = candidate_with_content(10, 0.8, 0.5, 10, "scoped memory")?;
+        let cases = [
+            (
+                super::WhyNotSelectionExclusionKind::Scope,
+                "scope_mismatch",
+                "excluded_by_scope",
+            ),
+            (
+                super::WhyNotSelectionExclusionKind::Redaction,
+                "redaction_level_blocks_memory",
+                "excluded_by_redaction",
+            ),
+            (
+                super::WhyNotSelectionExclusionKind::ValidityWindow,
+                "validity_window_expired",
+                "excluded_by_validity_window",
+            ),
+        ];
+
+        for (kind, code, reason) in cases {
+            let budget =
+                TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?;
+            let input = super::WhyNotSelectedInput::new(
+                "prepare release",
+                target.clone(),
+                budget,
+                ContextPackProfile::Balanced,
+                Vec::new(),
+            )
+            .with_exclusions(vec![super::WhyNotSelectionExclusion::new(
+                kind,
+                code,
+                "candidate blocked before selection",
+                Some("adjust context filters".to_string()),
+            )]);
+            let report = super::explain_why_not_selected(input)
+                .map_err(|error| format!("why-not rejected: {error:?}"))?;
+
+            ensure_equal(
+                &report.primary_reason.as_str(),
+                &reason,
+                "exclusion primary reason",
+            )?;
+            ensure_equal(
+                &report.redaction_scope_exclusions[0].code.as_str(),
+                &code,
+                "exclusion code",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn why_not_selected_reports_degraded_index_miss() -> TestResult {
+        let target = candidate_with_content(20, 0.8, 0.5, 10, "degraded index target")?;
+        let budget =
+            TokenBudget::new(100).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let report = super::explain_why_not_selected(
+            super::WhyNotSelectedInput::new(
+                "prepare release",
+                target,
+                budget,
+                ContextPackProfile::Balanced,
+                Vec::new(),
+            )
+            .with_degraded(vec![super::WhyNotSelectionDegradation::new(
+                "index_stale",
+                "warning",
+                "search index was stale during retrieval",
+                Some("ee index rebuild --workspace .".to_string()),
+            )]),
+        )
+        .map_err(|error| format!("why-not rejected: {error:?}"))?;
+
+        ensure_equal(
+            &report.primary_reason.as_str(),
+            &"not_retrieved_due_to_degraded_index",
+            "degraded-index primary reason",
+        )?;
+        ensure(
+            report
+                .counterfactual_hints
+                .iter()
+                .any(|hint| hint.kind == "repair_degraded_index"),
+            "degraded index miss should include repair hint",
         )
     }
 
