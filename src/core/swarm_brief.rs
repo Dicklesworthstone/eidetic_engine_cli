@@ -38,7 +38,7 @@ const RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE: &str = "rch_remote_required_f
 const RCH_POSTURE_REMOTE_READY: &str = "remote_ready";
 const RCH_POSTURE_NO_REMOTE_WORKERS: &str = "no_remote_workers";
 const RCH_POSTURE_WORKER_UNREACHABLE: &str = "worker_unreachable";
-const RCH_WORKER_PRESSURE_SCHEMA_V1: &str = "ee.rch.worker_pressure.v1";
+pub const RCH_WORKER_PRESSURE_SCHEMA_V1: &str = "ee.rch.worker_pressure.v1";
 const AGENT_STATUS_UNAVAILABLE_CODE: &str = "agent_status_unavailable";
 const MAX_SWARM_BRIEF_SUMMARY_RECOMMENDATIONS: usize = 5;
 const MEMORY_DRIFT_SWARM_BRIEF_LIMIT: u32 = 16;
@@ -615,6 +615,22 @@ pub struct RchWorkerPressureReport {
     pub stale_worker_count: u64,
     pub unknown_worker_count: u64,
     pub workers: Vec<RchWorkerPressureObservation>,
+}
+
+impl RchWorkerPressureReport {
+    #[must_use]
+    pub fn pressure_unknown() -> Self {
+        Self {
+            schema: RCH_WORKER_PRESSURE_SCHEMA_V1,
+            status: "pressure_unknown".to_string(),
+            worker_count: 0,
+            usable_worker_count: 0,
+            blocked_worker_count: 0,
+            stale_worker_count: 0,
+            unknown_worker_count: 0,
+            workers: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -4839,6 +4855,12 @@ fn rch_queue_health(status: &Value) -> Option<RchQueueHealth> {
         queue_head_slots_needed: first_slots_needed,
         status: status_label.to_string(),
     })
+}
+
+pub fn parse_rch_worker_pressure_report(input: &str) -> Result<RchWorkerPressureReport, String> {
+    let status = serde_json::from_str::<Value>(input)
+        .map_err(|error| format!("RCH status JSON could not be parsed: {error}"))?;
+    Ok(rch_worker_pressure_report(&status, None))
 }
 
 fn rch_worker_pressure_report(status: &Value, probe: Option<&Value>) -> RchWorkerPressureReport {

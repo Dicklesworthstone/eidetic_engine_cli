@@ -23,6 +23,7 @@ use ee::core::status::{
     MemoryHealthStatus, PackBudgetBucketReport, ReadPoolStatusReport, RuntimeReport, StatusReport,
     WalStatusReport, WorkspaceDiagnosticReport, WorkspaceStatusReport,
 };
+use ee::core::swarm_brief::RchWorkerPressureReport;
 use ee::db::shard::{
     ShardFanoutResolverInput, ShardFanoutStatusReport, resolve_shard_fanout_status,
 };
@@ -1329,6 +1330,7 @@ fn status_missing_db_report() -> StatusReport {
         shard_fanout: fixture_shard_fanout(),
         pack_budget_buckets: PackBudgetBucketReport::default(),
         qos_posture: fixture_qos_posture(),
+        rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
         memory_health: unavailable_memory_health(),
         curation_health: CurationHealthReport::unavailable(),
         feedback_health: unavailable_feedback_health(),
@@ -1393,6 +1395,7 @@ fn status_pending_migration_report() -> StatusReport {
         shard_fanout: fixture_shard_fanout(),
         pack_budget_buckets: PackBudgetBucketReport::default(),
         qos_posture: fixture_qos_posture(),
+        rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
         memory_health: unavailable_memory_health(),
         curation_health: CurationHealthReport::unavailable(),
         feedback_health: unavailable_feedback_health(),
@@ -1457,6 +1460,7 @@ fn status_stale_index_lexical_only_report() -> StatusReport {
         shard_fanout: fixture_shard_fanout(),
         pack_budget_buckets: PackBudgetBucketReport::default(),
         qos_posture: fixture_qos_posture(),
+        rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
         memory_health: healthy_memory_health(),
         curation_health: CurationHealthReport::not_inspected(),
         feedback_health: healthy_feedback_health(),
@@ -1510,6 +1514,7 @@ fn status_search_unimplemented_report() -> StatusReport {
         shard_fanout: fixture_shard_fanout(),
         pack_budget_buckets: PackBudgetBucketReport::default(),
         qos_posture: fixture_qos_posture(),
+        rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
         memory_health: healthy_memory_health(),
         curation_health: CurationHealthReport::not_inspected(),
         feedback_health: healthy_feedback_health(),
@@ -1608,6 +1613,7 @@ fn doctor_missing_db_report() -> DoctorReport {
         posture: Posture::DegradedRecoverable,
         singleflight_posture: fixture_singleflight_posture(),
         qos_posture: fixture_qos_posture(),
+        rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
         checks: vec![
             CheckResult::ok("runtime", "Asupersync runtime initialized successfully."),
             CheckResult::warning(
@@ -1641,6 +1647,7 @@ fn doctor_pending_migration_report() -> DoctorReport {
         posture: Posture::Blocked,
         singleflight_posture: fixture_singleflight_posture(),
         qos_posture: fixture_qos_posture(),
+        rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
         checks: vec![
             CheckResult::ok("runtime", "Asupersync runtime initialized successfully."),
             CheckResult::ok("workspace", "Workspace inspected at /workspace."),

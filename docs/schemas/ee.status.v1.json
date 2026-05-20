@@ -24,6 +24,7 @@
         "shardFanout",
         "packBudgetBuckets",
         "qos",
+        "rchWorkerPressure",
         "memoryHealth",
         "curationHealth",
         "feedbackHealth",
@@ -47,6 +48,7 @@
         "shardFanout": {"$ref": "#/$defs/shardFanoutStatus"},
         "packBudgetBuckets": {"$ref": "#/$defs/packBudgetBuckets"},
         "qos": {"$ref": "#/$defs/qosStatus"},
+        "rchWorkerPressure": {"$ref": "#/$defs/rchWorkerPressure"},
         "memoryHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "curationHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "feedbackHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
@@ -61,8 +63,8 @@
   },
   "field_presets": {
     "minimal": ["command", "version", "workspace"],
-    "summary": ["command", "version", "workspace", "posture", "singleFlight", "qos", "capabilities"],
-    "standard": ["command", "version", "workspace", "posture", "capabilities", "runtime", "read_pool", "wal", "shardFanout", "packBudgetBuckets", "qos", "memoryHealth", "curationHealth", "feedbackHealth", "singleFlight", "graphCompute", "graphSnapshotArtifact", "derivedAssets", "agentInventory", "degraded"],
+    "summary": ["command", "version", "workspace", "posture", "singleFlight", "qos", "rchWorkerPressure", "capabilities"],
+    "standard": ["command", "version", "workspace", "posture", "capabilities", "runtime", "read_pool", "wal", "shardFanout", "packBudgetBuckets", "qos", "rchWorkerPressure", "memoryHealth", "curationHealth", "feedbackHealth", "singleFlight", "graphCompute", "graphSnapshotArtifact", "derivedAssets", "agentInventory", "degraded"],
     "full": ["*"]
   },
   "$defs": {
@@ -327,6 +329,68 @@
         "workspaceGeneration": {"type": "integer", "minimum": 0},
         "indexGeneration": {"type": ["integer", "null"], "minimum": 0},
         "graphGeneration": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "rchWorkerPressure": {
+      "type": "object",
+      "required": [
+        "schema",
+        "status",
+        "workerCount",
+        "usableWorkerCount",
+        "blockedWorkerCount",
+        "staleWorkerCount",
+        "unknownWorkerCount",
+        "workers"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.rch.worker_pressure.v1"},
+        "status": {
+          "type": "string",
+          "enum": [
+            "pressure_clear",
+            "pressure_degraded",
+            "healthy_but_pressure_blocked",
+            "telemetry_stale",
+            "pressure_policy_denied",
+            "pressure_unknown",
+            "not_collected"
+          ]
+        },
+        "workerCount": {"type": "integer", "minimum": 0},
+        "usableWorkerCount": {"type": "integer", "minimum": 0},
+        "blockedWorkerCount": {"type": "integer", "minimum": 0},
+        "staleWorkerCount": {"type": "integer", "minimum": 0},
+        "unknownWorkerCount": {"type": "integer", "minimum": 0},
+        "workers": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/rchWorkerPressureWorker"}
+        }
+      }
+    },
+    "rchWorkerPressureWorker": {
+      "type": "object",
+      "required": [
+        "workerId",
+        "pressureState",
+        "confidence",
+        "reasonCode",
+        "freeGb",
+        "freeRatioBps",
+        "telemetryFreshness",
+        "admissionImpact"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "workerId": {"type": "string"},
+        "pressureState": {"type": "string"},
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "reasonCode": {"type": "string"},
+        "freeGb": {"type": ["integer", "null"], "minimum": 0},
+        "freeRatioBps": {"type": ["integer", "null"], "minimum": 0},
+        "telemetryFreshness": {"type": "string"},
+        "admissionImpact": {"type": "string"}
       }
     },
     "jsonValue": {

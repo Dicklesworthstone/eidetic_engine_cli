@@ -28,7 +28,8 @@ use super::curate::stable_workspace_id;
 use super::index::{IndexHealth, IndexStatusOptions, get_index_status};
 use super::qos::{QosLaneSummary, summarize_qos_lane_registry};
 use super::singleflight::singleflight_posture_report;
-use super::status::{default_workspace_path, probe_cass_capability};
+use super::status::{default_workspace_path, gather_rch_worker_pressure, probe_cass_capability};
+use super::swarm_brief::RchWorkerPressureReport;
 
 pub const DEPENDENCY_DIAGNOSTICS_SCHEMA_V1: &str = "ee.diag.dependencies.v1";
 pub const FRANKEN_HEALTH_SCHEMA_V1: &str = "ee.doctor.franken_health.v1";
@@ -212,6 +213,8 @@ pub struct DoctorReport {
     pub singleflight_posture: SingleFlightPostureReport,
     /// Redaction-safe foreground/background QoS lane posture for agent operators.
     pub qos_posture: QosLaneSummary,
+    /// Redaction-safe remote compilation worker pressure posture.
+    pub rch_worker_pressure: RchWorkerPressureReport,
     pub checks: Vec<CheckResult>,
 }
 
@@ -232,12 +235,14 @@ impl DoctorReport {
     pub fn gather_with_workspace(workspace_path: Option<&Path>) -> Self {
         let singleflight_posture = singleflight_posture_report();
         let qos_posture = gather_qos_posture(workspace_path);
+        let rch_worker_pressure = gather_rch_worker_pressure(workspace_path);
         let checks = vec![
             check_runtime(),
             check_workspace(workspace_path),
             check_database(workspace_path),
             check_shard_fanout(workspace_path),
             check_search_index(workspace_path),
+            check_rch_worker_pressure(&rch_worker_pressure),
             check_cass(),
         ];
 
@@ -255,6 +260,7 @@ impl DoctorReport {
             posture,
             singleflight_posture,
             qos_posture,
+            rch_worker_pressure,
             checks,
         }
     }
@@ -1573,6 +1579,69 @@ fn check_cass() -> CheckResult {
     }
 }
 
+fn check_rch_worker_pressure(report: &RchWorkerPressureReport) -> CheckResult {
+    match report.status.as_str() {
+        "pressure_clear" => CheckResult::ok(
+            "rch_worker_pressure",
+            format!(
+                "RCH worker pressure is clear; {} of {} worker(s) usable.",
+                report.usable_worker_count, report.worker_count
+            ),
+        ),
+        "pressure_unknown" | "not_collected" => CheckResult::ok(
+            "rch_worker_pressure",
+            "RCH worker pressure telemetry is unavailable; no RCH pressure blocker was inferred.",
+        ),
+        "healthy_but_pressure_blocked" => CheckResult {
+            name: "rch_worker_pressure",
+            severity: CheckSeverity::Warning,
+            message: format!(
+                "RCH reports healthy workers, but pressure blocks admission on {} of {} worker(s).",
+                report.blocked_worker_count, report.worker_count
+            ),
+            error_code: None,
+            repair: Some("rch status --workers --jobs --json"),
+        },
+        "pressure_policy_denied" => CheckResult {
+            name: "rch_worker_pressure",
+            severity: CheckSeverity::Warning,
+            message: "RCH worker admission was denied by pressure policy.".to_string(),
+            error_code: None,
+            repair: Some("rch status --workers --jobs --json"),
+        },
+        "telemetry_stale" => CheckResult {
+            name: "rch_worker_pressure",
+            severity: CheckSeverity::Warning,
+            message: format!(
+                "RCH worker pressure telemetry is stale for {} of {} worker(s).",
+                report.stale_worker_count, report.worker_count
+            ),
+            error_code: None,
+            repair: Some("rch status --workers --jobs --json"),
+        },
+        "pressure_degraded" => CheckResult {
+            name: "rch_worker_pressure",
+            severity: CheckSeverity::Warning,
+            message: format!(
+                "RCH worker pressure is degraded; {} usable, {} blocked, {} stale.",
+                report.usable_worker_count, report.blocked_worker_count, report.stale_worker_count
+            ),
+            error_code: None,
+            repair: Some("rch status --workers --jobs --json"),
+        },
+        _ => CheckResult {
+            name: "rch_worker_pressure",
+            severity: CheckSeverity::Warning,
+            message: format!(
+                "RCH worker pressure returned unrecognized status '{}'.",
+                report.status
+            ),
+            error_code: None,
+            repair: Some("rch status --workers --jobs --json"),
+        },
+    }
+}
+
 fn count_status(entries: &[DependencyContractEntry], status: &str) -> usize {
     entries
         .iter()
@@ -1960,6 +2029,35 @@ mod tests {
     }
 
     #[test]
+    fn rch_worker_pressure_check_warns_on_blocked_workers() -> TestResult {
+        let report = RchWorkerPressureReport {
+            schema: super::super::swarm_brief::RCH_WORKER_PRESSURE_SCHEMA_V1,
+            status: "healthy_but_pressure_blocked".to_string(),
+            worker_count: 2,
+            usable_worker_count: 0,
+            blocked_worker_count: 2,
+            stale_worker_count: 0,
+            unknown_worker_count: 0,
+            workers: Vec::new(),
+        };
+
+        let check = check_rch_worker_pressure(&report);
+
+        ensure(check.name, "rch_worker_pressure", "check name")?;
+        ensure(check.severity, CheckSeverity::Warning, "check severity")?;
+        ensure(
+            check.error_code,
+            None,
+            "check does not invent ee error code",
+        )?;
+        ensure(
+            check.repair,
+            Some("rch status --workers --jobs --json"),
+            "repair command",
+        )
+    }
+
+    #[test]
     fn check_severity_strings_are_stable() -> TestResult {
         ensure(CheckSeverity::Ok.as_str(), "ok", "ok")?;
         ensure(CheckSeverity::Warning.as_str(), "warning", "warning")?;
@@ -2053,6 +2151,7 @@ mod tests {
             posture: Posture::Ok,
             singleflight_posture: singleflight_posture_report(),
             qos_posture: super::gather_qos_posture(None),
+            rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
             checks: vec![
                 CheckResult::ok("test1", "All good"),
                 CheckResult::ok("test2", "Also good"),
@@ -2073,6 +2172,7 @@ mod tests {
             posture: Posture::Ok,
             singleflight_posture: singleflight_posture_report(),
             qos_posture: super::gather_qos_posture(None),
+            rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
             checks: vec![],
         };
         let plan = report.to_fix_plan();
@@ -2108,6 +2208,7 @@ mod tests {
             posture: Posture::DegradedRecoverable,
             singleflight_posture: singleflight_posture_report(),
             qos_posture: super::gather_qos_posture(None),
+            rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
             checks: vec![CheckResult::warning(
                 "cass",
                 "CASS import dry-run recommended.",
@@ -2684,6 +2785,7 @@ mod tests {
             posture: Posture::Ok,
             singleflight_posture: singleflight_posture_report(),
             qos_posture: super::gather_qos_posture(None),
+            rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
             checks: vec![CheckResult::ok("runtime", "ok")],
         };
         assert_eq!(report.posture, Posture::Ok);

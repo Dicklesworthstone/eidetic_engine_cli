@@ -12,7 +12,7 @@
     "fields": {"type": "string"},
     "data": {
       "type": "object",
-      "required": ["command", "version", "posture", "healthy", "singleFlight", "qos", "checks"],
+      "required": ["command", "version", "posture", "healthy", "singleFlight", "qos", "rchWorkerPressure", "checks"],
       "additionalProperties": false,
       "properties": {
         "command": {"type": "string", "const": "doctor"},
@@ -21,6 +21,7 @@
         "healthy": {"type": "boolean"},
         "singleFlight": {"$ref": "#/$defs/singleFlightPosture"},
         "qos": {"$ref": "#/$defs/qosStatus"},
+        "rchWorkerPressure": {"$ref": "#/$defs/rchWorkerPressure"},
         "checks": {
           "type": "array",
           "items": {
@@ -39,8 +40,8 @@
   },
   "field_presets": {
     "minimal": ["command", "version", "posture", "healthy"],
-    "summary": ["command", "version", "posture", "healthy", "singleFlight", "qos"],
-    "standard": ["command", "version", "posture", "healthy", "singleFlight", "qos", "checks"],
+    "summary": ["command", "version", "posture", "healthy", "singleFlight", "qos", "rchWorkerPressure"],
+    "standard": ["command", "version", "posture", "healthy", "singleFlight", "qos", "rchWorkerPressure", "checks"],
     "full": ["*"]
   },
   "$defs": {
@@ -166,6 +167,68 @@
         "workspaceGeneration": {"type": "integer", "minimum": 0},
         "indexGeneration": {"type": ["integer", "null"], "minimum": 0},
         "graphGeneration": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "rchWorkerPressure": {
+      "type": "object",
+      "required": [
+        "schema",
+        "status",
+        "workerCount",
+        "usableWorkerCount",
+        "blockedWorkerCount",
+        "staleWorkerCount",
+        "unknownWorkerCount",
+        "workers"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.rch.worker_pressure.v1"},
+        "status": {
+          "type": "string",
+          "enum": [
+            "pressure_clear",
+            "pressure_degraded",
+            "healthy_but_pressure_blocked",
+            "telemetry_stale",
+            "pressure_policy_denied",
+            "pressure_unknown",
+            "not_collected"
+          ]
+        },
+        "workerCount": {"type": "integer", "minimum": 0},
+        "usableWorkerCount": {"type": "integer", "minimum": 0},
+        "blockedWorkerCount": {"type": "integer", "minimum": 0},
+        "staleWorkerCount": {"type": "integer", "minimum": 0},
+        "unknownWorkerCount": {"type": "integer", "minimum": 0},
+        "workers": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/rchWorkerPressureWorker"}
+        }
+      }
+    },
+    "rchWorkerPressureWorker": {
+      "type": "object",
+      "required": [
+        "workerId",
+        "pressureState",
+        "confidence",
+        "reasonCode",
+        "freeGb",
+        "freeRatioBps",
+        "telemetryFreshness",
+        "admissionImpact"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "workerId": {"type": "string"},
+        "pressureState": {"type": "string"},
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "reasonCode": {"type": "string"},
+        "freeGb": {"type": ["integer", "null"], "minimum": 0},
+        "freeRatioBps": {"type": ["integer", "null"], "minimum": 0},
+        "telemetryFreshness": {"type": "string"},
+        "admissionImpact": {"type": "string"}
       }
     }
   }

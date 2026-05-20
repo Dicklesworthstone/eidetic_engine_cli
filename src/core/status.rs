@@ -44,6 +44,10 @@ use super::agent_detect::AgentInventoryReport;
 use super::curate::stable_workspace_id;
 use super::index::{IndexHealth, IndexStatusOptions, get_index_status};
 use super::outcome::{DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR};
+use super::swarm_brief::{
+    RchWorkerPressureReport, SwarmBriefCommandRunner, SystemSwarmBriefCommandRunner,
+    parse_rch_worker_pressure_report,
+};
 use super::tailscale_probe::{
     SystemTailscaleCliProbeRunner, SystemTailscaleSocketProbeRunner,
     TAILSCALE_BINARY_INAUTHENTIC_CODE, TAILSCALE_DAEMON_UNREACHABLE_CODE,
@@ -81,6 +85,8 @@ const GRAPH_COMPUTE_ALGORITHMS: &[&str] = &[
 const PACK_BUDGET_BUCKET_SCHEMA_V1: &str = "ee.status.pack_budget_buckets.v1";
 const PACK_BUDGET_BUCKET_WINDOW_HOURS: u32 = 24;
 const DEFAULT_WAL_CHECKPOINT_BYTES_THRESHOLD: u64 = 64 * 1024 * 1024;
+const RCH_WORKER_PRESSURE_TIMEOUT_MS: u64 = 1_500;
+const RCH_WORKER_PRESSURE_COMMAND: &str = "rch status --workers --jobs --json";
 pub const WAL_GROWTH_EXCEEDS_THRESHOLD_CODE: &str = "wal_growth_exceeds_threshold";
 pub const WAL_GROWTH_NO_WRITER_CODE: &str = "wal_growth_no_writer";
 
@@ -1305,6 +1311,7 @@ pub struct StatusReport {
     pub shard_fanout: ShardFanoutStatusReport,
     pub pack_budget_buckets: PackBudgetBucketReport,
     pub qos_posture: super::qos::QosLaneSummary,
+    pub rch_worker_pressure: RchWorkerPressureReport,
     pub memory_health: MemoryHealthReport,
     pub curation_health: CurationHealthReport,
     pub feedback_health: FeedbackHealthReport,
@@ -1380,6 +1387,7 @@ impl StatusReport {
         let shard_fanout = gather_shard_fanout_status(options.workspace_path.as_deref());
         let pack_budget_buckets = gather_pack_budget_buckets(options.workspace_path.as_deref());
         let qos_posture = gather_qos_posture(options.workspace_path.as_deref());
+        let rch_worker_pressure = gather_rch_worker_pressure(options.workspace_path.as_deref());
         let (memory_health, memory_health_degradations) =
             gather_memory_health(options.workspace_path.as_deref());
         let workspace = gather_workspace_status(options.workspace_path.as_deref());
@@ -1442,6 +1450,7 @@ impl StatusReport {
             &curation_health,
             &feedback_health,
             &singleflight_posture,
+            &rch_worker_pressure,
             &graph_compute,
             &shard_fanout,
             &derived_assets,
@@ -1459,6 +1468,7 @@ impl StatusReport {
             shard_fanout,
             pack_budget_buckets,
             qos_posture,
+            rch_worker_pressure,
             memory_health,
             curation_health,
             feedback_health,
@@ -1598,6 +1608,26 @@ fn gather_qos_posture(workspace_path: Option<&Path>) -> super::qos::QosLaneSumma
         .unwrap_or(".");
     let now_epoch_ms = Utc::now().timestamp_millis().try_into().unwrap_or_default();
     super::qos::summarize_qos_lane_registry(workspace, workspace_identity, now_epoch_ms)
+}
+
+#[must_use]
+pub fn gather_rch_worker_pressure(workspace_path: Option<&Path>) -> RchWorkerPressureReport {
+    let runner = SystemSwarmBriefCommandRunner;
+    gather_rch_worker_pressure_with_runner(&runner, workspace_path)
+}
+
+#[must_use]
+pub fn gather_rch_worker_pressure_with_runner<R: SwarmBriefCommandRunner>(
+    runner: &R,
+    workspace_path: Option<&Path>,
+) -> RchWorkerPressureReport {
+    let workspace = workspace_path.unwrap_or_else(|| Path::new("."));
+    let args = ["status", "--workers", "--jobs", "--json"];
+    runner
+        .run("rch", &args, workspace, RCH_WORKER_PRESSURE_TIMEOUT_MS)
+        .ok()
+        .and_then(|output| parse_rch_worker_pressure_report(&output.stdout).ok())
+        .unwrap_or_else(RchWorkerPressureReport::pressure_unknown)
 }
 
 fn gather_tailscale_local_report() -> Option<TailscaleLocalReport> {
@@ -1748,6 +1778,7 @@ fn status_posture_report(
     curation_health: &CurationHealthReport,
     feedback_health: &FeedbackHealthReport,
     singleflight_posture: &SingleFlightPostureReport,
+    rch_worker_pressure: &RchWorkerPressureReport,
     graph_compute: &GraphComputeReport,
     shard_fanout: &ShardFanoutStatusReport,
     derived_assets: &[DerivedAssetReport],
@@ -1760,6 +1791,7 @@ fn status_posture_report(
         storage_posture_status(capabilities.storage, workspace_path, write_replay_required);
     let search_status = search_posture_status(capabilities.search, storage_status);
     let graph_status = graph_compute_posture_status(graph_compute.status);
+    let rch_worker_pressure_status = rch_worker_pressure_posture_status(rch_worker_pressure);
 
     let subsystems = vec![
         posture_row(
@@ -1823,6 +1855,12 @@ fn status_posture_report(
             singleflight_posture_fallback(singleflight_posture),
         ),
         posture_row(
+            "rch_worker_pressure",
+            rch_worker_pressure_status,
+            rch_worker_pressure_posture_reason(rch_worker_pressure),
+            rch_worker_pressure_posture_fallback(rch_worker_pressure),
+        ),
+        posture_row(
             "maintenance",
             maintenance_posture_status(derived_assets),
             maintenance_posture_reason(derived_assets),
@@ -1835,8 +1873,12 @@ fn status_posture_report(
             None,
         ),
     ];
+    let operation_status = SubsystemPostureStatus::aggregate(&[
+        operation_posture_status(capabilities),
+        rch_worker_pressure_status,
+    ]);
     let operation = OperationPostureReport {
-        status: operation_posture_status(capabilities),
+        status: operation_status,
         subsystems_used: vec![
             "runtime",
             "storage",
@@ -1847,6 +1889,7 @@ fn status_posture_report(
             "curate",
             "feedback",
             "singleflight",
+            "rch_worker_pressure",
             "maintenance",
             "agent_detection",
         ],
@@ -2319,6 +2362,39 @@ fn singleflight_posture_fallback(report: &SingleFlightPostureReport) -> Option<&
         SubsystemPostureStatus::Unimplemented => {
             Some("enable a single-flight surface before expecting coalescing")
         }
+    }
+}
+
+fn rch_worker_pressure_posture_status(report: &RchWorkerPressureReport) -> SubsystemPostureStatus {
+    match report.status.as_str() {
+        "pressure_clear" | "pressure_unknown" | "not_collected" => SubsystemPostureStatus::Ok,
+        "healthy_but_pressure_blocked" | "pressure_policy_denied" => {
+            SubsystemPostureStatus::DegradedRequired
+        }
+        "telemetry_stale" | "pressure_degraded" => SubsystemPostureStatus::DegradedRecoverable,
+        _ => SubsystemPostureStatus::Initializing,
+    }
+}
+
+fn rch_worker_pressure_posture_reason(report: &RchWorkerPressureReport) -> Option<&'static str> {
+    match report.status.as_str() {
+        "pressure_clear" | "pressure_unknown" | "not_collected" => None,
+        "healthy_but_pressure_blocked" => Some("rch_workers_blocked_by_pressure"),
+        "pressure_policy_denied" => Some("rch_worker_admission_policy_denied"),
+        "telemetry_stale" => Some("rch_worker_pressure_telemetry_stale"),
+        "pressure_degraded" => Some("rch_worker_pressure_degraded"),
+        _ => Some("rch_worker_pressure_unrecognized"),
+    }
+}
+
+fn rch_worker_pressure_posture_fallback(report: &RchWorkerPressureReport) -> Option<&'static str> {
+    match report.status.as_str() {
+        "pressure_clear" | "pressure_unknown" | "not_collected" => None,
+        "healthy_but_pressure_blocked"
+        | "pressure_policy_denied"
+        | "telemetry_stale"
+        | "pressure_degraded" => Some(RCH_WORKER_PRESSURE_COMMAND),
+        _ => Some(RCH_WORKER_PRESSURE_COMMAND),
     }
 }
 
@@ -4118,6 +4194,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
+    use crate::core::swarm_brief::{SwarmBriefCommandError, SwarmBriefCommandOutput};
     use crate::models::CapabilityStatus;
 
     type TestResult = Result<(), String>;
@@ -4127,6 +4204,22 @@ mod tests {
             Ok(())
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
+        }
+    }
+
+    struct FakeRchRunner {
+        output: Result<SwarmBriefCommandOutput, SwarmBriefCommandError>,
+    }
+
+    impl SwarmBriefCommandRunner for FakeRchRunner {
+        fn run(
+            &self,
+            _program: &str,
+            _args: &[&str],
+            _cwd: &Path,
+            _timeout_ms: u64,
+        ) -> Result<SwarmBriefCommandOutput, SwarmBriefCommandError> {
+            self.output.clone()
         }
     }
 
@@ -4253,6 +4346,59 @@ mod tests {
         ensure(report.two_to_four_k, 1, "2-4k")?;
         ensure(report.four_to_eight_k, 1, "4-8k")?;
         ensure(report.eight_k_plus, 1, "8k+")
+    }
+
+    #[test]
+    fn gather_rch_worker_pressure_parses_pressure_blocker() -> TestResult {
+        let runner = FakeRchRunner {
+            output: Ok(SwarmBriefCommandOutput {
+                stdout: r#"{
+                    "data": {
+                        "workers": [
+                            {
+                                "id": "worker-a",
+                                "diskPressure": "critical",
+                                "admissionImpact": "blocked",
+                                "reasonCode": "disk_pressure_critical",
+                                "freeGb": 0,
+                                "freeRatio": 0.03
+                            }
+                        ]
+                    }
+                }"#
+                .to_string(),
+                stderr: String::new(),
+            }),
+        };
+
+        let report = gather_rch_worker_pressure_with_runner(&runner, Some(Path::new(".")));
+
+        ensure(
+            report.status.as_str(),
+            "healthy_but_pressure_blocked",
+            "pressure status",
+        )?;
+        ensure(report.worker_count, 1, "worker count")?;
+        ensure(report.usable_worker_count, 0, "usable count")?;
+        ensure(report.blocked_worker_count, 1, "blocked count")
+    }
+
+    #[test]
+    fn gather_rch_worker_pressure_defaults_unknown_when_unavailable() -> TestResult {
+        let runner = FakeRchRunner {
+            output: Err(SwarmBriefCommandError::Unavailable(
+                "rch unavailable".to_string(),
+            )),
+        };
+
+        let report = gather_rch_worker_pressure_with_runner(&runner, Some(Path::new(".")));
+
+        ensure(
+            report.status.as_str(),
+            "pressure_unknown",
+            "pressure status",
+        )?;
+        ensure(report.worker_count, 0, "worker count")
     }
 
     #[test]

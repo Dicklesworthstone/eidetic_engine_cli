@@ -38,6 +38,7 @@ use crate::core::rule::{
 use crate::core::status::{
     DegradationReport, MeshStorageStatusReport, StatusReport, StatusSkylineReport,
 };
+use crate::core::swarm_brief::{RchWorkerPressureObservation, RchWorkerPressureReport};
 use crate::core::tailscale_probe::{TailscaleLocalReport, TailscaleProbeDegradation};
 use crate::core::why::WhyReport;
 use crate::core::{BuildProvenanceDegradation, VERSION_PROVENANCE_SCHEMA_V1, VersionReport};
@@ -3226,6 +3227,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
         render_shard_fanout_status_json(d, &report.shard_fanout);
         render_pack_budget_buckets_json(d, &report.pack_budget_buckets);
         render_qos_status_json(d, &report.qos_posture, false);
+        render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
         render_memory_health_json(d, &report.memory_health);
         render_curation_health_json(d, &report.curation_health);
         render_feedback_health_json(d, &report.feedback_health);
@@ -3394,6 +3396,36 @@ fn render_singleflight_posture_json(
             obj.field_str("suggestedAction", &surface.suggested_action);
         });
     });
+}
+
+fn render_rch_worker_pressure_json(parent: &mut JsonBuilder, report: &RchWorkerPressureReport) {
+    parent.field_object("rchWorkerPressure", |pressure| {
+        pressure.field_str("schema", report.schema);
+        pressure.field_str("status", &report.status);
+        pressure.field_raw("workerCount", &report.worker_count.to_string());
+        pressure.field_raw("usableWorkerCount", &report.usable_worker_count.to_string());
+        pressure.field_raw(
+            "blockedWorkerCount",
+            &report.blocked_worker_count.to_string(),
+        );
+        pressure.field_raw("staleWorkerCount", &report.stale_worker_count.to_string());
+        pressure.field_raw(
+            "unknownWorkerCount",
+            &report.unknown_worker_count.to_string(),
+        );
+        pressure.field_array_of_objects("workers", &report.workers, render_rch_worker_json);
+    });
+}
+
+fn render_rch_worker_json(parent: &mut JsonBuilder, worker: &RchWorkerPressureObservation) {
+    parent.field_str("workerId", &worker.worker_id);
+    parent.field_str("pressureState", &worker.pressure_state);
+    parent.field_str("confidence", &worker.confidence);
+    parent.field_str("reasonCode", &worker.reason_code);
+    field_optional_u64(parent, "freeGb", worker.free_gb);
+    field_optional_u64(parent, "freeRatioBps", worker.free_ratio_bps);
+    parent.field_str("telemetryFreshness", &worker.telemetry_freshness);
+    parent.field_str("admissionImpact", &worker.admission_impact);
 }
 
 fn render_status_workspace_posture_json(
@@ -4109,13 +4141,16 @@ pub fn render_status_human(report: &StatusReport) -> String {
             )
         });
     format!(
-        "ee status\n\n{}storage: {}\nshard fanout: {}\nsearch: {}\nmesh: {}\nagent detection: {}\nruntime: {} ({} {})\n\nNext:\n  ee status --json\n",
+        "ee status\n\n{}storage: {}\nshard fanout: {}\nsearch: {}\nmesh: {}\nagent detection: {}\nrch worker pressure: {} (usable: {}, blocked: {})\nruntime: {} ({} {})\n\nNext:\n  ee status --json\n",
         workspace_line,
         report.capabilities.storage.as_str(),
         report.shard_fanout.posture.as_str(),
         report.capabilities.search.as_str(),
         report.capabilities.mesh.as_str(),
         report.capabilities.agent_detection.as_str(),
+        report.rch_worker_pressure.status,
+        report.rch_worker_pressure.usable_worker_count,
+        report.rch_worker_pressure.blocked_worker_count,
         report.capabilities.runtime.as_str(),
         report.runtime.engine,
         report.runtime.profile
@@ -4286,6 +4321,7 @@ pub fn render_doctor_json(report: &DoctorReport) -> String {
         d.field_bool("healthy", report.overall_healthy);
         render_singleflight_posture_json(d, &report.singleflight_posture);
         render_qos_status_json(d, &report.qos_posture, false);
+        render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
         d.field_array_of_objects("checks", &report.checks, |obj, check| {
             obj.field_str("name", check.name);
             obj.field_str("severity", check.severity.as_str());
@@ -4336,6 +4372,14 @@ pub fn render_doctor_human(report: &DoctorReport) -> String {
         } else {
             "degraded"
         }
+    ));
+    output.push_str(&format!(
+        "rch worker pressure: {} (usable: {}, blocked: {}, stale: {}, unknown: {})\n",
+        report.rch_worker_pressure.status,
+        report.rch_worker_pressure.usable_worker_count,
+        report.rch_worker_pressure.blocked_worker_count,
+        report.rch_worker_pressure.stale_worker_count,
+        report.rch_worker_pressure.unknown_worker_count
     ));
 
     if report.overall_healthy {
@@ -10094,6 +10138,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
             render_status_posture_json(d, &report.posture);
             render_singleflight_posture_json(d, &report.singleflight_posture);
             render_qos_status_json(d, &report.qos_posture, profile.include_verbose_details());
+            render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
             d.field_object("capabilities", |c| {
                 c.field_str("runtime", report.capabilities.runtime.as_str());
                 c.field_str("storage", report.capabilities.storage.as_str());
@@ -10246,6 +10291,7 @@ pub fn render_doctor_json_filtered(report: &DoctorReport, profile: FieldProfile)
         if profile.include_summary_metrics() {
             render_singleflight_posture_json(d, &report.singleflight_posture);
             render_qos_status_json(d, &report.qos_posture, profile.include_verbose_details());
+            render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
         }
 
         if profile.include_arrays() {
@@ -13771,6 +13817,9 @@ mod tests {
         MeshStorageStatusReport, STATUS_SKYLINE_SCHEMA_V1, StatusReport,
         StatusSkylineCommunityReport, StatusSkylineReport, StatusSkylineSummaryReport,
     };
+    use crate::core::swarm_brief::{
+        RCH_WORKER_PRESSURE_SCHEMA_V1, RchWorkerPressureObservation, RchWorkerPressureReport,
+    };
     use crate::core::tailscale_probe::{TailscaleLocalReport, TailscaleProbeMethod};
     use crate::core::{
         BUILD_TIMESTAMP_POLICY, BuildFeature, BuildInfo, BuildProvenanceDegradation,
@@ -13792,6 +13841,28 @@ mod tests {
     };
 
     type TestResult = Result<(), String>;
+
+    fn rch_worker_pressure_fixture() -> RchWorkerPressureReport {
+        RchWorkerPressureReport {
+            schema: RCH_WORKER_PRESSURE_SCHEMA_V1,
+            status: "healthy_but_pressure_blocked".to_string(),
+            worker_count: 1,
+            usable_worker_count: 0,
+            blocked_worker_count: 1,
+            stale_worker_count: 0,
+            unknown_worker_count: 0,
+            workers: vec![RchWorkerPressureObservation {
+                worker_id: "worker-redacted".to_string(),
+                pressure_state: "critical".to_string(),
+                confidence: "high".to_string(),
+                reason_code: "disk_pressure_critical".to_string(),
+                free_gb: Some(0),
+                free_ratio_bps: Some(300),
+                telemetry_freshness: "fresh".to_string(),
+                admission_impact: "blocked".to_string(),
+            }],
+        }
+    }
 
     struct FailingSerialize;
 
@@ -14859,6 +14930,33 @@ mod tests {
             parsed["data"]["posture"]["workspace"]["storage"]["reason"]
                 == "uncommitted_write_replay_required",
             "storage posture reason is nested under posture.workspace.storage",
+        )
+    }
+
+    #[test]
+    fn status_json_exposes_rch_worker_pressure() -> TestResult {
+        let mut report = StatusReport::gather();
+        report.rch_worker_pressure = rch_worker_pressure_fixture();
+        let value = serde_json::from_str::<serde_json::Value>(&render_status_json(&report))
+            .map_err(|error| format!("status JSON should parse: {error}"))?;
+        let pressure = value
+            .pointer("/data/rchWorkerPressure")
+            .ok_or_else(|| "status JSON has data.rchWorkerPressure object".to_string())?;
+
+        ensure_equal(
+            &pressure["schema"],
+            &serde_json::json!("ee.rch.worker_pressure.v1"),
+            "rch worker pressure schema",
+        )?;
+        ensure_equal(
+            &pressure["blockedWorkerCount"],
+            &serde_json::json!(1),
+            "blocked worker count",
+        )?;
+        ensure_equal(
+            &pressure["workers"][0]["admissionImpact"],
+            &serde_json::json!("blocked"),
+            "admission impact",
         )
     }
 
@@ -16988,6 +17086,34 @@ mod tests {
     }
 
     #[test]
+    fn render_doctor_json_exposes_rch_worker_pressure() -> TestResult {
+        let mut report = DoctorReport::gather();
+        report.rch_worker_pressure = rch_worker_pressure_fixture();
+        let json = render_doctor_json_filtered(&report, FieldProfile::Standard);
+        let value = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("doctor JSON should parse: {error}"))?;
+        let pressure = value
+            .pointer("/data/rchWorkerPressure")
+            .ok_or_else(|| "doctor JSON has data.rchWorkerPressure object".to_string())?;
+
+        ensure_equal(
+            &pressure["schema"],
+            &serde_json::json!("ee.rch.worker_pressure.v1"),
+            "rch worker pressure schema",
+        )?;
+        ensure_equal(
+            &pressure["status"],
+            &serde_json::json!("healthy_but_pressure_blocked"),
+            "rch worker pressure status",
+        )?;
+        ensure_equal(
+            &pressure["workers"][0]["reasonCode"],
+            &serde_json::json!("disk_pressure_critical"),
+            "rch worker pressure reason code",
+        )
+    }
+
+    #[test]
     fn json_toon_parity_agent_docs_decodes_to_same_json() -> TestResult {
         let report = AgentDocsReport::gather(None);
         let json = render_agent_docs_json(&report);
@@ -17504,6 +17630,10 @@ mod tests {
             data.contains_key("singleFlight"),
             "has singleFlight posture",
         )?;
+        ensure(
+            data.contains_key("rchWorkerPressure"),
+            "has RCH worker pressure posture",
+        )?;
         ensure(!data.contains_key("runtime"), "no runtime object")?;
         ensure(!data.contains_key("degraded"), "no degraded array")
     }
@@ -17520,6 +17650,7 @@ mod tests {
         ensure_contains(&json, "\"runtime\":", "has runtime")?;
         ensure_contains(&json, "\"packBudgetBuckets\":", "has pack budget buckets")?;
         ensure_contains(&json, "\"singleFlight\":", "has singleFlight")?;
+        ensure_contains(&json, "\"rchWorkerPressure\":", "has RCH worker pressure")?;
         ensure_contains(
             &json,
             "\"schema\":\"ee.singleflight.posture.v1\"",
