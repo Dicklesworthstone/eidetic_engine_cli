@@ -710,6 +710,7 @@ fn curate_apply_promote_moves_episodic_to_semantic_with_transition_audit() {
         candidate_id,
         actor: Some("lifecycle-test"),
         dry_run: false,
+        allow_tombstone_load_bearing: false,
     })
     .expect("curate apply succeeds");
     assert_eq!(report.application.status, "applied");
