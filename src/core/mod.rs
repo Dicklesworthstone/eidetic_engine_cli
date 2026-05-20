@@ -33,6 +33,7 @@ pub mod derived_asset;
 pub mod determinism;
 pub mod disk_pressure;
 pub mod doctor;
+pub mod doctor_fixers;
 pub mod doctor_runtime;
 pub mod economy;
 pub mod effect;
