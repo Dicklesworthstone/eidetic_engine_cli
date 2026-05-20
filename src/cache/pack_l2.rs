@@ -13,26 +13,40 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 pub const PACK_L2_CACHE_ENTRY_SCHEMA_V1: &str = "ee.pack.l2_cache.entry.v1";
+pub const DEFAULT_MAX_BYTES: u64 = 256 * 1024 * 1024;
+pub const DEFAULT_MAX_ENTRY_BYTES: u64 = 1024 * 1024;
 const DEFAULT_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackL2CacheOptions {
     pub max_bytes: u64,
+    pub max_entry_bytes: u64,
     pub max_age: Duration,
 }
 
 impl PackL2CacheOptions {
     #[must_use]
     pub const fn new(max_bytes: u64, max_age: Duration) -> Self {
-        Self { max_bytes, max_age }
+        Self {
+            max_bytes,
+            max_entry_bytes: DEFAULT_MAX_ENTRY_BYTES,
+            max_age,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_max_entry_bytes(mut self, max_entry_bytes: u64) -> Self {
+        self.max_entry_bytes = max_entry_bytes;
+        self
     }
 }
 
 impl Default for PackL2CacheOptions {
     fn default() -> Self {
         Self {
-            max_bytes: 1_073_741_824,
+            max_bytes: DEFAULT_MAX_BYTES,
+            max_entry_bytes: DEFAULT_MAX_ENTRY_BYTES,
             max_age: DEFAULT_MAX_AGE,
         }
     }
@@ -126,6 +140,19 @@ impl PackL2Cache {
             }
         }
 
+        let byte_len = bytes.len() as u64;
+        if byte_len > self.options.max_entry_bytes {
+            remove_cache_entry_best_effort(&path);
+            return Ok(PackL2CacheLookup::Miss(PackL2CacheMiss {
+                key: key.to_owned(),
+                path,
+                reason: PackL2CacheMissReason::TooLarge {
+                    byte_len,
+                    max_entry_bytes: self.options.max_entry_bytes,
+                },
+            }));
+        }
+
         let entry = match serde_json::from_slice::<PackL2CacheEntry>(&bytes) {
             Ok(entry) => entry,
             Err(error) => {
@@ -179,7 +206,7 @@ impl PackL2Cache {
             path,
             stored_at_epoch_seconds: entry.stored_at_epoch_seconds,
             pack_json: entry.pack_json,
-            byte_len: bytes.len() as u64,
+            byte_len,
         }))
     }
 
@@ -197,7 +224,6 @@ impl PackL2Cache {
         pack_json: &JsonValue,
         stored_at_epoch_seconds: u64,
     ) -> Result<PackL2WriteReport, PackL2CacheError> {
-        ensure_cache_dir(&self.root)?;
         let path = self.entry_path(key);
         let entry = PackL2CacheEntry {
             schema: PACK_L2_CACHE_ENTRY_SCHEMA_V1.to_owned(),
@@ -210,8 +236,22 @@ impl PackL2Cache {
             operation: "serialize",
             source,
         })?;
+        let byte_len = bytes.len() as u64;
         let body_hash_prefix = body_hash_prefix(&bytes);
         let path = self.entry_path_for_body_hash(key, &body_hash_prefix);
+        if byte_len > self.options.max_entry_bytes {
+            return Ok(PackL2WriteReport {
+                key: key.to_owned(),
+                path,
+                byte_len,
+                outcome: PackL2WriteOutcome::SkippedTooLarge {
+                    max_entry_bytes: self.options.max_entry_bytes,
+                },
+                eviction: PackL2EvictionReport::default(),
+            });
+        }
+
+        ensure_cache_dir(&self.root)?;
         let temp_path = self.temp_path(key, &body_hash_prefix, stored_at_epoch_seconds);
         ensure_no_symlink_components(&path, "inspect_entry")?;
         ensure_no_symlink_components(&temp_path, "inspect_temp")?;
@@ -225,7 +265,8 @@ impl PackL2Cache {
         Ok(PackL2WriteReport {
             key: key.to_owned(),
             path,
-            byte_len: bytes.len() as u64,
+            byte_len,
+            outcome: PackL2WriteOutcome::Stored,
             eviction,
         })
     }
@@ -417,6 +458,7 @@ pub enum PackL2CacheMissReason {
     Corrupt(String),
     BodyHashMismatch { expected: String, actual: String },
     KeyMismatch { stored_key: String },
+    TooLarge { byte_len: u64, max_entry_bytes: u64 },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -424,7 +466,14 @@ pub struct PackL2WriteReport {
     pub key: String,
     pub path: PathBuf,
     pub byte_len: u64,
+    pub outcome: PackL2WriteOutcome,
     pub eviction: PackL2EvictionReport,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PackL2WriteOutcome {
+    Stored,
+    SkippedTooLarge { max_entry_bytes: u64 },
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -804,11 +853,14 @@ mod tests {
         max_bytes: u64,
         max_age: Duration,
     ) -> Result<(tempfile::TempDir, PackL2Cache), String> {
+        cache_with_options(PackL2CacheOptions::new(max_bytes, max_age))
+    }
+
+    fn cache_with_options(
+        options: PackL2CacheOptions,
+    ) -> Result<(tempfile::TempDir, PackL2Cache), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let cache = PackL2Cache::new(
-            temp.path().join("pack-l2"),
-            PackL2CacheOptions::new(max_bytes, max_age),
-        );
+        let cache = PackL2Cache::new(temp.path().join("pack-l2"), options);
         Ok((temp, cache))
     }
 
@@ -851,6 +903,20 @@ mod tests {
     }
 
     #[test]
+    fn default_options_use_pass2_size_limits() {
+        let options = PackL2CacheOptions::default();
+
+        assert_eq!(
+            options.max_bytes, DEFAULT_MAX_BYTES,
+            "default cache cap should stay at the pass-2 256 MiB budget"
+        );
+        assert_eq!(
+            options.max_entry_bytes, DEFAULT_MAX_ENTRY_BYTES,
+            "default per-entry cap should keep pathological packs out of L2"
+        );
+    }
+
+    #[test]
     fn happy_path_roundtrip_returns_stored_pack_json() -> TestResult {
         let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
         let pack = json!({"hash": "blake3:test", "items": [{"id": "mem_1"}]});
@@ -886,6 +952,82 @@ mod tests {
                 .map_err(|error| error.to_string())?,
         )?;
         assert_eq!(stored, pack, "cache hit should preserve pack JSON exactly");
+        Ok(())
+    }
+
+    #[test]
+    fn empty_or_boundary_entry_at_exactly_max_entry_bytes_is_cached() -> TestResult {
+        let key = "blake3:exact-entry-cap";
+        let stored_at_epoch_seconds = 100;
+        let pack = json!({"hash": "entry-cap", "items": [{"id": "mem_exact"}]});
+        let entry_len = raw_entry_bytes(key, pack.clone(), stored_at_epoch_seconds)?.len() as u64;
+        let (_temp, cache) = cache_with_options(
+            PackL2CacheOptions::new(4096, Duration::from_secs(60)).with_max_entry_bytes(entry_len),
+        )?;
+
+        let report = cache
+            .put_at(key, &pack, stored_at_epoch_seconds)
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.byte_len, entry_len);
+        assert_eq!(report.outcome, PackL2WriteOutcome::Stored);
+        assert!(
+            report.path.exists(),
+            "entry exactly at max_entry_bytes should be cached"
+        );
+        assert_eq!(
+            hit_json(cache.get_at(key, 120).map_err(|error| error.to_string())?)?,
+            pack
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn empty_or_boundary_entry_at_max_entry_bytes_plus_one_is_skipped_with_event() -> TestResult {
+        let key = "blake3:oversized-entry";
+        let stored_at_epoch_seconds = 100;
+        let pack = json!({"hash": "entry-cap", "items": [{"id": "mem_oversized"}]});
+        let entry_len = raw_entry_bytes(key, pack, stored_at_epoch_seconds)?.len() as u64;
+        let max_entry_bytes = entry_len
+            .checked_sub(1)
+            .ok_or_else(|| "test entry should have non-zero serialized length".to_owned())?;
+        let (_temp, cache) = cache_with_options(
+            PackL2CacheOptions::new(4096, Duration::from_secs(60))
+                .with_max_entry_bytes(max_entry_bytes),
+        )?;
+
+        let report = cache
+            .put_at(
+                key,
+                &json!({"hash": "entry-cap", "items": [{"id": "mem_oversized"}]}),
+                stored_at_epoch_seconds,
+            )
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.byte_len, entry_len);
+        assert_eq!(
+            report.outcome,
+            PackL2WriteOutcome::SkippedTooLarge { max_entry_bytes }
+        );
+        assert_eq!(
+            report.eviction,
+            PackL2EvictionReport::default(),
+            "skipped entries should not run write-through eviction"
+        );
+        assert!(
+            !report.path.exists(),
+            "oversized entries should not publish a cache file"
+        );
+        assert!(
+            matches!(
+                cache.get_at(key, 120).map_err(|error| error.to_string())?,
+                PackL2CacheLookup::Miss(PackL2CacheMiss {
+                    reason: PackL2CacheMissReason::NotFound,
+                    ..
+                })
+            ),
+            "skipped oversized entries should behave like cold misses"
+        );
         Ok(())
     }
 
@@ -955,6 +1097,40 @@ mod tests {
                     stored_at_epoch_seconds: 100,
                 },
             })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn error_or_invalid_oversized_existing_entry_is_removed_on_read() -> TestResult {
+        let key = "blake3:old-oversized-entry";
+        let pack = json!({"hash": "old-entry", "items": [{"id": "mem_old_oversized"}]});
+        let bytes = raw_entry_bytes(key, pack, 100)?;
+        let max_entry_bytes = (bytes.len() as u64)
+            .checked_sub(1)
+            .ok_or_else(|| "test entry should have non-zero serialized length".to_owned())?;
+        let (_temp, cache) = cache_with_options(
+            PackL2CacheOptions::new(4096, Duration::from_secs(60))
+                .with_max_entry_bytes(max_entry_bytes),
+        )?;
+        let path = write_raw_entry(&cache, key, &bytes)?;
+
+        let lookup = cache.get_at(key, 120).map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            lookup,
+            PackL2CacheLookup::Miss(PackL2CacheMiss {
+                key: key.to_owned(),
+                path: path.clone(),
+                reason: PackL2CacheMissReason::TooLarge {
+                    byte_len: bytes.len() as u64,
+                    max_entry_bytes,
+                },
+            })
+        );
+        assert!(
+            !path.exists(),
+            "oversized legacy entries should be invalidated under the current cap"
         );
         Ok(())
     }
