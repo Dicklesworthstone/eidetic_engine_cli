@@ -461,6 +461,43 @@ pub struct WhyDegradation {
     pub repair: Option<String>,
 }
 
+/// Rule-provenance bipartite explanation attached to `ee why`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoadBearingWhyExplanation {
+    /// Whether this memory appears in the ranked load-bearing authority set.
+    pub is_load_bearing: bool,
+    /// Bipartite authority score when available.
+    pub load_bearing_score: Option<f64>,
+    /// One-based authority rank when available.
+    pub authority_rank: Option<usize>,
+    /// Number of procedural rules that cite this memory as source evidence.
+    pub citing_rule_count: usize,
+    /// Redaction-safe rule references. Rule content is intentionally omitted.
+    pub citing_rules: Vec<LoadBearingRuleReference>,
+    /// Stable interpretation label.
+    pub interpretation: &'static str,
+    /// Algorithm and projection witness.
+    pub evidence: LoadBearingEvidence,
+    /// Human-readable rationale for the flag.
+    pub rationale: String,
+}
+
+/// Redaction-safe reference to a procedural rule that cites the memory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoadBearingRuleReference {
+    pub rule_id: String,
+    pub relation: &'static str,
+}
+
+/// Algorithm witness for load-bearing `ee why` output.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoadBearingEvidence {
+    pub schema: &'static str,
+    pub algorithm: &'static str,
+    pub projection: &'static str,
+    pub snapshot_version: u64,
+}
+
 /// Complete why report for a memory.
 #[derive(Clone, Debug)]
 pub struct WhyReport {
@@ -496,6 +533,8 @@ pub struct WhyReport {
     pub causal_explanation: Option<serde_json::Value>,
     /// Optional revision lineage block derived from the revision DAG.
     pub revision_lineage: Option<serde_json::Value>,
+    /// Optional rule-provenance bipartite load-bearing explanation.
+    pub load_bearing: Option<LoadBearingWhyExplanation>,
     /// Contradiction feedback recorded against this memory (EE-263).
     pub contradictions: Vec<ContradictionMetadata>,
     /// Memory links: supports, contradicts, derived_from, etc. (EE-LINK-USAGE-001).
@@ -591,6 +630,7 @@ impl WhyReport {
             bayes_posterior: None,
             causal_explanation: None,
             revision_lineage: None,
+            load_bearing: None,
             contradictions: Vec::new(),
             links: Vec::new(),
             history: None,
@@ -645,6 +685,7 @@ impl WhyReport {
             bayes_posterior: None,
             causal_explanation: None,
             revision_lineage: None,
+            load_bearing: None,
             contradictions: Vec::new(),
             links: Vec::new(),
             history: None,
@@ -674,6 +715,7 @@ impl WhyReport {
             bayes_posterior: None,
             causal_explanation: None,
             revision_lineage: None,
+            load_bearing: None,
             contradictions: Vec::new(),
             links: Vec::new(),
             history: None,
@@ -791,6 +833,16 @@ impl WhyReport {
     #[must_use]
     pub fn with_revision_lineage(mut self, revision_lineage: serde_json::Value) -> Self {
         self.revision_lineage = Some(revision_lineage);
+        self
+    }
+
+    /// Attach a rule-provenance load-bearing explanation.
+    #[must_use]
+    pub fn with_optional_load_bearing(
+        mut self,
+        load_bearing: Option<LoadBearingWhyExplanation>,
+    ) -> Self {
+        self.load_bearing = load_bearing;
         self
     }
 
@@ -1078,6 +1130,7 @@ fn explain_memory_inner(
         &contradictions,
         &validity.status,
     );
+    let load_bearing = build_load_bearing_why_explanation(&conn, &memory.workspace_id, memory_id);
     let storage = StorageExplanation {
         origin: determine_origin(&memory.trust_class),
         trust_class: memory.trust_class.clone(),
@@ -1130,6 +1183,7 @@ fn explain_memory_inner(
                     verification_evidence: Vec::new(),
                     coordination_fallback_evidence,
                     graph_retrieval,
+                    load_bearing,
                     degraded: evidence_degradations,
                     agent_profile,
                     dedup_link: find_embed_dedup_link(&conn, memory_id),
@@ -1169,6 +1223,7 @@ fn explain_memory_inner(
             verification_evidence,
             coordination_fallback_evidence,
             graph_retrieval,
+            load_bearing,
             degraded: evidence_degradations,
             agent_profile,
             dedup_link: find_embed_dedup_link(&conn, memory_id),
@@ -1374,6 +1429,97 @@ fn revision_lineage_for_why(
         "validationStatus": impact.impact_analysis.validation_status,
         "degraded": degraded,
     }))
+}
+
+fn build_load_bearing_why_explanation(
+    conn: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+) -> Option<LoadBearingWhyExplanation> {
+    let graph =
+        crate::graph::build_rule_provenance_bipartite_from_tables(conn, workspace_id).ok()?;
+    if graph.node_count() == 0 {
+        return None;
+    }
+    let hits = crate::graph::bipartite_provenance::compute_bipartite_hits(&graph).ok()?;
+    let snapshot_version = conn
+        .get_latest_graph_snapshot(workspace_id, crate::db::GraphSnapshotType::RuleProvenance)
+        .ok()
+        .flatten()
+        .map_or(0, |snapshot| u64::from(snapshot.snapshot_version));
+    let items = crate::graph::bipartite_provenance::load_bearing_memory_items(
+        &graph,
+        &hits,
+        snapshot_version,
+    );
+    let citing_rules = load_bearing_citing_rules(conn, workspace_id, memory_id).ok()?;
+    let ranked = items.iter().find(|item| item.memory_id == memory_id);
+    let evidence = LoadBearingEvidence {
+        schema: crate::graph::hits::HITS_REPORT_SCHEMA_V1,
+        algorithm: "bipartite_hits",
+        projection: "rule_provenance_bipartite",
+        snapshot_version,
+    };
+
+    Some(match ranked {
+        Some(item) => LoadBearingWhyExplanation {
+            is_load_bearing: true,
+            load_bearing_score: Some(item.load_bearing_score),
+            authority_rank: Some(item.rank),
+            citing_rule_count: item.citing_rule_count,
+            citing_rules,
+            interpretation: "load_bearing",
+            evidence,
+            rationale:
+                "This memory is cited by procedural rules in the rule-provenance bipartite projection."
+                    .to_owned(),
+        },
+        None => {
+            let citing_rule_count = citing_rules.len();
+            LoadBearingWhyExplanation {
+                is_load_bearing: false,
+                load_bearing_score: None,
+                authority_rank: None,
+                citing_rule_count,
+                citing_rules,
+                interpretation: "not_load_bearing",
+                evidence,
+                rationale:
+                    "This memory is not ranked as load-bearing in the current rule-provenance bipartite projection."
+                        .to_owned(),
+            }
+        }
+    })
+}
+
+fn load_bearing_citing_rules(
+    conn: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+) -> Result<Vec<LoadBearingRuleReference>, String> {
+    let rows = conn
+        .query(
+            "SELECT rsm.rule_id \
+             FROM rule_source_memories rsm \
+             JOIN procedural_rules rules ON rules.id = rsm.rule_id \
+             WHERE rsm.memory_id = ?1 \
+               AND rules.workspace_id = ?2 \
+               AND rules.tombstoned_at IS NULL \
+             ORDER BY rsm.rule_id ASC",
+            &[
+                Value::Text(memory_id.to_owned()),
+                Value::Text(workspace_id.to_owned()),
+            ],
+        )
+        .map_err(|error| format!("Failed to query load-bearing citing rules: {error}"))?;
+    rows.iter()
+        .map(|row| {
+            Ok(LoadBearingRuleReference {
+                rule_id: required_text(row, 0, "rule_source_memories.rule_id")?,
+                relation: "cites",
+            })
+        })
+        .collect()
 }
 
 fn revision_ancestors_at_depth(
@@ -1686,6 +1832,7 @@ struct ReportSelectionInputs {
     verification_evidence: Vec<VerificationEvidenceRecord>,
     coordination_fallback_evidence: Vec<CoordinationFallbackEvidenceSummary>,
     graph_retrieval: GraphRetrievalExplanation,
+    load_bearing: Option<LoadBearingWhyExplanation>,
     degraded: Vec<WhyDegradation>,
     agent_profile: Option<AgentProfileSelectionExplanation>,
     dedup_link: Option<DedupLinkEvidence>,
@@ -1718,6 +1865,7 @@ fn build_report(
         .with_links(selection_inputs.links)
         .with_optional_history(selection_inputs.history)
         .with_graph_retrieval(selection_inputs.graph_retrieval)
+        .with_optional_load_bearing(selection_inputs.load_bearing)
         .with_rationale_traces(selection_inputs.rationale_traces)
         .with_verification_evidence(selection_inputs.verification_evidence)
         .with_coordination_fallback_evidence(selection_inputs.coordination_fallback_evidence)
@@ -2633,7 +2781,10 @@ fn fetch_rationale_traces(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{CreateArtifactInput, CreateSessionInput, CreateWorkspaceInput};
+    use crate::db::{
+        CreateArtifactInput, CreateMemoryInput, CreateProceduralRuleInput, CreateSessionInput,
+        CreateWorkspaceInput,
+    };
     use crate::models::{
         RationaleTraceKind, RationaleTracePosture, RationaleTraceVisibility, RedactionStatus,
     };
@@ -3527,6 +3678,110 @@ mod tests {
             lineage["degraded"][0]["sources"][0].as_str(),
             Some("why_revision_lineage"),
             "disabled degraded source",
+        )
+    }
+
+    #[test]
+    fn explain_memory_attaches_load_bearing_rule_provenance() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or("database path should have parent")?,
+        )
+        .map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_whyloadbearing0000000000";
+        let memory_id = "mem_whyloadbearing0000000001";
+        let connection =
+            crate::db::DbConnection::open_file(&database_path).map_err(|e| e.to_string())?;
+        connection.migrate().map_err(|e| e.to_string())?;
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: temp.path().display().to_string(),
+                    name: Some("why load-bearing".to_owned()),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        connection
+            .insert_memory(
+                memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "Load-bearing memory should be protected.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: Some("2026-05-20T00:00:00Z".to_owned()),
+                    valid_to: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        for rule_id in [
+            "rule_whyloadbearingalpha00001",
+            "rule_whyloadbearingbeta000001",
+        ] {
+            connection
+                .insert_procedural_rule(
+                    rule_id,
+                    &CreateProceduralRuleInput {
+                        workspace_id: workspace_id.to_owned(),
+                        content: format!("{rule_id} cites load-bearing evidence."),
+                        confidence: 0.9,
+                        utility: 0.8,
+                        importance: 0.7,
+                        trust_class: "human_explicit".to_owned(),
+                        scope: "workspace".to_owned(),
+                        scope_pattern: None,
+                        maturity: "validated".to_owned(),
+                        protected: false,
+                        source_memory_ids: vec![memory_id.to_owned()],
+                        tags: Vec::new(),
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        drop(connection);
+
+        let report = explain_memory(&WhyOptions {
+            database_path: &database_path,
+            memory_id,
+            confidence_threshold: WhyOptions::DEFAULT_CONFIDENCE_THRESHOLD,
+        });
+
+        let load_bearing = report
+            .load_bearing
+            .as_ref()
+            .ok_or_else(|| "why should attach load-bearing explanation".to_owned())?;
+        ensure(load_bearing.is_load_bearing, true, "load-bearing flag")?;
+        ensure(
+            load_bearing.authority_rank,
+            Some(1_usize),
+            "load-bearing rank",
+        )?;
+        ensure(
+            load_bearing.citing_rule_count,
+            2_usize,
+            "load-bearing citing rule count",
+        )?;
+        ensure(
+            load_bearing.interpretation,
+            "load_bearing",
+            "load-bearing interpretation",
+        )?;
+        ensure(
+            load_bearing.evidence.projection,
+            "rule_provenance_bipartite",
+            "load-bearing projection",
         )
     }
 
