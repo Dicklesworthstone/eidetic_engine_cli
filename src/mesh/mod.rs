@@ -23,3 +23,4 @@ pub mod peer;
 pub mod policy;
 pub mod repair_action_graph;
 pub mod steward_decision;
+pub mod sync;
