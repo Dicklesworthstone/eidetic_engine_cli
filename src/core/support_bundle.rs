@@ -24,6 +24,10 @@ use serde_json::{Value, json};
 use sqlmodel_core::{Row as SqlRow, Value as SqlValue};
 
 use crate::cache::CacheBudget;
+use crate::core::qos::{
+    QosBackgroundThrottleAction, QosBackgroundThrottleDecision, QosBackgroundThrottleInput,
+    QosLane, QosLaneSummary, QosThrottleCheckpoint, decide_background_throttle,
+};
 use crate::db::{DbConnection, StoredAuditEntry, audit_actions};
 use crate::models::{
     ArtifactDegradationSeverity, ArtifactKind, ArtifactSummary, DomainError, MetricValue,
@@ -3201,11 +3205,127 @@ fn compute_hash(content: &str) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
+/// Cooperative QoS throttle decision for support-bundle collection
+/// (bd-1zb7k.20.3). Routes the shared `decide_background_throttle`
+/// policy through the support-bundle context so the bundle path
+/// participates in the same advisory active-lane registry as steward
+/// jobs, instead of inventing a parallel budget system.
+///
+/// Lane is fixed to `QosLane::BackgroundDerived` because the support
+/// bundle collection is derived-asset work; checkpoint is fixed to
+/// `BeforeExpensivePhase` because the bundle's expensive phase is the
+/// `collect_diagnostics` call that follows. Returns the decision so
+/// callers can render a `qosThrottle` block in their bundle report
+/// only when behavior changed (preserves output-hash determinism when
+/// no throttling decision affected selection — see the
+/// throttle_decision_continues_under_no_foreground_pressure test).
+///
+/// `remaining_item_budget` is the number of bundle items the caller
+/// was about to collect; `minimum_item_budget` is the smallest
+/// honest collection size the caller will accept rather than skip.
+/// `may_yield` should be `false` for the support bundle because the
+/// command is foreground-initiated and yielding would surface as a
+/// stuck command to the operator — under foreground pressure the
+/// shared helper falls back to `ShrinkItemBudget` instead, which is
+/// what the support bundle wants.
+#[must_use]
+pub fn support_bundle_qos_throttle_decision(
+    summary: &QosLaneSummary,
+    remaining_item_budget: u32,
+    minimum_item_budget: u32,
+) -> QosBackgroundThrottleDecision {
+    decide_background_throttle(
+        summary,
+        QosBackgroundThrottleInput {
+            lane: QosLane::BackgroundDerived,
+            checkpoint: QosThrottleCheckpoint::BeforeExpensivePhase,
+            remaining_item_budget,
+            minimum_item_budget,
+            may_yield: false,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     type TestResult = Result<(), String>;
+
+    fn empty_qos_summary() -> QosLaneSummary {
+        QosLaneSummary {
+            schema: "ee.qos.lane_summary.v1".to_owned(),
+            workspace_hash: "blake3:abc".to_owned(),
+            active_records: Vec::new(),
+            foreground_active_count: 0,
+            background_active_count: 0,
+            verification_active_count: 0,
+            maintenance_active_count: 0,
+            stale_ignored_count: 0,
+            degraded: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn throttle_decision_continues_under_no_foreground_pressure() {
+        let summary = empty_qos_summary();
+        let decision = support_bundle_qos_throttle_decision(&summary, 64, 8);
+        assert_eq!(decision.action, QosBackgroundThrottleAction::Continue);
+        assert!(!decision.behavior_changed());
+        assert_eq!(decision.adjusted_item_budget, None);
+    }
+
+    #[test]
+    fn throttle_decision_shrinks_under_foreground_pressure() {
+        let mut summary = empty_qos_summary();
+        summary.foreground_active_count = 2;
+        let decision = support_bundle_qos_throttle_decision(&summary, 64, 8);
+        assert_eq!(
+            decision.action,
+            QosBackgroundThrottleAction::ShrinkItemBudget
+        );
+        assert!(decision.behavior_changed());
+        assert_eq!(decision.adjusted_item_budget, Some(32));
+        assert!(decision.foreground_pressure);
+    }
+
+    #[test]
+    fn throttle_decision_fails_open_when_qos_summary_degraded() {
+        let mut summary = empty_qos_summary();
+        summary.foreground_active_count = 2;
+        summary
+            .degraded
+            .push(crate::core::qos::QosRegistryDegradation::registry_unavailable("test"));
+        let decision = support_bundle_qos_throttle_decision(&summary, 64, 8);
+        // Bead acceptance: degraded summary fails open (continue) so the
+        // support bundle never silently drops required work because the
+        // registry could not be consulted.
+        assert_eq!(decision.action, QosBackgroundThrottleAction::Continue);
+        assert!(!decision.behavior_changed());
+    }
+
+    #[test]
+    fn throttle_decision_holds_at_minimum_budget_floor() {
+        let mut summary = empty_qos_summary();
+        summary.foreground_active_count = 2;
+        let decision = support_bundle_qos_throttle_decision(&summary, 8, 8);
+        // Already at floor; the helper refuses to shrink below it.
+        assert_eq!(decision.action, QosBackgroundThrottleAction::Continue);
+        assert!(decision.foreground_pressure);
+    }
+
+    #[test]
+    fn throttle_decision_does_not_yield_for_support_bundle() {
+        // Even though the shared helper supports `Yield` at checkpoint
+        // boundaries, the support-bundle wrapper pins may_yield=false
+        // because yielding mid-collection would surface as a stuck
+        // foreground command. The wrapper falls back to ShrinkItemBudget
+        // when foreground pressure is present.
+        let mut summary = empty_qos_summary();
+        summary.foreground_active_count = 1;
+        let decision = support_bundle_qos_throttle_decision(&summary, 100, 8);
+        assert_ne!(decision.action, QosBackgroundThrottleAction::Yield);
+    }
 
     #[test]
     fn plan_bundle_dry_run() -> TestResult {
