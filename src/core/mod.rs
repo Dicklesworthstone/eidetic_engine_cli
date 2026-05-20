@@ -30,11 +30,13 @@ pub mod curate;
 pub mod degraded_aggregation;
 pub mod degraded_honesty;
 pub mod derived_asset;
+pub mod derived_asset_freshness;
 pub mod determinism;
 pub mod disk_pressure;
 pub mod doctor;
 pub mod doctor_fixers;
 pub mod doctor_runtime;
+pub mod duplicate_work_detector;
 pub mod economy;
 pub mod effect;
 pub mod explanation_latency_budget;
@@ -297,6 +299,10 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
         SupportedSchema::new(
             "disk_pressure_diagnostics",
             disk_pressure::DISK_PRESSURE_DIAGNOSTICS_SCHEMA_V1,
+        ),
+        SupportedSchema::new(
+            "agent_harness_log_classifier",
+            disk_pressure::AGENT_HARNESS_LOG_CLASSIFIER_SCHEMA_V1,
         ),
         SupportedSchema::new(
             "artifact_retention_diagnostics",
@@ -654,6 +660,7 @@ mod tests {
                 "proof_check",
                 "preflight_bypass_token",
                 "disk_pressure_diagnostics",
+                "agent_harness_log_classifier",
                 "artifact_retention_diagnostics",
                 "build_admission_diagnostics",
                 "pack_quality_report",
