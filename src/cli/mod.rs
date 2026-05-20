@@ -677,8 +677,9 @@ pub enum Command {
     Handoff(HandoffCommand),
     /// Quick health check with overall verdict.
     Health(HealthArgs),
-    /// Print command help.
-    Help,
+    /// Print command help. `ee help <subcommand>` shows that subcommand's help
+    /// (e.g. `ee help memory show`); `ee help` alone shows the top-level help.
+    Help(HelpArgs),
     /// Generate agent-harness hook helpers (preflight shell snippets, etc.).
     #[command(subcommand)]
     Hook(HookCommand),
@@ -1751,6 +1752,16 @@ pub struct HealthArgs {
     /// Emit graph-derived structural health for robot consumers.
     #[arg(long, action = ArgAction::SetTrue)]
     pub robot_insights: bool,
+}
+
+/// Arguments for `ee help`. Accepts an optional subcommand path so that
+/// `ee help memory show` works the same way `ee memory show --help` does;
+/// `ee help` alone prints top-level help.
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct HelpArgs {
+    /// Optional subcommand path (e.g. `memory show`, `swarm brief`).
+    #[arg(value_name = "COMMAND")]
+    pub topic: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
@@ -8951,7 +8962,8 @@ where
     }
 
     match cli.command {
-        None | Some(Command::Help) => write_help(stdout),
+        None => write_help(stdout),
+        Some(Command::Help(ref args)) => write_help_for_topic(&args.topic, stdout, stderr),
         Some(Command::Agent(AgentCommand::Detect(ref args))) => {
             handle_agent_detect(&cli, args, stdout, stderr)
         }
@@ -14102,6 +14114,63 @@ where
     W: Write,
 {
     let mut command = Cli::command();
+    match command
+        .write_help(stdout)
+        .and_then(|()| stdout.write_all(b"\n"))
+    {
+        Ok(()) => ProcessExitCode::Success,
+        Err(_) => ProcessExitCode::Usage,
+    }
+}
+
+/// Print help for an optional subcommand path. `topic` is the same shape as
+/// the trailing args of `ee help <subcommand> [<subsubcommand> ...]`. When
+/// the topic is empty, this falls through to the top-level help. When a
+/// segment is unknown, we surface a "did you mean" suggestion via the same
+/// Levenshtein matcher used for invalid-subcommand parse errors so an agent
+/// gets a learnable correction instead of "unknown subcommand".
+fn write_help_for_topic<W, E>(topic: &[String], stdout: &mut W, stderr: &mut E) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if topic.is_empty() {
+        return write_help(stdout);
+    }
+
+    let mut command = Cli::command();
+    let mut path_so_far: Vec<String> = Vec::new();
+    for segment in topic {
+        let Some(sub) = command.find_subcommand(segment) else {
+            let parent_path = if path_so_far.is_empty() {
+                None
+            } else {
+                Some(path_so_far.join(" "))
+            };
+            let suggestion = did_you_mean(segment, parent_path.as_deref());
+            let parent_label = parent_path
+                .as_deref()
+                .map(|p| format!("`{p}`"))
+                .unwrap_or_else(|| "ee".to_string());
+            let _ = writeln!(
+                stderr,
+                "error: no such subcommand '{segment}' under {parent_label}"
+            );
+            if let Some(ref s) = suggestion {
+                let example = if path_so_far.is_empty() {
+                    format!("ee help {s}")
+                } else {
+                    format!("ee help {} {s}", path_so_far.join(" "))
+                };
+                let _ = writeln!(stderr, "\nDid you mean `{example}`?");
+            }
+            let _ = writeln!(stderr, "\nNext:\n  ee help");
+            return ProcessExitCode::Usage;
+        };
+        path_so_far.push(segment.clone());
+        command = sub.clone();
+    }
+
     match command
         .write_help(stdout)
         .and_then(|()| stdout.write_all(b"\n"))
@@ -41927,7 +41996,7 @@ impl NormalizedInvocation {
                     HandoffCommand::RotateKey(_) => "handoff rotate-key".to_string(),
                 },
                 Command::Health(_) => "health".to_string(),
-                Command::Help => "help".to_string(),
+                Command::Help(_) => "help".to_string(),
                 Command::Init(_) => "init".to_string(),
                 Command::Insights(_) => "insights".to_string(),
                 Command::Import(import) => match import {
@@ -54006,6 +54075,49 @@ mod tests {
             &Some("did you mean `--schema-version`?".to_string()),
             "equals form should be normalized",
         )
+    }
+
+    // ========================================================================
+    // `ee help <subcommand>` topic routing — agent-ergonomics R-006.
+    // ========================================================================
+
+    #[test]
+    fn ee_help_search_prints_search_help() -> TestResult {
+        // The canonical "I want help for that command" invocation form an
+        // agent reaches for first. Prior to R-006 this errored with
+        // "unexpected argument 'search' found". After R-006 it prints the
+        // search subcommand's help on stdout and exits Success.
+        let (exit, stdout, stderr) = invoke(&["ee", "help", "search"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "exit Success")?;
+        ensure_contains(&stdout, "Search indexed memories", "search description")?;
+        ensure_contains(&stdout, "--json", "search help mentions --json")?;
+        ensure(stderr.is_empty(), "no stderr noise on successful help routing")
+    }
+
+    #[test]
+    fn ee_help_nested_memory_show_prints_nested_help() -> TestResult {
+        // Two-segment topic should resolve through find_subcommand.
+        let (exit, stdout, _) = invoke(&["ee", "help", "memory", "show"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "exit Success")?;
+        ensure_contains(&stdout, "memory", "memory in nested help")
+    }
+
+    #[test]
+    fn ee_help_unknown_subcommand_suggests_did_you_mean() -> TestResult {
+        // An agent that types `ee help serch` (typo) should be redirected
+        // toward `ee help search` rather than getting a bare error.
+        let (exit, _stdout, stderr) = invoke(&["ee", "help", "serch"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "exit Usage")?;
+        ensure_contains(&stderr, "no such subcommand 'serch'", "naming what failed")?;
+        ensure_contains(&stderr, "ee help search", "did-you-mean correction")
+    }
+
+    #[test]
+    fn ee_help_no_topic_prints_top_level_help() -> TestResult {
+        // Backward-compat: `ee help` with no topic still prints top-level help.
+        let (exit, stdout, _) = invoke(&["ee", "help"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "exit Success")?;
+        ensure_contains(&stdout, "Most-used commands", "top-level help prelude")
     }
 
     #[test]
