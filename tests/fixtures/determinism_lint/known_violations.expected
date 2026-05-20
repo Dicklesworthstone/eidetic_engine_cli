@@ -14,21 +14,29 @@ line 53: ambient_system_time_now: inject wall-clock time at the boundary instead
 line 58: ambient_env_var: read env through the registered config boundary
 line 59: ambient_env_var_os: read optional env through the registered config boundary
 line 60: ambient_env_iteration: iterate env only through a deterministic registered boundary
-line 61: ambient_env_var: read env through the registered config boundary
-line 62: ambient_env_var_os: read optional env through the registered config boundary
-line 63: ambient_env_iteration: iterate env only through a deterministic registered boundary
-line 64: ambient_env_iteration: iterate env only through a deterministic registered boundary
-line 70: hashmap_iteration: sort HashMap entries before deterministic output
-line 71: hashmap_iteration: sort HashMap entries before deterministic output
-line 72: hashmap_iteration: sort HashMap entries before deterministic output
-line 73: hashmap_iteration: sort HashMap entries before deterministic output
+line 61: ambient_process_args: read process args through the registered CLI boundary
+line 62: ambient_process_args: read process args through the registered CLI boundary
+line 63: ambient_env_var: read env through the registered config boundary
+line 64: ambient_env_var_os: read optional env through the registered config boundary
+line 65: ambient_env_iteration: iterate env only through a deterministic registered boundary
+line 66: ambient_env_iteration: iterate env only through a deterministic registered boundary
+line 67: ambient_process_args: read process args through the registered CLI boundary
+line 68: ambient_process_args: read process args through the registered CLI boundary
 line 74: hashmap_iteration: sort HashMap entries before deterministic output
-line 80: hashset_iteration: sort HashSet entries before deterministic output
-line 81: hashset_iteration: sort HashSet entries before deterministic output
-line 82: hashset_iteration: sort HashSet entries before deterministic output
-line 87: unsorted_read_dir: sort read_dir entries before deterministic output
-line 88: unsorted_read_dir: sort read_dir entries before deterministic output
-line 93: ambient_chrono_utc_now: inject UTC timestamps at the boundary instead of calling Utc::now
-line 94: ambient_chrono_local_now: inject local timestamps at the boundary instead of calling Local::now
-line 99: ambient_domain_id_now: use seeded ID helpers instead of ambient typed Id::now
-line 100: ambient_domain_id_now: use seeded ID helpers instead of ambient typed Id::now
+line 75: hashmap_iteration: sort HashMap entries before deterministic output
+line 76: hashmap_iteration: sort HashMap entries before deterministic output
+line 77: hashmap_iteration: sort HashMap entries before deterministic output
+line 78: hashmap_iteration: sort HashMap entries before deterministic output
+line 84: hashset_iteration: sort HashSet entries before deterministic output
+line 85: hashset_iteration: sort HashSet entries before deterministic output
+line 86: hashset_iteration: sort HashSet entries before deterministic output
+line 91: unsorted_read_dir: sort read_dir entries before deterministic output
+line 92: unsorted_read_dir: sort read_dir entries before deterministic output
+line 97: ambient_chrono_utc_now: inject UTC timestamps at the boundary instead of calling Utc::now
+line 98: ambient_chrono_local_now: inject local timestamps at the boundary instead of calling Local::now
+line 103: ambient_domain_id_now: use seeded ID helpers instead of ambient typed Id::now
+line 104: ambient_domain_id_now: use seeded ID helpers instead of ambient typed Id::now
+line 109: ambient_process_id: inject the host PID at the boundary instead of calling std::process::id
+line 110: ambient_process_id: inject the host PID at the boundary instead of calling std::process::id
+line 111: ambient_thread_current: inject the thread identifier at the boundary instead of std::thread::current
+line 112: ambient_thread_current: inject the thread identifier at the boundary instead of std::thread::current

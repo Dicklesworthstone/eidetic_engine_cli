@@ -163,6 +163,17 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "iterate env only through a deterministic registered boundary",
             });
         }
+        if line.contains("std::env::args(")
+            || line.contains("std::env::args_os(")
+            || contains_path_call(line, "env::args(")
+            || contains_path_call(line, "env::args_os(")
+        {
+            findings.push(Finding {
+                line: line_no,
+                code: "ambient_process_args",
+                message: "read process args through the registered CLI boundary",
+            });
+        }
         if hash_collection_iteration_call(line, &hash_map_bindings) {
             findings.push(Finding {
                 line: line_no,
@@ -182,6 +193,20 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 line: line_no,
                 code: "unsorted_read_dir",
                 message: "sort read_dir entries before deterministic output",
+            });
+        }
+        if line.contains("std::process::id(") || contains_path_call(line, "process::id(") {
+            findings.push(Finding {
+                line: line_no,
+                code: "ambient_process_id",
+                message: "inject the host PID at the boundary instead of calling std::process::id",
+            });
+        }
+        if line.contains("std::thread::current(") || contains_path_call(line, "thread::current(") {
+            findings.push(Finding {
+                line: line_no,
+                code: "ambient_thread_current",
+                message: "inject the thread identifier at the boundary instead of std::thread::current",
             });
         }
     }
@@ -494,6 +519,10 @@ mod self_tests {
                 // env::var_os("EE_SEED");
                 // env::vars();
                 // env::vars_os();
+                // std::env::args();
+                // std::env::args_os();
+                // env::args();
+                // env::args_os();
                 // fs::read_dir(".");
             }
         "#;
@@ -514,6 +543,10 @@ mod self_tests {
              * env::var_os("EE_SEED");
              * env::vars();
              * env::vars_os();
+             * std::env::args();
+             * std::env::args_os();
+             * env::args();
+             * env::args_os();
              * chrono::Utc::now();
              * std::fs::read_dir(".");
              * fs::read_dir(".");
@@ -535,10 +568,14 @@ mod self_tests {
                 let _ = std::env::var_os("EE_SEED");
                 let _ = std::env::vars();
                 let _ = std::env::vars_os();
+                let _ = std::env::args();
+                let _ = std::env::args_os();
                 let _ = env::var("EE_ALIAS_SEED");
                 let _ = env::var_os("EE_ALIAS_SEED");
                 let _ = env::vars();
                 let _ = env::vars_os();
+                let _ = env::args();
+                let _ = env::args_os();
                 let _ = fs::read_dir(".");
             }
         "#;
@@ -546,6 +583,7 @@ mod self_tests {
         assert!(report.contains("ambient_env_var"));
         assert!(report.contains("ambient_env_var_os"));
         assert_eq!(report.matches(": ambient_env_iteration:").count(), 4);
+        assert_eq!(report.matches(": ambient_process_args:").count(), 4);
         assert!(report.contains("unsorted_read_dir"));
     }
 
@@ -609,5 +647,27 @@ mod self_tests {
         "#;
         let report = render_report(&scan_fixture(fixture));
         assert_eq!(report.matches("ambient_rand_random").count(), 2);
+    }
+
+    #[test]
+    fn process_id_and_thread_current_calls_emit_known_violations() {
+        // Two distinct ambient classes: process::id() leaks the host
+        // PID into deterministic output, and thread::current() leaks
+        // the runtime-assigned thread identifier. Both must be caught
+        // through either the fully-qualified `std::` path or a
+        // pre-imported `process::` / `thread::` path.
+        let fixture = r#"
+            use std::{process, thread};
+
+            fn ambient() {
+                let _ = std::process::id();
+                let _ = process::id();
+                let _ = std::thread::current();
+                let _ = thread::current();
+            }
+        "#;
+        let report = render_report(&scan_fixture(fixture));
+        assert_eq!(report.matches("ambient_process_id").count(), 2);
+        assert_eq!(report.matches("ambient_thread_current").count(), 2);
     }
 }
