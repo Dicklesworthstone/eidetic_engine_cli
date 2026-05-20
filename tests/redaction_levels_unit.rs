@@ -249,6 +249,35 @@ fn redaction_level_behavior_matrix_matches_docs() -> TestResult {
 }
 
 #[test]
+fn high_entropy_token_thresholds_match_docs() -> TestResult {
+    let standard_token = "0123456789abcdef0123456789abcdef";
+    let strict_only_token = "abcdefghijklabcdefghijklabcdefghijkl";
+    let standard_text = format!("fingerprint {standard_token} done");
+    let strict_text = format!("nonce {strict_only_token} done");
+
+    ensure(
+        redact_content(&standard_text, RedactionLevel::Minimal) == standard_text,
+        "minimal should preserve high-entropy tokens that are not secret-shaped",
+    )?;
+    ensure(
+        redact_content(&standard_text, RedactionLevel::Standard)
+            == format!("fingerprint {REDACTED_PLACEHOLDER} done"),
+        "standard should redact tokens at or above 4.0 bits per byte",
+    )?;
+    ensure(
+        redact_content(&strict_text, RedactionLevel::Standard) == strict_text,
+        "standard should preserve tokens below 4.0 bits per byte",
+    )?;
+    ensure(
+        redact_content(
+            &format!("nonce {strict_only_token} done"),
+            RedactionLevel::Strict,
+        ) == format!("nonce {REDACTED_PLACEHOLDER} done"),
+        "strict should redact tokens at or above 3.5 bits per byte",
+    )
+}
+
+#[test]
 fn rust_surface_defaults_match_k6_documented_defaults() -> TestResult {
     ensure(
         PackAssemblyOptions::default().redaction_level == RedactionLevel::Minimal,

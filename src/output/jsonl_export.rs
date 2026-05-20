@@ -48,6 +48,10 @@ pub const REDACTED_PATH_PLACEHOLDER: &str = "[REDACTED_PATH]";
 /// Placeholder for redacted identifiers.
 pub const REDACTED_ID_PLACEHOLDER: &str = "[REDACTED_ID]";
 
+const MIN_HIGH_ENTROPY_TOKEN_BYTES: usize = 32;
+const STANDARD_HIGH_ENTROPY_BITS_PER_BYTE: f64 = 4.0;
+const STRICT_HIGH_ENTROPY_BITS_PER_BYTE: f64 = 3.5;
+
 const SENSITIVE_PATH_PREFIXES: &[&str] = &[
     "/home/",
     "/Users/",
@@ -87,14 +91,23 @@ pub fn redact_content(content: &str, level: RedactionLevel) -> String {
             if contains_secret_pattern(content) {
                 REDACTED_PLACEHOLDER.to_owned()
             } else {
-                redact_paths_in_content(content)
+                redact_high_entropy_tokens(
+                    &redact_paths_in_content(content),
+                    STANDARD_HIGH_ENTROPY_BITS_PER_BYTE,
+                )
             }
         }
         RedactionLevel::Strict => {
             if contains_secret_pattern(content) {
                 REDACTED_PLACEHOLDER.to_owned()
             } else {
-                redact_paths_in_content(content).chars().take(200).collect()
+                redact_high_entropy_tokens(
+                    &redact_paths_in_content(content),
+                    STRICT_HIGH_ENTROPY_BITS_PER_BYTE,
+                )
+                .chars()
+                .take(200)
+                .collect()
             }
         }
         RedactionLevel::Paranoid => REDACTED_PLACEHOLDER.to_owned(),
@@ -142,6 +155,68 @@ fn redact_paths_in_content(content: &str) -> String {
         }
     }
     result
+}
+
+fn redact_high_entropy_tokens(content: &str, threshold_bits_per_byte: f64) -> String {
+    let mut output = String::with_capacity(content.len());
+    let mut cursor = 0usize;
+
+    while cursor < content.len() {
+        let Some(ch) = content[cursor..].chars().next() else {
+            break;
+        };
+        if !is_high_entropy_token_char(ch) {
+            output.push(ch);
+            cursor += ch.len_utf8();
+            continue;
+        }
+
+        let start = cursor;
+        cursor += ch.len_utf8();
+        while cursor < content.len() {
+            let Some(next) = content[cursor..].chars().next() else {
+                break;
+            };
+            if !is_high_entropy_token_char(next) {
+                break;
+            }
+            cursor += next.len_utf8();
+        }
+
+        let token = &content[start..cursor];
+        if is_high_entropy_token(token, threshold_bits_per_byte) {
+            output.push_str(REDACTED_PLACEHOLDER);
+        } else {
+            output.push_str(token);
+        }
+    }
+
+    output
+}
+
+fn is_high_entropy_token_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '+' | '/' | '=')
+}
+
+fn is_high_entropy_token(token: &str, threshold_bits_per_byte: f64) -> bool {
+    if token.len() < MIN_HIGH_ENTROPY_TOKEN_BYTES {
+        return false;
+    }
+
+    let mut counts = [0usize; 256];
+    for byte in token.bytes() {
+        counts[usize::from(byte)] += 1;
+    }
+
+    let len = token.len() as f64;
+    let entropy = counts
+        .iter()
+        .filter(|count| **count > 0)
+        .fold(0.0, |acc, count| {
+            let probability = *count as f64 / len;
+            acc - probability * probability.log2()
+        });
+    entropy >= threshold_bits_per_byte
 }
 
 fn starts_with_sensitive_path_prefix(value: &str) -> bool {
@@ -901,6 +976,38 @@ mod tests {
             redact_content(normal, RedactionLevel::Minimal),
             normal.to_owned(),
             "minimal preserves normal",
+        )
+    }
+
+    #[test]
+    fn redact_content_standard_and_strict_redact_high_entropy_tokens() -> TestResult {
+        let standard_token = "0123456789abcdef0123456789abcdef";
+        let strict_only_token = "abcdefghijklabcdefghijklabcdefghijkl";
+        let standard_text = format!("fingerprint {standard_token} done");
+        let strict_text = format!("nonce {strict_only_token} done");
+
+        ensure(
+            redact_content(&standard_text, RedactionLevel::Minimal),
+            standard_text.clone(),
+            "minimal preserves high-entropy tokens",
+        )?;
+        ensure(
+            redact_content(&standard_text, RedactionLevel::Standard),
+            format!("fingerprint {REDACTED_PLACEHOLDER} done"),
+            "standard redacts tokens at or above 4.0 bits per byte",
+        )?;
+        ensure(
+            redact_content(&strict_text, RedactionLevel::Standard),
+            strict_text,
+            "standard preserves tokens below 4.0 bits per byte",
+        )?;
+        ensure(
+            redact_content(
+                &format!("nonce {strict_only_token} done"),
+                RedactionLevel::Strict,
+            ),
+            format!("nonce {REDACTED_PLACEHOLDER} done"),
+            "strict redacts tokens at or above 3.5 bits per byte",
         )
     }
 
