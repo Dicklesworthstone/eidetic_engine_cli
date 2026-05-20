@@ -131,6 +131,8 @@ fn assert_envelope_shape(audit: &Value) -> TestResult {
         "bead_assignee",
         "bead_title",
         "open_dependencies",
+        "dependency_cycles",
+        "dependency_cycle_count",
         "uncommitted_files_referencing_bead",
         "rch_status",
         "rch_queue_status",
@@ -195,6 +197,7 @@ fn closeout_audit_script_tracks_current_coordination_surfaces() -> TestResult {
         "rch_queue_stale_active_records",
         "rch CLI rejects 'rch exec' as an unknown subcommand",
         "RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects RCH_ALIAS_PROJECT_ROOT=/data/projects rch queue --json",
+        "dependency_cycles:",
         "srr6_mesh_off_marker_missing",
         "missing_proof_markers",
         "mesh_off_status_opens_no_mesh_listener",
@@ -374,6 +377,25 @@ fn srr6_closeout_reports_unresolved_dependency_blockers() -> TestResult {
     }) {
         return Err(format!(
             "SRR6 closeout blocker missing from blockers: {blockers:?}",
+        ));
+    }
+    if audit["evidence"]["dependency_cycle_count"]
+        .as_u64()
+        .is_none_or(|count| count == 0)
+    {
+        return Err(format!(
+            "SRR6 fixture should expose dependency-cycle evidence: {}",
+            audit["evidence"]
+        ));
+    }
+    if !blockers.iter().any(|blocker| {
+        blocker
+            .as_str()
+            .unwrap_or("")
+            .starts_with("dependency_cycles:")
+    }) {
+        return Err(format!(
+            "dependency cycle blocker missing from blockers: {blockers:?}",
         ));
     }
 

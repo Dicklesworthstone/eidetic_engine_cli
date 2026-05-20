@@ -1,0 +1,3 @@
+{"id":"bd-2vu8m","title":"SRR6.23 final closeout fixture — unresolved dependency","status":"in_progress","priority":2,"issue_type":"task","assignee":"CoralRiver","dependencies":[{"depends_on_id":"bd-srr6-open","type":"blocks"},{"depends_on_id":"bd-srr6-closed","type":"blocks"}]}
+{"id":"bd-srr6-open","title":"SRR6 dependency still open","status":"open","priority":2,"issue_type":"task","dependencies":[{"depends_on_id":"bd-2vu8m","type":"blocks"}]}
+{"id":"bd-srr6-closed","title":"SRR6 dependency already closed","status":"closed","priority":2,"issue_type":"task"}

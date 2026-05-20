@@ -161,6 +161,30 @@ if [ "$DEPS_JSON" != "[]" ] && [ "$DEPS_JSON" != "null" ]; then
     fi
 fi
 
+# Check the dependency graph directly from JSONL so closeout does not rely on a
+# live br daemon. This mirrors the `br dep cycles` gate at the evidence level:
+# any cycle in the tracked bead graph blocks closure until the graph is fixed.
+DEPENDENCY_CYCLES_JSON="$(jq -s -c '
+    def dependency_targets($issue):
+        [($issue.dependencies // [])[]?
+            | (.depends_on_id // .id // empty)
+            | select(type == "string" and length > 0)];
+    (map(select(.id? != null))
+        | map({key: .id, value: dependency_targets(.)})
+        | from_entries) as $edges
+    | def walk($id; $path):
+        if ($path | index($id)) then
+            [($path + [$id])]
+        else
+            ([($edges[$id] // [])[]? as $next | walk($next; $path + [$id])] | add) // []
+        end;
+    [$edges | keys[] as $root | walk($root; [])[]]
+    | map(select(length > 1))
+    | map({path: ., cycle: join(" -> ")})
+    | unique_by(.cycle)
+' "$ISSUES_JSONL" 2>/dev/null || printf '[]')"
+DEPENDENCY_CYCLE_COUNT="$(printf '%s' "$DEPENDENCY_CYCLES_JSON" | jq 'length')"
+
 # SRR6 final closeout has a stricter contract than ordinary bead closure:
 # every child must be closed/deferred and the optional mesh-off proof paths must
 # still exist. This keeps bd-2vu8m from being marked ready by a generic audit
@@ -338,6 +362,10 @@ if [ "$OPEN_DEPS_COUNT" -gt 0 ]; then
     BLOCKERS+=("open_dependencies: ${OPEN_DEPS_COUNT} dep(s) not yet closed")
     NEXT_ACTIONS+=("close or force-close the open dependencies; review each via 'br show <id>'")
 fi
+if [ "$DEPENDENCY_CYCLE_COUNT" -gt 0 ]; then
+    BLOCKERS+=("dependency_cycles: ${DEPENDENCY_CYCLE_COUNT} cycle(s) detected in the bead graph")
+    NEXT_ACTIONS+=("break dependency cycles before closeout; verify with 'br dep cycles --json'")
+fi
 if [ "$SRR6_CLOSEOUT_ENABLED" = "true" ]; then
     SRR6_UNRESOLVED_DEPS_COUNT="$(printf '%s' "$SRR6_UNRESOLVED_DEPS_JSON" | jq 'length')"
     SRR6_MISSING_PROOFS_COUNT="$(printf '%s' "$SRR6_MISSING_PROOFS_JSON" | jq 'length')"
@@ -413,6 +441,8 @@ RESULT_JSON="$(jq -nc \
     --arg bead_assignee "$BEAD_ASSIGNEE" \
     --arg bead_title "$BEAD_TITLE" \
     --argjson open_deps "$OPEN_DEPS_JSON" \
+    --argjson dependency_cycles "$DEPENDENCY_CYCLES_JSON" \
+    --argjson dependency_cycle_count "$DEPENDENCY_CYCLE_COUNT" \
     --argjson uncommitted_refs "$UNCOMMITTED_REFS_JSON" \
     --arg rch_status "$RCH_STATUS" \
     --arg rch_queue_status "$RCH_QUEUE_STATUS" \
@@ -455,6 +485,8 @@ RESULT_JSON="$(jq -nc \
             bead_assignee: $bead_assignee,
             bead_title: $bead_title,
             open_dependencies: $open_deps,
+            dependency_cycles: $dependency_cycles,
+            dependency_cycle_count: $dependency_cycle_count,
             uncommitted_files_referencing_bead: $uncommitted_refs,
             rch_status: $rch_status,
             rch_queue_status: $rch_queue_status,
@@ -494,6 +526,10 @@ else
     if [ "$OPEN_DEPS_COUNT" -gt 0 ]; then
         printf '  open_dependencies (%d):\n' "$OPEN_DEPS_COUNT"
         printf '%s' "$OPEN_DEPS_JSON" | jq -r '.[] | "    - \(.id) [\(.status)]"'
+    fi
+    if [ "$DEPENDENCY_CYCLE_COUNT" -gt 0 ]; then
+        printf '  dependency_cycles (%d):\n' "$DEPENDENCY_CYCLE_COUNT"
+        printf '%s' "$DEPENDENCY_CYCLES_JSON" | jq -r '.[] | "    - \(.cycle)"'
     fi
     if [ "$UNCOMMITTED_REFS_COUNT" -gt 0 ]; then
         printf '  uncommitted files referencing bead (%d):\n' "$UNCOMMITTED_REFS_COUNT"
