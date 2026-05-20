@@ -15,7 +15,7 @@ use crate::config::{
     EnvVar, GRAPH_FEATURE_SKYLINE_ENABLED_KEY, WorkspaceDiagnostic, WorkspaceDiagnosticSeverity,
     WorkspaceResolution, WorkspaceResolutionMode, WorkspaceResolutionRequest,
     WorkspaceResolutionSource, diagnose_workspace_resolution, read_env_var,
-    read_env_var_or_default, read_env_var_os, resolve_workspace,
+    read_env_var_or_default, read_env_var_os, resolve_workspace, workspace_config,
 };
 use crate::db::{
     CreateWorkspaceInput, DbConnection, FeedbackSourceHarmfulCount, GraphSnapshotStatus,
@@ -39,10 +39,19 @@ use crate::models::posture::{
 };
 use crate::models::{CapabilityStatus, MemoryId, SingleFlightPostureReport};
 use crate::policy::{MEMORY_DECAY_SOURCE, MemoryDecayThresholds, evaluate_memory_decay};
+use crate::search::lexical_ram_tier::{
+    LEXICAL_HUGEPAGES_UNAVAILABLE_CODE, LEXICAL_RAM_TIER_HUGEPAGES_ENV,
+    LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE, LEXICAL_RAM_TIER_PIN_RAM_ENV, LexicalRamTierConfig,
+    LexicalRamTierResult, pin_lexical_index_files, trace_lexical_ram_tier,
+};
 
 use super::agent_detect::AgentInventoryReport;
 use super::curate::stable_workspace_id;
-use super::index::{IndexHealth, IndexStatusOptions, get_index_status};
+use super::derived_asset_freshness::{
+    DerivedAssetFreshnessInput, DerivedAssetFreshnessReport, FreshnessDependency,
+    plan_derived_asset_freshness,
+};
+use super::index::{DEFAULT_INDEX_SUBDIR, IndexHealth, IndexStatusOptions, get_index_status};
 use super::outcome::{DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR};
 use super::swarm_brief::{
     RchWorkerPressureReport, SwarmBriefCommandRunner, SystemSwarmBriefCommandRunner,
@@ -60,9 +69,16 @@ use super::{build_info, runtime_status};
 
 const GRAPH_SNAPSHOT_ASSET_NAME: &str = "graph_snapshot_artifact";
 const GRAPH_SNAPSHOT_ASSET_KIND: &str = "persisted_snapshot";
+const SEARCH_INDEX_ASSET_NAME: &str = "search_index";
 const SEARCH_INDEX_ASSET_KIND: &str = "persisted_index";
+const SEARCH_INDEX_PATH: &str = ".ee/index";
+const PACK_L2_CACHE_ASSET_NAME: &str = "pack_l2_cache";
+const PACK_L2_CACHE_ASSET_KIND: &str = "ephemeral_cache";
+const PACK_L2_CACHE_PATH: &str = "cache.pack_l2";
 const GRAPH_SNAPSHOT_PATH: &str = ".ee/graph";
 const GRAPH_SNAPSHOT_REFRESH_COMMAND: &str = "ee graph centrality-refresh --workspace .";
+const SEARCH_INDEX_REBUILD_COMMAND: &str = "ee index rebuild --workspace .";
+const PACK_L2_CACHE_REPAIR_COMMAND: &str = "ee context --workspace . --json";
 const GRAPH_LIVE_COMPUTE_AVAILABLE: &str = "live_compute_available";
 #[cfg(not(feature = "graph"))]
 const GRAPH_LIVE_COMPUTE_UNAVAILABLE: &str = "live_compute_unavailable";
@@ -396,6 +412,7 @@ pub struct DerivedAssetReport {
     pub name: &'static str,
     pub kind: &'static str,
     pub status: DerivedAssetStatus,
+    pub freshness: DerivedAssetFreshnessReport,
     pub source_high_watermark: Option<u64>,
     pub asset_high_watermark: Option<u64>,
     pub high_watermark_lag: Option<u64>,
@@ -405,53 +422,112 @@ pub struct DerivedAssetReport {
     pub repair: Option<&'static str>,
 }
 
+struct DerivedAssetReportParts {
+    name: &'static str,
+    kind: &'static str,
+    status: DerivedAssetStatus,
+    source_high_watermark: Option<u64>,
+    asset_high_watermark: Option<u64>,
+    path: &'static str,
+    last_built_at: Option<String>,
+    memory_graph: Option<GraphSnapshotMemoryGraphReport>,
+    repair: Option<&'static str>,
+    source_dependencies: Vec<FreshnessDependency>,
+    config_dependencies: Vec<FreshnessDependency>,
+    feature_dependencies: Vec<FreshnessDependency>,
+    input_manifest_hash: Option<String>,
+}
+
 impl DerivedAssetReport {
     #[must_use]
-    pub const fn not_inspected(name: &'static str, path: &'static str) -> Self {
-        Self {
+    pub fn not_inspected(name: &'static str, path: &'static str) -> Self {
+        Self::not_inspected_with_kind(
             name,
-            kind: SEARCH_INDEX_ASSET_KIND,
-            status: DerivedAssetStatus::NotInspected,
-            source_high_watermark: None,
-            asset_high_watermark: None,
-            high_watermark_lag: None,
+            SEARCH_INDEX_ASSET_KIND,
             path,
-            last_built_at: None,
-            memory_graph: None,
-            repair: Some("Run `ee status --workspace . --json` to inspect this asset."),
-        }
+            Some("Run `ee status --workspace . --json` to inspect this asset."),
+        )
     }
 
     #[must_use]
-    pub const fn unimplemented(name: &'static str, path: &'static str) -> Self {
-        Self {
+    fn not_inspected_with_kind(
+        name: &'static str,
+        kind: &'static str,
+        path: &'static str,
+        repair: Option<&'static str>,
+    ) -> Self {
+        Self::from_parts(DerivedAssetReportParts {
+            name,
+            kind,
+            status: DerivedAssetStatus::NotInspected,
+            source_high_watermark: None,
+            asset_high_watermark: None,
+            path,
+            last_built_at: None,
+            memory_graph: None,
+            repair,
+            source_dependencies: vec![FreshnessDependency::new("source", "workspace", "none")],
+            config_dependencies: vec![FreshnessDependency::new("config", "path", path)],
+            feature_dependencies: Vec::new(),
+            input_manifest_hash: None,
+        })
+    }
+
+    #[must_use]
+    pub fn unimplemented(name: &'static str, path: &'static str) -> Self {
+        Self::from_parts(DerivedAssetReportParts {
             name,
             kind: GRAPH_SNAPSHOT_ASSET_KIND,
             status: DerivedAssetStatus::Unimplemented,
             source_high_watermark: None,
             asset_high_watermark: None,
-            high_watermark_lag: None,
             path,
             last_built_at: None,
             memory_graph: None,
             repair: Some("Implement the persistent derived asset before reporting a watermark."),
-        }
+            source_dependencies: vec![FreshnessDependency::new("source", "planned_asset", name)],
+            config_dependencies: vec![FreshnessDependency::new("config", "path", path)],
+            feature_dependencies: graph_snapshot_feature_dependencies(),
+            input_manifest_hash: None,
+        })
     }
 
     #[must_use]
-    pub const fn unavailable(name: &'static str, path: &'static str) -> Self {
-        Self {
+    pub fn unavailable(name: &'static str, path: &'static str) -> Self {
+        Self::unavailable_with_kind(
             name,
-            kind: SEARCH_INDEX_ASSET_KIND,
+            SEARCH_INDEX_ASSET_KIND,
+            path,
+            Some("Run `ee doctor --json` to inspect storage and filesystem access."),
+        )
+    }
+
+    #[must_use]
+    fn unavailable_with_kind(
+        name: &'static str,
+        kind: &'static str,
+        path: &'static str,
+        repair: Option<&'static str>,
+    ) -> Self {
+        Self::from_parts(DerivedAssetReportParts {
+            name,
+            kind,
             status: DerivedAssetStatus::Unavailable,
             source_high_watermark: None,
             asset_high_watermark: None,
-            high_watermark_lag: None,
             path,
             last_built_at: None,
             memory_graph: None,
-            repair: Some("Run `ee doctor --json` to inspect storage and filesystem access."),
-        }
+            repair,
+            source_dependencies: vec![FreshnessDependency::new(
+                "source",
+                "workspace",
+                "unavailable",
+            )],
+            config_dependencies: vec![FreshnessDependency::new("config", "path", path)],
+            feature_dependencies: Vec::new(),
+            input_manifest_hash: None,
+        })
     }
 
     #[must_use]
@@ -463,38 +539,301 @@ impl DerivedAssetReport {
             IndexHealth::Corrupt => DerivedAssetStatus::Corrupt,
         };
 
-        Self {
-            name: "search_index",
+        Self::from_parts(DerivedAssetReportParts {
+            name: SEARCH_INDEX_ASSET_NAME,
             kind: SEARCH_INDEX_ASSET_KIND,
             status,
             source_high_watermark: report.db_generation,
             asset_high_watermark: report.index_generation,
-            high_watermark_lag: high_watermark_lag(report.db_generation, report.index_generation),
-            path: ".ee/index",
+            path: SEARCH_INDEX_PATH,
             last_built_at: report.last_rebuild_at.clone(),
             memory_graph: None,
-            repair: report.repair_hint,
-        }
+            repair: report.repair_hint.or(Some(SEARCH_INDEX_REBUILD_COMMAND)),
+            source_dependencies: vec![
+                FreshnessDependency::new(
+                    "source",
+                    "database_path",
+                    report.database_path.display().to_string(),
+                ),
+                FreshnessDependency::new(
+                    "source",
+                    "db_generation",
+                    optional_u64_dependency(report.db_generation),
+                ),
+                FreshnessDependency::new(
+                    "source",
+                    "db_memory_count",
+                    report.db_memory_count.to_string(),
+                ),
+                FreshnessDependency::new(
+                    "source",
+                    "db_session_count",
+                    report.db_session_count.to_string(),
+                ),
+            ],
+            config_dependencies: vec![
+                FreshnessDependency::new(
+                    "config",
+                    "storage.index_dir",
+                    report.index_dir.display().to_string(),
+                ),
+                FreshnessDependency::new("config", "path", SEARCH_INDEX_PATH),
+            ],
+            feature_dependencies: search_index_feature_dependencies(),
+            input_manifest_hash: None,
+        })
     }
 
     #[must_use]
     pub fn from_graph_snapshot_artifact(report: &GraphSnapshotArtifactReport) -> Self {
-        Self {
+        Self::from_parts(DerivedAssetReportParts {
             name: GRAPH_SNAPSHOT_ASSET_NAME,
             kind: GRAPH_SNAPSHOT_ASSET_KIND,
             status: report.status,
             source_high_watermark: Some(report.memory_graph.generation),
             asset_high_watermark: report.snapshot_generation,
-            high_watermark_lag: high_watermark_lag(
-                Some(report.memory_graph.generation),
-                report.snapshot_generation,
-            ),
             path: GRAPH_SNAPSHOT_PATH,
             last_built_at: report.last_built_at.clone(),
             memory_graph: Some(report.memory_graph.clone()),
             repair: Some(GRAPH_SNAPSHOT_REFRESH_COMMAND),
+            source_dependencies: vec![
+                FreshnessDependency::new(
+                    "source",
+                    "memory_graph_generation",
+                    report.memory_graph.generation.to_string(),
+                ),
+                FreshnessDependency::new(
+                    "source",
+                    "memory_graph_node_count",
+                    report.memory_graph.node_count.to_string(),
+                ),
+                FreshnessDependency::new(
+                    "source",
+                    "memory_graph_edge_count",
+                    report.memory_graph.edge_count.to_string(),
+                ),
+            ],
+            config_dependencies: vec![
+                FreshnessDependency::new("config", "graph.snapshot.path", GRAPH_SNAPSHOT_PATH),
+                FreshnessDependency::new("config", "graph.type", "memory_links"),
+            ],
+            feature_dependencies: graph_snapshot_feature_dependencies(),
+            input_manifest_hash: None,
+        })
+    }
+
+    #[must_use]
+    fn from_pack_l2_cache_status(workspace_path: &Path) -> Self {
+        let config = workspace_config(workspace_path);
+        let pack_l2 = config.as_ref().map(|config| &config.cache.pack_l2);
+        let disabled_by_env = read_env_bool(EnvVar::L2PackCacheDisable).unwrap_or(false);
+        let enabled_by_config = pack_l2.and_then(|config| config.enabled).unwrap_or(true);
+        let root = read_env_var(EnvVar::L2PackCacheDir)
+            .or_else(|| {
+                pack_l2
+                    .and_then(|config| config.directory.as_ref())
+                    .map(|path| path.display().to_string())
+            })
+            .unwrap_or_else(|| "default".to_owned());
+        let max_bytes = read_env_var(EnvVar::L2PackCacheBytes)
+            .or_else(|| {
+                pack_l2
+                    .and_then(|config| config.max_bytes)
+                    .map(|value| value.to_string())
+            })
+            .unwrap_or_else(|| crate::cache::pack_l2::DEFAULT_MAX_BYTES.to_string());
+        let max_age_days = pack_l2
+            .and_then(|config| config.max_age_days)
+            .map_or_else(|| "30".to_owned(), |value| value.to_string());
+
+        if disabled_by_env || !enabled_by_config {
+            return Self::from_parts(DerivedAssetReportParts {
+                name: PACK_L2_CACHE_ASSET_NAME,
+                kind: PACK_L2_CACHE_ASSET_KIND,
+                status: DerivedAssetStatus::Unavailable,
+                source_high_watermark: None,
+                asset_high_watermark: None,
+                path: PACK_L2_CACHE_PATH,
+                last_built_at: None,
+                memory_graph: None,
+                repair: Some("Enable [cache.pack_l2] or unset EE_L2_PACK_CACHE_DISABLE."),
+                source_dependencies: pack_l2_source_dependencies(workspace_path),
+                config_dependencies: pack_l2_config_dependencies(
+                    disabled_by_env,
+                    enabled_by_config,
+                    root,
+                    max_bytes,
+                    max_age_days,
+                ),
+                feature_dependencies: pack_l2_feature_dependencies(),
+                input_manifest_hash: None,
+            });
+        }
+
+        Self::from_parts(DerivedAssetReportParts {
+            name: PACK_L2_CACHE_ASSET_NAME,
+            kind: PACK_L2_CACHE_ASSET_KIND,
+            status: DerivedAssetStatus::Current,
+            source_high_watermark: None,
+            asset_high_watermark: None,
+            path: PACK_L2_CACHE_PATH,
+            last_built_at: None,
+            memory_graph: None,
+            repair: Some(PACK_L2_CACHE_REPAIR_COMMAND),
+            source_dependencies: pack_l2_source_dependencies(workspace_path),
+            config_dependencies: pack_l2_config_dependencies(
+                disabled_by_env,
+                enabled_by_config,
+                root,
+                max_bytes,
+                max_age_days,
+            ),
+            feature_dependencies: pack_l2_feature_dependencies(),
+            input_manifest_hash: None,
+        })
+    }
+
+    fn from_parts(parts: DerivedAssetReportParts) -> Self {
+        let high_watermark_lag =
+            high_watermark_lag(parts.source_high_watermark, parts.asset_high_watermark);
+        let (freshness_source_high_watermark, freshness_asset_high_watermark) =
+            freshness_watermarks(
+                parts.status,
+                parts.source_high_watermark,
+                parts.asset_high_watermark,
+            );
+        let freshness = plan_derived_asset_freshness(DerivedAssetFreshnessInput {
+            asset_id: parts.name,
+            asset_kind: parts.kind,
+            inspected: parts.status != DerivedAssetStatus::NotInspected,
+            available: !matches!(
+                parts.status,
+                DerivedAssetStatus::Unavailable | DerivedAssetStatus::Unimplemented
+            ),
+            artifact_present: !matches!(
+                parts.status,
+                DerivedAssetStatus::Empty | DerivedAssetStatus::Missing
+            ),
+            artifact_compatible: parts.status != DerivedAssetStatus::Corrupt,
+            source_high_watermark: freshness_source_high_watermark,
+            asset_high_watermark: freshness_asset_high_watermark,
+            source_dependencies: parts.source_dependencies,
+            config_dependencies: parts.config_dependencies,
+            feature_dependencies: parts.feature_dependencies,
+            input_manifest_hash: parts.input_manifest_hash,
+            repair_action: parts.repair.unwrap_or("Inspect derived asset status."),
+        });
+
+        Self {
+            name: parts.name,
+            kind: parts.kind,
+            status: parts.status,
+            freshness,
+            source_high_watermark: parts.source_high_watermark,
+            asset_high_watermark: parts.asset_high_watermark,
+            high_watermark_lag,
+            path: parts.path,
+            last_built_at: parts.last_built_at,
+            memory_graph: parts.memory_graph,
+            repair: parts.repair,
         }
     }
+}
+
+fn freshness_watermarks(
+    status: DerivedAssetStatus,
+    source: Option<u64>,
+    asset: Option<u64>,
+) -> (Option<u64>, Option<u64>) {
+    if status == DerivedAssetStatus::Stale
+        && source
+            .zip(asset)
+            .is_none_or(|(source, asset)| source <= asset)
+    {
+        return (Some(1), Some(0));
+    }
+    (source, asset)
+}
+
+fn optional_u64_dependency(value: Option<u64>) -> String {
+    value.map_or_else(|| "none".to_owned(), |value| value.to_string())
+}
+
+fn search_index_feature_dependencies() -> Vec<FreshnessDependency> {
+    vec![
+        FreshnessDependency::new("feature", "fts5", cfg!(feature = "fts5").to_string()),
+        FreshnessDependency::new(
+            "feature",
+            "embed-fast",
+            cfg!(feature = "embed-fast").to_string(),
+        ),
+        FreshnessDependency::new(
+            "feature",
+            "embed-quality",
+            cfg!(feature = "embed-quality").to_string(),
+        ),
+        FreshnessDependency::new(
+            "feature",
+            "lexical-bm25",
+            cfg!(feature = "lexical-bm25").to_string(),
+        ),
+    ]
+}
+
+fn graph_snapshot_feature_dependencies() -> Vec<FreshnessDependency> {
+    vec![FreshnessDependency::new(
+        "feature",
+        "graph",
+        cfg!(feature = "graph").to_string(),
+    )]
+}
+
+fn pack_l2_feature_dependencies() -> Vec<FreshnessDependency> {
+    vec![FreshnessDependency::new(
+        "feature",
+        "pack_l2_cache",
+        "compiled",
+    )]
+}
+
+fn pack_l2_source_dependencies(workspace_path: &Path) -> Vec<FreshnessDependency> {
+    vec![FreshnessDependency::new(
+        "source",
+        "workspace_id",
+        stable_workspace_id(workspace_path),
+    )]
+}
+
+fn pack_l2_config_dependencies(
+    disabled_by_env: bool,
+    enabled_by_config: bool,
+    root: String,
+    max_bytes: String,
+    max_age_days: String,
+) -> Vec<FreshnessDependency> {
+    vec![
+        FreshnessDependency::new(
+            "config",
+            EnvVar::L2PackCacheDisable.name(),
+            disabled_by_env.to_string(),
+        ),
+        FreshnessDependency::new(
+            "config",
+            "cache.pack_l2.enabled",
+            enabled_by_config.to_string(),
+        ),
+        FreshnessDependency::new("config", "cache.pack_l2.directory", root),
+        FreshnessDependency::new("config", "cache.pack_l2.max_bytes", max_bytes),
+        FreshnessDependency::new("config", "cache.pack_l2.max_age_days", max_age_days),
+    ]
+}
+
+fn read_env_bool(var: EnvVar) -> Option<bool> {
+    read_env_var(var).and_then(|raw| match raw.as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    })
 }
 
 fn high_watermark_lag(source: Option<u64>, asset: Option<u64>) -> Option<u64> {
@@ -1319,6 +1658,7 @@ pub struct StatusReport {
     pub graph_compute: GraphComputeReport,
     pub graph_snapshot_artifact: GraphSnapshotArtifactReport,
     pub derived_assets: Vec<DerivedAssetReport>,
+    pub lexical_ram_tier: LexicalRamTierResult,
     pub mesh_storage: Option<MeshStorageStatusReport>,
     pub tailscale_local: Option<TailscaleLocalReport>,
     pub agent_inventory: AgentInventoryReport,
@@ -1403,6 +1743,7 @@ impl StatusReport {
         };
         let derived_assets =
             gather_derived_assets(options.workspace_path.as_deref(), &graph_snapshot_artifact);
+        let lexical_ram_tier = gather_lexical_ram_tier_status(options.workspace_path.as_deref());
         let (curation_health, curation_degradations) =
             gather_curation_health(options.workspace_path.as_deref());
         let (feedback_health, feedback_degradations) =
@@ -1435,6 +1776,7 @@ impl StatusReport {
         push_wal_degradations(&mut degradations, &wal);
         push_read_pool_degradations(&mut degradations, &read_pool);
         push_shard_fanout_degradations(&mut degradations, &shard_fanout);
+        push_lexical_ram_tier_degradations(&mut degradations, &lexical_ram_tier);
 
         degradations.extend(memory_health_degradations);
         degradations.extend(curation_degradations);
@@ -1476,10 +1818,65 @@ impl StatusReport {
             graph_compute,
             graph_snapshot_artifact,
             derived_assets,
+            lexical_ram_tier,
             mesh_storage,
             tailscale_local,
             agent_inventory,
             degradations,
+        }
+    }
+}
+
+fn gather_lexical_ram_tier_status(workspace_path: Option<&Path>) -> LexicalRamTierResult {
+    let index_path = lexical_ram_tier_index_path(workspace_path);
+    let config = LexicalRamTierConfig::from_environment_with_reader(
+        |name| match name {
+            LEXICAL_RAM_TIER_PIN_RAM_ENV => read_env_var(EnvVar::LexicalIndexPinRam),
+            LEXICAL_RAM_TIER_HUGEPAGES_ENV => read_env_var(EnvVar::LexicalIndexHugepages),
+            _ => None,
+        },
+        |_name, _raw| {},
+    );
+    let result = pin_lexical_index_files(&index_path, &config);
+    let workspace_id = workspace_path
+        .map(stable_workspace_id)
+        .unwrap_or_else(|| "workspace_unknown".to_owned());
+    trace_lexical_ram_tier(&workspace_id, &result, 0.0);
+    result
+}
+
+fn lexical_ram_tier_index_path(workspace_path: Option<&Path>) -> PathBuf {
+    workspace_path
+        .map(|path| path.join(".ee").join(DEFAULT_INDEX_SUBDIR).join("lexical"))
+        .unwrap_or_else(|| {
+            PathBuf::from(".ee")
+                .join(DEFAULT_INDEX_SUBDIR)
+                .join("lexical")
+        })
+}
+
+fn push_lexical_ram_tier_degradations(
+    degradations: &mut Vec<DegradationReport>,
+    report: &LexicalRamTierResult,
+) {
+    if !report.enabled {
+        return;
+    }
+    for code in &report.degraded_codes {
+        match code.as_str() {
+            LEXICAL_HUGEPAGES_UNAVAILABLE_CODE => degradations.push(DegradationReport {
+                code: LEXICAL_HUGEPAGES_UNAVAILABLE_CODE,
+                severity: "info",
+                message: "Lexical RAM-tier hugepages were requested but this host cannot grant them.",
+                repair: "Disable EE_LEXICAL_INDEX_HUGEPAGES or move the workspace to a Linux host with transparent hugepages available.",
+            }),
+            LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE => degradations.push(DegradationReport {
+                code: LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE,
+                severity: "info",
+                message: "Lexical RAM-tier pinning is enabled, but the safe syscall adapter has not been installed; search results are unchanged.",
+                repair: "Keep EE_LEXICAL_INDEX_PIN_RAM unset until the mmap/mlock adapter slice lands.",
+            }),
+            _ => {}
         }
     }
 }
@@ -2876,15 +3273,26 @@ fn gather_derived_assets(
             };
             match get_index_status(&options) {
                 Ok(report) => DerivedAssetReport::from_index_status(&report),
-                Err(_) => DerivedAssetReport::unavailable("search_index", ".ee/index"),
+                Err(_) => {
+                    DerivedAssetReport::unavailable(SEARCH_INDEX_ASSET_NAME, SEARCH_INDEX_PATH)
+                }
             }
         }
-        None => DerivedAssetReport::not_inspected("search_index", ".ee/index"),
+        None => DerivedAssetReport::not_inspected(SEARCH_INDEX_ASSET_NAME, SEARCH_INDEX_PATH),
     };
 
     let graph_snapshot = DerivedAssetReport::from_graph_snapshot_artifact(graph_snapshot_artifact);
+    let pack_l2_cache = match workspace_path {
+        Some(path) => DerivedAssetReport::from_pack_l2_cache_status(path),
+        None => DerivedAssetReport::not_inspected_with_kind(
+            PACK_L2_CACHE_ASSET_NAME,
+            PACK_L2_CACHE_ASSET_KIND,
+            PACK_L2_CACHE_PATH,
+            Some("Run `ee status --workspace . --json` to inspect this asset."),
+        ),
+    };
 
-    vec![search_index, graph_snapshot]
+    vec![search_index, graph_snapshot, pack_l2_cache]
 }
 
 fn gather_graph_compute(workspace_path: Option<&Path>) -> GraphComputeReport {
@@ -5353,6 +5761,16 @@ mod tests {
             asset.repair,
             Some("ee index rebuild --workspace ."),
             "repair",
+        )?;
+        ensure(
+            asset.freshness.verdict.as_str(),
+            "rebuild_needed",
+            "freshness verdict",
+        )?;
+        ensure(
+            asset.freshness.invalidates,
+            vec![SEARCH_INDEX_ASSET_NAME],
+            "freshness invalidates",
         )
     }
 
@@ -5410,7 +5828,17 @@ mod tests {
             "live availability",
         )?;
         ensure(asset.name, GRAPH_SNAPSHOT_ASSET_NAME, "asset name")?;
-        ensure(asset.kind, GRAPH_SNAPSHOT_ASSET_KIND, "asset kind")
+        ensure(asset.kind, GRAPH_SNAPSHOT_ASSET_KIND, "asset kind")?;
+        ensure(
+            asset.freshness.verdict.as_str(),
+            "missing",
+            "graph freshness verdict",
+        )?;
+        ensure(
+            asset.freshness.invalidates,
+            vec![GRAPH_SNAPSHOT_ASSET_NAME],
+            "graph freshness invalidates",
+        )
     }
 
     #[test]
@@ -5570,6 +5998,27 @@ mod tests {
             search_index.status != DerivedAssetStatus::NotInspected,
             true,
             "search index should be inspected when current dir is workspace",
+        )
+    }
+
+    #[test]
+    fn derived_assets_include_pack_l2_freshness_surface() -> TestResult {
+        let report = gather_derived_assets(None, &gather_graph_snapshot_artifact(None));
+        let pack_l2 = report
+            .iter()
+            .find(|asset| asset.name == PACK_L2_CACHE_ASSET_NAME)
+            .ok_or_else(|| "missing pack L2 asset".to_string())?;
+
+        ensure(pack_l2.kind, PACK_L2_CACHE_ASSET_KIND, "pack L2 kind")?;
+        ensure(
+            pack_l2.freshness.verdict.as_str(),
+            "not_inspected",
+            "pack L2 freshness verdict",
+        )?;
+        ensure(
+            pack_l2.freshness.schema,
+            crate::core::derived_asset_freshness::DERIVED_ASSET_FRESHNESS_SCHEMA_V1,
+            "pack L2 freshness schema",
         )
     }
 

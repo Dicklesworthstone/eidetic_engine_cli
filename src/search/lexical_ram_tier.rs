@@ -11,14 +11,13 @@
 //! snapshot mmap), bd-ndzfg (L2 pack result cache), and bd-168gm (embedding
 //! LRU) — each pins a different dataset.
 //!
-//! This scaffold owns the platform-agnostic public surface: configuration
-//! types, the result envelope the wiring slice will surface under
-//! `ee status --json` → `data.search.lexicalRamTier`, the degraded-code
-//! vocabulary, and the entry point the index loader will eventually call.
-//! The real Linux `mmap` + `MAP_POPULATE` + `mlock` + `MADV_HUGEPAGE`
-//! syscall path, the wiring into `src/search/mod.rs`, the env-var registry
-//! rows, and the `ee status` block emission live under sibling slices of
-//! bd-21xbi so this module can land without touching any contested file.
+//! This module owns the platform-agnostic public surface: configuration
+//! types, the result envelope surfaced under `ee status --json` →
+//! `data.search.lexicalRamTier`, the degraded-code vocabulary, and the
+//! entry point the index loader calls. The real Linux `mmap` +
+//! `MAP_POPULATE` + `mlock` + `MADV_HUGEPAGE` syscall path still needs a
+//! safe adapter slice; until then the loader reports the attempted posture
+//! without claiming pinning succeeded.
 //!
 //! Determinism contract: the optimization only changes wall-clock and
 //! page-cache residency; lexical search results MUST be byte-identical
@@ -117,10 +116,10 @@ impl LexicalRamTierPlatform {
 }
 
 /// Operator-facing configuration. Defaults are conservative: pinning is
-/// `enabled=true` (per bd-21xbi the cost of an unrealized scaffold is
-/// zero) but `request_hugepages` defaults to `false` because the THP
-/// configuration is host-specific and the kernel can return EINVAL for
-/// `MADV_HUGEPAGE` on file-backed mmaps depending on tunables.
+/// opt-in (`enabled=false`) and `request_hugepages` defaults to `false`
+/// because the THP configuration is host-specific and the kernel can
+/// return EINVAL for `MADV_HUGEPAGE` on file-backed mmaps depending on
+/// tunables.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LexicalRamTierConfig {
     pub enabled: bool,
@@ -131,7 +130,7 @@ pub struct LexicalRamTierConfig {
 impl Default for LexicalRamTierConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             request_hugepages: false,
             populate_on_open: true,
         }
@@ -176,7 +175,7 @@ impl LexicalRamTierConfig {
     /// non-empty value invokes the `on_unparseable` callback with the var
     /// name and raw value so the caller can record a degraded code; the
     /// config field then retains its default. Missing values keep the
-    /// existing default (`enabled = true`, `request_hugepages = false`,
+    /// existing default (`enabled = false`, `request_hugepages = false`,
     /// `populate_on_open = true`).
     ///
     /// Semantic precondition: requesting hugepages only makes sense when
@@ -235,6 +234,34 @@ impl LexicalRamTierConfig {
 
         config
     }
+}
+
+/// Emit the required lexical RAM-tier trace fields in a single place so
+/// status and search wiring stay aligned.
+pub fn trace_lexical_ram_tier(
+    workspace_id: &str,
+    result: &LexicalRamTierResult,
+    elapsed_ms_first_search: f64,
+) {
+    let index_path = result
+        .index_path
+        .as_deref()
+        .map(Path::display)
+        .map(|display| display.to_string())
+        .unwrap_or_else(|| "unknown".to_owned());
+    tracing::info!(
+        surface = "lexical_ram_tier",
+        workspace_id,
+        index_path = %index_path,
+        bytes_mmapped = result.bytes_mmapped,
+        hugepages_requested = result.hugepages_requested,
+        hugepages_granted = result.hugepages_granted,
+        page_faults_pre = result.page_faults_pre,
+        page_faults_post = result.page_faults_post,
+        elapsed_ms_first_search,
+        degraded_codes = ?result.degraded_codes,
+        "lexical RAM-tier posture"
+    );
 }
 
 /// Lenient boolean parser shared with the CLI flag parser. Accepts the
@@ -410,9 +437,9 @@ mod tests {
     }
 
     #[test]
-    fn default_config_is_enabled_and_no_hugepages() {
+    fn default_config_is_disabled_and_no_hugepages() {
         let config = LexicalRamTierConfig::default();
-        assert!(config.enabled);
+        assert!(!config.enabled);
         assert!(!config.request_hugepages);
         assert!(config.populate_on_open);
     }
@@ -459,7 +486,13 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn non_linux_platform_returns_not_implemented_code() {
-        let result = pin_lexical_index_files(fake_index_dir(), &LexicalRamTierConfig::default());
+        let result = pin_lexical_index_files(
+            fake_index_dir(),
+            &LexicalRamTierConfig {
+                enabled: true,
+                ..LexicalRamTierConfig::default()
+            },
+        );
         assert!(!result.supported);
         assert!(result.enabled);
         assert!(!result.attempted);
@@ -483,7 +516,13 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_scaffold_reports_not_implemented_without_claiming_success() {
-        let result = pin_lexical_index_files(fake_index_dir(), &LexicalRamTierConfig::default());
+        let result = pin_lexical_index_files(
+            fake_index_dir(),
+            &LexicalRamTierConfig {
+                enabled: true,
+                ..LexicalRamTierConfig::default()
+            },
+        );
         assert_eq!(result.platform, LexicalRamTierPlatform::Linux);
         assert!(result.supported);
         assert!(result.enabled);
@@ -510,7 +549,11 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn requesting_hugepages_on_unsupported_platform_emits_unavailable_code() {
-        let config = LexicalRamTierConfig::default().with_request_hugepages(true);
+        let config = LexicalRamTierConfig {
+            enabled: true,
+            ..LexicalRamTierConfig::default()
+        }
+        .with_request_hugepages(true);
         let result = pin_lexical_index_files(fake_index_dir(), &config);
         assert!(result.hugepages_requested);
         assert!(!result.hugepages_granted);
@@ -526,7 +569,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn requesting_hugepages_on_linux_does_not_emit_unavailable_code() {
-        let config = LexicalRamTierConfig::default().with_request_hugepages(true);
+        let config = LexicalRamTierConfig {
+            enabled: true,
+            ..LexicalRamTierConfig::default()
+        }
+        .with_request_hugepages(true);
         let result = pin_lexical_index_files(fake_index_dir(), &config);
         assert!(result.hugepages_requested);
         assert!(
@@ -541,7 +588,7 @@ mod tests {
 
     #[test]
     fn result_schema_matches_documented_id() {
-        let result = pin_lexical_index_files(fake_index_dir(), &LexicalRamTierConfig::default());
+        let result = pin_lexical_index_files(fake_index_dir(), &LexicalRamTierConfig::disabled());
         assert_eq!(result.schema, STATUS_SEARCH_LEXICAL_RAM_TIER_SCHEMA_V1);
         assert_eq!(
             STATUS_SEARCH_LEXICAL_RAM_TIER_SCHEMA_V1,
@@ -556,13 +603,13 @@ mod tests {
             .with_populate_on_open(false);
         assert!(config.request_hugepages);
         assert!(!config.populate_on_open);
-        assert!(config.enabled);
+        assert!(!config.enabled);
     }
 
     #[test]
     fn pin_lexical_index_files_preserves_index_path_in_result() {
         let path = Path::new("/var/lib/ee/indexes/combined/lexical");
-        let result = pin_lexical_index_files(path, &LexicalRamTierConfig::default());
+        let result = pin_lexical_index_files(path, &LexicalRamTierConfig::disabled());
         assert_eq!(result.index_path.as_deref(), Some(path));
     }
 
@@ -644,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn from_environment_with_empty_reader_yields_default_config() {
+    fn from_environment_with_empty_reader_yields_default_off_config() {
         let unparseable: RefCell<Vec<(&'static str, String)>> = RefCell::new(Vec::new());
         let config = LexicalRamTierConfig::from_environment_with_reader(
             |_name| None,
@@ -690,6 +737,21 @@ mod tests {
     }
 
     #[test]
+    fn from_environment_with_pin_ram_and_hugepages_enables_request() {
+        let unparseable: RefCell<Vec<(&'static str, String)>> = RefCell::new(Vec::new());
+        let reader = env_reader_from(&[
+            (LEXICAL_RAM_TIER_PIN_RAM_ENV, "on"),
+            (LEXICAL_RAM_TIER_HUGEPAGES_ENV, "on"),
+        ]);
+        let config = LexicalRamTierConfig::from_environment_with_reader(reader, |name, raw| {
+            unparseable.borrow_mut().push((name, raw.to_owned()))
+        });
+        assert!(config.enabled);
+        assert!(config.request_hugepages);
+        assert!(unparseable.borrow().is_empty());
+    }
+
+    #[test]
     fn from_environment_records_unparseable_pin_ram_and_keeps_default() {
         let unparseable: RefCell<Vec<(&'static str, String)>> = RefCell::new(Vec::new());
         let reader = env_reader_from(&[(LEXICAL_RAM_TIER_PIN_RAM_ENV, "maybe")]);
@@ -697,8 +759,8 @@ mod tests {
             unparseable.borrow_mut().push((name, raw.to_owned()))
         });
         assert!(
-            config.enabled,
-            "unparseable value must leave the default enabled in place"
+            !config.enabled,
+            "unparseable value must leave the default disabled in place"
         );
         let log = unparseable.borrow();
         assert_eq!(log.len(), 1);
@@ -749,16 +811,22 @@ mod tests {
 
     #[test]
     fn from_environment_pin_ram_default_keeps_hugepages_request_active() {
-        // When pin-ram is not explicitly set the default `enabled=true`
-        // wins, so an explicit hugepages opt-in should pass through.
+        // When pin-ram is not explicitly set the default `enabled=false`
+        // wins, so an explicit hugepages opt-in is rejected as a no-op.
         let unparseable: RefCell<Vec<(&'static str, String)>> = RefCell::new(Vec::new());
         let reader = env_reader_from(&[(LEXICAL_RAM_TIER_HUGEPAGES_ENV, "on")]);
         let config = LexicalRamTierConfig::from_environment_with_reader(reader, |name, raw| {
             unparseable.borrow_mut().push((name, raw.to_owned()))
         });
-        assert!(config.enabled);
-        assert!(config.request_hugepages);
-        assert!(unparseable.borrow().is_empty());
+        assert!(!config.enabled);
+        assert!(!config.request_hugepages);
+        assert_eq!(
+            unparseable.borrow().as_slice(),
+            &[(
+                LEXICAL_RAM_TIER_HUGEPAGES_ENV,
+                "requires-pin-ram-enabled".to_owned()
+            )]
+        );
     }
 
     #[test]

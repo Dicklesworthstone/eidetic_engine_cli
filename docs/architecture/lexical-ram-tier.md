@@ -125,7 +125,13 @@ lexical index file that was successfully pinned.
 ## Current landed artifacts
 
 - `src/search/lexical_ram_tier.rs` defines the status shape, config data
-  structures, degraded-code constants, and reader-driven env parsing scaffold.
+  structures, degraded-code constants, reader-driven env parsing, and the
+  shared tracing helper.
+- `src/core/search.rs` invokes the loader at search time when the selected
+  index exists, then surfaces enabled-tier degraded codes without changing
+  search ranking or results.
+- `src/core/status.rs` and `src/output/mod.rs` surface
+  `data.search.lexicalRamTier` in `ee status --json`.
 - `docs/schemas/ee.status.search.lexical_ram_tier.v1.json` pins the status
   block schema for future `ee status --json` output.
 - `src/config/env_registry.rs` and `docs/env_vars.md` register
@@ -138,8 +144,7 @@ lexical index file that was successfully pinned.
 ## What the scaffold does NOT do (yet)
 
 - Issue any `mmap`, `mlock`, `madvise`, or `munmap` syscalls.
-- Wire into the Frankensearch lexical index loader.
-- Surface the `lexicalRamTier` block in `ee status --json`.
+- Claim `succeeded=true` or non-zero `bytesMmapped`.
 - Register the `[search.lexical_ram_tier]` config section in `src/config/mod.rs`.
 - Read the lexical RAM-tier config through the production config loader.
 - Add a `ee doctor` lexical-ram-tier readiness check.

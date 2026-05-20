@@ -240,6 +240,27 @@ expression: status
       "profile": "current_thread",
       "workerThreads": 1
     },
+    "search": {
+      "lexicalRamTier": {
+        "attempted": false,
+        "bytesMmapped": 0,
+        "degradedCodes": [
+          "lexical_ram_tier_disabled"
+        ],
+        "enabled": false,
+        "fallbackPath": "disabled_by_operator",
+        "hugepagesGranted": false,
+        "hugepagesRequested": false,
+        "indexPath": "[INDEX]/lexical",
+        "pageFaultsPost": 0,
+        "pageFaultsPre": 0,
+        "platform": "linux",
+        "populateRequested": true,
+        "schema": "ee.status.search.lexical_ram_tier.v1",
+        "succeeded": false,
+        "supported": true
+      }
+    },
     "version": "0.1.0",
     "workspace": {
       "canonicalRoot": "[WORKSPACE]",

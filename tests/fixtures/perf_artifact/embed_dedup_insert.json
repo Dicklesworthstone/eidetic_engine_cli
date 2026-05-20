@@ -1,0 +1,146 @@
+{
+  "schema": "ee.embed_dedup.perf_artifact.v1",
+  "beadId": "bd-1iltv.5",
+  "description": "Performance fixture for embed-dedup insert path. Pins the deterministic decision-count + embedder-call shape that the live no-mock e2e in tests/embed_dedup_e2e.rs emits as ee.test_event.v1 events. Concrete latency numbers are intentionally NOT pinned — they vary by host class. The fixture pins the COUNTS and SHAPE so a regression that silently disables dedup or burns extra embeddings trips the contract.",
+  "scenarios": [
+    {
+      "name": "disabled_default_workspace_identical_burst",
+      "intent": "When embed-dedup is disabled, identical-content inserts must not invoke any dedup decision path; both inserts run the embedder.",
+      "config": {
+        "enabled": false,
+        "hammingDistanceMax": null,
+        "cosineFloor": null
+      },
+      "decisions": {
+        "fresh": 2,
+        "reuseExact": 0,
+        "reuseNear": 0,
+        "rejectedSimHashCollisionBelowCosineFloor": 0
+      },
+      "embedderCallCount": 2,
+      "expectedDegradedCodes": [],
+      "perfShape": {
+        "embedderCallsAvoidedVsLegacy": 0,
+        "writeLatencyDeltaMsLowerBound": null,
+        "writeLatencyDeltaMsUpperBound": null
+      }
+    },
+    {
+      "name": "enabled_workspace_identical_burst",
+      "intent": "When embed-dedup is enabled with hammingK=12 / cosineFloor=0.97, an identical-content second insert must reuse exactly the first memory's embedding without invoking the embedder again.",
+      "config": {
+        "enabled": true,
+        "hammingDistanceMax": 12,
+        "cosineFloor": 0.97
+      },
+      "decisions": {
+        "fresh": 1,
+        "reuseExact": 1,
+        "reuseNear": 0,
+        "rejectedSimHashCollisionBelowCosineFloor": 0
+      },
+      "embedderCallCount": 1,
+      "expectedDegradedCodes": [],
+      "perfShape": {
+        "embedderCallsAvoidedVsLegacy": 1,
+        "writeLatencyDeltaMsLowerBound": -10000,
+        "writeLatencyDeltaMsUpperBound": 0
+      }
+    },
+    {
+      "name": "enabled_workspace_typo_near_duplicate",
+      "intent": "Near-duplicate content with both SimHash hamming distance below cap AND cosine similarity above floor must reuse. If either gate fails it must NOT reuse.",
+      "config": {
+        "enabled": true,
+        "hammingDistanceMax": 12,
+        "cosineFloor": 0.97
+      },
+      "decisions": {
+        "fresh": 1,
+        "reuseExact": 0,
+        "reuseNear": 1,
+        "rejectedSimHashCollisionBelowCosineFloor": 0
+      },
+      "embedderCallCount": 2,
+      "expectedDegradedCodes": [],
+      "perfShape": {
+        "embedderCallsAvoidedVsLegacy": 0,
+        "writeLatencyDeltaMsLowerBound": null,
+        "writeLatencyDeltaMsUpperBound": null
+      }
+    },
+    {
+      "name": "strict_workspace_simhash_collision_rejected",
+      "intent": "With cosineFloor=1.0 the cosine gate rejects any near-duplicate even when SimHash hamming distance is within cap, proving the second gate prevents false-positive collisions from corrupting reuse decisions.",
+      "config": {
+        "enabled": true,
+        "hammingDistanceMax": 128,
+        "cosineFloor": 1.0
+      },
+      "decisions": {
+        "fresh": 2,
+        "reuseExact": 1,
+        "reuseNear": 0,
+        "rejectedSimHashCollisionBelowCosineFloor": 1
+      },
+      "embedderCallCount": 3,
+      "expectedDegradedCodes": [],
+      "perfShape": {
+        "embedderCallsAvoidedVsLegacy": 1,
+        "writeLatencyDeltaMsLowerBound": null,
+        "writeLatencyDeltaMsUpperBound": null
+      }
+    },
+    {
+      "name": "feature_disabled_preserves_legacy_pack_search",
+      "intent": "When embed-dedup is disabled the pack/search output must remain byte-identical to the pre-feature baseline. No dedupLink in why/audit, no degraded codes from the feature path.",
+      "config": {
+        "enabled": false,
+        "hammingDistanceMax": null,
+        "cosineFloor": null
+      },
+      "decisions": {
+        "fresh": 2,
+        "reuseExact": 0,
+        "reuseNear": 0,
+        "rejectedSimHashCollisionBelowCosineFloor": 0
+      },
+      "embedderCallCount": 2,
+      "expectedDegradedCodes": [],
+      "perfShape": {
+        "embedderCallsAvoidedVsLegacy": 0,
+        "writeLatencyDeltaMsLowerBound": null,
+        "writeLatencyDeltaMsUpperBound": null
+      }
+    },
+    {
+      "name": "stale_simhash_index_degrades_honestly",
+      "intent": "When the SimHash index is missing or stale, inserts must degrade honestly: dedup decision is skipped, a degraded code is emitted, and no memory is lost.",
+      "config": {
+        "enabled": true,
+        "hammingDistanceMax": 12,
+        "cosineFloor": 0.97
+      },
+      "decisions": {
+        "fresh": 2,
+        "reuseExact": 0,
+        "reuseNear": 0,
+        "rejectedSimHashCollisionBelowCosineFloor": 0
+      },
+      "embedderCallCount": 2,
+      "expectedDegradedCodes": [
+        "simhash_index_unavailable"
+      ],
+      "perfShape": {
+        "embedderCallsAvoidedVsLegacy": 0,
+        "writeLatencyDeltaMsLowerBound": null,
+        "writeLatencyDeltaMsUpperBound": null
+      }
+    }
+  ],
+  "notes": [
+    "writeLatencyDeltaMs bounds are intentionally permissive (null or wide-range) because absolute timing is host-dependent; the fixture pins counts and decision shape, not wall-clock latency.",
+    "embedderCallCount is the number of times the embedder was invoked across the scenario's insert sequence. embedderCallsAvoidedVsLegacy is the count saved vs the disabled-baseline scenario for the same insert sequence.",
+    "expectedDegradedCodes lists the exact set of degraded codes the scenario expects in the response envelope. Empty array means the response must carry no degraded entries from the embed-dedup feature path."
+  ]
+}

@@ -3234,6 +3234,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
         render_singleflight_posture_json(d, &report.singleflight_posture);
         render_graph_compute_json(d, &report.graph_compute);
         render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
+        render_search_status_json(d, &report.lexical_ram_tier);
         render_derived_assets_json(d, &report.derived_assets, true);
         render_mesh_status_json(
             d,
@@ -3935,6 +3936,23 @@ fn render_derived_assets_json(
             None => obj.field_raw("highWatermarkLag", "null"),
         };
         obj.field_str("path", asset.path);
+        obj.field_object("freshness", |freshness| {
+            freshness.field_str("schema", asset.freshness.schema);
+            freshness.field_str("verdict", asset.freshness.verdict.as_str());
+            freshness.field_str("dependencyHash", &asset.freshness.dependency_hash);
+            freshness.field_str(
+                "sourceDependencyHash",
+                &asset.freshness.source_dependency_hash,
+            );
+            freshness.field_str("configHash", &asset.freshness.config_hash);
+            freshness.field_str("featureFlagsHash", &asset.freshness.feature_flags_hash);
+            match asset.freshness.input_manifest_hash.as_deref() {
+                Some(value) => freshness.field_str("inputManifestHash", value),
+                None => freshness.field_raw("inputManifestHash", "null"),
+            };
+            freshness.field_array_of_strs("invalidates", &asset.freshness.invalidates);
+            freshness.field_str("repairAction", asset.freshness.repair_action);
+        });
         if asset.name == "graph_snapshot_artifact" {
             match asset.last_built_at.as_deref() {
                 Some(value) => obj.field_str("lastBuiltAt", value),
@@ -3954,6 +3972,82 @@ fn render_derived_assets_json(
             obj.field_str("repair", repair);
         }
     });
+}
+
+fn render_search_status_json(
+    parent: &mut JsonBuilder,
+    lexical_ram_tier: &crate::search::lexical_ram_tier::LexicalRamTierResult,
+) {
+    parent.field_object("search", |search| {
+        search.field_object("lexicalRamTier", |tier| {
+            tier.field_str("schema", lexical_ram_tier.schema);
+            tier.field_str(
+                "platform",
+                lexical_ram_tier_platform_name(lexical_ram_tier.platform),
+            );
+            tier.field_bool("supported", lexical_ram_tier.supported);
+            tier.field_bool("enabled", lexical_ram_tier.enabled);
+            tier.field_bool("attempted", lexical_ram_tier.attempted);
+            tier.field_bool("succeeded", lexical_ram_tier.succeeded);
+            tier.field_bool("hugepagesRequested", lexical_ram_tier.hugepages_requested);
+            tier.field_bool("hugepagesGranted", lexical_ram_tier.hugepages_granted);
+            tier.field_bool("populateRequested", lexical_ram_tier.populate_requested);
+            tier.field_raw("bytesMmapped", &lexical_ram_tier.bytes_mmapped.to_string());
+            tier.field_raw(
+                "pageFaultsPre",
+                &lexical_ram_tier.page_faults_pre.to_string(),
+            );
+            tier.field_raw(
+                "pageFaultsPost",
+                &lexical_ram_tier.page_faults_post.to_string(),
+            );
+            tier.field_str(
+                "fallbackPath",
+                lexical_ram_tier_fallback_name(lexical_ram_tier.fallback_path),
+            );
+            match lexical_ram_tier.index_path.as_deref() {
+                Some(path) => {
+                    let index_path = path.to_string_lossy();
+                    tier.field_str("indexPath", index_path.as_ref())
+                }
+                None => tier.field_raw("indexPath", "null"),
+            };
+            tier.field_array_of_strings("degradedCodes", &lexical_ram_tier.degraded_codes);
+        });
+    });
+}
+
+fn lexical_ram_tier_platform_name(
+    platform: crate::search::lexical_ram_tier::LexicalRamTierPlatform,
+) -> &'static str {
+    match platform {
+        crate::search::lexical_ram_tier::LexicalRamTierPlatform::Linux => "linux",
+        crate::search::lexical_ram_tier::LexicalRamTierPlatform::MacosLimited => "macos_limited",
+        crate::search::lexical_ram_tier::LexicalRamTierPlatform::WindowsLimited => {
+            "windows_limited"
+        }
+        crate::search::lexical_ram_tier::LexicalRamTierPlatform::OtherUnsupported => {
+            "other_unsupported"
+        }
+    }
+}
+
+fn lexical_ram_tier_fallback_name(
+    fallback: crate::search::lexical_ram_tier::LexicalRamTierFallbackPath,
+) -> &'static str {
+    match fallback {
+        crate::search::lexical_ram_tier::LexicalRamTierFallbackPath::None => "none",
+        crate::search::lexical_ram_tier::LexicalRamTierFallbackPath::SoftwareNotImplemented => {
+            "software_not_implemented"
+        }
+        crate::search::lexical_ram_tier::LexicalRamTierFallbackPath::MadviseWillneed => {
+            "madvise_willneed"
+        }
+        crate::search::lexical_ram_tier::LexicalRamTierFallbackPath::HeapOnly => "heap_only",
+        crate::search::lexical_ram_tier::LexicalRamTierFallbackPath::DisabledByOperator => {
+            "disabled_by_operator"
+        }
+    }
 }
 
 fn render_graph_compute_json(
@@ -4098,6 +4192,7 @@ pub fn render_status_json_with_meta(
         render_memory_health_json(d, &report.memory_health);
         render_graph_compute_json(d, &report.graph_compute);
         render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
+        render_search_status_json(d, &report.lexical_ram_tier);
         render_derived_assets_json(d, &report.derived_assets, true);
         render_mesh_status_json(
             d,
@@ -10520,6 +10615,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
             render_feedback_health_json(d, &report.feedback_health);
             render_graph_compute_json(d, &report.graph_compute);
             render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
+            render_search_status_json(d, &report.lexical_ram_tier);
             render_derived_assets_json(
                 d,
                 &report.derived_assets,

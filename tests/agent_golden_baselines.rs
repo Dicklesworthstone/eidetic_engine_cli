@@ -35,6 +35,9 @@ use ee::models::{
     SingleFlightSurfacePosture, error_codes,
 };
 use ee::output::{render_doctor_json, render_status_json};
+use ee::search::lexical_ram_tier::{
+    LexicalRamTierConfig, LexicalRamTierResult, pin_lexical_index_files,
+};
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
@@ -1313,6 +1316,13 @@ fn fixture_shard_fanout() -> ShardFanoutStatusReport {
     })
 }
 
+fn fixture_lexical_ram_tier() -> LexicalRamTierResult {
+    pin_lexical_index_files(
+        std::path::Path::new("/fixture/workspace/.ee/index/lexical"),
+        &LexicalRamTierConfig::disabled(),
+    )
+}
+
 fn status_missing_db_report() -> StatusReport {
     StatusReport {
         version: env!("CARGO_PKG_VERSION"),
@@ -1352,6 +1362,7 @@ fn status_missing_db_report() -> StatusReport {
             },
             graph_snapshot_empty_asset(),
         ],
+        lexical_ram_tier: fixture_lexical_ram_tier(),
         mesh_storage: None,
         tailscale_local: None,
         agent_inventory: AgentInventoryReport::not_inspected(),
@@ -1417,6 +1428,7 @@ fn status_pending_migration_report() -> StatusReport {
             },
             graph_snapshot_empty_asset(),
         ],
+        lexical_ram_tier: fixture_lexical_ram_tier(),
         mesh_storage: None,
         tailscale_local: None,
         agent_inventory: AgentInventoryReport::not_inspected(),
@@ -1482,6 +1494,7 @@ fn status_stale_index_lexical_only_report() -> StatusReport {
             },
             graph_snapshot_empty_asset(),
         ],
+        lexical_ram_tier: fixture_lexical_ram_tier(),
         mesh_storage: None,
         tailscale_local: None,
         agent_inventory: AgentInventoryReport::not_inspected(),
@@ -1536,6 +1549,7 @@ fn status_search_unimplemented_report() -> StatusReport {
             },
             graph_snapshot_empty_asset(),
         ],
+        lexical_ram_tier: fixture_lexical_ram_tier(),
         mesh_storage: None,
         tailscale_local: None,
         agent_inventory: AgentInventoryReport::not_inspected(),

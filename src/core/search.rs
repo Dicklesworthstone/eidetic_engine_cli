@@ -32,6 +32,11 @@ use super::memory_scope::{MemoryScopeContext, MeshQueryVisibility, mesh_query_vi
 use super::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 #[cfg(feature = "lexical-bm25")]
 use crate::search::TantivyIndex;
+use crate::search::lexical_ram_tier::{
+    LEXICAL_HUGEPAGES_UNAVAILABLE_CODE, LEXICAL_RAM_TIER_HUGEPAGES_ENV,
+    LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE, LEXICAL_RAM_TIER_PIN_RAM_ENV, LexicalRamTierConfig,
+    LexicalRamTierResult, pin_lexical_index_files, trace_lexical_ram_tier,
+};
 use crate::search::{
     Embedder, HashEmbedder, SpeedMode, TwoTierConfig, TwoTierIndex, TwoTierSearcher,
 };
@@ -593,6 +598,26 @@ impl SearchDegradation {
             message: "Requested lexical_only search, but the lexical/BM25 arm is unavailable."
                 .to_string(),
             repair: Some("rebuild ee with --features fts5,lexical-bm25".to_string()),
+        }
+    }
+
+    #[must_use]
+    fn lexical_hugepages_unavailable() -> Self {
+        Self {
+            code: LEXICAL_HUGEPAGES_UNAVAILABLE_CODE.to_string(),
+            severity: "info".to_string(),
+            message: "Lexical RAM-tier hugepages were requested but this host cannot grant them; search continues with regular page-size behavior.".to_string(),
+            repair: Some("Disable EE_LEXICAL_INDEX_HUGEPAGES or move the workspace to a Linux host with transparent hugepages available.".to_string()),
+        }
+    }
+
+    #[must_use]
+    fn lexical_ram_tier_not_implemented() -> Self {
+        Self {
+            code: LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE.to_string(),
+            severity: "info".to_string(),
+            message: "Lexical RAM-tier pinning is enabled, but the safe mmap/mlock adapter is not installed; search results are unchanged.".to_string(),
+            repair: Some("Keep EE_LEXICAL_INDEX_PIN_RAM unset until the lexical RAM-tier syscall adapter lands.".to_string()),
         }
     }
 
@@ -2464,6 +2489,8 @@ fn run_search_inner(
     let output_redaction_enabled =
         crate::config::workspace_output_redaction_enabled(&options.workspace_path);
     let mut degraded = search_degradations(options, &index_dir);
+    let lexical_ram_tier = pin_lexical_ram_tier_for_search(&options.workspace_path, &index_dir);
+    push_lexical_ram_tier_search_degradations(&mut degraded, &lexical_ram_tier);
     if !output_redaction_enabled {
         degraded.push(SearchDegradation::output_redaction_disabled());
     }
@@ -2892,6 +2919,52 @@ fn search_degradations(options: &SearchOptions, index_dir: &Path) -> Vec<SearchD
         IndexHealth::Corrupt => vec![SearchDegradation::corrupt_index(
             index_status.last_check_error.as_deref(),
         )],
+    }
+}
+
+fn pin_lexical_ram_tier_for_search(
+    workspace_path: &Path,
+    index_dir: &Path,
+) -> LexicalRamTierResult {
+    let started = Instant::now();
+    let config = LexicalRamTierConfig::from_environment_with_reader(
+        |name| match name {
+            LEXICAL_RAM_TIER_PIN_RAM_ENV => {
+                crate::config::read_env_var(crate::config::EnvVar::LexicalIndexPinRam)
+            }
+            LEXICAL_RAM_TIER_HUGEPAGES_ENV => {
+                crate::config::read_env_var(crate::config::EnvVar::LexicalIndexHugepages)
+            }
+            _ => None,
+        },
+        |_name, _raw| {},
+    );
+    let result = pin_lexical_index_files(&index_dir.join("lexical"), &config);
+    trace_lexical_ram_tier(
+        &crate::core::curate::stable_workspace_id(workspace_path),
+        &result,
+        started.elapsed().as_secs_f64() * 1000.0,
+    );
+    result
+}
+
+fn push_lexical_ram_tier_search_degradations(
+    degraded: &mut Vec<SearchDegradation>,
+    report: &LexicalRamTierResult,
+) {
+    if !report.enabled {
+        return;
+    }
+    for code in &report.degraded_codes {
+        match code.as_str() {
+            LEXICAL_HUGEPAGES_UNAVAILABLE_CODE => {
+                degraded.push(SearchDegradation::lexical_hugepages_unavailable());
+            }
+            LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE => {
+                degraded.push(SearchDegradation::lexical_ram_tier_not_implemented());
+            }
+            _ => {}
+        }
     }
 }
 
