@@ -12,6 +12,7 @@ use ee::models::{
 use ee::output::jsonl_export::{
     REDACTED_PLACEHOLDER, redact_audit_record, redact_content, redact_memory_record, redact_record,
 };
+use ee::pack::PackAssemblyOptions;
 use serde_json::Value as JsonValue;
 
 type TestResult = Result<(), String>;
@@ -249,6 +250,10 @@ fn redaction_level_behavior_matrix_matches_docs() -> TestResult {
 
 #[test]
 fn rust_surface_defaults_match_k6_documented_defaults() -> TestResult {
+    ensure(
+        PackAssemblyOptions::default().redaction_level == RedactionLevel::Minimal,
+        "ee context --json pack assembly default should be minimal",
+    )?;
     ensure(
         HandoffCreateOptions::default().redaction_level == RedactionLevel::Standard,
         "ee handoff create default should be standard",
