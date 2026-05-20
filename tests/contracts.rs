@@ -241,6 +241,9 @@ mod why_not_selected_schema;
 #[path = "contracts/host_calibration_recommendation_schema.rs"]
 mod host_calibration_recommendation_schema;
 
+#[path = "contracts/host_calibration_freshness_contract.rs"]
+mod host_calibration_freshness_contract;
+
 #[path = "contracts/agent_workload_trace_schema.rs"]
 mod agent_workload_trace_schema;
 
