@@ -978,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_enrollment_fails_closed_when_audit_emission_fails() {
+    fn auto_enrollment_plan_records_materialized_outcome_before_audit_attachment() {
         let result = plan_auto_enrollment(input(vec![candidate("nodekey:alpha")]));
         assert_eq!(
             result.materialization.outcome_to_record,
@@ -988,14 +988,14 @@ mod tests {
     }
 
     #[test]
-    fn auto_enrollment_acquires_write_owner_lock_before_db_read() {
+    fn auto_enrollment_plan_marks_peer_rows_for_materialization() {
         let result = plan_auto_enrollment(input(vec![candidate("nodekey:alpha")]));
         assert!(result.materialization.writes_peer_rows);
         assert_eq!(result.command, "mesh auto-enroll");
     }
 
     #[test]
-    fn auto_enrollment_releases_write_owner_lock_on_panic_via_transaction_guard() {
+    fn auto_enrollment_sync_once_failure_records_warning_after_materialization_plan() {
         let mut result = plan_auto_enrollment(input(vec![candidate("nodekey:alpha")]));
         result.record_sync_once_failure("simulated post-materialization failure");
         assert!(result.materialization.writes_peer_rows);
