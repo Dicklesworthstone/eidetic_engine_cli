@@ -24,6 +24,7 @@ use crate::models::{
     RationaleTraceVisibility, RedactionStatus, validate_rationale_summary,
 };
 
+pub mod migrate;
 pub mod read_pool;
 pub mod shard;
 
