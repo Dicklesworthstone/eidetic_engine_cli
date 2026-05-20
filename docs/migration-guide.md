@@ -512,6 +512,8 @@ is byte-identical to v0.2.x. This invariant is gated by
 | `EE_MESH_DRIFT_HARD_STALE_AFTER` | `3` | bd-36bbk.1.13 | Missed hello-probe count before a peer enters hard-stale drift |
 | `EE_MESH_DRIFT_HARD_STALE_AFTER_SECONDS` | `3600` | bd-36bbk.1.13 | Minimum seconds since last success before hard-stale drift applies |
 | `EE_MESH_ENABLED` | `0` | bd-36bbk umbrella | Master kill-switch; `0` disables every mesh code path |
+| `EE_MESH_HELLO_PORT` | `41888` | bd-36bbk.1.12 | Tailnet-only hello responder port used by `ee daemon` |
+| `EE_MESH_HELLO_RESPONDER_DISABLED` | `0` | bd-36bbk.1.12 | Emergency switch to keep mesh enabled but prevent the responder from binding |
 | `EE_MESH_MODE` | `off` | bd-36bbk umbrella | Default mesh command mode; accepted values are `off`, `cache`, `revisable`, and `blocking` |
 | `EE_TAILSCALE_BINARY_OVERRIDE` | unset | bd-36bbk.1.1 | Test-only: pin the `tailscale` binary path (production code rejects relative paths) |
 | `EE_TAILSCALE_PROBE_SOCKET_OVERRIDE` | unset | bd-36bbk.1.1 | Test-only: pin the tailscaled socket path |
@@ -521,9 +523,8 @@ is byte-identical to v0.2.x. This invariant is gated by
 
 Future v0.3.x point releases may register further `EE_MESH_*` and
 `EE_TAILSCALE_*` env vars as the remaining SRR6.46 sub-beads land
-(hello port, steward interval, daily cap, etc.). Every new var is
-registered in `src/config/env_registry.rs` and documented in
-`docs/env_vars.md`.
+(steward interval, daily cap, etc.). Every new var is registered in
+`src/config/env_registry.rs` and documented in `docs/env_vars.md`.
 
 ### Schemas added
 
@@ -559,11 +560,13 @@ the JSON Schema file lands under `docs/schemas/`.
 |---|---|---|
 | `mesh.auto_enrollment_intended` | bd-36bbk.1.5 | BEFORE any durable peer-group write; fail-closed if this row fails |
 | `mesh.auto_enrollment_outcome_recorded` | bd-36bbk.1.5 | Back-fill once SRR6.46.3 knows materialized/rolled_back/dry_run/audit_only |
+| `mesh.hello_responder_started` | bd-36bbk.1.12 | Foreground daemon started the supervised hello responder |
+| `mesh.hello_responder_stopped` | bd-36bbk.1.12 | Foreground daemon stopped the supervised hello responder cleanly |
+| `mesh.hello_responder_crashed_restarted` | bd-36bbk.1.12 | Supervision restarted the responder after a crash |
 
 Future v0.3.x will register additional event types as further sub-beads
 land (`mesh.auto_enrollment_materialized`, `mesh.auto_enrollment_rolled_back`,
 `mesh.peer_revoked`, `mesh.manual_to_auto_migration_intended`,
-`mesh.hello_responder_started/stopped/crashed_restarted`,
 `mesh.steward_reconciliation_skipped/triggered/refused/daily_cap_reached`,
 `mesh.discovery_policy_changed`, etc.).
 

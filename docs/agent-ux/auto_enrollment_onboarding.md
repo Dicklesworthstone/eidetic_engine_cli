@@ -292,10 +292,15 @@ every step):
 | `tailscale_binary_inauthentic` | high | `--version` output doesn't match Tailscale Inc. format | `which tailscale` + verify provenance + reinstall |
 | `tailscale_shields_up` | warning | shields-up is on; inbound blocked | `tailscale set --shields-up=false` |
 | `tailscale_probe_timeout` | warning | Probe hit the 1500ms budget | Set `EE_TAILSCALE_PROBE_TIMEOUT_MS=<larger>` |
+| `tailscale_probe_unavailable` | info | Tailscale probe was disabled or unavailable in the current environment | Keep mesh disabled or repair the local Tailscale install |
+| `tailscale_status` | info | `ee status` nested a Tailscale posture degradation | Read the nested repair action before attempting auto-enroll |
 | `no_ee_peers_on_tailnet` | info | Tailnet healthy, no other ee instances | Run ee on a second tailnet host |
 | `peer_discovery_workspace_mismatch` | info | Peers run ee but for a different workspace | (Optional) explicit `ee mesh enroll <node-key>` |
 | `hello_responder_not_running` | medium | `ee daemon` not running; peers cannot reach us | `ee daemon --foreground` |
 | `hello_responder_port_in_use` | high | Configured port held by another process | `EE_MESH_HELLO_PORT=<other> ee daemon --foreground` |
+| `hello_responder_no_tailscale_ip` | medium | Responder cannot find a local Tailscale address to bind | Check `tailscale status` and restart `ee daemon` |
+| `hello_responder_crash_loop` | high | Supervised responder restarted too often | Inspect daemon logs before retrying |
+| `hello_responder_rate_limited_storm` | warning | Hello probes are hitting the storm limiter | Slow probe cadence or narrow discovery policy |
 | `auto_enrollment_no_eligible_peers` | info | Discovery returned zero eligible peers | (See discovery hints) |
 | `auto_enrollment_partial_failure` | warning | Some peer enrollments succeeded, some failed; transaction rolled back | Re-run; check per-peer details |
 | `auto_enrollment_blocked_by_policy` | medium | SRR6.5 trust policy rejected the auto defaults | Manual `ee mesh enroll` |
@@ -307,12 +312,16 @@ every step):
 | `auto_enrollment_audit_failed` | critical | SRR6.46.5 audit-row write failed; fail-closed | Inspect audit chain integrity (`ee audit verify --json`) |
 | `auto_enrollment_sync_once_failed` | warning | Materialization OK; post-kick sync-once failed | Retry `ee mesh sync-once` |
 | `auto_enrollment_invalid_override_node_key` | warning | `--include`/`--exclude` named a node-key not on tailnet | Confirm node-key spelling |
+| `auto_enrollment_manual_migration_unmatched_peer_set` | medium | Manual-to-auto migration found a different discovered peer set | Review dry-run output before replacing manual config |
 | `mesh_disable_noop` | info | No materialized peer-group to disable | No-op |
 | `mesh_disable_concurrent_attempt` | warning | Another agent holds the write-owner lock | Wait, then retry |
 | `mesh_revoke_unknown_peer` | warning | Named peer not in current peer-group | Re-list eligible peers |
 | `discovery_policy_no_ee_mesh_tag` | info | Responder is in `service_tag` mode but not advertising the tag | `tailscale up --advertise-tags=tag:ee-mesh` |
+| `discovery_policy_empty_allowlist` | info | Discovery mode is `allowlist` but no node keys are configured | Add allowed node keys or switch discovery mode |
 | `lane_grant_preview_peer_not_in_group` | warning | Named peer not in the workspace's auto-enrolled group | Preview still runs; peer wouldn't receive until enrolled |
 | `steward_auto_enroll_disabled` | info | `EE_MESH_AUTO_ENROLL_ON_DEMAND=0` (default) | Set the env var if you want auto-reconciliation |
+| `mesh_peer_policy_denied` | medium | SRR6.5 peer policy denied the requested mesh lane | Review trust and lane policy before retrying |
+| `mesh_peer_human_explicit_filtered` | medium | Human-explicit memories were filtered from peer exposure | Use preview-grant and explicit policy before widening access |
 
 ## Safety Patterns
 
