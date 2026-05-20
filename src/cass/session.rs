@@ -151,6 +151,144 @@ impl CassSessionInfo {
     }
 }
 
+/// Stable reference to a CASS session or line range used by mesh evidence refs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CassSessionReference {
+    pub session_id: String,
+    pub line_start: Option<u32>,
+    pub line_end: Option<u32>,
+}
+
+impl CassSessionReference {
+    #[must_use]
+    pub fn to_uri(&self) -> String {
+        let mut uri = format!("cass-session://{}", self.session_id);
+        if let Some(line_start) = self.line_start {
+            uri.push_str("#L");
+            uri.push_str(&line_start.to_string());
+            if self.line_end.is_some_and(|line_end| line_end != line_start) {
+                uri.push('-');
+                uri.push_str(&self.line_end.unwrap_or(line_start).to_string());
+            }
+        }
+        uri
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CassSessionReferenceError {
+    reason: &'static str,
+}
+
+impl CassSessionReferenceError {
+    #[must_use]
+    pub const fn reason(&self) -> &'static str {
+        self.reason
+    }
+}
+
+impl fmt::Display for CassSessionReferenceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "invalid CASS session reference: {}", self.reason)
+    }
+}
+
+impl std::error::Error for CassSessionReferenceError {}
+
+/// Normalize the remote-evidence CASS URI shape without touching the session body.
+///
+/// Accepted forms are `cass-session://<session-id>` and
+/// `cass-session://<session-id>#L<start>-<end>`. Local file paths and arbitrary
+/// URI query strings are rejected because peer evidence refs must preserve
+/// fetchability without leaking host paths.
+pub fn normalize_cass_session_uri(
+    raw: &str,
+) -> Result<CassSessionReference, CassSessionReferenceError> {
+    let raw = raw.trim();
+    let Some(rest) = raw.strip_prefix("cass-session://") else {
+        return Err(CassSessionReferenceError {
+            reason: "missing_cass_session_scheme",
+        });
+    };
+    if rest.is_empty() {
+        return Err(CassSessionReferenceError {
+            reason: "missing_session_id",
+        });
+    }
+    if raw.chars().any(char::is_control) || raw.contains('?') {
+        return Err(CassSessionReferenceError {
+            reason: "unsupported_uri_component",
+        });
+    }
+
+    let (session_id, fragment) = rest
+        .split_once('#')
+        .map_or((rest, None), |(id, fragment)| (id, Some(fragment)));
+    if session_id.is_empty()
+        || session_id.contains('/')
+        || session_id.contains('\\')
+        || session_id.contains("..")
+    {
+        return Err(CassSessionReferenceError {
+            reason: "unsafe_session_id",
+        });
+    }
+    if !session_id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(CassSessionReferenceError {
+            reason: "unsupported_session_id_character",
+        });
+    }
+
+    let (line_start, line_end) = match fragment {
+        None => (None, None),
+        Some(fragment) => parse_cass_line_fragment(fragment)?,
+    };
+
+    Ok(CassSessionReference {
+        session_id: session_id.to_owned(),
+        line_start,
+        line_end,
+    })
+}
+
+fn parse_cass_line_fragment(
+    fragment: &str,
+) -> Result<(Option<u32>, Option<u32>), CassSessionReferenceError> {
+    let Some(rest) = fragment.strip_prefix('L') else {
+        return Err(CassSessionReferenceError {
+            reason: "unsupported_fragment",
+        });
+    };
+    let (start, end) = rest
+        .split_once('-')
+        .map_or((rest, rest), |(start, end)| (start, end));
+    let start = parse_positive_cass_line(start)?;
+    let end = parse_positive_cass_line(end)?;
+    if end < start {
+        return Err(CassSessionReferenceError {
+            reason: "line_range_reversed",
+        });
+    }
+    Ok((Some(start), Some(end)))
+}
+
+fn parse_positive_cass_line(value: &str) -> Result<u32, CassSessionReferenceError> {
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| CassSessionReferenceError {
+            reason: "invalid_line_number",
+        })?;
+    if parsed == 0 {
+        return Err(CassSessionReferenceError {
+            reason: "line_number_zero",
+        });
+    }
+    Ok(parsed)
+}
+
 /// Parsed response from `cass search --robot --robot-meta`.
 ///
 /// The field set mirrors CASS contract version 1. Unknown fields are

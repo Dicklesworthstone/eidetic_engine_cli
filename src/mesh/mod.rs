@@ -23,6 +23,7 @@ pub mod identity_change_guard;
 pub mod lane_grant_preview;
 pub mod peer;
 pub mod policy;
+pub mod remote_evidence;
 pub mod repair_action_graph;
 pub mod steward_decision;
 pub mod sync;
