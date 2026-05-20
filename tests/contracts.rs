@@ -286,6 +286,9 @@ mod mesh_auto_status_schema;
 #[path = "contracts/closeout_audit_schema.rs"]
 mod closeout_audit_schema;
 
+#[path = "contracts/mcp_parity_required_coverage.rs"]
+mod mcp_parity_required_coverage;
+
 #[path = "contracts/peer_conflict_schema.rs"]
 mod peer_conflict_schema;
 
