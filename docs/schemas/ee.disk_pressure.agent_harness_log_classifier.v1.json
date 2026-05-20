@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.disk_pressure.agent_harness_log_classifier.v1.json",
+  "title": "ee.disk_pressure.agent_harness_log_classifier.v1",
+  "description": "Read-only per-file classification for oversized agent-harness logs found by ee diag disk-pressure.",
+  "type": "object",
+  "required": [
+    "schema",
+    "entry",
+    "role",
+    "repairKind",
+    "reason",
+    "suggestion",
+    "mutationPolicy",
+    "sideEffectFree"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.disk_pressure.agent_harness_log_classifier.v1"
+    },
+    "entry": {
+      "type": "object",
+      "required": [
+        "path",
+        "sizeBytes",
+        "filesystemLabel",
+        "onWorkspaceFilesystem",
+        "mtimeUnixSeconds",
+        "activity",
+        "owningProcessSummary",
+        "tailByteTarget"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string"},
+        "sizeBytes": {"type": "integer", "minimum": 0},
+        "filesystemLabel": {"type": "string"},
+        "onWorkspaceFilesystem": {"type": "boolean"},
+        "mtimeUnixSeconds": {"type": ["integer", "null"], "minimum": 0},
+        "activity": {
+          "type": "string",
+          "enum": ["active_open", "closed", "open_handle_probe_unavailable"]
+        },
+        "owningProcessSummary": {"type": ["string", "null"]},
+        "tailByteTarget": {"type": "integer", "minimum": 0}
+      }
+    },
+    "role": {"type": "string", "const": "agent_harness_log"},
+    "repairKind": {
+      "type": "string",
+      "enum": [
+        "preserve_tail_copy",
+        "rotate_with_manifest",
+        "move_preserve",
+        "ask_human",
+        "noop"
+      ]
+    },
+    "reason": {"type": "string", "minLength": 1},
+    "suggestion": {"type": "string", "minLength": 1},
+    "mutationPolicy": {"type": "string", "const": "preservation_only"},
+    "sideEffectFree": {"type": "boolean", "const": true}
+  }
+}

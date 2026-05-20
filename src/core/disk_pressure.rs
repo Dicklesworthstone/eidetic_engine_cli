@@ -91,6 +91,7 @@ pub struct DiskPressureReport {
     pub posture: DiskPressurePosture,
     pub roots: Vec<DiskPressureRoot>,
     pub top_consumers: Vec<DiskPressureTopConsumer>,
+    pub agent_harness_logs: Vec<AgentHarnessLogClassification>,
     pub recovery_actions: Vec<DiskPressureRecoveryAction>,
     pub guidance: Vec<DiskPressureGuidance>,
 }
@@ -399,10 +400,10 @@ pub fn gather_disk_pressure_report(options: &DiskPressureOptions) -> DiskPressur
     let mut roots = Vec::with_capacity(specs.len());
     let mut global_consumers = Vec::new();
 
-    for (spec, path) in specs {
+    for (spec, path) in &specs {
         let root = inspect_root(
-            spec,
-            &path,
+            *spec,
+            path,
             options.top_limit.max(1),
             options.consumer_depth,
             options.consumer_entry_limit.max(1),
@@ -431,13 +432,18 @@ pub fn gather_disk_pressure_report(options: &DiskPressureOptions) -> DiskPressur
         .map(|root| root.posture)
         .max()
         .unwrap_or(DiskPressurePosture::Ok);
-    let guidance = build_guidance(&roots, external_root);
-    let recovery_actions = build_recovery_actions(posture, &guidance);
+    let agent_harness_logs =
+        gather_agent_harness_log_classifications(&workspace, &specs, options.consumer_entry_limit);
+    let mut guidance = build_guidance(&roots, external_root);
+    append_agent_harness_log_guidance(&mut guidance, &agent_harness_logs);
+    let mut recovery_actions = build_recovery_actions(posture, &guidance);
+    append_agent_harness_log_recovery_actions(&mut recovery_actions, &agent_harness_logs);
     tracing::info!(
         event = "disk_pressure_repair_plan_emitted",
         posture = posture.as_str(),
         guidance_count = guidance.len(),
         recovery_action_count = recovery_actions.len(),
+        agent_harness_log_count = agent_harness_logs.len(),
         side_effect_free = true,
         "disk pressure repair plan emitted"
     );
@@ -462,6 +468,7 @@ pub fn gather_disk_pressure_report(options: &DiskPressureOptions) -> DiskPressur
         posture,
         roots,
         top_consumers: global_consumers,
+        agent_harness_logs,
         recovery_actions,
         guidance,
     }
@@ -1390,6 +1397,76 @@ fn build_recovery_actions(
     actions
 }
 
+fn append_agent_harness_log_guidance(
+    guidance: &mut Vec<DiskPressureGuidance>,
+    classifications: &[AgentHarnessLogClassification],
+) {
+    let actionable: Vec<&AgentHarnessLogClassification> = classifications
+        .iter()
+        .filter(|classification| classification.repair_kind != AgentHarnessLogRepairKind::Noop)
+        .collect();
+    if actionable.is_empty() {
+        return;
+    }
+
+    let largest = actionable
+        .iter()
+        .map(|classification| classification.entry.size_bytes)
+        .max()
+        .unwrap_or(0);
+    let severity = if actionable.iter().any(|classification| {
+        classification.repair_kind == AgentHarnessLogRepairKind::AskHuman
+            || classification.entry.size_bytes >= AGENT_HARNESS_LOG_DEGRADED_BYTES
+    }) {
+        "high"
+    } else {
+        "medium"
+    };
+
+    guidance.push(DiskPressureGuidance {
+        code: "agent_harness_log_pressure",
+        severity,
+        message: format!(
+            "{} oversized agent-harness log(s) detected; largest is {} bytes. \
+CARGO_TARGET_DIR and TMPDIR may be correctly externalized while ~/.codex/log still fills the host filesystem.",
+            actionable.len(),
+            largest
+        ),
+        repair: "Use agentHarnessLogs[].repairKind and recoveryActions entries for preservation-only rotation; do not delete or truncate logs without explicit approval.".to_owned(),
+    });
+}
+
+fn append_agent_harness_log_recovery_actions(
+    actions: &mut Vec<DiskPressureRecoveryAction>,
+    classifications: &[AgentHarnessLogClassification],
+) {
+    let actionable: Vec<&AgentHarnessLogClassification> = classifications
+        .iter()
+        .filter(|classification| classification.repair_kind != AgentHarnessLogRepairKind::Noop)
+        .collect();
+    if actionable.is_empty() {
+        return;
+    }
+
+    actions.retain(|action| !(action.kind == "noop" && action.target == "disk_pressure"));
+    let mut next_priority = actions
+        .iter()
+        .map(|action| action.priority)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    for classification in actionable {
+        actions.push(DiskPressureRecoveryAction {
+            priority: next_priority,
+            kind: classification.repair_kind.as_str(),
+            target: "agent_harness_log",
+            reason: classification.reason.clone(),
+            suggestion: classification.suggestion.clone(),
+        });
+        next_priority = next_priority.saturating_add(1);
+    }
+}
+
 fn top_consumers(
     root_label: &'static str,
     root: &Path,
@@ -1420,6 +1497,192 @@ fn top_consumers(
     entries.sort_by_key(|entry| Reverse(entry.bytes));
     entries.truncate(top_limit);
     entries
+}
+
+fn gather_agent_harness_log_classifications(
+    workspace: &Path,
+    specs: &[(RootSpec, PathBuf)],
+    entry_limit: usize,
+) -> Vec<AgentHarnessLogClassification> {
+    gather_agent_harness_log_classifications_with_probe(
+        workspace,
+        specs,
+        entry_limit,
+        probe_agent_harness_log_activity,
+    )
+}
+
+fn gather_agent_harness_log_classifications_with_probe<F>(
+    workspace: &Path,
+    specs: &[(RootSpec, PathBuf)],
+    entry_limit: usize,
+    mut probe: F,
+) -> Vec<AgentHarnessLogClassification>
+where
+    F: FnMut(&Path) -> (AgentHarnessLogActivity, Option<String>),
+{
+    let mut classifications = Vec::new();
+    let limit = entry_limit.max(1);
+
+    for (_, root) in specs
+        .iter()
+        .filter(|(spec, _)| spec.role == "codex_log_root")
+    {
+        if !path_is_directory_no_follow(root) {
+            continue;
+        }
+        let Ok(children) = fs::read_dir(root) else {
+            continue;
+        };
+        for child in children.flatten() {
+            let path = child.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !metadata.file_type().is_file() || metadata.len() < AGENT_HARNESS_LOG_WARNING_BYTES {
+                continue;
+            }
+
+            let (activity, owning_process_summary) = probe(&path);
+            let on_workspace_filesystem = path_on_same_filesystem_as_workspace(&path, workspace);
+            let entry = AgentHarnessLogEntry {
+                filesystem_label: agent_harness_log_filesystem_label(
+                    on_workspace_filesystem,
+                    &path,
+                ),
+                mtime_unix_seconds: metadata_modified_unix_seconds(&metadata),
+                path,
+                size_bytes: metadata.len(),
+                on_workspace_filesystem,
+                activity,
+                owning_process_summary,
+                tail_byte_target: AGENT_HARNESS_LOG_DEFAULT_TAIL_BYTES,
+            };
+            classifications.push(classify_agent_harness_log(&entry));
+        }
+    }
+
+    classifications.sort_by(|left, right| {
+        right
+            .entry
+            .size_bytes
+            .cmp(&left.entry.size_bytes)
+            .then_with(|| left.entry.path.cmp(&right.entry.path))
+    });
+    classifications.truncate(limit);
+    classifications
+}
+
+fn metadata_modified_unix_seconds(metadata: &fs::Metadata) -> Option<u64> {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+}
+
+fn agent_harness_log_filesystem_label(on_workspace_filesystem: bool, path: &Path) -> String {
+    if trusted_external_path(path, Path::new(EXTERNAL_BUILD_ROOT)) {
+        "external_build_root".to_owned()
+    } else if on_workspace_filesystem {
+        "workspace_filesystem".to_owned()
+    } else {
+        "non_workspace_filesystem".to_owned()
+    }
+}
+
+fn path_on_same_filesystem_as_workspace(path: &Path, workspace: &Path) -> bool {
+    paths_share_filesystem(path, workspace).unwrap_or_else(|| path.starts_with(workspace))
+}
+
+#[cfg(unix)]
+fn paths_share_filesystem(left: &Path, right: &Path) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+
+    let left_device = fs::metadata(nearest_existing_path(left)?).ok()?.dev();
+    let right_device = fs::metadata(nearest_existing_path(right)?).ok()?.dev();
+    Some(left_device == right_device)
+}
+
+#[cfg(not(unix))]
+fn paths_share_filesystem(left: &Path, right: &Path) -> Option<bool> {
+    let _ = fs::metadata(left).ok()?;
+    let _ = fs::metadata(right).ok()?;
+    Some(left.starts_with(right) || right.starts_with(left))
+}
+
+#[cfg(unix)]
+fn probe_agent_harness_log_activity(path: &Path) -> (AgentHarnessLogActivity, Option<String>) {
+    let output = match std::process::Command::new("lsof")
+        .arg("-Fpc")
+        .arg("--")
+        .arg(path)
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return (
+                AgentHarnessLogActivity::OpenHandleProbeUnavailable,
+                Some("open-handle probe unavailable: lsof not found".to_owned()),
+            );
+        }
+        Err(error) => {
+            return (
+                AgentHarnessLogActivity::OpenHandleProbeUnavailable,
+                Some(format!("open-handle probe unavailable: {error}")),
+            );
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let owners = parse_lsof_field_output(&stdout);
+    if !owners.is_empty() {
+        return (AgentHarnessLogActivity::ActiveOpen, Some(owners.join(", ")));
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let reason = stderr.trim();
+    if output.status.success() || (output.status.code() == Some(1) && reason.is_empty()) {
+        return (AgentHarnessLogActivity::Closed, None);
+    }
+
+    (
+        AgentHarnessLogActivity::OpenHandleProbeUnavailable,
+        Some(if reason.is_empty() {
+            "open-handle probe unavailable: lsof exited without owner data".to_owned()
+        } else {
+            format!("open-handle probe unavailable: {reason}")
+        }),
+    )
+}
+
+#[cfg(not(unix))]
+fn probe_agent_harness_log_activity(_path: &Path) -> (AgentHarnessLogActivity, Option<String>) {
+    (
+        AgentHarnessLogActivity::OpenHandleProbeUnavailable,
+        Some("open-handle probe unavailable: unsupported platform".to_owned()),
+    )
+}
+
+fn parse_lsof_field_output(output: &str) -> Vec<String> {
+    let mut owners = Vec::new();
+    let mut current_pid: Option<String> = None;
+
+    for line in output.lines() {
+        if let Some(pid) = line.strip_prefix('p') {
+            current_pid = Some(pid.to_owned());
+        } else if let Some(command) = line.strip_prefix('c')
+            && let Some(pid) = current_pid.take()
+        {
+            owners.push(format!("pid={pid} command={command}"));
+        }
+    }
+
+    if let Some(pid) = current_pid {
+        owners.push(format!("pid={pid}"));
+    }
+
+    owners
 }
 
 fn path_is_directory_no_follow(path: &Path) -> bool {
@@ -1619,10 +1882,8 @@ fn first_existing_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> 
 // truncation would corrupt the writer's append offset) from closed oversized
 // logs (where rotation is safe with manifest evidence).
 //
-// This sub-module adds a *pure* per-entry classifier with no I/O and no
-// mutation. The walker that gathers `AgentHarnessLogEntry` inputs from
-// `~/.codex/log/*` and feeds them into the classifier is a follow-up slice
-// of bd-1zb7k.11.7 (the bead remains open until that lands).
+// This sub-module adds a *pure* per-entry classifier plus a bounded read-only
+// walker that gathers `AgentHarnessLogEntry` inputs from `~/.codex/log/*`.
 //
 // The classifier never returns a repair kind that deletes or truncates files
 // without explicit human approval: every recommended action is either
@@ -1932,6 +2193,95 @@ mod tests {
         } else {
             Err(format!("unexpected action kinds: {actions:?}"))
         }
+    }
+
+    #[test]
+    fn lsof_field_parser_reports_owner_processes() -> TestResult {
+        ensure(
+            parse_lsof_field_output("p123\ncCodex\np456\nczsh\n"),
+            vec![
+                "pid=123 command=Codex".to_owned(),
+                "pid=456 command=zsh".to_owned(),
+            ],
+            "owners",
+        )
+    }
+
+    #[test]
+    fn agent_harness_log_walker_classifies_oversized_codex_logs() -> TestResult {
+        let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp_dir.path().join("workspace");
+        let log_root = temp_dir.path().join(".codex/log");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&log_root).map_err(|error| error.to_string())?;
+        fs::File::create(log_root.join("small.log"))
+            .map_err(|error| error.to_string())?
+            .set_len(10 * MIB)
+            .map_err(|error| error.to_string())?;
+        let big_log = log_root.join("big.log");
+        fs::File::create(&big_log)
+            .map_err(|error| error.to_string())?
+            .set_len(2 * GIB)
+            .map_err(|error| error.to_string())?;
+        let specs = vec![(
+            RootSpec {
+                label: "codex_logs",
+                role: "codex_log_root",
+                required: false,
+            },
+            log_root,
+        )];
+
+        let classifications =
+            gather_agent_harness_log_classifications_with_probe(&workspace, &specs, 10, |_| {
+                (AgentHarnessLogActivity::Closed, None)
+            });
+
+        ensure(classifications.len(), 1, "classification count")?;
+        ensure(
+            classifications[0].entry.path.clone(),
+            big_log,
+            "classified path",
+        )?;
+        ensure(
+            classifications[0].repair_kind,
+            AgentHarnessLogRepairKind::RotateWithManifest,
+            "repair kind",
+        )?;
+        if classifications[0].entry.on_workspace_filesystem {
+            Ok(())
+        } else {
+            Err("expected same-device log to be marked on workspace filesystem".to_owned())
+        }
+    }
+
+    #[test]
+    fn agent_harness_log_recovery_actions_replace_noop_plan() -> TestResult {
+        let entry = harness_log_entry(2 * GIB, false, AgentHarnessLogActivity::ActiveOpen);
+        let classification = classify_agent_harness_log(&entry);
+        let mut guidance = Vec::new();
+        append_agent_harness_log_guidance(&mut guidance, std::slice::from_ref(&classification));
+        let mut actions = build_recovery_actions(DiskPressurePosture::Ok, &guidance);
+        append_agent_harness_log_recovery_actions(
+            &mut actions,
+            std::slice::from_ref(&classification),
+        );
+
+        ensure(guidance.len(), 1, "guidance count")?;
+        ensure(
+            guidance[0].code,
+            "agent_harness_log_pressure",
+            "guidance code",
+        )?;
+        if actions.iter().any(|action| action.kind == "noop") {
+            return Err(format!("noop action should be replaced: {actions:?}"));
+        }
+        ensure(actions.len(), 1, "action count")?;
+        ensure(
+            actions[0].kind,
+            AgentHarnessLogRepairKind::PreserveTailCopy.as_str(),
+            "action kind",
+        )
     }
 
     #[test]
