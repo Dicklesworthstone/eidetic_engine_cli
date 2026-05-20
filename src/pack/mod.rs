@@ -7,6 +7,7 @@ use serde::{Serialize, Serializer};
 use tiktoken_rs::{CoreBPE, cl100k_base};
 
 use crate::cache::{CacheBudget, MemoryPressure, assess_pressure};
+use crate::config::MeshCommandMode;
 use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
 };
@@ -31,8 +32,119 @@ pub const FACILITY_LOCATION_EPSILON: f32 = 0.000_001;
 pub const DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR: f32 = 0.05;
 pub const MAX_PACK_SKIPPED_ITEMS: usize = 50;
 pub const COORDINATION_SNAPSHOT_SCHEMA_V1: &str = "ee.coordination_snapshot.v1";
+pub const PACK_REVISION_TOKEN_SCHEMA_V1: &str = "ee.pack.revision_token.v1";
 pub const WHY_NOT_SELECTED_SCHEMA_V1: &str = "ee.why_not_selected.v1";
 pub const DEFAULT_COORDINATION_STALE_AFTER_MS: u64 = 86_400_000;
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackRevisionMeshMetadata {
+    pub schema: &'static str,
+    pub mode: &'static str,
+    pub token: String,
+    pub tier1_usable: bool,
+    pub revision_available: bool,
+    pub reason: &'static str,
+    pub query_hash: String,
+    pub pack_hash: String,
+    pub local_mesh_tip_state: PackRevisionMeshTipState,
+    pub selected_memory_ids: Vec<String>,
+    pub rebuild_command: String,
+    pub diff_command: String,
+}
+
+impl PackRevisionMeshMetadata {
+    #[must_use]
+    pub fn for_context_response(
+        response: &ContextResponse,
+        mode: MeshCommandMode,
+        surface_command: &str,
+    ) -> Option<Self> {
+        if mode != MeshCommandMode::Revisable {
+            return None;
+        }
+        let query_hash = revision_hash_with_prefix(&["query", &response.data.request.query]);
+        let pack_hash = response
+            .data
+            .pack
+            .hash
+            .clone()
+            .unwrap_or_else(|| "absent".to_owned());
+        let selected_memory_ids = response
+            .data
+            .pack
+            .items
+            .iter()
+            .map(|item| item.memory_id.to_string())
+            .collect::<Vec<_>>();
+        let local_mesh_tip_state = PackRevisionMeshTipState::not_checked();
+        let selected_fingerprint = selected_memory_ids.join("\n");
+        let token_digest = revision_hash(&[
+            PACK_REVISION_TOKEN_SCHEMA_V1,
+            mode.as_str(),
+            surface_command,
+            &query_hash,
+            &pack_hash,
+            local_mesh_tip_state.status,
+            local_mesh_tip_state.basis,
+            &selected_fingerprint,
+        ]);
+        let token = format!("packrev_{}", &token_digest[..32]);
+        let quoted_query = shell_quote(&response.data.request.query);
+        Some(Self {
+            schema: PACK_REVISION_TOKEN_SCHEMA_V1,
+            mode: mode.as_str(),
+            token: token.clone(),
+            tier1_usable: true,
+            revision_available: false,
+            reason: "no_fresher_peer_material_known",
+            query_hash,
+            pack_hash: pack_hash.clone(),
+            local_mesh_tip_state,
+            selected_memory_ids,
+            rebuild_command: format!("ee {surface_command} {quoted_query} --mesh revisable --json"),
+            diff_command: format!("ee pack diff {pack_hash} {token}"),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackRevisionMeshTipState {
+    pub status: &'static str,
+    pub basis: &'static str,
+}
+
+impl PackRevisionMeshTipState {
+    #[must_use]
+    pub const fn not_checked() -> Self {
+        Self {
+            status: "not_checked",
+            basis: "no_async_peer_freshness_probe_attached",
+        }
+    }
+}
+
+pub(crate) fn revision_hash(parts: &[&str]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for part in parts {
+        hasher.update((part.len() as u64).to_be_bytes().as_slice());
+        hasher.update(part.as_bytes());
+        hasher.update(&[0]);
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+pub(crate) fn revision_hash_with_prefix(parts: &[&str]) -> String {
+    format!("blake3:{}", revision_hash(parts))
+}
+
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_owned();
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PackAssemblyOptions {
@@ -3056,6 +3168,7 @@ impl ContextResponse {
                 consensus: Vec::new(),
                 conflicts: Vec::new(),
                 coordination: None,
+                mesh: None,
                 pack_dna: None,
                 adaptive_budget: None,
                 degraded,
@@ -3102,6 +3215,7 @@ impl ContextResponse {
                 consensus: Vec::new(),
                 conflicts: Vec::new(),
                 coordination: None,
+                mesh: None,
                 pack_dna: None,
                 adaptive_budget: None,
                 degraded: Vec::new(),
@@ -3121,6 +3235,7 @@ pub struct ContextResponseData {
     pub consensus: Vec<ConsensusEntry>,
     pub conflicts: Vec<ConflictEntry>,
     pub coordination: Option<PackCoordinationSnapshot>,
+    pub mesh: Option<PackRevisionMeshMetadata>,
     pub pack_dna: Option<serde_json::Value>,
     pub adaptive_budget: Option<budget_classifier::AdaptiveBudgetDecision>,
     pub degraded: Vec<ContextResponseDegradation>,
@@ -6228,21 +6343,23 @@ mod tests {
         ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
         ContextResponseDegradation, ContextResponseSeverity, DEFAULT_CHARS_PER_TOKEN,
         FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR, PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE,
-        PACK_ASSEMBLY_SLOW_CODE, PackAssemblyOptions, PackAssemblySlo, PackAssemblySloActuals,
-        PackAssemblySloStatus, PackCacheGovernor, PackCacheStatus, PackCandidate,
-        PackCandidateInput, PackDraft, PackDraftItem, PackHotset, PackHotsetEntry,
-        PackHotsetEntryKind, PackItemRedaction, PackOmissionReason, PackProvenance,
-        PackRejectionStage, PackResourceProfile, PackSection, PackSelectedItem, PackSelectionAudit,
-        PackSelectionObjective, PackSelectionPhase, PackTrustSignal, PackValidationError,
-        SectionQuota, SectionQuotas, TokenBudget, TokenEstimationStrategy,
-        WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR, WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR,
-        assemble_draft, assemble_draft_with_cache_governor, assemble_draft_with_profile,
+        PACK_ASSEMBLY_SLOW_CODE, PACK_REVISION_TOKEN_SCHEMA_V1, PackAssemblyOptions,
+        PackAssemblySlo, PackAssemblySloActuals, PackAssemblySloStatus, PackCacheGovernor,
+        PackCacheStatus, PackCandidate, PackCandidateInput, PackDraft, PackDraftItem, PackHotset,
+        PackHotsetEntry, PackHotsetEntryKind, PackItemRedaction, PackOmissionReason,
+        PackProvenance, PackRejectionStage, PackResourceProfile, PackRevisionMeshMetadata,
+        PackSection, PackSelectedItem, PackSelectionAudit, PackSelectionObjective,
+        PackSelectionPhase, PackTrustSignal, PackValidationError, SectionQuota, SectionQuotas,
+        TokenBudget, TokenEstimationStrategy, WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR,
+        WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR, assemble_draft,
+        assemble_draft_with_cache_governor, assemble_draft_with_profile,
         assemble_draft_with_profile_and_options_seeded, candidate_similarity, escape_markdown_text,
         estimate_character_heuristic_tokens, estimate_tokens, estimate_tokens_default,
         estimate_word_heuristic_tokens, facility_similarity, pack_item_provenance_json,
         prewarm_pack_hotset, subsystem_name,
     };
     use crate::cache::{CacheBudget, MemoryPressure};
+    use crate::config::MeshCommandMode;
     use crate::models::{ContextProfile, MemoryId, ProvenanceUri, TrustClass, UnitScore};
     use crate::runtime::determinism::Deterministic;
     use crate::testing::ensure_contains;
@@ -9268,6 +9385,90 @@ mod tests {
                 .and_then(|degraded| degraded.repair.as_deref()),
             &Some("ee index rebuild --workspace ."),
             "degradation repair",
+        )
+    }
+
+    #[test]
+    fn revisable_pack_metadata_is_explicit_and_deterministic() -> TestResult {
+        let request = ContextRequest::from_query("format before release")
+            .map_err(|error| format!("request rejected: {error:?}"))?;
+        let draft = assemble_draft(
+            request.query.clone(),
+            request.budget,
+            vec![candidate(1, 1.0, 0.5, 10)?],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+        let response = ContextResponse::new(request, draft, Vec::new())
+            .map_err(|error| format!("response rejected: {error:?}"))?;
+
+        ensure(
+            PackRevisionMeshMetadata::for_context_response(
+                &response,
+                MeshCommandMode::Off,
+                "context",
+            )
+            .is_none(),
+            "strict/off mode must not emit revision metadata",
+        )?;
+        let first = PackRevisionMeshMetadata::for_context_response(
+            &response,
+            MeshCommandMode::Revisable,
+            "context",
+        )
+        .ok_or_else(|| "revisable mode should emit revision metadata".to_owned())?;
+        let replay = PackRevisionMeshMetadata::for_context_response(
+            &response,
+            MeshCommandMode::Revisable,
+            "context",
+        )
+        .ok_or_else(|| "revisable replay should emit revision metadata".to_owned())?;
+
+        ensure_equal(&first, &replay, "revision metadata replay")?;
+        ensure_equal(
+            &first.schema,
+            &PACK_REVISION_TOKEN_SCHEMA_V1,
+            "revision schema",
+        )?;
+        ensure(first.token.starts_with("packrev_"), "revision token prefix")?;
+        ensure(first.tier1_usable, "tier1 pack remains usable")?;
+        ensure(
+            !first.revision_available,
+            "no peer freshness is silently claimed",
+        )?;
+        ensure(
+            first.query_hash.starts_with("blake3:"),
+            "query fingerprint prefix",
+        )?;
+        ensure_equal(
+            &first.local_mesh_tip_state.status,
+            &"not_checked",
+            "local mesh tip state",
+        )?;
+        ensure_equal(
+            &first.selected_memory_ids,
+            &vec![memory_id(1).to_string()],
+            "selected memory ids",
+        )?;
+
+        let other_request = ContextRequest::from_query("prepare release")
+            .map_err(|error| format!("other request rejected: {error:?}"))?;
+        let other_draft = assemble_draft(
+            other_request.query.clone(),
+            other_request.budget,
+            vec![candidate(1, 1.0, 0.5, 10)?],
+        )
+        .map_err(|error| format!("other draft rejected: {error:?}"))?;
+        let other_response = ContextResponse::new(other_request, other_draft, Vec::new())
+            .map_err(|error| format!("other response rejected: {error:?}"))?;
+        let other = PackRevisionMeshMetadata::for_context_response(
+            &other_response,
+            MeshCommandMode::Revisable,
+            "context",
+        )
+        .ok_or_else(|| "other revisable response should emit revision metadata".to_owned())?;
+        ensure(
+            first.token != other.token,
+            "query fingerprint must influence revision token",
         )
     }
 
