@@ -95,6 +95,23 @@
         }
       }
     },
+    "ee_context_pack_l2_warm": {
+      "p50_ms": 10.0,
+      "p99_ms": 50.0,
+      "tolerance_pct_p50": 20,
+      "tolerance_pct_p99": 50,
+      "unstable": false,
+      "scales": {
+        "warm_hit_json": {
+          "p50_ms": 10.0,
+          "p99_ms": 50.0
+        },
+        "4_concurrent_identical_requests": {
+          "p50_ms": 10.0,
+          "p99_ms": 50.0
+        }
+      }
+    },
     "ee_why": {
       "p50_ms": 25.0,
       "p99_ms": 100.0,

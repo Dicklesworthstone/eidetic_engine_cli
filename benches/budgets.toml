@@ -34,6 +34,7 @@ benches = [
   "remember",
   "search",
   "context",
+  "context_l2_warm",
   "context_with_ppr",
   "pack_size",
   "why",
@@ -66,6 +67,7 @@ benches = [
   "remember",
   "search",
   "context",
+  "context_l2_warm",
   "context_with_ppr",
   "pack_size",
   "why",
@@ -114,6 +116,11 @@ description = "Build 4k-token context pack with PPR rerank enabled on a 1k-memor
 p50_ms_max = 1000.0
 p99_ms_max = 10000.0
 description = "S4 resource-aware context pack SLO benchmark across 1k, 10k, and stress-only 100k memory fixtures"
+
+[operations.ee_context_pack_l2_warm]
+p50_ms_max = 10.0
+p99_ms_max = 50.0
+description = "Warm L2 context-pack JSON retrieval for identical context requests; target evidence is one fresh assembly followed by three L2 hits"
 
 [operations.ee_pack_size]
 p50_ms_max = 95.0

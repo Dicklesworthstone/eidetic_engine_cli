@@ -435,6 +435,39 @@ run_criterion_bench() {
     fi
 }
 
+run_context_l2_warm_bench() {
+    bench="context"
+    key="ee_context_pack_l2_warm"
+
+    echo "" >&2
+    echo "[*] Benchmark: context_l2_warm" >&2
+    # BENCH_ARGS intentionally expands into separate Criterion CLI arguments.
+    # shellcheck disable=SC2086
+    if output=$(cargo bench --bench "$bench" -- ee_context_pack_l2_warm $BENCH_ARGS 2>&1); then
+        status=0
+    else
+        status=$?
+    fi
+    if [ "$status" -eq 0 ]; then
+        printf '%s\n' "$output" >&2
+        parsed=$(parse_time_value "$output" || true)
+        if [ -n "$parsed" ]; then
+            raw_value=$(printf '%s\n' "$parsed" | awk '{print $1}')
+            raw_unit=$(printf '%s\n' "$parsed" | awk '{print $2}')
+            p50_ms=$(to_ms "$raw_value" "$raw_unit")
+        else
+            p50_ms=null
+        fi
+        append_measured_ms "$key" "$p50_ms"
+        echo "[+] context_l2_warm: p50=${p50_ms}ms" >&2
+    else
+        printf '%s\n' "$output" >&2
+        append_result "$key" "failed" null null null null null
+        echo "[-] context_l2_warm: FAILED" >&2
+        FAILED=true
+    fi
+}
+
 run_pack_replay_freshness_smoke() {
     echo "" >&2
     echo "[*] Pack replay/freshness overhead smoke..." >&2
@@ -667,6 +700,10 @@ for bench in $BENCHMARKS; do
         run_criterion_bench "$bench"
     fi
 done
+
+if [ "$PROFILE" != "ci-smoke" ]; then
+    run_context_l2_warm_bench
+fi
 
 if [ "$PROFILE" = "ci-smoke" ]; then
     run_pack_replay_freshness_smoke

@@ -21,8 +21,10 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use ee::cache::pack_l2::{PackL2Cache, PackL2CacheLookup, PackL2CacheOptions};
 use tempfile::TempDir;
 
 use ee::core::context::{
@@ -46,6 +48,14 @@ const REGRESSION_THRESHOLD: f64 = 0.30;
 const S4_RELEASE_CANDIDATE_SCALE: usize = 1_000;
 const S4_NIGHTLY_SCALE: usize = 10_000;
 const S4_STRESS_SCALE: usize = 100_000;
+const L2_WARM_BENCH_GROUP: &str = "ee_context_pack_l2_warm";
+const L2_WARM_BENCH_OPERATION: &str = "ee_context_pack_l2_warm";
+const L2_WARM_BUDGET_P50_MS: f64 = 10.0;
+const L2_WARM_BUDGET_P99_MS: f64 = 50.0;
+const L2_CONCURRENT_IDENTICAL_REQUESTS: usize = 4;
+const L2_EXPECTED_FRESH_ASSEMBLIES: usize = 1;
+const L2_EXPECTED_WARM_HITS: usize =
+    L2_CONCURRENT_IDENTICAL_REQUESTS - L2_EXPECTED_FRESH_ASSEMBLIES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ResourceScale {
@@ -258,6 +268,39 @@ fn performance_timing_ms(performance: &serde_json::Value, name: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
+fn l2_warm_pack_json() -> serde_json::Value {
+    serde_json::json!({
+        "schema": "ee.response.v2",
+        "success": true,
+        "data": {
+            "pack": {
+                "schema": "ee.pack.v2",
+                "hash": "blake3:l2-warm-benchmark-pack",
+                "text": "L2 warm cache benchmark context pack.",
+                "items": [],
+                "meta": {
+                    "operation": L2_WARM_BENCH_OPERATION,
+                    "expectedFreshAssemblies": L2_EXPECTED_FRESH_ASSEMBLIES,
+                    "expectedWarmHits": L2_EXPECTED_WARM_HITS,
+                },
+            },
+        },
+        "degraded": [],
+    })
+}
+
+fn seed_l2_warm_cache(cache_root: &Path) -> (PackL2Cache, String) {
+    let cache = PackL2Cache::new(
+        cache_root.to_path_buf(),
+        PackL2CacheOptions::new(1_048_576, Duration::from_secs(300)),
+    );
+    let key = "blake3:ee-context-pack-l2-warm-benchmark-key".to_owned();
+    cache
+        .put(&key, l2_warm_pack_json())
+        .expect("seed warm L2 pack cache entry");
+    (cache, key)
+}
+
 fn active_bench_profile() -> String {
     std::env::var("EE_BENCH_PROFILE").unwrap_or_else(|_| "manual".to_owned())
 }
@@ -446,11 +489,41 @@ fn bench_context_s4_resource_scales(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark warm L2 JSON retrieval for the context-pack cache gate.
+fn bench_context_l2_warm_cache(c: &mut Criterion) {
+    let mut group = c.benchmark_group(L2_WARM_BENCH_GROUP);
+    let temp_dir = TempDir::new().expect("temp dir");
+    let (cache, key) = seed_l2_warm_cache(&temp_dir.path().join("pack-l2"));
+
+    group.bench_function("warm_hit_json", |b| {
+        b.iter(|| {
+            match cache
+                .get(black_box(key.as_str()))
+                .expect("warm L2 cache lookup")
+            {
+                PackL2CacheLookup::Hit(hit) => {
+                    assert_eq!(hit.key, key, "warm L2 hit should preserve cache key");
+                    black_box(hit.pack_json)
+                }
+                PackL2CacheLookup::Miss(miss) => {
+                    panic!(
+                        "warm L2 cache entry should hit, got miss: {:?}",
+                        miss.reason
+                    );
+                }
+            }
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_context,
     bench_context_memory_scales,
-    bench_context_s4_resource_scales
+    bench_context_s4_resource_scales,
+    bench_context_l2_warm_cache
 );
 criterion_main!(benches);
 
@@ -460,9 +533,12 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        BUDGET_P50_MS, BUDGET_P99_MS, REGRESSION_THRESHOLD, S4_NIGHTLY_SCALE,
-        S4_RELEASE_CANDIDATE_SCALE, S4_RESOURCE_SCALES, S4_STRESS_SCALE,
-        s4_resource_scales_for_profile, seed_database,
+        BUDGET_P50_MS, BUDGET_P99_MS, L2_CONCURRENT_IDENTICAL_REQUESTS,
+        L2_EXPECTED_FRESH_ASSEMBLIES, L2_EXPECTED_WARM_HITS, L2_WARM_BENCH_GROUP,
+        L2_WARM_BENCH_OPERATION, L2_WARM_BUDGET_P50_MS, L2_WARM_BUDGET_P99_MS,
+        REGRESSION_THRESHOLD, S4_NIGHTLY_SCALE, S4_RELEASE_CANDIDATE_SCALE, S4_RESOURCE_SCALES,
+        S4_STRESS_SCALE, l2_warm_pack_json, s4_resource_scales_for_profile, seed_database,
+        seed_l2_warm_cache,
     };
 
     #[test]
@@ -542,5 +618,29 @@ mod tests {
                 S4_STRESS_SCALE
             ]
         );
+    }
+
+    #[test]
+    fn l2_warm_cache_benchmark_contract_matches_gate() -> Result<(), String> {
+        assert_eq!(L2_WARM_BENCH_GROUP, "ee_context_pack_l2_warm");
+        assert_eq!(L2_WARM_BENCH_OPERATION, "ee_context_pack_l2_warm");
+        assert!(
+            L2_WARM_BUDGET_P50_MS > 0.0 && L2_WARM_BUDGET_P99_MS >= L2_WARM_BUDGET_P50_MS,
+            "warm L2 benchmark budgets must be positive and monotonic"
+        );
+        assert_eq!(L2_CONCURRENT_IDENTICAL_REQUESTS, 4);
+        assert_eq!(L2_EXPECTED_FRESH_ASSEMBLIES, 1);
+        assert_eq!(L2_EXPECTED_WARM_HITS, 3);
+
+        let temp_dir = TempDir::new().map_err(|error| error.to_string())?;
+        let (cache, key) = seed_l2_warm_cache(&temp_dir.path().join("pack-l2"));
+        let hit = match cache.get(&key).map_err(|error| error.to_string())? {
+            super::PackL2CacheLookup::Hit(hit) => hit,
+            super::PackL2CacheLookup::Miss(miss) => {
+                return Err(format!("seeded warm L2 entry missed: {:?}", miss.reason));
+            }
+        };
+        assert_eq!(hit.pack_json, l2_warm_pack_json());
+        Ok(())
     }
 }
