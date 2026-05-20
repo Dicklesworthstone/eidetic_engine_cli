@@ -113,7 +113,7 @@ fn evidence_for_symbol<'a>(
     evidence_id: &'a str,
     provenance_uri: &'a str,
     path: &'a str,
-    symbol: &SymbolRecord,
+    symbol: &'a SymbolRecord,
 ) -> SymbolEvidenceInput<'a> {
     SymbolEvidenceInput::new(
         source_kind,
@@ -124,6 +124,7 @@ fn evidence_for_symbol<'a>(
         symbol.range.end_line,
         0.9371,
     )
+    .with_expected_symbol(symbol.id.as_str(), symbol.rename_fingerprint.as_str())
 }
 
 fn assert_equivalent_link_sets(
@@ -155,12 +156,15 @@ fn assert_equivalent_link_sets(
         forward_ids == reversed_ids,
         format!("link order must be canonical after sorting: {forward_ids:?} != {reversed_ids:?}"),
     )?;
+    let non_exact: Vec<_> = forward
+        .links
+        .iter()
+        .filter(|link| link.resolution != SymbolEvidenceResolution::ExactSymbol)
+        .map(|link| (link.evidence_id.as_str(), link.resolution))
+        .collect();
     ensure(
-        forward
-            .links
-            .iter()
-            .all(|link| link.resolution == SymbolEvidenceResolution::ExactSymbol),
-        "all fixture links should resolve to exact symbols",
+        non_exact.is_empty(),
+        format!("all fixture links should resolve to exact symbols: {non_exact:?}"),
     )?;
     Ok(())
 }
