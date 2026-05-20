@@ -96,6 +96,7 @@ pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V1: &str = "ee.pack.l2_cache_key.v1";
 const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V1: &str = "ee.pack.l2_context_response.v1";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
 const CONTEXT_CHANGED_SYMBOL_BOOST: f32 = 0.05;
+const CONTEXT_CHANGED_SYMBOL_ADJACENCY_LINE_WINDOW: u32 = 20;
 
 #[derive(Debug)]
 struct PackSlotGuard {
@@ -5238,6 +5239,7 @@ fn apply_changed_symbol_context_boost(
         .iter()
         .map(|symbol| (symbol.id.as_str(), symbol))
         .collect::<BTreeMap<_, _>>();
+    let selected_symbols = selected_changed_symbols(&snapshot.symbols, &selectors);
     let mut matches = BTreeMap::<MemoryId, ChangedSymbolMatch>::new();
     for link in &link_set.links {
         let Some(symbol_id) = link.symbol_id.as_deref() else {
@@ -5246,16 +5248,19 @@ fn apply_changed_symbol_context_boost(
         let Some(symbol) = symbols_by_id.get(symbol_id) else {
             continue;
         };
-        if symbol_matches_selectors(symbol, &selectors) {
+        if let Some((anchor, match_kind)) =
+            changed_symbol_boost_anchor(symbol, &selectors, &selected_symbols)
+        {
             let reason = format!(
-                "{}:{}:{}",
+                "{}:{}:{}:{}",
                 symbol.path,
                 symbol.canonical_name,
-                link.reason.as_str()
+                link.reason.as_str(),
+                changed_symbol_boost_reason(match_kind, anchor)
             );
             if let Ok(memory_id) = MemoryId::from_str(&link.evidence_id) {
                 matches.entry(memory_id).or_insert(ChangedSymbolMatch {
-                    canonical_name: symbol.canonical_name.clone(),
+                    canonical_name: anchor.canonical_name.clone(),
                     reason,
                 });
             }
@@ -5450,6 +5455,69 @@ fn symbol_matches_selectors(
         .next()
         .map(normalize_symbol_key)
         .is_some_and(|name| selectors.contains(&name))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChangedSymbolBoostMatchKind {
+    Direct,
+    Adjacent,
+}
+
+fn selected_changed_symbols<'a>(
+    symbols: &'a [crate::models::SymbolRecord],
+    selectors: &BTreeSet<String>,
+) -> Vec<&'a crate::models::SymbolRecord> {
+    symbols
+        .iter()
+        .filter(|symbol| symbol_matches_selectors(symbol, selectors))
+        .collect()
+}
+
+fn changed_symbol_boost_anchor<'a>(
+    symbol: &'a crate::models::SymbolRecord,
+    selectors: &BTreeSet<String>,
+    selected_symbols: &[&'a crate::models::SymbolRecord],
+) -> Option<(&'a crate::models::SymbolRecord, ChangedSymbolBoostMatchKind)> {
+    if symbol_matches_selectors(symbol, selectors) {
+        return Some((symbol, ChangedSymbolBoostMatchKind::Direct));
+    }
+    selected_symbols
+        .iter()
+        .copied()
+        .find(|anchor| symbol_is_adjacent_to_changed_symbol(symbol, anchor))
+        .map(|anchor| (anchor, ChangedSymbolBoostMatchKind::Adjacent))
+}
+
+fn symbol_is_adjacent_to_changed_symbol(
+    symbol: &crate::models::SymbolRecord,
+    anchor: &crate::models::SymbolRecord,
+) -> bool {
+    if symbol.id == anchor.id || symbol.path != anchor.path {
+        return false;
+    }
+    symbol_line_gap(symbol, anchor) <= CONTEXT_CHANGED_SYMBOL_ADJACENCY_LINE_WINDOW
+}
+
+fn symbol_line_gap(left: &crate::models::SymbolRecord, right: &crate::models::SymbolRecord) -> u32 {
+    if left.range.end_line < right.range.start_line {
+        right.range.start_line.saturating_sub(left.range.end_line)
+    } else if right.range.end_line < left.range.start_line {
+        left.range.start_line.saturating_sub(right.range.end_line)
+    } else {
+        0
+    }
+}
+
+fn changed_symbol_boost_reason(
+    match_kind: ChangedSymbolBoostMatchKind,
+    anchor: &crate::models::SymbolRecord,
+) -> String {
+    match match_kind {
+        ChangedSymbolBoostMatchKind::Direct => "direct".to_string(),
+        ChangedSymbolBoostMatchKind::Adjacent => {
+            format!("adjacent_to={}", anchor.canonical_name)
+        }
+    }
 }
 
 fn normalize_symbol_selector(raw: &str) -> Option<String> {
@@ -7710,6 +7778,71 @@ mod tests {
         assert!(
             degraded.is_empty(),
             "fresh symbol extraction should not degrade: {degraded:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn changed_symbol_context_boost_includes_adjacent_symbol_evidence() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let src_dir = tempdir.path().join("src");
+        std::fs::create_dir_all(&src_dir).map_err(|error| error.to_string())?;
+        let far_padding = "\n".repeat(25);
+        std::fs::write(
+            src_dir.join("lib.rs"),
+            format!(
+                "\
+pub fn changed_symbol() -> u64 {
+    1
+}
+
+pub fn adjacent_symbol() -> u64 {
+    2
+}
+{far_padding}
+pub fn far_symbol() -> u64 {
+    3
+}
+"
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let changed = MemoryId::from_uuid(uuid::Uuid::from_u128(1401));
+        let adjacent = MemoryId::from_uuid(uuid::Uuid::from_u128(1402));
+        let far = MemoryId::from_uuid(uuid::Uuid::from_u128(1403));
+        let mut candidates = vec![
+            symbol_candidate(changed, 0.40, tempdir.path(), "src/lib.rs", 1)?,
+            symbol_candidate(adjacent, 0.47, tempdir.path(), "src/lib.rs", 5)?,
+            symbol_candidate(far, 0.60, tempdir.path(), "src/lib.rs", 34)?,
+        ];
+        let mut degraded = Vec::new();
+
+        let metrics = super::apply_changed_symbol_context_boost(
+            tempdir.path(),
+            &["changed_symbol".to_owned()],
+            false,
+            &mut candidates,
+            &mut degraded,
+        );
+        super::sort_context_candidates(&mut candidates);
+
+        assert_eq!(metrics.boosted_candidates, 2);
+        assert_eq!(candidates[0].memory_id, far);
+        let adjacent_candidate = candidates
+            .iter()
+            .find(|candidate| candidate.memory_id == adjacent)
+            .ok_or("adjacent candidate should be present")?;
+        assert!(
+            adjacent_candidate
+                .why
+                .contains("adjacent_to=changed_symbol"),
+            "adjacent symbol boost should explain the anchor: {}",
+            adjacent_candidate.why
+        );
+        assert!(
+            degraded.is_empty(),
+            "fresh adjacent-symbol extraction should not degrade: {degraded:?}"
         );
         Ok(())
     }
