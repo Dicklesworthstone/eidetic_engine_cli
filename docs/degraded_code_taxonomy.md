@@ -487,6 +487,14 @@ memory bodies in `sources[]`.
 | `replay_fidelity` | info | bd-17c65.14.15.5 (N15.4) |
 | `stable_unit` | info | bd-17c65.14.3 (N3) — replay verification |
 
+#### Symbol graph contracts (4)
+| Code | Severity | Bead |
+|------|----------|------|
+| `ambiguous_containing_symbols` | warning | bd-2xuu7.6 |
+| `source_unparsable` | medium | bd-2xuu7.6 |
+| `stale_line_span` | warning | bd-2xuu7.6 |
+| `symbol_index_stale` | warning | bd-2xuu7.6 |
+
 #### Graph snapshot (6 — response_time variants of graph_unavailable)
 | Code | Severity | Bead |
 |------|----------|------|

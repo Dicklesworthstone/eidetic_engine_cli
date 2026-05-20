@@ -4,6 +4,7 @@ pub const SYMBOL_SNAPSHOT_SCHEMA_V1: &str = "ee.symbol_snapshot.v1";
 pub const SYMBOL_EVIDENCE_LINKS_SCHEMA_V1: &str = "ee.symbol_evidence_links.v1";
 pub const SYMBOL_ID_PREFIX: &str = "sym_v1_";
 pub const SYMBOL_EVIDENCE_LINK_ID_PREFIX: &str = "sym_link_v1_";
+pub const SYMBOL_INDEX_STALE_CODE: &str = "symbol_index_stale";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -147,6 +148,19 @@ pub enum SymbolEvidenceLinkDegradationCode {
     SymbolDeleted,
 }
 
+impl SymbolEvidenceLinkDegradationCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StaleLineSpan => "stale_line_span",
+            Self::SourceFileMissing => "source_file_missing",
+            Self::AmbiguousContainingSymbols => "ambiguous_containing_symbols",
+            Self::SymbolRenamed => "symbol_renamed",
+            Self::SymbolDeleted => "symbol_deleted",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SymbolSourceFile {
@@ -252,6 +266,21 @@ pub enum SymbolGraphDegradationCode {
     SourceTooLarge,
     SourceUnreadable,
     SourceUnparsable,
+    SymbolIndexStale,
+}
+
+impl SymbolGraphDegradationCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SourceMissing => "source_missing",
+            Self::SourceNonRegular => "source_non_regular",
+            Self::SourceTooLarge => "source_too_large",
+            Self::SourceUnreadable => "source_unreadable",
+            Self::SourceUnparsable => "source_unparsable",
+            Self::SymbolIndexStale => SYMBOL_INDEX_STALE_CODE,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]

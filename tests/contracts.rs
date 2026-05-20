@@ -136,6 +136,9 @@ mod singleflight_key_schema;
 #[path = "contracts/symbol_snapshot_schema.rs"]
 mod symbol_snapshot_schema;
 
+#[path = "contracts/symbol_graph_artifacts.rs"]
+mod symbol_graph_artifacts;
+
 #[path = "contracts/graph_schemas_v1.rs"]
 mod graph_schemas_v1;
 
