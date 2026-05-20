@@ -24,7 +24,7 @@
 //! byte-identical JSON after the caller strips volatile fields such as
 //! `capturedAt`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
@@ -46,6 +46,18 @@ pub const STALE_HOTSET_CODE: &str = "cache_hotset_stale";
 /// hotset structs. If any entry carries a different marker the manifest
 /// refuses to admit it (see [`HotsetManifest::is_redaction_safe`]).
 pub const REDACTION_STATUS: &str = "content_not_stored";
+
+/// JSON Schema id for the advisory dry-run plan that predicts context
+/// hotsets from swarm coordination signals.
+pub const PREWARM_PLAN_SCHEMA: &str = "ee.cache.hotset_prewarm_plan.v1";
+
+/// Degraded code emitted when the prewarm planner receives no usable signal.
+pub const PREWARM_NO_SIGNAL_CODE: &str = "hotset_prewarm_no_signals";
+
+/// Redaction posture for prewarm plans. Query text, mail bodies, bead titles,
+/// and other raw coordination text are used only in-process to derive BLAKE3
+/// query-shape keys; the plan itself exposes hashes and source classes.
+pub const PREWARM_REDACTION_STATUS: &str = "query_hashes_only";
 
 /// Generation gate the manifest evaluates entries against. Entries whose
 /// `generation` is strictly less than the active workspace generation or the
@@ -122,6 +134,435 @@ impl HotsetBudget {
             "currentBytes": self.current_bytes,
         })
     }
+}
+
+/// Source class for an advisory context-hotset prewarm signal.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum PrewarmSignalSource {
+    Beads,
+    Bv,
+    AgentMail,
+    VerificationBroker,
+    HostProfile,
+}
+
+impl PrewarmSignalSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Beads => "beads",
+            Self::Bv => "bv",
+            Self::AgentMail => "agent_mail",
+            Self::VerificationBroker => "verification_broker",
+            Self::HostProfile => "host_profile",
+        }
+    }
+
+    const fn weight(self) -> u64 {
+        match self {
+            Self::Beads => 48,
+            Self::Bv => 44,
+            Self::AgentMail => 36,
+            Self::VerificationBroker => 32,
+            Self::HostProfile => 20,
+        }
+    }
+}
+
+/// Redaction-safe input signal for advisory context hotset prewarm planning.
+///
+/// `summary` and `labels` may contain raw coordination text, so they are never
+/// emitted by [`HotsetPrewarmPlan::to_json`]. Callers can construct these from
+/// Beads, BV, Agent Mail subjects, verification blockers, or host-profile
+/// posture without coupling the cache module to those services.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrewarmSignal {
+    source: PrewarmSignalSource,
+    stable_id: String,
+    summary: String,
+    labels: Vec<String>,
+    priority: u8,
+}
+
+impl PrewarmSignal {
+    #[must_use]
+    pub fn new(
+        source: PrewarmSignalSource,
+        stable_id: impl Into<String>,
+        summary: impl Into<String>,
+    ) -> Self {
+        Self {
+            source,
+            stable_id: stable_id.into(),
+            summary: summary.into(),
+            labels: Vec::new(),
+            priority: 5,
+        }
+    }
+
+    #[must_use]
+    pub fn with_labels(mut self, labels: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.labels = labels.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
+    pub const fn with_priority(mut self, priority: u8) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    #[must_use]
+    pub const fn source(&self) -> PrewarmSignalSource {
+        self.source
+    }
+
+    #[must_use]
+    pub fn stable_id(&self) -> &str {
+        &self.stable_id
+    }
+}
+
+/// One candidate query shape predicted by the dry-run prewarm planner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HotsetPrewarmCandidate {
+    search_entry: SearchHotsetEntry,
+    source_kinds: Vec<&'static str>,
+    signal_ref_hashes: Vec<String>,
+    token_count: usize,
+    score: u64,
+}
+
+impl HotsetPrewarmCandidate {
+    #[must_use]
+    pub fn query_shape_key(&self) -> &str {
+        &self.search_entry.key
+    }
+
+    #[must_use]
+    pub const fn score(&self) -> u64 {
+        self.score
+    }
+
+    #[must_use]
+    pub const fn estimated_bytes(&self) -> usize {
+        self.search_entry.estimated_bytes
+    }
+
+    #[must_use]
+    pub const fn search_entry(&self) -> &SearchHotsetEntry {
+        &self.search_entry
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "queryShapeKey": &self.search_entry.key,
+            "kind": self.search_entry.kind.as_str(),
+            "generation": self.search_entry.generation,
+            "sourceKinds": &self.source_kinds,
+            "signalRefHashes": &self.signal_ref_hashes,
+            "tokenCount": self.token_count,
+            "score": self.score,
+            "estimatedBytes": self.search_entry.estimated_bytes,
+            "redactionStatus": PREWARM_REDACTION_STATUS,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PrewarmCandidateAccumulator {
+    entry: SearchHotsetEntry,
+    source_kinds: BTreeSet<&'static str>,
+    signal_ref_hashes: BTreeSet<String>,
+    token_count: usize,
+    score: u64,
+}
+
+impl PrewarmCandidateAccumulator {
+    fn new(entry: SearchHotsetEntry, signal: &PrewarmSignal, token_count: usize) -> Self {
+        let mut source_kinds = BTreeSet::new();
+        source_kinds.insert(signal.source.as_str());
+        let mut signal_ref_hashes = BTreeSet::new();
+        signal_ref_hashes.insert(signal_ref_hash(signal));
+        Self {
+            entry,
+            source_kinds,
+            signal_ref_hashes,
+            token_count,
+            score: prewarm_signal_score(signal, token_count),
+        }
+    }
+
+    fn merge(&mut self, entry: SearchHotsetEntry, signal: &PrewarmSignal, token_count: usize) {
+        self.entry.hit_count = self.entry.hit_count.saturating_add(entry.hit_count);
+        self.entry.estimated_bytes = self.entry.estimated_bytes.max(entry.estimated_bytes);
+        self.entry.generation = self.entry.generation.max(entry.generation);
+        self.source_kinds.insert(signal.source.as_str());
+        self.signal_ref_hashes.insert(signal_ref_hash(signal));
+        self.token_count = self.token_count.max(token_count);
+        self.score = self
+            .score
+            .saturating_add(prewarm_signal_score(signal, token_count));
+    }
+
+    fn into_candidate(self) -> HotsetPrewarmCandidate {
+        HotsetPrewarmCandidate {
+            search_entry: self.entry,
+            source_kinds: self.source_kinds.into_iter().collect(),
+            signal_ref_hashes: self.signal_ref_hashes.into_iter().collect(),
+            token_count: self.token_count,
+            score: self.score,
+        }
+    }
+}
+
+/// Advisory, side-effect-free context hotset prewarm plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HotsetPrewarmPlan {
+    generation: u64,
+    budget: HotsetBudget,
+    input_signal_count: usize,
+    skipped_signal_count: usize,
+    max_candidates: usize,
+    candidates: Vec<HotsetPrewarmCandidate>,
+}
+
+impl HotsetPrewarmPlan {
+    #[must_use]
+    pub const fn schema(&self) -> &'static str {
+        PREWARM_PLAN_SCHEMA
+    }
+
+    #[must_use]
+    pub fn candidates(&self) -> &[HotsetPrewarmCandidate] {
+        &self.candidates
+    }
+
+    #[must_use]
+    pub const fn input_signal_count(&self) -> usize {
+        self.input_signal_count
+    }
+
+    #[must_use]
+    pub const fn skipped_signal_count(&self) -> usize {
+        self.skipped_signal_count
+    }
+
+    #[must_use]
+    pub fn estimated_memory_bytes(&self) -> usize {
+        self.candidates
+            .iter()
+            .map(HotsetPrewarmCandidate::estimated_bytes)
+            .sum()
+    }
+
+    #[must_use]
+    pub fn expected_latency_win_ms(&self) -> u64 {
+        self.candidates
+            .iter()
+            .map(|candidate| {
+                8_u64
+                    .saturating_add(candidate.search_entry.hit_count.min(8))
+                    .saturating_add((candidate.score / 32).min(16))
+            })
+            .sum()
+    }
+
+    #[must_use]
+    pub fn degraded_codes(&self) -> Vec<Value> {
+        let mut degraded = Vec::new();
+        if self.candidates.is_empty() {
+            degraded.push(json!({
+                "code": PREWARM_NO_SIGNAL_CODE,
+                "severity": "low",
+                "message": "No usable Beads, BV, Agent Mail, verification, or host-profile signals were available for context hotset prewarm.",
+                "repair": "Capture at least one current coordination signal before running prewarm.",
+                "details": {
+                    "inputSignalCount": self.input_signal_count,
+                    "skippedSignalCount": self.skipped_signal_count,
+                }
+            }));
+        }
+        degraded
+    }
+
+    #[must_use]
+    pub fn search_hotset_entries(&self) -> Vec<SearchHotsetEntry> {
+        self.candidates
+            .iter()
+            .map(|candidate| candidate.search_entry.clone())
+            .collect()
+    }
+
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let remaining_entries = self
+            .budget
+            .max_entries
+            .saturating_sub(self.budget.current_entries);
+        let remaining_bytes = self
+            .budget
+            .max_bytes
+            .saturating_sub(self.budget.current_bytes);
+        let estimated_bytes = self.estimated_memory_bytes();
+        let cache_status = if self.budget.max_entries == 0 && self.budget.max_bytes == 0 {
+            "unbudgeted"
+        } else if self.candidates.len() <= remaining_entries && estimated_bytes <= remaining_bytes {
+            "admissible"
+        } else {
+            "over_budget"
+        };
+
+        json!({
+            "schema": PREWARM_PLAN_SCHEMA,
+            "generation": self.generation,
+            "redactionStatus": PREWARM_REDACTION_STATUS,
+            "inputSignalCount": self.input_signal_count,
+            "skippedSignalCount": self.skipped_signal_count,
+            "candidateCount": self.candidates.len(),
+            "maxCandidates": self.max_candidates,
+            "estimatedMemoryBytes": estimated_bytes,
+            "expectedLatencyWinMs": self.expected_latency_win_ms(),
+            "indexPosture": {
+                "status": if self.candidates.is_empty() { "cold" } else { "prewarm_recommended" },
+                "generation": self.generation,
+            },
+            "graphPosture": {
+                "status": "not_required_for_dry_run",
+            },
+            "cachePosture": {
+                "status": cache_status,
+                "remainingEntries": remaining_entries,
+                "remainingBytes": remaining_bytes,
+            },
+            "admissionBudget": self.budget.to_json(),
+            "searchEntries": self
+                .candidates
+                .iter()
+                .map(|candidate| candidate.search_entry.data_json())
+                .collect::<Vec<_>>(),
+            "candidates": self
+                .candidates
+                .iter()
+                .map(HotsetPrewarmCandidate::to_json)
+                .collect::<Vec<_>>(),
+            "degraded": self.degraded_codes(),
+        })
+    }
+}
+
+/// Predict a bounded, redaction-safe set of query shapes for `ee context`
+/// prewarm. This function is pure and advisory: it does not read Beads, BV,
+/// Agent Mail, caches, files, or databases, and it does not mutate derived
+/// state. Callers pass already-captured coordination summaries.
+#[must_use]
+pub fn plan_context_hotset_prewarm(
+    signals: impl IntoIterator<Item = PrewarmSignal>,
+    generation: u64,
+    budget: HotsetBudget,
+    max_candidates: usize,
+) -> HotsetPrewarmPlan {
+    let mut input_signal_count = 0_usize;
+    let mut skipped_signal_count = 0_usize;
+    let mut merged: BTreeMap<String, PrewarmCandidateAccumulator> = BTreeMap::new();
+
+    for signal in signals {
+        input_signal_count = input_signal_count.saturating_add(1);
+        let tokens = prewarm_signal_tokens(&signal);
+        if tokens.is_empty() {
+            skipped_signal_count = skipped_signal_count.saturating_add(1);
+            continue;
+        }
+        let query_shape = tokens.join(" ");
+        let Some(entry) = SearchHotsetEntry::query_shape(&query_shape, generation, 1) else {
+            skipped_signal_count = skipped_signal_count.saturating_add(1);
+            continue;
+        };
+        let key = entry.key.clone();
+        if let Some(existing) = merged.get_mut(&key) {
+            existing.merge(entry, &signal, tokens.len());
+        } else {
+            merged.insert(
+                key,
+                PrewarmCandidateAccumulator::new(entry, &signal, tokens.len()),
+            );
+        }
+    }
+
+    let mut candidates: Vec<_> = merged
+        .into_values()
+        .map(PrewarmCandidateAccumulator::into_candidate)
+        .collect();
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.query_shape_key().cmp(right.query_shape_key()))
+    });
+    if max_candidates > 0 {
+        candidates.truncate(max_candidates);
+    }
+
+    HotsetPrewarmPlan {
+        generation,
+        budget,
+        input_signal_count,
+        skipped_signal_count,
+        max_candidates,
+        candidates,
+    }
+}
+
+fn prewarm_signal_tokens(signal: &PrewarmSignal) -> Vec<String> {
+    let mut tokens = Vec::new();
+    collect_prewarm_tokens(&signal.summary, &mut tokens);
+    for label in &signal.labels {
+        collect_prewarm_tokens(label, &mut tokens);
+    }
+    tokens.sort();
+    tokens.dedup();
+    tokens.truncate(12);
+    tokens
+}
+
+fn collect_prewarm_tokens(input: &str, tokens: &mut Vec<String>) {
+    let mut token = String::new();
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            token.push(ch.to_ascii_lowercase());
+            if token.len() >= 48 {
+                finish_prewarm_token(&mut token, tokens);
+            }
+        } else {
+            finish_prewarm_token(&mut token, tokens);
+        }
+    }
+    finish_prewarm_token(&mut token, tokens);
+}
+
+fn finish_prewarm_token(token: &mut String, tokens: &mut Vec<String>) {
+    if token.len() >= 2 {
+        tokens.push(std::mem::take(token));
+    } else {
+        token.clear();
+    }
+}
+
+fn prewarm_signal_score(signal: &PrewarmSignal, token_count: usize) -> u64 {
+    let priority = signal.priority.min(9);
+    let priority_weight = u64::from(10_u8.saturating_sub(priority)).saturating_mul(8);
+    let token_weight =
+        u64::from(u8::try_from(token_count.min(12)).expect("capped token count always fits in u8"));
+    signal
+        .source
+        .weight()
+        .saturating_add(priority_weight)
+        .saturating_add(token_weight)
+}
+
+fn signal_ref_hash(signal: &PrewarmSignal) -> String {
+    let digest_input = format!("{}:{}", signal.source.as_str(), signal.stable_id);
+    format!("blake3:{}", blake3::hash(digest_input.as_bytes()).to_hex())
 }
 
 /// Builder for [`HotsetManifest`]. The builder owns the deterministic merge
@@ -698,5 +1139,116 @@ mod tests {
         assert_eq!(json["memoryBudget"]["maxBytes"], 8 * 1024);
         assert_eq!(json["memoryBudget"]["currentEntries"], 7);
         assert_eq!(json["memoryBudget"]["currentBytes"], 512);
+    }
+
+    fn bead_signal(id: &str, summary: &str) -> PrewarmSignal {
+        PrewarmSignal::new(PrewarmSignalSource::Beads, id, summary)
+            .with_labels(["context", "prewarm", "swarm-scale"])
+            .with_priority(2)
+    }
+
+    #[test]
+    fn prewarm_plan_is_deterministic_for_same_signals() -> TestResult {
+        let bead = bead_signal(
+            "bd-1zb7k.17.3",
+            "Context hotset prewarm from Beads BV and Agent Mail signals",
+        );
+        let mail = PrewarmSignal::new(
+            PrewarmSignalSource::AgentMail,
+            "thread-hotset",
+            "Context hotset prewarm from Beads BV and Agent Mail signals",
+        )
+        .with_labels(["context", "prewarm", "swarm-scale"])
+        .with_priority(2);
+
+        let budget = HotsetBudget::new(16, 16 * 1024);
+        let p1 = plan_context_hotset_prewarm([bead.clone(), mail.clone()], 42, budget, 8);
+        let p2 = plan_context_hotset_prewarm([mail, bead], 42, budget, 8);
+
+        let s1 = serde_json::to_string(&p1.to_json()).map_err(|err| err.to_string())?;
+        let s2 = serde_json::to_string(&p2.to_json()).map_err(|err| err.to_string())?;
+        assert_eq!(s1, s2, "prewarm plan JSON must be deterministic");
+        assert_eq!(p1.schema(), "ee.cache.hotset_prewarm_plan.v1");
+        assert_eq!(p1.input_signal_count(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn prewarm_plan_merges_duplicate_query_shapes_across_sources() -> TestResult {
+        let summary = "Shard fanout global timeline audit chain";
+        let bead = PrewarmSignal::new(PrewarmSignalSource::Beads, "bd-f6jfs.6", summary)
+            .with_labels(["audit", "shard"])
+            .with_priority(1);
+        let bv = PrewarmSignal::new(PrewarmSignalSource::Bv, "bv-bottleneck-1", summary)
+            .with_labels(["audit", "shard"])
+            .with_priority(1);
+
+        let plan = plan_context_hotset_prewarm([bead, bv], 7, HotsetBudget::new(8, 8 * 1024), 8);
+
+        assert_eq!(plan.candidates().len(), 1);
+        let json = plan.to_json();
+        let candidate = &json["candidates"][0];
+        assert_eq!(candidate["sourceKinds"], json!(["beads", "bv"]));
+        assert_eq!(
+            candidate["signalRefHashes"].as_array().map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(json["searchEntries"].as_array().map(Vec::len), Some(1));
+        assert_eq!(json["cachePosture"]["status"], "admissible");
+        Ok(())
+    }
+
+    #[test]
+    fn prewarm_plan_caps_candidates_by_score_then_hash() {
+        let high = bead_signal("bd-high", "context pack prewarm hot path").with_priority(1);
+        let low = PrewarmSignal::new(
+            PrewarmSignalSource::HostProfile,
+            "host-cold",
+            "host profile low memory pressure",
+        )
+        .with_priority(8);
+
+        let uncapped = plan_context_hotset_prewarm(
+            [high.clone(), low.clone()],
+            9,
+            HotsetBudget::new(8, 8 * 1024),
+            0,
+        );
+        assert_eq!(uncapped.candidates().len(), 2);
+
+        let capped = plan_context_hotset_prewarm([high, low], 9, HotsetBudget::new(8, 8 * 1024), 1);
+        assert_eq!(capped.candidates().len(), 1);
+        assert!(
+            capped.candidates()[0].score() >= uncapped.candidates()[1].score(),
+            "highest-score candidate should survive cap"
+        );
+    }
+
+    #[test]
+    fn prewarm_plan_does_not_emit_raw_signal_text() -> TestResult {
+        let secret = "DATABASE_URL=postgres://user:hunter2@host/db";
+        let mail = PrewarmSignal::new(PrewarmSignalSource::AgentMail, "thread-secret", secret)
+            .with_labels(["credential:do-not-leak", "context"])
+            .with_priority(1);
+
+        let plan = plan_context_hotset_prewarm([mail], 3, HotsetBudget::new(8, 8 * 1024), 8);
+        let serialized = serde_json::to_string(&plan.to_json()).map_err(|err| err.to_string())?;
+
+        assert!(!serialized.contains("hunter2"));
+        assert!(!serialized.contains("DATABASE_URL"));
+        assert!(!serialized.contains("credential:do-not-leak"));
+        assert!(serialized.contains("query_hashes_only"));
+        Ok(())
+    }
+
+    #[test]
+    fn prewarm_plan_empty_inputs_surface_degraded_code() {
+        let plan = plan_context_hotset_prewarm([], 1, HotsetBudget::new(8, 8 * 1024), 8);
+        assert!(plan.candidates().is_empty());
+        assert_eq!(plan.skipped_signal_count(), 0);
+
+        let json = plan.to_json();
+        assert_eq!(json["candidateCount"], 0);
+        assert_eq!(json["degraded"][0]["code"], "hotset_prewarm_no_signals");
     }
 }
