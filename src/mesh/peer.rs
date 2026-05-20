@@ -22,6 +22,8 @@ pub const PEER_ENROLLMENT_CAPABILITY_MISMATCH_CODE: &str =
     "mesh_peer_capability_handshake_mismatch";
 pub const PEER_KEY_ROTATION_REVOKED_CODE: &str = "mesh_peer_key_rotation_revoked";
 pub const PEER_UNKNOWN_ATTEMPT_DENIED_CODE: &str = "mesh_peer_unknown_attempt_denied";
+pub const MESH_PEER_E2E_SURFACE: &str = "mesh_peer_enrollment";
+pub const TEST_EVENT_SCHEMA_V1: &str = "ee.test_event.v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -182,6 +184,29 @@ impl MeshPeerState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshPeerEnrollmentScenario {
+    Pair,
+    Deny,
+    Rotate,
+    Revoke,
+    UnknownPeer,
+}
+
+impl MeshPeerEnrollmentScenario {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pair => "pair",
+            Self::Deny => "deny",
+            Self::Rotate => "rotate",
+            Self::Revoke => "revoke",
+            Self::UnknownPeer => "unknown_peer",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshPeerEndpoint {
@@ -311,6 +336,23 @@ pub struct MeshPeerCommandReport {
     pub next_commands: Vec<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshPeerTestEvent {
+    pub schema: &'static str,
+    pub surface: &'static str,
+    pub scenario: MeshPeerEnrollmentScenario,
+    pub phase: &'static str,
+    pub command: &'static str,
+    pub success: bool,
+    pub peer_id: Option<String>,
+    pub denied_code: Option<&'static str>,
+    pub capability_profile: Option<MeshPeerCapabilityProfile>,
+    pub state: Option<MeshPeerState>,
+    pub key_generation: Option<u32>,
+    pub message: String,
+}
+
 impl MeshPeerCommandReport {
     fn success(
         command: &'static str,
@@ -343,6 +385,31 @@ impl MeshPeerCommandReport {
             message: message.into(),
             next_commands: Vec::new(),
         }
+    }
+}
+
+#[must_use]
+pub fn peer_command_test_event(
+    scenario: MeshPeerEnrollmentScenario,
+    report: &MeshPeerCommandReport,
+) -> MeshPeerTestEvent {
+    let peer = report.peer.as_ref();
+    MeshPeerTestEvent {
+        schema: TEST_EVENT_SCHEMA_V1,
+        surface: MESH_PEER_E2E_SURFACE,
+        scenario,
+        phase: "assert",
+        command: report.command,
+        success: report.success,
+        peer_id: report
+            .peer_id
+            .clone()
+            .or_else(|| peer.map(|peer| peer.peer_id.clone())),
+        denied_code: report.denied_code,
+        capability_profile: peer.map(|peer| peer.capabilities.profile),
+        state: peer.map(|peer| peer.state),
+        key_generation: peer.map(|peer| peer.key.generation),
+        message: report.message.clone(),
     }
 }
 
@@ -566,9 +633,11 @@ pub fn unknown_peer_attempt_report(
 #[cfg(test)]
 mod tests {
     use super::{
-        MeshPeerCapabilityProfile, MeshPeerEndpoint, MeshPeerEnrollInput, MeshPeerHandshake,
-        PEER_ENROLLMENT_CAPABILITY_MISMATCH_CODE, enroll_peer, first_missing_material_capability,
-        handshake_advertises_material_capability,
+        MeshPeerCapabilityProfile, MeshPeerEndpoint, MeshPeerEnrollInput,
+        MeshPeerEnrollmentScenario, MeshPeerHandshake, MeshPeerRotateInput, MeshPeerState,
+        PEER_ENROLLMENT_CAPABILITY_MISMATCH_CODE, PEER_UNKNOWN_ATTEMPT_DENIED_CODE, enroll_peer,
+        first_missing_material_capability, handshake_advertises_material_capability,
+        peer_command_test_event, revoke_peer, rotate_peer_key, unknown_peer_attempt_report,
     };
 
     const WORKSPACE_ID: &str = "wsp_peer_capability_contract";
@@ -654,5 +723,66 @@ mod tests {
         assert!(report.success);
         assert!(peer.capabilities.wire_capability_names().is_empty());
         assert!(peer.handshake.responder_capabilities.is_empty());
+    }
+
+    #[test]
+    fn command_reports_emit_structured_peer_enrollment_events() {
+        let pair_report = enroll_with_capabilities(
+            MeshPeerCapabilityProfile::BodyAllowed,
+            &["metadata", "body"],
+        );
+        let pair_event = peer_command_test_event(MeshPeerEnrollmentScenario::Pair, &pair_report);
+        let peer = pair_report.peer.expect("paired peer");
+        let rotate_report = rotate_peer_key(
+            &peer,
+            MeshPeerRotateInput {
+                new_public_key_fingerprint: "blake3:rotated-capability".to_owned(),
+                rotated_at: "2026-05-20T00:10:00Z".to_owned(),
+                reason: "operator requested rotation".to_owned(),
+            },
+        );
+        let rotate_event =
+            peer_command_test_event(MeshPeerEnrollmentScenario::Rotate, &rotate_report);
+        let rotated_peer = rotate_report.peer.expect("rotated peer");
+        let revoke_report = revoke_peer(&rotated_peer, "2026-05-20T00:15:00Z");
+        let revoke_event =
+            peer_command_test_event(MeshPeerEnrollmentScenario::Revoke, &revoke_report);
+        let deny_report =
+            enroll_with_capabilities(MeshPeerCapabilityProfile::BodyAllowed, &["metadata"]);
+        let deny_event = peer_command_test_event(MeshPeerEnrollmentScenario::Deny, &deny_report);
+        let unknown_report = unknown_peer_attempt_report(&[], WORKSPACE_ID, NODE_KEY);
+        let unknown_event =
+            peer_command_test_event(MeshPeerEnrollmentScenario::UnknownPeer, &unknown_report);
+
+        assert_eq!(pair_event.schema, super::TEST_EVENT_SCHEMA_V1);
+        assert_eq!(pair_event.surface, super::MESH_PEER_E2E_SURFACE);
+        assert_eq!(pair_event.scenario.as_str(), "pair");
+        assert!(pair_event.success);
+        assert_eq!(
+            pair_event.capability_profile,
+            Some(MeshPeerCapabilityProfile::BodyAllowed)
+        );
+        assert_eq!(rotate_event.key_generation, Some(2));
+        assert_eq!(revoke_event.state, Some(MeshPeerState::Revoked));
+        assert_eq!(
+            deny_event.denied_code,
+            Some(PEER_ENROLLMENT_CAPABILITY_MISMATCH_CODE)
+        );
+        assert_eq!(
+            unknown_event.denied_code,
+            Some(PEER_UNKNOWN_ATTEMPT_DENIED_CODE)
+        );
+
+        let json = serde_json::to_string(&[
+            pair_event,
+            rotate_event,
+            revoke_event,
+            deny_event,
+            unknown_event,
+        ])
+        .expect("serialize peer test events");
+        assert!(json.contains("\"schema\":\"ee.test_event.v1\""));
+        assert!(json.contains("\"scenario\":\"unknown_peer\""));
+        assert!(!json.contains("private_key"));
     }
 }
