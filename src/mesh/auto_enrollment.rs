@@ -413,6 +413,13 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
         &input.workspace_path,
     );
 
+    let peers_to_revoke = revocation_node_keys(
+        &exclude_overrides,
+        &existing_enabled,
+        manual_migration,
+        !selected.is_empty(),
+    );
+
     let trigger_reason = if input.options.dry_run {
         TriggerReason::DryRunPreview
     } else if tailnet_changed {
@@ -425,6 +432,7 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
         tailnet_changed,
         manual_conflict && !input.options.replace_manual_with_auto,
         selected.is_empty(),
+        !peers_to_revoke.is_empty(),
         Some(existing_hash.as_str()),
         &selected,
     );
@@ -527,7 +535,7 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
     let mut materialization = AutoEnrollmentMaterializationPlan {
         outcome_to_record: outcome.materialization_outcome(),
         manual_to_auto_migration_intended: manual_migration,
-        peers_to_revoke: exclude_overrides,
+        peers_to_revoke,
         append_denylist_node_keys: input.options.exclude_overrides.clone(),
         ..AutoEnrollmentMaterializationPlan::default()
     };
@@ -603,13 +611,14 @@ fn initial_outcome(
     tailnet_changed: bool,
     manual_conflict: bool,
     no_eligible_peers: bool,
+    has_revocations: bool,
     existing_hash: Option<&str>,
     selected: &[AutoEnrollmentCandidate],
 ) -> AutoEnrollmentOutcome {
     if tailnet_changed || manual_conflict {
         return AutoEnrollmentOutcome::Blocked;
     }
-    if no_eligible_peers {
+    if no_eligible_peers && !has_revocations {
         return AutoEnrollmentOutcome::NoEligiblePeers;
     }
     let intended_hash = peer_set_hash_from_candidates(
@@ -627,6 +636,28 @@ fn initial_outcome(
         return AutoEnrollmentOutcome::ExplainOnly;
     }
     AutoEnrollmentOutcome::Materialized
+}
+
+fn revocation_node_keys(
+    exclude_overrides: &[String],
+    existing_enabled: &[ExistingAutoEnrollmentPeer],
+    manual_migration: bool,
+    has_selected_peers: bool,
+) -> Vec<String> {
+    let mut keys: BTreeSet<String> = exclude_overrides
+        .iter()
+        .filter(|node_key| looks_like_node_key(node_key))
+        .cloned()
+        .collect();
+    if manual_migration && has_selected_peers {
+        keys.extend(
+            existing_enabled
+                .iter()
+                .filter(|peer| !peer.is_auto_managed())
+                .map(|peer| peer.node_key.clone()),
+        );
+    }
+    keys.into_iter().collect()
 }
 
 fn enrollment_outcomes(
@@ -940,6 +971,10 @@ mod tests {
         let result = plan_auto_enrollment(input);
         assert_eq!(result.outcome, "materialized");
         assert!(result.materialization.manual_to_auto_migration_intended);
+        assert_eq!(
+            result.materialization.peers_to_revoke,
+            vec!["nodekey:manual"]
+        );
     }
 
     #[test]
@@ -1005,8 +1040,39 @@ mod tests {
         let result = plan_auto_enrollment(input);
         assert_eq!(result.materialization.peers_to_upsert.len(), 1);
         assert_eq!(
+            result.materialization.peers_to_revoke,
+            vec!["nodekey:bravo"]
+        );
+        assert_eq!(
             result.materialization.append_denylist_node_keys,
             vec!["nodekey:bravo"]
+        );
+    }
+
+    #[test]
+    fn auto_enrollment_exclude_existing_peer_materializes_revocation_when_no_candidates_remain() {
+        let mut input = input(vec![candidate("nodekey:alpha")]);
+        input.existing_peers = vec![ExistingAutoEnrollmentPeer {
+            peer_id: "peer_alpha".to_owned(),
+            node_key: "nodekey:alpha".to_owned(),
+            tailnet_id: Some("tailnet-alpha".to_owned()),
+            hostname: "alpha".to_owned(),
+            tailscale_ip: "100.64.0.2".to_owned(),
+            magic_dns_name: None,
+            ee_protocol_version: "1.0".to_owned(),
+            enrollment_source: "tailscale_auto_enrollment".to_owned(),
+            enabled: true,
+        }];
+        input.options.exclude_overrides = vec!["nodekey:alpha".to_owned()];
+
+        let result = plan_auto_enrollment(input);
+
+        assert_eq!(result.outcome, "materialized");
+        assert!(result.materialization.writes_peer_rows);
+        assert!(result.materialization.peers_to_upsert.is_empty());
+        assert_eq!(
+            result.materialization.peers_to_revoke,
+            vec!["nodekey:alpha"]
         );
     }
 
@@ -1032,6 +1098,22 @@ mod tests {
                 .iter()
                 .any(|item| item.code == AUTO_ENROLLMENT_INVALID_OVERRIDE_NODE_KEY_CODE)
         );
+    }
+
+    #[test]
+    fn auto_enrollment_invalid_exclude_without_candidates_does_not_materialize_revocation() {
+        let mut input = input(Vec::new());
+        input.options.exclude_overrides = vec!["not-a-node-key".to_owned()];
+
+        let result = plan_auto_enrollment(input);
+
+        assert_eq!(result.outcome, "no_eligible_peers");
+        assert!(!result.materialization.writes_peer_rows);
+        assert!(result.materialization.peers_to_revoke.is_empty());
+        assert!(result.degraded.iter().any(|item| {
+            item.code == AUTO_ENROLLMENT_INVALID_OVERRIDE_NODE_KEY_CODE
+                && item.severity == "warning"
+        }));
     }
 
     #[test]

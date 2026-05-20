@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -977,9 +978,21 @@ where
             Ok(upserts) => upserts,
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         };
+        let revocations = match auto_enrollment_peer_revocations(
+            &snapshot.workspace_id,
+            &snapshot,
+            &report.materialization.peers_to_revoke,
+            &now,
+        ) {
+            Ok(revocations) => revocations,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
         if let Err(error) = connection.with_transaction(|| {
             for upsert in &upserts {
                 connection.upsert_mesh_peer(upsert)?;
+            }
+            for revocation in &revocations {
+                connection.upsert_mesh_peer(revocation)?;
             }
             Ok(())
         }) {
@@ -2334,6 +2347,52 @@ fn auto_enrollment_peer_upserts(
     Ok(upserts)
 }
 
+fn auto_enrollment_peer_revocations(
+    workspace_id: &str,
+    snapshot: &MeshForegroundSnapshot,
+    node_keys: &[String],
+    now: &str,
+) -> Result<Vec<UpsertMeshPeerInput>, DomainError> {
+    let node_keys: BTreeSet<&str> = node_keys.iter().map(String::as_str).collect();
+    if node_keys.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut revocations = Vec::new();
+    for row in &snapshot.peers {
+        if !row.enabled {
+            continue;
+        }
+        let node_key = auto_enrollment_node_key_for_row(row)?;
+        if !node_keys.contains(node_key.as_str()) {
+            continue;
+        }
+        revocations.push(UpsertMeshPeerInput {
+            workspace_id: workspace_id.to_owned(),
+            peer_id: row.peer_id.clone(),
+            origin_node_id: row.origin_node_id.clone(),
+            display_name: row.display_name.clone(),
+            policy_summary_json: row.policy_summary_json.clone(),
+            enabled: false,
+            last_seen_at: Some(now.to_owned()),
+        });
+    }
+    Ok(revocations)
+}
+
+fn auto_enrollment_node_key_for_row(
+    row: &crate::mesh::foreground_cli::MeshPeerRow,
+) -> Result<String, DomainError> {
+    enrolled_peer_record_from_policy_summary(row.policy_summary_json.as_deref(), &row.peer_id).map(
+        |record| {
+            record.map_or_else(
+                || row.origin_node_id.clone(),
+                |peer| peer.endpoint.tailscale_node_key,
+            )
+        },
+    )
+}
+
 fn auto_enrollment_public_key_fingerprint(node_key: &str) -> String {
     format!("auto:{}", blake3::hash(node_key.as_bytes()).to_hex())
 }
@@ -3222,5 +3281,74 @@ mod tests {
             MeshCommandMode::Cache
         );
         assert!(parse_env_mesh_mode(EnvVar::MeshMode, "online").is_err());
+    }
+
+    #[test]
+    fn auto_enrollment_peer_revocations_disable_matching_enabled_rows() {
+        let snapshot = mesh_snapshot_with_peers(vec![
+            mesh_peer_row(
+                "peer_alpha",
+                "nodekey:alpha",
+                true,
+                Some("{\"schema\":\"other\"}"),
+            ),
+            mesh_peer_row("peer_bravo", "nodekey:bravo", true, None),
+            mesh_peer_row("peer_charlie", "nodekey:charlie", false, None),
+        ]);
+
+        let revocations = auto_enrollment_peer_revocations(
+            "wsp_test_workspace",
+            &snapshot,
+            &[
+                "nodekey:alpha".to_owned(),
+                "nodekey:charlie".to_owned(),
+                "nodekey:missing".to_owned(),
+            ],
+            "2026-05-20T00:00:00Z",
+        )
+        .unwrap();
+
+        assert_eq!(revocations.len(), 1);
+        assert_eq!(revocations[0].peer_id, "peer_alpha");
+        assert_eq!(revocations[0].origin_node_id, "nodekey:alpha");
+        assert_eq!(
+            revocations[0].policy_summary_json,
+            Some("{\"schema\":\"other\"}".to_owned())
+        );
+        assert!(!revocations[0].enabled);
+    }
+
+    fn mesh_snapshot_with_peers(
+        peers: Vec<crate::mesh::foreground_cli::MeshPeerRow>,
+    ) -> MeshForegroundSnapshot {
+        MeshForegroundSnapshot {
+            workspace_id: "wsp_test_workspace".to_owned(),
+            workspace_path: "/tmp/workspace".to_owned(),
+            database_path: "/tmp/workspace/.ee/ee.db".to_owned(),
+            initialized: true,
+            mesh_enabled: true,
+            mode: "cache".to_owned(),
+            storage: MeshStorageCounts::default(),
+            peers,
+            cursors: Vec::new(),
+            events: Vec::new(),
+            degraded: Vec::new(),
+        }
+    }
+
+    fn mesh_peer_row(
+        peer_id: &str,
+        origin_node_id: &str,
+        enabled: bool,
+        policy_summary_json: Option<&str>,
+    ) -> crate::mesh::foreground_cli::MeshPeerRow {
+        crate::mesh::foreground_cli::MeshPeerRow {
+            peer_id: peer_id.to_owned(),
+            origin_node_id: origin_node_id.to_owned(),
+            display_name: Some(peer_id.to_owned()),
+            enabled,
+            last_seen_at: "2026-05-20T00:00:00Z".to_owned(),
+            policy_summary_json: policy_summary_json.map(str::to_owned),
+        }
     }
 }
