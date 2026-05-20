@@ -40,8 +40,22 @@ pub enum EnvVar {
     EmbedDedupHammingK,
     /// `EE_EXPERIMENTAL_TRIAD`
     ExperimentalTriad,
+    /// `EE_FLIGHT_RECORDER`
+    FlightRecorder,
+    /// `EE_FLIGHT_RECORDER_DIR`
+    FlightRecorderDir,
+    /// `EE_FLIGHT_RECORDER_RETENTION_DAYS`
+    FlightRecorderRetentionDays,
     /// `EE_FORMAT`
     Format,
+    /// `EE_GRAPH_MEMORY_DEGRADED_BELOW_PCT`
+    GraphMemoryDegradedBelowPct,
+    /// `EE_GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS`
+    GraphMemoryGrowthMultiplierBasisPoints,
+    /// `EE_GRAPH_MEMORY_PER_ALGORITHM_CAP_MB`
+    GraphMemoryPerAlgorithmCapMb,
+    /// `EE_GRAPH_MEMORY_SNAPSHOT_CAP_MB`
+    GraphMemorySnapshotCapMb,
     /// `EE_GRAPH_WITNESSES_RETENTION_DAYS`
     GraphWitnessesRetentionDays,
     /// `EE_HARMFUL_BURST_WINDOW_SECONDS`
@@ -162,7 +176,14 @@ impl EnvVar {
             Self::EmbedDedupEnabled,
             Self::EmbedDedupHammingK,
             Self::ExperimentalTriad,
+            Self::FlightRecorder,
+            Self::FlightRecorderDir,
+            Self::FlightRecorderRetentionDays,
             Self::Format,
+            Self::GraphMemoryDegradedBelowPct,
+            Self::GraphMemoryGrowthMultiplierBasisPoints,
+            Self::GraphMemoryPerAlgorithmCapMb,
+            Self::GraphMemorySnapshotCapMb,
             Self::GraphWitnessesRetentionDays,
             Self::HarmfulBurstWindowSeconds,
             Self::HarmfulPerSourcePerHour,
@@ -234,7 +255,16 @@ impl EnvVar {
             Self::EmbedDedupEnabled => "EE_EMBED_DEDUP_ENABLED",
             Self::EmbedDedupHammingK => "EE_EMBED_DEDUP_HAMMING_K",
             Self::ExperimentalTriad => "EE_EXPERIMENTAL_TRIAD",
+            Self::FlightRecorder => "EE_FLIGHT_RECORDER",
+            Self::FlightRecorderDir => "EE_FLIGHT_RECORDER_DIR",
+            Self::FlightRecorderRetentionDays => "EE_FLIGHT_RECORDER_RETENTION_DAYS",
             Self::Format => "EE_FORMAT",
+            Self::GraphMemoryDegradedBelowPct => "EE_GRAPH_MEMORY_DEGRADED_BELOW_PCT",
+            Self::GraphMemoryGrowthMultiplierBasisPoints => {
+                "EE_GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS"
+            }
+            Self::GraphMemoryPerAlgorithmCapMb => "EE_GRAPH_MEMORY_PER_ALGORITHM_CAP_MB",
+            Self::GraphMemorySnapshotCapMb => "EE_GRAPH_MEMORY_SNAPSHOT_CAP_MB",
             Self::GraphWitnessesRetentionDays => "EE_GRAPH_WITNESSES_RETENTION_DAYS",
             Self::HarmfulBurstWindowSeconds => "EE_HARMFUL_BURST_WINDOW_SECONDS",
             Self::HarmfulPerSourcePerHour => "EE_HARMFUL_PER_SOURCE_PER_HOUR",
@@ -327,7 +357,26 @@ impl EnvVar {
             Self::ExperimentalTriad => {
                 "Compatibility no-op for the promoted ee pack/note/why aliases."
             }
+            Self::FlightRecorder => {
+                "Enable the redacted command flight recorder for ee subcommands."
+            }
+            Self::FlightRecorderDir => {
+                "Override the directory where flight recorder traces are written."
+            }
+            Self::FlightRecorderRetentionDays => {
+                "Override the flight recorder trace retention window in days."
+            }
             Self::Format => "Select the default output renderer.",
+            Self::GraphMemoryDegradedBelowPct => {
+                "Override the graph snapshot advisory threshold as a percent of the snapshot cap."
+            }
+            Self::GraphMemoryGrowthMultiplierBasisPoints => {
+                "Override the graph snapshot in-build growth tripwire ratio in basis points."
+            }
+            Self::GraphMemoryPerAlgorithmCapMb => {
+                "Override the per-algorithm graph working-set cap in MiB."
+            }
+            Self::GraphMemorySnapshotCapMb => "Override the graph snapshot admission cap in MiB.",
             Self::GraphWitnessesRetentionDays => {
                 "Override the default graph algorithm witness retention window in days."
             }
@@ -437,10 +486,16 @@ impl EnvVar {
             Self::EmbedDedupCosineFloor => Some("0.97"),
             Self::EmbedDedupEnabled => Some("false"),
             Self::EmbedDedupHammingK => Some("12"),
+            Self::FlightRecorder => Some("false"),
+            Self::FlightRecorderRetentionDays => Some("7"),
             Self::LexicalIndexHugepages => Some("false"),
             Self::LexicalIndexPinRam => Some("false"),
             Self::PprCacheEntries => Some("4096"),
             Self::QueryPlanCacheEntries => Some("1024"),
+            Self::GraphMemoryDegradedBelowPct => Some("80"),
+            Self::GraphMemoryGrowthMultiplierBasisPoints => Some("15000"),
+            Self::GraphMemoryPerAlgorithmCapMb => Some("100"),
+            Self::GraphMemorySnapshotCapMb => Some("250"),
             Self::GraphWitnessesRetentionDays => Some("30"),
             Self::ReadPoolAcquireTimeoutMs => Some("5000"),
             Self::ReadPoolMaxPinSeconds => Some("30"),
@@ -465,6 +520,7 @@ impl EnvVar {
             Self::CassBinary => "integration",
             Self::DatabasePath
             | Self::DemoEvidenceRoot
+            | Self::FlightRecorderDir
             | Self::IndexDir
             | Self::L2PackCacheDir
             | Self::ShardsDir
@@ -480,7 +536,9 @@ impl EnvVar {
             | Self::Json
             | Self::NoColor
             | Self::OutputFormat => "output",
-            Self::LogFormat
+            Self::FlightRecorder
+            | Self::FlightRecorderRetentionDays
+            | Self::LogFormat
             | Self::LogJson
             | Self::TestLogLevel
             | Self::TestLogPath
@@ -499,6 +557,10 @@ impl EnvVar {
             | Self::AuditLaneBatchMax
             | Self::AuditLaneCapacity
             | Self::AuditLaneFlushMs
+            | Self::GraphMemoryDegradedBelowPct
+            | Self::GraphMemoryGrowthMultiplierBasisPoints
+            | Self::GraphMemoryPerAlgorithmCapMb
+            | Self::GraphMemorySnapshotCapMb
             | Self::GraphWitnessesRetentionDays
             | Self::HarmfulPerSourcePerHour
             | Self::L2PackCacheBytes
@@ -692,6 +754,37 @@ mod tests {
         }
         if EnvVar::EmbedDedupEnabled.category() != "embeddings" {
             return Err("embed dedup vars must be categorized as embeddings".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn flight_recorder_env_vars_are_registered_disabled_by_default() -> TestResult {
+        if !EnvVar::all().contains(&EnvVar::FlightRecorder) {
+            return Err("EE_FLIGHT_RECORDER missing from registry order".to_owned());
+        }
+        if !EnvVar::all().contains(&EnvVar::FlightRecorderDir) {
+            return Err("EE_FLIGHT_RECORDER_DIR missing from registry order".to_owned());
+        }
+        if !EnvVar::all().contains(&EnvVar::FlightRecorderRetentionDays) {
+            return Err("EE_FLIGHT_RECORDER_RETENTION_DAYS missing from registry order".to_owned());
+        }
+        if EnvVar::FlightRecorder.default_value() != Some("false") {
+            return Err("EE_FLIGHT_RECORDER must default to false".to_owned());
+        }
+        if EnvVar::FlightRecorderRetentionDays.default_value() != Some("7") {
+            return Err("EE_FLIGHT_RECORDER_RETENTION_DAYS must default to 7".to_owned());
+        }
+        if EnvVar::FlightRecorder.category() != "diagnostics" {
+            return Err("EE_FLIGHT_RECORDER must be categorized as diagnostics".to_owned());
+        }
+        if EnvVar::FlightRecorderRetentionDays.category() != "diagnostics" {
+            return Err(
+                "EE_FLIGHT_RECORDER_RETENTION_DAYS must be categorized as diagnostics".to_owned(),
+            );
+        }
+        if EnvVar::FlightRecorderDir.category() != "paths" {
+            return Err("EE_FLIGHT_RECORDER_DIR must be categorized as a path override".to_owned());
         }
         Ok(())
     }

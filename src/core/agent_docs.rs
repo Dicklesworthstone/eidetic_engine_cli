@@ -282,6 +282,24 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         category: EnvVar::ExperimentalTriad.category(),
     },
     EnvVarEntry {
+        name: EnvVar::FlightRecorder.name(),
+        description: EnvVar::FlightRecorder.description(),
+        default: EnvVar::FlightRecorder.default_value(),
+        category: EnvVar::FlightRecorder.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::FlightRecorderDir.name(),
+        description: EnvVar::FlightRecorderDir.description(),
+        default: EnvVar::FlightRecorderDir.default_value(),
+        category: EnvVar::FlightRecorderDir.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::FlightRecorderRetentionDays.name(),
+        description: EnvVar::FlightRecorderRetentionDays.description(),
+        default: EnvVar::FlightRecorderRetentionDays.default_value(),
+        category: EnvVar::FlightRecorderRetentionDays.category(),
+    },
+    EnvVarEntry {
         name: EnvVar::Format.name(),
         description: EnvVar::Format.description(),
         default: EnvVar::Format.default_value(),
