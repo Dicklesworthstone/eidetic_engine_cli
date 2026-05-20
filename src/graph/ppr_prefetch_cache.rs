@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use fnx_algorithms::{CentralityScore, PageRankResult};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -62,12 +60,185 @@ impl PprPrefetchCacheEntry {
     }
 }
 
+#[derive(Clone, Debug)]
+struct PprPrefetchCacheSlot {
+    key: PprPrefetchCacheKey,
+    entry: PprPrefetchCacheEntry,
+}
+
+#[derive(Debug)]
+struct PprPrefetchCuckooTable {
+    buckets: Vec<Option<PprPrefetchCacheSlot>>,
+    len: usize,
+}
+
+impl PprPrefetchCuckooTable {
+    fn new(entry_capacity: usize) -> Self {
+        let bucket_count = cuckoo_bucket_count(entry_capacity);
+        let mut buckets = Vec::with_capacity(bucket_count);
+        buckets.resize_with(bucket_count, || None);
+        Self { buckets, len: 0 }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn clear(&mut self) {
+        for bucket in &mut self.buckets {
+            *bucket = None;
+        }
+        self.len = 0;
+    }
+
+    fn contains_key(&self, key: &PprPrefetchCacheKey) -> bool {
+        self.slot_index(key).is_some()
+    }
+
+    fn get(&self, key: &PprPrefetchCacheKey) -> Option<&PprPrefetchCacheEntry> {
+        let index = self.slot_index(key)?;
+        self.buckets[index].as_ref().map(|slot| &slot.entry)
+    }
+
+    fn get_mut(&mut self, key: &PprPrefetchCacheKey) -> Option<&mut PprPrefetchCacheEntry> {
+        let index = self.slot_index(key)?;
+        self.buckets[index].as_mut().map(|slot| &mut slot.entry)
+    }
+
+    fn remove(&mut self, key: &PprPrefetchCacheKey) -> Option<PprPrefetchCacheEntry> {
+        let index = self.slot_index(key)?;
+        let slot = self.buckets[index].take()?;
+        self.len = self.len.saturating_sub(1);
+        Some(slot.entry)
+    }
+
+    fn insert(
+        &mut self,
+        key: PprPrefetchCacheKey,
+        entry: PprPrefetchCacheEntry,
+    ) -> Option<(PprPrefetchCacheKey, PprPrefetchCacheEntry)> {
+        if self.buckets.is_empty() {
+            return Some((key, entry));
+        }
+        if let Some(existing) = self.get_mut(&key) {
+            *existing = entry;
+            return None;
+        }
+        self.insert_new(key, entry)
+    }
+
+    fn insert_new(
+        &mut self,
+        mut key: PprPrefetchCacheKey,
+        mut entry: PprPrefetchCacheEntry,
+    ) -> Option<(PprPrefetchCacheKey, PprPrefetchCacheEntry)> {
+        let mut bucket_index = self.index_one(&key);
+        for _ in 0..self.max_displacements() {
+            let slot = PprPrefetchCacheSlot { key, entry };
+            let Some(displaced) = self.buckets[bucket_index].replace(slot) else {
+                self.len += 1;
+                return None;
+            };
+            key = displaced.key;
+            entry = displaced.entry;
+            bucket_index = self.alternate_index(&key, bucket_index);
+        }
+        Some((key, entry))
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&PprPrefetchCacheKey, &PprPrefetchCacheEntry)> {
+        self.buckets
+            .iter()
+            .filter_map(|bucket| bucket.as_ref().map(|slot| (&slot.key, &slot.entry)))
+    }
+
+    fn slot_index(&self, key: &PprPrefetchCacheKey) -> Option<usize> {
+        if self.buckets.is_empty() {
+            return None;
+        }
+        let first = self.index_one(key);
+        if self.key_matches_bucket(key, first) {
+            return Some(first);
+        }
+        let second = self.index_two(key);
+        if first != second && self.key_matches_bucket(key, second) {
+            return Some(second);
+        }
+        None
+    }
+
+    fn key_matches_bucket(&self, key: &PprPrefetchCacheKey, bucket_index: usize) -> bool {
+        self.buckets
+            .get(bucket_index)
+            .and_then(Option::as_ref)
+            .is_some_and(|slot| slot.key == *key)
+    }
+
+    fn index_one(&self, key: &PprPrefetchCacheKey) -> usize {
+        cuckoo_index(
+            key,
+            b"ee.graph.ppr_prefetch_cache.cuckoo.a.v1",
+            self.buckets.len(),
+        )
+    }
+
+    fn index_two(&self, key: &PprPrefetchCacheKey) -> usize {
+        let bucket_count = self.buckets.len();
+        let first = self.index_one(key);
+        let second = cuckoo_index(
+            key,
+            b"ee.graph.ppr_prefetch_cache.cuckoo.b.v1",
+            bucket_count,
+        );
+        if bucket_count > 1 && second == first {
+            (second + 1) % bucket_count
+        } else {
+            second
+        }
+    }
+
+    fn alternate_index(&self, key: &PprPrefetchCacheKey, current_index: usize) -> usize {
+        let first = self.index_one(key);
+        let second = self.index_two(key);
+        if current_index == first {
+            second
+        } else {
+            first
+        }
+    }
+
+    fn max_displacements(&self) -> usize {
+        16 + self.buckets.len().ilog2() as usize * 2
+    }
+}
+
+fn cuckoo_bucket_count(entry_capacity: usize) -> usize {
+    entry_capacity.saturating_mul(4).max(2).next_power_of_two()
+}
+
+fn cuckoo_index(key: &PprPrefetchCacheKey, domain: &[u8], bucket_count: usize) -> usize {
+    debug_assert!(bucket_count > 0);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(&(key.seed_set_hash.len() as u64).to_le_bytes());
+    hasher.update(key.seed_set_hash.as_bytes());
+    hasher.update(&key.snapshot_generation.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest.as_bytes()[..8]);
+    (u64::from_le_bytes(bytes) as usize) % bucket_count
+}
+
 #[derive(Debug)]
 pub struct PprPrefetchCache {
     capacity: usize,
     access_sequence: u64,
     live_generation: Option<u64>,
-    entries: BTreeMap<PprPrefetchCacheKey, PprPrefetchCacheEntry>,
+    entries: PprPrefetchCuckooTable,
 }
 
 impl PprPrefetchCache {
@@ -77,7 +248,7 @@ impl PprPrefetchCache {
             capacity,
             access_sequence: 0,
             live_generation: None,
-            entries: BTreeMap::new(),
+            entries: PprPrefetchCuckooTable::new(capacity),
         }
     }
 
@@ -103,6 +274,12 @@ impl PprPrefetchCache {
     ) -> PprPrefetchCacheInsert {
         let result_hash = ppr_prefetch_result_hash(&key, &scores);
         let snapshot_generation = key.snapshot_generation;
+        let entry = PprPrefetchCacheEntry {
+            scores,
+            result: None,
+            result_hash: result_hash.clone(),
+            last_used_sequence: self.next_access_sequence(),
+        };
         if self.capacity == 0 {
             let evicted = self.evict_for_generation_insert(snapshot_generation);
             self.entries.clear();
@@ -113,16 +290,10 @@ impl PprPrefetchCache {
         }
 
         let mut evicted = self.evict_for_generation_insert(snapshot_generation);
-        let last_used_sequence = self.next_access_sequence();
-        self.entries.insert(
-            key,
-            PprPrefetchCacheEntry {
-                scores,
-                result: None,
-                result_hash: result_hash.clone(),
-                last_used_sequence,
-            },
-        );
+        self.evict_before_new_key(&key, &mut evicted);
+        if let Some((evicted_key, _entry)) = self.entries.insert(key, entry) {
+            evicted.push(evicted_key);
+        }
         evicted.extend(self.evict_to_capacity());
         PprPrefetchCacheInsert {
             result_hash,
@@ -137,6 +308,12 @@ impl PprPrefetchCache {
     ) -> PprPrefetchCacheInsert {
         let result_hash = ppr_prefetch_page_rank_result_hash(&key, &result);
         let snapshot_generation = key.snapshot_generation;
+        let entry = PprPrefetchCacheEntry {
+            scores: result.scores.clone(),
+            result: Some(result),
+            result_hash: result_hash.clone(),
+            last_used_sequence: self.next_access_sequence(),
+        };
         if self.capacity == 0 {
             let evicted = self.evict_for_generation_insert(snapshot_generation);
             self.entries.clear();
@@ -147,16 +324,10 @@ impl PprPrefetchCache {
         }
 
         let mut evicted = self.evict_for_generation_insert(snapshot_generation);
-        let last_used_sequence = self.next_access_sequence();
-        self.entries.insert(
-            key,
-            PprPrefetchCacheEntry {
-                scores: result.scores.clone(),
-                result: Some(result),
-                result_hash: result_hash.clone(),
-                last_used_sequence,
-            },
-        );
+        self.evict_before_new_key(&key, &mut evicted);
+        if let Some((evicted_key, _entry)) = self.entries.insert(key, entry) {
+            evicted.push(evicted_key);
+        }
         evicted.extend(self.evict_to_capacity());
         PprPrefetchCacheInsert {
             result_hash,
@@ -217,7 +388,8 @@ impl PprPrefetchCache {
     fn remove_generations_except(&mut self, snapshot_generation: u64) -> Vec<PprPrefetchCacheKey> {
         let stale = self
             .entries
-            .keys()
+            .iter()
+            .map(|(key, _entry)| key)
             .filter(|key| key.snapshot_generation != snapshot_generation)
             .cloned()
             .collect::<Vec<_>>();
@@ -229,7 +401,8 @@ impl PprPrefetchCache {
 
     #[must_use]
     pub fn debug_dump(&self) -> Vec<PprPrefetchCacheDebugEntry> {
-        self.entries
+        let mut dump = self
+            .entries
             .iter()
             .map(|(key, entry)| PprPrefetchCacheDebugEntry {
                 seed_set_hash: key.seed_set_hash.clone(),
@@ -238,7 +411,13 @@ impl PprPrefetchCache {
                 score_count: entry.scores().len(),
                 last_used_sequence: entry.last_used_sequence,
             })
-            .collect()
+            .collect::<Vec<_>>();
+        dump.sort_by(|left, right| {
+            left.seed_set_hash
+                .cmp(&right.seed_set_hash)
+                .then_with(|| left.snapshot_generation.cmp(&right.snapshot_generation))
+        });
+        dump
     }
 
     fn next_access_sequence(&mut self) -> u64 {
@@ -256,6 +435,20 @@ impl PprPrefetchCache {
             evicted.push(victim);
         }
         evicted
+    }
+
+    fn evict_before_new_key(
+        &mut self,
+        key: &PprPrefetchCacheKey,
+        evicted: &mut Vec<PprPrefetchCacheKey>,
+    ) {
+        if self.entries.contains_key(key) || self.entries.len() < self.capacity {
+            return;
+        }
+        if let Some(victim) = self.lru_victim_key() {
+            self.entries.remove(&victim);
+            evicted.push(victim);
+        }
     }
 
     fn lru_victim_key(&self) -> Option<PprPrefetchCacheKey> {
@@ -307,6 +500,14 @@ impl PprPrefetchCache {
         {
             result.witness.algorithm = algorithm.to_owned();
         }
+    }
+
+    #[cfg(test)]
+    fn swap_entries_for_test(&mut self, left: &PprPrefetchCacheKey, right: &PprPrefetchCacheKey) {
+        let left_entry = self.entries.remove(left).expect("left entry");
+        let right_entry = self.entries.remove(right).expect("right entry");
+        self.entries.insert(left.clone(), right_entry);
+        self.entries.insert(right.clone(), left_entry);
     }
 }
 
@@ -631,11 +832,7 @@ mod tests {
         let second = key("seed-b", 1);
         cache.insert(first.clone(), scores(&[("mem-a", 1.0)]));
         cache.insert(second.clone(), scores(&[("mem-b", 1.0)]));
-
-        let first_entry = cache.entries.remove(&first).expect("first entry");
-        let second_entry = cache.entries.remove(&second).expect("second entry");
-        cache.entries.insert(first.clone(), second_entry);
-        cache.entries.insert(second.clone(), first_entry);
+        cache.swap_entries_for_test(&first, &second);
 
         assert_eq!(cache.get(&first), None);
         assert_eq!(cache.get(&second), None);
