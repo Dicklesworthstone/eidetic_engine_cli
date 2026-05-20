@@ -10,6 +10,7 @@
 //! - **counterfactual**: Emit pack-diff hypotheses that require external validation
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
@@ -26,6 +27,9 @@ pub const LAB_CAPTURE_SCHEMA_V1: &str = "ee.lab.capture.v1";
 /// Schema for lab replay report.
 pub const LAB_REPLAY_SCHEMA_V1: &str = "ee.lab.replay.v1";
 
+/// Schema for agent workload replay reports derived from redacted traces.
+pub const AGENT_WORKLOAD_REPLAY_SCHEMA_V1: &str = "ee.agent_workload_replay.v1";
+
 /// Schema for lab counterfactual report.
 pub const LAB_COUNTERFACTUAL_SCHEMA_V1: &str = "ee.lab.counterfactual.v1";
 
@@ -33,6 +37,9 @@ pub const LAB_COUNTERFACTUAL_SCHEMA_V1: &str = "ee.lab.counterfactual.v1";
 pub const LAB_RECONSTRUCT_SCHEMA_V1: &str = "ee.lab.reconstruct.v1";
 
 const FROZEN_EPISODE_SCHEMA_V1: &str = "ee.lab.frozen_episode.v1";
+const AGENT_WORKLOAD_TRACE_SCHEMA_V1: &str = "ee.agent_workload_trace.v1";
+pub const DEFAULT_AGENT_WORKLOAD_REPLAY_AGENTS: u16 = 64;
+const MAX_AGENT_WORKLOAD_REPLAY_AGENTS: u16 = 256;
 const LAB_REPLAY_UNAVAILABLE_CODE: &str = "lab_replay_unavailable";
 pub const LAB_COUNTERFACTUAL_MULTI_SWAP_UNSUPPORTED_CODE: &str =
     "lab_counterfactual_multi_swap_unsupported";
@@ -243,6 +250,159 @@ impl ReplayReport {
     pub fn to_json(&self) -> String {
         crate::core::serialize_or_error(self)
     }
+}
+
+/// Options for replaying a redacted agent workload trace.
+#[derive(Clone, Debug)]
+pub struct AgentWorkloadReplayOptions {
+    /// Redacted ee.agent_workload_trace.v1 JSONL trace.
+    pub trace_path: PathBuf,
+    /// Synthetic agent count to fan the trace across.
+    pub agent_count: u16,
+    /// Run deterministic hash construction three times.
+    pub verify_determinism: bool,
+}
+
+/// Deterministic replay report for redacted agent workload traces.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkloadReplayReport {
+    pub schema: String,
+    pub side_effect_free: bool,
+    pub command: String,
+    pub playback: AgentWorkloadPlaybackSummary,
+    pub trace: AgentWorkloadReplayTraceSummary,
+    pub command_counts: Vec<AgentWorkloadCommandCount>,
+    pub schemas_observed: Vec<AgentWorkloadSchemaCount>,
+    pub degraded_code_deltas: Vec<AgentWorkloadDegradedCodeDelta>,
+    pub byte_token_deltas: AgentWorkloadByteTokenDeltas,
+    pub latency: AgentWorkloadLatencySummary,
+    pub cache_posture: AgentWorkloadCachePosture,
+    pub duplicate_work_coalescing: AgentWorkloadDuplicateWorkCoalescing,
+    pub replay_hash: String,
+    pub determinism: Option<AgentWorkloadReplayDeterminism>,
+    pub fixture_promotion: AgentWorkloadFixturePromotion,
+    pub warnings: Vec<String>,
+}
+
+impl AgentWorkloadReplayReport {
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        crate::core::serialize_or_error(self)
+    }
+}
+
+/// Synthetic fan-out posture for replaying redacted traces across many agents.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkloadPlaybackSummary {
+    pub requested_agents: u16,
+    pub active_agents: u16,
+    pub resource_cap_agents: u16,
+    pub resource_limited: bool,
+    pub trace_rows_per_agent: usize,
+    pub synthetic_operations: u64,
+    pub workload_hash: String,
+}
+
+/// Stable summary of the trace used for workload replay.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkloadReplayTraceSummary {
+    pub source_path_tail: String,
+    pub row_count: usize,
+    pub trace_hash: String,
+    pub redaction_levels: Vec<String>,
+    pub harness_programs: Vec<String>,
+    pub model_families: Vec<String>,
+    pub memory_reference_count: usize,
+}
+
+/// Count of one command shape in a replayed workload.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkloadCommandCount {
+    pub command: String,
+    pub count: usize,
+}
+
+/// Count of one observed schema in a replayed workload.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkloadSchemaCount {
+    pub schema: String,
+    pub count: usize,
+}
+
+/// Delta from an empty replay baseline for one degraded code.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkloadDegradedCodeDelta {
+    pub code: String,
+    pub baseline_count: usize,
+    pub observed_count: usize,
+    pub delta: i64,
+}
+
+/// Byte, token, and latency aggregates for a replayed workload.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkloadByteTokenDeltas {
+    pub response_bytes_total: u64,
+    pub response_bytes_max: u64,
+    pub response_token_estimate_total: u64,
+    pub response_token_estimate_max: u64,
+    pub missing_token_estimate_rows: usize,
+    pub elapsed_ms_total: u64,
+    pub elapsed_ms_max: u64,
+}
+
+/// Latency percentiles for synthetic replayed operations.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkloadLatencySummary {
+    pub samples: u64,
+    pub p50_ms: u64,
+    pub p95_ms: u64,
+    pub p99_ms: u64,
+    pub max_ms: u64,
+}
+
+/// Deterministic cache posture inferred from synthetic fan-out.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkloadCachePosture {
+    pub cache_hit_count: u64,
+    pub cache_miss_count: u64,
+    pub hit_ratio_basis_points: u16,
+}
+
+/// Duplicate-work coalescing posture for identical redacted operations.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkloadDuplicateWorkCoalescing {
+    pub unique_work_items: usize,
+    pub coalesced_operations: u64,
+    pub coalescing_ratio_basis_points: u16,
+}
+
+/// Determinism proof for workload replay hash construction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkloadReplayDeterminism {
+    pub runs: usize,
+    pub replay_hashes: Vec<String>,
+    pub all_identical: bool,
+    pub first_diff_byte_offset: Option<usize>,
+}
+
+/// Stable fixture-promotion identifiers emitted by workload replay.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkloadFixturePromotion {
+    pub sanitized_fixture_hash: String,
+    pub replay_case_hash: String,
+    pub perf_budget_key: String,
 }
 
 /// Frozen pack reconstructed during lab replay.
@@ -1043,6 +1203,645 @@ pub fn replay_episode(options: &ReplayOptions) -> Result<ReplayReport, DomainErr
     }
 
     Ok(report)
+}
+
+/// Replay a redacted agent workload trace into a deterministic local report.
+pub fn replay_agent_workload_trace(
+    options: &AgentWorkloadReplayOptions,
+) -> Result<AgentWorkloadReplayReport, DomainError> {
+    let metadata = fs::symlink_metadata(&options.trace_path)
+        .map_err(|error| lab_storage_error("inspect agent workload trace", error))?;
+    if !metadata.file_type().is_file() {
+        return Err(lab_storage_error_message(
+            "validate agent workload trace path",
+            format!(
+                "refusing to read {} because it is not a regular file",
+                options.trace_path.display()
+            ),
+        ));
+    }
+    let text = read_lab_file_to_string_no_follow(&options.trace_path)
+        .map_err(|error| lab_storage_error("read agent workload trace", error))?;
+    replay_agent_workload_trace_jsonl_with_agents(
+        &agent_workload_source_path_tail(&options.trace_path),
+        &text,
+        options.verify_determinism,
+        options.agent_count,
+    )
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentWorkloadTraceRow {
+    schema: String,
+    side_effect_free: bool,
+    redaction_level: String,
+    trace_id: String,
+    recorded_at: String,
+    command: AgentWorkloadTraceCommand,
+    exit_code: u8,
+    elapsed_ms: u64,
+    response_byte_count: u64,
+    #[serde(default)]
+    response_token_estimate: Option<u64>,
+    #[serde(default)]
+    token_estimator_id: Option<String>,
+    harness_identity: AgentWorkloadTraceHarnessIdentity,
+    #[serde(default)]
+    memory_references: Vec<AgentWorkloadTraceMemoryReference>,
+    #[serde(default)]
+    degraded_codes: Vec<String>,
+    #[serde(default)]
+    redaction_posture: Option<AgentWorkloadTraceRedactionPosture>,
+    #[serde(default)]
+    retention_posture: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentWorkloadTraceCommand {
+    verbs: Vec<String>,
+    #[serde(default)]
+    positional_arity: Option<u64>,
+    #[serde(default)]
+    flag_names: Vec<String>,
+    #[serde(default)]
+    output_format: Option<String>,
+}
+
+impl AgentWorkloadTraceCommand {
+    fn normalize(&self) -> NormalizedAgentWorkloadTraceCommand {
+        let mut flag_names = self.flag_names.clone();
+        flag_names.sort();
+        flag_names.dedup();
+        NormalizedAgentWorkloadTraceCommand {
+            verbs: self.verbs.clone(),
+            positional_arity: self.positional_arity,
+            flag_names,
+            output_format: self.output_format.clone(),
+        }
+    }
+
+    fn command_key(&self) -> String {
+        self.verbs.join(" ")
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentWorkloadTraceHarnessIdentity {
+    program: String,
+    #[serde(default)]
+    model_family: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, Ord, PartialOrd)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentWorkloadTraceMemoryReference {
+    hash: String,
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentWorkloadTraceRedactionPosture {
+    #[serde(default)]
+    raw_task_string_present: bool,
+    #[serde(default)]
+    raw_query_text_present: bool,
+    #[serde(default)]
+    raw_memory_body_present: bool,
+    #[serde(default)]
+    raw_provenance_text_present: bool,
+    #[serde(default)]
+    raw_mail_body_present: bool,
+    #[serde(default)]
+    secrets_present: bool,
+    #[serde(default)]
+    environment_dump_present: bool,
+    #[serde(default)]
+    full_file_listing_present: bool,
+}
+
+impl AgentWorkloadTraceRedactionPosture {
+    const fn has_raw_content(&self) -> bool {
+        self.raw_task_string_present
+            || self.raw_query_text_present
+            || self.raw_memory_body_present
+            || self.raw_provenance_text_present
+            || self.raw_mail_body_present
+            || self.secrets_present
+            || self.environment_dump_present
+            || self.full_file_listing_present
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NormalizedAgentWorkloadTraceRow {
+    schema: String,
+    side_effect_free: bool,
+    redaction_level: String,
+    trace_id: String,
+    command: NormalizedAgentWorkloadTraceCommand,
+    exit_code: u8,
+    elapsed_ms: u64,
+    response_byte_count: u64,
+    response_token_estimate: Option<u64>,
+    token_estimator_id: Option<String>,
+    harness_identity: AgentWorkloadTraceHarnessIdentity,
+    memory_references: Vec<AgentWorkloadTraceMemoryReference>,
+    degraded_codes: Vec<String>,
+}
+
+impl NormalizedAgentWorkloadTraceRow {
+    fn sort_key(&self) -> String {
+        format!(
+            "{}\n{}\n{}\n{}",
+            self.trace_id,
+            self.command.verbs.join(" "),
+            self.exit_code,
+            self.response_byte_count
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NormalizedAgentWorkloadTraceCommand {
+    verbs: Vec<String>,
+    positional_arity: Option<u64>,
+    flag_names: Vec<String>,
+    output_format: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentWorkloadReplayHashInput {
+    playback: AgentWorkloadPlaybackSummary,
+    trace: AgentWorkloadReplayTraceSummary,
+    command_counts: Vec<AgentWorkloadCommandCount>,
+    schemas_observed: Vec<AgentWorkloadSchemaCount>,
+    degraded_code_deltas: Vec<AgentWorkloadDegradedCodeDelta>,
+    byte_token_deltas: AgentWorkloadByteTokenDeltas,
+    latency: AgentWorkloadLatencySummary,
+    cache_posture: AgentWorkloadCachePosture,
+    duplicate_work_coalescing: AgentWorkloadDuplicateWorkCoalescing,
+}
+
+fn replay_agent_workload_trace_jsonl(
+    source_path_tail: &str,
+    text: &str,
+    verify_determinism: bool,
+) -> Result<AgentWorkloadReplayReport, DomainError> {
+    replay_agent_workload_trace_jsonl_with_agents(
+        source_path_tail,
+        text,
+        verify_determinism,
+        DEFAULT_AGENT_WORKLOAD_REPLAY_AGENTS,
+    )
+}
+
+fn replay_agent_workload_trace_jsonl_with_agents(
+    source_path_tail: &str,
+    text: &str,
+    verify_determinism: bool,
+    requested_agents: u16,
+) -> Result<AgentWorkloadReplayReport, DomainError> {
+    validate_agent_workload_replay_agent_count(requested_agents)?;
+    let rows = parse_agent_workload_trace_jsonl(text)?;
+    Ok(build_agent_workload_replay_report(
+        source_path_tail,
+        rows,
+        verify_determinism,
+        requested_agents,
+    ))
+}
+
+fn validate_agent_workload_replay_agent_count(requested_agents: u16) -> Result<(), DomainError> {
+    if requested_agents == 0 {
+        return Err(DomainError::Usage {
+            message: "agent workload replay requires at least one synthetic agent".to_owned(),
+            repair: Some(
+                "Pass --agents 1 or higher; use --agents 64 for the AFR5 stress profile."
+                    .to_owned(),
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn parse_agent_workload_trace_jsonl(text: &str) -> Result<Vec<AgentWorkloadTraceRow>, DomainError> {
+    let mut rows = Vec::new();
+    for (line_index, line) in text.lines().enumerate() {
+        let line_number = line_index + 1;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let row: AgentWorkloadTraceRow = serde_json::from_str(line).map_err(|error| {
+            agent_workload_trace_usage_error(
+                line_number,
+                format!("invalid ee.agent_workload_trace.v1 row: {error}"),
+            )
+        })?;
+        validate_agent_workload_trace_row(line_number, &row)?;
+        rows.push(row);
+    }
+    if rows.is_empty() {
+        return Err(DomainError::Usage {
+            message: "agent workload trace did not contain any replayable rows".to_owned(),
+            repair: Some(
+                "Provide a redacted ee.agent_workload_trace.v1 JSONL trace with at least one row."
+                    .to_owned(),
+            ),
+        });
+    }
+    Ok(rows)
+}
+
+fn validate_agent_workload_trace_row(
+    line_number: usize,
+    row: &AgentWorkloadTraceRow,
+) -> Result<(), DomainError> {
+    if row.schema != AGENT_WORKLOAD_TRACE_SCHEMA_V1 {
+        return Err(agent_workload_trace_usage_error(
+            line_number,
+            format!(
+                "expected schema {AGENT_WORKLOAD_TRACE_SCHEMA_V1}, got {}",
+                row.schema
+            ),
+        ));
+    }
+    if !row.side_effect_free {
+        return Err(agent_workload_trace_usage_error(
+            line_number,
+            "workload replay only accepts side-effect-free trace rows",
+        ));
+    }
+    if !matches!(row.redaction_level.as_str(), "strict" | "audit") {
+        return Err(agent_workload_trace_usage_error(
+            line_number,
+            format!("unsupported redaction level {}", row.redaction_level),
+        ));
+    }
+    if row.command.verbs.is_empty() {
+        return Err(agent_workload_trace_usage_error(
+            line_number,
+            "command.verbs must contain at least one verb",
+        ));
+    }
+    if row.recorded_at.trim().is_empty() {
+        return Err(agent_workload_trace_usage_error(
+            line_number,
+            "recordedAt must be present even though replay strips it from deterministic hashes",
+        ));
+    }
+    if let Some(retention_posture) = &row.retention_posture
+        && !retention_posture.is_object()
+    {
+        return Err(agent_workload_trace_usage_error(
+            line_number,
+            "retentionPosture must be an object when present",
+        ));
+    }
+    if row
+        .redaction_posture
+        .as_ref()
+        .is_some_and(AgentWorkloadTraceRedactionPosture::has_raw_content)
+    {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "agent workload trace line {line_number} is not redacted enough for replay"
+            ),
+            repair: Some(
+                "Record or export the trace with all redactionPosture raw-content booleans false."
+                    .to_owned(),
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn build_agent_workload_replay_report(
+    source_path_tail: &str,
+    rows: Vec<AgentWorkloadTraceRow>,
+    verify_determinism: bool,
+    requested_agents: u16,
+) -> AgentWorkloadReplayReport {
+    let active_agents = requested_agents.min(MAX_AGENT_WORKLOAD_REPLAY_AGENTS);
+    let agent_scale = u64::from(active_agents);
+    let agent_scale_usize = usize::from(active_agents);
+    let mut command_counts = BTreeMap::<String, usize>::new();
+    let mut schema_counts = BTreeMap::<String, usize>::new();
+    let mut degraded_counts = BTreeMap::<String, usize>::new();
+    let mut redaction_levels = BTreeSet::<String>::new();
+    let mut harness_programs = BTreeSet::<String>::new();
+    let mut model_families = BTreeSet::<String>::new();
+    let mut memory_references = BTreeSet::<AgentWorkloadTraceMemoryReference>::new();
+    let mut byte_token_deltas = AgentWorkloadByteTokenDeltas::default();
+    let mut latency_samples = Vec::with_capacity(rows.len());
+    let mut normalized_rows = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        *command_counts
+            .entry(row.command.command_key())
+            .or_insert(0usize) += 1;
+        *schema_counts.entry(row.schema.clone()).or_insert(0usize) += 1;
+        redaction_levels.insert(row.redaction_level.clone());
+        harness_programs.insert(row.harness_identity.program.clone());
+        if let Some(model_family) = &row.harness_identity.model_family {
+            model_families.insert(model_family.clone());
+        }
+        byte_token_deltas.response_bytes_total = byte_token_deltas
+            .response_bytes_total
+            .saturating_add(row.response_byte_count);
+        byte_token_deltas.response_bytes_max = byte_token_deltas
+            .response_bytes_max
+            .max(row.response_byte_count);
+        byte_token_deltas.elapsed_ms_total = byte_token_deltas
+            .elapsed_ms_total
+            .saturating_add(row.elapsed_ms);
+        byte_token_deltas.elapsed_ms_max = byte_token_deltas.elapsed_ms_max.max(row.elapsed_ms);
+        latency_samples.push(row.elapsed_ms);
+        if let Some(token_estimate) = row.response_token_estimate {
+            byte_token_deltas.response_token_estimate_total = byte_token_deltas
+                .response_token_estimate_total
+                .saturating_add(token_estimate);
+            byte_token_deltas.response_token_estimate_max = byte_token_deltas
+                .response_token_estimate_max
+                .max(token_estimate);
+        } else {
+            byte_token_deltas.missing_token_estimate_rows += 1;
+        }
+        let mut degraded_codes = row.degraded_codes.clone();
+        degraded_codes.sort();
+        degraded_codes.dedup();
+        for code in &degraded_codes {
+            *degraded_counts.entry(code.clone()).or_insert(0usize) += 1;
+        }
+        let mut row_memory_references = row.memory_references.clone();
+        row_memory_references.sort();
+        row_memory_references.dedup();
+        memory_references.extend(row_memory_references.iter().cloned());
+        normalized_rows.push(NormalizedAgentWorkloadTraceRow {
+            schema: row.schema,
+            side_effect_free: row.side_effect_free,
+            redaction_level: row.redaction_level,
+            trace_id: row.trace_id,
+            command: row.command.normalize(),
+            exit_code: row.exit_code,
+            elapsed_ms: row.elapsed_ms,
+            response_byte_count: row.response_byte_count,
+            response_token_estimate: row.response_token_estimate,
+            token_estimator_id: row.token_estimator_id,
+            harness_identity: row.harness_identity,
+            memory_references: row_memory_references,
+            degraded_codes,
+        });
+    }
+
+    normalized_rows.sort_by_key(NormalizedAgentWorkloadTraceRow::sort_key);
+    let trace_hash =
+        prefixed_blake3_hash(crate::core::serialize_or_error(&normalized_rows).as_bytes());
+    scale_byte_token_deltas(&mut byte_token_deltas, active_agents);
+    let trace = AgentWorkloadReplayTraceSummary {
+        source_path_tail: source_path_tail.to_owned(),
+        row_count: normalized_rows.len(),
+        trace_hash: trace_hash.clone(),
+        redaction_levels: redaction_levels.into_iter().collect(),
+        harness_programs: harness_programs.into_iter().collect(),
+        model_families: model_families.into_iter().collect(),
+        memory_reference_count: memory_references.len(),
+    };
+    let synthetic_operations = (trace.row_count as u64).saturating_mul(agent_scale);
+    let workload_hash = prefixed_blake3_hash(
+        crate::core::serialize_or_error(&(
+            trace_hash.as_str(),
+            active_agents,
+            synthetic_operations,
+        ))
+        .as_bytes(),
+    );
+    let playback = AgentWorkloadPlaybackSummary {
+        requested_agents,
+        active_agents,
+        resource_cap_agents: MAX_AGENT_WORKLOAD_REPLAY_AGENTS,
+        resource_limited: requested_agents > MAX_AGENT_WORKLOAD_REPLAY_AGENTS,
+        trace_rows_per_agent: trace.row_count,
+        synthetic_operations,
+        workload_hash,
+    };
+    let command_counts = command_counts
+        .into_iter()
+        .map(|(command, count)| AgentWorkloadCommandCount {
+            command,
+            count: count.saturating_mul(agent_scale_usize),
+        })
+        .collect::<Vec<_>>();
+    let schemas_observed = schema_counts
+        .into_iter()
+        .map(|(schema, count)| AgentWorkloadSchemaCount {
+            schema,
+            count: count.saturating_mul(agent_scale_usize),
+        })
+        .collect::<Vec<_>>();
+    let degraded_code_deltas = degraded_counts
+        .into_iter()
+        .map(|(code, observed_count)| AgentWorkloadDegradedCodeDelta {
+            code,
+            baseline_count: 0,
+            observed_count: observed_count.saturating_mul(agent_scale_usize),
+            delta: saturating_usize_to_i64(observed_count.saturating_mul(agent_scale_usize)),
+        })
+        .collect::<Vec<_>>();
+    let latency = build_agent_workload_latency_summary(&mut latency_samples, active_agents);
+    let cache_posture = build_agent_workload_cache_posture(trace.row_count, active_agents);
+    let duplicate_work_coalescing =
+        build_agent_workload_duplicate_work_coalescing(trace.row_count, active_agents);
+    let hash_input = AgentWorkloadReplayHashInput {
+        playback: playback.clone(),
+        trace: trace.clone(),
+        command_counts: command_counts.clone(),
+        schemas_observed: schemas_observed.clone(),
+        degraded_code_deltas: degraded_code_deltas.clone(),
+        byte_token_deltas: byte_token_deltas.clone(),
+        latency: latency.clone(),
+        cache_posture: cache_posture.clone(),
+        duplicate_work_coalescing: duplicate_work_coalescing.clone(),
+    };
+    let replay_hash = agent_workload_replay_hash(&hash_input);
+    let determinism = if verify_determinism {
+        Some(verify_agent_workload_replay_determinism(&hash_input))
+    } else {
+        None
+    };
+    let fixture_promotion = AgentWorkloadFixturePromotion {
+        sanitized_fixture_hash: trace_hash,
+        replay_case_hash: replay_hash.clone(),
+        perf_budget_key: format!(
+            "agent-workload:{}:{}:{}",
+            trace.row_count,
+            active_agents,
+            trace.harness_programs.join("+")
+        ),
+    };
+    let mut warnings = Vec::new();
+    if playback.resource_limited {
+        warnings.push(format!(
+            "requested {requested_agents} synthetic agents, capped at {MAX_AGENT_WORKLOAD_REPLAY_AGENTS} to avoid host oversubscription"
+        ));
+    }
+
+    AgentWorkloadReplayReport {
+        schema: AGENT_WORKLOAD_REPLAY_SCHEMA_V1.to_owned(),
+        side_effect_free: true,
+        command: "lab replay workload".to_owned(),
+        playback,
+        trace,
+        command_counts,
+        schemas_observed,
+        degraded_code_deltas,
+        byte_token_deltas,
+        latency,
+        cache_posture,
+        duplicate_work_coalescing,
+        replay_hash,
+        determinism,
+        fixture_promotion,
+        warnings,
+    }
+}
+
+fn scale_byte_token_deltas(deltas: &mut AgentWorkloadByteTokenDeltas, active_agents: u16) {
+    let scale = u64::from(active_agents);
+    deltas.response_bytes_total = deltas.response_bytes_total.saturating_mul(scale);
+    deltas.response_token_estimate_total =
+        deltas.response_token_estimate_total.saturating_mul(scale);
+    deltas.elapsed_ms_total = deltas.elapsed_ms_total.saturating_mul(scale);
+    deltas.missing_token_estimate_rows = deltas
+        .missing_token_estimate_rows
+        .saturating_mul(usize::from(active_agents));
+}
+
+fn build_agent_workload_latency_summary(
+    samples: &mut [u64],
+    active_agents: u16,
+) -> AgentWorkloadLatencySummary {
+    samples.sort_unstable();
+    let synthetic_samples = (samples.len() as u64).saturating_mul(u64::from(active_agents));
+    AgentWorkloadLatencySummary {
+        samples: synthetic_samples,
+        p50_ms: percentile_nearest_rank(samples, 50),
+        p95_ms: percentile_nearest_rank(samples, 95),
+        p99_ms: percentile_nearest_rank(samples, 99),
+        max_ms: samples.last().copied().unwrap_or_default(),
+    }
+}
+
+fn percentile_nearest_rank(sorted_samples: &[u64], percentile: usize) -> u64 {
+    if sorted_samples.is_empty() {
+        return 0;
+    }
+    let index = sorted_samples
+        .len()
+        .saturating_mul(percentile)
+        .saturating_sub(1)
+        / 100;
+    sorted_samples[index.min(sorted_samples.len() - 1)]
+}
+
+fn build_agent_workload_cache_posture(
+    trace_rows_per_agent: usize,
+    active_agents: u16,
+) -> AgentWorkloadCachePosture {
+    let misses = trace_rows_per_agent as u64;
+    let hits = misses.saturating_mul(u64::from(active_agents.saturating_sub(1)));
+    AgentWorkloadCachePosture {
+        cache_hit_count: hits,
+        cache_miss_count: misses,
+        hit_ratio_basis_points: ratio_basis_points(hits, hits.saturating_add(misses)),
+    }
+}
+
+fn build_agent_workload_duplicate_work_coalescing(
+    trace_rows_per_agent: usize,
+    active_agents: u16,
+) -> AgentWorkloadDuplicateWorkCoalescing {
+    let unique_work_items = trace_rows_per_agent;
+    let coalesced_operations =
+        (trace_rows_per_agent as u64).saturating_mul(u64::from(active_agents.saturating_sub(1)));
+    let total_operations = (trace_rows_per_agent as u64).saturating_mul(u64::from(active_agents));
+    AgentWorkloadDuplicateWorkCoalescing {
+        unique_work_items,
+        coalesced_operations,
+        coalescing_ratio_basis_points: ratio_basis_points(coalesced_operations, total_operations),
+    }
+}
+
+fn ratio_basis_points(numerator: u64, denominator: u64) -> u16 {
+    if denominator == 0 {
+        return 0;
+    }
+    numerator
+        .saturating_mul(10_000)
+        .saturating_add(denominator / 2)
+        .checked_div(denominator)
+        .unwrap_or_default()
+        .min(u64::from(u16::MAX)) as u16
+}
+
+fn verify_agent_workload_replay_determinism(
+    hash_input: &AgentWorkloadReplayHashInput,
+) -> AgentWorkloadReplayDeterminism {
+    let replay_hashes = (0..3)
+        .map(|_| agent_workload_replay_hash(hash_input))
+        .collect::<Vec<_>>();
+    let first = replay_hashes.first().cloned().unwrap_or_default();
+    let all_identical = replay_hashes.iter().all(|hash| hash == &first);
+    let first_diff_byte_offset = replay_hashes
+        .iter()
+        .find_map(|hash| first_diff_byte_offset(first.as_bytes(), hash.as_bytes()));
+    AgentWorkloadReplayDeterminism {
+        runs: replay_hashes.len(),
+        replay_hashes,
+        all_identical,
+        first_diff_byte_offset,
+    }
+}
+
+fn agent_workload_replay_hash(hash_input: &AgentWorkloadReplayHashInput) -> String {
+    prefixed_blake3_hash(crate::core::serialize_or_error(hash_input).as_bytes())
+}
+
+fn prefixed_blake3_hash(data: &[u8]) -> String {
+    format!("blake3:{}", hash_content(data))
+}
+
+fn saturating_usize_to_i64(value: usize) -> i64 {
+    if value > i64::MAX as usize {
+        i64::MAX
+    } else {
+        value as i64
+    }
+}
+
+fn agent_workload_source_path_tail(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("trace.jsonl")
+        .to_owned()
+}
+
+fn agent_workload_trace_usage_error(line_number: usize, message: impl Into<String>) -> DomainError {
+    DomainError::Usage {
+        message: format!("agent workload trace line {line_number}: {}", message.into()),
+        repair: Some(
+            "Provide redacted ee.agent_workload_trace.v1 JSONL rows exported by the flight recorder."
+                .to_owned(),
+        ),
+    }
 }
 
 fn lab_pack_hash(query: &str, policy_ids: &[String]) -> String {
@@ -1991,6 +2790,199 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    const REDACTED_WORKLOAD_TRACE: &str =
+        include_str!("../../tests/fixtures/agent_workloads/redacted_trace_minimal.jsonl");
+
+    #[test]
+    fn workload_replay_counts_redacted_trace_shapes() -> TestResult {
+        let report = replay_agent_workload_trace_jsonl(
+            "redacted_trace_minimal.jsonl",
+            REDACTED_WORKLOAD_TRACE,
+            true,
+        )
+        .map_err(|error| error.message())?;
+
+        ensure(
+            report.schema,
+            AGENT_WORKLOAD_REPLAY_SCHEMA_V1.to_owned(),
+            "schema",
+        )?;
+        ensure(report.side_effect_free, true, "side_effect_free")?;
+        ensure(
+            report.playback.requested_agents,
+            DEFAULT_AGENT_WORKLOAD_REPLAY_AGENTS,
+            "requested agents",
+        )?;
+        ensure(report.playback.active_agents, 64u16, "active agents")?;
+        ensure(
+            report.playback.synthetic_operations,
+            256u64,
+            "synthetic operations",
+        )?;
+        ensure(report.trace.row_count, 4usize, "row_count")?;
+        ensure(report.trace.memory_reference_count, 3usize, "memory refs")?;
+        ensure(
+            report
+                .command_counts
+                .iter()
+                .map(|count| count.command.as_str())
+                .collect::<Vec<_>>(),
+            vec!["context", "search", "status", "why"],
+            "commands",
+        )?;
+        ensure(
+            report
+                .degraded_code_deltas
+                .iter()
+                .find(|delta| delta.code == "index_stale")
+                .map(|delta| delta.observed_count),
+            Some(128usize),
+            "index_stale count",
+        )?;
+        ensure(
+            report.byte_token_deltas.response_bytes_total,
+            557_056u64,
+            "scaled bytes",
+        )?;
+        ensure(report.latency.samples, 256u64, "latency samples")?;
+        ensure(report.latency.p99_ms, 95u64, "p99")?;
+        ensure(report.cache_posture.cache_hit_count, 252u64, "cache hits")?;
+        ensure(report.cache_posture.cache_miss_count, 4u64, "cache misses")?;
+        ensure(
+            report.duplicate_work_coalescing.coalesced_operations,
+            252u64,
+            "coalesced operations",
+        )?;
+        ensure(
+            report
+                .determinism
+                .as_ref()
+                .map(|determinism| determinism.all_identical),
+            Some(true),
+            "determinism",
+        )
+    }
+
+    #[test]
+    fn workload_replay_ordering_and_hash_are_deterministic() -> TestResult {
+        let reversed = REDACTED_WORKLOAD_TRACE
+            .lines()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let first = replay_agent_workload_trace_jsonl(
+            "redacted_trace_minimal.jsonl",
+            REDACTED_WORKLOAD_TRACE,
+            true,
+        )
+        .map_err(|error| error.message())?;
+        let second =
+            replay_agent_workload_trace_jsonl("redacted_trace_minimal.jsonl", &reversed, true)
+                .map_err(|error| error.message())?;
+
+        ensure(
+            first.trace.trace_hash,
+            second.trace.trace_hash,
+            "trace_hash",
+        )?;
+        ensure(first.replay_hash, second.replay_hash, "replay_hash")?;
+        ensure(first.to_json(), second.to_json(), "json output")
+    }
+
+    #[test]
+    fn workload_replay_strips_recorded_at_from_hashes() -> TestResult {
+        let shifted = REDACTED_WORKLOAD_TRACE
+            .replace("2026-05-20T00:00:01Z", "2026-05-21T00:00:01Z")
+            .replace("2026-05-20T00:00:02Z", "2026-05-21T00:00:02Z")
+            .replace("2026-05-20T00:00:03Z", "2026-05-21T00:00:03Z")
+            .replace("2026-05-20T00:00:04Z", "2026-05-21T00:00:04Z");
+        let first = replay_agent_workload_trace_jsonl(
+            "redacted_trace_minimal.jsonl",
+            REDACTED_WORKLOAD_TRACE,
+            false,
+        )
+        .map_err(|error| error.message())?;
+        let second =
+            replay_agent_workload_trace_jsonl("redacted_trace_minimal.jsonl", &shifted, false)
+                .map_err(|error| error.message())?;
+
+        ensure(
+            first.trace.trace_hash,
+            second.trace.trace_hash,
+            "trace_hash",
+        )?;
+        ensure(first.replay_hash, second.replay_hash, "replay_hash")
+    }
+
+    #[test]
+    fn workload_replay_rejects_raw_content_posture() -> TestResult {
+        let raw = REDACTED_WORKLOAD_TRACE.replacen(
+            "\"rawQueryTextPresent\":false",
+            "\"rawQueryTextPresent\":true",
+            1,
+        );
+        let result = replay_agent_workload_trace_jsonl("raw_trace.jsonl", &raw, false);
+
+        ensure(
+            matches!(result, Err(DomainError::PolicyDenied { .. })),
+            true,
+            "policy denied",
+        )
+    }
+
+    #[test]
+    fn workload_replay_report_is_byte_identical_across_three_runs() -> TestResult {
+        let first = replay_agent_workload_trace_jsonl(
+            "redacted_trace_minimal.jsonl",
+            REDACTED_WORKLOAD_TRACE,
+            true,
+        )
+        .map_err(|error| error.message())?
+        .to_json();
+        let second = replay_agent_workload_trace_jsonl(
+            "redacted_trace_minimal.jsonl",
+            REDACTED_WORKLOAD_TRACE,
+            true,
+        )
+        .map_err(|error| error.message())?
+        .to_json();
+        let third = replay_agent_workload_trace_jsonl(
+            "redacted_trace_minimal.jsonl",
+            REDACTED_WORKLOAD_TRACE,
+            true,
+        )
+        .map_err(|error| error.message())?
+        .to_json();
+
+        ensure(first.clone(), second, "first vs second")?;
+        ensure(first, third, "first vs third")
+    }
+
+    #[test]
+    fn workload_replay_reports_resource_cap_without_silent_oversubscription() -> TestResult {
+        let report = replay_agent_workload_trace_jsonl_with_agents(
+            "redacted_trace_minimal.jsonl",
+            REDACTED_WORKLOAD_TRACE,
+            false,
+            MAX_AGENT_WORKLOAD_REPLAY_AGENTS + 1,
+        )
+        .map_err(|error| error.message())?;
+
+        ensure(
+            report.playback.requested_agents,
+            MAX_AGENT_WORKLOAD_REPLAY_AGENTS + 1,
+            "requested agents",
+        )?;
+        ensure(
+            report.playback.active_agents,
+            MAX_AGENT_WORKLOAD_REPLAY_AGENTS,
+            "active agents capped",
+        )?;
+        ensure(report.playback.resource_limited, true, "resource limited")?;
+        ensure(report.warnings.len(), 1usize, "warning count")
     }
 
     #[test]

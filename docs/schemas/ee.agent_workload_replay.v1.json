@@ -1,0 +1,399 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.agent_workload_replay.v1.json",
+  "title": "ee.agent_workload_replay.v1",
+  "description": "Deterministic, side-effect-free replay summary derived from redacted ee.agent_workload_trace.v1 JSONL rows.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "sideEffectFree",
+    "command",
+    "playback",
+    "trace",
+    "commandCounts",
+    "schemasObserved",
+    "degradedCodeDeltas",
+    "byteTokenDeltas",
+    "latency",
+    "cachePosture",
+    "duplicateWorkCoalescing",
+    "replayHash",
+    "determinism",
+    "fixturePromotion",
+    "warnings"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.agent_workload_replay.v1"
+    },
+    "sideEffectFree": {
+      "type": "boolean",
+      "const": true
+    },
+    "command": {
+      "type": "string",
+      "const": "lab replay workload"
+    },
+    "playback": {
+      "$ref": "#/$defs/playback"
+    },
+    "trace": {
+      "$ref": "#/$defs/traceSummary"
+    },
+    "commandCounts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/commandCount"
+      }
+    },
+    "schemasObserved": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/schemaCount"
+      }
+    },
+    "degradedCodeDeltas": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/degradedCodeDelta"
+      }
+    },
+    "byteTokenDeltas": {
+      "$ref": "#/$defs/byteTokenDeltas"
+    },
+    "latency": {
+      "$ref": "#/$defs/latency"
+    },
+    "cachePosture": {
+      "$ref": "#/$defs/cachePosture"
+    },
+    "duplicateWorkCoalescing": {
+      "$ref": "#/$defs/duplicateWorkCoalescing"
+    },
+    "replayHash": {
+      "$ref": "#/$defs/blake3Hash"
+    },
+    "determinism": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/determinism"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "fixturePromotion": {
+      "$ref": "#/$defs/fixturePromotion"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "blake3Hash": {
+      "type": "string",
+      "pattern": "^blake3:[A-Fa-f0-9]{64}$"
+    },
+    "playback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestedAgents",
+        "activeAgents",
+        "resourceCapAgents",
+        "resourceLimited",
+        "traceRowsPerAgent",
+        "syntheticOperations",
+        "workloadHash"
+      ],
+      "properties": {
+        "requestedAgents": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "activeAgents": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "resourceCapAgents": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "resourceLimited": {
+          "type": "boolean"
+        },
+        "traceRowsPerAgent": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "syntheticOperations": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "workloadHash": {
+          "$ref": "#/$defs/blake3Hash"
+        }
+      }
+    },
+    "traceSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourcePathTail",
+        "rowCount",
+        "traceHash",
+        "redactionLevels",
+        "harnessPrograms",
+        "modelFamilies",
+        "memoryReferenceCount"
+      ],
+      "properties": {
+        "sourcePathTail": {
+          "type": "string"
+        },
+        "rowCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "traceHash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "redactionLevels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["strict", "audit"]
+          }
+        },
+        "harnessPrograms": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "modelFamilies": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "memoryReferenceCount": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "commandCount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "count"],
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "schemaCount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "count"],
+      "properties": {
+        "schema": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "degradedCodeDelta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "baselineCount", "observedCount", "delta"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "baselineCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "observedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "delta": {
+          "type": "integer"
+        }
+      }
+    },
+    "byteTokenDeltas": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "responseBytesTotal",
+        "responseBytesMax",
+        "responseTokenEstimateTotal",
+        "responseTokenEstimateMax",
+        "missingTokenEstimateRows",
+        "elapsedMsTotal",
+        "elapsedMsMax"
+      ],
+      "properties": {
+        "responseBytesTotal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "responseBytesMax": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "responseTokenEstimateTotal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "responseTokenEstimateMax": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missingTokenEstimateRows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "elapsedMsTotal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "elapsedMsMax": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "latency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["samples", "p50Ms", "p95Ms", "p99Ms", "maxMs"],
+      "properties": {
+        "samples": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "p50Ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p95Ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p99Ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxMs": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "cachePosture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cacheHitCount", "cacheMissCount", "hitRatioBasisPoints"],
+      "properties": {
+        "cacheHitCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cacheMissCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hitRatioBasisPoints": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        }
+      }
+    },
+    "duplicateWorkCoalescing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uniqueWorkItems",
+        "coalescedOperations",
+        "coalescingRatioBasisPoints"
+      ],
+      "properties": {
+        "uniqueWorkItems": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "coalescedOperations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "coalescingRatioBasisPoints": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        }
+      }
+    },
+    "determinism": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runs", "replayHashes", "allIdentical", "firstDiffByteOffset"],
+      "properties": {
+        "runs": {
+          "type": "integer",
+          "const": 3
+        },
+        "replayHashes": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "$ref": "#/$defs/blake3Hash"
+          }
+        },
+        "allIdentical": {
+          "type": "boolean"
+        },
+        "firstDiffByteOffset": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
+      }
+    },
+    "fixturePromotion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sanitizedFixtureHash", "replayCaseHash", "perfBudgetKey"],
+      "properties": {
+        "sanitizedFixtureHash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "replayCaseHash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "perfBudgetKey": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
