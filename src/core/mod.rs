@@ -85,6 +85,7 @@ pub mod singleflight;
 pub mod situation;
 pub mod status;
 pub mod streams;
+pub mod subscribe;
 pub mod support_bundle;
 pub mod swarm_brief;
 pub mod swarm_brief_delta;

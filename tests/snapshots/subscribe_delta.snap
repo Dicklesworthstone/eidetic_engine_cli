@@ -1,0 +1,28 @@
+{
+  "agentName": "ee remember",
+  "auditId": "audit_00000000000000000000000000",
+  "changedFields": [
+    "content_hash",
+    "confidence",
+    "utility",
+    "level",
+    "kind",
+    "tags"
+  ],
+  "cursor": 1,
+  "kind": "created",
+  "kinds": [
+    "rule"
+  ],
+  "levels": [
+    "procedural"
+  ],
+  "memoryId": "mem_00000000000000000000000000",
+  "occurredAt": "2026-05-20T00:00:00Z",
+  "schema": "ee.memory.delta.v1",
+  "tags": [
+    "release"
+  ],
+  "trustClass": "human_explicit",
+  "workspaceId": "wsp_00000000000000000000000000"
+}

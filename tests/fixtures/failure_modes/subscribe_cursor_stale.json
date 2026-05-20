@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "subscribe_cursor_stale",
+  "introduced_by": {
+    "bead": "bd-ub249",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "subscribe poll"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee subscribe poll is invoked with a cursor ahead of the durable audit high watermark.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "ee remember 'Run release checks before publishing.' --workspace . --level procedural --kind rule --json"
+    ],
+    "invocation": "ee subscribe poll --cursor 999999 --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "subscribe_cursor_stale",
+    "severity": "warning",
+    "message_contains": [
+      "Requested cursor",
+      "ahead of the audit high watermark"
+    ],
+    "repair_contains": "returned nextCursor",
+    "repair_string": "Persist the returned nextCursor before polling again."
+  }
+}

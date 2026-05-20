@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic.engine/schemas/ee.memory.delta.v1.json",
+  "title": "Eidetic Engine Memory Delta",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "cursor",
+    "kind",
+    "memoryId",
+    "levels",
+    "kinds",
+    "tags",
+    "workspaceId",
+    "trustClass",
+    "agentName",
+    "changedFields",
+    "auditId",
+    "occurredAt"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ee.memory.delta.v1"
+    },
+    "cursor": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic audit cursor. Pollers persist this and resume with --cursor."
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "created",
+        "updated",
+        "level_transitioned",
+        "expired",
+        "tombstoned"
+      ]
+    },
+    "memoryId": {
+      "type": "string",
+      "pattern": "^mem_[0-9A-Za-z]{26}$"
+    },
+    "levels": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "working",
+          "episodic",
+          "semantic",
+          "procedural"
+        ]
+      }
+    },
+    "kinds": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      }
+    },
+    "workspaceId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "trustClass": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "human_explicit",
+        "agent_validated",
+        "agent_assertion",
+        "cass_evidence",
+        "legacy_import",
+        null
+      ]
+    },
+    "agentName": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "changedFields": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "auditId": {
+      "type": "string",
+      "pattern": "^audit_[0-9A-Za-z]{26}$"
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
