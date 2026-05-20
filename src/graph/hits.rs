@@ -306,6 +306,30 @@ mod tests {
     }
 
     #[test]
+    fn hits_single_node_report_matches_inline_snapshot() -> TestResult {
+        let mut graph = empty_digraph();
+        graph.add_node("solo");
+
+        let report = graph_result(compute_hits_report(&graph))?;
+
+        insta::assert_json_snapshot!(report, @r###"
+        {
+          "schema": "ee.graph.hits.v1",
+          "scores": {
+            "hubs": {
+              "solo": 1.0
+            },
+            "authorities": {
+              "solo": 1.0
+            }
+          },
+          "degraded": []
+        }
+        "###);
+        Ok(())
+    }
+
+    #[test]
     fn hits_star_authority_dominates_center() -> TestResult {
         // a, c, d each point to b. b is the single authority; a, c, d
         // are hubs of equal hub score; b's hub score is the floor since

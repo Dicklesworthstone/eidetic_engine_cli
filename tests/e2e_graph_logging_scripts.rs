@@ -100,6 +100,30 @@ fn g10_hits_script_covers_why_hits_contract() {
 }
 
 #[test]
+fn g10_hits_script_covers_context_profile_rerank_contract() {
+    let path = "scripts/e2e_overhaul/g10_hits.sh";
+    let contents = read_script(path);
+    for marker in [
+        "CONTEXT_GROUNDING_JSON=$(ee_workspace context",
+        "--profile grounding",
+        "CONTEXT_ORIENTATION_JSON=$(ee_workspace context",
+        "--profile orientation",
+        "g10_hits_surface=context profile rerank",
+        "g10_hits_context_grounding_profile",
+        "g10_hits_context_orientation_profile",
+        "g10_hits_context_grounding_authority_ranked",
+        "g10_hits_context_orientation_hub_ranked",
+        "g10_hits_context_profiles_differ",
+        "g10_hits_context_profiles_available",
+    ] {
+        assert!(
+            contents.contains(marker),
+            "{path} must keep the HITS context-profile rerank assertion marker `{marker}`",
+        );
+    }
+}
+
+#[test]
 fn graph_e2e_script_inventory_matches_bead_coverage() {
     let actual = GRAPH_E2E_SCRIPTS
         .iter()
