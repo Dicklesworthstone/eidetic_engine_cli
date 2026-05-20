@@ -1,6 +1,7 @@
 use std::process::ExitCode;
 
 pub mod backup;
+pub mod bead_affinity;
 pub mod causal;
 pub mod certificate;
 pub mod claims;
