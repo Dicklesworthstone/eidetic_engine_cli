@@ -537,14 +537,11 @@ fn effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating() -> TestRe
 
     let manifest = EffectManifest::build();
 
-    // N15.2 (bd-17c65.14.15.3) retired `revision_write_unavailable` from
-    // `memory revise` when the real write path turned on. The remaining
-    // entries here are the surfaces still in their honesty-only
-    // abstention state.
-    for (command, code) in [
-        ("lab replay", "lab_replay_unavailable"),
-        ("economy report", "economy_metrics_unavailable"),
-    ] {
+    // N15 retired `revision_write_unavailable` from `memory revise` and the
+    // lab replay/counterfactual command-effect paths now describe real
+    // read-only implementations. The entries here are still in their
+    // honesty-only abstention state.
+    for (command, code) in [("economy report", "economy_metrics_unavailable")] {
         let effect = manifest
             .get(command)
             .ok_or_else(|| format!("{command} not in manifest"))?;
@@ -584,6 +581,8 @@ fn effect_manifest_tracks_implemented_surfaces() -> TestResult {
     let manifest = EffectManifest::build();
 
     for command in [
+        "lab counterfactual",
+        "lab replay",
         "support inspect",
         "preflight show",
         "tripwire list",
@@ -626,6 +625,25 @@ fn effect_manifest_tracks_implemented_surfaces() -> TestResult {
         support.mutation_contract.degraded_code,
         None,
         "support bundle has no unavailable sentinel",
+    )?;
+
+    let lab_capture = manifest
+        .get("lab capture")
+        .ok_or_else(|| "lab capture not in manifest".to_string())?;
+    ensure(
+        lab_capture.default_effect,
+        EffectClass::WorkspaceFileWrite,
+        "lab capture writes frozen episode side-path artifacts",
+    )?;
+    ensure(
+        lab_capture.mutation_contract.side_effect_class,
+        SideEffectClass::SidePathArtifact,
+        "lab capture side-effect class",
+    )?;
+    ensure(
+        lab_capture.mutation_contract.degraded_code,
+        None,
+        "lab capture has no unavailable sentinel",
     )?;
 
     for command in ["preflight run", "preflight close"] {
