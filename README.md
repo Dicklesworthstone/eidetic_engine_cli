@@ -115,6 +115,22 @@ ee outcome <memory-id> --workspace . --signal helpful --reason "<what it changed
 | You need a safe handoff | `ee handoff create --workspace . --out <capsule.json> --json` |
 | You need a support artifact | `ee support bundle --out <dir> --workspace . --json` |
 
+### Operator rules in practice
+
+The private operator playbook boils down to a few habits:
+
+| ID | Rule | Command habit |
+|---|---|---|
+| EE-001 | Pull task context before real work | `ee context "<task>" --workspace . --max-tokens 4000 --format markdown` |
+| EE-002 / EE-003 | Choose memory level and kind by what the fact is | Use `working`, `episodic`, `semantic`, `procedural`; use `rule`, `fact`, `decision`, `failure`, `command`, `convention`, `anti-pattern`, `risk`, or `playbook-step` |
+| EE-004 / EE-025 | Inspect surprising results before discarding them | `ee context "<task>" --explain --json`; `ee why <id> --workspace . --json` |
+| EE-005 / EE-017 | Treat pack replay as forensics | `ee pack replay <pack-id> --json`; rerun live `ee context` when evidence freshness changed |
+| EE-009 / EE-011 | Save memory IDs and close the feedback loop promptly | `ee outcome <id> --signal helpful\|harmful --reason "<one sentence>"` |
+| EE-010 / EE-030 | Run preflight per risky command | `ee preflight check --cmd "<exact command>" --workspace . --json` |
+| EE-013 / EE-021 | In crowded repos, coordinate before staging | `ee swarm brief --workspace . --json`; `ee workspace hygiene --workspace . --json` |
+| EE-019 | Use TOON for tight prompt budgets and JSON for parsers | `ee context "<task>" --format toon`; `ee context "<task>" --json` |
+| EE-020 / EE-026 | Use the right sharing artifact | `ee support bundle` for bug reports; `ee handoff create` for resumable work |
+
 ---
 
 ## Quick Example
@@ -506,8 +522,23 @@ Machine readers should inspect the JSON contract before trusting a result:
 | Recoveries | `error.details.recovery[]`, which is structured for agents |
 | Posture | `ee status --json` uses `data.posture.overall`; `ee doctor --json` returns a doctor-specific posture view |
 | Provenance | `provenance[]`, `evidence_spans[]`, and `trustClass` on memory and pack items |
-| Pack identity | `data.pack.contentHash`, plus section names and omission reasons |
+| Pack identity | `data.pack.hash` for batch packs; `packHash` on stream trailer frames |
 | Graph explanation | `data.pack.packDna` when `ee context --explain --json` is used |
+| Feature gaps | `ee capabilities --json` at `data.unimplemented[]`, not command `degraded[]` |
+| Streams | `ee.pack.stream.v1` NDJSON frames: `header`, `item`, terminal `trailer`, `error`, or `cancelled` |
+
+Severity vocabulary:
+
+| Order | Values |
+|---|---|
+| Low to high | `info` < `low` < `warning` < `medium` < `high` < `critical` |
+
+Status and doctor posture are separate contracts:
+
+| Command | Field | Values |
+|---|---|---|
+| `ee status --json` | `data.posture.overall` | `ok`, `degraded_recoverable`, `degraded_required`, `blocked`, `unimplemented`, `initializing` |
+| `ee doctor --json` | `data.posture` | `ready`, `degraded`, `needs_attention` |
 
 Exit code vocabulary:
 
@@ -536,6 +567,54 @@ Common red flags:
 | `workspace_ambiguous` | Use `ee workspace list`, then pass an explicit workspace or alias |
 | exit `7` | Stop and get human approval before using any bypass-token path |
 | exit `8` | Run `ee migrate run --workspace . --json` |
+
+### Context pack controls
+
+`ee context` and `ee pack build` expose three layers of control:
+
+| Layer | Flags | Use |
+|---|---|---|
+| Retrieval profile | `--profile compact\|balanced\|grounding\|orientation\|thorough\|submodular` | Choose the memory mix and graph bias |
+| Output profile | `--pack-profile lean\|standard\|verbose` | Trim or expand JSON metadata |
+| Resource profile | `--resource-profile lean\|standard\|swarm_heavy` | Pick pack assembly SLO posture |
+| Size | `--max-tokens N`, `--candidate-pool N` | Bound prompt budget and candidate pool |
+| Output format | `--format markdown\|json\|toon`, `--stream --json` | Prompt text, parser output, token-tight TOON, or NDJSON frames |
+| JSON diet | `--no-rendered-text`, `--no-skipped`, `--no-meta`, `--no-pack-dna` | Suppress bulky sections for structured consumers |
+| Coordination | `--coordination-snapshot <path>`, `--coordination-stale-after-ms N` | Embed a redacted coordination snapshot |
+| Code-change hints | `--changed-symbol <selector>`, `--changed-symbols-from-git` | Bias toward memories linked to changed symbols |
+| Time windows | `--as-of <RFC3339>`, `--include-expired`, `--include-future`, `--include-stale`, `--include-tombstoned` | Inspect validity-window behavior |
+| Trust lane | `--memory-scope self\|team\|workspace\|verified\|swarm`, `--strict-scope` | Bound which trust lane can contribute |
+| Privacy | `--redaction none\|minimal\|standard\|strict\|paranoid` | Tune output redaction where the command allows it |
+
+Examples:
+
+```bash
+ee context "debug release failure" \
+  --workspace . \
+  --profile thorough \
+  --pack-profile verbose \
+  --resource-profile swarm_heavy \
+  --max-tokens 8000 \
+  --explain \
+  --json
+
+ee context "small hook context" \
+  --workspace . \
+  --profile compact \
+  --pack-profile lean \
+  --max-tokens 1200 \
+  --format toon
+
+ee context "large agent handoff" \
+  --workspace . \
+  --stream \
+  --format jsonl
+```
+
+When `[pack] adaptive_budget = true`, omitted `--max-tokens` lets `ee` compute
+a budget from retrieval entropy, graph fanout, and task keywords. Passing
+`--max-tokens N` pins the budget for prompt caches, eval fixtures, CI gates, or
+multi-pack composition.
 
 ### Graph-derived insights
 
@@ -724,6 +803,58 @@ Attach `swarm_brief_summary.json` in support bundles and handoffs when you need
 coordination posture without leaking content; attach fresh live output only when
 the recipient is allowed to see the underlying repo and coordination metadata.
 
+### Workspace hygiene and commit readiness
+
+`ee workspace hygiene` is a read-only dirty-checkout classifier for agents and
+pre-commit hooks.
+
+| Bucket | Meaning |
+|---|---|
+| `stage_candidate` | Regular source, tests, and docs after content review |
+| `do_not_commit` | Generated files, scratch files, local-machine state, or secret risk |
+| `needs_human_review` | Large diffs, dependency changes, infrastructure changes, or schema migrations |
+| `ignore_for_now` | Known transient state, such as logs or peer-owned churn |
+
+| Kind | Examples |
+|---|---|
+| `source`, `test`, `docs` | Normal tracked code surfaces |
+| `beads_metadata` | Beads state and workflow files |
+| `generated`, `scratch`, `local_machine` | Build output, temp logs, editor config, local env |
+| `secret_risk` | API keys, private keys, `.env` files, cloud credentials, tokens |
+| `binary`, `unknown` | Large binaries or paths without a known class |
+
+Useful checks:
+
+```bash
+ee workspace hygiene --workspace . --json \
+  | jq '.data.pathClassifications | group_by(.bucket) | map({bucket: .[0].bucket, count: length})'
+
+ee workspace hygiene --workspace . --mode precommit --strict-advisory --json
+```
+
+The report can include Agent Mail reservations and Beads links, so an agent can
+see whether a path is risky because of content, ownership, or current work
+coordination.
+
+### Handoff and resume
+
+Use a handoff capsule when another agent or another machine should resume a
+mid-task state.
+
+| Command | Purpose |
+|---|---|
+| `ee handoff create --workspace . --out <capsule.json> --json` | Write a signed capsule |
+| `ee handoff inspect <capsule.json> --workspace . --json` | Inspect capsule contents without consuming it |
+| `ee handoff preview <capsule.json> --workspace . --json` | Show resume effects before consuming it |
+| `ee handoff resume <capsule.json> --workspace . --json` | Consume the capsule and re-warm context |
+| `ee handoff rotate-key <capsule.json> --workspace . --json` | Re-sign after suspected exposure |
+
+Capsules carry bead context, recent commits, reservations, last pack ID,
+posture, next steps, redaction summary, and content hashes. They are
+HMAC-signed files, so treat the capsule path as a credential. Use `ee support
+bundle` for bug reports and `ee export` for memory transfer; handoff is for
+resuming work.
+
 ### Swarm schema contracts
 
 Swarm-scale JSON contracts live in [`docs/schemas/swarm/`](docs/schemas/swarm/)
@@ -798,6 +929,28 @@ Related docs:
 | `ee playbook import --source <file> [--apply]` | Dry-run or apply a portable playbook import through audited rule writes |
 | `ee rule add` / `list` / `show <id>` / `mark <id>` / `protect <id>` / `update <id>` | Direct rule management |
 
+Outcome signal vocabulary:
+
+| Signal | Use |
+|---|---|
+| `helpful` | Memory directly changed the result for the better |
+| `harmful` | Memory misled the operator or agent |
+| `confirmation` | Independent evidence supported the memory |
+| `contradiction` | New evidence conflicts with the memory |
+| `stale` | Convention or fact was superseded |
+| `inaccurate` | Body contains a factual error |
+| `outdated` | Version-specific fact no longer applies |
+| `positive` | Useful but weaker than `helpful` |
+| `negative` | Unhelpful but weaker than `harmful` |
+
+Targets can be memories, packs, or curation candidates:
+
+```bash
+ee outcome <memory-id> --signal helpful --reason "Caught a release gate omission" --workspace .
+ee outcome <pack-id> --target-type pack --signal helpful --reason "Included the missing RCH rule" --workspace .
+ee outcome <candidate-id> --target-type candidate --signal negative --reason "Too vague after review" --workspace .
+```
+
 ### Memory inspection
 
 | Command | Purpose |
@@ -849,6 +1002,24 @@ Related docs:
 | `ee db status` / `inspect <table>` / `check-integrity` / `reindex --dry-run` | Inspect FrankenSQLite schema, table rows, integrity, and derived-index rebuild plans without bypassing `ee` |
 | `ee model status` / `list` | Inspect embedding model registry posture |
 | `ee schema list` / `export <schema-id>` | Inspect stable machine-output schemas |
+
+### Focus and memory bias
+
+Focus state is a small workspace-local bias for the next task family. It changes
+ranking, not trust class or stored content.
+
+| Command | Purpose |
+|---|---|
+| `ee focus set <mem...> --workspace . --json` | Replace the active focus set |
+| `ee focus show --workspace . --json` | Inspect active focus |
+| `ee focus add <mem> --workspace . --json` | Add one memory |
+| `ee focus remove <mem> --workspace . --json` | Remove one memory |
+| `ee focus clear --workspace . --json` | Clear the focus state |
+| `ee focus explain --workspace . --json` | Explain focus and per-agent bias effects |
+
+`EE_AGENT_NAME` lets `ee` attribute outcomes to an agent identity. After enough
+outcome events, per-agent bias can nudge familiar memories while keeping the
+base retrieval signal dominant.
 
 ### Backup & restore
 
@@ -936,6 +1107,7 @@ query_plan_cache_entries = 1024
 default_profile  = "balanced"
 default_format   = "markdown"
 default_max_tokens = 4000
+adaptive_budget  = false
 mmr_lambda       = 0.7
 candidate_pool   = 100
 
@@ -997,6 +1169,8 @@ Environment variable overrides:
 | `EE_INDEX_DIR`     | `[storage].index_dir` |
 | `EE_PROFILE`       | `[pack].default_profile` |
 | `EE_MAX_TOKENS`    | `[pack].default_max_tokens` |
+| `EE_AGENT_NAME` | agent identity for outcome attribution and per-agent bias |
+| `EE_SECURITY_PROFILE` | preflight policy posture |
 | `EE_HARMFUL_PER_SOURCE_PER_HOUR` | `[feedback].harmful_per_source_per_hour` |
 | `EE_HARMFUL_BURST_WINDOW_SECONDS` | `[feedback].harmful_burst_window_seconds` |
 | `EE_QUERY_PLAN_CACHE_ENTRIES` | query-plan cache size |
@@ -1154,6 +1328,18 @@ Different tasks need different memory mixes. `--profile` currently selects one o
 | `orientation` | Uses balanced quotas and boosts HITS hub memories when graph scores are available |
 | `thorough` | Expands evidence and artifact coverage for higher-recall work |
 | `submodular` | Uses the facility-location objective with thorough section quotas for deterministic diversity |
+
+Output formats:
+
+| Format | Use |
+|---|---|
+| `markdown` | Prompt-prepend text for agents and humans |
+| `json` | Full structured contract for parsers |
+| `toon` | Token-tight prompt material with stable field order |
+| `jsonl` with `--stream` | Incremental `ee.pack.stream.v1` frames |
+
+Stream consumers should read until a terminal frame. `kind: "cancelled"` can
+still carry emitted items; `kind: "error"` is the hard failure path.
 
 ---
 
@@ -1326,6 +1512,16 @@ ee remember "DATABASE_URL=postgres://user:hunter2@host/db"
 # stored as: "DATABASE_URL=postgres://user:***REDACTED:password***@host/db"
 ```
 
+Redaction levels:
+
+| Level | Typical use |
+|---|---|
+| `none` | Local inspection only |
+| `minimal` | Storage and context JSON default posture |
+| `standard` | Export and handoff artifacts |
+| `strict` | Shared artifacts with body truncation |
+| `paranoid` | Support bundles and public diagnostics |
+
 ### Trust classes
 
 Memories carry a trust class that affects packing priority:
@@ -1337,6 +1533,16 @@ Memories carry a trust class that affects packing priority:
 | `agent_assertion` | Agent assertion, no validation | 0.50 |
 | `cass_evidence` | Imported session span | 0.45 |
 | `legacy_import` | Old Eidetic Engine artifact | 0.30 (caps until validated) |
+
+Advisory priority at retrieval time:
+
+| Tier | Packing behavior |
+|---|---|
+| `blocked` | Excluded because of policy, secret risk, or prompt-injection match |
+| `quarantined` | Held for curation review |
+| `degraded` | Lower rank because freshness, contradiction, or evidence is weak |
+| `advisory` | Low-confidence hint |
+| `clear` | Normal ranking |
 
 Lifecycle rules, advisory priority, and prompt-injection handling are specified
 in [`docs/trust-model.md`](docs/trust-model.md); ADR 0009 remains the canonical
