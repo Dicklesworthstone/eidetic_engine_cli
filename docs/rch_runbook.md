@@ -255,6 +255,15 @@ Use precise Agent Mail wording:
 - `committed_tree_unsupported`: committed source identity is known, but remote
   Cargo did not run from that source set.
 
+Use these exact handoff openings when the distinction matters:
+
+- `Code implemented but clean proof blocked`: use when source-state or RCH
+  worker evidence refused before remote Cargo, and include the blocker fields
+  from the template above.
+- `Committed tree verified`: use only when `verification_attribution` is
+  `committed_tree`, `status` is `remote_pass`, and the message names
+  `resolved_commit`, `git_tree`, and `source_manifest_hash`.
+
 Dirty `.beads/issues.jsonl` is safe metadata churn only when you own the tracker
 update and can commit it. It still blocks `--require-clean-tree`. If Beads is
 dirty, run `br doctor --json` and `br sync --flush-only`; if the file is reserved
