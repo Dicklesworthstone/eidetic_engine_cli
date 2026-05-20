@@ -1,0 +1,33 @@
+{
+  "schema": "ee.mesh.cli.status.v1",
+  "command": "mesh status",
+  "workspaceId": "wsp_meshforeground0000000001",
+  "workspacePath": "/tmp/ee-mesh",
+  "databasePath": "/tmp/ee-mesh/.ee/ee.db",
+  "initialized": true,
+  "meshEnabled": false,
+  "mode": "off",
+  "posture": "disabled_local_only",
+  "storage": {
+    "peerCount": 0,
+    "cursorCount": 0,
+    "importedEventCount": 0,
+    "policyDecisionEventCount": 0,
+    "policyFailureEventCount": 0,
+    "mappedMemoryCount": 0,
+    "cachedBodyCount": 0
+  },
+  "repairCommands": [
+    "ee init --workspace \"/tmp/ee-mesh\" --json",
+    "ee mesh export --workspace \"/tmp/ee-mesh\" --out mesh-export.json --json",
+    "ee mesh import --workspace \"/tmp/ee-mesh\" --file mesh-export.json --json"
+  ],
+  "degraded": [
+    {
+      "code": "mesh_disabled",
+      "severity": "info",
+      "message": "Optional mesh memory is disabled; foreground commands remain local-only.",
+      "repair": "Set EE_MESH_ENABLED=1 or configure [mesh].enabled only when you want mesh surfaces."
+    }
+  ]
+}

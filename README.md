@@ -377,6 +377,7 @@ Each gate reports exit code and elapsed time.
 | `ee pack replay <pack-id> --json` | Inspect the persisted, redaction-safe selection ledger for a historical pack |
 | `ee pack diff <old-pack-id> <new-pack-id> --json` | Compare two persisted pack ledgers and explain selection, freshness, redaction, or derived-asset changes |
 | `ee support bundle --out <dir> --json` | Create a redacted diagnostic bundle, including pack replay and swarm-brief summaries without raw query, mail body, memory, or full file-listing content |
+| `ee mesh status\|peers\|export\|import\|sync --once --json` | Run foreground, daemon-free mesh peer/cache status and local file exchange surfaces |
 
 ### Graph-derived insights
 

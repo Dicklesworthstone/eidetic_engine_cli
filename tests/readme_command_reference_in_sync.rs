@@ -262,6 +262,7 @@ const TOP_LEVEL_COMMAND_VARIANTS: &[&str] = &[
     "Mcp",
     "Memory",
     "Migrate",
+    "Mesh",
     "Model",
     "Note",
     "Outcome",

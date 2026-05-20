@@ -1,0 +1,17 @@
+{
+  "schema": "ee.mesh.foreground_export.v1",
+  "workspaceId": "wsp_meshforeground0000000001",
+  "source": "ee mesh export",
+  "storage": {
+    "peerCount": 0,
+    "cursorCount": 0,
+    "importedEventCount": 0,
+    "policyDecisionEventCount": 0,
+    "policyFailureEventCount": 0,
+    "mappedMemoryCount": 0,
+    "cachedBodyCount": 0
+  },
+  "peers": [],
+  "cursors": [],
+  "events": []
+}
