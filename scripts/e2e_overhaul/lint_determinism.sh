@@ -2,8 +2,8 @@
 # N4.4 - Determinism lint e2e driver.
 #
 # Runs the cheap Clippy disallowed-methods gate, the exemption audit, and the
-# known-violations fixture harness. A structured lint_determinism event records
-# counts needed by the N4.4 closeout evidence.
+# known-violations fixture harness only when explicitly routed through RCH.
+# Default execution logs skipped gates and never falls back to local Cargo.
 
 set -euo pipefail
 
@@ -17,22 +17,26 @@ run_status=0
 disallowed_methods_violations=0
 ui_tests_passed=0
 ui_tests_failed=0
+last_cargo_gate_skipped=0
 
 run_cargo_gate() {
     local label="$1"
     shift
 
-    if [ "${EE_LINT_DETERMINISM_USE_RCH:-0}" = "1" ]; then
-        if "$REPO_ROOT/scripts/rch_verify.sh" \
-            --bead-id bd-17c65.14.4.4 \
-            --summary \
-            --no-write \
-            --project-root "$REPO_ROOT" \
-            -- "$@"; then
-            e2e_log_assert_eq "true" "true" "$label"
-            return 0
-        fi
-    elif (cd "$REPO_ROOT" && "$@"); then
+    last_cargo_gate_skipped=0
+
+    if [ "${EE_LINT_DETERMINISM_USE_RCH:-0}" != "1" ]; then
+        last_cargo_gate_skipped=1
+        e2e_log_assert_eq "skipped" "skipped" "$label.remote_required"
+        return 0
+    fi
+
+    if RCH_REQUIRE_REMOTE=1 "$REPO_ROOT/scripts/rch_verify.sh" \
+        --bead-id bd-17c65.14.4.4 \
+        --summary \
+        --no-write \
+        --project-root "$REPO_ROOT" \
+        -- "$@"; then
         e2e_log_assert_eq "true" "true" "$label"
         return 0
     fi
@@ -123,7 +127,9 @@ run_cargo_gate \
 if run_cargo_gate \
     "lint_determinism_known_violations_fixture" \
     cargo test --test determinism_lint_catches_known_violations -- --nocapture; then
-    ui_tests_passed=$((ui_tests_passed + 1))
+    if [ "$last_cargo_gate_skipped" -eq 0 ]; then
+        ui_tests_passed=$((ui_tests_passed + 1))
+    fi
 else
     ui_tests_failed=$((ui_tests_failed + 1))
 fi
