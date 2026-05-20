@@ -233,9 +233,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        RedactionDefaultSurface, subsystem_name, trace_minhash_rank_centrality_config,
+        RedactionDefaultSurface, first_existing_config_symlink_component,
+        open_workspace_config_file_for_read, subsystem_name, trace_minhash_rank_centrality_config,
         workspace_output_redaction_enabled, workspace_redaction_default,
-        first_existing_config_symlink_component, open_workspace_config_file_for_read,
     };
     use crate::models::RedactionLevel;
 

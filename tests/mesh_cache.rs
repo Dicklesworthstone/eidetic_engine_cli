@@ -9,8 +9,8 @@ mod cache;
 use cache::{
     MeshCacheBodyFetchDecision, MeshCacheEntry, MeshCacheEvictionReason, MeshCacheLane,
     MeshCacheQuotaKind, MeshCacheQuotaWarningSeverity, MeshCacheQuotas, MeshCacheRetentionInput,
-    MeshCacheStatus, blake3_content_hash, decide_body_fetch_lifecycle,
-    eager_replication_warnings, plan_mesh_cache_retention,
+    MeshCacheStatus, blake3_content_hash, decide_body_fetch_lifecycle, eager_replication_warnings,
+    plan_mesh_cache_retention,
 };
 
 type TestResult = Result<(), String>;
@@ -44,7 +44,10 @@ fn quota_pressure_evicts_low_score_lru_body_and_logs_audit_fields() -> TestResul
     let eviction = &plan.evictions[0];
     assert_eq!(eviction.cache_key, "body-old");
     assert_eq!(eviction.peer_id, "peer_alpha");
-    assert_eq!(eviction.reason, MeshCacheEvictionReason::GlobalQuotaExceeded);
+    assert_eq!(
+        eviction.reason,
+        MeshCacheEvictionReason::GlobalQuotaExceeded
+    );
     assert_eq!(eviction.cache_bytes_before, 480);
     assert_eq!(eviction.cache_bytes_after, 260);
     assert_eq!(eviction.evicted_count, 1);

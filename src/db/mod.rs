@@ -7778,10 +7778,7 @@ impl DbConnection {
     }
 
     /// List anti-entropy cursors for one local workspace in deterministic order.
-    pub fn list_mesh_peer_cursors(
-        &self,
-        workspace_id: &str,
-    ) -> Result<Vec<StoredMeshPeerCursor>> {
+    pub fn list_mesh_peer_cursors(&self, workspace_id: &str) -> Result<Vec<StoredMeshPeerCursor>> {
         let rows = self.query_for(
             DbOperation::Query,
             "SELECT workspace_id, peer_id, origin_node_id, origin_workspace_id,

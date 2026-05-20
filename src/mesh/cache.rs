@@ -494,8 +494,8 @@ pub fn decide_body_fetch_lifecycle(
     fetched_body: &[u8],
 ) -> MeshCacheBodyFetchDecision {
     let actual_local_body_hash = blake3_content_hash(fetched_body);
-    let hash_matches =
-        expected_content_hash.starts_with("blake3:") && expected_content_hash == actual_local_body_hash;
+    let hash_matches = expected_content_hash.starts_with("blake3:")
+        && expected_content_hash == actual_local_body_hash;
     let (status, body_persist_allowed, quarantine_reason) = if hash_matches {
         (MeshCacheStatus::Available, true, None)
     } else {
@@ -649,7 +649,8 @@ fn push_quota_warning(
     };
     let severity = if bytes_after > limit_bytes {
         MeshCacheQuotaWarningSeverity::WouldExceed
-    } else if threshold_percent.is_some_and(|percent| crosses_threshold(bytes_after, limit_bytes, percent))
+    } else if threshold_percent
+        .is_some_and(|percent| crosses_threshold(bytes_after, limit_bytes, percent))
     {
         MeshCacheQuotaWarningSeverity::NearLimit
     } else {
@@ -715,10 +716,7 @@ fn compare_eviction_candidate(left: &MeshCacheEntry, right: &MeshCacheEntry) -> 
         .then_with(|| left.cache_key.cmp(&right.cache_key))
 }
 
-fn compare_quota_warning(
-    left: &MeshCacheQuotaWarning,
-    right: &MeshCacheQuotaWarning,
-) -> Ordering {
+fn compare_quota_warning(left: &MeshCacheQuotaWarning, right: &MeshCacheQuotaWarning) -> Ordering {
     left.kind
         .as_str()
         .cmp(right.kind.as_str())

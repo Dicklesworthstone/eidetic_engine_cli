@@ -117,9 +117,8 @@ fn safety_snapshot_subsequent_outcome_back_fill_emits_second_audit_row_with_prev
     let connection = fresh_db();
     let summary = compute_summary(&fixture_input());
 
-    let intended_audit_id =
-        emit_safety_snapshot_audit(&connection, &summary, Some("actor"), None)
-            .expect("intended emits");
+    let intended_audit_id = emit_safety_snapshot_audit(&connection, &summary, Some("actor"), None)
+        .expect("intended emits");
     let outcome_audit_id = update_materialization_outcome(
         &connection,
         &intended_audit_id,
@@ -155,8 +154,8 @@ fn safety_snapshot_dry_run_outcome_back_fill_records_dry_run() {
     input.materialization_outcome = MaterializationOutcome::DryRun;
     let summary = compute_summary(&input);
 
-    let intended_audit_id = emit_safety_snapshot_audit(&connection, &summary, None, None)
-        .expect("intended emits");
+    let intended_audit_id =
+        emit_safety_snapshot_audit(&connection, &summary, None, None).expect("intended emits");
     let outcome_audit_id = update_materialization_outcome(
         &connection,
         &intended_audit_id,
@@ -222,8 +221,7 @@ fn safety_snapshot_idempotent_repeat_emit_writes_two_rows_with_distinct_audit_id
     // (the input was the same) — locks the no-dedupe contract.
     for row in &intended_rows {
         let parsed: Json =
-            serde_json::from_str(row.details.as_deref().expect("details present"))
-                .expect("parse");
+            serde_json::from_str(row.details.as_deref().expect("details present")).expect("parse");
         assert_eq!(parsed["triggerReason"], "drift_reconciliation");
         assert_eq!(parsed["materializationOutcome"], "audit_only");
     }
@@ -308,9 +306,8 @@ fn safety_snapshot_records_previous_peer_group_id_when_replacing_existing() {
     let connection = fresh_db();
     let mut input = fixture_input();
     input.previous_peer_group_id = Some("pg_existing_replacement_aa");
-    input.previous_peer_set_hash = Some(
-        "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd",
-    );
+    input.previous_peer_set_hash =
+        Some("blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd");
     let summary = compute_summary(&input);
     let audit_id =
         emit_safety_snapshot_audit(&connection, &summary, None, Some("pg_new_replacement_aa"))
@@ -321,8 +318,7 @@ fn safety_snapshot_records_previous_peer_group_id_when_replacing_existing() {
         .expect("audit query")
         .expect("row present");
     let parsed: Json =
-        serde_json::from_str(row.details.as_deref().expect("details present"))
-            .expect("parse");
+        serde_json::from_str(row.details.as_deref().expect("details present")).expect("parse");
     assert_eq!(parsed["previousPeerGroupId"], "pg_existing_replacement_aa");
     assert_eq!(
         parsed["previousPeerSetHash"],
