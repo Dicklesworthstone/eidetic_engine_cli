@@ -34179,6 +34179,7 @@ where
         candidate_id: &args.candidate_id,
         actor: args.actor.as_deref(),
         dry_run: args.dry_run,
+        allow_tombstone_load_bearing: args.allow_tombstone_load_bearing,
     };
 
     match apply_curation_candidate(&options) {
@@ -34377,6 +34378,7 @@ where
         memory_id: &args.memory_id,
         actor: args.actor.as_deref(),
         dry_run: args.dry_run,
+        allow_tombstone_load_bearing: args.allow_tombstone_load_bearing,
         reason: args.reason.as_deref(),
     };
 
