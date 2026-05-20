@@ -11,6 +11,7 @@
 //! Sub-surfaces live in their own files and are documented in their bead
 //! descriptions (SRR6.46.* under bd-36bbk).
 
+pub mod admission;
 pub mod audit;
 pub mod auto_enrollment_safety;
 pub mod discovery_policy;
