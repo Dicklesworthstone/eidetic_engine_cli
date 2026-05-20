@@ -227,6 +227,11 @@ fn worst_case_serialized_degraded_array_has_one_snapshot_row_with_sources() {
     let aggregates = aggregate_degraded_entries(worst_case_input());
     let json = serde_json::to_value(&aggregates).expect("aggregates serialize to JSON");
     let rows = json.as_array().expect("aggregates serialize as an array");
+    assert_eq!(
+        rows.len(),
+        DEGRADED_AGGREGATION_MAX_ENTRIES,
+        "serialized degraded[] must honor the public cap"
+    );
     let snapshot_rows: Vec<_> = rows
         .iter()
         .filter(|row| row.get("code").and_then(serde_json::Value::as_str) == Some("snapshot_stale"))
@@ -257,6 +262,28 @@ fn worst_case_serialized_degraded_array_has_one_snapshot_row_with_sources() {
             "voronoi"
         ]),
         "serialized sources[] must preserve every stale-snapshot emitter"
+    );
+
+    let trailer_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row.get("code").and_then(serde_json::Value::as_str)
+                == Some(DEGRADED_AGGREGATION_TRUNCATED_CODE)
+        })
+        .collect();
+    assert_eq!(
+        trailer_rows.len(),
+        1,
+        "serialized degraded[] must include one truncation trailer when capped"
+    );
+    let trailer = trailer_rows[0];
+    let dropped_sources = trailer["sources"]
+        .as_array()
+        .expect("trailer sources serialize as an array");
+    assert_eq!(
+        dropped_sources.len(),
+        22 - (DEGRADED_AGGREGATION_MAX_ENTRIES - 1),
+        "serialized trailer sources[] must enumerate every dropped aggregate code"
     );
 }
 
