@@ -32,8 +32,8 @@ use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
     ApplyMemoryLevelTransitionInput, CreateAuditInput, CreateCurationCandidateInput,
     CreateMemoryInput, CreateMemoryLinkInput, CreateSearchIndexJobInput, CreateWorkspaceInput,
-    DbConnection, MemoryLinkRelation, MemoryLinkSource, SearchIndexJobType, StoredMemory,
-    StoredMemoryLink, audit_actions, generate_audit_id, generate_audit_id_seeded,
+    DbConnection, MemoryContentSimHash, MemoryLinkRelation, MemoryLinkSource, SearchIndexJobType,
+    StoredMemory, StoredMemoryLink, audit_actions, generate_audit_id, generate_audit_id_seeded,
 };
 use crate::models::{
     DomainError, MAX_TAG_BYTES, MemoryContent, MemoryId, MemoryKind, MemoryLevel,
@@ -43,6 +43,7 @@ use crate::models::{
 use crate::obs::{AuditEvent, AuditOutcome, now_rfc3339_nanos};
 use crate::runtime::determinism::{Deterministic, Seed};
 use crate::search::HashEmbedder;
+use crate::search::simhash::{EmbedDedupConfig, SimHash128, first_confirmed_simhash_candidate};
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 /// A memory with its associated tags for display.
@@ -307,6 +308,70 @@ impl WorkflowCreateReport {
 pub const REMEMBER_SUGGESTED_LINK_SCHEMA_V1: &str = "ee.remember.suggested_link.v1";
 
 const REMEMBER_SUGGESTED_LINK_LIMIT: usize = 5;
+const REMEMBER_EMBED_DEDUP_CANDIDATE_LIMIT: usize = 16;
+const REMEMBER_EMBED_DEDUP_LINK_SCHEMA_V1: &str = "ee.embed_dedup.link.v1";
+
+#[derive(Clone, Debug, PartialEq)]
+struct RememberEmbedDedupDecision {
+    content_simhash: Option<MemoryContentSimHash>,
+    link: Option<RememberEmbedDedupLink>,
+    decision: &'static str,
+    reason: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RememberEmbedDedupLink {
+    target_memory_id: String,
+    hamming_distance: u32,
+    cosine_similarity: f32,
+    cosine_floor: f32,
+}
+
+impl RememberEmbedDedupDecision {
+    const fn disabled() -> Self {
+        Self {
+            content_simhash: None,
+            link: None,
+            decision: "new_embed",
+            reason: "dedup_disabled",
+        }
+    }
+
+    const fn fresh(content_simhash: MemoryContentSimHash, reason: &'static str) -> Self {
+        Self {
+            content_simhash: Some(content_simhash),
+            link: None,
+            decision: "new_embed",
+            reason,
+        }
+    }
+
+    fn reused(content_simhash: MemoryContentSimHash, link: RememberEmbedDedupLink) -> Self {
+        Self {
+            content_simhash: Some(content_simhash),
+            link: Some(link),
+            decision: "reuse",
+            reason: "simhash_within_threshold_and_cosine_confirmed",
+        }
+    }
+
+    fn link_metadata_json(&self) -> Option<String> {
+        let link = self.link.as_ref()?;
+        Some(
+            serde_json::json!({
+                "schema": REMEMBER_EMBED_DEDUP_LINK_SCHEMA_V1,
+                "relationship": "embedding_reuse",
+                "targetMemoryId": link.target_memory_id,
+                "hammingDistance": link.hamming_distance,
+                "cosineSimilarity": link.cosine_similarity,
+                "cosineFloor": link.cosine_floor,
+                "decision": self.decision,
+                "reason": self.reason,
+            })
+            .to_string(),
+        )
+    }
+}
 
 /// A staged adjacent-memory suggestion returned from `ee remember`.
 #[derive(Clone, Debug, PartialEq)]
@@ -567,7 +632,6 @@ fn remember_memory_inner(
         .clone()
         .zip(policy_bypass_audit_id)
         .map(|(bypass, audit_id)| bypass.with_audit_id(audit_id));
-    let audit_details = remember_audit_details(&memory_id, &memory_input, policy_bypass.as_ref());
     let index_input = CreateSearchIndexJobInput {
         workspace_id: prepared.workspace_id.clone(),
         job_type: SearchIndexJobType::SingleDocument,
@@ -575,6 +639,12 @@ fn remember_memory_inner(
         document_id: Some(memory_id.clone()),
         documents_total: 1,
     };
+    let embed_dedup_decision = remember_embed_dedup_decision_from_env(&connection, &memory_input)?;
+    let embed_dedup_link_id = embed_dedup_decision
+        .link
+        .as_ref()
+        .map(|_| generate_memory_link_id());
+    let audit_details = remember_audit_details(&memory_id, &memory_input, policy_bypass.as_ref());
 
     store_remembered_memory_with_retry(
         &connection,
@@ -582,6 +652,8 @@ fn remember_memory_inner(
         &audit_id,
         &index_job_id,
         &memory_input,
+        &embed_dedup_decision,
+        embed_dedup_link_id.as_deref(),
         &audit_details,
         &index_input,
         policy_bypass.as_ref(),
@@ -2176,6 +2248,8 @@ fn store_remembered_memory_with_retry(
     audit_id: &str,
     index_job_id: &str,
     memory_input: &CreateMemoryInput,
+    embed_dedup_decision: &RememberEmbedDedupDecision,
+    embed_dedup_link_id: Option<&str>,
     audit_details: &str,
     index_input: &CreateSearchIndexJobInput,
     policy_bypass: Option<&RememberPolicyBypassReport>,
@@ -2183,7 +2257,34 @@ fn store_remembered_memory_with_retry(
 ) -> Result<(), DomainError> {
     for attempt in 0..REMEMBER_CONTENTION_MAX_ATTEMPTS {
         match connection.with_transaction(|| {
-            connection.insert_memory(memory_id, memory_input)?;
+            match embed_dedup_decision.content_simhash {
+                Some(content_simhash) => connection.insert_memory_with_content_simhash(
+                    memory_id,
+                    memory_input,
+                    content_simhash,
+                )?,
+                None => connection.insert_memory(memory_id, memory_input)?,
+            }
+            if let (Some(link), Some(link_id)) =
+                (embed_dedup_decision.link.as_ref(), embed_dedup_link_id)
+            {
+                connection.insert_memory_link(
+                    link_id,
+                    &CreateMemoryLinkInput {
+                        src_memory_id: memory_id.to_owned(),
+                        dst_memory_id: link.target_memory_id.clone(),
+                        relation: MemoryLinkRelation::Related,
+                        weight: 1.0,
+                        confidence: link.cosine_similarity.clamp(0.0, 1.0),
+                        directed: true,
+                        evidence_count: 2,
+                        last_reinforced_at: None,
+                        source: MemoryLinkSource::Auto,
+                        created_by: Some("ee remember".to_owned()),
+                        metadata_json: embed_dedup_decision.link_metadata_json(),
+                    },
+                )?;
+            }
             if audit_lane.is_none() {
                 emit_remember_audit_events(
                     connection,
@@ -2251,6 +2352,177 @@ fn store_remembered_memory_with_retry(
         message: "Failed to store memory: retry loop exhausted".to_owned(),
         repair: Some("ee doctor".to_string()),
     })
+}
+
+fn remember_embed_dedup_decision_from_env(
+    connection: &DbConnection,
+    memory_input: &CreateMemoryInput,
+) -> Result<RememberEmbedDedupDecision, DomainError> {
+    let config = EmbedDedupConfig::from_env().map_err(|error| DomainError::Configuration {
+        message: error.to_string(),
+        repair: Some(error.repair.to_owned()),
+    })?;
+    remember_embed_dedup_decision(connection, memory_input, config)
+}
+
+fn remember_embed_dedup_decision(
+    connection: &DbConnection,
+    memory_input: &CreateMemoryInput,
+    config: EmbedDedupConfig,
+) -> Result<RememberEmbedDedupDecision, DomainError> {
+    if !config.enabled {
+        return Ok(RememberEmbedDedupDecision::disabled());
+    }
+
+    let started = Instant::now();
+    let query_fingerprint = crate::search::simhash::simhash_128(&memory_input.content);
+    let content_simhash = query_fingerprint.to_be_bytes();
+    let candidates = connection
+        .list_memory_simhash_candidates(
+            &memory_input.workspace_id,
+            content_simhash,
+            config.hamming_k,
+            REMEMBER_EMBED_DEDUP_CANDIDATE_LIMIT,
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query embed-dedup SimHash candidates: {error}"),
+            repair: Some("Run `ee doctor --json` and inspect the memories table.".to_owned()),
+        })?;
+    if candidates.is_empty() {
+        trace_remember_embed_dedup_decision(
+            &memory_input.workspace_id,
+            None,
+            None,
+            None,
+            "new_embed",
+            "no_prior_workspace_simhash_candidate",
+            started.elapsed(),
+        );
+        return Ok(RememberEmbedDedupDecision::fresh(
+            content_simhash,
+            "no_prior_workspace_simhash_candidate",
+        ));
+    }
+
+    let candidate_ids = candidates
+        .iter()
+        .map(|candidate| candidate.memory_id.as_str())
+        .collect::<Vec<_>>();
+    let candidate_memories = connection
+        .get_memories_batch(&candidate_ids)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load embed-dedup candidate memories: {error}"),
+            repair: Some("Run `ee doctor --json` and inspect memory rows.".to_owned()),
+        })?;
+
+    let embedder = HashEmbedder::default_256();
+    let query_embedding = embedder.embed_sync(&memory_input.content);
+    let candidate_embeddings = candidates
+        .iter()
+        .filter_map(|candidate| {
+            let memory = candidate_memories.get(&candidate.memory_id)?;
+            Some((
+                candidate.memory_id.clone(),
+                SimHash128::from_be_bytes(candidate.content_simhash),
+                candidate.hamming_distance,
+                embedder.embed_sync(&memory.content),
+            ))
+        })
+        .collect::<Vec<_>>();
+    if candidate_embeddings.is_empty() {
+        trace_remember_embed_dedup_decision(
+            &memory_input.workspace_id,
+            None,
+            None,
+            None,
+            "new_embed",
+            "simhash_candidate_rows_missing",
+            started.elapsed(),
+        );
+        return Ok(RememberEmbedDedupDecision::fresh(
+            content_simhash,
+            "simhash_candidate_rows_missing",
+        ));
+    }
+
+    let cosine_floor = config.cosine_floor as f32;
+    let confirmed = first_confirmed_simhash_candidate(
+        query_fingerprint,
+        &query_embedding,
+        candidate_embeddings
+            .iter()
+            .map(|(memory_id, fingerprint, _, embedding)| {
+                (memory_id.as_str(), *fingerprint, embedding.as_slice())
+            }),
+        config.hamming_k,
+        cosine_floor,
+    );
+
+    match confirmed {
+        Some(candidate) => {
+            trace_remember_embed_dedup_decision(
+                &memory_input.workspace_id,
+                Some(candidate.candidate_id),
+                Some(candidate.hamming_distance),
+                Some(candidate.cosine.similarity),
+                "reuse",
+                "simhash_within_threshold_and_cosine_confirmed",
+                started.elapsed(),
+            );
+            Ok(RememberEmbedDedupDecision::reused(
+                content_simhash,
+                RememberEmbedDedupLink {
+                    target_memory_id: candidate.candidate_id.to_owned(),
+                    hamming_distance: candidate.hamming_distance,
+                    cosine_similarity: candidate.cosine.similarity,
+                    cosine_floor,
+                },
+            ))
+        }
+        None => {
+            let nearest = candidate_embeddings
+                .iter()
+                .min_by(|left, right| left.2.cmp(&right.2).then_with(|| left.0.cmp(&right.0)));
+            trace_remember_embed_dedup_decision(
+                &memory_input.workspace_id,
+                nearest.map(|candidate| candidate.0.as_str()),
+                nearest.map(|candidate| candidate.2),
+                None,
+                "new_embed",
+                "cosine_under_floor",
+                started.elapsed(),
+            );
+            Ok(RememberEmbedDedupDecision::fresh(
+                content_simhash,
+                "cosine_under_floor",
+            ))
+        }
+    }
+}
+
+fn trace_remember_embed_dedup_decision(
+    workspace_id: &str,
+    candidate_memory_id: Option<&str>,
+    hamming_distance: Option<u32>,
+    cosine_similarity: Option<f32>,
+    decision: &'static str,
+    reason: &'static str,
+    elapsed: Duration,
+) {
+    tracing::info!(
+        workspace_id,
+        request_id = "ee_remember",
+        bead_id = "bd-1iltv",
+        surface = "embed_dedup",
+        phase = "decision",
+        elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+        candidate_memory_id,
+        hamming_distance,
+        cosine_similarity,
+        decision,
+        reason,
+        "remember embed-dedup decision"
+    );
 }
 
 fn emit_remember_audit_events(
@@ -6180,6 +6452,39 @@ mod tests {
         }
     }
 
+    fn remember_test_memory_input(workspace_id: &str, content: &str) -> CreateMemoryInput {
+        CreateMemoryInput {
+            workspace_id: workspace_id.to_owned(),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            content: content.to_owned(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.5,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+            trust_subclass: None,
+            tags: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+        }
+    }
+
+    fn setup_remember_test_workspace(connection: &DbConnection) -> Result<String, String> {
+        let workspace_id = "wsp_01234567890123456789012345".to_owned();
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: "/tmp/remember-embed-dedup-test".to_owned(),
+                    name: Some("remember embed dedup test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(workspace_id)
+    }
+
     #[test]
     fn curation_member_memory_ids_use_radix_payload_order_and_dedup() -> TestResult {
         let lower = MemoryId::from_uuid(uuid::Uuid::from_u128(7100)).to_string();
@@ -6247,6 +6552,8 @@ mod tests {
             audit_id,
             index_job_id,
             &memory_input,
+            &RememberEmbedDedupDecision::disabled(),
+            None,
             "{}",
             &index_input,
             None,
@@ -6281,6 +6588,152 @@ mod tests {
             audit.target_id,
             Some(memory_id.to_owned()),
             "audit target id",
+        )?;
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn remember_embed_dedup_decision_selects_confirmed_candidate() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = setup_remember_test_workspace(&connection)?;
+        let content = "Run cargo fmt before committing Rust changes.";
+        let fingerprint = crate::search::simhash::simhash_128(content).to_be_bytes();
+        connection
+            .insert_memory_with_content_simhash(
+                "mem_embeddedupsource0000000000",
+                &remember_test_memory_input(&workspace_id, content),
+                fingerprint,
+            )
+            .map_err(|error| error.to_string())?;
+
+        let decision = remember_embed_dedup_decision(
+            &connection,
+            &remember_test_memory_input(&workspace_id, content),
+            EmbedDedupConfig {
+                enabled: true,
+                hamming_k: 0,
+                cosine_floor: 0.99,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        ensure(
+            decision.content_simhash,
+            Some(fingerprint),
+            "new memory SimHash",
+        )?;
+        ensure(decision.decision, "reuse", "dedup decision")?;
+        ensure(
+            decision.reason,
+            "simhash_within_threshold_and_cosine_confirmed",
+            "dedup reason",
+        )?;
+        let link = decision
+            .link
+            .ok_or_else(|| "confirmed candidate must produce a dedup link".to_owned())?;
+        ensure(
+            link.target_memory_id,
+            "mem_embeddedupsource0000000000".to_owned(),
+            "dedup target",
+        )?;
+        ensure(link.hamming_distance, 0_u32, "dedup hamming distance")?;
+        if link.cosine_similarity < 0.99 {
+            return Err(format!(
+                "expected cosine confirmation >= 0.99, got {}",
+                link.cosine_similarity
+            ));
+        }
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn store_remembered_memory_persists_simhash_and_dedup_link() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = setup_remember_test_workspace(&connection)?;
+        let target_id = "mem_embeddeduptarget0000000000";
+        connection
+            .insert_memory_with_content_simhash(
+                target_id,
+                &remember_test_memory_input(&workspace_id, "Prefer remote RCH verification."),
+                [1_u8; 16],
+            )
+            .map_err(|error| error.to_string())?;
+
+        let memory_id = "mem_embeddedupnew0000000000000";
+        let audit_id = "audit_embeddedupnew0000000000001";
+        let index_job_id = "sidx_embeddedupnew0000000000000";
+        let memory_input =
+            remember_test_memory_input(&workspace_id, "Prefer remote RCH verification.");
+        let index_input = CreateSearchIndexJobInput {
+            workspace_id: workspace_id.clone(),
+            job_type: SearchIndexJobType::SingleDocument,
+            document_source: Some("memory".to_owned()),
+            document_id: Some(memory_id.to_owned()),
+            documents_total: 1,
+        };
+        let decision = RememberEmbedDedupDecision::reused(
+            [2_u8; 16],
+            RememberEmbedDedupLink {
+                target_memory_id: target_id.to_owned(),
+                hamming_distance: 3,
+                cosine_similarity: 0.992,
+                cosine_floor: 0.97,
+            },
+        );
+
+        store_remembered_memory_with_retry(
+            &connection,
+            memory_id,
+            audit_id,
+            index_job_id,
+            &memory_input,
+            &decision,
+            Some("link_embeddedupnew0000000000000"),
+            "{}",
+            &index_input,
+            None,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let candidates = connection
+            .list_memory_simhash_candidates(&workspace_id, [2_u8; 16], 0, 10)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            candidates
+                .iter()
+                .map(|candidate| candidate.memory_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![memory_id],
+            "persisted SimHash candidate",
+        )?;
+        let links = connection
+            .list_memory_links_for_memory(memory_id, Some(MemoryLinkRelation::Related))
+            .map_err(|error| error.to_string())?;
+        ensure(links.len(), 1_usize, "one dedup link")?;
+        let link = &links[0];
+        ensure(link.dst_memory_id.as_str(), target_id, "dedup link target")?;
+        ensure(
+            link.source.as_str(),
+            MemoryLinkSource::Auto.as_str(),
+            "dedup link source",
+        )?;
+        let metadata: serde_json::Value = serde_json::from_str(
+            link.metadata_json
+                .as_deref()
+                .ok_or_else(|| "dedup link metadata missing".to_owned())?,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            metadata
+                .get("relationship")
+                .and_then(serde_json::Value::as_str),
+            Some("embedding_reuse"),
+            "dedup relationship metadata",
         )?;
 
         connection.close().map_err(|error| error.to_string())

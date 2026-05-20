@@ -2,9 +2,10 @@
 
 Bead: `bd-1iltv`
 
-Status: SimHash/cosine substrate, disabled-by-default env rollout parsing, and
-the nullable storage/lookup substrate are landed; remember-path integration is
-not complete.
+Status: SimHash/cosine substrate, disabled-by-default env rollout parsing,
+nullable storage/lookup, and the first remember-path persistence slice are
+landed; full embedding-vector reuse and public `dedupLink` output are not
+complete.
 
 ## Goal
 
@@ -58,7 +59,7 @@ encoding.
 
 ## Write-Path Contract
 
-The unfinished remember-path integration should implement this order:
+The remember-path integration follows this order:
 
 1. Resolve the workspace and prepare the memory content exactly as the normal
    `remember` path does today.
@@ -69,11 +70,12 @@ The unfinished remember-path integration should implement this order:
    values.
 5. Keep candidates whose Hamming distance is at most
    `EE_EMBED_DEDUP_HAMMING_K`, default `12`.
-6. Fetch candidate embeddings and run cosine confirmation.
+6. Fetch candidate memory content and run cosine confirmation with the current
+   deterministic hash embedder until stored embedding vectors are available.
 7. Reuse an existing embedding only when cosine similarity is at least
    `EE_EMBED_DEDUP_COSINE_FLOOR`, default `0.97`.
-8. Persist the new memory with its own `content_simhash` and a dedup link to the
-   reused memory when reuse occurred.
+8. Persist the new memory with its own `content_simhash` and a durable
+   `embedding_reuse` memory-link metadata record when reuse is confirmed.
 9. If no candidate confirms, run the embedder and store a fresh embedding.
 
 The database migration adds a nullable `content_simhash` column encoded as 16
@@ -83,7 +85,10 @@ lookup but remain valid memories. The DB layer intentionally stores and ranks
 raw bytes only; `src/search/simhash.rs` remains the owner of SimHash
 computation, so storage does not depend on the search module.
 
-The public explanation surface should expose the link in `ee why` as
+The current write-path slice persists the link as a typed `related` memory link
+with `schema = "ee.embed_dedup.link.v1"` and
+`relationship = "embedding_reuse"` in `metadata_json`. The public explanation
+surface should expose the link in `ee why` as
 `dedupLink` when the surrounding JSON schema uses camelCase. Internal Rust
 fields may use `dedup_link`, but emitted JSON must follow the schema convention
 for that response.
@@ -153,15 +158,16 @@ and `decision`.
 Current evidence is limited to build-independent static review,
 `tests/property_simhash.rs`, `tests/embed_dedup_unit.rs`, the env-registry
 coverage in `tests/env_registry_unit.rs`, DB unit coverage for the
-`content_simhash` storage/lookup API, and the intended chain fixture at
+`content_simhash` storage/lookup API, the remember-path SimHash persistence and
+durable link unit tests, and the intended chain fixture at
 `tests/golden/embed_dedup_chain.json`. The unit coverage proves the reusable
 SimHash/cosine decision scaffold, disabled-by-default config parsing, threshold
 repair text, the nullable storage substrate, null-row lookup exclusion, 16-byte
-storage validation, workspace-scoped Hamming lookup, and the fixture that pins
-the future `dedupLink` emission shape. It does not prove the persisted
-remember-path feature yet. Full acceptance for `bd-1iltv` still requires:
+storage validation, workspace-scoped Hamming lookup, first write-path candidate
+selection, durable `embedding_reuse` link persistence, and the fixture that pins
+the future `dedupLink` emission shape. Full acceptance for `bd-1iltv` still
+requires:
 
-- Unit tests for dedup-link selection after DB/write-path fields exist.
 - E2E tests showing identical and near-identical memories reuse embeddings.
 - A semantic false-positive test showing SimHash proximity alone does not reuse
   embeddings when cosine is under the floor.
@@ -174,11 +180,9 @@ Do not use local Cargo as a fallback on the Mac dev host.
 
 ## Remaining Integration Checklist
 
-- Wire parsed `EE_EMBED_DEDUP_*` rollout config into `remember_memory_inner`.
-- Compute SimHash in the remember path and pass the resulting 16-byte
-  fingerprint to the DB storage API.
-- Wire the lookup and confirmation gate into `remember_memory_inner`.
-- Persist the dedup link and surface it through `ee why`.
+- Replace temporary candidate-content embedding confirmation with stored
+  embedding-vector fetch/reuse when the durable embedding store is available.
+- Surface the persisted dedup link through `ee why`.
 - Add the remaining dedup-link, E2E, and golden tests listed above.
 - Add degraded-code taxonomy rows and fixtures if the source emits new runtime
   degraded codes.
