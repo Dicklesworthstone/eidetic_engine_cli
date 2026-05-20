@@ -6,6 +6,7 @@ pub mod log_envelope;
 pub mod test_log;
 pub mod volatile_fields;
 
+pub use flight_recorder::{FlightRecorderPosture, classify_flight_recorder_posture};
 pub use log_envelope::{
     AUDIT_EVENT_SCHEMA_V1, AuditEvent, AuditOutcome, LOG_ENVELOPE_SCHEMA_V1, LogEnvelope, LogLevel,
     now_rfc3339_nanos,

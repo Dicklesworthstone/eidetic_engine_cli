@@ -53,6 +53,59 @@ pub enum MeshCommand {
     Import(MeshImportArgs),
     /// Run one foreground sync cycle without background daemon mode.
     Sync(MeshSyncArgs),
+    /// Preview the effect of granting one lane to a peer without mutating policy.
+    PreviewGrant(MeshPreviewGrantArgs),
+}
+
+/// Arguments for `ee mesh preview-grant`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshPreviewGrantArgs {
+    /// Peer node key the preview targets.
+    #[arg(value_name = "PEER_NODE_KEY")]
+    pub peer_node_key: String,
+
+    /// Lane to preview granting on this peer.
+    #[arg(long, value_name = "LANE")]
+    pub lane: MeshPreviewGrantLane,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Maximum preview rows. Internally clamped to LANE_GRANT_PREVIEW_MAX_LIMIT.
+    #[arg(long, default_value_t = 50)]
+    pub limit: usize,
+
+    /// How the preview samples memories from the candidate set.
+    #[arg(
+        long = "sample-strategy",
+        value_name = "STRATEGY",
+        default_value = "random"
+    )]
+    pub sample_strategy: MeshPreviewGrantSampleStrategy,
+
+    /// Seed for the random sample strategy. Pinned for deterministic replay.
+    #[arg(long, default_value_t = 0)]
+    pub seed: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum MeshPreviewGrantLane {
+    Metadata,
+    Body,
+    Embedding,
+    GraphLink,
+    CurationSignal,
+    RevisionNotice,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum MeshPreviewGrantSampleStrategy {
+    Random,
+    HighestTrust,
+    MostRecent,
 }
 
 /// Arguments for `ee mesh init`.
@@ -359,7 +412,112 @@ where
         MeshCommand::Export(args) => handle_mesh_export(cli, args, stdout, stderr),
         MeshCommand::Import(args) => handle_mesh_import(cli, args, stdout, stderr),
         MeshCommand::Sync(args) => handle_mesh_sync(cli, args, stdout, stderr),
+        MeshCommand::PreviewGrant(args) => handle_mesh_preview_grant(cli, args, stdout, stderr),
     }
+}
+
+fn handle_mesh_preview_grant<W, E>(
+    cli: &Cli,
+    args: &MeshPreviewGrantArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::mesh::auto_enrollment_safety::IntendedLanePolicy;
+    use crate::mesh::lane_grant_preview::{
+        LANE_GRANT_PREVIEW_MAX_LIMIT, Lane, LaneGrantPreviewInput, SampleStrategy,
+        compute_lane_grant_preview,
+    };
+
+    if args.limit > LANE_GRANT_PREVIEW_MAX_LIMIT {
+        let domain_error = DomainError::Configuration {
+            message: format!(
+                "--limit {} exceeds LANE_GRANT_PREVIEW_MAX_LIMIT={LANE_GRANT_PREVIEW_MAX_LIMIT}",
+                args.limit
+            ),
+            repair: Some(format!(
+                "Re-run with --limit <= {LANE_GRANT_PREVIEW_MAX_LIMIT}"
+            )),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let snapshot = match build_snapshot(cli, args.database.as_deref()) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    let lane = match args.lane {
+        MeshPreviewGrantLane::Metadata => Lane::Metadata,
+        MeshPreviewGrantLane::Body => Lane::Body,
+        MeshPreviewGrantLane::Embedding => Lane::Embedding,
+        MeshPreviewGrantLane::GraphLink => Lane::GraphLink,
+        MeshPreviewGrantLane::CurationSignal => Lane::CurationSignal,
+        MeshPreviewGrantLane::RevisionNotice => Lane::RevisionNotice,
+    };
+    let sample_strategy = match args.sample_strategy {
+        MeshPreviewGrantSampleStrategy::Random => SampleStrategy::Random,
+        MeshPreviewGrantSampleStrategy::HighestTrust => SampleStrategy::HighestTrust,
+        MeshPreviewGrantSampleStrategy::MostRecent => SampleStrategy::MostRecent,
+    };
+
+    let redaction_rules: Vec<String> = Vec::new();
+    // DB-backed resolver is owned by a follow-up slice; for now the
+    // preview runs against an empty candidate set and surfaces the
+    // structural envelope including peer_not_in_group and
+    // lane_already_granted cautions that derive from peer policy state.
+    let memories: Vec<crate::mesh::lane_grant_preview::MemoryView<'_>> = Vec::new();
+    let preview = compute_lane_grant_preview(&LaneGrantPreviewInput {
+        peer_node_key: args.peer_node_key.as_str(),
+        peer_in_group: false,
+        lane,
+        workspace_id: snapshot.workspace_id.as_str(),
+        current_policy: IntendedLanePolicy::conservative_default(),
+        proposed_policy: lane_grant_preview_proposed_policy(lane),
+        memories: &memories,
+        sample_strategy,
+        limit: args.limit,
+        redaction_rules: redaction_rules.as_slice(),
+        sample_random_seed: args.seed,
+    });
+
+    let preview_value = serde_json::to_value(&preview).unwrap_or_else(|_| serde_json::json!({}));
+    let response = serde_json::json!({
+        "schema": "ee.response.v1",
+        "success": true,
+        "data": {
+            "command": "mesh preview-grant",
+            "workspaceId": snapshot.workspace_id,
+            "preview": preview_value,
+        },
+        "degraded": [],
+    });
+
+    let _ = write_stdout(
+        stdout,
+        &(serde_json::to_string(&response).unwrap_or_default() + "\n"),
+    );
+    ProcessExitCode::Success
+}
+
+fn lane_grant_preview_proposed_policy(
+    lane: crate::mesh::lane_grant_preview::Lane,
+) -> crate::mesh::auto_enrollment_safety::IntendedLanePolicy {
+    use crate::mesh::auto_enrollment_safety::{IntendedLanePolicy, LaneDecision};
+    use crate::mesh::lane_grant_preview::Lane;
+    let mut policy = IntendedLanePolicy::conservative_default();
+    match lane {
+        Lane::Metadata => policy.metadata = LaneDecision::Allow,
+        Lane::Body => policy.body = LaneDecision::Allow,
+        Lane::Embedding => policy.embedding = LaneDecision::Allow,
+        Lane::GraphLink => policy.graph_link = LaneDecision::Allow,
+        Lane::CurationSignal => policy.curation_signal = LaneDecision::Allow,
+        Lane::RevisionNotice => policy.revision_notice = LaneDecision::Allow,
+    }
+    policy
 }
 
 fn handle_mesh_init<W, E>(

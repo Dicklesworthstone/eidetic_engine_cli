@@ -9,24 +9,28 @@
 //! `docs/schemas/ee.agent_workload_trace.v1.json`. The output is suitable
 //! for write-once append to a local JSONL file under `EE_FLIGHT_RECORDER_DIR`.
 //!
-//! Phase-1 scope: pure constructor + redaction-safety guards + stable
-//! BLAKE3 hashing. The opt-in I/O wrapper, status/doctor posture wiring,
-//! config keys, and integration coverage across `context`/`search`/`why`/
-//! `status` land in follow-up bd-1zb7k.19.1.{b,c,d} slices.
+//! Scope: pure constructor + redaction-safety guards + stable BLAKE3
+//! hashing + append-only JSONL storage + deterministic replay summaries.
+//! Automatic per-command capture, status/doctor posture wiring, and
+//! integration coverage across `context`/`search`/`why`/`status` can layer
+//! on this storage engine without changing the trace schema.
 
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::{self, OpenOptions},
+    io::{self, Write},
+    path::{Path, PathBuf},
+};
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 /// Public schema identifier, matching the title of
 /// `docs/schemas/ee.agent_workload_trace.v1.json`.
 pub const AGENT_WORKLOAD_TRACE_SCHEMA_V1: &str = "ee.agent_workload_trace.v1";
 
 /// Default redaction posture for the recorder. The schema only allows
-/// `strict` or `audit`; `strict` is the default and the only level that
-/// omits hashed memory IDs as well as raw text. The `audit` level keeps
-/// the hashed memory IDs available for offline replay analysis but
-/// still never carries any raw text.
+/// `strict` or `audit`; `strict` is the default. Both levels omit raw
+/// text and only accept caller-provided BLAKE3 memory hashes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RedactionLevel {
     Strict,
@@ -40,6 +44,26 @@ impl RedactionLevel {
             Self::Strict => "strict",
             Self::Audit => "audit",
         }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "strict" => Some(Self::Strict),
+            "audit" => Some(Self::Audit),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RedactionLevel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value)
+            .ok_or_else(|| de::Error::custom(format!("invalid redaction level `{value}`")))
     }
 }
 
@@ -68,6 +92,27 @@ impl TokenEstimatorId {
             Self::TiktokenCl100kBase => "tiktoken_cl100k_base",
             Self::Approximate => "approximate",
         }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "bytes_div_4" => Some(Self::BytesDiv4),
+            "tiktoken_cl100k_base" => Some(Self::TiktokenCl100kBase),
+            "approximate" => Some(Self::Approximate),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TokenEstimatorId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value)
+            .ok_or_else(|| de::Error::custom(format!("invalid token estimator `{value}`")))
     }
 }
 
@@ -105,6 +150,19 @@ impl HarnessProgram {
             Self::Unknown => "unknown",
         }
     }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "claude-code" => Self::ClaudeCode,
+            "codex-cli" => Self::CodexCli,
+            "gemini-cli" => Self::GeminiCli,
+            "cursor" => Self::Cursor,
+            "windsurf" => Self::Windsurf,
+            "ee-cli-direct" => Self::EeCliDirect,
+            _ => Self::Unknown,
+        }
+    }
 }
 
 impl Serialize for HarnessProgram {
@@ -113,6 +171,16 @@ impl Serialize for HarnessProgram {
         S: Serializer,
     {
         serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for HarnessProgram {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::parse(&value))
     }
 }
 
@@ -149,10 +217,10 @@ pub struct FlightRecorderInputs<'a> {
 }
 
 /// Output row produced by [`record_workload`].
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentWorkloadTrace {
-    pub schema: &'static str,
+    pub schema: String,
     pub side_effect_free: bool,
     pub redaction_level: RedactionLevel,
     pub trace_id: String,
@@ -170,7 +238,7 @@ pub struct AgentWorkloadTrace {
     pub degraded_codes: Vec<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandShape {
     pub verbs: Vec<String>,
@@ -180,7 +248,7 @@ pub struct CommandShape {
     pub output_format: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessIdentity {
     pub program: HarnessProgram,
@@ -188,7 +256,7 @@ pub struct HarnessIdentity {
     pub model_family: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryHashRef {
     pub hash: String,
@@ -198,11 +266,133 @@ pub struct MemoryHashRef {
 /// recorder's redaction contract.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FlightRecorderError {
-    InvalidVerbChain { verbs: Vec<String> },
-    InvalidFlagName { flag: String },
-    InvalidMemoryHash { value: String },
-    InvalidRecordedAt { value: String },
-    InvalidDegradedCode { code: String },
+    InvalidVerbChain {
+        verbs: Vec<String>,
+    },
+    InvalidFlagName {
+        flag: String,
+    },
+    InvalidMemoryHash {
+        value: String,
+    },
+    InvalidRecordedAt {
+        value: String,
+    },
+    InvalidDegradedCode {
+        code: String,
+    },
+    Io {
+        path: PathBuf,
+        message: String,
+    },
+    QuotaExceeded {
+        projected_bytes: u64,
+        max_bytes: u64,
+    },
+    MalformedTrace {
+        line: usize,
+        message: String,
+    },
+}
+
+impl std::fmt::Display for FlightRecorderError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidVerbChain { verbs } => {
+                write!(formatter, "invalid flight-recorder verb chain: {verbs:?}")
+            }
+            Self::InvalidFlagName { flag } => {
+                write!(formatter, "invalid flight-recorder flag name: {flag}")
+            }
+            Self::InvalidMemoryHash { value } => {
+                write!(formatter, "invalid flight-recorder memory hash: {value}")
+            }
+            Self::InvalidRecordedAt { value } => {
+                write!(formatter, "invalid flight-recorder timestamp: {value}")
+            }
+            Self::InvalidDegradedCode { code } => {
+                write!(formatter, "invalid flight-recorder degraded code: {code}")
+            }
+            Self::Io { path, message } => {
+                write!(
+                    formatter,
+                    "flight-recorder I/O failed at {}: {message}",
+                    path.display()
+                )
+            }
+            Self::QuotaExceeded {
+                projected_bytes,
+                max_bytes,
+            } => write!(
+                formatter,
+                "flight-recorder quota exceeded: projected {projected_bytes} bytes exceeds max {max_bytes}"
+            ),
+            Self::MalformedTrace { line, message } => {
+                write!(
+                    formatter,
+                    "malformed flight-recorder trace at line {line}: {message}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for FlightRecorderError {}
+
+/// Append-only JSONL storage options. Retention is reported and hashed into
+/// posture, but this module deliberately never deletes trace files.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FlightRecorderStorageOptions {
+    pub directory: PathBuf,
+    pub retention_days: u32,
+    pub max_bytes: u64,
+}
+
+impl FlightRecorderStorageOptions {
+    #[must_use]
+    pub fn trace_path(&self) -> PathBuf {
+        self.directory.join("agent-workload-trace.jsonl")
+    }
+}
+
+/// Result of one append-only trace write.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightRecorderAppendReport {
+    pub schema: &'static str,
+    pub side_effect_free: bool,
+    pub trace_id: String,
+    pub trace_path: String,
+    pub bytes_written: u64,
+    pub retained_bytes: u64,
+    pub retention_days: u32,
+    pub max_bytes: u64,
+    pub redaction_level: RedactionLevel,
+}
+
+/// Deterministic replay summary over one redacted JSONL trace.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightRecorderReplayReport {
+    pub schema: &'static str,
+    pub side_effect_free: bool,
+    pub trace_path: String,
+    pub trace_hash: String,
+    pub row_count: usize,
+    pub malformed_lines: usize,
+    pub command_counts: Vec<FlightRecorderCount>,
+    pub degraded_code_counts: Vec<FlightRecorderCount>,
+    pub response_bytes_total: u64,
+    pub response_token_estimate_total: u64,
+    pub memory_reference_count: usize,
+    pub replay_hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightRecorderCount {
+    pub key: String,
+    pub count: usize,
 }
 
 /// Pure constructor: validate the caller-curated inputs against the
@@ -218,7 +408,7 @@ pub fn record_workload(
         deduped_codes.insert(*code);
     }
     Ok(AgentWorkloadTrace {
-        schema: AGENT_WORKLOAD_TRACE_SCHEMA_V1,
+        schema: AGENT_WORKLOAD_TRACE_SCHEMA_V1.to_owned(),
         side_effect_free: true,
         redaction_level: inputs.redaction_level,
         trace_id,
@@ -259,6 +449,143 @@ pub fn record_workload(
             .iter()
             .map(|code| (*code).to_string())
             .collect(),
+    })
+}
+
+pub fn append_workload_trace(
+    options: &FlightRecorderStorageOptions,
+    trace: &AgentWorkloadTrace,
+) -> Result<FlightRecorderAppendReport, FlightRecorderError> {
+    fs::create_dir_all(&options.directory).map_err(|error| FlightRecorderError::Io {
+        path: options.directory.clone(),
+        message: error.to_string(),
+    })?;
+    let trace_path = options.trace_path();
+    let mut line = serde_json::to_string(trace).map_err(|error| FlightRecorderError::Io {
+        path: trace_path.clone(),
+        message: error.to_string(),
+    })?;
+    line.push('\n');
+    let existing_bytes = match fs::metadata(&trace_path) {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+        Err(error) => {
+            return Err(FlightRecorderError::Io {
+                path: trace_path,
+                message: error.to_string(),
+            });
+        }
+    };
+    let bytes_written = u64::try_from(line.len()).unwrap_or(u64::MAX);
+    let projected_bytes = existing_bytes.saturating_add(bytes_written);
+    if options.max_bytes > 0 && projected_bytes > options.max_bytes {
+        return Err(FlightRecorderError::QuotaExceeded {
+            projected_bytes,
+            max_bytes: options.max_bytes,
+        });
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&trace_path)
+        .map_err(|error| FlightRecorderError::Io {
+            path: trace_path.clone(),
+            message: error.to_string(),
+        })?;
+    file.write_all(line.as_bytes())
+        .map_err(|error| FlightRecorderError::Io {
+            path: trace_path.clone(),
+            message: error.to_string(),
+        })?;
+    Ok(FlightRecorderAppendReport {
+        schema: "ee.flight_recorder.append.v1",
+        side_effect_free: false,
+        trace_id: trace.trace_id.clone(),
+        trace_path: trace_path.display().to_string(),
+        bytes_written,
+        retained_bytes: projected_bytes,
+        retention_days: options.retention_days,
+        max_bytes: options.max_bytes,
+        redaction_level: trace.redaction_level,
+    })
+}
+
+pub fn replay_workload_trace(
+    trace_path: &Path,
+) -> Result<FlightRecorderReplayReport, FlightRecorderError> {
+    let body = fs::read_to_string(trace_path).map_err(|error| FlightRecorderError::Io {
+        path: trace_path.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    let trace_hash = format!("blake3:{}", blake3::hash(body.as_bytes()).to_hex());
+    let mut command_counts = BTreeMap::<String, usize>::new();
+    let mut degraded_code_counts = BTreeMap::<String, usize>::new();
+    let mut response_bytes_total = 0_u64;
+    let mut response_token_estimate_total = 0_u64;
+    let mut memory_reference_count = 0_usize;
+    let mut row_count = 0_usize;
+    let mut malformed_lines = 0_usize;
+
+    for (index, line) in body.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<AgentWorkloadTrace>(trimmed) {
+            Ok(row) if row.schema == AGENT_WORKLOAD_TRACE_SCHEMA_V1 => {
+                row_count = row_count.saturating_add(1);
+                let command_key = command_key(&row.command.verbs);
+                *command_counts.entry(command_key).or_default() += 1;
+                for code in row.degraded_codes {
+                    *degraded_code_counts.entry(code).or_default() += 1;
+                }
+                response_bytes_total = response_bytes_total.saturating_add(row.response_byte_count);
+                response_token_estimate_total = response_token_estimate_total.saturating_add(
+                    row.response_token_estimate.unwrap_or_else(|| {
+                        row.response_byte_count.saturating_add(3).saturating_div(4)
+                    }),
+                );
+                memory_reference_count =
+                    memory_reference_count.saturating_add(row.memory_references.len());
+            }
+            Ok(_) => malformed_lines = malformed_lines.saturating_add(1),
+            Err(error) => {
+                if row_count == 0 && malformed_lines == 0 {
+                    return Err(FlightRecorderError::MalformedTrace {
+                        line: index + 1,
+                        message: error.to_string(),
+                    });
+                }
+                malformed_lines = malformed_lines.saturating_add(1);
+            }
+        }
+    }
+
+    let command_counts = count_vec(command_counts);
+    let degraded_code_counts = count_vec(degraded_code_counts);
+    let replay_hash = replay_hash(
+        &trace_hash,
+        row_count,
+        &command_counts,
+        &degraded_code_counts,
+        response_bytes_total,
+        response_token_estimate_total,
+        memory_reference_count,
+    );
+
+    Ok(FlightRecorderReplayReport {
+        schema: "ee.flight_recorder.replay.v1",
+        side_effect_free: true,
+        trace_path: trace_path.display().to_string(),
+        trace_hash,
+        row_count,
+        malformed_lines,
+        command_counts,
+        degraded_code_counts,
+        response_bytes_total,
+        response_token_estimate_total,
+        memory_reference_count,
+        replay_hash,
     })
 }
 
@@ -336,6 +663,52 @@ fn is_degraded_code(value: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
+fn command_key(verbs: &[String]) -> String {
+    if verbs.is_empty() {
+        "unknown".to_string()
+    } else {
+        verbs.join(" ")
+    }
+}
+
+fn count_vec(counts: BTreeMap<String, usize>) -> Vec<FlightRecorderCount> {
+    counts
+        .into_iter()
+        .map(|(key, count)| FlightRecorderCount { key, count })
+        .collect()
+}
+
+fn replay_hash(
+    trace_hash: &str,
+    row_count: usize,
+    command_counts: &[FlightRecorderCount],
+    degraded_code_counts: &[FlightRecorderCount],
+    response_bytes_total: u64,
+    response_token_estimate_total: u64,
+    memory_reference_count: usize,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.flight_recorder.replay.v1");
+    hasher.update(trace_hash.as_bytes());
+    hasher.update(&usize_to_u64(row_count).to_le_bytes());
+    for count in command_counts {
+        hasher.update(count.key.as_bytes());
+        hasher.update(&usize_to_u64(count.count).to_le_bytes());
+    }
+    for count in degraded_code_counts {
+        hasher.update(count.key.as_bytes());
+        hasher.update(&usize_to_u64(count.count).to_le_bytes());
+    }
+    hasher.update(&response_bytes_total.to_le_bytes());
+    hasher.update(&response_token_estimate_total.to_le_bytes());
+    hasher.update(&usize_to_u64(memory_reference_count).to_le_bytes());
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
 /// Derive the trace id from the recorder's non-text inputs. Does NOT
 /// embed any task / query / memory body content — only the verb chain,
 /// positional arity, output format, exit code, elapsed ms, response
@@ -370,6 +743,114 @@ fn derive_trace_id(inputs: &FlightRecorderInputs<'_>) -> String {
     let mut id = String::from("trc_");
     id.push_str(&digest.as_str()[..32]);
     id
+}
+
+/// Posture vocabulary the flight recorder reports to `ee status` / `ee doctor`.
+///
+/// Pure-policy summary derived from the configured `EE_FLIGHT_RECORDER`,
+/// `EE_FLIGHT_RECORDER_DIR`, and `EE_FLIGHT_RECORDER_RETENTION_DAYS`
+/// environment overrides plus the directory probe. Decoupled from
+/// `status::SubsystemPostureStatus` so this crate can be reused by any
+/// renderer without pulling the full status module.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FlightRecorderPosture {
+    /// `EE_FLIGHT_RECORDER` is unset or `false`; no traces are being written.
+    Disabled,
+    /// Enabled, directory writable, retention within bounds.
+    Enabled,
+    /// Enabled but the configured retention is outside the supported range
+    /// (less than one day or greater than thirty).
+    RetentionOutOfRange,
+    /// Enabled but the configured directory could not be opened for writes.
+    DirectoryUnwritable,
+    /// Enabled but the configured directory override resolves to a path
+    /// underneath the workspace `.git/` tree.
+    DirectoryInsideGit,
+}
+
+impl FlightRecorderPosture {
+    /// Stable lower-snake code for posture reporting.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Enabled => "enabled",
+            Self::RetentionOutOfRange => "retention_out_of_range",
+            Self::DirectoryUnwritable => "directory_unwritable",
+            Self::DirectoryInsideGit => "directory_inside_git",
+        }
+    }
+
+    /// Whether the recorder is currently writing traces.
+    #[must_use]
+    pub const fn is_writing(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+
+    /// Stable reason code surfaced to `ee status` and `ee doctor` when the
+    /// posture is not the nominal Enabled / Disabled pair.
+    #[must_use]
+    pub const fn reason_code(self) -> Option<&'static str> {
+        match self {
+            Self::Disabled | Self::Enabled => None,
+            Self::RetentionOutOfRange => Some("flight_recorder_retention_out_of_range"),
+            Self::DirectoryUnwritable => Some("flight_recorder_directory_unwritable"),
+            Self::DirectoryInsideGit => Some("flight_recorder_directory_inside_git"),
+        }
+    }
+
+    /// Non-destructive repair command. Always emits an `ee` or `mkdir -p`
+    /// invocation — never proposes `rm`, `git clean`, or any other destructive
+    /// operation, per AGENTS.md.
+    #[must_use]
+    pub const fn repair_command(self) -> Option<&'static str> {
+        match self {
+            Self::Disabled | Self::Enabled => None,
+            Self::RetentionOutOfRange => {
+                Some("Set EE_FLIGHT_RECORDER_RETENTION_DAYS to a value in [1, 30].")
+            }
+            Self::DirectoryUnwritable => Some(
+                "Ensure EE_FLIGHT_RECORDER_DIR points to a writable directory and re-run the command.",
+            ),
+            Self::DirectoryInsideGit => Some(
+                "Point EE_FLIGHT_RECORDER_DIR at a path outside the workspace .git/ directory.",
+            ),
+        }
+    }
+}
+
+/// Pure-policy classifier for the flight recorder posture given the
+/// configured override snapshot. Inputs are caller-curated (already
+/// resolved from the environment registry and the directory probe);
+/// nothing inside this function touches the filesystem.
+///
+/// `retention_days` is the parsed retention value (defaults to 7 when
+/// the override is unset); `directory_writable` is `Some(false)` when
+/// the configured override exists but failed an `open(O_WRONLY)` probe,
+/// `Some(true)` when the probe succeeded, and `None` when the recorder
+/// is disabled (the probe is skipped). `directory_inside_git_tree` is
+/// `true` when the configured directory override resolves to a path
+/// underneath the workspace `.git/` tree.
+#[must_use]
+pub const fn classify_flight_recorder_posture(
+    enabled: bool,
+    retention_days: u32,
+    directory_writable: Option<bool>,
+    directory_inside_git_tree: bool,
+) -> FlightRecorderPosture {
+    if !enabled {
+        return FlightRecorderPosture::Disabled;
+    }
+    if directory_inside_git_tree {
+        return FlightRecorderPosture::DirectoryInsideGit;
+    }
+    if matches!(directory_writable, Some(false)) {
+        return FlightRecorderPosture::DirectoryUnwritable;
+    }
+    if retention_days == 0 || retention_days > 30 {
+        return FlightRecorderPosture::RetentionOutOfRange;
+    }
+    FlightRecorderPosture::Enabled
 }
 
 #[cfg(test)]
@@ -537,5 +1018,164 @@ mod tests {
             json.get("schema").and_then(|v| v.as_str()),
             Some(AGENT_WORKLOAD_TRACE_SCHEMA_V1)
         );
+    }
+
+    #[test]
+    fn append_trace_enforces_quota_without_deleting_existing_trace() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let options = FlightRecorderStorageOptions {
+            directory: temp.path().to_path_buf(),
+            retention_days: 7,
+            max_bytes: 8,
+        };
+        let trace = record_workload(&baseline_inputs()).expect("trace");
+        let err = append_workload_trace(&options, &trace).expect_err("quota exceeded");
+        assert!(matches!(err, FlightRecorderError::QuotaExceeded { .. }));
+        assert!(!options.trace_path().exists());
+    }
+
+    #[test]
+    fn append_and_replay_trace_is_deterministic_and_redacted() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let options = FlightRecorderStorageOptions {
+            directory: temp.path().to_path_buf(),
+            retention_days: 7,
+            max_bytes: 64 * 1024,
+        };
+        let trace = record_workload(&baseline_inputs()).expect("trace");
+        let append = append_workload_trace(&options, &trace).expect("append");
+        assert_eq!(append.trace_id, trace.trace_id);
+        let first = replay_workload_trace(&options.trace_path()).expect("first replay");
+        let second = replay_workload_trace(&options.trace_path()).expect("second replay");
+        assert_eq!(first, second);
+        assert_eq!(first.row_count, 1);
+        assert_eq!(first.memory_reference_count, 2);
+        let stored = std::fs::read_to_string(options.trace_path()).expect("stored trace");
+        for forbidden in ["sk-proj-", "query text", "memory body", "mail body"] {
+            assert!(
+                !stored.contains(forbidden),
+                "stored trace leaked {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn posture_disabled_when_recorder_off_regardless_of_other_inputs() {
+        assert_eq!(
+            classify_flight_recorder_posture(false, 7, Some(true), false),
+            FlightRecorderPosture::Disabled
+        );
+        assert_eq!(
+            classify_flight_recorder_posture(false, 99, Some(false), true),
+            FlightRecorderPosture::Disabled,
+        );
+    }
+
+    #[test]
+    fn posture_enabled_when_writable_and_retention_in_range() {
+        assert_eq!(
+            classify_flight_recorder_posture(true, 7, Some(true), false),
+            FlightRecorderPosture::Enabled
+        );
+        assert_eq!(
+            classify_flight_recorder_posture(true, 1, None, false),
+            FlightRecorderPosture::Enabled
+        );
+        assert_eq!(
+            classify_flight_recorder_posture(true, 30, Some(true), false),
+            FlightRecorderPosture::Enabled
+        );
+    }
+
+    #[test]
+    fn posture_flags_retention_out_of_range_for_zero_and_above_thirty() {
+        assert_eq!(
+            classify_flight_recorder_posture(true, 0, Some(true), false),
+            FlightRecorderPosture::RetentionOutOfRange
+        );
+        assert_eq!(
+            classify_flight_recorder_posture(true, 31, Some(true), false),
+            FlightRecorderPosture::RetentionOutOfRange
+        );
+    }
+
+    #[test]
+    fn posture_flags_unwritable_directory_before_retention_check() {
+        assert_eq!(
+            classify_flight_recorder_posture(true, 999, Some(false), false),
+            FlightRecorderPosture::DirectoryUnwritable
+        );
+    }
+
+    #[test]
+    fn posture_flags_directory_inside_git_tree_with_highest_priority() {
+        assert_eq!(
+            classify_flight_recorder_posture(true, 7, Some(true), true),
+            FlightRecorderPosture::DirectoryInsideGit
+        );
+        assert_eq!(
+            classify_flight_recorder_posture(true, 0, Some(false), true),
+            FlightRecorderPosture::DirectoryInsideGit
+        );
+    }
+
+    #[test]
+    fn posture_reason_and_repair_are_non_destructive_for_every_variant() {
+        let variants = [
+            FlightRecorderPosture::Disabled,
+            FlightRecorderPosture::Enabled,
+            FlightRecorderPosture::RetentionOutOfRange,
+            FlightRecorderPosture::DirectoryUnwritable,
+            FlightRecorderPosture::DirectoryInsideGit,
+        ];
+        let forbidden_tokens = [
+            "rm ",
+            "rm -",
+            "git reset",
+            "git clean",
+            "git checkout --",
+            "git restore --staged",
+            "git branch -D",
+            "--force",
+            "--hard",
+            "drop table",
+            "truncate ",
+            "delete from",
+        ];
+        for variant in variants {
+            assert!(!variant.as_str().is_empty(), "posture stable code");
+            for text in [variant.reason_code(), variant.repair_command()]
+                .into_iter()
+                .flatten()
+            {
+                let lowered = text.to_ascii_lowercase();
+                for token in &forbidden_tokens {
+                    assert!(
+                        !lowered.contains(token),
+                        "posture {:?} text {:?} contains destructive token {:?}",
+                        variant,
+                        text,
+                        token
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn posture_writing_predicate_matches_enabled_only() {
+        assert!(FlightRecorderPosture::Enabled.is_writing());
+        for non_writing in [
+            FlightRecorderPosture::Disabled,
+            FlightRecorderPosture::RetentionOutOfRange,
+            FlightRecorderPosture::DirectoryUnwritable,
+            FlightRecorderPosture::DirectoryInsideGit,
+        ] {
+            assert!(
+                !non_writing.is_writing(),
+                "{:?} must not report writing",
+                non_writing
+            );
+        }
     }
 }

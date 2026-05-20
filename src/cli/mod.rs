@@ -150,6 +150,11 @@ use crate::core::perf_forensics::{
     PerfLatencySurface, PromptBudgetReport, check_perf_budget_report,
     compare_artifact_summary_files, explain_latency_report, prompt_budget_report,
 };
+use crate::core::perf_live::{
+    PerfLiveOptions, PerfLiveSnapshot, collect_perf_live_snapshot,
+    default_perf_live_command_timeout_ms, default_perf_live_interval_ms,
+    parse_perf_live_duration_ms,
+};
 use crate::core::preflight::{
     CloseOptions as PreflightCloseOptions, RunOptions as PreflightRunOptions,
     ShowOptions as PreflightShowOptions, TripwireSource as PreflightTripwireSource,
@@ -5101,6 +5106,10 @@ pub struct PlaybookImportArgs {
 pub enum PerfCommand {
     /// Compare two normalized performance artifact summaries.
     Compare(PerfCompareArgs),
+    /// Emit one read-only live performance snapshot and exit.
+    Snapshot(PerfSnapshotArgs),
+    /// Stream read-only live performance snapshots to stdout.
+    Live(PerfLiveArgs),
     /// Report prompt-budget waste from redacted agent workload traces.
     #[command(name = "prompt-budget")]
     PromptBudget(PerfPromptBudgetArgs),
@@ -5137,6 +5146,42 @@ pub struct PerfPromptBudgetArgs {
     /// Redacted ee.agent_workload_trace.v1 JSONL trace.
     #[arg(long, value_name = "PATH")]
     pub trace: PathBuf,
+}
+
+/// Arguments for `ee perf snapshot`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct PerfSnapshotArgs {
+    /// Snapshot interval represented in the emitted report.
+    #[arg(long = "interval-ms", default_value_t = default_perf_live_interval_ms())]
+    pub interval_ms: u64,
+
+    /// Optional rolling window, such as 30s, represented in the emitted report.
+    #[arg(long, value_name = "DURATION")]
+    pub window: Option<String>,
+
+    /// Timeout for read-only external source commands.
+    #[arg(long = "command-timeout-ms", default_value_t = default_perf_live_command_timeout_ms())]
+    pub command_timeout_ms: u64,
+}
+
+/// Arguments for `ee perf live`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct PerfLiveArgs {
+    /// Poll interval between emitted JSON snapshots.
+    #[arg(long = "interval-ms", default_value_t = default_perf_live_interval_ms())]
+    pub interval_ms: u64,
+
+    /// Optional rolling window, such as 30s, represented in each emitted report.
+    #[arg(long, value_name = "DURATION")]
+    pub window: Option<String>,
+
+    /// Timeout for read-only external source commands.
+    #[arg(long = "command-timeout-ms", default_value_t = default_perf_live_command_timeout_ms())]
+    pub command_timeout_ms: u64,
+
+    /// Stop after this many snapshots. Primarily for deterministic harnesses.
+    #[arg(long = "max-snapshots", hide = true)]
+    pub max_snapshots: Option<u64>,
 }
 
 /// Arguments for `ee perf explain-latency`.
@@ -6573,6 +6618,10 @@ pub struct CurateApplyArgs {
     /// Preview without updating memory, candidate status, or audit.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+
+    /// Permit applying tombstone/retract candidates to load-bearing memories.
+    #[arg(long = "allow-tombstone-load-bearing", action = ArgAction::SetTrue)]
+    pub allow_tombstone_load_bearing: bool,
 }
 
 /// Shared arguments for `ee curate accept` and `ee curate reject`.
@@ -6703,6 +6752,10 @@ pub struct CurateTombstoneArgs {
     /// Preview without writing tombstone record.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+
+    /// Permit tombstoning a load-bearing memory after reviewing its why graph badge.
+    #[arg(long = "allow-tombstone-load-bearing", action = ArgAction::SetTrue)]
+    pub allow_tombstone_load_bearing: bool,
 
     /// Tombstone reason for audit trail.
     #[arg(long, value_name = "REASON")]
@@ -16927,12 +16980,39 @@ where
 {
     match command {
         PerfCommand::Compare(args) => handle_perf_compare(cli, args, stdout, stderr),
+        PerfCommand::Snapshot(args) => handle_perf_snapshot(cli, args, stdout, stderr),
+        PerfCommand::Live(args) => handle_perf_live(cli, args, stdout, stderr),
         PerfCommand::PromptBudget(args) => handle_perf_prompt_budget(cli, args, stdout, stderr),
         PerfCommand::ExplainLatency(args) => handle_perf_explain_latency(cli, args, stdout, stderr),
         PerfCommand::Budget(PerfBudgetCommand::Check(args)) => {
             handle_perf_budget_check(cli, args, stdout, stderr)
         }
     }
+}
+
+fn perf_live_options_from_args(
+    cli: &Cli,
+    interval_ms: u64,
+    window: Option<&str>,
+    command_timeout_ms: u64,
+) -> Result<PerfLiveOptions, DomainError> {
+    if interval_ms == 0 {
+        return Err(DomainError::Usage {
+            message: "perf live interval must be greater than zero milliseconds.".to_owned(),
+            repair: Some("Use --interval-ms 1000.".to_owned()),
+        });
+    }
+    if command_timeout_ms == 0 {
+        return Err(DomainError::Usage {
+            message: "perf live command timeout must be greater than zero milliseconds.".to_owned(),
+            repair: Some("Use --command-timeout-ms 500.".to_owned()),
+        });
+    }
+    let mut options = PerfLiveOptions::for_workspace(cli.resolve_workspace());
+    options.interval_ms = interval_ms;
+    options.command_timeout_ms = command_timeout_ms;
+    options.window_ms = window.map(parse_perf_live_duration_ms).transpose()?;
+    Ok(options)
 }
 
 fn handle_perf_compare<W, E>(
@@ -16948,6 +17028,70 @@ where
     match compare_artifact_summary_files(&args.baseline, &args.candidate) {
         Ok(report) => write_perf_compare_report(cli, &report, stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_perf_snapshot<W, E>(
+    cli: &Cli,
+    args: &PerfSnapshotArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let options = match perf_live_options_from_args(
+        cli,
+        args.interval_ms,
+        args.window.as_deref(),
+        args.command_timeout_ms,
+    ) {
+        Ok(options) => options,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let runner = SystemSwarmBriefCommandRunner;
+    let snapshot = collect_perf_live_snapshot(&options, &runner);
+    write_perf_live_snapshot(cli, &snapshot, stdout)
+}
+
+fn handle_perf_live<W, E>(
+    cli: &Cli,
+    args: &PerfLiveArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let options = match perf_live_options_from_args(
+        cli,
+        args.interval_ms,
+        args.window.as_deref(),
+        args.command_timeout_ms,
+    ) {
+        Ok(options) => options,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let runner = SystemSwarmBriefCommandRunner;
+    let max_snapshots = args.max_snapshots.unwrap_or(u64::MAX);
+    let mut emitted = 0_u64;
+    loop {
+        if emitted >= max_snapshots {
+            return ProcessExitCode::Success;
+        }
+        let snapshot = collect_perf_live_snapshot(&options, &runner);
+        let exit = write_perf_live_snapshot(cli, &snapshot, stdout);
+        if exit != ProcessExitCode::Success {
+            return exit;
+        }
+        let _ = stdout.flush();
+        emitted = emitted.saturating_add(1);
+        if emitted >= max_snapshots {
+            return ProcessExitCode::Success;
+        }
+        std::thread::sleep(Duration::from_millis(options.interval_ms));
     }
 }
 
@@ -17017,6 +17161,29 @@ where
     match check_perf_budget_report(&args.profile, &args.report) {
         Ok(report) => write_perf_budget_check_report(cli, &report, stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_perf_live_snapshot<W>(
+    cli: &Cli,
+    snapshot: &PerfLiveSnapshot,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_perf_live_snapshot_human(snapshot))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&snapshot.to_json()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(snapshot.to_json() + "\n")),
     }
 }
 
@@ -17199,6 +17366,19 @@ fn perf_effect_json(command_path: &str) -> serde_json::Value {
                 }
             })
         },
+    )
+}
+
+fn render_perf_live_snapshot_human(snapshot: &PerfLiveSnapshot) -> String {
+    format!(
+        "Perf live: ts={} interval={}ms ready={} in_progress={} blocked={} rch_queue={} degraded={}\n",
+        snapshot.ts,
+        snapshot.interval_ms,
+        snapshot.bead_activity.ready_beads,
+        snapshot.bead_activity.in_progress_beads,
+        snapshot.bead_activity.blocked_beads,
+        snapshot.rch.queue_depth,
+        snapshot.degraded.len()
     )
 }
 
@@ -32685,6 +32865,36 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             })
         })
         .collect();
+    let load_bearing = report.load_bearing.as_ref().map(|load_bearing| {
+        let citing_rules = load_bearing
+            .citing_rules
+            .iter()
+            .map(|rule| {
+                serde_json::json!({
+                    "ruleId": &rule.rule_id,
+                    "relation": rule.relation,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "isLoadBearing": load_bearing.is_load_bearing,
+            "loadBearingScore": load_bearing
+                .load_bearing_score
+                .map(graph_score_json_value)
+                .unwrap_or(serde_json::Value::Null),
+            "authorityRank": load_bearing.authority_rank,
+            "citingRuleCount": load_bearing.citing_rule_count,
+            "citingRules": citing_rules,
+            "interpretation": load_bearing.interpretation,
+            "evidence": {
+                "schema": load_bearing.evidence.schema,
+                "algorithm": load_bearing.evidence.algorithm,
+                "projection": load_bearing.evidence.projection,
+                "snapshotVersion": load_bearing.evidence.snapshot_version,
+            },
+            "rationale": &load_bearing.rationale,
+        })
+    });
 
     let mut json = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V1,
@@ -32709,6 +32919,18 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "degraded": degraded,
         }
     });
+    if let Some(load_bearing) = load_bearing
+        && let Some(data) = json
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        data.insert(
+            "graph".to_owned(),
+            serde_json::json!({
+                "loadBearing": load_bearing,
+            }),
+        );
+    }
     if let Some(causal_explanation) = &report.causal_explanation {
         if let Some(data) = json
             .get_mut("data")
@@ -33905,6 +34127,7 @@ where
         candidate_id: &args.candidate_id,
         actor: args.actor.as_deref(),
         dry_run: args.dry_run,
+        allow_tombstone_load_bearing: args.allow_tombstone_load_bearing,
     };
 
     match validate_curation_candidate(&options) {
@@ -34117,6 +34340,7 @@ where
         candidate_id: &args.candidate_id,
         actor: args.actor.as_deref(),
         dry_run: args.dry_run,
+        allow_tombstone_load_bearing: args.allow_tombstone_load_bearing,
         reason: args.reason.as_deref(),
     };
 
@@ -38172,6 +38396,10 @@ where
                 return write_maintenance_response(cli, stdout, false, data);
             }
         };
+        let process_pool_visible = crate::db::read_pool::process_read_pool_stats_for_database(
+            &crate::db::DatabaseConfig::file(database_path.clone()),
+        )
+        .is_some();
         let data = serde_json::json!({
             "schema": MAINTENANCE_RUN_SCHEMA_V1,
             "command": "maintenance wal-checkpoint",
@@ -38196,6 +38424,13 @@ where
                 "busy": false,
             },
             "checkpoint": null,
+            "checkpointBlockedBy": null,
+            "checkpointBlockerVisibility": checkpoint_blocker_visibility_json(
+                false,
+                false,
+                process_pool_visible,
+                false,
+            ),
             "before": wal_status_report_json(&before),
             "after": wal_status_report_json(&before),
             "next": "ee maintenance wal-checkpoint --workspace . --json",
@@ -38233,6 +38468,20 @@ where
     };
     let before = WalStatusReport::from_wal_status(checkpoint.before.clone(), threshold);
     let after = WalStatusReport::from_wal_status(checkpoint.after.clone(), threshold);
+    let checkpoint_outcome = crate::db::read_pool::note_process_checkpoint_outcome(
+        &crate::db::DatabaseConfig::file(database_path.clone()),
+        checkpoint.busy,
+    );
+    let checkpoint_blocked_by = checkpoint_outcome
+        .blocker
+        .as_ref()
+        .map(|blocker| checkpoint_blocker_json(blocker, selected_workspace.as_deref()));
+    let checkpoint_blocker_visibility = checkpoint_blocker_visibility_json(
+        true,
+        checkpoint.busy,
+        checkpoint_outcome.process_pool_visible,
+        checkpoint_blocked_by.is_some(),
+    );
     let data = serde_json::json!({
         "schema": MAINTENANCE_RUN_SCHEMA_V1,
         "command": "maintenance wal-checkpoint",
@@ -38261,6 +38510,8 @@ where
             "logFrames": checkpoint.log_frames,
             "checkpointedFrames": checkpoint.checkpointed_frames,
         },
+        "checkpointBlockedBy": checkpoint_blocked_by,
+        "checkpointBlockerVisibility": checkpoint_blocker_visibility,
         "before": wal_status_report_json(&before),
         "after": wal_status_report_json(&after),
         "next": if after.exceeds_threshold() {
@@ -38279,6 +38530,62 @@ fn wal_status_report_json(report: &WalStatusReport) -> serde_json::Value {
         "pageSize": report.page_size,
         "checkpointThresholdBytes": report.checkpoint_threshold_bytes,
         "exceedsThreshold": report.exceeds_threshold(),
+    })
+}
+
+fn checkpoint_blocker_json(
+    blocker: &crate::db::read_pool::CheckpointBlocker,
+    workspace_path: Option<&Path>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "pin_id": blocker.pin_id,
+        "slot_id": blocker.slot_id,
+        "workflow_id": blocker.workflow_id.as_deref(),
+        "request_id": blocker.request_id.as_deref(),
+        "workspace_id": workspace_path.map(|path| path.display().to_string()),
+        "age_ms": blocker.pin_age_ms,
+        "max_pin_duration_ms": blocker.max_pin_duration_ms,
+        "poisoned": blocker.poisoned,
+        "release_state": checkpoint_blocker_release_state_json(blocker.release_state),
+    })
+}
+
+fn checkpoint_blocker_release_state_json(
+    state: crate::db::read_pool::SnapshotPinReleaseState,
+) -> &'static str {
+    match state {
+        crate::db::read_pool::SnapshotPinReleaseState::Active => "active",
+        crate::db::read_pool::SnapshotPinReleaseState::Expired => "expired",
+        crate::db::read_pool::SnapshotPinReleaseState::Poisoned => "poisoned",
+    }
+}
+
+fn checkpoint_blocker_visibility_json(
+    checkpoint_attempted: bool,
+    checkpoint_busy: bool,
+    process_pool_visible: bool,
+    blocker_visible: bool,
+) -> serde_json::Value {
+    let explanation = if !checkpoint_attempted {
+        "dry-run did not attempt a WAL checkpoint; process-local read-pool visibility is advisory only"
+    } else if checkpoint_busy && blocker_visible {
+        "WAL checkpoint reported BUSY and a same-process SnapshotPin blocker was visible"
+    } else if checkpoint_busy && process_pool_visible {
+        "WAL checkpoint reported BUSY, but the registered same-process read pool had no active SnapshotPin blocker"
+    } else if checkpoint_busy {
+        "WAL checkpoint reported BUSY, but no same-process read pool was registered; readers in other processes are not visible"
+    } else if process_pool_visible {
+        "WAL checkpoint was not BUSY; same-process read-pool registry was visible"
+    } else {
+        "WAL checkpoint was not BUSY; no same-process read pool was registered"
+    };
+    serde_json::json!({
+        "checkpointAttempted": checkpoint_attempted,
+        "checkpointBusy": checkpoint_busy,
+        "processLocalRegistryVisible": process_pool_visible,
+        "blockerVisible": blocker_visible,
+        "crossProcessVisible": false,
+        "explanation": explanation,
     })
 }
 
@@ -41572,6 +41879,7 @@ impl NormalizedInvocation {
                     mesh::MeshCommand::Export(_) => "mesh export".to_string(),
                     mesh::MeshCommand::Import(_) => "mesh import".to_string(),
                     mesh::MeshCommand::Sync(_) => "mesh sync".to_string(),
+                    mesh::MeshCommand::PreviewGrant(_) => "mesh preview-grant".to_string(),
                 },
                 Command::Situation(sit) => match sit {
                     SituationCommand::Classify(_) => "situation classify".to_string(),
@@ -42248,6 +42556,7 @@ mod tests {
     use crate::core::why::{
         AgentProfileSelectionExplanation, CoordinationFallbackEvidenceSummary,
         GraphMetricExplanation, GraphRetrievalExplanation, GraphRetrievalSourceExplanation,
+        LoadBearingEvidence, LoadBearingRuleReference, LoadBearingWhyExplanation,
         PackSelectionExplanation, RationaleTraceSummary, RetrievalExplanation,
         SelectionExplanation, StorageExplanation, WhyDegradation, WhyReport,
     };
@@ -43601,6 +43910,52 @@ mod tests {
                 "why TOON preserves agent helpful count: expected 12, got {:?}",
                 actual["data"]["agentProfile"]["helpfulCount"]
             ),
+        )
+    }
+
+    #[test]
+    fn why_load_bearing_graph_block_matches_golden() -> TestResult {
+        let report = why_found_fixture().with_optional_load_bearing(Some(
+            LoadBearingWhyExplanation {
+                is_load_bearing: true,
+                load_bearing_score: Some(0.8732),
+                authority_rank: Some(1),
+                citing_rule_count: 2,
+                citing_rules: vec![
+                    LoadBearingRuleReference {
+                        rule_id: "rule_release_safety".to_owned(),
+                        relation: "cites",
+                    },
+                    LoadBearingRuleReference {
+                        rule_id: "rule_rch_remote_only".to_owned(),
+                        relation: "cites",
+                    },
+                ],
+                interpretation: "load_bearing",
+                evidence: LoadBearingEvidence {
+                    schema: crate::graph::hits::HITS_REPORT_SCHEMA_V1,
+                    algorithm: "bipartite_hits",
+                    projection: "rule_provenance_bipartite",
+                    snapshot_version: 42,
+                },
+                rationale:
+                    "This memory is cited by multiple procedural rules in the rule-provenance bipartite projection."
+                        .to_owned(),
+            },
+        ));
+        let value: serde_json::Value = serde_json::from_str(&super::format_why_json(&report))
+            .map_err(|error| error.to_string())?;
+        let graph = value
+            .pointer("/data/graph")
+            .ok_or_else(|| "why JSON missing data.graph".to_owned())?;
+        let mut actual = serde_json::to_string(graph).map_err(|error| error.to_string())?;
+        actual.push('\n');
+
+        ensure_equal(
+            &actual,
+            &include_str!("../../tests/fixtures/golden/why/load_bearing_graph.json.golden")
+                .to_owned(),
+            "why load-bearing golden",
         )
     }
 
