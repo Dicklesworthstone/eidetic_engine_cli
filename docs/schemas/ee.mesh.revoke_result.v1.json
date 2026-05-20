@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.revoke_result.v1.json",
+  "title": "ee.mesh.revoke_result.v1",
+  "description": "Result envelope emitted by the SRR6.46.9 `ee mesh revoke <node-key> [--workspace .] [--reason \"...\"] [--dry-run] [--json]` command. Reports per-peer revocation without full disable: the peer removed from the materialized peer-group, the workspace-scoped denylist updated so the next auto-discovery pass does not re-include the peer, and the audit row recording the reason.",
+  "type": "object",
+  "required": [
+    "schema",
+    "outcome",
+    "workspaceId",
+    "revokedNodeKey",
+    "auditRowId",
+    "dryRun",
+    "remainingPeerCount",
+    "denylistUpdated"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.revoke_result.v1"
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["revoked", "dry_run", "unknown_peer"],
+      "description": "`revoked`: peer removed from group + denylist appended; `dry_run`: --dry-run requested, steps 1-3 ran (lock + resolve + audit row) but step 4 was skipped; `unknown_peer`: peer not in materialized group, emitted with the `mesh_revoke_unknown_peer` warning caution."
+    },
+    "workspaceId": {
+      "$ref": "#/$defs/workspaceId"
+    },
+    "revokedNodeKey": {
+      "$ref": "#/$defs/nodeKey",
+      "description": "The node-key passed as the positional argument. Always echoed back (even on unknown_peer outcomes) so the caller can pair the response with the request."
+    },
+    "auditRowId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Id of the ee_audit row emitted with event_type=mesh.peer_revoked. Always present (even on dry-run + unknown_peer) so the audit log records every attempted revocation."
+    },
+    "dryRun": {
+      "type": "boolean",
+      "description": "True when the caller passed --dry-run. Step 4 (durable mutation) is skipped when true."
+    },
+    "userReason": {
+      "type": ["string", "null"],
+      "description": "Verbatim --reason argument passed by the operator, stored on the audit row. Null when --reason was omitted."
+    },
+    "remainingPeerCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Count of peers remaining in the materialized peer-group after revocation. When outcome=unknown_peer this equals the pre-call count."
+    },
+    "newPeerSetHash": {
+      "type": ["string", "null"],
+      "pattern": "^blake3:[A-Fa-f0-9]{32,128}$",
+      "description": "Stable BLAKE3 hash of the sorted node-key set after revocation. Null when outcome=unknown_peer (no change). Pinned to blake3:<32-128 hex> so support bundles can compare peer-set identity without leaking node-keys."
+    },
+    "denylistUpdated": {
+      "type": "boolean",
+      "description": "True when the workspace-scoped `.ee/discovery_denylist.toml` was updated (revoked) OR would be under --dry-run; false for unknown_peer outcomes."
+    },
+    "cautions": {
+      "type": "array",
+      "uniqueItems": false,
+      "description": "UX hazard signals the renderer surfaces visually. Closed set: `mesh_revoke_unknown_peer`, `mesh_revoke_last_peer_in_group`, `mesh_revoke_dry_run`. Severity is `info` or `warning` only.",
+      "items": { "$ref": "#/$defs/caution" }
+    }
+  },
+  "$defs": {
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "nodeKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Stable tailscale node identifier (e.g. `nodekey:<base64>`). Redactable under the `tailscale_metadata` class for support bundles."
+    },
+    "caution": {
+      "type": "object",
+      "required": ["kind", "message", "severity"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "mesh_revoke_unknown_peer",
+            "mesh_revoke_last_peer_in_group",
+            "mesh_revoke_dry_run"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1 },
+        "severity": { "type": "string", "enum": ["info", "warning"] }
+      }
+    }
+  }
+}

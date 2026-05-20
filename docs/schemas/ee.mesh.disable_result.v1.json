@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.disable_result.v1.json",
+  "title": "ee.mesh.disable_result.v1",
+  "description": "Result envelope emitted by the SRR6.46.9 `ee mesh disable [--workspace .] [--reason \"...\"] [--dry-run] [--json]` command. Reports the rollback the command performed (or would have performed under --dry-run): peer-group binding removed, peer-group row deleted IFF no other workspace bindings retain it, trust assignments cleared, audit row id. The reversal path SRR6.46.5's reversalCommand field promises operators.",
+  "type": "object",
+  "required": [
+    "schema",
+    "outcome",
+    "workspaceId",
+    "auditRowId",
+    "dryRun",
+    "removedPeerCount",
+    "removedBindings",
+    "bindingsRetainedForOtherWorkspaces"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.disable_result.v1"
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["disabled", "dry_run", "noop_no_peer_group"],
+      "description": "`disabled`: rollback completed; bindings + trust + peer-group row cleaned per the bead's step 5 contract. `dry_run`: --dry-run requested; steps 1-4 ran (lock + resolve + audit row) but step 5 was skipped. `noop_no_peer_group`: workspace has no materialized peer-group, so nothing to roll back; emitted with the `mesh_disable_noop` info-severity caution."
+    },
+    "workspaceId": {
+      "$ref": "#/$defs/workspaceId"
+    },
+    "removedPeerGroupId": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Peer-group id that was unlinked (always set when outcome=disabled OR outcome=dry_run; null when outcome=noop_no_peer_group)."
+    },
+    "auditRowId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Id of the ee_audit row emitted with event_type=mesh.auto_enrollment_rolled_back. Always present (even on dry-run) so the audit log records every attempted disable."
+    },
+    "dryRun": {
+      "type": "boolean",
+      "description": "True when the caller passed --dry-run. Step 5 (durable mutation) is skipped when true; the schema shape is otherwise identical so renderers don't branch."
+    },
+    "userReason": {
+      "type": ["string", "null"],
+      "description": "Verbatim --reason argument passed by the operator, stored on the audit row. Null when --reason was omitted."
+    },
+    "removedPeerCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of peers that were members of the disabled peer-group at the moment the audit row was emitted. Counts the peers, not the bindings."
+    },
+    "removedBindings": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of workspace-id -> peer-group binding rows removed. Typically 1 (just this workspace's binding); always 0 under outcome=noop_no_peer_group."
+    },
+    "bindingsRetainedForOtherWorkspaces": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of OTHER workspaces that still bind to the same peer-group. When this is >0, the peer-group row itself is NOT deleted (only this workspace's binding is unlinked) so other workspaces keep their materialized trust state. When this is 0 the peer-group row is deleted along with this workspace's binding."
+    },
+    "cautions": {
+      "type": "array",
+      "uniqueItems": false,
+      "description": "UX hazard signals the renderer surfaces visually. Closed set: `mesh_disable_noop`, `mesh_disable_bindings_retained`, `mesh_disable_dry_run`. Severity is `info` or `warning` only; `error` is not a path this command takes (errors propagate as the response envelope's top-level error block, not via cautions).",
+      "items": { "$ref": "#/$defs/caution" }
+    }
+  },
+  "$defs": {
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Stable workspace identifier (matches workspace.id elsewhere)."
+    },
+    "caution": {
+      "type": "object",
+      "required": ["kind", "message", "severity"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "mesh_disable_noop",
+            "mesh_disable_bindings_retained",
+            "mesh_disable_dry_run"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1 },
+        "severity": { "type": "string", "enum": ["info", "warning"] }
+      }
+    }
+  }
+}
