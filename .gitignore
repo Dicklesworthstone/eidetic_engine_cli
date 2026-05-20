@@ -165,6 +165,29 @@ tests/logs/
 # binaries — those live under /test_* patterns above with paired binaries.
 /temp_*.rs
 
+# Repo-root agent scratchpads (rule-based, replaces whack-a-mole).
+# Anchored to depth 1 so real fixtures and tests under subdirectories stay
+# visible to Git and RCH.
+/test_*.rs
+/test_capture*
+/test_clamp*
+/test_drop*
+/test_ln_1p*
+/test_min*
+/test_minmax*
+/test_multibyte*
+/test_output*.log
+/temp_*.rs
+/ubs_*.txt
+/ubs_*.json
+/ubs_*.jsonl
+/ubs.json
+/db_for_loops*
+/findings.jsonl
+/pass*.jsonl
+/fix_*.sh
+/find_*.sh
+
 # scripts/audit_install_pipeline.sh writes a timestamped JSON snapshot per
 # run into tests/audit_artifacts/. The "latest_install_pipeline.json" symlink
 # and an occasional `git add -f`'d baseline are the authoritative artifacts;

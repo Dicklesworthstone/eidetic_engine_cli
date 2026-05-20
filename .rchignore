@@ -60,6 +60,29 @@ recent_commits.txt
 /ubs_findings.jsonl
 /ubs_full.txt
 
+# Repo-root agent scratchpads (rule-based, mirrors .gitignore).
+# Anchored to depth 1 so RCH does not hide real fixtures or test sources under
+# subdirectories.
+/test_*.rs
+/test_capture*
+/test_clamp*
+/test_drop*
+/test_ln_1p*
+/test_min*
+/test_minmax*
+/test_multibyte*
+/test_output*.log
+/temp_*.rs
+/ubs_*.txt
+/ubs_*.json
+/ubs_*.jsonl
+/ubs.json
+/db_for_loops*
+/findings.jsonl
+/pass*.jsonl
+/fix_*.sh
+/find_*.sh
+
 # Volatile Beads SQLite sidecars and temp files. Keep .beads/issues.jsonl
 # visible for tests and coordination, but do not let transient DB files make
 # RCH fall back to local execution when they vanish during rsync.

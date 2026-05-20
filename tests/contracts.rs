@@ -223,6 +223,9 @@ mod hygiene_reason_code_vocabulary;
 #[path = "contracts/workspace_hygiene_classifier_matrix.rs"]
 mod workspace_hygiene_classifier_matrix;
 
+#[path = "contracts/repo_hygiene_root_clutter.rs"]
+mod repo_hygiene_root_clutter;
+
 #[path = "contracts/mesh_surrogate_schema.rs"]
 mod mesh_surrogate_schema;
 
