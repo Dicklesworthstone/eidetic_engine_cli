@@ -11,6 +11,7 @@ use crate::core::why::{DedupLinkEvidence, find_embed_dedup_link};
 use crate::db::{
     CreateAuditInput, DbConnection, audit_actions, generate_audit_id, generate_audit_id_seeded,
 };
+use crate::models::degradation::CONFORMAL_CALIBRATION_INSUFFICIENT_CODE;
 use crate::models::query::{EqlQuery, EqlSpeedMode, EqlTagsMode};
 use crate::models::{
     MemoryId, MemoryScope, MemoryScopeStats, ProvenanceUri, TrustClass, UnitScore,
@@ -53,7 +54,10 @@ use frankensearch::LexicalSearch;
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
 pub const DIAG_SEARCH_SCHEMA_V1: &str = "ee.diag.search.v1";
 pub const PERFORMANCE_EXPLAIN_SCHEMA_V1: &str = "ee.explain.performance.v1";
+pub const SEARCH_SCORE_INTERVAL_SCHEMA_V1: &str = "ee.search.score_interval.v1";
 const INDEX_STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
+const SEARCH_SCORE_COVERAGE_GUARANTEE: f32 = 0.95;
+const MIN_SEARCH_SCORE_CALIBRATION_SAMPLES: usize = 20;
 const SEARCH_ANALYSIS_CONTENT_KEY: &str = "_ee_analysis_content";
 const SEARCH_ANALYSIS_CONFIDENCE_KEY: &str = "_ee_analysis_confidence";
 const SEARCH_ANALYSIS_UTILITY_KEY: &str = "_ee_analysis_utility";
@@ -587,6 +591,23 @@ impl SearchDegradation {
     }
 
     #[must_use]
+    fn conformal_calibration_insufficient(sample_count: usize) -> Self {
+        Self {
+            code: CONFORMAL_CALIBRATION_INSUFFICIENT_CODE.to_string(),
+            severity: "low".to_string(),
+            message: format!(
+                "Search score calibration has {sample_count} usable sample{plural}; {required} are required for split-conformal score intervals. Returning conservative [0, 1] intervals.",
+                plural = if sample_count == 1 { "" } else { "s" },
+                required = MIN_SEARCH_SCORE_CALIBRATION_SAMPLES,
+            ),
+            repair: Some(
+                "Add outcome-backed rows to .ee/search/calibration.jsonl with score and groundTruthRelevance fields, or run the calibrated search refresh workflow when available."
+                    .to_string(),
+            ),
+        }
+    }
+
+    #[must_use]
     fn mesh_workspace_scope_filtered(filtered: usize) -> Self {
         Self {
             code: "mesh_workspace_scope_filtered".to_string(),
@@ -1065,6 +1086,8 @@ impl SearchReport {
                 let mut obj = serde_json::json!({
                     "docId": hit.doc_id,
                     "score": hit.score,
+                    "scoreInterval": search_hit_score_interval_json(hit),
+                    "coverageGuarantee": search_hit_coverage_guarantee_json(hit),
                     "source": hit.source.as_str(),
                     "why": hit.why(),
                     "provenance": provenance,
@@ -1405,6 +1428,198 @@ impl SearchHit {
         }));
         (provenance, redacted_patterns.into_iter().collect())
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SearchScoreCalibrationStatus {
+    Absent,
+    Insufficient,
+    Calibrated,
+}
+
+impl SearchScoreCalibrationStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Insufficient => "insufficient",
+            Self::Calibrated => "calibrated",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SearchScoreCalibration {
+    status: SearchScoreCalibrationStatus,
+    sample_count: usize,
+    residual_quantile: Option<f32>,
+}
+
+impl SearchScoreCalibration {
+    fn for_workspace(workspace_path: &Path) -> Self {
+        let path = workspace_path
+            .join(".ee")
+            .join("search")
+            .join("calibration.jsonl");
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            return Self {
+                status: SearchScoreCalibrationStatus::Absent,
+                sample_count: 0,
+                residual_quantile: None,
+            };
+        };
+
+        let mut residuals = Vec::new();
+        for line in contents
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let Some(score) = calibration_number(
+                &value,
+                &["score", "predictedScore", "predicted_score", "fusionScore"],
+            ) else {
+                continue;
+            };
+            let Some(truth) = calibration_number(
+                &value,
+                &[
+                    "groundTruthRelevance",
+                    "ground_truth_relevance",
+                    "relevance",
+                    "label",
+                ],
+            ) else {
+                continue;
+            };
+            let scale = score_uncertainty_scale(score);
+            residuals
+                .push(((score.clamp(0.0, 1.0) - truth.clamp(0.0, 1.0)).abs() / scale).min(20.0));
+        }
+
+        if residuals.len() < MIN_SEARCH_SCORE_CALIBRATION_SAMPLES {
+            return Self {
+                status: SearchScoreCalibrationStatus::Insufficient,
+                sample_count: residuals.len(),
+                residual_quantile: None,
+            };
+        }
+
+        Self {
+            status: SearchScoreCalibrationStatus::Calibrated,
+            sample_count: residuals.len(),
+            residual_quantile: Some(split_conformal_quantile(
+                residuals,
+                SEARCH_SCORE_COVERAGE_GUARANTEE,
+            )),
+        }
+    }
+
+    fn interval_for_score(&self, score: f32) -> [f32; 2] {
+        let score = if score.is_finite() {
+            score.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let Some(quantile) = self.residual_quantile else {
+            return [0.0, 1.0];
+        };
+        let radius = (quantile * score_uncertainty_scale(score)).clamp(0.0, 1.0);
+        [
+            round_metric_f32((score - radius).clamp(0.0, 1.0)),
+            round_metric_f32((score + radius).clamp(0.0, 1.0)),
+        ]
+    }
+
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": SEARCH_SCORE_INTERVAL_SCHEMA_V1,
+            "method": "scaled_split_conformal",
+            "status": self.status.as_str(),
+            "coverage": round_metric_f32(SEARCH_SCORE_COVERAGE_GUARANTEE),
+            "sampleCount": self.sample_count,
+            "minimumSamples": MIN_SEARCH_SCORE_CALIBRATION_SAMPLES,
+            "residualQuantile": self.residual_quantile.map(round_metric_f32),
+        })
+    }
+}
+
+fn calibration_number(value: &serde_json::Value, keys: &[&str]) -> Option<f32> {
+    keys.iter()
+        .find_map(|key| {
+            value.get(*key).and_then(|entry| {
+                entry
+                    .as_f64()
+                    .map(|number| number as f32)
+                    .or_else(|| entry.as_str()?.parse::<f32>().ok())
+            })
+        })
+        .filter(|number| number.is_finite())
+}
+
+fn score_uncertainty_scale(score: f32) -> f32 {
+    (1.0 - score.clamp(0.0, 1.0)).clamp(0.05, 1.0)
+}
+
+fn split_conformal_quantile(mut residuals: Vec<f32>, coverage: f32) -> f32 {
+    if residuals.is_empty() {
+        return 1.0;
+    }
+    residuals.sort_by(f32::total_cmp);
+    let rank = (((residuals.len() as f32 + 1.0) * coverage).ceil() as usize)
+        .saturating_sub(1)
+        .min(residuals.len() - 1);
+    residuals[rank]
+}
+
+fn annotate_hits_with_score_calibration(
+    workspace_path: &Path,
+    hits: &mut [SearchHit],
+    degraded: &mut Vec<SearchDegradation>,
+) {
+    let calibration = SearchScoreCalibration::for_workspace(workspace_path);
+    if calibration.status == SearchScoreCalibrationStatus::Insufficient {
+        degraded.push(SearchDegradation::conformal_calibration_insufficient(
+            calibration.sample_count,
+        ));
+    }
+
+    for hit in hits {
+        let interval = calibration.interval_for_score(hit.score);
+        let mut metadata = hit
+            .metadata
+            .take()
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        metadata.insert(
+            "scoreInterval".to_string(),
+            serde_json::json!([interval[0], interval[1]]),
+        );
+        metadata.insert(
+            "coverageGuarantee".to_string(),
+            serde_json::json!(round_metric_f32(SEARCH_SCORE_COVERAGE_GUARANTEE)),
+        );
+        metadata.insert("scoreCalibration".to_string(), calibration.data_json());
+        hit.metadata = Some(serde_json::Value::Object(metadata));
+    }
+}
+
+fn search_hit_score_interval_json(hit: &SearchHit) -> serde_json::Value {
+    hit.metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("scoreInterval"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([0.0, 1.0]))
+}
+
+fn search_hit_coverage_guarantee_json(hit: &SearchHit) -> serde_json::Value {
+    hit.metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("coverageGuarantee"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(round_metric_f32(SEARCH_SCORE_COVERAGE_GUARANTEE)))
 }
 
 fn redact_search_provenance_uri(
@@ -2613,7 +2828,12 @@ fn run_search_inner(
                 apply_tombstone_visibility(options, above_floor, &mut degraded, read_connection);
             let (above_floor, scope_stats) =
                 apply_memory_scope_visibility(options, above_floor, &mut degraded, read_connection);
-            let above_floor = apply_mesh_query_visibility(above_floor, &mut degraded);
+            let mut above_floor = apply_mesh_query_visibility(above_floor, &mut degraded);
+            annotate_hits_with_score_calibration(
+                &options.workspace_path,
+                &mut above_floor,
+                &mut degraded,
+            );
             let kept = above_floor.len();
 
             // Representative floor for degradation reporting + metrics:
@@ -2862,8 +3082,9 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
             user_floor_override.unwrap_or_else(|| default_floor_for_source(hit.source));
         hit.score.is_finite() && hit.score >= per_hit_floor
     });
-    let (above_floor, scope_stats) =
+    let (mut above_floor, scope_stats) =
         apply_memory_scope_visibility(options, above_floor, &mut degraded, None);
+    annotate_hits_with_score_calibration(&options.workspace_path, &mut above_floor, &mut degraded);
     let kept = above_floor.len();
     let dropped = below_floor.len();
     let floor = user_floor_override.unwrap_or_else(|| {
@@ -4693,8 +4914,77 @@ mod tests {
         assert_eq!(json["metrics"]["sourceModeApplied"], "hybrid");
         assert_eq!(json["metrics"]["fallbackApplied"], false);
         assert_eq!(json["metrics"]["strictSourceMode"], false);
+        assert_eq!(
+            json["results"][0]["scoreInterval"],
+            serde_json::json!([0.0, 1.0])
+        );
+        assert_eq!(json["results"][0]["coverageGuarantee"], 0.95);
         assert!(json["results"][0]["why"].is_string());
         assert!(json["results"][0]["provenance"].is_array());
+    }
+
+    #[test]
+    fn conformal_quantile_uses_closed_split_rank() {
+        let quantile = split_conformal_quantile(
+            vec![0.10, 0.05, 0.30, 0.20],
+            SEARCH_SCORE_COVERAGE_GUARANTEE,
+        );
+
+        assert_eq!(quantile, 0.30);
+    }
+
+    #[test]
+    fn search_score_calibration_marks_small_sets_insufficient() -> TestResult {
+        let workspace = unique_test_dir("score-calibration-small");
+        let calibration_dir = workspace.join(".ee").join("search");
+        std::fs::create_dir_all(&calibration_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            calibration_dir.join("calibration.jsonl"),
+            r#"{"score":0.8,"groundTruthRelevance":0.7}"#,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let calibration = SearchScoreCalibration::for_workspace(&workspace);
+
+        assert_eq!(
+            calibration.status,
+            SearchScoreCalibrationStatus::Insufficient
+        );
+        assert_eq!(calibration.sample_count, 1);
+        assert_eq!(calibration.interval_for_score(0.8), [0.0, 1.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn search_score_calibration_intervals_tighten_for_higher_scores() -> TestResult {
+        let workspace = unique_test_dir("score-calibration-calibrated");
+        let calibration_dir = workspace.join(".ee").join("search");
+        std::fs::create_dir_all(&calibration_dir).map_err(|error| error.to_string())?;
+        let rows = (0..MIN_SEARCH_SCORE_CALIBRATION_SAMPLES)
+            .map(|index| {
+                let score = 0.50 + (index as f32 * 0.001);
+                let truth = score - 0.05;
+                format!(r#"{{"score":{score:.3},"groundTruthRelevance":{truth:.3}}}"#)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(calibration_dir.join("calibration.jsonl"), rows)
+            .map_err(|error| error.to_string())?;
+
+        let calibration = SearchScoreCalibration::for_workspace(&workspace);
+        let low = calibration.interval_for_score(0.40);
+        let high = calibration.interval_for_score(0.90);
+
+        assert_eq!(calibration.status, SearchScoreCalibrationStatus::Calibrated);
+        assert_eq!(
+            calibration.sample_count,
+            MIN_SEARCH_SCORE_CALIBRATION_SAMPLES
+        );
+        assert!(
+            (high[1] - high[0]) <= (low[1] - low[0]),
+            "higher scores should have tighter or equal score intervals"
+        );
+        Ok(())
     }
 
     #[test]
