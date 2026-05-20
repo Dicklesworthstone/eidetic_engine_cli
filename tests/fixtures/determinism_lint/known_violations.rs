@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Instant, SystemTime};
 use std::{env, fs};
 
-use rand::Rng;
+use rand::{Rng, random};
 use uuid::Uuid;
 
 #[determinism::required]
@@ -17,6 +17,7 @@ fn ambient_rng(_: &ee::runtime::determinism::Deterministic<Seed>) {
 #[determinism::required]
 fn ambient_random(_: &ee::runtime::determinism::Deterministic<Seed>) {
     let _: u64 = rand::random();
+    let _: u64 = random::<u64>();
 }
 
 #[determinism::required]
@@ -100,7 +101,7 @@ fn ambient_domain_id(_: &ee::runtime::determinism::Deterministic<Seed>) {
 }
 
 fn benign_documentation_mentions() {
-    let _ = "rand::random::<u64>() getrandom::fill(&mut bytes) SystemRandom::new() Instant::now() SystemTime::now() chrono::Utc::now() MemoryId::now() std::fs::read_dir(.) HashSet";
+    let _ = "rand::random::<u64>() random::<u64>() getrandom::fill(&mut bytes) SystemRandom::new() Instant::now() SystemTime::now() chrono::Utc::now() MemoryId::now() std::fs::read_dir(.) HashSet";
     // rand::thread_rng();
     // getrandom::fill(&mut bytes);
     // ring::rand::SystemRandom::new();
@@ -120,6 +121,7 @@ fn benign_documentation_mentions() {
 fn benign_block_comment_and_raw_string_mentions() {
     /*
      * rand::thread_rng();
+     * random::<u64>();
      * getrandom::fill(&mut bytes);
      * ring::rand::SystemRandom::new();
      * SystemRandom::new();
@@ -134,5 +136,5 @@ fn benign_block_comment_and_raw_string_mentions() {
      * env::vars();
      * env::vars_os();
      */
-    let _ = r#"std::env::var("EE_SEED") SystemRandom::new() Instant::now() SystemTime::now() chrono::Local::now() RuleId::now()"#;
+    let _ = r#"std::env::var("EE_SEED") random::<u64>() SystemRandom::new() Instant::now() SystemTime::now() chrono::Local::now() RuleId::now()"#;
 }

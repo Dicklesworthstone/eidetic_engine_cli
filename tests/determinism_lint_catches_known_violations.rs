@@ -62,7 +62,11 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "use Deterministic<Seed> instead of rand::thread_rng",
             });
         }
-        if line.contains("rand::random::<") || line.contains("rand::random(") {
+        if line.contains("rand::random::<")
+            || line.contains("rand::random(")
+            || contains_path_call(line, "random::<")
+            || contains_path_call(line, "random(")
+        {
             findings.push(Finding {
                 line: line_no,
                 code: "ambient_rand_random",
@@ -591,5 +595,19 @@ mod self_tests {
         let report = render_report(&scan_fixture(fixture));
         assert_eq!(report.matches("ambient_getrandom_fill").count(), 1);
         assert_eq!(report.matches("ambient_ring_system_random").count(), 2);
+    }
+
+    #[test]
+    fn imported_rand_random_calls_emit_known_violations() {
+        let fixture = r#"
+            use rand::random;
+
+            fn ambient() {
+                let _: u64 = random();
+                let _: u64 = random::<u64>();
+            }
+        "#;
+        let report = render_report(&scan_fixture(fixture));
+        assert_eq!(report.matches("ambient_rand_random").count(), 2);
     }
 }
