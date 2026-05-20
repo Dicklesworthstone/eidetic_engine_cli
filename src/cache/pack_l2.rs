@@ -1,7 +1,7 @@
 //! Filesystem-backed L2 cache for serialized context-pack JSON.
 
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, FileTimes, OpenOptions};
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -173,6 +173,7 @@ impl PackL2Cache {
             }));
         }
 
+        touch_cache_entry_mtime_best_effort(&path, now_epoch_seconds);
         Ok(PackL2CacheLookup::Hit(PackL2CacheHit {
             key: entry.key,
             path,
@@ -217,6 +218,7 @@ impl PackL2Cache {
 
         write_synced_file(&temp_path, &bytes)?;
         publish_cache_entry_temp_file(&temp_path, &path)?;
+        touch_cache_entry_mtime_best_effort(&path, stored_at_epoch_seconds);
         sync_directory(&self.root)?;
         let eviction = self.evict_best_effort_at(stored_at_epoch_seconds)?;
 
@@ -284,6 +286,7 @@ impl PackL2Cache {
                 .unwrap_or(0);
             let stored_epoch_seconds =
                 cache_entry_stored_at(&path).unwrap_or(fallback_epoch_seconds);
+            let last_used_epoch_seconds = fallback_epoch_seconds;
             let expired = stored_epoch_seconds == 0
                 || is_expired(
                     stored_epoch_seconds,
@@ -294,6 +297,7 @@ impl PackL2Cache {
                 path,
                 byte_len,
                 stored_epoch_seconds,
+                last_used_epoch_seconds,
                 expired,
             });
         }
@@ -302,6 +306,10 @@ impl PackL2Cache {
             left.expired
                 .cmp(&right.expired)
                 .reverse()
+                .then_with(|| {
+                    left.last_used_epoch_seconds
+                        .cmp(&right.last_used_epoch_seconds)
+                })
                 .then_with(|| left.stored_epoch_seconds.cmp(&right.stored_epoch_seconds))
                 .then_with(|| left.path.cmp(&right.path))
         });
@@ -497,6 +505,7 @@ struct EvictionCandidate {
     path: PathBuf,
     byte_len: u64,
     stored_epoch_seconds: u64,
+    last_used_epoch_seconds: u64,
     expired: bool,
 }
 
@@ -588,6 +597,14 @@ fn system_time_seconds(time: SystemTime) -> Result<u64, PackL2CacheError> {
     time.duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .map_err(|source| PackL2CacheError::TimeBeforeUnixEpoch { source })
+}
+
+fn touch_cache_entry_mtime_best_effort(path: &Path, epoch_seconds: u64) {
+    let modified_at = UNIX_EPOCH + Duration::from_secs(epoch_seconds);
+    let times = FileTimes::new().set_modified(modified_at);
+    if let Ok(file) = open_cache_entry_file_for_touch(path) {
+        let _ = file.set_times(times);
+    }
 }
 
 fn cache_entry_stored_at(path: &Path) -> Option<u64> {
@@ -752,6 +769,13 @@ fn open_cache_temp_file_for_create(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
+fn open_cache_entry_file_for_touch(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true);
+    configure_pack_l2_open_no_follow(&mut options);
+    options.open(path)
+}
+
 fn open_cache_directory_for_sync(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -818,6 +842,14 @@ mod tests {
         Ok(path)
     }
 
+    fn modified_epoch_seconds(path: &Path) -> Result<u64, String> {
+        let modified = fs::metadata(path)
+            .map_err(|error| error.to_string())?
+            .modified()
+            .map_err(|error| error.to_string())?;
+        system_time_seconds(modified).map_err(|error| error.to_string())
+    }
+
     #[test]
     fn happy_path_roundtrip_returns_stored_pack_json() -> TestResult {
         let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
@@ -854,6 +886,33 @@ mod tests {
                 .map_err(|error| error.to_string())?,
         )?;
         assert_eq!(stored, pack, "cache hit should preserve pack JSON exactly");
+        Ok(())
+    }
+
+    #[test]
+    fn happy_path_touch_on_read_advances_mtime() -> TestResult {
+        let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
+        let report = cache
+            .put_at("blake3:touch", &json!({"hash": "mtime"}), 100)
+            .map_err(|error| error.to_string())?;
+        let mtime_before = modified_epoch_seconds(&report.path)?;
+        assert_eq!(
+            mtime_before, 100,
+            "write path should seed mtime from the stored-at timestamp"
+        );
+
+        let lookup = cache
+            .get_at("blake3:touch", 150)
+            .map_err(|error| error.to_string())?;
+
+        assert!(
+            lookup.is_hit(),
+            "fresh entry should hit before touching mtime"
+        );
+        assert!(
+            modified_epoch_seconds(&report.path)? >= 150,
+            "read path should advance mtime for portable LRU accounting"
+        );
         Ok(())
     }
 
@@ -1361,12 +1420,79 @@ mod tests {
     }
 
     #[test]
+    fn eviction_uses_touched_mtime_for_lru_order() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = temp.path().join("pack-l2");
+        let writer = PackL2Cache::new(
+            root.clone(),
+            PackL2CacheOptions::new(u64::MAX, Duration::from_secs(10_000)),
+        );
+        let first = writer
+            .put_at("blake3:first", &json!({"payload": "first"}), 100)
+            .map_err(|error| error.to_string())?;
+        let _second = writer
+            .put_at("blake3:second", &json!({"payload": "second"}), 200)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            writer
+                .get_at("blake3:first", 300)
+                .map_err(|error| error.to_string())?
+                .is_hit(),
+            "read should touch the first entry before size eviction"
+        );
+        let third = writer
+            .put_at("blake3:third", &json!({"payload": "third"}), 250)
+            .map_err(|error| error.to_string())?;
+
+        let evicting = PackL2Cache::new(
+            root,
+            PackL2CacheOptions::new(first.byte_len + third.byte_len, Duration::from_secs(10_000)),
+        );
+        let report = evicting
+            .evict_best_effort_at(300)
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            report.removed, 1,
+            "size eviction should remove exactly one oldest LRU entry"
+        );
+        assert!(
+            matches!(
+                evicting
+                    .get_at("blake3:second", 300)
+                    .map_err(|error| error.to_string())?,
+                PackL2CacheLookup::Miss(PackL2CacheMiss {
+                    reason: PackL2CacheMissReason::NotFound,
+                    ..
+                })
+            ),
+            "untouched second entry should be evicted before the touched first entry"
+        );
+        assert!(
+            evicting
+                .get_at("blake3:first", 300)
+                .map_err(|error| error.to_string())?
+                .is_hit(),
+            "touched first entry should survive LRU eviction"
+        );
+        assert!(
+            evicting
+                .get_at("blake3:third", 300)
+                .map_err(|error| error.to_string())?
+                .is_hit(),
+            "newest third entry should survive LRU eviction"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn concurrent_eviction__enoent_treated_as_success() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let candidate = EvictionCandidate {
             path: temp.path().join("already-evicted.json"),
             byte_len: 128,
             stored_epoch_seconds: 100,
+            last_used_epoch_seconds: 100,
             expired: true,
         };
         let mut report = PackL2EvictionReport {
