@@ -327,7 +327,7 @@ jobs:
             printf '%s\n' '### Unix (Linux/macOS)'
             printf '%s\n' '```bash'
             printf 'curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/%s/install.sh \\\n' "$TAG"
-            printf '  | EE_VERSION="%s" sh\n' "$TAG"
+            printf '  | EE_VERSION="%s" bash\n' "$TAG"
             printf '%s\n\n' '```'
             printf '%s\n' '### Windows (PowerShell)'
             printf '%s\n' '```powershell'

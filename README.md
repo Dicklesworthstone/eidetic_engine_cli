@@ -10,10 +10,19 @@
 [![Rust 2024](https://img.shields.io/badge/rust-2024-orange.svg)](rust-toolchain.toml)
 [![No Tokio](https://img.shields.io/badge/runtime-Asupersync-blueviolet.svg)](#hard-requirements)
 
+**Current install path: source build**
+
 ```bash
 git clone https://github.com/Dicklesworthstone/eidetic_engine_cli
 cd eidetic_engine_cli
 cargo build --release
+```
+
+**Planned release installer: not published yet**
+
+```bash
+curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.1.0/install.sh \
+  | EE_VERSION=v0.1.0 bash
 ```
 
 </div>
@@ -22,25 +31,33 @@ cargo build --release
 
 ## TL;DR
 
-### The Problem
+### Why This Exists
 
-Coding agents have **amnesia**.
+Coding agents forget.
 
-Every fresh agent session walks in blank. It re-discovers your project's conventions, re-reads the same files, and hits the same trap another agent hit yesterday on the same repo. It promotes a wrong-but-plausible idea into "fact" because nothing reminded it of a decision the team already made three months ago.
+A fresh session re-discovers project conventions, re-reads the same files, and
+walks into traps another agent already hit. Bad assumptions become "facts"
+because the harness has no durable place to look for decisions, failures,
+rules, and evidence from prior runs.
 
-The agent harness owns the loop. It does not own *memory*.
+The agent harness owns the loop. `ee` handles the memory layer.
 
-### The Solution
+### What `ee` Does
 
-`ee` is a single-binary Rust CLI that gives every agent on your machine a **durable, hybrid-searchable, explainable memory substrate**. It captures facts, decisions, procedural rules, anti-patterns, and session evidence; indexes them with hybrid lexical and semantic search; reasons over them with graph algorithms; and emits compact, provenance-tagged context packs that any harness can paste into its prompt.
+`ee` is a Rust CLI that gives agents a durable, searchable memory layer. It
+stores facts, decisions, procedural rules, anti-patterns, session evidence, and
+outcomes; indexes them with lexical and semantic search; connects them with
+graph features; and emits compact context packs with provenance.
 
 ```bash
 ee context "prepare release for this project" --workspace . --max-tokens 4000 --format markdown
 ```
 
-It returns a Markdown pack of project release rules, prior release incidents from your `cass` history, verification commands, branch traps, and high-severity warnings, each with an evidence pointer and a score breakdown.
+The command returns a Markdown pack with project release rules, prior release
+incidents from `cass`, verification commands, branch traps, and high-severity
+warnings. Each item carries an evidence pointer and a score breakdown.
 
-### Why Use `ee`?
+### What You Get
 
 | Capability | What you get |
 |---|---|
@@ -48,21 +65,61 @@ It returns a Markdown pack of project release rules, prior release incidents fro
 | **Explainable scores** | Every returned memory shows component scores, freshness, confidence, and which sources support it |
 | **Procedural rules with decay** | Confidence ages out, harmful feedback demotes faster than helpful feedback promotes |
 | **Anti-patterns first-class** | Trauma-guard surfaces high-severity risk memories before destructive actions |
-| **Graph-aware** | PageRank, communities, shortest paths, and link prediction over memory/session/decision graphs |
+| **Graph-aware** | PageRank, HITS, PPR, Gomory-Hu proximity, dominance, causal paths, structural health, Pack DNA, and skyline views |
 | **CASS session import** | Mines your existing `cass` corpus (Claude Code, Codex, Cursor, Gemini, ChatGPT) for evidence |
-| **Context profiles** | `compact`, `balanced`, `thorough`, and `submodular` quota/objective mixes |
+| **Context profiles** | `compact`, `balanced`, `grounding`, `orientation`, `thorough`, and `submodular` quota/objective mixes |
 | **Local-first** | No cloud. No paid LLM APIs required. Embeddings run locally through Frankensearch |
 | **Stable JSON contract** | Every machine-facing command emits versioned JSON with `schema` field for parsing and validation |
 | **Deterministic** | Same DB + indexes + config + query → identical pack hash |
 | **Cancellation correct** | Built on Asupersync, so every long operation respects `&Cx`, budgets, and `Outcome` |
 | **CLI first, daemon optional** | Every essential workflow runs as a one-shot. No background process required |
 | **Auditable curation** | Promotions, consolidations, and tombstones produce audit entries; no silent rewrites |
+| **Crowded-agent posture** | Swarm brief, workspace hygiene, verification broker, QoS lanes, and flight recorder help agents coordinate without taking over the loop |
+
+### Current State Snapshot
+
+| Area | Current status |
+|---|---|
+| Latest tag | `v0.1.0` git tag exists |
+| GitHub Releases | No published release assets yet |
+| crates.io | Package name selected as `eidetic-engine`; `publish = false` in current `Cargo.toml` |
+| Live install path | Source build with Cargo |
+| Default feature set | `fts5`, `json`, `embed-fast`, `lexical-bm25`, `graph` |
+| Optional adapters | MCP adapter is feature-gated; `serve` and `science-analytics` remain reserved/degraded |
+| Mesh | Optional and off by default; foreground CLI, Tailscale probe/autodiscovery, policy, hello, and sync surfaces exist |
+| Verification | `scripts/verify.sh` is the central gate runner; heavy Cargo work in agent sessions should go through RCH |
+
+### Agent Operating Loop
+
+For agent use, the core rhythm is small and repetitive:
+
+```bash
+ee swarm brief --workspace . --json
+ee context "<task>" --workspace . --max-tokens 4000 --format markdown
+ee search "<specific question>" --workspace . --limit 20 --explain --json
+ee why <memory-id> --workspace . --json
+ee preflight check --cmd "<risky shell command>" --workspace . --json
+ee remember "<durable lesson>" --workspace . --level procedural --kind rule --json
+ee outcome <memory-id> --workspace . --signal helpful --reason "<what it changed>"
+```
+
+| Situation | First `ee` command |
+|---|---|
+| Starting substantive work | `ee context "<task>" --workspace . --max-tokens 4000 --format markdown` |
+| Joining a crowded checkout | `ee swarm brief --workspace . --json` |
+| Learning a durable rule | `ee remember "<text>" --workspace . --level procedural --kind rule --json` |
+| A memory helped or misled you | `ee outcome <id> --signal helpful\|harmful --reason "<one sentence>"` |
+| A high-ranked memory looks suspicious | `ee why <id> --workspace . --json` |
+| A context pack looks odd | `ee context "<task>" --workspace . --explain --json` |
+| About to run a destructive command | `ee preflight check --cmd "<exact command>" --workspace . --json` |
+| You need a safe handoff | `ee handoff create --workspace . --out <capsule.json> --json` |
+| You need a support artifact | `ee support bundle --out <dir> --workspace . --json` |
 
 ---
 
 ## Quick Example
 
-A real session, top to bottom:
+A typical session:
 
 ```bash
 # 1. Initialize a workspace
@@ -131,15 +188,17 @@ $ ee outcome mem_01HQ3K5Z --signal helpful --reason "Caught a clippy regression"
 ✓ utility +0.08 → confidence 0.63
 ```
 
-The whole flow runs locally with no daemon and no cloud, in well under a second on a typical project.
+The flow runs locally with no daemon and no cloud. On a typical project, the
+interactive steps are fast enough to use before ordinary agent work.
 
 ---
 
 ## Design Philosophy
 
-> `ee` is the durable memory layer your agent harness calls. It does not replace the agent harness.
+> `ee` is the durable memory layer your agent harness calls. The harness still
+> owns tools, approvals, and the prompt loop.
 
-These principles are enforced in code wherever possible.
+The code and tests back these contracts where they can.
 
 ### 1. Local First
 
@@ -147,17 +206,21 @@ All primary data lives on your machine. No cloud dependency is required. Remote 
 
 ### 2. Harness Agnostic
 
-`ee` is callable from any shell: Claude Code hooks, Codex shell-outs, custom scripts, plain humans, MCP adapters. It never assumes control of the agent loop. Agents push evidence in; agents pull context out.
+`ee` is callable from any shell: Claude Code hooks, Codex shell-outs, custom
+scripts, plain humans, and MCP adapters. Agents push evidence in and pull
+context out.
 
 ### 3. CLI First, Daemon Later
 
-Every essential feature works as a one-shot CLI command. The daemon (`ee daemon`) is opt-in; the current slice provides supervised foreground/write-owner plumbing, while scheduled steward jobs report a degraded status until real maintenance handlers land. No core command requires it.
+Core workflows run as one-shot CLI commands. The daemon (`ee daemon`) is opt-in
+for supervised foreground maintenance and write-owner work; bounded `job` and
+`maintenance` commands handle explicit steward work from the shell.
 
 ### 4. Deterministic By Default
 
 Given the same database, indexes, config, profile, budget, seed, and query, the JSON output is byte-stable, ranking ties resolve deterministically, and context pack hashes reproduce exactly. Golden tests assert this.
 
-Mechanized proof artifacts now live alongside the test suite: [`proofs/lean4/pack_determinism.lean`](proofs/lean4/pack_determinism.lean) models the pack-hash determinism invariant, and [`proofs/tla/agent_mail_coordination.tla`](proofs/tla/agent_mail_coordination.tla) models exclusive Agent Mail reservation safety. The proof-check report schema is registered as `ee.proof_check.v1`; the `ee verify proofs` CLI surface and non-blocking `verify.sh` stage are tracked under `bd-nnfq4`.
+Mechanized proof artifacts now live alongside the test suite: [`proofs/lean4/pack_determinism.lean`](proofs/lean4/pack_determinism.lean) models the pack-hash determinism invariant, and [`proofs/tla/agent_mail_coordination.tla`](proofs/tla/agent_mail_coordination.tla) models exclusive Agent Mail reservation safety. The proof-check report schema is registered as `ee.proof_check.v1`; `ee verify proofs` and the non-blocking `verify.sh` stage are tracked under `bd-nnfq4`.
 
 ### 5. Explainable Retrieval
 
@@ -172,7 +235,9 @@ Every returned memory answers six questions:
 
 ### 6. Search Indexes Are Derived Assets
 
-FrankenSQLite + SQLModel hold the source of truth. Frankensearch indexes, embeddings, graph snapshots, and caches are rebuildable from scratch. Lose your index dir? `ee index rebuild` and you are whole.
+FrankenSQLite + SQLModel hold the source of truth. Frankensearch indexes,
+embeddings, graph snapshots, and caches are rebuildable from scratch. If the
+index directory is lost, run `ee index rebuild`.
 
 ### 7. Graceful Degradation
 
@@ -185,7 +250,7 @@ FrankenSQLite + SQLModel hold the source of truth. Frankensearch indexes, embedd
 
 Each degradation surfaces in the JSON `degraded` array with a repair command.
 
-### 8. Evidence Over Vibes
+### 8. Evidence Before Promotion
 
 A procedural rule with no source session, no feedback events, and no validation stays low-confidence. Promotion to high-confidence requires evidence. Harmful feedback demotes faster than helpful feedback promotes.
 
@@ -205,7 +270,7 @@ Every promotion, consolidation, replacement, and tombstone produces an audit ent
 | Procedural rules with decay | ✅ | ❌ | ❌ | ❌ |
 | Anti-patterns + harmful feedback | ✅ | ❌ | ❌ | manual |
 | Explainable scores | ✅ | ❌ | partial | n/a |
-| Graph analytics (PageRank, paths) | ✅ | ❌ | ❌ | ❌ |
+| Graph analytics (PPR, HITS, PageRank, proximity, causal paths) | ✅ | ❌ | ❌ | ❌ |
 | Deterministic JSON output | ✅ | varies | varies | n/a |
 | CASS session corpus import | ✅ | manual ETL | ❌ | manual |
 | Works without daemon | ✅ | ❌ | ❌ | ✅ |
@@ -220,7 +285,7 @@ Every promotion, consolidation, replacement, and tombstone produces an audit ent
 
 Hard constraints. CI fails if any of them break.
 
-- Binary is named `ee`. Single static binary.
+- Binary is named `ee`. Single CLI binary.
 - Implementation is **Rust 2024**, nightly toolchain.
 - Runtime is `/dp/asupersync`. **No Tokio.** Anywhere. Ever.
 - Database is `/dp/frankensqlite` through `/dp/sqlmodel_rust`. **No `rusqlite`, no SQLx, no Diesel, no SeaORM.**
@@ -237,14 +302,15 @@ Hard constraints. CI fails if any of them break.
 ### Installation status
 
 `ee` is still pre-release. The GitHub release, Homebrew tap, and crates.io
-install paths below are planned surfaces, not live distribution channels yet.
-The current audit (`scripts/audit_install_pipeline.sh`) reports:
+install paths below are planned channels, not live distribution channels yet.
+Current release posture:
 
 | Path | Status | Tracking |
 |---|---|---|
+| Git tag | `v0.1.0` exists | [`CHANGELOG.md`](CHANGELOG.md) |
 | GitHub release installer | planned; no release assets published yet | `bd-3usjw.9` |
 | Homebrew tap | planned; tap formula not published yet | `bd-3usjw.13` |
-| crates.io | planned; package name selected as `eidetic-engine`; binary remains `ee` | `bd-3usjw.10` |
+| crates.io | planned; package name selected as `eidetic-engine`; binary remains `ee`; `publish = false` today | `bd-3usjw.10` |
 | Source build | available now | this README |
 
 ### Release installer (planned)
@@ -253,7 +319,7 @@ Planned after the first signed GitHub release ships; see `bd-3usjw.9`.
 
 ```bash
 curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.1.0/install.sh \
-  | EE_VERSION=v0.1.0 sh
+  | EE_VERSION=v0.1.0 bash
 ```
 
 This will verify the binary against the published Sigstore bundle, drop it in
@@ -300,9 +366,19 @@ cargo build --release
 ```bash
 ee --version
 ee doctor --json
+ee capabilities --json
 ```
 
-`ee doctor` checks: database health, schema version, index manifest, embedding model presence, `cass` binary detection, workspace identity, and degraded-mode capabilities. Every check has a copy-paste repair command.
+`ee doctor` reports database health, schema version, index posture, embedding
+model posture, `cass` binary detection, workspace identity, mesh posture,
+capabilities, and repair actions. Useful focused modes:
+
+```bash
+ee doctor --quick --json
+ee doctor --robot-triage --json
+ee doctor --capabilities --json
+ee doctor --gc-plan 30 --json
+```
 
 ---
 
@@ -334,7 +410,7 @@ ee curate apply <candidate-id>
 ee search "release failure clippy" --workspace . --limit 20 --explain --json
 ```
 
-That's the core loop.
+That is the core loop.
 
 ---
 
@@ -346,28 +422,60 @@ To run the full verification suite before committing or pushing:
 ./scripts/verify.sh
 ```
 
-This orchestrates all readiness gates in order, failing fast on the first failure:
-1. Forbidden dependency audit (no tokio, rusqlite, petgraph, etc.)
-2. Unit, contract, and golden tests
-3. Basic E2E tests
-4. Advanced E2E tests
-5. Boundary migration tests
+This runs all readiness gates in order, stopping at the first failure:
 
-Each gate reports exit code and elapsed time.
+| Stage | Gate |
+|---:|---|
+| 1 | Forbidden dependency audit |
+| 2 | Closure linter |
+| 3 | Snapshot proposal guard |
+| 4 | Untracked work audit |
+| 4.5 | Bridge staleness advisory |
+| 4.6 | Plan drift advisory |
+| 4.7 | Fuzz target audit |
+| 5 | Vision coverage |
+| 5.5 | Proof verification |
+| 6 | Unit, contract, golden, binary, test, and example targets |
+| 6 | Basic E2E |
+| 6.5 | Overhaul integration when `VERIFY_OVERHAUL` is enabled |
+| 6.6 | Fake Tailscale harness |
+| 7 | Advanced E2E |
+| 8 | Boundary migration |
+| 8.5 | `ee doctor` safety harness |
+| 9 | Benchmarks when `--include-bench` is passed |
+
+The runner reports exit code, elapsed time, and artifact directories. In agent
+sessions, route heavy Cargo stages through RCH rather than using local fallback.
 
 ---
 
 ## Command Reference
 
-`ee` is organized into core commands and command groups. Run `ee <command> --help` or `ee <group> --help` for full details.
+`ee` has core commands and command groups. Run `ee <command> --help` or
+`ee <group> --help` for full details.
+
+Current top-level groups:
+
+| Group | Commands |
+|---|---|
+| Core memory loop | `init`, `remember`, `search`, `context`, `why`, `status`, `doctor`, `capabilities`, `check`, `health` |
+| Memory lifecycle | `memory`, `rule`, `curate`, `review`, `playbook`, `procedure`, `workflow`, `outcome`, `outcome-quarantine` |
+| Packing and retrieval | `pack`, `context-show`, `show`, `link`, `tag`, `history`, `proximity`, `insights`, `subscribe` |
+| Graph and structure | `graph`, `causal`, `economy`, `focus`, `learn`, `lab`, `rehearse`, `rationale`, `situation`, `task-frame` |
+| Storage and derived assets | `db`, `migrate`, `index`, `model`, `schema`, `backup`, `export`, `artifact`, `config`, `workspace` |
+| Diagnostics and release gates | `diag`, `eval`, `perf`, `preflight`, `tripwire`, `verify`, `verification`, `audit`, `claim`, `certificate`, `demo` |
+| Agent integration | `agent`, `agent-docs`, `hook`, `mcp`, `support`, `swarm`, `handoff`, `recorder`, `completion` |
+| Optional adapters and operations | `daemon`, `job`, `maintenance`, `mesh`, `share`, `serve`, `install`, `update`, `version`, `introspect`, `plan` |
 
 ### Core workflow
 
 | Command | Purpose |
 |---|---|
+| `ee help [command path]` | Show top-level help or help for nested commands such as `ee help memory show` |
 | `ee init [--workspace .]` | Create or open a workspace, run migrations, prepare indexes |
 | `ee status [--json]` | DB generation, index generation, degraded capabilities, recent jobs |
 | `ee doctor [--json]` | Health checks with repair commands for every failure |
+| `ee capabilities [--json]` | Feature, schema, renderer, env-var, and capability posture |
 | `ee context "<task>" [--profile <p>] [--max-tokens N] [--format <fmt>]` | Assemble a task-specific context pack (the headline command) |
 | `ee search "<query>" [--limit N] [--explain] [--json]` | Hybrid retrieval over memories, sessions, rules, evidence |
 | `ee remember "<text>" --level <l> [--kind <k>] [--tags a,b]` | Capture a durable memory |
@@ -377,7 +485,57 @@ Each gate reports exit code and elapsed time.
 | `ee pack replay <pack-id> --json` | Inspect the persisted, redaction-safe selection ledger for a historical pack |
 | `ee pack diff <old-pack-id> <new-pack-id> --json` | Compare two persisted pack ledgers and explain selection, freshness, redaction, or derived-asset changes |
 | `ee support bundle --out <dir> --json` | Create a redacted diagnostic bundle, including pack replay and swarm-brief summaries without raw query, mail body, memory, or full file-listing content |
-| `ee mesh status\|peers\|export\|import\|sync --once --json` | Run foreground, daemon-free mesh peer/cache status and local file exchange surfaces |
+| `ee preflight check --cmd "<shell command>" --json` | Check shell commands against the policy/trauma guard before risky operations |
+| `ee verify proofs --json` | Check committed Lean4 and TLA+ proof artifacts |
+
+### JSON output and exit codes
+
+Machine readers should inspect the JSON contract before trusting a result:
+
+```jsonc
+{ "schema": "ee.response.v1", "success": true,  "data": { }, "degraded": [ ] }
+{ "schema": "ee.response.v2", "success": true,  "data": { }, "degraded": [ ] }
+{ "schema": "ee.error.v2",    "success": false, "error": { "code": "...", "message": "...", "severity": "...", "repair": "...", "details": { "recovery": [ ] } } }
+```
+
+| Check | What to read |
+|---|---|
+| Envelope | `schema` and `success` |
+| Exit status | `0` clean, `6` degraded-required, `7` policy denied, `8` migration required |
+| Degradations | `degraded[]` for issues that affected this response |
+| Recoveries | `error.details.recovery[]`, which is structured for agents |
+| Posture | `ee status --json` uses `data.posture.overall`; `ee doctor --json` returns a doctor-specific posture view |
+| Provenance | `provenance[]`, `evidence_spans[]`, and `trustClass` on memory and pack items |
+| Pack identity | `data.pack.contentHash`, plus section names and omission reasons |
+| Graph explanation | `data.pack.packDna` when `ee context --explain --json` is used |
+
+Exit code vocabulary:
+
+| Code | Meaning |
+|---:|---|
+| `0` | success |
+| `1` | usage error |
+| `2` | configuration error |
+| `3` | storage error |
+| `4` | search/index error |
+| `5` | import error |
+| `6` | degraded-required |
+| `7` | policy denied |
+| `8` | migration required |
+
+Common red flags:
+
+| Signal | First response |
+|---|---|
+| `data.posture.overall = "blocked"` | Run `ee doctor --json` and follow the failing check repair |
+| `data.posture.overall = "degraded_required"` | Read `degraded[]` and `error.details.recovery[]` |
+| `search_index_stale` | `ee index rebuild --workspace .` |
+| `embed_model_unavailable` | Continue lexical-only or run `ee index reembed --workspace .` |
+| `graph_snapshot_stale` | Continue retrieval, then refresh graph snapshots when graph scores matter |
+| `pack_budget_too_small` | Raise `--max-tokens` or switch to `--profile compact` |
+| `workspace_ambiguous` | Use `ee workspace list`, then pass an explicit workspace or alias |
+| exit `7` | Stop and get human approval before using any bypass-token path |
+| exit `8` | Run `ee migrate run --workspace . --json` |
 
 ### Graph-derived insights
 
@@ -467,7 +625,7 @@ causes. Freshness states and degradation codes identify evidence that was
 changed, missing, stale, or unavailable at replay time; treat those as repair or
 revalidation signals instead of silently dropping the memory from the story.
 
-For bug reports and handoffs, attach the output of
+For bug reports and handoffs, attach
 `ee support bundle --out <dir> --json`. The bundle includes
 `pack_replay_summary.json`, which keeps pack IDs, pack hashes, ledger hashes,
 freshness counts, degradation codes, redaction classes, and derived-asset
@@ -479,8 +637,8 @@ snapshot for support and handoff triage. It keeps source statuses, ready/blocked
 work counts, active-conflict counts, resource-pressure posture, degraded codes,
 top recommendation IDs, and hashes/provenance for the underlying brief. It
 omits raw Agent Mail bodies, raw query text, raw provenance text, and full file
-listings. Treat it as diagnostic context only; it is not a substitute for a
-fresh `ee swarm brief` before claiming work or coordinating edits.
+listings. Treat it as diagnostic context. Before claiming work or coordinating
+edits, run a fresh `ee swarm brief`.
 
 ### Swarm brief workflow
 
@@ -544,14 +702,14 @@ Operator workflow for crowded repos:
 4. Use RCH for Cargo verification, especially when the brief reports `rec.resource_pressure.use_rch_for_cargo`.
 5. Rerun the brief after large edits, after reservation changes, and before handoff.
 
-The brief complements existing tools; it does not replace their authority.
-`br ready --json` remains the source of ready-work records, and
-`bv --robot-triage` remains the graph-aware ranking engine. Agent Mail remains
-the authority for reservations and coordination messages. Handoff capsules and
-support bundles carry diagnostic snapshots such as `swarm_brief_summary.json`,
-but a live brief is still the preflight before new claims. Profile reports and
-performance forensics diagnose host behavior in detail; the brief only surfaces
-enough posture to steer choices such as routing Cargo through RCH.
+The brief sits beside the existing tools. `br ready --json` remains the source
+of ready-work records, and `bv --robot-triage` remains the graph-aware ranking
+engine. Agent Mail remains the authority for reservations and coordination
+messages. Handoff capsules and support bundles carry diagnostic snapshots such
+as `swarm_brief_summary.json`, but a live brief is still the preflight before
+new claims. Profile reports and performance forensics diagnose host behavior in
+detail; the brief only carries enough posture to steer choices such as routing
+Cargo through RCH.
 
 The command never claims work, never reserves files, never releases files,
 never sends mail, never runs builds, never edits files, never mutates Beads,
@@ -578,6 +736,44 @@ Every schema carries an `x-ee-status` marker. Agents should treat
 `"shipped": false` as documentation for a future surface, not runtime
 availability. The schema catalog does not turn `ee` into a scheduler, web
 service, mail sender, Beads mutator, or agent loop.
+
+### Mesh and Tailscale
+
+Mesh is optional. Local-first operation is the default. Use mesh when a trusted
+tailnet or local file-exchange path is part of the agent workflow.
+
+| Command | Purpose |
+|---|---|
+| `ee mesh init --json` | Inspect foreground mesh readiness without starting a daemon |
+| `ee mesh status --json` | Report local mesh posture, cache counts, and repair commands |
+| `ee mesh peers --json` | List configured peers and anti-entropy cursors |
+| `ee mesh peer add\|list\|show\|rotate\|revoke\|unknown-attempt` | Manage app-level mesh peer records after explicit consent |
+| `ee mesh auto-enroll --json` | Materialize Tailscale-discovered peers from fresh autodiscovery |
+| `ee mesh discovery-policy [set\|allow\|deny] --json` | Inspect or update caller/responder discovery policy |
+| `ee mesh hello-responder status --json` | Inspect the local hello responder lifecycle job |
+| `ee mesh preview-grant <nodekey> --lane <lane> --json` | Preview lane grants without mutating policy |
+| `ee mesh export --out <file> --json` | Write a redaction-safe foreground mesh artifact |
+| `ee mesh import --file <file> --json` | Import a foreground mesh artifact from a local file |
+| `ee mesh sync --once --json` | Run one foreground sync cycle |
+
+Mesh command mode can be selected per command or through `EE_MESH_MODE`:
+
+```bash
+ee search "release proof" --workspace . --mesh off --json
+ee context "handoff this bead" --workspace . --mesh cache --json
+ee status --workspace . --mesh revisable --json
+ee mesh discovery-policy --explain --json
+```
+
+Related docs:
+
+| Doc | Purpose |
+|---|---|
+| [`docs/adr/0037-optional-mesh-memory.md`](docs/adr/0037-optional-mesh-memory.md) | Optional mesh design |
+| [`docs/adr/0041-mesh-anti-entropy-model.md`](docs/adr/0041-mesh-anti-entropy-model.md) | Anti-entropy model |
+| [`docs/mesh/operator_onboarding.md`](docs/mesh/operator_onboarding.md) | Operator workflow |
+| [`docs/mesh/command_modes.md`](docs/mesh/command_modes.md) | `off`, `cache`, `revisable`, and `blocking` modes |
+| [`docs/agent-ux/auto_enrollment_onboarding.md`](docs/agent-ux/auto_enrollment_onboarding.md) | Agent auto-enrollment checklist |
 
 ### Import & ingestion
 
@@ -618,11 +814,23 @@ service, mail sender, Beads mutator, or agent loop.
 
 | Command | Purpose |
 |---|---|
+| `ee graph pagerank [--limit N]` | Compute PageRank scores over memory links |
+| `ee graph betweenness [--limit N]` | Compute betweenness centrality over memory links |
+| `ee graph hits [--limit N]` | Compute HITS hub and authority scores |
+| `ee graph louvain [--resolution R]` | Compute Louvain communities |
+| `ee graph communities [--limit N]` | Compute label-propagation communities |
+| `ee graph k-core [--k K]` | Extract a k-core, defaulting to the main core |
+| `ee graph articulation [--limit N]` | List articulation points for structural-decay and bridge analysis |
+| `ee graph path <src> <dst>` | Find the shortest memory-link path between two memories |
+| `ee graph explain-link <src> <dst>` | Explain direct and path-based graph evidence between memories |
 | `ee graph export [--workspace .]` | Export a deterministic graph snapshot artifact |
+| `ee graph snapshot refresh --graph <type>` | Refresh typed snapshots: `memory_links`, `causal`, `revision`, `rules`, `contradictions`, or `all` |
 | `ee graph neighborhood <id> [--direction both] [--limit N]` | Expand around a memory/session/rule |
+| `ee graph centrality [--algorithm <name>]` | Read persisted centrality scores, including `pagerank`, `betweenness`, `authority`, `hits-hubs`, and `hits-authorities` |
 | `ee graph centrality-refresh [--dry-run]` | Refresh PageRank / betweenness metrics |
 | `ee graph feature-enrichment [--dry-run]` | Compute bounded graph-derived retrieval features |
 | `ee insights [--section <name>] [--explain <id>] --json` | Inspect graph-derived findings and memory-centric topology |
+| `ee proximity <memory-a> <memory-b> --json` | Explain Gomory-Hu min-cut proximity between two memory nodes |
 
 ### Index
 
@@ -636,6 +844,8 @@ service, mail sender, Beads mutator, or agent loop.
 | Command | Purpose |
 |---|---|
 | `ee workspace resolve` / `list` / `alias <name>` | Identity, monorepo subscopes, and aliases |
+| `ee workspace hygiene [--mode report\|precommit] --json` | Dirty-path hygiene, secret-risk, generated/scratch/local-machine classification, and commit-readiness guidance |
+| `ee migrate status` / `run` / `shard-fanout --dry-run` | Migration posture and shard-fanout planning |
 | `ee db status` / `inspect <table>` / `check-integrity` / `reindex --dry-run` | Inspect FrankenSQLite schema, table rows, integrity, and derived-index rebuild plans without bypassing `ee` |
 | `ee model status` / `list` | Inspect embedding model registry posture |
 | `ee schema list` / `export <schema-id>` | Inspect stable machine-output schemas |
@@ -653,6 +863,18 @@ service, mail sender, Beads mutator, or agent loop.
 
 | Command | Purpose |
 |---|---|
+| `ee doctor --quick\|--robot-triage\|--capabilities\|--gc-plan <days>` | Focused repair and operator triage surfaces |
+| `ee preflight run "<task>"` / `show` / `close` | Task risk assessment, tripwire context, and post-run feedback |
+| `ee preflight check --cmd "<command>" --json` | Command-facing policy guard for shell hooks |
+| `ee tripwire list` / `check` | Inspect and check preflight tripwires |
+| `ee diag plan-cache` | EQL query plan-cache counters and integration posture |
+| `ee diag disk-pressure` / `build-admission` / `artifacts` | Storage, artifact, and build-admission diagnostics |
+| `ee diag graph` / `graph-snapshot` / `search` | Graph, snapshot, and retrieval diagnostics |
+| `ee diag integrity` / `dependencies` / `streams` | Integrity, dependency, and stdout/stderr stream checks |
+| `ee verify ingest` / `proofs` / `broker lookup` / `closure-guidance` | Verification evidence, proof checks, reusable RCH evidence, and closeout guidance |
+| `ee maintenance run` / `status` / `wal-checkpoint` / `graph-snapshot-prune` / `graph-witnesses-prune` | Explicit maintenance jobs and retention helpers |
+| `ee job run` / `list` / `show` | Durable steward job history and explicit job execution |
+| `ee install check` / `plan` and `ee update` | Agent-safe install/update checks and dry-run plans |
 | `ee eval run` / `list` | Run or list retrieval-quality evaluation fixtures |
 | `ee eval report [fixture]` | Summarize fixture IDs, data hashes, aggregate retrieval metrics, and the first failing query |
 | `ee eval run <fixture> --pack-quality --json` | Check whether deterministic fixtures still select required context-pack evidence |
@@ -708,6 +930,7 @@ default_speed   = "balanced"         # fast | balanced | thorough
 lexical_weight  = 0.45
 semantic_weight = 0.45
 graph_weight    = 0.10
+query_plan_cache_entries = 1024
 
 [pack]
 default_profile  = "balanced"
@@ -745,6 +968,25 @@ redaction_classes = ["api_key", "jwt", "password", "private_key", "ssh_key"]
 [trust]
 default_class = "agent_assertion"     # bumped on validation, demoted on contradiction
 prompt_injection_guard = true
+
+[graph.memory]
+snapshot_cap_mb = 250
+per_algorithm_cap_mb = 100
+
+[graph.witnesses]
+retention_days = 30
+
+[cache.pack_l2]
+enabled = true
+max_bytes = 1073741824
+
+[mesh]
+enabled = false
+mode = "off"                          # off | cache | revisable | blocking
+
+[mesh.tailscale]
+discovery_mode = "service_tag"         # service_tag | auto_admit | allowlist
+respond_mode   = "service_tag"
 ```
 
 Environment variable overrides:
@@ -757,11 +999,42 @@ Environment variable overrides:
 | `EE_MAX_TOKENS`    | `[pack].default_max_tokens` |
 | `EE_HARMFUL_PER_SOURCE_PER_HOUR` | `[feedback].harmful_per_source_per_hour` |
 | `EE_HARMFUL_BURST_WINDOW_SECONDS` | `[feedback].harmful_burst_window_seconds` |
+| `EE_QUERY_PLAN_CACHE_ENTRIES` | query-plan cache size |
+| `EE_PPR_CACHE_ENTRIES` | PPR prefetch cache size |
+| `EE_L2_PACK_CACHE_BYTES` / `EE_L2_PACK_CACHE_DIR` / `EE_L2_PACK_CACHE_DISABLE` | pack L2 cache controls |
+| `EE_READ_POOL_SIZE` / `EE_READ_POOL_ACQUIRE_TIMEOUT_MS` / `EE_READ_POOL_MAX_PIN_SECONDS` | read-pool controls |
+| `EE_GRAPH_MEMORY_SNAPSHOT_CAP_MB` / `EE_GRAPH_MEMORY_PER_ALGORITHM_CAP_MB` | graph working-set admission controls |
+| `EE_MESH_ENABLED` / `EE_MESH_MODE` | optional mesh default posture |
+| `EE_TAILSCALE_DISCOVERY_MODE` / `EE_TAILSCALE_RESPOND_MODE` | Tailscale discovery and responder policy |
+| `EE_TAILSCALE_PEER_PROBE_TIMEOUT_MS` / `EE_TAILSCALE_DISCOVERY_BUDGET_MS` | Tailscale peer-discovery budgets |
+| `EE_FLIGHT_RECORDER` / `EE_FLIGHT_RECORDER_DIR` / `EE_FLIGHT_RECORDER_RETENTION_DAYS` | flight-recorder controls; see [`docs/agent-ux/flight-recorder.md`](docs/agent-ux/flight-recorder.md) |
+| `EE_WORKSPACE_HYGIENE_SECRET_PATTERNS` / `EE_WORKSPACE_HYGIENE_GENERATED_PATTERNS` / `EE_WORKSPACE_HYGIENE_SCRATCH_PATTERNS` / `EE_WORKSPACE_HYGIENE_IGNORE_PATTERNS` | workspace hygiene classifier overlays |
 | `EE_SCIENCE_BACKEND_PATH` | optional science analytics backend health path |
 | `EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS` | disables Frankensearch neighbors for remember-time curation proposal |
 | `EE_DISABLE_TOON` | disables TOON capability reporting and auto-selection |
 | `EE_NO_COLOR`      | disables ANSI styling on stderr |
 | `EE_TRACE`         | enables structured tracing to stderr |
+
+The full registry is [`docs/env_vars.md`](docs/env_vars.md) and the code source
+is `src/config/env_registry.rs`.
+
+Feature flags:
+
+| Flag | Status | Notes |
+|---|---|---|
+| `default` | active | `fts5`, `json`, `embed-fast`, `lexical-bm25`, `graph` |
+| `fts5` | active | Frankensearch FTS5 lexical fallback |
+| `json` | reserved | JSON output is unconditional today; flag is reserved for a minimal profile |
+| `embed-fast` | active | Frankensearch `model2vec` semantic embedder |
+| `lexical-bm25` | active | Frankensearch BM25 scorer |
+| `graph` | active | Default-on graph analytics surface |
+| `differential-networkx` | active test gate | Heavy Python NetworkX differential suite |
+| `mcp` | active optional adapter | Stdio adapter module; default builds keep manifest discovery |
+| `serve` | reserved | Future localhost HTTP/SSE adapter |
+| `science-analytics` | reserved | Future analytics subsystem; current CLI reports degraded/unavailable posture |
+
+See [`docs/feature_flag_registry.md`](docs/feature_flag_registry.md) for the
+tracked owner and status of each flag.
 
 ---
 
@@ -803,6 +1076,16 @@ Environment variable overrides:
 
 **Native Asupersync.** Every async path takes `&Cx`, returns `Outcome<T>`, respects budgets, and supports cancellation. Tests run on `LabRuntime` for deterministic time and scheduling.
 
+Additional runtime-adjacent modules:
+
+| Module | Role |
+|---|---|
+| `mesh` | Optional peer exchange, Tailscale autodiscovery, hello responder, anti-entropy, policy, and lane preview |
+| `obs` | Flight recorder, structured tracing, posture helpers, and diagnostic evidence |
+| `hooks` | Agent harness hook helpers, including preflight shell snippets |
+| `steward` | Bounded maintenance jobs, spec packs, and optional daemon work |
+| `shadow` | Read-only shadow/diagnostic support paths |
+
 ---
 
 ## Storage Layout
@@ -814,12 +1097,14 @@ Environment variable overrides:
 │   └── combined/
 │       ├── manifest.json   # generation, model id, lexical+vector files
 │       └── ...             # Frankensearch artifacts
-├── backups/                # `ee backup create` lands here
 ├── cache/                  # transient, safe to wipe
 └── logs/                   # tracing-subscriber JSON logs
 
 <workspace>/.ee/            # optional project artifacts (git-friendly)
 ├── config.toml             # checked-in project overrides
+├── backups/                # default `ee backup create` root
+├── index/                  # default workspace index dir for local runs
+├── mesh/                   # optional mesh cache and peer metadata
 ├── playbook.yaml           # human-editable rules promoted into the project
 ├── memory.jsonl            # optional auto-export
 └── README.txt
@@ -865,6 +1150,8 @@ Different tasks need different memory mixes. `--profile` currently selects one o
 |---|---|
 | `compact` | Prioritizes procedural rules and known failure modes in a tight budget |
 | `balanced` | Default mix across rules, decisions, failures, evidence, and artifacts |
+| `grounding` | Uses balanced quotas and boosts HITS authority evidence when graph scores are available |
+| `orientation` | Uses balanced quotas and boosts HITS hub memories when graph scores are available |
 | `thorough` | Expands evidence and artifact coverage for higher-recall work |
 | `submodular` | Uses the facility-location objective with thorough section quotas for deterministic diversity |
 
@@ -898,6 +1185,73 @@ If `cass` is missing, `ee` runs in degraded mode. Explicit `ee remember` records
 
 ---
 
+## Beyond Coding
+
+The same memory model works outside software when the work has durable facts,
+recurring decisions, and cited sources.
+
+| Domain | Useful memories | Typical source URI |
+|---|---|---|
+| Investment research | Thesis revisions, valuation methods, failed screens, peer sets | `sec-filing://...`, `earnings-call://...`, `analyst-note://...` |
+| Legal work | Case rules, drafting conventions, negotiation outcomes, due-diligence steps | `case://...`, `pacer://...`, `westlaw://...` |
+| Marketing analysis | Campaign retrospectives, A/B results, channel rules, segmentation methods | `ga4://...`, `mixpanel://...`, `campaign://...` |
+| Product management | User research, launch retrospectives, personas, prioritization rules | `interview://...`, `linear://...`, `notion://...` |
+| Security and incident response | IOCs, TTPs, response playbooks, detection-rule outcomes | `cve://...`, `mitre://...`, `incident://...` |
+| Medicine or clinical operations | Guideline facts, near misses, differential-diagnosis procedures | `pubmed://...`, `guideline://...`, `emr://...` |
+| Sales and account work | Call notes, objection patterns, account maps, qualification playbooks | `crm://...`, `salesforce://...`, `gong://...` |
+
+For privileged domains, isolate by workspace:
+
+```bash
+ee init --workspace ./matters/smith-v-jones --json
+ee init --workspace ./deals/2026-q3-acme --json
+ee init --workspace ./positions/AAPL-long --json
+```
+
+`cass` is specific to coding sessions. For other domains, use direct `ee remember` calls or
+structured imports through `ee import jsonl --source <file>`.
+
+## Negative Evidence Ledger
+
+For long-running optimization work, record failed attempts before they disappear
+into a revert. The useful artifact is the attempt, why it lost, and the smallest
+measurement or source that proves it lost.
+
+| Loop step | `ee` surface |
+|---|---|
+| Start a campaign | `ee init --workspace ./optimization/<campaign> --json` |
+| Capture a failed attempt | `ee remember "...what lost and why..." --level episodic --kind failure --tags family-...,cause-...,regression-... --source <artifact-uri> --json` |
+| Cluster repeated failures | `ee playbook extract --workspace ./optimization/<campaign> --dry-run --json` |
+| Promote a validated anti-pattern | `ee curate validate <candidate-id>` then `ee curate apply <candidate-id>` |
+| Prime the next attempt | `ee context "<next hypothesis>" --workspace ./optimization/<campaign> --profile thorough --format markdown` |
+
+Example capture:
+
+```bash
+ee remember "Tried: page-level cache prefetch on btree leaf reads, 64-byte stride. \
+Result: -8% on small-N reads from cache pollution, +2% on scan-heavy. \
+Reverted at SHA 9af3c21. Family: aggressive prefetch, third failure in this family." \
+  --workspace ./optimization/query-engine \
+  --level episodic \
+  --kind failure \
+  --tags perf,prefetch,btree-leaf,cache-pollution,family-aggressive-prefetch,regression-small-n-read \
+  --source "bench-run://2026-09-12T14:23/oltp-mixed-small-n" \
+  --source "git-sha://9af3c21-pre-revert" \
+  --source "flamegraph://artifacts/9af3c21/cpu-prof.svg" \
+  --json
+```
+
+Useful tag prefixes:
+
+| Prefix | Meaning |
+|---|---|
+| `family-<name>` | Approach family, such as `family-aggressive-prefetch` |
+| `regression-<surface>` | Where it lost, such as `regression-tail-latency` |
+| `cause-<root>` | Inferred root cause, such as `cause-cache-pollution` |
+| `reverted-at-<sha>` | Decision point or revert commit |
+
+---
+
 ## Agent Harness Integration
 
 ### Claude Code
@@ -906,25 +1260,31 @@ Add to your `AGENTS.md` or hook setup:
 
 ```text
 Before starting substantial work, run:
+  ee swarm brief --workspace . --json
   ee context "<task>" --workspace . --max-tokens 4000 --format markdown
 
 When you discover a durable project convention:
   ee remember --workspace . --level procedural --kind rule "<rule>"
+
+Before risky shell commands:
+  ee preflight check --cmd "<shell-command>" --workspace . --json
 
 After a remembered rule helps or harms:
   ee outcome <id> --signal helpful
   ee outcome <id> --signal harmful
 ```
 
-Or wire it into a PreToolUse hook that injects context before risky commands. The `ee context` JSON is stable and parseable.
+You can also wire it into a PreToolUse hook that injects context before risky
+commands. The `ee context` JSON is stable and parseable.
 
 ### Codex
 
-Codex shells out, so the same calls work. The output of `ee context "<task>" --json` is designed to drop directly into a system or developer message.
+Codex shells out, so the same calls work. `ee context "<task>" --json` can be
+inserted directly into a system or developer message.
 
 ### MCP
 
-The MCP manifest is always available so agents can discover the CLI contract
+The MCP manifest is available so agents can discover the CLI contract
 from default builds:
 
 ```bash
@@ -935,8 +1295,8 @@ ee mcp validate --json
 
 When the `mcp` feature is not enabled, the manifest succeeds and reports
 `capabilityGap.code=mcp_feature_disabled` for the stdio adapter. Build with
-`cargo build --release --features mcp` when you need the adapter itself. The
-manifest mirrors the CLI contracts for tools such as `ee_context`, `ee_search`,
+`cargo build --release --features mcp` from source when you need the adapter.
+The manifest mirrors the CLI contracts for tools such as `ee_context`, `ee_search`,
 `ee_remember`, `ee_outcome`, `ee_curate_candidates`, and `ee_memory_show`.
 Default builds keep `ee mcp serve-stdio --json` discoverable and return the
 same `mcp_feature_disabled` capability gap instead of starting an adapter.
@@ -948,7 +1308,7 @@ the compatibility contract.
 
 ### Plain humans
 
-It's a CLI. Use it from your shell.
+Use it from a shell.
 
 ---
 
@@ -956,7 +1316,10 @@ It's a CLI. Use it from your shell.
 
 ### Redaction
 
-Secrets are detected before storage. Default redaction classes: `api_key`, `jwt`, `password`, `private_key`, `ssh_key`, `aws_secret`, `oauth_token`. Redacted spans are replaced with stable placeholders and the original is **never** written to disk.
+Secrets are detected before storage. Default redaction classes: `api_key`,
+`jwt`, `password`, `private_key`, `ssh_key`, `aws_secret`, `oauth_token`.
+Redacted spans are replaced with stable placeholders; the original is not
+written to disk.
 
 ```bash
 ee remember "DATABASE_URL=postgres://user:hunter2@host/db"
@@ -981,7 +1344,20 @@ trust taxonomy.
 
 ### Prompt-injection guard
 
-The trust pipeline flags suspicious patterns (fake instructions, role override attempts, exfiltration cues) before promotion. Flagged memories quarantine into `curate candidates` and never silently enter the procedural layer.
+The trust pipeline flags suspicious patterns before promotion: fake
+instructions, role override attempts, and exfiltration cues. Flagged memories
+go into `curate candidates` and do not silently enter the procedural layer.
+
+### Mesh sharing posture
+
+Outbound sharing goes through policy and preview paths before lane grants.
+
+| Surface | What to use |
+|---|---|
+| Preview lane access | `ee mesh preview-grant <nodekey> --lane metadata --json` |
+| Discovery consent | `ee mesh discovery-policy --explain --json` |
+| Share preview | `ee share preview --peer <peer> --json` |
+| Operator docs | [`docs/mesh/share_preview.md`](docs/mesh/share_preview.md), [`docs/mesh/peer_policy.md`](docs/mesh/peer_policy.md) |
 
 ---
 
@@ -1005,14 +1381,24 @@ ee backup inspect bk_01HQ4… --json
 ee backup restore bk_01HQ4… --side-path ~/ee-restored/
 ```
 
-Backups include the durable DB/JSONL source of truth, the curation audit log, and a `manifest.json` with content hashes. By default, `ee backup create` also includes graph-cache derived assets: graph snapshots, graph algorithm witnesses, and graph algorithm result-cache rows. Use `--include-graph-cache=false` to create a source-only backup, and use `ee backup restore --skip-graph-cache` when you want restore to leave that cache cold and re-warm it on first use. Missing index manifests are reported as degraded. Verification re-hashes everything included on disk.
+Backups include the durable DB/JSONL source of truth, the curation audit log,
+and a `manifest.json` with content hashes. By default, `ee backup create` also
+includes graph-cache derived assets: graph snapshots, graph algorithm
+witnesses, and graph algorithm result-cache rows. Use
+`--include-graph-cache=false` for a source-only backup, and use
+`ee backup restore --skip-graph-cache` when restore should leave that cache cold
+and re-warm it on first use. Missing index manifests are reported as degraded.
+Verification re-hashes everything included on disk.
 
 ---
 
 ## Performance
 
 Canonical hardware class: `mac-m3-pro` (`benches/baselines/hardware_classes.toml`).
-Measured on a 2024 MacBook Pro M3 against a workspace with 25 projects, 14k memories, 8k imported CASS sessions, ~120k indexed documents. CI and release tooling must not overwrite these rows with artifacts from a different hardware class.
+Measured on a 2024 MacBook Pro M3 against a workspace with 25 projects, 14k
+memories, 8k imported CASS sessions, and about 120k indexed documents. CI and
+release tooling should only update these rows with artifacts from the same
+hardware class.
 
 <!-- perf:begin hardware-class=mac-m3-pro baseline=benches/baselines/perf_v0_2.json -->
 | Operation | Hardware class | p50 | p99 |
@@ -1052,6 +1438,17 @@ latency fields, resource fields when available, and regression status. A J10
 coverage test keeps every row in the table above tied to a benchmark/baseline
 or an explicit advisory marker. Profiles can become release-blocking once their
 fixture variance is low enough for CI.
+
+Performance and resource posture commands:
+
+| Command | Use |
+|---|---|
+| `ee perf compare --baseline <baseline.json> --candidate <candidate.json>` | Compare normalized perf artifacts |
+| `ee perf budget check --profile <name> --report <artifact.json>` | Check one artifact against a host profile |
+| `ee perf explain-latency --surface search\|context --report <artifact.json>` | Explain search/context latency stages and cache posture |
+| `ee diag host-profile --json` | Redacted host/resource profile inputs |
+| `ee diag plan-cache --json` | EQL query plan-cache counters |
+| `ee status --skyline --json` | Knowledge skyline posture when graph support is available |
 
 ### Codex RCH Workaround
 
@@ -1102,17 +1499,20 @@ cargo install --path /dp/coding_agent_session_search
 
 ### `error: migration required`
 
-The schema version on disk is older than the binary expects. This is safe and reversible:
+The schema version on disk is older than the binary expects. Run initialization
+again to apply the migration path:
 
 ```bash
 ee init --workspace . --json
 ```
 
-Failed migrations leave clear recovery instructions in stderr and never partially apply.
+Failed migrations leave clear recovery instructions in stderr and stop before a
+partial apply.
 
 ### `error: workspace ambiguous (3 candidates)`
 
-You are inside a worktree, fork, or symlinked path that resolves to multiple registered workspaces. Disambiguate explicitly:
+The current path resolves to multiple registered workspaces. Disambiguate it
+explicitly:
 
 ```bash
 ee workspace list
@@ -1122,7 +1522,8 @@ ee --workspace <name> context "..."
 
 ### `error: embed model not loaded`
 
-The semantic stack is in degraded lexical-only mode. Frankensearch owns model selection; configure it there, then re-embed:
+The semantic stack is in degraded lexical-only mode. Frankensearch owns model
+selection; configure it there, then re-embed:
 
 ```bash
 ee index reembed --workspace .
@@ -1130,19 +1531,73 @@ ee index reembed --workspace .
 
 You can also keep running lexical-only; `ee status` shows the degraded capability.
 
+### `ee doctor` reports a repair plan
+
+Start with the agent-oriented triage view, then inspect one finding:
+
+```bash
+ee doctor --robot-triage --json
+ee doctor --only <failure-mode-code> --json
+ee doctor --fix-plan --json
+```
+
+Use `--fix` and `--undo <RUN_ID>` only after reviewing the generated plan.
+
+### Mesh or Tailscale is unavailable
+
+Mesh is optional. Local memory commands can stay on `--mesh off`.
+
+```bash
+ee status --mesh off --json
+ee mesh status --json
+ee mesh discovery-policy --explain --json
+```
+
+For fake-tailnet and operator workflows, see
+[`docs/mesh/operator_onboarding.md`](docs/mesh/operator_onboarding.md).
+
+### Preflight blocks a shell command
+
+Inspect the policy result and follow the repair text:
+
+```bash
+ee preflight check --cmd 'cargo test --all-targets' --json
+ee preflight issue-bypass-token --reason "human approved exact command" --json
+```
+
+Bypass tokens are one-shot recorded artifacts. They are for explicit human
+approval, not automated retries.
+
+### A crowded checkout has unknown dirty files
+
+Use the read-only hygiene report before staging anything:
+
+```bash
+ee workspace hygiene --workspace . --json
+ee swarm brief --workspace . --json
+```
+
+The report classifies generated, scratch, local-machine, review-needed, and
+secret-risk paths without changing the worktree.
+
 ---
 
 ## Limitations
 
-`ee` is **honest about what it isn't**.
+Boundaries to know:
 
-- **Not a multi-process write fortress.** FrankenSQLite is single-process MVCC WAL. Multiple agents on one machine can read freely, but heavy concurrent writes are coordinated via job locks or the optional daemon's write owner. Don't run a swarm of writers without `ee daemon`.
-- **Not an agent harness.** `ee` does not run tools, manage approvals, or own the prompt loop. Use Claude Code or Codex for that.
-- **Not a chat UI.** No web frontend, and graph exports are CLI artifacts rather than an interactive web surface.
-- **Not a permanent archive.** Forgetting and decay are features. If you need a sealed audit log, export to JSONL and version it in git.
-- **No paid LLM APIs out of the box.** Embedding is delegated to Frankensearch, which is local by default. No OpenAI/Anthropic/Google API calls in `ee` itself.
-- **Semantic quality is bounded by the model Frankensearch loads.** `ee` does not pick embedding models; configure them through Frankensearch.
-- **The CLI is primary; MCP sits on top of it.** If MCP is your only interface, you will find the CLI's surface richer.
+| Boundary | Practical meaning |
+|---|---|
+| Concurrent writes | FrankenSQLite uses single-process MVCC WAL. Many agents can read at once; heavy write swarms should route through job locks or the optional daemon write owner. |
+| Agent loop | `ee` stores and retrieves memory. Claude Code, Codex, or another harness still owns tools, approvals, and the prompt loop. |
+| User interface | The primary interface is the CLI. Graph exports are CLI artifacts, not an interactive web app. |
+| Retention model | Forgetting and decay are product features. Export JSONL into git when you need sealed long-term records. |
+| Model choice | Embeddings are delegated to Frankensearch. Semantic quality follows the model and index Frankensearch is configured to use. |
+| MCP | MCP sits above the CLI. The CLI has the richest contract surface. |
+| Release distribution | Source builds are live. GitHub Release assets, Homebrew, and crates.io publication are planned. |
+| Mesh | Mesh exchanges redaction-safe rows and posture under policy. FrankenSQLite remains the local source of truth. |
+| Reserved adapters | `serve` and `science-analytics` report capability gaps until their adapters mature. |
+| Doctor repairs | Start with `ee doctor --fix-plan --json`; use `--fix` only after reviewing the run summary and undo path. |
 
 ---
 
@@ -1152,7 +1607,9 @@ You can also keep running lexical-only; `ee status` shows the degraded capabilit
 No. It is the durable memory those harnesses call. The harness owns the loop; `ee` owns memory.
 
 **Does it phone home or call any external API?**
-`ee` itself makes no network calls. Embedding is delegated to Frankensearch, which runs locally by default; if you point Frankensearch at a remote model, that's your decision, not `ee`'s.
+`ee` itself makes no network calls. Embedding is delegated to Frankensearch,
+which runs locally by default. Configuring Frankensearch to use a remote model
+is an explicit operator choice.
 
 **Why no Tokio?**
 The runtime is Asupersync, which gives us structured concurrency, capability narrowing, deterministic tests via `LabRuntime`, and an `Outcome` lattice. Tokio is forbidden in the dep tree, audited by CI.
@@ -1164,22 +1621,48 @@ The storage layer is FrankenSQLite via SQLModel. `rusqlite` is forbidden in the 
 Yes. `cass` is an evidence source, not a hard dependency. Without it, `ee remember`, `ee context`, `ee search`, curation, graph, and packing all work normally.
 
 **How big does the database get?**
-On a typical multi-project developer machine, expect 50-500 MB after a year. Cold/warm/hot tiering keeps the hot path small. `ee backup create` produces portable, verified record archives.
+On a typical multi-project developer machine, expect 50-500 MB after a year.
+Cold/warm/hot tiering keeps the hot path small. `ee backup create` produces
+portable, verified record archives.
 
 **What happens if my index gets corrupted?**
-`ee index rebuild` reproduces it from the DB. Indexes are derived assets, so losing them is annoying but never catastrophic.
+`ee index rebuild` reproduces it from the DB. Indexes are derived assets, so
+losing them is annoying but recoverable.
 
 **Does it work on Windows?**
-Yes. Single static binary. PowerShell installer included. Paths follow platform conventions (`%APPDATA%`, `%LOCALAPPDATA%`).
+Yes. It is a single CLI binary, with a PowerShell installer script in the repo.
+Paths follow platform conventions (`%APPDATA%`, `%LOCALAPPDATA%`).
 
 **Can multiple agents on the same machine share one database?**
-Yes, that's the default. Reads are concurrent. Writes serialize through a job lock. For heavy multi-writer swarms, run `ee daemon` and let the daemon own the write side.
+Yes. Reads are concurrent. Writes serialize through a job lock. For heavy
+multi-writer swarms, run `ee daemon` and let the daemon own the write side.
+
+**Should I use the curl installer today?**
+Not yet. The curl installer is documented as the planned release path. Build
+from source until release assets are published.
+
+**Should I enable mesh?**
+Usually no. Mesh helps trusted peers exchange redaction-safe posture and memory
+metadata, but single-machine local-first usage works with `--mesh off`.
+
+**What should an agent run first in a crowded checkout?**
+Start with `ee swarm brief --workspace . --json` and
+`ee workspace hygiene --workspace . --json`, then use Agent Mail or Beads for
+the actual claim/reservation workflow.
+
+**How do I inspect current command contracts?**
+Use `ee --help`, `ee help <command path>`, `ee --help-json`, `ee schema list`,
+and `ee capabilities --json`.
 
 **How do I integrate with my CI?**
-Run `ee context "<the task this CI run is doing>" --json` and pipe relevant rules into your agent's system prompt. JSON output is stable across patch versions.
+Run `ee context "<the task this CI run is doing>" --json` and pipe relevant
+rules into your agent's system prompt. JSON output is stable across patch
+versions.
 
 **Does `ee` ever rewrite my memories silently?**
-No. The steward proposes; you approve. Every promotion, consolidation, replacement, and tombstone produces an audit entry visible via `ee why <id>` and the curation queue commands.
+No. The steward proposes; you approve. Promotions, consolidations,
+replacements, and tombstones each produce recorded entries visible via
+`ee why <id>` and the curation queue commands.
 
 **Where do I see the architectural decisions?**
 [`docs/adr/`](docs/adr/). Every major subsystem has an ADR with rejected alternatives and verification hooks.
@@ -1190,15 +1673,30 @@ No. The steward proposes; you approve. Every promotion, consolidation, replaceme
 
 | Doc | Purpose |
 |---|---|
+| [`CHANGELOG.md`](CHANGELOG.md) | Reconstructed release history and current release posture |
+| [`CHANGELOG_RESEARCH.md`](CHANGELOG_RESEARCH.md) | Evidence ledger behind the changelog reconstruction |
 | [`docs/query-schema.md`](docs/query-schema.md) | EQL-inspired request schema for `ee pack` |
 | [`docs/trust-model.md`](docs/trust-model.md) | Memory advisory priority, trust classes, prompt-injection defenses |
 | [`docs/agent-outcome-scenarios.md`](docs/agent-outcome-scenarios.md) | North-star agent journey matrix and acceptance scenarios |
 | [`docs/agent-ux/insights-onboarding.md`](docs/agent-ux/insights-onboarding.md) | Agent workflow for graph-derived insights, Pack DNA, skyline, and proximity surfaces |
 | [`docs/agent-ux/auto_enrollment_onboarding.md`](docs/agent-ux/auto_enrollment_onboarding.md) | Agent workflow and use/no-use checklist for optional Tailscale mesh, auto-enrollment, drift handling, and safety previews |
+| [`docs/agent-ux/ee-doctor-first-aid-precedence.md`](docs/agent-ux/ee-doctor-first-aid-precedence.md) | Doctor-first repair workflow for agents |
+| [`docs/agent-ux/flight-recorder.md`](docs/agent-ux/flight-recorder.md) | Redacted workload flight-recorder operator and agent reference |
+| [`docs/agent-ux/workspace-hygiene.md`](docs/agent-ux/workspace-hygiene.md) | Dirty-checkout and commit-readiness workflow |
 | [`docs/mesh/operator_onboarding.md`](docs/mesh/operator_onboarding.md) | Operator guide for optional mesh usage, trust/redaction posture, revision tokens, and troubleshooting |
+| [`docs/mesh/command_modes.md`](docs/mesh/command_modes.md) | Optional mesh command modes and degraded behavior |
+| [`docs/mesh/anti_entropy.md`](docs/mesh/anti_entropy.md) | Mesh anti-entropy workflow |
+| [`docs/mesh/peer_policy.md`](docs/mesh/peer_policy.md) | Mesh peer-policy and lane semantics |
 | [`docs/cli-reference/graph-flags.md`](docs/cli-reference/graph-flags.md) | Aggregated graph-related CLI flags by command, including implemented and pending surfaces |
 | [`docs/configuration/graph.md`](docs/configuration/graph.md) | Graph feature flags, thresholds, and tuning guidance |
+| [`docs/configuration/cache.md`](docs/configuration/cache.md) | Pack and query cache configuration |
+| [`docs/configuration/storage.md`](docs/configuration/storage.md) | Read pool, snapshot pin, and storage configuration |
 | [`docs/architecture/graph-snapshots.md`](docs/architecture/graph-snapshots.md) | Graph snapshot families, lifecycle, locks, budgets, and degraded behavior |
+| [`docs/architecture/shard-fanout.md`](docs/architecture/shard-fanout.md) | Shard-fanout architecture and migration posture |
+| [`docs/search/plan-cache.md`](docs/search/plan-cache.md) | EQL plan-cache behavior and diagnostics |
+| [`docs/env_vars.md`](docs/env_vars.md) | Complete `EE_*` environment variable registry |
+| [`docs/feature_flag_registry.md`](docs/feature_flag_registry.md) | Cargo feature flag status and owner tracking |
+| [`docs/degraded_code_taxonomy.md`](docs/degraded_code_taxonomy.md) | Degraded-code classification and severity vocabulary |
 | [`docs/dependency-contract-matrix.md`](docs/dependency-contract-matrix.md) | Franken-stack integration contracts and version pins |
 | [`docs/testing-strategy.md`](docs/testing-strategy.md) | Test categories, verification gates, golden test structure |
 | [`docs/command_classification.md`](docs/command_classification.md) | Command effect taxonomy and read/write classification |
