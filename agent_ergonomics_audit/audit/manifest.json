@@ -1,0 +1,70 @@
+{
+  "schema": "agent_ergonomics.manifest.v1",
+  "tool_name": "ee",
+  "tool_repo": "/Users/jemanuel/projects/eidetic_engine_cli",
+  "audit_workspace": "/Users/jemanuel/projects/eidetic_engine_cli/agent_ergonomics_audit",
+  "tool_version": "0.1.0",
+  "target_branch": "main",
+  "branch_policy": "in-tree workspace, current branch only (never a feature branch per AGENTS.md RULE 2)",
+  "current_pass": 1,
+  "passes": [
+    {
+      "pass": 1,
+      "started_at": "2026-05-20T04:25:00Z",
+      "started_sha": "e4a525b3",
+      "mode": "full",
+      "rubric_version": "1.0",
+      "applied_changes_count": 2,
+      "applied_recommendations": [
+        {
+          "id": "R-001",
+          "title": "Capture clap error continuation lines + extract subcommand for repair",
+          "shipped_via_commit": "50b6a628",
+          "co-author": "DarkCastle (pre-commit sweep merged this with R-001 starter from AgentErgonomicsPass)",
+          "dimensions_uplifted": [
+            "error_pedagogy",
+            "output_parseability",
+            "intent_inference"
+          ],
+          "tests_added": [
+            "clap_error_message_captures_required_arg_continuation",
+            "clap_error_message_captures_tip_continuation",
+            "clap_error_message_captures_multiple_tip_continuations_separated_by_blanks",
+            "clap_error_message_captures_multiple_required_args_separated_by_blanks",
+            "extract_usage_subcommand_parses_remember",
+            "extract_usage_subcommand_parses_nested",
+            "extract_usage_subcommand_bare_binary_returns_none"
+          ]
+        },
+        {
+          "id": "R-002",
+          "title": "Expand COMMAND_MANIFEST from 19 to 49 entries — restore parity between --help and machine-readable surfaces",
+          "shipped_via_commit": "9dac422a",
+          "co-author": "HazyLake (pre-commit sweep)",
+          "dimensions_uplifted": [
+            "self_documentation",
+            "agent_intuitiveness",
+            "agent_ease_of_use"
+          ],
+          "tests_added": [
+            "help_json_advertises_most_used_commands"
+          ],
+          "downstream_effects": [
+            "ee --help-json now lists 49 commands (was 19) — agents discovering capabilities through the JSON surface no longer miss init/note/context/pack/why",
+            "ee introspect --json reflects the same expanded manifest",
+            "MCP tool manifest now exposes ee_init / ee_note / ee_context / ee_pack / ee_why / ee_outcome / ee_memory etc. — bringing the implementation into compliance with the AGENTS.md promise (\"manifest mirrors ... ee_context, ee_outcome, ee_memory_show, ee_curate_candidates\")"
+          ]
+        }
+      ]
+    }
+  ],
+  "agents_md_compliance": {
+    "branch_policy": "main only — never created a branch",
+    "workspace_policy": "in-tree at agent_ergonomics_audit/ — never a sibling",
+    "file_deletion": "no files deleted",
+    "destructive_git": "none used",
+    "script_based_code_changes": "none — all edits applied manually via Edit tool",
+    "file_proliferation": "no _v2 / _improved files created",
+    "agent_name_env": "set AGENT_NAME=AgentErgonomicsPass on commit attempts"
+  }
+}
