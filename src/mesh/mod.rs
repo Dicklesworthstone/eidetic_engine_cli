@@ -27,3 +27,4 @@ pub mod remote_evidence;
 pub mod repair_action_graph;
 pub mod steward_decision;
 pub mod sync;
+pub mod tailscale_transport;
