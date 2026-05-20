@@ -261,3 +261,9 @@ mod prompt_budget_report;
 
 #[path = "contracts/doctor_undo_replay_e2e.rs"]
 mod doctor_undo_replay_e2e;
+
+#[path = "contracts/peer_conflict_schema.rs"]
+mod peer_conflict_schema;
+
+#[path = "contracts/perf_live_schema.rs"]
+mod perf_live_schema;
