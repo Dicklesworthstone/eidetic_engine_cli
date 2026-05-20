@@ -160,6 +160,9 @@ mod mesh_peer_policy_schema;
 #[path = "contracts/tailscale_local_schema.rs"]
 mod tailscale_local_schema;
 
+#[path = "contracts/auto_enroll_verify_gate_coverage.rs"]
+mod auto_enroll_verify_gate_coverage;
+
 #[path = "contracts/cli_help_completeness.rs"]
 mod cli_help_completeness;
 
