@@ -6,11 +6,13 @@
 //! The `--fix-plan` flag (EE-241) outputs a structured repair plan that
 //! agents can execute step-by-step.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
+use serde::Serialize;
 
-use crate::config::{EnvVar, read_env_var, read_env_var_os};
+use crate::config::{EnvVar, read_env_var, read_env_var_os, workspace_config};
 use crate::core::agent_detect::{AgentInventoryReport, AgentInventoryStatus};
 use crate::db::{
     CreateMemoryInput, DbConnection, ForeignKeyCheckResult, IntegrityCheckResult,
@@ -19,6 +21,11 @@ use crate::db::{
         ShardFanoutPosture, ShardFanoutResolverInput, resolve_shard_fanout_status,
         shard_fanout_enabled_from_env_value,
     },
+};
+use crate::mesh::hello_responder::HelloResponderStatusReport;
+use crate::mesh::repair_action_graph::{
+    ActionKind, ExecutionContext, ExpectedOutcome, Priority, REPAIR_ACTION_GRAPH_SCHEMA_V1,
+    RepairAction, RepairActionGraph, build_repair_action_graph,
 };
 use crate::models::error_codes::{self, ErrorCode};
 use crate::models::{SingleFlightPostureReport, TrustClass};
@@ -33,6 +40,11 @@ use super::status::{
     gather_rch_worker_pressure, probe_cass_capability,
 };
 use super::swarm_brief::RchWorkerPressureReport;
+use super::tailscale_probe::{
+    SystemTailscaleCliProbeRunner, SystemTailscaleSocketProbeRunner, TailscaleCliProbeConfig,
+    TailscaleLocalReport, TailscalePlatform, TailscaleSocketProbeConfig,
+    probe_tailscale_local_with_runners, tailscale_probe_timeout_ms_from_env_value,
+};
 
 pub const DEPENDENCY_DIAGNOSTICS_SCHEMA_V1: &str = "ee.diag.dependencies.v1";
 pub const FRANKEN_HEALTH_SCHEMA_V1: &str = "ee.doctor.franken_health.v1";
@@ -43,6 +55,7 @@ pub const DEPENDENCY_MATRIX_SOURCE_PLAN_ITEM: &str = "EE-307";
 pub const DEPENDENCY_MATRIX_DEFAULT_FEATURE_PROFILE: &str = "default";
 pub const INTEGRITY_CANARY_MEMORY_ID: &str = "mem_integritycanary00000000000";
 const INTEGRITY_CANARY_CONTENT: &str = "EE integrity canary memory. Safe to ignore; verifies memory table write/read/provenance chain.";
+pub const DOCTOR_MESH_AUTO_ENROLLMENT_SCHEMA_V1: &str = "ee.doctor.mesh_auto_enrollment.v1";
 
 pub const FORBIDDEN_CRATES: &[&str] = &[
     "tokio",
@@ -316,6 +329,1053 @@ impl DoctorReport {
             cass_import_guidance: CassImportGuidance::from_agent_inventory(agent_inventory),
         }
     }
+}
+
+/// Doctor-local status vocabulary for SRR6.46 auto-enrollment readiness checks.
+///
+/// This is intentionally separate from the legacy top-level [`CheckSeverity`]:
+/// the SRR6.46 doctor block needs an explicit `skipped` state when mesh is
+/// disabled and a `fail` state for per-check readiness, while the existing
+/// doctor aggregate keeps the historical `ok | warning | error` wire values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorMeshAutoEnrollmentCheckStatus {
+    Ok,
+    Warning,
+    Fail,
+    Skipped,
+}
+
+impl DoctorMeshAutoEnrollmentCheckStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Warning => "warning",
+            Self::Fail => "fail",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    #[must_use]
+    pub const fn needs_attention(self) -> bool {
+        matches!(self, Self::Warning | Self::Fail)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorMeshAutoEnrollmentEvidence {
+    pub key: String,
+    pub value: String,
+}
+
+impl DoctorMeshAutoEnrollmentEvidence {
+    #[must_use]
+    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorMeshAutoEnrollmentCheck {
+    pub name: &'static str,
+    pub status: DoctorMeshAutoEnrollmentCheckStatus,
+    pub message: String,
+    pub evidence: Vec<DoctorMeshAutoEnrollmentEvidence>,
+    pub fix_action_id: Option<String>,
+}
+
+impl DoctorMeshAutoEnrollmentCheck {
+    #[must_use]
+    pub fn new(
+        name: &'static str,
+        status: DoctorMeshAutoEnrollmentCheckStatus,
+        message: impl Into<String>,
+        evidence: Vec<DoctorMeshAutoEnrollmentEvidence>,
+        fix_action_id: Option<&str>,
+    ) -> Self {
+        Self {
+            name,
+            status,
+            message: message.into(),
+            evidence,
+            fix_action_id: fix_action_id.map(str::to_owned),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorMeshAutoEnrollmentSummary {
+    pub ok: u32,
+    pub warning: u32,
+    pub fail: u32,
+    pub skipped: u32,
+    pub total: u32,
+}
+
+impl DoctorMeshAutoEnrollmentSummary {
+    #[must_use]
+    pub fn from_checks(checks: &[DoctorMeshAutoEnrollmentCheck]) -> Self {
+        let mut summary = Self::default();
+        for check in checks {
+            match check.status {
+                DoctorMeshAutoEnrollmentCheckStatus::Ok => summary.ok += 1,
+                DoctorMeshAutoEnrollmentCheckStatus::Warning => summary.warning += 1,
+                DoctorMeshAutoEnrollmentCheckStatus::Fail => summary.fail += 1,
+                DoctorMeshAutoEnrollmentCheckStatus::Skipped => summary.skipped += 1,
+            }
+        }
+        summary.total = checks.len() as u32;
+        summary
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorMeshAutoEnrollmentDegradation {
+    pub code: &'static str,
+    pub severity: &'static str,
+    pub message: String,
+    pub repair: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorMeshTailscaleReadiness {
+    pub schema: &'static str,
+    pub installed: Option<bool>,
+    pub daemon_running: Option<bool>,
+    pub authenticated: Option<bool>,
+    pub binary_authentic: Option<bool>,
+    pub shields_up: Option<bool>,
+    pub peer_count: u32,
+    pub probe_method: &'static str,
+    pub platform: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorMeshHelloResponderReadiness {
+    pub schema: &'static str,
+    pub running: Option<bool>,
+    pub crash_loop_detected: Option<bool>,
+    pub listen_address: Option<String>,
+    pub crash_count_24h: Option<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorMeshDiscoveryCacheReadiness {
+    pub schema: &'static str,
+    pub status: &'static str,
+    pub ttl_seconds: u64,
+    pub stale_beyond_workspace: Option<bool>,
+    pub hit: Option<bool>,
+    pub refreshed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorMeshMaterializedConfigReadiness {
+    pub present: bool,
+    pub peer_group_count: u32,
+    pub peer_count: u32,
+    pub consistent: Option<bool>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorMeshDriftPostureReadiness {
+    pub status: &'static str,
+    pub new_peer_count: u32,
+    pub stale_peer_count: u32,
+    pub tailnet_changed: Option<bool>,
+    pub node_key_changed: Option<bool>,
+    pub manual_conflict_present: Option<bool>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorMeshAutoEnrollmentReport {
+    pub schema: &'static str,
+    pub enabled: bool,
+    pub posture: &'static str,
+    pub workspace_path: String,
+    pub tailscale: DoctorMeshTailscaleReadiness,
+    pub hello_responder: DoctorMeshHelloResponderReadiness,
+    pub discovery_cache: DoctorMeshDiscoveryCacheReadiness,
+    pub materialized_config: DoctorMeshMaterializedConfigReadiness,
+    pub drift_posture: DoctorMeshDriftPostureReadiness,
+    pub checks: Vec<DoctorMeshAutoEnrollmentCheck>,
+    pub categorized_summary: DoctorMeshAutoEnrollmentSummary,
+    pub action_graph: RepairActionGraph,
+    pub degraded: Vec<DoctorMeshAutoEnrollmentDegradation>,
+}
+
+impl DoctorMeshAutoEnrollmentReport {
+    #[must_use]
+    pub fn gather(workspace_path: Option<&Path>) -> Self {
+        let probe = DoctorMeshAutoEnrollmentProbe::gather(workspace_path);
+        Self::from_probe(&probe)
+    }
+
+    fn from_probe(probe: &DoctorMeshAutoEnrollmentProbe) -> Self {
+        let checks = doctor_mesh_auto_enrollment_checks(probe);
+        let categorized_summary = DoctorMeshAutoEnrollmentSummary::from_checks(&checks);
+        let posture = doctor_mesh_auto_enrollment_posture(&categorized_summary);
+        let action_graph = doctor_mesh_auto_enrollment_action_graph(&probe.workspace_path, &checks);
+        let degraded = doctor_mesh_auto_enrollment_degraded(&checks);
+
+        Self {
+            schema: DOCTOR_MESH_AUTO_ENROLLMENT_SCHEMA_V1,
+            enabled: probe.mesh_enabled,
+            posture,
+            workspace_path: probe.workspace_path.clone(),
+            tailscale: DoctorMeshTailscaleReadiness {
+                schema: "ee.tailscale.local.v1",
+                installed: probe.tailscale.as_ref().map(|report| report.installed),
+                daemon_running: probe
+                    .tailscale
+                    .as_ref()
+                    .map(|report| report.daemon_reachable),
+                authenticated: probe.tailscale.as_ref().map(|report| report.authenticated),
+                binary_authentic: probe
+                    .tailscale
+                    .as_ref()
+                    .map(|report| report.binary_authentic),
+                shields_up: probe
+                    .tailscale
+                    .as_ref()
+                    .and_then(|report| report.shields_up),
+                peer_count: probe.discovered_peer_count(),
+                probe_method: probe
+                    .tailscale
+                    .as_ref()
+                    .map_or("skipped", |report| report.probe_method.as_str()),
+                platform: probe
+                    .tailscale
+                    .as_ref()
+                    .map_or("other", |report| report.platform.as_str()),
+            },
+            hello_responder: DoctorMeshHelloResponderReadiness {
+                schema: "ee.mesh.hello_responder.status.v1",
+                running: probe.hello_responder.as_ref().map(|report| report.running),
+                crash_loop_detected: probe
+                    .hello_responder
+                    .as_ref()
+                    .map(|report| report.crash_count_24h >= 3),
+                listen_address: probe
+                    .hello_responder
+                    .as_ref()
+                    .and_then(|report| report.listen_address.clone()),
+                crash_count_24h: probe
+                    .hello_responder
+                    .as_ref()
+                    .map(|report| report.crash_count_24h),
+            },
+            discovery_cache: DoctorMeshDiscoveryCacheReadiness {
+                schema: "ee.mesh.discovery_cache.status.v1",
+                status: if probe.mesh_enabled {
+                    "not_loaded"
+                } else {
+                    "skipped"
+                },
+                ttl_seconds: crate::mesh::discovery_cache::DEFAULT_DISCOVERY_CACHE_TTL_SECONDS,
+                stale_beyond_workspace: probe.discovery_cache_stale_beyond_workspace,
+                hit: None,
+                refreshed_at: None,
+            },
+            materialized_config: DoctorMeshMaterializedConfigReadiness {
+                present: probe.materialized_peer_group_count > 0,
+                peer_group_count: probe.materialized_peer_group_count,
+                peer_count: probe.materialized_peer_count,
+                consistent: probe.materialized_peer_group_consistent,
+            },
+            drift_posture: DoctorMeshDriftPostureReadiness {
+                status: if !probe.mesh_enabled {
+                    "skipped"
+                } else if categorized_summary.fail > 0 {
+                    "blocked"
+                } else if categorized_summary.warning > 0 {
+                    "actionable"
+                } else {
+                    "stable"
+                },
+                new_peer_count: probe.discovered_peer_count(),
+                stale_peer_count: 0,
+                tailnet_changed: None,
+                node_key_changed: None,
+                manual_conflict_present: None,
+            },
+            checks,
+            categorized_summary,
+            action_graph,
+            degraded,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DoctorMeshAutoEnrollmentProbe {
+    workspace_path: String,
+    mesh_enabled: bool,
+    mesh_enabled_source: &'static str,
+    tailscale: Option<TailscaleLocalReport>,
+    hello_responder: Option<HelloResponderStatusReport>,
+    audit_chain_intact: Option<bool>,
+    steward_consecutive_failures_24h: Option<u64>,
+    steward_state_file_readable: Option<bool>,
+    discovery_cache_stale_beyond_workspace: Option<bool>,
+    materialized_peer_group_count: u32,
+    materialized_peer_count: u32,
+    materialized_peer_group_consistent: Option<bool>,
+    mcp_parity_present: Option<bool>,
+}
+
+impl DoctorMeshAutoEnrollmentProbe {
+    fn gather(workspace_path: Option<&Path>) -> Self {
+        let (mesh_enabled, mesh_enabled_source) = doctor_mesh_enabled(workspace_path);
+        let workspace_path = workspace_path
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| ".".to_owned());
+        let tailscale = mesh_enabled.then(gather_doctor_tailscale_local_report);
+        let hello_responder = if mesh_enabled {
+            HelloResponderStatusReport::from_environment(true).ok()
+        } else {
+            None
+        };
+        let (materialized_peer_group_count, materialized_peer_count) =
+            materialized_peer_group_counts(workspace_path.as_ref());
+        let materialized_peer_group_consistent = mesh_enabled
+            .then_some(materialized_peer_group_count == 1 && materialized_peer_count > 0);
+
+        Self {
+            workspace_path,
+            mesh_enabled,
+            mesh_enabled_source,
+            tailscale,
+            hello_responder,
+            audit_chain_intact: None,
+            steward_consecutive_failures_24h: None,
+            steward_state_file_readable: mesh_enabled.then(steward_state_file_readable),
+            discovery_cache_stale_beyond_workspace: None,
+            materialized_peer_group_count,
+            materialized_peer_count,
+            materialized_peer_group_consistent,
+            mcp_parity_present: None,
+        }
+    }
+
+    fn discovered_peer_count(&self) -> u32 {
+        self.tailscale
+            .as_ref()
+            .map_or(0, |report| report.peers.len() as u32)
+    }
+}
+
+fn doctor_mesh_enabled(workspace_path: Option<&Path>) -> (bool, &'static str) {
+    if let Some(raw) = read_env_var(EnvVar::MeshEnabled) {
+        return (
+            parse_doctor_env_bool(&raw).unwrap_or(false),
+            if parse_doctor_env_bool(&raw).is_some() {
+                "env"
+            } else {
+                "env_invalid"
+            },
+        );
+    }
+
+    if let Some(enabled) = workspace_path
+        .and_then(workspace_config)
+        .and_then(|config| config.mesh.enabled)
+    {
+        return (enabled, "workspace_config");
+    }
+
+    (false, "default")
+}
+
+fn parse_doctor_env_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn gather_doctor_tailscale_local_report() -> TailscaleLocalReport {
+    let timeout_ms = tailscale_probe_timeout_ms_from_env_value(
+        read_env_var(EnvVar::TailscaleProbeTimeoutMs).as_deref(),
+    );
+    let mut cli_config = TailscaleCliProbeConfig::mesh_enabled();
+    cli_config.timeout_ms = timeout_ms;
+    cli_config.binary_override = read_env_var(EnvVar::TailscaleBinaryOverride).map(PathBuf::from);
+    cli_config.platform_hint = current_doctor_tailscale_platform();
+
+    let mut socket_config = TailscaleSocketProbeConfig::mesh_enabled();
+    socket_config.timeout_ms = timeout_ms;
+    socket_config.platform_hint = current_doctor_tailscale_platform();
+    if let Some(override_path) = read_env_var(EnvVar::TailscaleProbeSocketOverride)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        socket_config.socket_candidates = vec![PathBuf::from(override_path)];
+    }
+
+    let mut socket_runner = SystemTailscaleSocketProbeRunner;
+    let mut cli_runner = SystemTailscaleCliProbeRunner;
+    probe_tailscale_local_with_runners(
+        &socket_config,
+        &cli_config,
+        &mut socket_runner,
+        &mut cli_runner,
+    )
+}
+
+fn current_doctor_tailscale_platform() -> TailscalePlatform {
+    if cfg!(target_os = "linux") {
+        TailscalePlatform::Linux
+    } else if cfg!(target_os = "macos") {
+        TailscalePlatform::MacosOpen
+    } else if cfg!(target_os = "windows") {
+        TailscalePlatform::Windows
+    } else {
+        TailscalePlatform::Other
+    }
+}
+
+fn materialized_peer_group_counts(workspace_path: &str) -> (u32, u32) {
+    let path = Path::new(workspace_path);
+    let Some(config) = workspace_config(path) else {
+        return (0, 0);
+    };
+    let Some(bindings) = config.mesh.peer_group_bindings.as_ref() else {
+        return (0, 0);
+    };
+    let peer_count = bindings
+        .iter()
+        .map(|binding| binding.peer_ids.as_ref().map_or(0, Vec::len))
+        .sum::<usize>() as u32;
+    (bindings.len() as u32, peer_count)
+}
+
+fn steward_state_file_readable() -> bool {
+    let Some(base) = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+    else {
+        return false;
+    };
+    std::fs::read_to_string(base.join("ee/steward/auto_enroll_state.json")).is_ok()
+}
+
+fn doctor_mesh_auto_enrollment_checks(
+    probe: &DoctorMeshAutoEnrollmentProbe,
+) -> Vec<DoctorMeshAutoEnrollmentCheck> {
+    if !probe.mesh_enabled {
+        return doctor_mesh_auto_enrollment_skipped_checks(probe);
+    }
+
+    let tailscale = probe.tailscale.as_ref();
+    let hello = probe.hello_responder.as_ref();
+    let mut checks = Vec::with_capacity(15);
+
+    checks.push(DoctorMeshAutoEnrollmentCheck::new(
+        "mesh_enabled",
+        DoctorMeshAutoEnrollmentCheckStatus::Ok,
+        "Mesh auto-enrollment checks are enabled for this doctor run.",
+        vec![
+            DoctorMeshAutoEnrollmentEvidence::new("source", probe.mesh_enabled_source),
+            DoctorMeshAutoEnrollmentEvidence::new("enabled", "true"),
+        ],
+        None,
+    ));
+    checks.push(doctor_bool_check(
+        "tailscale_installed",
+        tailscale.map(|report| report.installed),
+        true,
+        "Tailscale is installed.",
+        "Tailscale is not installed or the local socket was not found.",
+        "Tailscale installation was not inspected.",
+        "tailscale_install",
+    ));
+    checks.push(doctor_bool_check(
+        "tailscale_daemon_running",
+        tailscale.map(|report| report.daemon_reachable),
+        true,
+        "Tailscale daemon is reachable.",
+        "Tailscale daemon is not reachable.",
+        "Tailscale daemon reachability was not inspected.",
+        "tailscale_up",
+    ));
+    checks.push(doctor_bool_check(
+        "tailscale_authenticated",
+        tailscale.map(|report| report.authenticated),
+        true,
+        "Tailscale is authenticated.",
+        "Tailscale is not authenticated.",
+        "Tailscale authentication was not inspected.",
+        "tailscale_up",
+    ));
+    checks.push(doctor_bool_check(
+        "tailscale_binary_authentic",
+        tailscale.map(|report| report.binary_authentic),
+        true,
+        "Tailscale binary authenticity check passed.",
+        "Tailscale binary authenticity check failed.",
+        "Tailscale binary authenticity was not inspected.",
+        "tailscale_install",
+    ));
+    checks.push(doctor_bool_check(
+        "tailscale_shields_not_up",
+        tailscale
+            .and_then(|report| report.shields_up)
+            .map(|value| !value),
+        true,
+        "Tailscale shields-up is disabled.",
+        "Tailscale shields-up is enabled; peers cannot initiate discovery.",
+        "Tailscale shields-up posture was not inspected.",
+        "tailscale_disable_shields_up",
+    ));
+    checks.push(doctor_bool_check(
+        "hello_responder_running",
+        hello.map(|report| report.running),
+        true,
+        "The mesh hello responder is running.",
+        "The mesh hello responder is not running.",
+        "The mesh hello responder lifecycle was not inspected.",
+        "ee_daemon_start",
+    ));
+    checks.push(doctor_bool_check(
+        "hello_responder_no_crash_loop",
+        hello.map(|report| report.crash_count_24h < 3),
+        true,
+        "The mesh hello responder is not crash-looping.",
+        "The mesh hello responder appears to be crash-looping.",
+        "The mesh hello responder crash history was not inspected.",
+        "inspect_hello_responder_audit",
+    ));
+    checks.push(doctor_count_check(
+        "discovery_returns_at_least_one_peer",
+        probe.discovered_peer_count(),
+        "At least one Tailscale peer is visible to discovery.",
+        "No Tailscale peers were visible to auto-enrollment discovery.",
+        "ee_mesh_discovery_refresh",
+    ));
+    checks.push(doctor_bool_check(
+        "auto_enrollment_audit_chain_intact",
+        probe.audit_chain_intact,
+        true,
+        "Auto-enrollment audit chain is intact.",
+        "Auto-enrollment audit chain is not intact.",
+        "Auto-enrollment audit chain was not inspected.",
+        "inspect_auto_enrollment_audit",
+    ));
+    checks.push(doctor_bool_check(
+        "auto_enrollment_no_consecutive_failures",
+        probe
+            .steward_consecutive_failures_24h
+            .map(|failures| failures == 0),
+        true,
+        "Auto-enrollment steward has no consecutive failures.",
+        "Auto-enrollment steward has consecutive failures.",
+        "Auto-enrollment steward failure state was not inspected.",
+        "inspect_steward_failures",
+    ));
+    checks.push(doctor_bool_check(
+        "steward_state_file_readable",
+        probe.steward_state_file_readable,
+        true,
+        "Auto-enrollment steward state file is readable.",
+        "Auto-enrollment steward state file is missing or unreadable.",
+        "Auto-enrollment steward state file was not inspected.",
+        "inspect_steward_state",
+    ));
+    checks.push(doctor_bool_check(
+        "discovery_cache_not_stale_beyond_workspace",
+        probe
+            .discovery_cache_stale_beyond_workspace
+            .map(|stale| !stale),
+        true,
+        "Discovery cache is not stale beyond the selected workspace.",
+        "Discovery cache is stale or belongs to another workspace.",
+        "Discovery cache staleness was not inspected.",
+        "ee_mesh_discovery_refresh",
+    ));
+    checks.push(doctor_bool_check(
+        "materialized_peer_group_consistent",
+        probe.materialized_peer_group_consistent,
+        true,
+        "Materialized auto-enrollment peer group is consistent.",
+        "Materialized auto-enrollment peer group is missing or inconsistent.",
+        "Materialized auto-enrollment peer group was not inspected.",
+        "ee_mesh_auto_enroll",
+    ));
+    checks.push(doctor_bool_check(
+        "mcp_parity_present",
+        probe.mcp_parity_present,
+        true,
+        "MCP parity coverage for mesh auto-enrollment is present.",
+        "MCP parity coverage for mesh auto-enrollment is missing.",
+        "MCP parity coverage for mesh auto-enrollment was not inspected.",
+        "ee_mcp_parity_check",
+    ));
+
+    checks
+}
+
+fn doctor_mesh_auto_enrollment_skipped_checks(
+    probe: &DoctorMeshAutoEnrollmentProbe,
+) -> Vec<DoctorMeshAutoEnrollmentCheck> {
+    const CHECK_NAMES: [&str; 15] = [
+        "mesh_enabled",
+        "tailscale_installed",
+        "tailscale_daemon_running",
+        "tailscale_authenticated",
+        "tailscale_binary_authentic",
+        "tailscale_shields_not_up",
+        "hello_responder_running",
+        "hello_responder_no_crash_loop",
+        "discovery_returns_at_least_one_peer",
+        "auto_enrollment_audit_chain_intact",
+        "auto_enrollment_no_consecutive_failures",
+        "steward_state_file_readable",
+        "discovery_cache_not_stale_beyond_workspace",
+        "materialized_peer_group_consistent",
+        "mcp_parity_present",
+    ];
+
+    CHECK_NAMES
+        .into_iter()
+        .map(|name| {
+            DoctorMeshAutoEnrollmentCheck::new(
+                name,
+                DoctorMeshAutoEnrollmentCheckStatus::Skipped,
+                "Mesh auto-enrollment is disabled; readiness check skipped.",
+                vec![
+                    DoctorMeshAutoEnrollmentEvidence::new("source", probe.mesh_enabled_source),
+                    DoctorMeshAutoEnrollmentEvidence::new("enabled", "false"),
+                ],
+                None,
+            )
+        })
+        .collect()
+}
+
+fn doctor_bool_check(
+    name: &'static str,
+    actual: Option<bool>,
+    expected: bool,
+    ok_message: &'static str,
+    fail_message: &'static str,
+    unknown_message: &'static str,
+    fix_action_id: &'static str,
+) -> DoctorMeshAutoEnrollmentCheck {
+    match actual {
+        Some(value) if value == expected => DoctorMeshAutoEnrollmentCheck::new(
+            name,
+            DoctorMeshAutoEnrollmentCheckStatus::Ok,
+            ok_message,
+            vec![DoctorMeshAutoEnrollmentEvidence::new(
+                "observed",
+                value.to_string(),
+            )],
+            None,
+        ),
+        Some(value) => DoctorMeshAutoEnrollmentCheck::new(
+            name,
+            DoctorMeshAutoEnrollmentCheckStatus::Fail,
+            fail_message,
+            vec![DoctorMeshAutoEnrollmentEvidence::new(
+                "observed",
+                value.to_string(),
+            )],
+            Some(fix_action_id),
+        ),
+        None => DoctorMeshAutoEnrollmentCheck::new(
+            name,
+            DoctorMeshAutoEnrollmentCheckStatus::Warning,
+            unknown_message,
+            vec![DoctorMeshAutoEnrollmentEvidence::new(
+                "observed",
+                "not_inspected",
+            )],
+            Some(fix_action_id),
+        ),
+    }
+}
+
+fn doctor_count_check(
+    name: &'static str,
+    count: u32,
+    ok_message: &'static str,
+    fail_message: &'static str,
+    fix_action_id: &'static str,
+) -> DoctorMeshAutoEnrollmentCheck {
+    if count > 0 {
+        DoctorMeshAutoEnrollmentCheck::new(
+            name,
+            DoctorMeshAutoEnrollmentCheckStatus::Ok,
+            ok_message,
+            vec![DoctorMeshAutoEnrollmentEvidence::new(
+                "peerCount",
+                count.to_string(),
+            )],
+            None,
+        )
+    } else {
+        DoctorMeshAutoEnrollmentCheck::new(
+            name,
+            DoctorMeshAutoEnrollmentCheckStatus::Warning,
+            fail_message,
+            vec![DoctorMeshAutoEnrollmentEvidence::new("peerCount", "0")],
+            Some(fix_action_id),
+        )
+    }
+}
+
+fn doctor_mesh_auto_enrollment_posture(summary: &DoctorMeshAutoEnrollmentSummary) -> &'static str {
+    if summary.total == summary.skipped {
+        "skipped"
+    } else if summary.fail > 0 {
+        "fail"
+    } else if summary.warning > 0 {
+        "warning"
+    } else {
+        "ok"
+    }
+}
+
+fn doctor_mesh_auto_enrollment_degraded(
+    checks: &[DoctorMeshAutoEnrollmentCheck],
+) -> Vec<DoctorMeshAutoEnrollmentDegradation> {
+    checks
+        .iter()
+        .filter(|check| check.status.needs_attention())
+        .map(|check| DoctorMeshAutoEnrollmentDegradation {
+            code: check.name,
+            severity: check.status.as_str(),
+            message: check.message.clone(),
+            repair: check
+                .fix_action_id
+                .as_ref()
+                .map(|id| format!("Run action graph step `{id}`.")),
+        })
+        .collect()
+}
+
+fn doctor_mesh_auto_enrollment_action_graph(
+    workspace_path: &str,
+    checks: &[DoctorMeshAutoEnrollmentCheck],
+) -> RepairActionGraph {
+    let mut required: BTreeSet<String> = checks
+        .iter()
+        .filter_map(|check| check.fix_action_id.clone())
+        .collect();
+    if required.is_empty() {
+        return empty_doctor_repair_action_graph();
+    }
+
+    close_action_dependencies(&mut required);
+
+    let actions = required
+        .iter()
+        .filter_map(|id| doctor_mesh_auto_enrollment_action(id, workspace_path, &required))
+        .collect();
+    build_repair_action_graph(actions).unwrap_or_else(|error| {
+        tracing::warn!(
+            error = %error,
+            "doctor mesh auto-enrollment built an invalid repair action graph"
+        );
+        empty_doctor_repair_action_graph()
+    })
+}
+
+fn close_action_dependencies(required: &mut BTreeSet<String>) {
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let current: Vec<String> = required.iter().cloned().collect();
+        for id in current {
+            let deps = match id.as_str() {
+                "tailscale_up" => vec!["tailscale_install"],
+                "tailscale_disable_shields_up" => vec!["tailscale_up"],
+                "ee_daemon_start" => vec!["tailscale_up", "tailscale_disable_shields_up"],
+                "ee_mesh_discovery_refresh" => vec!["tailscale_up", "ee_daemon_start"],
+                "ee_mesh_auto_enroll" => {
+                    vec!["ee_mesh_discovery_refresh", "ee_daemon_start"]
+                }
+                "ee_mcp_parity_check" => vec!["ee_mesh_auto_enroll"],
+                _ => Vec::new(),
+            };
+            for dep in deps {
+                changed |= required.insert(dep.to_owned());
+            }
+        }
+    }
+}
+
+fn empty_doctor_repair_action_graph() -> RepairActionGraph {
+    RepairActionGraph {
+        schema: REPAIR_ACTION_GRAPH_SCHEMA_V1.to_owned(),
+        actions: Vec::new(),
+        topologically_ordered_execution: Vec::new(),
+        parallelizable_groups: Vec::new(),
+        estimated_total_duration_seconds: 0,
+    }
+}
+
+fn doctor_mesh_auto_enrollment_action(
+    id: &str,
+    workspace_path: &str,
+    required: &BTreeSet<String>,
+) -> Option<RepairAction> {
+    let present_deps = |deps: &[&str]| -> Vec<String> {
+        deps.iter()
+            .filter(|dep| required.contains(*dep))
+            .map(|dep| (*dep).to_owned())
+            .collect()
+    };
+
+    let action = match id {
+        "tailscale_install" => RepairAction {
+            id: id.to_owned(),
+            kind: ActionKind::ExternalTool,
+            command: "Install Tailscale from https://tailscale.com/download".to_owned(),
+            human_readable: "Install the Tailscale client on this host.".to_owned(),
+            prerequisites: Vec::new(),
+            expected_outcome: ExpectedOutcome {
+                resolves_checks: vec![
+                    "tailscale_installed".to_owned(),
+                    "tailscale_binary_authentic".to_owned(),
+                ],
+                preconditions_for_next_actions: Vec::new(),
+            },
+            priority: Priority::Critical,
+            estimated_duration_seconds: 180,
+            reversible: false,
+            reversal_command: None,
+            requires_user_confirmation: true,
+            execution_context: ExecutionContext::ExternalTool,
+        },
+        "tailscale_up" => RepairAction {
+            id: id.to_owned(),
+            kind: ActionKind::ShellCommand,
+            command: "tailscale up".to_owned(),
+            human_readable: "Authenticate this host with Tailscale.".to_owned(),
+            prerequisites: present_deps(&["tailscale_install"]),
+            expected_outcome: ExpectedOutcome {
+                resolves_checks: vec![
+                    "tailscale_daemon_running".to_owned(),
+                    "tailscale_authenticated".to_owned(),
+                ],
+                preconditions_for_next_actions: Vec::new(),
+            },
+            priority: Priority::Critical,
+            estimated_duration_seconds: 60,
+            reversible: false,
+            reversal_command: None,
+            requires_user_confirmation: true,
+            execution_context: ExecutionContext::UserShell,
+        },
+        "tailscale_disable_shields_up" => RepairAction {
+            id: id.to_owned(),
+            kind: ActionKind::ShellCommand,
+            command: "tailscale set --shields-up=false".to_owned(),
+            human_readable: "Allow trusted peers to initiate Tailscale discovery.".to_owned(),
+            prerequisites: present_deps(&["tailscale_up"]),
+            expected_outcome: ExpectedOutcome {
+                resolves_checks: vec!["tailscale_shields_not_up".to_owned()],
+                preconditions_for_next_actions: Vec::new(),
+            },
+            priority: Priority::High,
+            estimated_duration_seconds: 5,
+            reversible: true,
+            reversal_command: Some("tailscale set --shields-up=true".to_owned()),
+            requires_user_confirmation: false,
+            execution_context: ExecutionContext::UserShell,
+        },
+        "ee_daemon_start" => RepairAction {
+            id: id.to_owned(),
+            kind: ActionKind::EeSubcommand,
+            command: format!("ee daemon --foreground --workspace \"{workspace_path}\""),
+            human_readable: "Start the foreground ee daemon and hello responder.".to_owned(),
+            prerequisites: present_deps(&["tailscale_up", "tailscale_disable_shields_up"]),
+            expected_outcome: ExpectedOutcome {
+                resolves_checks: vec!["hello_responder_running".to_owned()],
+                preconditions_for_next_actions: Vec::new(),
+            },
+            priority: Priority::High,
+            estimated_duration_seconds: 10,
+            reversible: true,
+            reversal_command: Some("Stop the foreground daemon with Ctrl-C.".to_owned()),
+            requires_user_confirmation: false,
+            execution_context: ExecutionContext::EeSubcommand,
+        },
+        "inspect_hello_responder_audit" => RepairAction {
+            id: id.to_owned(),
+            kind: ActionKind::EeSubcommand,
+            command: format!(
+                "ee audit timeline --workspace \"{workspace_path}\" --event-type mesh.hello_responder_crashed_restarted --json"
+            ),
+            human_readable: "Inspect hello-responder restart audit rows.".to_owned(),
+            prerequisites: Vec::new(),
+            expected_outcome: ExpectedOutcome {
+                resolves_checks: vec!["hello_responder_no_crash_loop".to_owned()],
+                preconditions_for_next_actions: Vec::new(),
+            },
+            priority: Priority::High,
+            estimated_duration_seconds: 15,
+            reversible: true,
+            reversal_command: None,
+            requires_user_confirmation: false,
+            execution_context: ExecutionContext::EeSubcommand,
+        },
+        "ee_mesh_discovery_refresh" => RepairAction {
+            id: id.to_owned(),
+            kind: ActionKind::EeSubcommand,
+            command: format!("ee mesh status --workspace \"{workspace_path}\" --json"),
+            human_readable: "Refresh the read-only mesh discovery posture.".to_owned(),
+            prerequisites: present_deps(&["tailscale_up", "ee_daemon_start"]),
+            expected_outcome: ExpectedOutcome {
+                resolves_checks: vec![
+                    "discovery_returns_at_least_one_peer".to_owned(),
+                    "discovery_cache_not_stale_beyond_workspace".to_owned(),
+                ],
+                preconditions_for_next_actions: Vec::new(),
+            },
+            priority: Priority::Medium,
+            estimated_duration_seconds: 5,
+            reversible: true,
+            reversal_command: None,
+            requires_user_confirmation: false,
+            execution_context: ExecutionContext::EeSubcommand,
+        },
+        "inspect_auto_enrollment_audit" => RepairAction {
+            id: id.to_owned(),
+            kind: ActionKind::EeSubcommand,
+            command: format!("ee audit verify --workspace \"{workspace_path}\" --json"),
+            human_readable: "Verify the auto-enrollment audit chain.".to_owned(),
+            prerequisites: Vec::new(),
+            expected_outcome: ExpectedOutcome {
+                resolves_checks: vec!["auto_enrollment_audit_chain_intact".to_owned()],
+                preconditions_for_next_actions: Vec::new(),
+            },
+            priority: Priority::High,
+            estimated_duration_seconds: 20,
+            reversible: true,
+            reversal_command: None,
+            requires_user_confirmation: false,
+            execution_context: ExecutionContext::EeSubcommand,
+        },
+        "inspect_steward_failures" => RepairAction {
+            id: id.to_owned(),
+            kind: ActionKind::EeSubcommand,
+            command: format!(
+                "ee audit timeline --workspace \"{workspace_path}\" --event-type mesh.steward_reconciliation_failed --json"
+            ),
+            human_readable: "Inspect recent steward reconciliation failures.".to_owned(),
+            prerequisites: Vec::new(),
+            expected_outcome: ExpectedOutcome {
+                resolves_checks: vec!["auto_enrollment_no_consecutive_failures".to_owned()],
+                preconditions_for_next_actions: Vec::new(),
+            },
+            priority: Priority::Medium,
+            estimated_duration_seconds: 15,
+            reversible: true,
+            reversal_command: None,
+            requires_user_confirmation: false,
+            execution_context: ExecutionContext::EeSubcommand,
+        },
+        "inspect_steward_state" => RepairAction {
+            id: id.to_owned(),
+            kind: ActionKind::ManualStep,
+            command: "Inspect ~/.local/share/ee/steward/auto_enroll_state.json".to_owned(),
+            human_readable: "Inspect the local auto-enrollment steward state file.".to_owned(),
+            prerequisites: Vec::new(),
+            expected_outcome: ExpectedOutcome {
+                resolves_checks: vec!["steward_state_file_readable".to_owned()],
+                preconditions_for_next_actions: Vec::new(),
+            },
+            priority: Priority::Medium,
+            estimated_duration_seconds: 30,
+            reversible: true,
+            reversal_command: None,
+            requires_user_confirmation: false,
+            execution_context: ExecutionContext::ExternalTool,
+        },
+        "ee_mesh_auto_enroll" => RepairAction {
+            id: id.to_owned(),
+            kind: ActionKind::EeSubcommand,
+            command: format!("ee mesh auto-enroll --workspace \"{workspace_path}\""),
+            human_readable: "Materialize discovered ee-capable peers into the mesh peer set."
+                .to_owned(),
+            prerequisites: present_deps(&[
+                "ee_mesh_discovery_refresh",
+                "ee_daemon_start",
+                "ee_mesh_disable",
+            ]),
+            expected_outcome: ExpectedOutcome {
+                resolves_checks: vec!["materialized_peer_group_consistent".to_owned()],
+                preconditions_for_next_actions: Vec::new(),
+            },
+            priority: Priority::Medium,
+            estimated_duration_seconds: 5,
+            reversible: true,
+            reversal_command: Some(format!(
+                "ee mesh disable --workspace \"{workspace_path}\" --reason \"revert auto-enrollment\""
+            )),
+            requires_user_confirmation: false,
+            execution_context: ExecutionContext::EeSubcommand,
+        },
+        "ee_mesh_disable" => RepairAction {
+            id: id.to_owned(),
+            kind: ActionKind::EeSubcommand,
+            command: format!(
+                "ee mesh disable --workspace \"{workspace_path}\" --reason \"reset inconsistent auto-enrollment\""
+            ),
+            human_readable: "Disable stale materialized mesh configuration before re-enrolling."
+                .to_owned(),
+            prerequisites: Vec::new(),
+            expected_outcome: ExpectedOutcome {
+                resolves_checks: vec!["materialized_peer_group_consistent".to_owned()],
+                preconditions_for_next_actions: Vec::new(),
+            },
+            priority: Priority::High,
+            estimated_duration_seconds: 5,
+            reversible: false,
+            reversal_command: None,
+            requires_user_confirmation: true,
+            execution_context: ExecutionContext::EeSubcommand,
+        },
+        "ee_mcp_parity_check" => RepairAction {
+            id: id.to_owned(),
+            kind: ActionKind::EeSubcommand,
+            command: "ee mcp manifest --json".to_owned(),
+            human_readable: "Inspect MCP manifest coverage for mesh auto-enrollment surfaces."
+                .to_owned(),
+            prerequisites: present_deps(&["ee_mesh_auto_enroll"]),
+            expected_outcome: ExpectedOutcome {
+                resolves_checks: vec!["mcp_parity_present".to_owned()],
+                preconditions_for_next_actions: Vec::new(),
+            },
+            priority: Priority::Low,
+            estimated_duration_seconds: 5,
+            reversible: true,
+            reversal_command: None,
+            requires_user_confirmation: false,
+            execution_context: ExecutionContext::EeSubcommand,
+        },
+        _ => return None,
+    };
+
+    Some(action)
 }
 
 fn gather_qos_posture(workspace_path: Option<&Path>) -> QosLaneSummary {
@@ -2022,6 +3082,249 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn mesh_auto_enrollment_problem_probe() -> DoctorMeshAutoEnrollmentProbe {
+        DoctorMeshAutoEnrollmentProbe {
+            workspace_path: "/tmp/ee-doctor-mesh".to_owned(),
+            mesh_enabled: true,
+            mesh_enabled_source: "test",
+            tailscale: Some(TailscaleLocalReport {
+                schema: "ee.tailscale.local.v1",
+                installed: false,
+                daemon_reachable: false,
+                authenticated: false,
+                binary_authentic: false,
+                binary_version_raw: None,
+                binary_absolute_path: None,
+                shields_up: Some(true),
+                tailnet_id: None,
+                tailnet_display_name: None,
+                self_node_key: None,
+                self_tailscale_ip: None,
+                self_magic_dns_name: None,
+                self_advertised_tags: Vec::new(),
+                peers: Vec::new(),
+                version: None,
+                probe_method: crate::core::tailscale_probe::TailscaleProbeMethod::Cli,
+                probe_elapsed_ms: 10,
+                platform: TailscalePlatform::MacosOpen,
+                degradations: Vec::new(),
+            }),
+            hello_responder: Some(HelloResponderStatusReport {
+                schema: "ee.mesh.hello_responder.status.v1",
+                running: false,
+                listen_address: None,
+                accepted_requests_1h: 0,
+                denied_requests_1h: 0,
+                rate_limited_requests_1h: 0,
+                last_request_at: None,
+                last_restart_at: None,
+                crash_count_24h: 3,
+                degraded: Vec::new(),
+            }),
+            audit_chain_intact: Some(false),
+            steward_consecutive_failures_24h: Some(2),
+            steward_state_file_readable: Some(false),
+            discovery_cache_stale_beyond_workspace: Some(true),
+            materialized_peer_group_count: 0,
+            materialized_peer_count: 0,
+            materialized_peer_group_consistent: Some(false),
+            mcp_parity_present: Some(false),
+        }
+    }
+
+    fn mesh_auto_enrollment_disabled_probe() -> DoctorMeshAutoEnrollmentProbe {
+        DoctorMeshAutoEnrollmentProbe {
+            workspace_path: "/tmp/ee-doctor-mesh".to_owned(),
+            mesh_enabled: false,
+            mesh_enabled_source: "default",
+            tailscale: None,
+            hello_responder: None,
+            audit_chain_intact: None,
+            steward_consecutive_failures_24h: None,
+            steward_state_file_readable: None,
+            discovery_cache_stale_beyond_workspace: None,
+            materialized_peer_group_count: 0,
+            materialized_peer_count: 0,
+            materialized_peer_group_consistent: None,
+            mcp_parity_present: None,
+        }
+    }
+
+    #[test]
+    fn doctor_mesh_auto_enrollment_returns_skipped_when_mesh_disabled() -> TestResult {
+        let report =
+            DoctorMeshAutoEnrollmentReport::from_probe(&mesh_auto_enrollment_disabled_probe());
+
+        ensure(report.enabled, false, "mesh disabled")?;
+        ensure(report.checks.len(), 15, "all readiness checks emitted")?;
+        ensure(
+            report
+                .checks
+                .iter()
+                .all(|check| check.status == DoctorMeshAutoEnrollmentCheckStatus::Skipped),
+            true,
+            "all readiness checks are skipped",
+        )?;
+        ensure(
+            report.action_graph.actions.is_empty(),
+            true,
+            "disabled mesh emits no repair actions",
+        )?;
+        ensure(report.categorized_summary.skipped, 15, "skipped count")
+    }
+
+    #[test]
+    fn doctor_mesh_action_graph_schema_reuses_shared_repair_action_graph_v1() -> TestResult {
+        let report =
+            DoctorMeshAutoEnrollmentReport::from_probe(&mesh_auto_enrollment_problem_probe());
+
+        ensure(
+            report.action_graph.schema.as_str(),
+            REPAIR_ACTION_GRAPH_SCHEMA_V1,
+            "action graph schema",
+        )
+    }
+
+    #[test]
+    fn doctor_mesh_action_graph_orders_dependencies_topologically() -> TestResult {
+        let report =
+            DoctorMeshAutoEnrollmentReport::from_probe(&mesh_auto_enrollment_problem_probe());
+        let order = &report.action_graph.topologically_ordered_execution;
+        let position = |id: &str| {
+            order
+                .iter()
+                .position(|candidate| candidate == id)
+                .ok_or_else(|| format!("missing action {id}"))
+        };
+
+        ensure(
+            position("tailscale_install")? < position("tailscale_up")?,
+            true,
+            "tailscale install precedes tailscale up",
+        )?;
+        ensure(
+            position("tailscale_up")? < position("ee_daemon_start")?,
+            true,
+            "tailscale up precedes daemon start",
+        )?;
+        ensure(
+            position("ee_daemon_start")? < position("ee_mesh_auto_enroll")?,
+            true,
+            "daemon start precedes auto-enroll",
+        )
+    }
+
+    #[test]
+    fn doctor_mesh_action_graph_groups_independent_actions_for_parallel_execution() -> TestResult {
+        let report =
+            DoctorMeshAutoEnrollmentReport::from_probe(&mesh_auto_enrollment_problem_probe());
+        let first_group = report
+            .action_graph
+            .parallelizable_groups
+            .first()
+            .ok_or_else(|| "expected at least one parallel group".to_owned())?;
+
+        ensure(
+            first_group.contains(&"inspect_auto_enrollment_audit".to_owned())
+                && first_group.contains(&"inspect_steward_state".to_owned()),
+            true,
+            "independent inspection actions share first group",
+        )?;
+        ensure(
+            first_group.len() > 1,
+            true,
+            "first group has parallel actions",
+        )
+    }
+
+    #[test]
+    fn doctor_mesh_action_graph_estimates_action_and_total_duration() -> TestResult {
+        let report =
+            DoctorMeshAutoEnrollmentReport::from_probe(&mesh_auto_enrollment_problem_probe());
+        let sum = report
+            .action_graph
+            .actions
+            .iter()
+            .map(|action| u64::from(action.estimated_duration_seconds))
+            .sum::<u64>();
+
+        ensure(
+            report.action_graph.estimated_total_duration_seconds,
+            sum,
+            "total duration sums actions",
+        )?;
+        ensure(sum > 0, true, "duration is non-zero")
+    }
+
+    #[test]
+    fn doctor_mesh_action_graph_distinguishes_action_kinds() -> TestResult {
+        let report =
+            DoctorMeshAutoEnrollmentReport::from_probe(&mesh_auto_enrollment_problem_probe());
+        let kinds = report
+            .action_graph
+            .actions
+            .iter()
+            .map(|action| action.kind.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        ensure(
+            kinds.contains("shell_command"),
+            true,
+            "shell command action",
+        )?;
+        ensure(
+            kinds.contains("ee_subcommand"),
+            true,
+            "ee subcommand action",
+        )?;
+        ensure(
+            kinds.contains("external_tool"),
+            true,
+            "external tool action",
+        )?;
+        ensure(kinds.contains("manual_step"), true, "manual step action")
+    }
+
+    #[test]
+    fn doctor_mesh_action_graph_marks_reversible_and_destructive_actions() -> TestResult {
+        let report =
+            DoctorMeshAutoEnrollmentReport::from_probe(&mesh_auto_enrollment_problem_probe());
+        let disable = report
+            .action_graph
+            .actions
+            .iter()
+            .find(|action| action.id == "ee_mesh_disable")
+            .ok_or_else(|| "ee_mesh_disable action missing".to_owned())?;
+        let daemon = report
+            .action_graph
+            .actions
+            .iter()
+            .find(|action| action.id == "ee_daemon_start")
+            .ok_or_else(|| "ee_daemon_start action missing".to_owned())?;
+
+        ensure(disable.reversible, false, "mesh disable is not reversible")?;
+        ensure(
+            disable.requires_user_confirmation,
+            true,
+            "mesh disable requires confirmation",
+        )?;
+        ensure(daemon.reversible, true, "daemon start is reversible")
+    }
+
+    #[test]
+    fn doctor_mesh_categorized_summary_matches_individual_checks() -> TestResult {
+        let report =
+            DoctorMeshAutoEnrollmentReport::from_probe(&mesh_auto_enrollment_problem_probe());
+        let recomputed = DoctorMeshAutoEnrollmentSummary::from_checks(&report.checks);
+
+        ensure(
+            report.categorized_summary,
+            recomputed,
+            "summary matches checks",
+        )?;
+        ensure(report.categorized_summary.total, 15, "summary total")
     }
 
     #[test]

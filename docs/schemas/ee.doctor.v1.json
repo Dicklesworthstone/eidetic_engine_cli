@@ -12,7 +12,7 @@
     "fields": {"type": "string"},
     "data": {
       "type": "object",
-      "required": ["command", "version", "posture", "healthy", "singleFlight", "qos", "rchWorkerPressure", "checks"],
+      "required": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "meshAutoEnrollment", "checks"],
       "additionalProperties": false,
       "properties": {
         "command": {"type": "string", "const": "doctor"},
@@ -20,8 +20,10 @@
         "posture": {"type": "string"},
         "healthy": {"type": "boolean"},
         "singleFlight": {"$ref": "#/$defs/singleFlightPosture"},
+        "flightRecorder": {"type": "object", "additionalProperties": true},
         "qos": {"$ref": "#/$defs/qosStatus"},
         "rchWorkerPressure": {"$ref": "#/$defs/rchWorkerPressure"},
+        "meshAutoEnrollment": {"$ref": "#/$defs/meshAutoEnrollment"},
         "checks": {
           "type": "array",
           "items": {
@@ -31,7 +33,9 @@
             "properties": {
               "name": {"type": "string"},
               "severity": {"type": "string", "enum": ["ok", "warning", "error"]},
-              "message": {"type": "string"}
+              "message": {"type": "string"},
+              "errorCode": {"type": "string"},
+              "repair": {"type": "string"}
             }
           }
         }
@@ -40,8 +44,8 @@
   },
   "field_presets": {
     "minimal": ["command", "version", "posture", "healthy"],
-    "summary": ["command", "version", "posture", "healthy", "singleFlight", "qos", "rchWorkerPressure"],
-    "standard": ["command", "version", "posture", "healthy", "singleFlight", "qos", "rchWorkerPressure", "checks"],
+    "summary": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "meshAutoEnrollment"],
+    "standard": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "meshAutoEnrollment", "checks"],
     "full": ["*"]
   },
   "$defs": {
@@ -229,6 +233,111 @@
         "freeRatioBps": {"type": ["integer", "null"], "minimum": 0},
         "telemetryFreshness": {"type": "string"},
         "admissionImpact": {"type": "string"}
+      }
+    },
+    "meshAutoEnrollment": {
+      "type": "object",
+      "required": [
+        "schema",
+        "enabled",
+        "posture",
+        "workspacePath",
+        "tailscale",
+        "helloResponder",
+        "discoveryCache",
+        "materializedConfig",
+        "driftPosture",
+        "checks",
+        "categorizedSummary",
+        "actionGraph",
+        "degraded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.doctor.mesh_auto_enrollment.v1"},
+        "enabled": {"type": "boolean"},
+        "posture": {"type": "string", "enum": ["ok", "warning", "fail", "skipped"]},
+        "workspacePath": {"type": "string"},
+        "tailscale": {"type": "object", "additionalProperties": true},
+        "helloResponder": {"type": "object", "additionalProperties": true},
+        "discoveryCache": {"type": "object", "additionalProperties": true},
+        "materializedConfig": {"type": "object", "additionalProperties": true},
+        "driftPosture": {"type": "object", "additionalProperties": true},
+        "checks": {
+          "type": "array",
+          "minItems": 15,
+          "items": {"$ref": "#/$defs/meshAutoEnrollmentCheck"}
+        },
+        "categorizedSummary": {
+          "type": "object",
+          "required": ["ok", "warning", "fail", "skipped", "total"],
+          "additionalProperties": false,
+          "properties": {
+            "ok": {"type": "integer", "minimum": 0},
+            "warning": {"type": "integer", "minimum": 0},
+            "fail": {"type": "integer", "minimum": 0},
+            "skipped": {"type": "integer", "minimum": 0},
+            "total": {"type": "integer", "minimum": 15}
+          }
+        },
+        "actionGraph": {"$ref": "#/$defs/repairActionGraph"},
+        "degraded": {
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": true}
+        }
+      }
+    },
+    "meshAutoEnrollmentCheck": {
+      "type": "object",
+      "required": ["name", "status", "message", "evidence", "fixActionId"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "status": {"type": "string", "enum": ["ok", "warning", "fail", "skipped"]},
+        "message": {"type": "string"},
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["key", "value"],
+            "additionalProperties": false,
+            "properties": {
+              "key": {"type": "string"},
+              "value": {"type": "string"}
+            }
+          }
+        },
+        "fixActionId": {"type": ["string", "null"]}
+      }
+    },
+    "repairActionGraph": {
+      "type": "object",
+      "required": [
+        "schema",
+        "actions",
+        "topologicallyOrderedExecution",
+        "parallelizableGroups",
+        "estimatedTotalDurationSeconds"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.repair_action_graph.v1"},
+        "actions": {
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": true}
+        },
+        "topologicallyOrderedExecution": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "parallelizableGroups": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        },
+        "estimatedTotalDurationSeconds": {"type": "integer", "minimum": 0}
       }
     }
   }

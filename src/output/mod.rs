@@ -19,9 +19,10 @@ use crate::core::degraded_aggregation::{
 };
 use crate::core::doctor::{
     DependencyBlockedFeature, DependencyContractEntry, DependencyDiagnosticsReport,
-    DependencyFeatureProfile, DependencyOptionalFeatureProfile, DependencySource, DoctorReport,
-    FixPlan, FrankenDependencyHealth, FrankenHealthReport, IntegrityCanaryReport,
-    IntegrityDiagnosticCheck, IntegrityDiagnosticDegradation, IntegrityDiagnosticsReport,
+    DependencyFeatureProfile, DependencyOptionalFeatureProfile, DependencySource,
+    DoctorMeshAutoEnrollmentReport, DoctorReport, FixPlan, FrankenDependencyHealth,
+    FrankenHealthReport, IntegrityCanaryReport, IntegrityDiagnosticCheck,
+    IntegrityDiagnosticDegradation, IntegrityDiagnosticsReport,
 };
 use crate::core::health::{HealthReport, StructuralHealthDegradation, StructuralHealthReport};
 use crate::core::memory::{
@@ -4439,6 +4440,7 @@ pub fn render_status_toon_filtered(report: &StatusReport, profile: FieldProfile)
 #[must_use]
 pub fn render_doctor_json(report: &DoctorReport) -> String {
     let mut b = JsonBuilder::with_capacity(512);
+    let mesh_auto_enrollment = render_doctor_mesh_auto_enrollment_json();
     b.field_str("schema", RESPONSE_SCHEMA_V1);
     // bd-2xdom Gap 4: envelope `success` means "command ran", not "system is healthy".
     // System state is in `data.posture` (canonical, 5-state enum) and `data.healthy`
@@ -4455,6 +4457,7 @@ pub fn render_doctor_json(report: &DoctorReport) -> String {
         render_flight_recorder_status_json(d, &report.flight_recorder);
         render_qos_status_json(d, &report.qos_posture, false);
         render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
+        d.field_raw("meshAutoEnrollment", &mesh_auto_enrollment);
         d.field_array_of_objects("checks", &report.checks, |obj, check| {
             obj.field_str("name", check.name);
             obj.field_str("severity", check.severity.as_str());
@@ -4474,6 +4477,9 @@ pub fn render_doctor_json(report: &DoctorReport) -> String {
 #[must_use]
 pub fn render_doctor_human(report: &DoctorReport) -> String {
     let mut output = String::from("ee doctor\n\n");
+    let mesh_auto_enrollment = DoctorMeshAutoEnrollmentReport::gather(
+        crate::core::status::default_workspace_path().as_deref(),
+    );
 
     for check in &report.checks {
         let icon = match check.severity {
@@ -4521,6 +4527,15 @@ pub fn render_doctor_human(report: &DoctorReport) -> String {
         report.rch_worker_pressure.stale_worker_count,
         report.rch_worker_pressure.unknown_worker_count
     ));
+    output.push_str(&format!(
+        "mesh auto-enrollment: {} (ok: {}, warning: {}, fail: {}, skipped: {}, actions: {})\n",
+        mesh_auto_enrollment.posture,
+        mesh_auto_enrollment.categorized_summary.ok,
+        mesh_auto_enrollment.categorized_summary.warning,
+        mesh_auto_enrollment.categorized_summary.fail,
+        mesh_auto_enrollment.categorized_summary.skipped,
+        mesh_auto_enrollment.action_graph.actions.len()
+    ));
 
     if report.overall_healthy {
         output.push_str("\nAll checks passed.\n");
@@ -4529,6 +4544,17 @@ pub fn render_doctor_human(report: &DoctorReport) -> String {
     }
 
     output
+}
+
+fn render_doctor_mesh_auto_enrollment_json() -> String {
+    let workspace_path = crate::core::status::default_workspace_path();
+    let report = DoctorMeshAutoEnrollmentReport::gather(workspace_path.as_deref());
+    serde_json::to_string(&report).unwrap_or_else(|_| {
+        format!(
+            "{{\"schema\":\"{}\",\"enabled\":false,\"posture\":\"skipped\",\"workspacePath\":\".\",\"checks\":[],\"categorizedSummary\":{{\"ok\":0,\"warning\":0,\"fail\":0,\"skipped\":0,\"total\":0}},\"actionGraph\":{{\"schema\":\"ee.repair_action_graph.v1\",\"actions\":[],\"topologicallyOrderedExecution\":[],\"parallelizableGroups\":[],\"estimatedTotalDurationSeconds\":0}},\"degraded\":[]}}",
+            crate::core::doctor::DOCTOR_MESH_AUTO_ENROLLMENT_SCHEMA_V1
+        )
+    })
 }
 
 /// Render a doctor report as TOON.
@@ -10767,6 +10793,11 @@ pub fn render_capabilities_json_filtered(
 #[must_use]
 pub fn render_doctor_json_filtered(report: &DoctorReport, profile: FieldProfile) -> String {
     let mut b = JsonBuilder::with_capacity(512);
+    let mesh_auto_enrollment = if profile.include_summary_metrics() {
+        Some(render_doctor_mesh_auto_enrollment_json())
+    } else {
+        None
+    };
     b.field_str("schema", RESPONSE_SCHEMA_V1);
     // bd-2xdom Gap 4: envelope `success` means "command ran", not "system is healthy".
     // System state is in `data.posture` (canonical) and `data.healthy` (deprecated alias).
@@ -10784,6 +10815,9 @@ pub fn render_doctor_json_filtered(report: &DoctorReport, profile: FieldProfile)
             render_flight_recorder_status_json(d, &report.flight_recorder);
             render_qos_status_json(d, &report.qos_posture, profile.include_verbose_details());
             render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
+            if let Some(mesh_auto_enrollment) = mesh_auto_enrollment.as_deref() {
+                d.field_raw("meshAutoEnrollment", mesh_auto_enrollment);
+            }
         }
 
         if profile.include_arrays() {
@@ -17624,6 +17658,33 @@ mod tests {
             &pressure["workers"][0]["reasonCode"],
             &serde_json::json!("disk_pressure_critical"),
             "rch worker pressure reason code",
+        )
+    }
+
+    #[test]
+    fn render_doctor_json_exposes_mesh_auto_enrollment_checks() -> TestResult {
+        let report = DoctorReport::gather();
+        let json = render_doctor_json_filtered(&report, FieldProfile::Standard);
+        let value = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("doctor JSON should parse: {error}"))?;
+        let mesh = value
+            .pointer("/data/meshAutoEnrollment")
+            .ok_or_else(|| "doctor JSON has data.meshAutoEnrollment object".to_string())?;
+
+        ensure_equal(
+            &mesh["schema"],
+            &serde_json::json!("ee.doctor.mesh_auto_enrollment.v1"),
+            "mesh auto-enrollment schema",
+        )?;
+        ensure_equal(
+            &mesh["actionGraph"]["schema"],
+            &serde_json::json!("ee.repair_action_graph.v1"),
+            "mesh auto-enrollment action graph schema",
+        )?;
+        ensure_equal(
+            &mesh["checks"].as_array().map(Vec::len),
+            &Some(15),
+            "mesh auto-enrollment check count",
         )
     }
 
