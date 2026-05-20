@@ -366,7 +366,9 @@ print_detected_agents() {
   local count=${#DETECTED_AGENTS[@]}
   local plural=""; [[ $count -gt 1 ]] && plural="s"
 
-  local render
+  # Inner helper. `local` cannot scope a function definition in bash, so
+  # `render` is defined globally; defining it here keeps it co-located with
+  # its only caller below.
   render() {
     local label="$1" ver="$2"
     local v=""
@@ -581,8 +583,12 @@ check_installed_version() {
   local target="$1"
   [ -x "$DEST/$BINARY" ] || return 1
   local installed
+  # BSD sed (macOS) treats `\+` as literal `+`, not the GNU "one or more"
+  # quantifier — so the prior regex silently failed to match on macOS,
+  # making check_installed_version always return 1 (broken short-circuit,
+  # benign re-install). Use portable POSIX BRE: `[[:space:]][[:space:]]*`.
   installed=$("$DEST/$BINARY" --version 2>/dev/null | head -1 \
-    | sed -n -e 's/.*ee[[:space:]]\+v\{0,1\}\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' \
+    | sed -n -e 's/.*ee[[:space:]][[:space:]]*v\{0,1\}\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' \
              -e 's/^[[:space:]]*v\{0,1\}\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)[[:space:]]*$/\1/p' \
     | head -1)
   [ -z "$installed" ] && return 1
@@ -600,19 +606,23 @@ maybe_add_path() {
     *:"$DEST":*) return 0 ;;
     *)
       if [ "$EASY" -eq 1 ]; then
-        local updated=0
+        local appended=0
+        local rc_existed=0
         for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
           if [ -e "$rc" ] && [ -w "$rc" ]; then
+            rc_existed=1
             if ! grep -F "$DEST" "$rc" >/dev/null 2>&1; then
               echo "export PATH=\"$DEST:\$PATH\"" >> "$rc"
+              appended=1
             fi
-            updated=1
           fi
         done
-        if [ "$updated" -eq 1 ]; then
+        if [ "$appended" -eq 1 ]; then
           warn "PATH updated in ~/.zshrc/.bashrc — restart your shell to use $BINARY"
+        elif [ "$rc_existed" -eq 1 ]; then
+          info "PATH already configured in ~/.zshrc/.bashrc — restart your shell to use $BINARY"
         else
-          warn "Add $DEST to PATH to use $BINARY"
+          warn "Add $DEST to PATH to use $BINARY (no writable ~/.zshrc or ~/.bashrc found)"
         fi
       else
         warn "Add $DEST to PATH to use $BINARY (or re-run with --easy-mode to auto-update)"
@@ -744,7 +754,11 @@ ensure_rust() {
   fi
   if [ "$EASY" -ne 1 ] && [ -t 0 ]; then
     echo -n "ee requires Rust nightly. Install via rustup? (y/N): "
-    read -r ans
+    # `read` returns non-zero on EOF; under `set -e` that would terminate the
+    # script, so swallow the failure and let an empty answer fall through to
+    # the default-deny branch.
+    local ans=""
+    read -r ans || ans=""
     case "$ans" in y|Y|yes|Yes) :;; *) warn "Skipping rustup install"; return 0;; esac
   fi
   info "Installing rustup (nightly toolchain)…"
@@ -870,7 +884,10 @@ else
         err "Use --no-verify only if you have an out-of-band reason to trust this artifact."
         exit 1
       fi
-      CHECKSUM=$(awk '{print $1}' "$TMP/checksum.sha256")
+      # `awk '{print $1}'` on a multi-line file would concatenate first
+      # fields and produce a string that never matches the actual SHA256.
+      # Pin to the first line so a multi-checksum file degrades gracefully.
+      CHECKSUM=$(awk 'NR==1{print $1; exit}' "$TMP/checksum.sha256")
       if [ -z "$CHECKSUM" ]; then
         err "Empty checksum file"
         exit 1

@@ -451,14 +451,18 @@ function Test-Sigstore {
         return
     }
     Write-Info "Verifying Sigstore signature..."
-    $args = @(
+    # `$args` is an automatic variable in PowerShell functions; shadowing it
+    # with a local assignment is legal but error-prone (e.g., under future
+    # CmdletBinding the auto-var would not exist). Use a distinct name and
+    # splat it explicitly.
+    $cosignArgs = @(
         "verify-blob",
         "--bundle", $BundlePath,
         "--certificate-identity-regexp", $Script:CosignIdentityRegexp,
         "--certificate-oidc-issuer",     $Script:CosignOidcIssuer,
         $TarballPath
     )
-    $output = & cosign @args 2>&1
+    $output = & cosign @cosignArgs 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-ErrorExit "Sigstore signature verification failed: $output"
     }
