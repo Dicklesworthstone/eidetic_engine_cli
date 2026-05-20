@@ -609,7 +609,7 @@ bd-21xbi; see `docs/architecture/lexical-ram-tier.md`.
 | `clustering_no_candidates` | info | bd-17c65.7.5 (G5) |
 | `clustering_no_embeddings` | info | bd-17c65.7.5 (G5) |
 
-#### Miscellaneous (15)
+#### Miscellaneous (16)
 | Code | Severity | Bead |
 |------|----------|------|
 | `action_override_not_actionable` | low | (TBD) |
@@ -619,6 +619,7 @@ bd-21xbi; see `docs/architecture/lexical-ram-tier.md`.
 | `fixture_tier_mismatch` | low | (TBD) |
 | `heavy_gates_skipped` | info | (TBD) |
 | `index_locked` | medium | bd-17c65.10.6 (J6) |
+| `lab_counterfactual_multi_swap_unsupported` | medium | bd-17c65.14.15.6 (N15.5) — multi-swap rejected by ADR 0028 |
 | `lab_replay_determinism_violation` | high | bd-17c65.14.15.5 (N15.4) — same-query replay hash differs from frozen capture |
 | `lab_replay_nondeterministic` | high | bd-17c65.14.15.5 (N15.4) — --verify-determinism replay runs diverged |
 | `lab_replay_unavailable` | medium | bd-17c65.14.15.5 (N15.4) — slated for retirement once N15 lands |

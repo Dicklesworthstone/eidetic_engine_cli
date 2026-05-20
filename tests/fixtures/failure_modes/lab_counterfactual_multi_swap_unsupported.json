@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "lab_counterfactual_multi_swap_unsupported",
+  "introduced_by": {
+    "bead": "bd-17c65.14.15.6",
+    "epic_letter": "N"
+  },
+  "surfaces": [
+    "lab counterfactual"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A lab counterfactual invocation supplies more than one single-input swap, which is rejected to preserve counterfactual interpretability.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee lab counterfactual EPISODE_ID --workspace . --swap query='new query' --swap config.profile=thorough --json"
+  },
+  "expected_emission": {
+    "code": "lab_counterfactual_multi_swap_unsupported",
+    "severity": "medium",
+    "message_contains": [
+      "multiple",
+      "swaps"
+    ],
+    "repair_contains": "separate counterfactual invocations"
+  }
+}

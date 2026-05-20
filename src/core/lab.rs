@@ -371,6 +371,9 @@ pub struct InterventionSpec {
     /// Revision resolution mode for memory swaps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swap_revision: Option<SwapRevisionMode>,
+    /// Explicit revision ID when `swap_revision` is `Explicit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap_revision_id: Option<String>,
     /// Hypothesis about expected effect.
     pub hypothesis: Option<String>,
 }
@@ -386,6 +389,7 @@ impl InterventionSpec {
             swap_target: None,
             swap_value: None,
             swap_revision: None,
+            swap_revision_id: None,
             hypothesis: None,
         }
     }
@@ -400,6 +404,7 @@ impl InterventionSpec {
             swap_target: None,
             swap_value: None,
             swap_revision: None,
+            swap_revision_id: None,
             hypothesis: None,
         }
     }
@@ -414,6 +419,7 @@ impl InterventionSpec {
             swap_target: None,
             swap_value: None,
             swap_revision: None,
+            swap_revision_id: None,
             hypothesis: None,
         }
     }
@@ -428,6 +434,7 @@ impl InterventionSpec {
             swap_target: None,
             swap_value: None,
             swap_revision: None,
+            swap_revision_id: None,
             hypothesis: None,
         }
     }
@@ -442,6 +449,7 @@ impl InterventionSpec {
             swap_target: None,
             swap_value: None,
             swap_revision: Some(SwapRevisionMode::AtCapture),
+            swap_revision_id: None,
             hypothesis: None,
         }
     }
@@ -456,6 +464,7 @@ impl InterventionSpec {
             swap_target: None,
             swap_value: Some("true".to_string()),
             swap_revision: Some(SwapRevisionMode::AtCapture),
+            swap_revision_id: None,
             hypothesis: None,
         }
     }
@@ -470,6 +479,7 @@ impl InterventionSpec {
             swap_target: Some(path.into()),
             swap_value: Some(value.into()),
             swap_revision: None,
+            swap_revision_id: None,
             hypothesis: None,
         }
     }
@@ -484,6 +494,7 @@ impl InterventionSpec {
             swap_target: Some("query".to_string()),
             swap_value: Some(query.into()),
             swap_revision: None,
+            swap_revision_id: None,
             hypothesis: None,
         }
     }
@@ -491,6 +502,24 @@ impl InterventionSpec {
     #[must_use]
     pub fn with_swap_revision(mut self, swap_revision: SwapRevisionMode) -> Self {
         self.swap_revision = Some(swap_revision);
+        if swap_revision != SwapRevisionMode::Explicit {
+            self.swap_revision_id = None;
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn with_swap_revision_target(
+        mut self,
+        swap_revision: SwapRevisionMode,
+        revision_id: Option<String>,
+    ) -> Self {
+        self.swap_revision = Some(swap_revision);
+        self.swap_revision_id = if swap_revision == SwapRevisionMode::Explicit {
+            revision_id
+        } else {
+            None
+        };
         self
     }
 
@@ -584,6 +613,8 @@ pub struct CounterfactualSwapSummary {
     pub target: String,
     pub value_hash: Option<String>,
     pub revision_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
 }
 
 /// Deterministic pack diff emitted for an N15.5 single-input swap.
@@ -1524,6 +1555,8 @@ fn counterfactual_pack_hash_input(
                 .unwrap_or_default(),
         );
         input.push(':');
+        input.push_str(intervention.swap_revision_id.as_deref().unwrap_or_default());
+        input.push(':');
         input.push_str(
             &intervention
                 .strength_delta
@@ -1547,6 +1580,7 @@ fn counterfactual_swap_summary(swap: &InterventionSpec) -> CounterfactualSwapSum
         target: counterfactual_swap_target(swap),
         value_hash: value,
         revision_mode: swap.swap_revision.unwrap_or_default().as_str().to_string(),
+        revision_id: swap.swap_revision_id.clone(),
     }
 }
 
@@ -1595,6 +1629,14 @@ fn counterfactual_pack_diff(
                 after: swap.swap_revision.unwrap_or_default().as_str().to_string(),
                 reason: "memory_swap_revision_resolution".to_string(),
             });
+            if let Some(revision_id) = &swap.swap_revision_id {
+                why_changes.push(CounterfactualDiffEntry {
+                    path: format!("why[{target}].revisionId"),
+                    before: "captured_snapshot_revision".to_string(),
+                    after: revision_id.clone(),
+                    reason: "explicit_memory_swap_revision_target".to_string(),
+                });
+            }
         }
         InterventionType::MemoryRemovedSwap => {
             excluded_changes.push(CounterfactualDiffEntry {
@@ -2331,9 +2373,27 @@ mod tests {
             "memory content swap revision mode",
         )?;
         ensure(
+            memory_swap.swap_revision_id.is_none(),
+            true,
+            "current revision mode has no explicit revision id",
+        )?;
+        ensure(
             memory_swap.is_single_input_swap(),
             true,
             "memory content swap is single-input swap",
+        )?;
+
+        let explicit = InterventionSpec::swap_memory_content("mem_release_rule", "run fmt")
+            .with_swap_revision_target(SwapRevisionMode::Explicit, Some("rev_42".to_string()));
+        ensure(
+            explicit.swap_revision,
+            Some(SwapRevisionMode::Explicit),
+            "explicit revision mode",
+        )?;
+        ensure(
+            explicit.swap_revision_id,
+            Some("rev_42".to_string()),
+            "explicit revision id",
         )?;
 
         let removed = InterventionSpec::swap_memory_removed("mem_noisy");
@@ -2561,6 +2621,59 @@ mod tests {
             report.next_action.contains("multi-swap is rejected"),
             true,
             "multi swap repair text",
+        )
+    }
+
+    #[test]
+    fn counterfactual_explicit_revision_swap_is_visible_in_diff() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let capture = capture_episode(&CaptureOptions {
+            workspace: tempdir.path().to_path_buf(),
+            task_input: Some("prepare release with historical context".to_string()),
+            dry_run: false,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        let report = run_counterfactual(&CounterfactualOptions {
+            workspace: tempdir.path().to_path_buf(),
+            episode_id: capture.episode_id,
+            interventions: vec![
+                InterventionSpec::swap_memory_content("mem_release_rule", "run fmt")
+                    .with_swap_revision_target(
+                        SwapRevisionMode::Explicit,
+                        Some("rev_release_rule_002".to_string()),
+                    ),
+            ],
+            generate_hypotheses: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let summary = report
+            .swap_summary
+            .as_ref()
+            .ok_or_else(|| "missing swap summary".to_string())?;
+        ensure(
+            summary.revision_mode.as_str(),
+            "explicit",
+            "explicit revision summary mode",
+        )?;
+        ensure(
+            summary.revision_id.as_deref(),
+            Some("rev_release_rule_002"),
+            "explicit revision summary id",
+        )?;
+        let diff = report
+            .pack_diff
+            .as_ref()
+            .ok_or_else(|| "missing pack diff".to_string())?;
+        ensure(
+            diff.why_changes
+                .iter()
+                .any(|entry| entry.path == "why[mem_release_rule].revisionId"),
+            true,
+            "explicit revision id diff row",
         )
     }
 

@@ -117,7 +117,8 @@ use crate::core::install::{
 use crate::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
 use crate::core::lab::{
     CaptureOptions as LabCaptureOptions, CounterfactualOptions as LabCounterfactualOptions,
-    InterventionSpec, ReplayOptions as LabReplayOptions, capture_episode, replay_episode,
+    InterventionSpec, LAB_COUNTERFACTUAL_MULTI_SWAP_UNSUPPORTED_CODE,
+    ReplayOptions as LabReplayOptions, SwapRevisionMode, capture_episode, replay_episode,
     run_counterfactual,
 };
 use crate::core::learn::{
@@ -3858,6 +3859,14 @@ pub struct LabCounterfactualArgs {
     /// Weaken a memory's influence (can be specified multiple times).
     #[arg(long, value_name = "MEMORY_ID", action = ArgAction::Append)]
     pub weaken_memory: Vec<String>,
+
+    /// Swap exactly one captured input before reassembling the counterfactual pack.
+    #[arg(long, value_name = "TYPE=VALUE", action = ArgAction::Append)]
+    pub swap: Vec<String>,
+
+    /// Revision target for memory swaps: at-capture, current, or an explicit revision ID.
+    #[arg(long, value_name = "MODE_OR_REV_ID")]
+    pub swap_revision: Option<String>,
 
     /// Report the counterfactual plan without executing.
     #[arg(long, action = ArgAction::SetTrue)]
@@ -14085,7 +14094,7 @@ fn write_lab_counterfactual_report<W>(
 where
     W: Write,
 {
-    match cli.renderer() {
+    let write_exit = match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => write_stdout(
             stdout,
             &(output::render_lab_counterfactual_human(report) + "\n"),
@@ -14101,6 +14110,16 @@ where
             stdout,
             &(output::render_lab_counterfactual_json(report) + "\n"),
         ),
+    };
+    if write_exit == ProcessExitCode::Success
+        && report
+            .degradation_codes
+            .iter()
+            .any(|code| code == LAB_COUNTERFACTUAL_MULTI_SWAP_UNSUPPORTED_CODE)
+    {
+        ProcessExitCode::UnsatisfiedDegradedMode
+    } else {
+        write_exit
     }
 }
 
@@ -14165,6 +14184,61 @@ where
     W: Write,
     E: Write,
 {
+    let mut interventions = match lab_counterfactual_interventions(args) {
+        Ok(interventions) => interventions,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let swap_revision = match parse_lab_counterfactual_swap_revision(args.swap_revision.as_deref())
+    {
+        Ok(revision) => revision,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    for raw_swap in &args.swap {
+        let intervention = match parse_lab_counterfactual_swap(raw_swap, &swap_revision) {
+            Ok(intervention) => intervention,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        interventions.push(intervention);
+    }
+    if args.swap_revision.is_some()
+        && interventions
+            .iter()
+            .filter(|intervention| intervention.is_single_input_swap())
+            .all(|intervention| {
+                !matches!(
+                    intervention.intervention_type,
+                    crate::core::lab::InterventionType::MemoryContentSwap
+                        | crate::core::lab::InterventionType::MemoryRemovedSwap
+                )
+            })
+    {
+        let error = DomainError::Usage {
+            message: "--swap-revision only applies to memory.* counterfactual swaps".to_string(),
+            repair: Some(
+                "Use --swap memory.<id>.content=TEXT or --swap memory.<id>.removed=true, or omit --swap-revision."
+                    .to_string(),
+            ),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    let options = LabCounterfactualOptions {
+        workspace: lab_workspace(cli),
+        episode_id: args.episode_id.clone(),
+        interventions,
+        generate_hypotheses: true,
+        dry_run: args.dry_run,
+    };
+
+    match run_counterfactual(&options) {
+        Ok(report) => write_lab_counterfactual_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn lab_counterfactual_interventions(
+    args: &LabCounterfactualArgs,
+) -> Result<Vec<InterventionSpec>, DomainError> {
     let mut interventions = Vec::new();
     interventions.extend(
         args.add_memory
@@ -14190,18 +14264,96 @@ where
             .cloned()
             .map(|memory_id| InterventionSpec::weaken_memory(memory_id, 0.25)),
     );
+    Ok(interventions)
+}
 
-    let options = LabCounterfactualOptions {
-        workspace: lab_workspace(cli),
-        episode_id: args.episode_id.clone(),
-        interventions,
-        generate_hypotheses: true,
-        dry_run: args.dry_run,
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LabSwapRevisionTarget {
+    mode: SwapRevisionMode,
+    revision_id: Option<String>,
+}
+
+fn parse_lab_counterfactual_swap_revision(
+    raw: Option<&str>,
+) -> Result<LabSwapRevisionTarget, DomainError> {
+    match raw.map(str::trim) {
+        None | Some("") | Some("at-capture" | "at_capture") => Ok(LabSwapRevisionTarget {
+            mode: SwapRevisionMode::AtCapture,
+            revision_id: None,
+        }),
+        Some("current") => Ok(LabSwapRevisionTarget {
+            mode: SwapRevisionMode::Current,
+            revision_id: None,
+        }),
+        Some(revision_id) => {
+            if revision_id.chars().any(char::is_whitespace) {
+                return Err(DomainError::Usage {
+                    message: format!(
+                        "Invalid --swap-revision `{revision_id}`: explicit revision IDs must not contain whitespace"
+                    ),
+                    repair: Some(
+                        "Use --swap-revision at-capture, --swap-revision current, or a single revision ID."
+                            .to_string(),
+                    ),
+                });
+            }
+            Ok(LabSwapRevisionTarget {
+                mode: SwapRevisionMode::Explicit,
+                revision_id: Some(revision_id.to_string()),
+            })
+        }
+    }
+}
+
+fn parse_lab_counterfactual_swap(
+    raw: &str,
+    revision: &LabSwapRevisionTarget,
+) -> Result<InterventionSpec, DomainError> {
+    let Some((target, value)) = raw.split_once('=') else {
+        return Err(invalid_lab_counterfactual_swap(raw));
     };
+    let target = target.trim();
+    if let Some(logical_id) = target
+        .strip_prefix("memory.")
+        .and_then(|rest| rest.strip_suffix(".content"))
+    {
+        if logical_id.is_empty() || value.is_empty() {
+            return Err(invalid_lab_counterfactual_swap(raw));
+        }
+        return Ok(InterventionSpec::swap_memory_content(logical_id, value)
+            .with_swap_revision_target(revision.mode, revision.revision_id.clone()));
+    }
+    if let Some(logical_id) = target
+        .strip_prefix("memory.")
+        .and_then(|rest| rest.strip_suffix(".removed"))
+    {
+        if logical_id.is_empty() || !value.trim().eq_ignore_ascii_case("true") {
+            return Err(invalid_lab_counterfactual_swap(raw));
+        }
+        return Ok(InterventionSpec::swap_memory_removed(logical_id)
+            .with_swap_revision_target(revision.mode, revision.revision_id.clone()));
+    }
+    if let Some(path) = target.strip_prefix("config.") {
+        if path.is_empty() || value.is_empty() {
+            return Err(invalid_lab_counterfactual_swap(raw));
+        }
+        return Ok(InterventionSpec::swap_config(path, value));
+    }
+    if target == "query" && !value.is_empty() {
+        return Ok(InterventionSpec::swap_query(value));
+    }
+    Err(invalid_lab_counterfactual_swap(raw))
+}
 
-    match run_counterfactual(&options) {
-        Ok(report) => write_lab_counterfactual_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+fn invalid_lab_counterfactual_swap(raw: &str) -> DomainError {
+    DomainError::Usage {
+        message: format!(
+            "Invalid --swap `{raw}`: expected memory.ID.content=TEXT, memory.ID.removed=true, config.PATH=VALUE, or query=TEXT"
+        ),
+        repair: Some(
+            "Run one counterfactual per invocation, for example: ee lab counterfactual EPISODE_ID --swap memory.mem_123.content='new text' --json"
+                .to_string(),
+        ),
     }
 }
 
@@ -40761,18 +40913,21 @@ mod tests {
         COORDINATION_FALLBACK_INGEST_SCHEMA_V1, COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command,
         CurateCommand, DaemonCommand, DiagCommand, DiagQuarantineCommand, DomainError,
         EconomyCommand, EffectiveRedactionLevel, FieldsLevel, FocusCommand, GraphCommand,
-        GraphSnapshotCommand, HandoffCommand, HookCommand, LearnCommand, LearnExperimentCommand,
-        MaintenanceCommand, MaintenanceWalCheckpointArgs, MaintenanceWalCheckpointMode,
-        MemoryCommand, OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand,
-        RedactionLevelSource, RuleCommand, ShadowMode, SituationCommand, StatusArgs,
-        SupportCommand, SwarmBriefArgs, SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand,
-        VerifyCommand, WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs,
-        db_inspect_redact_source_uri, hook_git_readiness_response_json,
-        parse_completion_audit_evidence_input, parse_verification_evidence_record_input,
-        plan_cache_diag_degraded, plan_cache_diag_response_json, run, write_index_rebuild_error,
+        GraphSnapshotCommand, HandoffCommand, HookCommand, LabCommand, LearnCommand,
+        LearnExperimentCommand, MaintenanceCommand, MaintenanceWalCheckpointArgs,
+        MaintenanceWalCheckpointMode, MemoryCommand, OutputFormat, PackCommand,
+        PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, RuleCommand, ShadowMode,
+        SituationCommand, StatusArgs, SupportCommand, SwarmBriefArgs, SwarmCommand,
+        TaskFrameCommand, TaskFrameSubgoalCommand, VerifyCommand, WorkflowCommand,
+        WorkspaceCommand, WorkspaceHygieneArgs, db_inspect_redact_source_uri,
+        hook_git_readiness_response_json, parse_completion_audit_evidence_input,
+        parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
+        parse_verification_evidence_record_input, plan_cache_diag_degraded,
+        plan_cache_diag_response_json, run, write_index_rebuild_error,
     };
     use crate::config::MeshCommandMode;
     use crate::core::index::IndexRebuildError;
+    use crate::core::lab::{InterventionType, SwapRevisionMode};
     use crate::core::search::{
         ScoreExplanation, ScoreFactor, ScoreSource, SearchHit, SearchReport, SearchSourceMode,
         SearchStatus,
@@ -47502,6 +47657,76 @@ mod tests {
             Some(Command::Serve(args)) => ensure_equal(&args.foreground, &true, "foreground flag"),
             other => Err(format!("expected serve command, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn lab_counterfactual_swap_flags_parse() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "lab",
+            "counterfactual",
+            "ep_release_001",
+            "--swap",
+            "memory.mem_release_rule.content=run fmt before release",
+            "--swap-revision",
+            "current",
+            "--json",
+        ])
+        .map_err(|e| format!("failed to parse lab counterfactual swap: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Lab(LabCommand::Counterfactual(args))) => {
+                ensure_equal(&args.swap.len(), &1, "swap flag count")?;
+                let revision =
+                    parse_lab_counterfactual_swap_revision(args.swap_revision.as_deref())
+                        .map_err(|error| error.message())?;
+                let intervention = parse_lab_counterfactual_swap(&args.swap[0], &revision)
+                    .map_err(|error| error.message())?;
+                ensure_equal(
+                    &intervention.intervention_type,
+                    &InterventionType::MemoryContentSwap,
+                    "swap intervention type",
+                )?;
+                ensure_equal(
+                    &intervention.memory_id.as_deref(),
+                    &Some("mem_release_rule"),
+                    "swap memory id",
+                )?;
+                ensure_equal(
+                    &intervention.swap_revision,
+                    &Some(SwapRevisionMode::Current),
+                    "swap revision mode",
+                )
+            }
+            other => Err(format!(
+                "expected lab counterfactual command, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn lab_counterfactual_explicit_revision_swap_parses() -> TestResult {
+        let revision = parse_lab_counterfactual_swap_revision(Some("rev_release_rule_002"))
+            .map_err(|error| error.message())?;
+        let intervention =
+            parse_lab_counterfactual_swap("memory.mem_release_rule.removed=true", &revision)
+                .map_err(|error| error.message())?;
+
+        ensure_equal(
+            &intervention.intervention_type,
+            &InterventionType::MemoryRemovedSwap,
+            "removed swap intervention type",
+        )?;
+        ensure_equal(
+            &intervention.swap_revision,
+            &Some(SwapRevisionMode::Explicit),
+            "explicit swap revision mode",
+        )?;
+        ensure_equal(
+            &intervention.swap_revision_id.as_deref(),
+            &Some("rev_release_rule_002"),
+            "explicit swap revision id",
+        )
     }
 
     #[test]

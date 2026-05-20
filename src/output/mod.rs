@@ -11666,6 +11666,11 @@ fn lab_degradation_input(source: &'static str, code: &str) -> DegradationAggrega
             "Lab counterfactual ran as a dry run and did not persist durable mutations.",
             "Run without --dry-run after validating the counterfactual hypothesis.",
         ),
+        "lab_counterfactual_multi_swap_unsupported" => (
+            "medium",
+            "Lab counterfactual rejected multiple single-input swaps in one invocation.",
+            "Run separate counterfactual invocations and compose diffs externally; multi-swap is rejected by design (see ADR 0028).",
+        ),
         _ => (
             "medium",
             "Lab analysis completed with degraded evidence.",

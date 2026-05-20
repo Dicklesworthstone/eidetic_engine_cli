@@ -13,7 +13,7 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "Lab replay surfaces abstain because stored episode replay artifacts are not implemented yet.",
+    "description": "Lab replay surfaces abstain because the requested frozen episode replay artifacts are missing or cannot be trusted.",
     "setup_commands": [
       "ee init --workspace ."
     ],

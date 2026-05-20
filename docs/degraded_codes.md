@@ -4193,6 +4193,36 @@ ee diag integrity --database ./integrity-schema-required-skew.db --workspace . -
 
 ---
 
+## `lab_counterfactual_multi_swap_unsupported`
+
+**Severity:** medium
+
+**Surfaces:** lab counterfactual
+
+**Introduced by:** bd-17c65.14.15.6 (epic N)
+
+**Trigger.** A lab counterfactual invocation supplies more than one single-input swap, which is rejected to preserve counterfactual interpretability.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+```
+
+**Invocation.**
+
+```bash
+ee lab counterfactual EPISODE_ID --workspace . --swap query='new query' --swap config.profile=thorough --json
+```
+
+**Expected emission.** Message contains: `multiple ... swaps`
+
+**Repair hint.** `separate counterfactual invocations`
+
+**Fixture.** [`tests/fixtures/failure_modes/lab_counterfactual_multi_swap_unsupported.json`](../tests/fixtures/failure_modes/lab_counterfactual_multi_swap_unsupported.json)
+
+---
+
 ## `lab_replay_determinism_violation`
 
 **Severity:** high
@@ -4261,7 +4291,7 @@ ee lab replay EPISODE_ID --workspace . --verify-determinism --json
 
 **Introduced by:** bd-17c65.10.6 (epic J)
 
-**Trigger.** Lab replay surfaces abstain because stored episode replay artifacts are not implemented yet.
+**Trigger.** Lab replay surfaces abstain because the requested frozen episode replay artifacts are missing or cannot be trusted.
 
 **Setup.**
 
