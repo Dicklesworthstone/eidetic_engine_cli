@@ -532,12 +532,15 @@ Future v0.3.x point releases may register further `EE_MESH_*` and
 |---|---|---|
 | `ee.completion_audit.report.v2` | bd-3d6ko.6.1 | Completion-audit report with `localBuildPolicy` state for local Cargo bypass attempts, remote-required blockers, and remote RCH verification |
 | `ee.tailscale.local.v1` | bd-36bbk.1.1 | Local `tailscaled` probe report block on `ee status` |
+| `ee.mesh.auto_status.v1` | bd-36bbk.1.4 | Auto-enrollment readiness, materialized peer-group, discovery cache, and drift status block |
 | `ee.mesh.auto_enrollment_summary.v1` | bd-36bbk.1.5 | Forensic audit-row payload before any peer-group write |
 | `ee.mesh.discovery_policy.v1` | bd-36bbk.1.7 | Service-tag, allowlist, denylist, and discovery consent policy |
 | `ee.mesh.hello.v1` | bd-36bbk.1.2 (SRR6.46.2) | Tiny bounded handshake request sent to candidate peers (read-only; payload ≤ 4096 bytes) |
 | `ee.mesh.hello.response.v1` | bd-36bbk.1.12 (SRR6.46.12) | Hello-handshake success response from the responder when discovery policy grants consent |
 | `ee.mesh.hello.error.v1` | bd-36bbk.1.12 (SRR6.46.12) | Hello-handshake decline response; privacy-invariant — must NOT carry responder-side metadata |
+| `ee.mesh.hello_responder.status.v1` | bd-36bbk.1.12 (SRR6.46.12) | Read-only hello-responder lifecycle status emitted by `ee mesh hello-responder status` |
 | `ee.mesh.lane_grant_preview.v1` | bd-36bbk.1.17 (SRR6.46.17) | Pre-grant lane visibility audit; read-only by construction (`src/mesh/lane_grant_preview.rs`) |
+| `ee.repair_action_graph.v1` | bd-36bbk.1.16 (SRR6.46.16) | Shared machine-readable repair-action graph consumed by doctor and mesh status surfaces |
 | `ee.mesh.peer_group_binding.v1` | bd-2jb3s (SRR6.30) | Workspace-scoped peer-group authorization record |
 | `ee.mesh.peer_policy.v1` | bd-29ulx (SRR6.5) | Per-peer trust, lane policy, and redaction grant |
 | `ee.mesh.policy_decision.v1` | bd-29ulx | Per-call policy evaluation outcome |
