@@ -117,10 +117,11 @@ use crate::core::install::{
 };
 use crate::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
 use crate::core::lab::{
+    AgentWorkloadReplayOptions as LabAgentWorkloadReplayOptions,
     CaptureOptions as LabCaptureOptions, CounterfactualOptions as LabCounterfactualOptions,
     InterventionSpec, LAB_COUNTERFACTUAL_MULTI_SWAP_UNSUPPORTED_CODE,
-    ReplayOptions as LabReplayOptions, SwapRevisionMode, capture_episode, replay_episode,
-    run_counterfactual,
+    ReplayOptions as LabReplayOptions, SwapRevisionMode, capture_episode,
+    replay_agent_workload_trace, replay_episode, run_counterfactual,
 };
 use crate::core::learn::{
     LearnCloseOptions, LearnExperimentProposeOptions, LearnExperimentRunOptions,
@@ -144,8 +145,9 @@ use crate::core::outcome::{
 };
 use crate::core::perf_forensics::{
     BUDGET_CHECK_SCHEMA_V1, BudgetCheckReport, COMPARE_RESULT_SCHEMA_V1, CompareReport,
-    EXPLAIN_LATENCY_SCHEMA_V1, ExplainLatencyReport, PerfLatencySurface, check_perf_budget_report,
-    compare_artifact_summary_files, explain_latency_report,
+    EXPLAIN_LATENCY_SCHEMA_V1, ExplainLatencyReport, PROMPT_BUDGET_REPORT_SCHEMA_V1,
+    PerfLatencySurface, PromptBudgetReport, check_perf_budget_report,
+    compare_artifact_summary_files, explain_latency_report, prompt_budget_report,
 };
 use crate::core::preflight::{
     CloseOptions as PreflightCloseOptions, RunOptions as PreflightRunOptions,
@@ -3821,11 +3823,15 @@ pub struct LabCaptureArgs {
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct LabReplayArgs {
     /// Episode ID to replay.
-    #[arg(value_name = "EPISODE_ID")]
-    pub episode_id: String,
+    #[arg(value_name = "EPISODE_ID", required_unless_present = "trace")]
+    pub episode_id: Option<String>,
+
+    /// Redacted ee.agent_workload_trace.v1 JSONL trace to replay as a workload fixture.
+    #[arg(long, value_name = "TRACE_JSONL", conflicts_with = "episode_id")]
+    pub trace: Option<PathBuf>,
 
     /// Query override to run against the frozen episode.
-    #[arg(long, value_name = "TEXT")]
+    #[arg(long, value_name = "TEXT", conflicts_with = "trace")]
     pub query: Option<String>,
 
     /// Reassemble the frozen pack three times and verify deterministic output.
@@ -5090,6 +5096,9 @@ pub struct PlaybookImportArgs {
 pub enum PerfCommand {
     /// Compare two normalized performance artifact summaries.
     Compare(PerfCompareArgs),
+    /// Report prompt-budget waste from redacted agent workload traces.
+    #[command(name = "prompt-budget")]
+    PromptBudget(PerfPromptBudgetArgs),
     /// Explain latency stages for a normalized search/context perf artifact.
     #[command(name = "explain-latency")]
     ExplainLatency(PerfExplainLatencyArgs),
@@ -5115,6 +5124,14 @@ pub struct PerfCompareArgs {
     /// Candidate normalized artifact summary JSON.
     #[arg(long, value_name = "PATH")]
     pub candidate: PathBuf,
+}
+
+/// Arguments for `ee perf prompt-budget`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct PerfPromptBudgetArgs {
+    /// Redacted ee.agent_workload_trace.v1 JSONL trace.
+    #[arg(long, value_name = "PATH")]
+    pub trace: PathBuf,
 }
 
 /// Arguments for `ee perf explain-latency`.
@@ -5446,11 +5463,103 @@ pub enum RecorderCommand {
     Tail(RecorderTailArgs),
     /// Follow recorder events as JSON lines.
     Follow(RecorderFollowArgs),
+    /// Append or replay redacted agent workload flight-recorder traces.
+    #[command(subcommand)]
+    Flight(FlightRecorderCommand),
     /// Plan a read-only recorder import from connector output.
     Import(RecorderImportArgs),
     /// Query recorded events from the event store.
     #[command(subcommand)]
     Events(RecorderEventsCommand),
+}
+
+/// Subcommands for `ee recorder flight`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum FlightRecorderCommand {
+    /// Append one redacted ee.agent_workload_trace.v1 row to local JSONL storage.
+    Append(FlightRecorderAppendArgs),
+    /// Replay a redacted flight-recorder JSONL trace into deterministic aggregates.
+    Replay(FlightRecorderReplayArgs),
+}
+
+/// Arguments for `ee recorder flight append`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct FlightRecorderAppendArgs {
+    /// Directory that will contain agent-workload-trace.jsonl.
+    #[arg(long, value_name = "DIR")]
+    pub trace_dir: PathBuf,
+
+    /// Command verb. Repeat for nested commands, e.g. --verb pack --verb replay.
+    #[arg(long = "verb", value_name = "VERB")]
+    pub verbs: Vec<String>,
+
+    /// Count of positional arguments, without recording their values.
+    #[arg(long, default_value_t = 0)]
+    pub positional_arity: u32,
+
+    /// Flag name that was set. Use --flag-name=--json for dash-prefixed values.
+    #[arg(long = "flag-name", value_name = "--FLAG")]
+    pub flag_names: Vec<String>,
+
+    /// Output format enum, if known.
+    #[arg(long, value_name = "FORMAT")]
+    pub output_format: Option<String>,
+
+    /// Process exit code.
+    #[arg(long, default_value_t = 0)]
+    pub exit_code: u8,
+
+    /// Elapsed command wall time in milliseconds.
+    #[arg(long, default_value_t = 0)]
+    pub elapsed_ms: u64,
+
+    /// Response byte count.
+    #[arg(long, default_value_t = 0)]
+    pub response_bytes: u64,
+
+    /// Optional response token estimate.
+    #[arg(long)]
+    pub response_tokens: Option<u64>,
+
+    /// Harness program enum.
+    #[arg(long, default_value = "ee-cli-direct")]
+    pub harness_program: String,
+
+    /// Harness model-family enum, if known.
+    #[arg(long)]
+    pub model_family: Option<String>,
+
+    /// Pre-hashed selected memory reference. Raw memory IDs are rejected.
+    #[arg(long = "memory-hash", value_name = "blake3:HEX")]
+    pub memory_hashes: Vec<String>,
+
+    /// Degraded code emitted by the command.
+    #[arg(long = "degraded-code", value_name = "CODE")]
+    pub degraded_codes: Vec<String>,
+
+    /// Redaction level: strict or audit.
+    #[arg(long, default_value = "strict")]
+    pub redaction_level: String,
+
+    /// Retention posture recorded with the append report. No files are deleted.
+    #[arg(long, default_value_t = 7)]
+    pub retention_days: u32,
+
+    /// Maximum JSONL file size. Exceeding this fails closed before append.
+    #[arg(long, default_value_t = 10_485_760)]
+    pub max_bytes: u64,
+
+    /// Deterministic timestamp override for tests.
+    #[arg(long)]
+    pub recorded_at: Option<String>,
+}
+
+/// Arguments for `ee recorder flight replay`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct FlightRecorderReplayArgs {
+    /// Redacted ee.agent_workload_trace.v1 JSONL trace.
+    #[arg(long, value_name = "PATH")]
+    pub trace: PathBuf,
 }
 
 /// Subcommands for `ee recorder events`.
@@ -5990,6 +6099,27 @@ pub struct DoctorArgs {
         conflicts_with_all = ["fix_plan", "franken_health", "capabilities", "robot_docs", "undo"],
     )]
     pub since: Option<String>,
+
+    /// List past `ee doctor --fix` runs persisted under
+    /// `<workspace>/.doctor/runs/`. Emits an `ee.doctor.run_index.v1`
+    /// JSON envelope whose `runs[]` carries each run's `state.json`
+    /// contents (schema/run_id/target_sha/workspace/started_at/
+    /// finished_at/status/action_count/dry_run) sorted by `started_at`
+    /// descending so the most-recent run is first. Read-only; never
+    /// invokes the `src/core/doctor_runtime::mutate` chokepoint. This
+    /// is the `ls` surface from the bd-3boan pass-2 backlog, expressed
+    /// as a flag so it composes with the existing flat DoctorArgs
+    /// shape; once the doctor command surface migrates to a clap
+    /// Subcommand it lifts to `ee doctor ls`.
+    #[arg(
+        long = "list-runs",
+        action = ArgAction::SetTrue,
+        conflicts_with_all = [
+            "fix_plan", "franken_health", "capabilities", "robot_docs", "undo",
+            "quick", "only", "since",
+        ],
+    )]
+    pub list_runs: bool,
 }
 
 /// Arguments for `ee init`.
@@ -8879,6 +9009,17 @@ where
                 write_stdout(stdout, &(doctor_robot_docs_json() + "\n"));
                 return ProcessExitCode::Success;
             }
+            if args.list_runs {
+                let workspace = cli.workspace.clone().unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                });
+                let runs_root = workspace.join(".doctor").join("runs");
+                write_stdout(
+                    stdout,
+                    &(doctor_list_runs_json(&workspace, &runs_root) + "\n"),
+                );
+                return ProcessExitCode::Success;
+            }
             if let Some(run_id) = args.undo.as_deref() {
                 let workspace = cli.workspace.clone().unwrap_or_else(|| {
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -9624,6 +9765,12 @@ where
         Some(Command::Recorder(RecorderCommand::Follow(ref args))) => {
             handle_recorder_follow(&cli, args, stdout, stderr)
         }
+        Some(Command::Recorder(RecorderCommand::Flight(FlightRecorderCommand::Append(
+            ref args,
+        )))) => handle_recorder_flight_append(&cli, args, stdout, stderr),
+        Some(Command::Recorder(RecorderCommand::Flight(FlightRecorderCommand::Replay(
+            ref args,
+        )))) => handle_recorder_flight_replay(&cli, args, stdout, stderr),
         Some(Command::Recorder(RecorderCommand::Import(ref args))) => {
             handle_recorder_import(&cli, args, stdout, stderr)
         }
@@ -13737,6 +13884,82 @@ fn doctor_robot_docs_json() -> String {
     .to_string()
 }
 
+/// Emit the agent-facing `ee.doctor.run_index.v1` JSON envelope listing
+/// every `state.json` under `<workspace>/.doctor/runs/`. Read-only:
+/// performs only `std::fs::read_dir` + `read_to_string` and never
+/// invokes the `src/core/doctor_runtime::mutate` chokepoint.
+///
+/// Per AGENTS.md RULE 1 this never removes any file even when a
+/// `state.json` fails to parse — corrupt rows surface as an entry with
+/// `parseError` populated so an operator can audit them. Runs are
+/// sorted by `started_at` descending (most-recent first); rows missing
+/// a timestamp fall to the end.
+fn doctor_list_runs_json(workspace: &Path, runs_root: &Path) -> String {
+    let mut runs: Vec<serde_json::Value> = Vec::new();
+    let read_dir = match std::fs::read_dir(runs_root) {
+        Ok(iter) => Some(iter),
+        Err(_) => None,
+    };
+    if let Some(iter) = read_dir {
+        for entry in iter.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let run_id = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_owned();
+            if run_id.is_empty() {
+                continue;
+            }
+            let state_path = path.join("state.json");
+            let row = match std::fs::read_to_string(&state_path) {
+                Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                    Ok(value) => serde_json::json!({
+                        "runId": run_id,
+                        "runDir": path.display().to_string(),
+                        "state": value,
+                    }),
+                    Err(error) => serde_json::json!({
+                        "runId": run_id,
+                        "runDir": path.display().to_string(),
+                        "parseError": error.to_string(),
+                    }),
+                },
+                Err(error) => serde_json::json!({
+                    "runId": run_id,
+                    "runDir": path.display().to_string(),
+                    "parseError": format!("read state.json: {error}"),
+                }),
+            };
+            runs.push(row);
+        }
+    }
+    runs.sort_by(|left, right| {
+        let lhs = left
+            .pointer("/state/started_at")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let rhs = right
+            .pointer("/state/started_at")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        rhs.cmp(lhs)
+    });
+    serde_json::json!({
+        "schema": "ee.doctor.run_index.v1",
+        "doctor_version": env!("CARGO_PKG_VERSION"),
+        "workspace": workspace.display().to_string(),
+        "runsRoot": runs_root.display().to_string(),
+        "runsRootExists": runs_root.exists(),
+        "count": runs.len(),
+        "runs": runs,
+    })
+    .to_string()
+}
+
 fn clap_error_message(error: &clap::Error) -> String {
     let full = error.to_string();
     let mut lines_iter = full.lines();
@@ -14362,6 +14585,17 @@ where
     }
 }
 
+fn write_lab_agent_workload_replay_report<W>(
+    _cli: &Cli,
+    report: &crate::core::lab::AgentWorkloadReplayReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    write_stdout(stdout, &(report.to_json() + "\n"))
+}
+
 fn write_lab_counterfactual_report<W>(
     cli: &Cli,
     report: &crate::core::lab::CounterfactualReport,
@@ -14434,9 +14668,31 @@ where
     W: Write,
     E: Write,
 {
+    if let Some(trace_path) = &args.trace {
+        let options = LabAgentWorkloadReplayOptions {
+            trace_path: trace_path.clone(),
+            verify_determinism: args.verify_determinism,
+        };
+        return match replay_agent_workload_trace(&options) {
+            Ok(report) => write_lab_agent_workload_replay_report(cli, &report, stdout),
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    }
+
+    let Some(episode_id) = args.episode_id.clone() else {
+        let error = DomainError::Usage {
+            message: "lab replay requires either EPISODE_ID or --trace <TRACE_JSONL>".to_owned(),
+            repair: Some(
+                "Use `ee lab replay <episode-id>` or `ee lab replay --trace trace.jsonl --json`."
+                    .to_owned(),
+            ),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    };
+
     let options = LabReplayOptions {
         workspace: lab_workspace(cli),
-        episode_id: args.episode_id.clone(),
+        episode_id,
         query: args.query.clone(),
         verify_hash: true,
         verify_determinism: args.verify_determinism,
@@ -16179,6 +16435,7 @@ where
 {
     match command {
         PerfCommand::Compare(args) => handle_perf_compare(cli, args, stdout, stderr),
+        PerfCommand::PromptBudget(args) => handle_perf_prompt_budget(cli, args, stdout, stderr),
         PerfCommand::ExplainLatency(args) => handle_perf_explain_latency(cli, args, stdout, stderr),
         PerfCommand::Budget(PerfBudgetCommand::Check(args)) => {
             handle_perf_budget_check(cli, args, stdout, stderr)
@@ -16198,6 +16455,22 @@ where
 {
     match compare_artifact_summary_files(&args.baseline, &args.candidate) {
         Ok(report) => write_perf_compare_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_perf_prompt_budget<W, E>(
+    cli: &Cli,
+    args: &PerfPromptBudgetArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match prompt_budget_report(&args.trace) {
+        Ok(report) => write_perf_prompt_budget_report(cli, &report, stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -16315,6 +16588,37 @@ where
     }
 }
 
+fn write_perf_prompt_budget_report<W>(
+    cli: &Cli,
+    report: &PromptBudgetReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_perf_prompt_budget_human(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&perf_response_json(
+                "perf prompt-budget",
+                PROMPT_BUDGET_REPORT_SCHEMA_V1,
+                report,
+            )) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(perf_response_json("perf prompt-budget", PROMPT_BUDGET_REPORT_SCHEMA_V1, report)
+                + "\n"),
+        ),
+    }
+}
+
 fn write_perf_budget_check_report<W>(
     cli: &Cli,
     report: &BudgetCheckReport,
@@ -16406,6 +16710,33 @@ fn perf_effect_json(command_path: &str) -> serde_json::Value {
     )
 }
 
+fn render_perf_prompt_budget_human(report: &PromptBudgetReport) -> String {
+    let mut out = format!(
+        "Perf prompt budget: events={} total={}B avoidable={}B (~{} tokens)\n",
+        report.total_events,
+        report.total_response_bytes,
+        report.avoidable_bytes,
+        report.avoidable_token_estimate
+    );
+    if !report.top_waste_categories.is_empty() {
+        out.push_str("  Top waste:\n");
+        for category in report.top_waste_categories.iter().take(5) {
+            out.push_str(&format!(
+                "  - {}: {}B across {} event(s)\n",
+                category.category, category.avoidable_bytes, category.event_count
+            ));
+        }
+    }
+    append_perf_prompt_budget_degradation_summary(&mut out, &report.degraded);
+    if !report.suggested_actions.is_empty() {
+        out.push_str("  Suggested actions:\n");
+        for action in report.suggested_actions.iter().take(3) {
+            out.push_str(&format!("  - {} ({})\n", action.command, action.category));
+        }
+    }
+    out
+}
+
 fn render_perf_compare_human(report: &CompareReport) -> String {
     let mut out = format!(
         "Perf compare: {}\n  Confidence: {}\n  Worst severity: {}\n  Deltas: {} (regressions {}, improvements {})\n",
@@ -16487,6 +16818,27 @@ fn render_perf_explain_latency_human(report: &ExplainLatencyReport) -> String {
 fn append_perf_degradation_summary(
     out: &mut String,
     degradations: &[crate::core::perf_forensics::CompareDegradation],
+) {
+    if degradations.is_empty() {
+        return;
+    }
+    out.push_str("  Degraded:\n");
+    for degradation in degradations.iter().take(3) {
+        out.push_str(&format!(
+            "  - {} ({})",
+            degradation.code,
+            degradation.severity.as_str()
+        ));
+        if let Some(repair) = degradation.repair.as_deref() {
+            out.push_str(&format!(" repair={repair}"));
+        }
+        out.push('\n');
+    }
+}
+
+fn append_perf_prompt_budget_degradation_summary(
+    out: &mut String,
+    degradations: &[crate::core::perf_forensics::PromptBudgetDegradation],
 ) {
     if degradations.is_empty() {
         return;
@@ -17963,6 +18315,181 @@ where
         stdout,
         stderr,
     )
+}
+
+fn handle_recorder_flight_append<W, E>(
+    cli: &Cli,
+    args: &FlightRecorderAppendArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let Some(redaction_level) =
+        crate::obs::flight_recorder::RedactionLevel::parse(&args.redaction_level)
+    else {
+        let error = DomainError::Usage {
+            message: format!(
+                "Unsupported flight-recorder redaction level `{}`.",
+                args.redaction_level
+            ),
+            repair: Some("Use --redaction-level strict or --redaction-level audit.".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    };
+    let recorded_at = args
+        .recorded_at
+        .clone()
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    let verbs = args.verbs.iter().map(String::as_str).collect::<Vec<_>>();
+    let flag_names = args
+        .flag_names
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let memory_hashes = args
+        .memory_hashes
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let degraded_codes = args
+        .degraded_codes
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let inputs = crate::obs::flight_recorder::FlightRecorderInputs {
+        redaction_level,
+        recorded_at_rfc3339: &recorded_at,
+        command: crate::obs::flight_recorder::CommandShapeInput {
+            verbs: &verbs,
+            positional_arity: args.positional_arity,
+            flag_names: &flag_names,
+            output_format: args.output_format.as_deref(),
+        },
+        exit_code: args.exit_code,
+        elapsed_ms: args.elapsed_ms,
+        response_byte_count: args.response_bytes,
+        response_token_estimate: args.response_tokens,
+        token_estimator_id: args
+            .response_tokens
+            .map(|_| crate::obs::flight_recorder::TokenEstimatorId::BytesDiv4),
+        harness_program: crate::obs::flight_recorder::HarnessProgram::parse(&args.harness_program),
+        harness_model_family: args.model_family.as_deref(),
+        memory_hashes: &memory_hashes,
+        degraded_codes: &degraded_codes,
+    };
+    let trace = match crate::obs::flight_recorder::record_workload(&inputs) {
+        Ok(trace) => trace,
+        Err(error) => {
+            return write_domain_error(
+                &flight_recorder_error_to_domain(error),
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+    let storage = crate::obs::flight_recorder::FlightRecorderStorageOptions {
+        directory: args.trace_dir.clone(),
+        retention_days: args.retention_days,
+        max_bytes: args.max_bytes,
+    };
+    match crate::obs::flight_recorder::append_workload_trace(&storage, &trace) {
+        Ok(report) => write_flight_recorder_report(cli, "recorder flight append", &report, stdout),
+        Err(error) => write_domain_error(
+            &flight_recorder_error_to_domain(error),
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_recorder_flight_replay<W, E>(
+    cli: &Cli,
+    args: &FlightRecorderReplayArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match crate::obs::flight_recorder::replay_workload_trace(&args.trace) {
+        Ok(report) => write_flight_recorder_report(cli, "recorder flight replay", &report, stdout),
+        Err(error) => write_domain_error(
+            &flight_recorder_error_to_domain(error),
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn write_flight_recorder_report<W, T>(
+    cli: &Cli,
+    command: &'static str,
+    report: &T,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+    T: serde::Serialize,
+{
+    let json = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "command": command,
+            "report": report,
+        }
+    });
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&json.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(json.to_string() + "\n")),
+    }
+}
+
+fn flight_recorder_error_to_domain(
+    error: crate::obs::flight_recorder::FlightRecorderError,
+) -> DomainError {
+    match error {
+        crate::obs::flight_recorder::FlightRecorderError::InvalidVerbChain { .. }
+        | crate::obs::flight_recorder::FlightRecorderError::InvalidFlagName { .. }
+        | crate::obs::flight_recorder::FlightRecorderError::InvalidMemoryHash { .. }
+        | crate::obs::flight_recorder::FlightRecorderError::InvalidRecordedAt { .. }
+        | crate::obs::flight_recorder::FlightRecorderError::InvalidDegradedCode { .. }
+        | crate::obs::flight_recorder::FlightRecorderError::MalformedTrace { .. } => {
+            DomainError::Usage {
+                message: error.to_string(),
+                repair: Some(
+                    "Use shape-only inputs: verbs, flag names, blake3 memory hashes, and degraded codes."
+                        .to_owned(),
+                ),
+            }
+        }
+        crate::obs::flight_recorder::FlightRecorderError::QuotaExceeded { .. } => {
+            DomainError::Storage {
+                message: error.to_string(),
+                repair: Some("Increase --max-bytes or rotate the trace directory manually.".to_owned()),
+            }
+        }
+        crate::obs::flight_recorder::FlightRecorderError::Io { .. } => DomainError::Storage {
+            message: error.to_string(),
+            repair: Some("Check the trace path permissions and retry.".to_owned()),
+        },
+    }
 }
 
 fn parse_recorder_event_filter(
@@ -40428,6 +40955,7 @@ impl NormalizedInvocation {
                 },
                 Command::Perf(perf) => match perf {
                     PerfCommand::Compare(_) => "perf compare".to_string(),
+                    PerfCommand::PromptBudget(_) => "perf prompt-budget".to_string(),
                     PerfCommand::ExplainLatency(_) => "perf explain-latency".to_string(),
                     PerfCommand::Budget(PerfBudgetCommand::Check(_)) => {
                         "perf budget check".to_string()
@@ -40491,6 +41019,12 @@ impl NormalizedInvocation {
                     RecorderCommand::Finish(_) => "recorder finish".to_string(),
                     RecorderCommand::Tail(_) => "recorder tail".to_string(),
                     RecorderCommand::Follow(_) => "recorder follow".to_string(),
+                    RecorderCommand::Flight(FlightRecorderCommand::Append(_)) => {
+                        "recorder flight append".to_string()
+                    }
+                    RecorderCommand::Flight(FlightRecorderCommand::Replay(_)) => {
+                        "recorder flight replay".to_string()
+                    }
                     RecorderCommand::Import(_) => "recorder import".to_string(),
                     RecorderCommand::Events(ev) => match ev {
                         RecorderEventsCommand::List(_) => "recorder events list".to_string(),
