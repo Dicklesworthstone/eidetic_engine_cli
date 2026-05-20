@@ -522,6 +522,10 @@ run_stage "Tailscale Local Probe E2E (SRR6.46.1)" "./scripts/e2e_overhaul/tailsc
 # covering the bounded hello request/response/error schemas and fixtures.
 run_stage "Mesh Hello Handshake E2E (SRR6.46.6)" "./scripts/e2e_overhaul/mesh_hello_handshake.sh"
 
+# Gate 6.10: Mesh hello responder lifecycle contract (SRR6.46.12). Static
+# no-Cargo gate covering daemon/status wiring, degraded fixtures, and audit names.
+run_stage "Mesh Hello Responder Lifecycle E2E (SRR6.46.12)" "./scripts/e2e_overhaul/hello_responder_lifecycle.sh"
+
 # Gate 7: Advanced End-to-End
 run_stage "Advanced E2E Scripts" "./scripts/e2e_advanced.sh"
 
