@@ -10,6 +10,7 @@
 //! - Tier 1 reads return local state immediately and can later be revised;
 //! - conflicting logical revisions remain visible instead of overwriting.
 
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// ADR that owns this model's assumptions.
@@ -39,6 +40,7 @@ pub const VALIDITY_EXPIRY_VISIBILITY_REASON: &str =
     "validity_expiry_filters_reads_without_peer_cache_purge";
 pub const MESH_EVENT_QUARANTINED_CODE: &str = "mesh_event_quarantined";
 pub const MESH_CURSOR_REPAIR_REQUIRED_CODE: &str = "mesh_cursor_repair_required";
+pub const MESH_REPLAY_RECOVERY_SCHEMA_V1: &str = "ee.mesh.replay_recovery.v1";
 pub const QUARANTINE_ENTERED_LOG: &str = "quarantine_entered";
 pub const CURSOR_NOT_ADVANCED_LOG: &str = "cursor_not_advanced";
 pub const REPAIR_ACTION_LOG: &str = "repair_action";
@@ -251,6 +253,16 @@ impl ReplayRepairAction {
             Self::ResetCache => "reset_cache",
         }
     }
+
+    #[must_use]
+    pub const fn as_cli_arg(self) -> &'static str {
+        match self {
+            Self::Retry => "retry",
+            Self::SkipWithAudit => "skip-with-audit",
+            Self::RevokePeer => "revoke-peer",
+            Self::ResetCache => "reset-cache",
+        }
+    }
 }
 
 /// Redaction-safe quarantine record for one rejected replay event.
@@ -285,6 +297,23 @@ pub struct CursorRepairRecord {
     pub cursor_before: u64,
     pub repaired_cursor: u64,
     pub degraded_code: &'static str,
+    pub structured_log_events: Vec<&'static str>,
+}
+
+/// Status/doctor-ready summary of replay recovery work that must complete
+/// before peer sync can be trusted again.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayRecoveryStatus {
+    pub schema: &'static str,
+    pub status: &'static str,
+    pub quarantined_event_count: usize,
+    pub cursor_repair_required_count: usize,
+    pub latest_quarantined_event_id: Option<String>,
+    pub repair_audit_count: usize,
+    pub repair_actions: Vec<String>,
+    pub sync_blocked: bool,
+    pub degraded: Vec<&'static str>,
     pub structured_log_events: Vec<&'static str>,
 }
 
@@ -400,6 +429,54 @@ impl ModelNode {
     #[must_use]
     pub fn repair_audit(&self) -> Vec<ReplayRepairAuditRecord> {
         self.repair_audit.clone()
+    }
+
+    #[must_use]
+    pub fn replay_recovery_status(&self) -> ReplayRecoveryStatus {
+        let quarantined = self.quarantine_records();
+        let cursor_repairs = self.cursor_repair_requirements();
+        let mut degraded = BTreeSet::new();
+        let mut structured_log_events = BTreeSet::new();
+        let mut repair_actions = BTreeSet::new();
+
+        for record in &quarantined {
+            degraded.insert(record.degraded_code);
+            for event in &record.structured_log_events {
+                structured_log_events.insert(*event);
+            }
+            repair_actions.insert(quarantine_repair_command(record));
+        }
+
+        for repair in &cursor_repairs {
+            degraded.insert(repair.degraded_code);
+            for event in &repair.structured_log_events {
+                structured_log_events.insert(*event);
+            }
+            repair_actions.insert(cursor_repair_command(repair));
+        }
+
+        let status = if !cursor_repairs.is_empty() {
+            "cursor_repair_required"
+        } else if !quarantined.is_empty() {
+            "quarantine_present"
+        } else {
+            "clear"
+        };
+
+        ReplayRecoveryStatus {
+            schema: MESH_REPLAY_RECOVERY_SCHEMA_V1,
+            status,
+            quarantined_event_count: quarantined.len(),
+            cursor_repair_required_count: cursor_repairs.len(),
+            latest_quarantined_event_id: quarantined
+                .last()
+                .map(|record| record.incoming_event_id.clone()),
+            repair_audit_count: self.repair_audit.len(),
+            repair_actions: repair_actions.into_iter().collect(),
+            sync_blocked: !quarantined.is_empty() || !cursor_repairs.is_empty(),
+            degraded: degraded.into_iter().collect(),
+            structured_log_events: structured_log_events.into_iter().collect(),
+        }
     }
 
     pub fn repair_quarantined_event(
@@ -770,12 +847,33 @@ impl ModelNode {
     }
 }
 
+fn quarantine_repair_command(record: &ReplayQuarantineRecord) -> String {
+    let actions = record
+        .repair_actions
+        .iter()
+        .map(|action| action.as_cli_arg())
+        .collect::<Vec<_>>()
+        .join("|");
+    format!(
+        "ee mesh repair --event {} --action {actions} --json",
+        record.incoming_event_id
+    )
+}
+
+fn cursor_repair_command(record: &CursorRepairRecord) -> String {
+    format!(
+        "ee mesh repair --cursor --origin {} --from {} --to {} --json",
+        record.origin_node_id, record.cursor_before, record.repaired_cursor
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ANTI_ENTROPY_MODEL_SCENARIOS, CURSOR_NOT_ADVANCED_LOG, EventRange, LogicalVisibilityStatus,
-        MESH_CURSOR_REPAIR_REQUIRED_CODE, MESH_EVENT_QUARANTINED_CODE, ModelEvent, ModelEventKind,
-        ModelNode, QUARANTINE_ENTERED_LOG, REPAIR_ACTION_LOG, REPLAY_RECOVERED_LOG, ReplayOutcome,
+        MESH_CURSOR_REPAIR_REQUIRED_CODE, MESH_EVENT_QUARANTINED_CODE,
+        MESH_REPLAY_RECOVERY_SCHEMA_V1, ModelEvent, ModelEventKind, ModelNode,
+        QUARANTINE_ENTERED_LOG, REPAIR_ACTION_LOG, REPLAY_RECOVERED_LOG, ReplayOutcome,
         ReplayQuarantineReason, ReplayRepairAction, ReplayValidation, TOMBSTONE_VISIBILITY_REASON,
         VALIDITY_EXPIRY_VISIBILITY_REASON, WITHDRAWAL_VISIBILITY_REASON,
     };
@@ -1211,6 +1309,56 @@ mod tests {
         assert_eq!(repaired.structured_log_events, vec![REPLAY_RECOVERED_LOG]);
         assert_eq!(node.cursor_for("node_a"), 1);
         assert!(node.cursor_repair_requirements().is_empty());
+    }
+
+    #[test]
+    fn replay_recovery_status_reports_quarantine_and_cursor_repair() {
+        let mut node = ModelNode::new();
+        let rejected = event("node_a", 1, "mem_quarantined", None, "hash_policy_denied");
+        let rejected_event_id = rejected.event_id.clone();
+        let _ = node.replay_with_validation(
+            rejected,
+            ReplayValidation::Quarantine(ReplayQuarantineReason::PolicyDenied),
+        );
+
+        let crashed = event("node_b", 1, "mem_crash_recovery", None, "hash_crashed");
+        node.accepted.insert(crashed.key.clone(), crashed);
+
+        let status = node.replay_recovery_status();
+
+        assert_eq!(status.schema, MESH_REPLAY_RECOVERY_SCHEMA_V1);
+        assert_eq!(status.status, "cursor_repair_required");
+        assert_eq!(status.quarantined_event_count, 1);
+        assert_eq!(status.cursor_repair_required_count, 1);
+        assert_eq!(
+            status.latest_quarantined_event_id.as_deref(),
+            Some(rejected_event_id.as_str())
+        );
+        assert_eq!(status.repair_audit_count, 0);
+        assert!(status.sync_blocked);
+        assert_eq!(
+            status.degraded,
+            vec![
+                MESH_CURSOR_REPAIR_REQUIRED_CODE,
+                MESH_EVENT_QUARANTINED_CODE
+            ]
+        );
+        assert_eq!(
+            status.structured_log_events,
+            vec![CURSOR_NOT_ADVANCED_LOG, QUARANTINE_ENTERED_LOG]
+        );
+        assert!(
+            status
+                .repair_actions
+                .iter()
+                .any(|command| command.contains("--event")
+                    && command.contains(rejected_event_id.as_str())
+                    && command.contains("retry|skip-with-audit|revoke-peer|reset-cache"))
+        );
+        assert!(
+            status.repair_actions.iter().any(|command| command
+                == "ee mesh repair --cursor --origin node_b --from 0 --to 1 --json")
+        );
     }
 
     #[test]
