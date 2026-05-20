@@ -1,0 +1,36 @@
+# fm-schema_migrations-shard-fanout-catalog-hash-mismatch
+
+| Field | Value |
+| --- | --- |
+| Failure-mode id | `fm-schema_migrations-shard-fanout-catalog-hash-mismatch` |
+| Severity | P0 |
+| Subsystem | schema_migrations |
+| Repair spec | [`doctor_workspace/analysis/repair_specs/schema_migrations.md`](../../../doctor_workspace/analysis/repair_specs/schema_migrations.md) |
+
+## Round-trip contract
+
+Per `bd-2oh15`, the fixture lifecycle is:
+
+1. `corrupt.sh` builds an isolated corrupt workspace at
+   `$EE_DOCTOR_FIXTURE_TARGET` and writes the marker
+   `.ee/doctor-fixtures/fm-schema_migrations-shard-fanout-catalog-hash-mismatch.json`, plus a baseline
+   `.fixture_baseline/before.sha256`.
+2. `assert.sh` confirms the marker is present. When
+   `EE_DOCTOR_FIXTURE_RUN_EE=1` and a binary is provided in
+   `EE_DOCTOR_FIXTURE_BINARY`, it additionally runs
+   `ee doctor --fix --only fm-schema_migrations-shard-fanout-catalog-hash-mismatch`, then a follow-up
+   `ee doctor` read-back, then `ee doctor undo --last`,
+   and finally compares the post-undo SHA-256 manifest
+   against the pre-fix baseline (round-trip byte-identical).
+
+The shell scripts intentionally NEVER invoke Cargo and NEVER
+delete files. Recovery, including the post-undo step, runs
+through the read-only `corrupt` -> `marker write` -> `doctor`
+-> `undo` sequence so an operator can audit every intermediate
+state on disk.
+
+## Wiring status
+
+`ee doctor --fix --only fm-schema_migrations-shard-fanout-catalog-hash-mismatch` is currently gated by
+`bd-3boan` (CLI surface for the doctor runtime); set
+`EE_DOCTOR_FIXTURE_RUN_EE=1` only once the CLI wiring lands.

@@ -1,0 +1,32 @@
+{
+  "schema": "ee.doctor_fixtures.v1",
+  "source": "doctor_workspace/failure_mode_scores.jsonl",
+  "bead": "bd-2oh15",
+  "fixtures": [
+    { "id": "fm-state_files-sqlite-wal-shm-sidecar-drift", "severity": "P0", "subsystem": "state_files", "spec": "doctor_workspace/analysis/repair_specs/state_files.md" },
+    { "id": "fm-state_files-sqlite-integrity-page-malformed", "severity": "P0", "subsystem": "state_files", "spec": "doctor_workspace/analysis/repair_specs/state_files.md" },
+    { "id": "fm-state_files-empty-or-truncated-database", "severity": "P0", "subsystem": "state_files", "spec": "doctor_workspace/analysis/repair_specs/state_files.md" },
+    { "id": "fm-state_files-merge-conflict-markers", "severity": "P0", "subsystem": "state_files", "spec": "doctor_workspace/analysis/repair_specs/state_files.md" },
+    { "id": "fm-state_files-jsonl-tombstone-drift", "severity": "P1", "subsystem": "state_files", "spec": "doctor_workspace/analysis/repair_specs/state_files.md" },
+    { "id": "fm-state_files-orphaned-pid-write-lock", "severity": "P1", "subsystem": "state_files", "spec": "doctor_workspace/analysis/repair_specs/state_files.md" },
+    { "id": "fm-state_files-permissions-too-permissive", "severity": "P1", "subsystem": "state_files", "spec": "doctor_workspace/analysis/repair_specs/state_files.md" },
+    { "id": "fm-state_files-workspace-ambiguous-multiple-candidates", "severity": "P1", "subsystem": "state_files", "spec": "doctor_workspace/analysis/repair_specs/state_files.md" },
+    { "id": "fm-schema_migrations-pending-migrations-detected", "severity": "P1", "subsystem": "schema_migrations", "spec": "doctor_workspace/analysis/repair_specs/schema_migrations.md" },
+    { "id": "fm-schema_migrations-migration-drift-checksum-mismatch", "severity": "P0", "subsystem": "schema_migrations", "spec": "doctor_workspace/analysis/repair_specs/schema_migrations.md" },
+    { "id": "fm-schema_migrations-shard-fanout-catalog-hash-mismatch", "severity": "P0", "subsystem": "schema_migrations", "spec": "doctor_workspace/analysis/repair_specs/schema_migrations.md" },
+    { "id": "fm-search_indexes-index_missing", "severity": "P1", "subsystem": "search_indexes", "spec": "doctor_workspace/analysis/repair_specs/search_indexes.md" },
+    { "id": "fm-search_indexes-index_stale", "severity": "P1", "subsystem": "search_indexes", "spec": "doctor_workspace/analysis/repair_specs/search_indexes.md" },
+    { "id": "fm-search_indexes-index_corrupt", "severity": "P0", "subsystem": "search_indexes", "spec": "doctor_workspace/analysis/repair_specs/search_indexes.md" },
+    { "id": "fm-cass_integration-cass_not_found", "severity": "P0", "subsystem": "cass_integration", "spec": "doctor_workspace/analysis/repair_specs/cass_integration.md" },
+    { "id": "fm-cass_integration-cass_unavailable-contract-mismatch", "severity": "P1", "subsystem": "cass_integration", "spec": "doctor_workspace/analysis/repair_specs/cass_integration.md" },
+    { "id": "fm-workspace_config-nested-ee-markers", "severity": "P1", "subsystem": "workspace_config", "spec": "doctor_workspace/analysis/repair_specs/workspace_config.md" },
+    { "id": "fm-workspace_config-config-toml-malformed", "severity": "P1", "subsystem": "workspace_config", "spec": "doctor_workspace/analysis/repair_specs/workspace_config.md" },
+    { "id": "fm-graph_subsystem-snapshot-stale", "severity": "P1", "subsystem": "graph_subsystem", "spec": "doctor_workspace/analysis/repair_specs/graph_subsystem.md" },
+    { "id": "fm-graph_subsystem-snapshot-missing", "severity": "P1", "subsystem": "graph_subsystem", "spec": "doctor_workspace/analysis/repair_specs/graph_subsystem.md" },
+    { "id": "fm-graph_subsystem-snapshot-write-lock-held", "severity": "P0", "subsystem": "graph_subsystem", "spec": "doctor_workspace/analysis/repair_specs/graph_subsystem.md" },
+    { "id": "fm-agent_coordination-rch-workers-all-blocked-by-pressure", "severity": "P0", "subsystem": "agent_coordination", "spec": "doctor_workspace/analysis/repair_specs/agent_coordination.md" },
+    { "id": "fm-agent_coordination-mcp-agent-mail-file-reservation-conflict", "severity": "P1", "subsystem": "agent_coordination", "spec": "doctor_workspace/analysis/repair_specs/agent_coordination.md" },
+    { "id": "fm-policy_safety-trauma-guard-policy-denied-exit-7", "severity": "P1", "subsystem": "policy_safety", "spec": "doctor_workspace/analysis/repair_specs/policy_safety.md" },
+    { "id": "fm-policy_safety-redaction-class-coverage-gap", "severity": "P1", "subsystem": "policy_safety", "spec": "doctor_workspace/analysis/repair_specs/policy_safety.md" }
+  ]
+}
