@@ -85,6 +85,7 @@ pub mod status;
 pub mod streams;
 pub mod support_bundle;
 pub mod swarm_brief;
+pub mod swarm_brief_delta;
 pub mod swarm_next_action;
 pub mod symbol_graph;
 pub mod tailscale_probe;
