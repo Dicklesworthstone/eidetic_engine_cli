@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.curate.peer_evidence.v1.json",
+  "title": "ee.curate.peer_evidence.v1",
+  "description": "Curation candidate envelope that has been informed by cached peer-origin evidence. The schema separates 'evidence we learned from' from 'truth we adopt': peer contributions appear as `peerEvidence[]` and influence `score` but never silently flip the candidate's `trustClass` into a local-human-explicit lane. `promotionBlockReason` records why a candidate that would otherwise be promoted was held back when peer evidence alone supplied the supporting signal. This contract is the schema-side scaffold for the SRR6.28 peer-aware learn-and-curate behavior; the actual sync pipeline is owned by bd-1k0ql / bd-1lgq6 / bd-wl4ja / bd-273tl. Rust emission constants and failure-mode fixtures land in a follow-up slice once those mesh dependencies merge.",
+  "type": "object",
+  "required": [
+    "schema",
+    "candidateId",
+    "candidateKind",
+    "score",
+    "trustClass",
+    "peerEvidence",
+    "contributingPeerCount",
+    "trustCap",
+    "promotable"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.curate.peer_evidence.v1"
+    },
+    "candidateId": {
+      "$ref": "#/$defs/candidateId"
+    },
+    "candidateKind": {
+      "$ref": "#/$defs/candidateKind"
+    },
+    "score": {
+      "description": "Combined candidate score after peer evidence has been folded in. The score MUST be reproducible from `peerEvidence[]` plus any local evidence the candidate already carried; consumers can re-derive it deterministically to detect provenance drift.",
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0
+    },
+    "trustClass": {
+      "description": "Trust class assigned to the candidate after peer contributions are folded in. Peer-only evidence MUST land at `agent_assertion` or `agent_validated` and MUST NOT escalate the candidate to `human_explicit` or `cass_evidence` — those classes are reserved for local human or local replay evidence respectively (parallels [[ee.mesh.peer_policy.v1]] `importTrustClass`).",
+      "type": "string",
+      "enum": ["agent_assertion", "agent_validated", "human_explicit", "cass_evidence", "legacy_import"]
+    },
+    "peerEvidence": {
+      "description": "Each entry records one peer's contribution to the candidate's evidence. The body of remote memories is not included here — only redaction-safe identifiers and the score delta the contribution produced.",
+      "type": "array",
+      "minItems": 0,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/peerEvidenceEntry"
+      }
+    },
+    "contributingPeerCount": {
+      "description": "Number of distinct peers (by `peerId`) whose evidence influenced this candidate. MUST equal the count of distinct `peerEvidence[].peerId` values.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "trustCap": {
+      "description": "Maximum `trustClass` this candidate could reach given peer-evidence-only contributions. When local evidence is also present, the effective trustClass may exceed this cap; for peer-only candidates, `trustClass` MUST be <= `trustCap`.",
+      "type": "string",
+      "enum": ["agent_assertion", "agent_validated"]
+    },
+    "promotable": {
+      "description": "When true, the candidate is eligible for promotion by `ee curate apply`. When false, `promotionBlockReason` MUST be present.",
+      "type": "boolean"
+    },
+    "promotionBlockReason": {
+      "$ref": "#/$defs/promotionBlockReason"
+    },
+    "contradictsCandidates": {
+      "description": "Other candidate ids whose evidence directly contradicts this one. Empty when no contradictions are detected. Producers MUST populate this when at least one peer's evidence supports an opposite signal so that `ee learn` surfaces the conflict instead of silently demoting one side.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/candidateId"
+      }
+    },
+    "createdAt": {
+      "$ref": "#/$defs/rfc3339"
+    }
+  },
+  "$defs": {
+    "candidateId": {
+      "type": "string",
+      "pattern": "^cand_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "candidateKind": {
+      "description": "What the candidate represents. Peer evidence can support all three kinds; promotion gating differs by kind (rules require human review more aggressively than workflow hints, for example).",
+      "type": "string",
+      "enum": ["rule", "anti_pattern", "workflow_hint"]
+    },
+    "peerEvidenceEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["peerId", "memoryRef", "scoreDelta", "recordedAt"],
+      "properties": {
+        "peerId": {
+          "$ref": "#/$defs/peerId"
+        },
+        "memoryRef": {
+          "description": "Redaction-safe reference to the peer-origin memory (id only; body is NOT embedded here).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "scoreDelta": {
+          "description": "Signed delta this evidence contributed to `score`. The sum of all entries' `scoreDelta` plus any local-evidence delta MUST reproduce `score` deterministically (allows replay-based audit).",
+          "type": "number",
+          "minimum": -1.0,
+          "maximum": 1.0
+        },
+        "outcomeWeight": {
+          "description": "Optional weight applied to this peer's contribution based on the peer's prior outcome accuracy. Owned by the follow-up SRR6.44 peer outcome-feedback bead bd-2ni8l.",
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "recordedAt": {
+          "$ref": "#/$defs/rfc3339"
+        }
+      }
+    },
+    "promotionBlockReason": {
+      "description": "Stable taxonomy of why a candidate was held back from promotion. The four base values are the SRR6.28 acceptance contract; additions are allowed in future minor revisions, deletions are not.",
+      "type": "string",
+      "enum": [
+        "peer_evidence_only_below_trust_cap",
+        "contradicting_peer_evidence",
+        "peer_outcome_feedback_pending",
+        "human_review_required_for_rule_kind"
+      ]
+    },
+    "peerId": {
+      "type": "string",
+      "pattern": "^peer_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "rfc3339": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

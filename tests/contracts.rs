@@ -231,3 +231,6 @@ mod mesh_surrogate_schema;
 
 #[path = "contracts/mesh_anti_entropy_schema.rs"]
 mod mesh_anti_entropy_schema;
+
+#[path = "contracts/curate_peer_evidence_schema.rs"]
+mod curate_peer_evidence_schema;
