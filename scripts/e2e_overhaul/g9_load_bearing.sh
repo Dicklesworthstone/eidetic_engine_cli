@@ -10,6 +10,39 @@ require_jq
 START_SECONDS="$(python3 -c 'import time; print(time.monotonic())')"
 epic_setup "g9_load_bearing"
 seed_corpus
+ee_workspace config set graph.feature.load_bearing.enabled true --json >/dev/null
+
+LOAD_BEARING_MEMORY_JSON=$(ee_workspace remember \
+    "G9 load-bearing source memory shared by cornerstone rules." \
+    --level semantic \
+    --kind fact \
+    --confidence 0.91 \
+    --json)
+LOAD_BEARING_MEMORY_ID=$(printf '%s' "$LOAD_BEARING_MEMORY_JSON" | jq -r '.data.memory_id // empty')
+SOLO_MEMORY_JSON=$(ee_workspace remember \
+    "G9 solo source memory cited by one rule." \
+    --level semantic \
+    --kind fact \
+    --confidence 0.81 \
+    --json)
+SOLO_MEMORY_ID=$(printf '%s' "$SOLO_MEMORY_JSON" | jq -r '.data.memory_id // empty')
+
+if [ -z "$LOAD_BEARING_MEMORY_ID" ] || [ -z "$SOLO_MEMORY_ID" ]; then
+    e2e_log_assert_eq "${LOAD_BEARING_MEMORY_ID:-missing}/${SOLO_MEMORY_ID:-missing}" "memory-ids" "g9_load_bearing_fixture_memory_ids"
+else
+    ee_workspace rule add \
+        "G9 cornerstone rule alpha cites the load-bearing memory." \
+        --maturity validated \
+        --source-memory "$LOAD_BEARING_MEMORY_ID" \
+        --json >/dev/null
+    ee_workspace rule add \
+        "G9 cornerstone rule beta cites both load-bearing and solo memories." \
+        --maturity validated \
+        --source-memory "$LOAD_BEARING_MEMORY_ID" \
+        --source-memory "$SOLO_MEMORY_ID" \
+        --json >/dev/null
+    e2e_log_note "g9_load_bearing_fixture load_bearing_memory=${LOAD_BEARING_MEMORY_ID} solo_memory=${SOLO_MEMORY_ID}"
+fi
 
 e2e_log_note "g9_load_bearing_surface=insights --section loadBearingMemories"
 INSIGHTS_JSON=$(ee_workspace insights --section loadBearingMemories --json 2>/dev/null || true)
@@ -42,6 +75,22 @@ if printf '%s' "$INSIGHTS_JSON" | jq . >/dev/null 2>&1; then
 else
     todo_assert "g9_load_bearing_surface_available" "bd-2jl2.4" "ee insights --section loadBearingMemories is not fully available yet."
     SNAPSHOT_VERSION="unavailable"
+fi
+
+e2e_log_note "g9_load_bearing_surface=why graph.loadBearing"
+if [ -n "${LOAD_BEARING_MEMORY_ID:-}" ]; then
+    WHY_JSON=$(ee_workspace why "$LOAD_BEARING_MEMORY_ID" --json 2>/dev/null || true)
+    if printf '%s' "$WHY_JSON" | jq . >/dev/null 2>&1; then
+        assert_jq "$WHY_JSON" '.schema // empty' "ee.response.v1" "g9_load_bearing_why_envelope_schema"
+        assert_jq "$WHY_JSON" '.success // false' "true" "g9_load_bearing_why_success"
+        assert_jq "$WHY_JSON" '.data.graph.loadBearing.isLoadBearing // false' "true" "g9_load_bearing_why_flag"
+        assert_jq "$WHY_JSON" '.data.graph.loadBearing.interpretation // empty' "load_bearing" "g9_load_bearing_why_interpretation"
+        assert_jq "$WHY_JSON" '(.data.graph.loadBearing.citingRuleCount // 0) >= 2' "true" "g9_load_bearing_why_citing_rule_count"
+        assert_jq "$WHY_JSON" '.data.graph.loadBearing.evidence.projection // empty' "rule_provenance_bipartite" "g9_load_bearing_why_projection"
+        assert_jq "$WHY_JSON" '.data.graph.loadBearing.evidence.algorithm // empty' "bipartite_hits" "g9_load_bearing_why_algorithm"
+    else
+        e2e_log_assert_eq "parseable-json" "invalid-json" "g9_load_bearing_why_parseable_json" || true
+    fi
 fi
 
 if [ "${EE_GRAPH_E2E_INJECT_FAILURE:-0}" = "1" ]; then

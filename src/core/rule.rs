@@ -4448,6 +4448,7 @@ mod tests {
                 candidate_id: &candidate_id,
                 actor: Some("test"),
                 dry_run: false,
+                allow_tombstone_load_bearing: false,
             },
         )
         .map_err(|error| error.message())?;
@@ -4464,6 +4465,7 @@ mod tests {
                 candidate_id: &candidate_id,
                 actor: Some("test"),
                 dry_run: false,
+                allow_tombstone_load_bearing: false,
             },
         )
         .map_err(|error| error.message())?;
