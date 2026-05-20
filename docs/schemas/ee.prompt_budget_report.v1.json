@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.prompt_budget_report.v1.json",
+  "title": "ee.prompt_budget_report.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "traceHash",
+    "totalEvents",
+    "totalResponseBytes",
+    "totalTokenEstimate",
+    "avoidableBytes",
+    "avoidableTokenEstimate",
+    "topWasteCategories",
+    "affectedCommandSequences",
+    "suggestedActions",
+    "degraded"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.prompt_budget_report.v1"
+    },
+    "traceHash": {
+      "type": "string",
+      "pattern": "^blake3:[A-Fa-f0-9]{32,128}$"
+    },
+    "totalEvents": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "totalResponseBytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "totalTokenEstimate": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "avoidableBytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "avoidableTokenEstimate": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "topWasteCategories": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/wasteCategory"
+      }
+    },
+    "affectedCommandSequences": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/commandSequence"
+      }
+    },
+    "suggestedActions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/action"
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/degradation"
+      }
+    }
+  },
+  "$defs": {
+    "wasteCategory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "category",
+        "eventCount",
+        "avoidableBytes",
+        "avoidableTokenEstimate",
+        "rationale"
+      ],
+      "properties": {
+        "category": {
+          "type": "string",
+          "enum": [
+            "repeated_context_bytes",
+            "bulky_optional_json_fields",
+            "redundant_search_why_context_sequence",
+            "unchanged_pack_resent_full",
+            "degraded_retry_no_output_change"
+          ]
+        },
+        "eventCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "avoidableBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "avoidableTokenEstimate": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rationale": {
+          "type": "string"
+        }
+      }
+    },
+    "commandSequence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequenceHash",
+        "commands",
+        "eventCount",
+        "responseBytes",
+        "avoidableBytes",
+        "wasteCategories"
+      ],
+      "properties": {
+        "sequenceHash": {
+          "type": "string",
+          "pattern": "^seq_[A-Fa-f0-9]{16}$"
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*( [a-z][a-z0-9-]*)*$"
+          }
+        },
+        "eventCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "responseBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "avoidableBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wasteCategories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "command", "reason"],
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message", "repair"],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "critical"]
+        },
+        "message": {
+          "type": "string"
+        },
+        "repair": {
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}

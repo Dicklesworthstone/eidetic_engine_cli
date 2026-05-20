@@ -21,8 +21,12 @@ use crate::models::{self, DomainError};
 pub const COMPARE_RESULT_SCHEMA_V1: &str = "ee.perf.compare.v1";
 pub const BUDGET_CHECK_SCHEMA_V1: &str = "ee.perf.budget_check.v1";
 pub const EXPLAIN_LATENCY_SCHEMA_V1: &str = "ee.perf.explain_latency.v1";
+pub const PROMPT_BUDGET_REPORT_SCHEMA_V1: &str = "ee.prompt_budget_report.v1";
 
 const ARTIFACT_SUMMARY_SCHEMA: &str = "ee.perf.artifact_summary.v1";
+const AGENT_WORKLOAD_TRACE_SCHEMA_V1: &str = "ee.agent_workload_trace.v1";
+const BYTES_PER_TOKEN_ESTIMATE: u64 = 4;
+const BULKY_JSON_RESPONSE_BYTES: u64 = 16 * 1024;
 
 fn default_artifact_summary_schema() -> String {
     ARTIFACT_SUMMARY_SCHEMA.to_owned()
@@ -34,6 +38,10 @@ fn default_compare_result_schema() -> &'static str {
 
 fn default_explain_latency_schema() -> &'static str {
     EXPLAIN_LATENCY_SCHEMA_V1
+}
+
+fn default_prompt_budget_report_schema() -> &'static str {
+    PROMPT_BUDGET_REPORT_SCHEMA_V1
 }
 
 /// User-facing surfaces supported by the latency explanation report.
@@ -743,6 +751,139 @@ pub struct ExplainLatencyReport {
     pub next_commands: Vec<String>,
 }
 
+/// Read-only prompt budget diet report over redacted agent workload traces.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptBudgetReport {
+    #[serde(skip_deserializing, default = "default_prompt_budget_report_schema")]
+    pub schema: &'static str,
+    pub trace_hash: String,
+    pub total_events: usize,
+    pub total_response_bytes: u64,
+    pub total_token_estimate: u64,
+    pub avoidable_bytes: u64,
+    pub avoidable_token_estimate: u64,
+    pub top_waste_categories: Vec<PromptBudgetWasteCategory>,
+    pub affected_command_sequences: Vec<PromptBudgetCommandSequence>,
+    pub suggested_actions: Vec<PromptBudgetAction>,
+    pub degraded: Vec<PromptBudgetDegradation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptBudgetWasteCategory {
+    pub category: String,
+    pub event_count: usize,
+    pub avoidable_bytes: u64,
+    pub avoidable_token_estimate: u64,
+    pub rationale: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptBudgetCommandSequence {
+    pub sequence_hash: String,
+    pub commands: Vec<String>,
+    pub event_count: usize,
+    pub response_bytes: u64,
+    pub avoidable_bytes: u64,
+    pub waste_categories: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptBudgetAction {
+    pub category: String,
+    pub command: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptBudgetDegradation {
+    pub code: String,
+    pub severity: Severity,
+    pub message: String,
+    pub repair: Option<String>,
+}
+
+impl PromptBudgetDegradation {
+    #[must_use]
+    pub fn partial_trace(malformed_lines: usize) -> Self {
+        Self {
+            code: "prompt_budget_trace_partial".to_owned(),
+            severity: Severity::Low,
+            message: format!(
+                "Skipped {malformed_lines} malformed trace line(s) while preserving the remaining report."
+            ),
+            repair: Some("Regenerate the flight-recorder trace as JSONL.".to_owned()),
+        }
+    }
+
+    #[must_use]
+    pub fn missing_trace_events() -> Self {
+        Self {
+            code: "prompt_budget_trace_empty".to_owned(),
+            severity: Severity::Medium,
+            message: "No usable ee.agent_workload_trace.v1 events were found.".to_owned(),
+            repair: Some(
+                "Run ee with flight recorder enabled, then pass the trace JSONL.".to_owned(),
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptBudgetTraceRow {
+    schema: String,
+    trace_id: String,
+    command: PromptBudgetCommandShape,
+    #[serde(default)]
+    response_byte_count: u64,
+    #[serde(default)]
+    response_token_estimate: Option<u64>,
+    #[serde(default)]
+    memory_references: Vec<PromptBudgetMemoryRef>,
+    #[serde(default)]
+    degraded_codes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptBudgetCommandShape {
+    #[serde(default)]
+    verbs: Vec<String>,
+    #[serde(default)]
+    flag_names: Vec<String>,
+    #[serde(default)]
+    output_format: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PromptBudgetMemoryRef {
+    hash: String,
+}
+
+#[derive(Clone, Debug)]
+struct PromptBudgetTraceEvent {
+    trace_id: String,
+    command_key: String,
+    command_family: String,
+    output_format: Option<String>,
+    flag_names: Vec<String>,
+    response_bytes: u64,
+    token_estimate: u64,
+    memory_hashes: Vec<String>,
+    degraded_codes: Vec<String>,
+}
+
+#[derive(Default)]
+struct PromptBudgetAccumulator {
+    event_count: usize,
+    avoidable_bytes: u64,
+}
+
 /// Redaction-safe artifact identity embedded in `ee perf explain-latency`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1399,6 +1540,485 @@ pub fn explain_latency_report(
     report.degraded.extend(extra_degraded);
     sort_explain_latency_degraded(&mut report.degraded);
     Ok(report)
+}
+
+/// Build a redaction-safe prompt budget diet report from agent workload traces.
+pub fn prompt_budget_report(trace_path: &Path) -> Result<PromptBudgetReport, DomainError> {
+    let (trace_hash, events, malformed_lines) = read_prompt_budget_trace_events(trace_path)?;
+    Ok(analyze_prompt_budget_trace(
+        trace_hash,
+        &events,
+        malformed_lines,
+    ))
+}
+
+/// Analyze already-redacted trace events. Does not inspect raw task/query/memory text.
+#[must_use]
+fn analyze_prompt_budget_trace(
+    trace_hash: String,
+    events: &[PromptBudgetTraceEvent],
+    malformed_lines: usize,
+) -> PromptBudgetReport {
+    let total_response_bytes = events.iter().map(|event| event.response_bytes).sum();
+    let total_token_estimate = events.iter().map(|event| event.token_estimate).sum();
+    let mut category_accumulators: BTreeMap<&'static str, PromptBudgetAccumulator> =
+        BTreeMap::new();
+    let mut sequence_map: BTreeMap<String, PromptBudgetCommandSequence> = BTreeMap::new();
+
+    detect_repeated_memory_context(events, &mut category_accumulators, &mut sequence_map);
+    detect_bulky_json(events, &mut category_accumulators, &mut sequence_map);
+    detect_redundant_search_why_context(events, &mut category_accumulators, &mut sequence_map);
+    detect_unchanged_pack_resends(events, &mut category_accumulators, &mut sequence_map);
+    detect_degraded_retries(events, &mut category_accumulators, &mut sequence_map);
+
+    let mut top_waste_categories = category_accumulators
+        .into_iter()
+        .map(|(category, accumulator)| PromptBudgetWasteCategory {
+            category: category.to_owned(),
+            event_count: accumulator.event_count,
+            avoidable_bytes: accumulator.avoidable_bytes,
+            avoidable_token_estimate: bytes_to_tokens(accumulator.avoidable_bytes),
+            rationale: prompt_budget_category_rationale(category).to_owned(),
+        })
+        .filter(|category| category.avoidable_bytes > 0)
+        .collect::<Vec<_>>();
+    top_waste_categories.sort_by(|left, right| {
+        right
+            .avoidable_bytes
+            .cmp(&left.avoidable_bytes)
+            .then_with(|| left.category.cmp(&right.category))
+    });
+
+    let category_total = top_waste_categories
+        .iter()
+        .map(|category| category.avoidable_bytes)
+        .sum::<u64>();
+    let avoidable_bytes = category_total.min(total_response_bytes);
+    let mut degraded = Vec::new();
+    if malformed_lines > 0 {
+        degraded.push(PromptBudgetDegradation::partial_trace(malformed_lines));
+    }
+    if events.is_empty() {
+        degraded.push(PromptBudgetDegradation::missing_trace_events());
+    }
+    degraded.sort_by(|left, right| {
+        right
+            .severity
+            .cmp(&left.severity)
+            .then_with(|| left.code.cmp(&right.code))
+    });
+
+    let mut affected_command_sequences = sequence_map.into_values().collect::<Vec<_>>();
+    affected_command_sequences.sort_by(|left, right| {
+        right
+            .avoidable_bytes
+            .cmp(&left.avoidable_bytes)
+            .then_with(|| left.sequence_hash.cmp(&right.sequence_hash))
+    });
+
+    PromptBudgetReport {
+        schema: PROMPT_BUDGET_REPORT_SCHEMA_V1,
+        trace_hash,
+        total_events: events.len(),
+        total_response_bytes,
+        total_token_estimate,
+        avoidable_bytes,
+        avoidable_token_estimate: bytes_to_tokens(avoidable_bytes),
+        top_waste_categories,
+        affected_command_sequences,
+        suggested_actions: prompt_budget_actions(),
+        degraded,
+    }
+}
+
+fn read_prompt_budget_trace_events(
+    path: &Path,
+) -> Result<(String, Vec<PromptBudgetTraceEvent>, usize), DomainError> {
+    validate_prompt_budget_trace_path(path)?;
+    let body = fs::read_to_string(path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Could not read prompt-budget trace {}: {error}",
+            path.display()
+        ),
+        repair: Some("Verify the trace JSONL file is readable and retry.".to_owned()),
+    })?;
+    let trace_hash = format!("blake3:{}", blake3::hash(body.as_bytes()).to_hex());
+    let mut events = Vec::new();
+    let mut malformed_lines = 0usize;
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<PromptBudgetTraceRow>(trimmed) {
+            Ok(row) if row.schema == AGENT_WORKLOAD_TRACE_SCHEMA_V1 => {
+                events.push(prompt_budget_event_from_row(row));
+            }
+            _ => malformed_lines += 1,
+        }
+    }
+
+    Ok((trace_hash, events, malformed_lines))
+}
+
+fn prompt_budget_event_from_row(row: PromptBudgetTraceRow) -> PromptBudgetTraceEvent {
+    let mut flag_names = row.command.flag_names;
+    flag_names.sort();
+    flag_names.dedup();
+    let mut memory_hashes = row
+        .memory_references
+        .into_iter()
+        .map(|reference| reference.hash)
+        .collect::<Vec<_>>();
+    memory_hashes.sort();
+    memory_hashes.dedup();
+    let mut degraded_codes = row.degraded_codes;
+    degraded_codes.sort();
+    degraded_codes.dedup();
+    let command_key = prompt_budget_command_key(&row.command.verbs);
+    let command_family = row
+        .command
+        .verbs
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_owned());
+    let response_bytes = row.response_byte_count;
+    let token_estimate = row
+        .response_token_estimate
+        .unwrap_or_else(|| bytes_to_tokens(response_bytes));
+
+    PromptBudgetTraceEvent {
+        trace_id: row.trace_id,
+        command_key,
+        command_family,
+        output_format: row.command.output_format,
+        flag_names,
+        response_bytes,
+        token_estimate,
+        memory_hashes,
+        degraded_codes,
+    }
+}
+
+fn validate_prompt_budget_trace_path(path: &Path) -> Result<(), DomainError> {
+    if let Some(symlink_path) =
+        first_existing_symlink_component(path).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Could not inspect prompt-budget trace path component {}: {}",
+                error.path.display(),
+                error.source
+            ),
+            repair: Some("Verify the trace file is readable and retry.".to_owned()),
+        })?
+    {
+        return Err(DomainError::Usage {
+            message: format!(
+                "Unsupported prompt-budget trace path {}: path traverses symlinked component {}",
+                path.display(),
+                symlink_path.display()
+            ),
+            repair: Some("Pass a regular JSONL trace file, not a symlink.".to_owned()),
+        });
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|_| DomainError::NotFound {
+        resource: "prompt-budget trace".to_owned(),
+        id: path.display().to_string(),
+        repair: Some("Pass a readable ee.agent_workload_trace.v1 JSONL file.".to_owned()),
+    })?;
+    if !metadata.is_file() {
+        return Err(DomainError::Usage {
+            message: format!("Unsupported prompt-budget trace path: {}", path.display()),
+            repair: Some("Pass a JSONL file, not a directory or special file.".to_owned()),
+        });
+    }
+    if !matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("jsonl" | "json")
+    ) {
+        return Err(DomainError::Usage {
+            message: format!(
+                "Unsupported prompt-budget trace extension: {}",
+                path.display()
+            ),
+            repair: Some("Use a .jsonl ee.agent_workload_trace.v1 trace file.".to_owned()),
+        });
+    }
+    Ok(())
+}
+
+fn detect_repeated_memory_context(
+    events: &[PromptBudgetTraceEvent],
+    categories: &mut BTreeMap<&'static str, PromptBudgetAccumulator>,
+    sequences: &mut BTreeMap<String, PromptBudgetCommandSequence>,
+) {
+    let mut groups: BTreeMap<(String, Vec<String>), Vec<&PromptBudgetTraceEvent>> = BTreeMap::new();
+    for event in events.iter().filter(|event| {
+        matches!(event.command_family.as_str(), "context" | "pack")
+            && !event.memory_hashes.is_empty()
+    }) {
+        groups
+            .entry((event.command_key.clone(), event.memory_hashes.clone()))
+            .or_default()
+            .push(event);
+    }
+    for group in groups.values().filter(|group| group.len() > 1) {
+        let avoidable = group
+            .iter()
+            .skip(1)
+            .map(|event| event.response_bytes)
+            .sum::<u64>();
+        add_prompt_budget_category(
+            categories,
+            "repeated_context_bytes",
+            group.len().saturating_sub(1),
+            avoidable,
+        );
+        add_prompt_budget_sequence(
+            sequences,
+            "repeated_context_bytes",
+            group.iter().map(|event| *event).collect(),
+            avoidable,
+        );
+    }
+}
+
+fn detect_bulky_json(
+    events: &[PromptBudgetTraceEvent],
+    categories: &mut BTreeMap<&'static str, PromptBudgetAccumulator>,
+    sequences: &mut BTreeMap<String, PromptBudgetCommandSequence>,
+) {
+    for event in events.iter().filter(|event| {
+        event.output_format.as_deref() == Some("json")
+            && event.response_bytes > BULKY_JSON_RESPONSE_BYTES
+            && event.flag_names.iter().any(|flag| {
+                matches!(
+                    flag.as_str(),
+                    "--explain"
+                        | "--include-outcomes"
+                        | "--include-provenance"
+                        | "--causal-explain"
+                )
+            })
+    }) {
+        let avoidable = event
+            .response_bytes
+            .saturating_sub(BULKY_JSON_RESPONSE_BYTES);
+        add_prompt_budget_category(categories, "bulky_optional_json_fields", 1, avoidable);
+        add_prompt_budget_sequence(
+            sequences,
+            "bulky_optional_json_fields",
+            vec![event],
+            avoidable,
+        );
+    }
+}
+
+fn detect_redundant_search_why_context(
+    events: &[PromptBudgetTraceEvent],
+    categories: &mut BTreeMap<&'static str, PromptBudgetAccumulator>,
+    sequences: &mut BTreeMap<String, PromptBudgetCommandSequence>,
+) {
+    for window in events.windows(3) {
+        if window[0].command_family == "search"
+            && window[1].command_family == "why"
+            && window[2].command_family == "context"
+        {
+            let avoidable = window[0]
+                .response_bytes
+                .saturating_add(window[1].response_bytes);
+            add_prompt_budget_category(
+                categories,
+                "redundant_search_why_context_sequence",
+                3,
+                avoidable,
+            );
+            add_prompt_budget_sequence(
+                sequences,
+                "redundant_search_why_context_sequence",
+                window.iter().collect(),
+                avoidable,
+            );
+        }
+    }
+}
+
+fn detect_unchanged_pack_resends(
+    events: &[PromptBudgetTraceEvent],
+    categories: &mut BTreeMap<&'static str, PromptBudgetAccumulator>,
+    sequences: &mut BTreeMap<String, PromptBudgetCommandSequence>,
+) {
+    for window in events.windows(2) {
+        let left = &window[0];
+        let right = &window[1];
+        if matches!(left.command_family.as_str(), "context" | "pack")
+            && left.command_key == right.command_key
+            && left.memory_hashes == right.memory_hashes
+            && left.response_bytes == right.response_bytes
+            && !left.memory_hashes.is_empty()
+        {
+            add_prompt_budget_category(
+                categories,
+                "unchanged_pack_resent_full",
+                1,
+                right.response_bytes,
+            );
+            add_prompt_budget_sequence(
+                sequences,
+                "unchanged_pack_resent_full",
+                vec![left, right],
+                right.response_bytes,
+            );
+        }
+    }
+}
+
+fn detect_degraded_retries(
+    events: &[PromptBudgetTraceEvent],
+    categories: &mut BTreeMap<&'static str, PromptBudgetAccumulator>,
+    sequences: &mut BTreeMap<String, PromptBudgetCommandSequence>,
+) {
+    for window in events.windows(2) {
+        let left = &window[0];
+        let right = &window[1];
+        if left.command_key == right.command_key
+            && left.degraded_codes == right.degraded_codes
+            && !left.degraded_codes.is_empty()
+            && left.response_bytes == right.response_bytes
+        {
+            add_prompt_budget_category(
+                categories,
+                "degraded_retry_no_output_change",
+                1,
+                right.response_bytes,
+            );
+            add_prompt_budget_sequence(
+                sequences,
+                "degraded_retry_no_output_change",
+                vec![left, right],
+                right.response_bytes,
+            );
+        }
+    }
+}
+
+fn add_prompt_budget_category(
+    categories: &mut BTreeMap<&'static str, PromptBudgetAccumulator>,
+    category: &'static str,
+    event_count: usize,
+    avoidable_bytes: u64,
+) {
+    let entry = categories.entry(category).or_default();
+    entry.event_count = entry.event_count.saturating_add(event_count);
+    entry.avoidable_bytes = entry.avoidable_bytes.saturating_add(avoidable_bytes);
+}
+
+fn add_prompt_budget_sequence(
+    sequences: &mut BTreeMap<String, PromptBudgetCommandSequence>,
+    category: &'static str,
+    events: Vec<&PromptBudgetTraceEvent>,
+    avoidable_bytes: u64,
+) {
+    let commands = events
+        .iter()
+        .map(|event| event.command_key.clone())
+        .collect::<Vec<_>>();
+    let sequence_hash = prompt_budget_sequence_hash(&events);
+    let entry =
+        sequences
+            .entry(sequence_hash.clone())
+            .or_insert_with(|| PromptBudgetCommandSequence {
+                sequence_hash,
+                commands,
+                event_count: events.len(),
+                response_bytes: events.iter().map(|event| event.response_bytes).sum(),
+                avoidable_bytes: 0,
+                waste_categories: Vec::new(),
+            });
+    entry.avoidable_bytes = entry.avoidable_bytes.saturating_add(avoidable_bytes);
+    if !entry
+        .waste_categories
+        .iter()
+        .any(|existing| existing == category)
+    {
+        entry.waste_categories.push(category.to_owned());
+        entry.waste_categories.sort();
+    }
+}
+
+fn prompt_budget_sequence_hash(events: &[&PromptBudgetTraceEvent]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for event in events {
+        hasher.update(event.trace_id.as_bytes());
+        hasher.update(event.command_key.as_bytes());
+        hasher.update(&event.response_bytes.to_le_bytes());
+    }
+    let hash = hasher.finalize().to_hex().to_string();
+    format!("seq_{}", &hash[..16])
+}
+
+fn prompt_budget_command_key(verbs: &[String]) -> String {
+    let mut clean = verbs
+        .iter()
+        .map(|verb| verb.trim())
+        .filter(|verb| !verb.is_empty())
+        .collect::<Vec<_>>();
+    if clean.is_empty() {
+        "unknown".to_owned()
+    } else {
+        clean.dedup();
+        clean.join(" ")
+    }
+}
+
+fn bytes_to_tokens(bytes: u64) -> u64 {
+    bytes.div_ceil(BYTES_PER_TOKEN_ESTIMATE)
+}
+
+fn prompt_budget_category_rationale(category: &str) -> &'static str {
+    match category {
+        "repeated_context_bytes" => {
+            "Same redacted memory set was sent repeatedly; use context delta or pack replay instead of resending full context."
+        }
+        "bulky_optional_json_fields" => {
+            "Large JSON responses carried optional diagnostic fields; request compact output or disable heavy explanation fields for steady-state agent loops."
+        }
+        "redundant_search_why_context_sequence" => {
+            "Search and why were followed by context in the same trace window; context can often provide the pack and explanation in one response."
+        }
+        "unchanged_pack_resent_full" => {
+            "Consecutive pack/context responses had the same memory hash set and size; reuse the prior pack hash or request a delta."
+        }
+        "degraded_retry_no_output_change" => {
+            "A degraded command was retried with the same shape and unchanged response size; inspect the degraded code before retrying."
+        }
+        _ => "Prompt budget waste was detected from redacted workload traces.",
+    }
+}
+
+fn prompt_budget_actions() -> Vec<PromptBudgetAction> {
+    vec![
+        PromptBudgetAction {
+            category: "repeated_context_bytes".to_owned(),
+            command: "ee context <task> --max-tokens <n> --json".to_owned(),
+            reason: "Lower max tokens or reuse a prior pack when the trace shows unchanged memory hashes.".to_owned(),
+        },
+        PromptBudgetAction {
+            category: "unchanged_pack_resent_full".to_owned(),
+            command: "ee pack replay <pack-id> --json".to_owned(),
+            reason: "Replay an unchanged pack ledger instead of asking the agent to ingest it again.".to_owned(),
+        },
+        PromptBudgetAction {
+            category: "bulky_optional_json_fields".to_owned(),
+            command: "ee context <task> --format markdown --max-tokens <n>".to_owned(),
+            reason: "Use a diet pack for the prompt path and keep full JSON for audit artifacts.".to_owned(),
+        },
+        PromptBudgetAction {
+            category: "degraded_retry_no_output_change".to_owned(),
+            command: "ee doctor --json".to_owned(),
+            reason: "Repair degraded posture before repeating commands that return unchanged output.".to_owned(),
+        },
+    ]
 }
 
 /// Explain latency posture from a canonical normalized artifact summary.
