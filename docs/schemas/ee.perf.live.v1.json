@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.perf.live.v1.json",
+  "title": "ee.perf.live.v1",
+  "description": "Read-only live performance snapshot for swarm observability.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "ts",
+    "intervalMs",
+    "sideEffectFree",
+    "redactionStatus",
+    "beadId",
+    "surfaces",
+    "readPool",
+    "auditLane",
+    "l2Cache",
+    "rch",
+    "graphSnapshot",
+    "hostPressure",
+    "beadActivity",
+    "degraded"
+  ],
+  "properties": {
+    "schema": { "const": "ee.perf.live.v1" },
+    "ts": { "type": "string", "format": "date-time" },
+    "intervalMs": { "type": "integer", "minimum": 1 },
+    "windowMs": { "type": "integer", "minimum": 1 },
+    "sideEffectFree": { "const": true },
+    "redactionStatus": { "type": "string" },
+    "beadId": { "const": "bd-1zwi4" },
+    "surfaces": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["context", "search", "remember", "why", "packBuild"],
+      "properties": {
+        "context": { "$ref": "#/$defs/surface" },
+        "search": { "$ref": "#/$defs/surface" },
+        "remember": { "$ref": "#/$defs/surface" },
+        "why": { "$ref": "#/$defs/surface" },
+        "packBuild": { "$ref": "#/$defs/surface" }
+      }
+    },
+    "readPool": { "$ref": "#/$defs/readPool" },
+    "auditLane": { "$ref": "#/$defs/auditLane" },
+    "l2Cache": { "$ref": "#/$defs/l2Cache" },
+    "rch": { "$ref": "#/$defs/rch" },
+    "graphSnapshot": { "$ref": "#/$defs/graphSnapshot" },
+    "hostPressure": { "$ref": "#/$defs/hostPressure" },
+    "beadActivity": { "$ref": "#/$defs/beadActivity" },
+    "degraded": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/degradation" }
+    }
+  },
+  "$defs": {
+    "surface": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "surface",
+        "p50Ms",
+        "p95Ms",
+        "p99Ms",
+        "p999Ms",
+        "qps",
+        "inflight",
+        "qosClassCounts"
+      ],
+      "properties": {
+        "surface": { "type": "string" },
+        "p50Ms": { "type": "integer", "minimum": 0 },
+        "p95Ms": { "type": "integer", "minimum": 0 },
+        "p99Ms": { "type": "integer", "minimum": 0 },
+        "p999Ms": { "type": "integer", "minimum": 0 },
+        "qps": { "type": "number", "minimum": 0 },
+        "inflight": { "type": "integer", "minimum": 0 },
+        "qosClassCounts": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "readPool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["activePins", "expiredPins", "releaseFailures", "queueDepth"],
+      "properties": {
+        "activePins": { "type": "integer", "minimum": 0 },
+        "expiredPins": { "type": "integer", "minimum": 0 },
+        "releaseFailures": { "type": "integer", "minimum": 0 },
+        "queueDepth": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "auditLane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "batchCount",
+        "batchSizeP50",
+        "batchSizeP99",
+        "backpressureEvents",
+        "channelDepth"
+      ],
+      "properties": {
+        "batchCount": { "type": "integer", "minimum": 0 },
+        "batchSizeP50": { "type": "integer", "minimum": 0 },
+        "batchSizeP99": { "type": "integer", "minimum": 0 },
+        "backpressureEvents": { "type": "integer", "minimum": 0 },
+        "channelDepth": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "l2Cache": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "hits", "misses", "hitRateBasisPoints", "byteSize", "evictions"],
+      "properties": {
+        "status": { "type": "string" },
+        "hits": { "type": "integer", "minimum": 0 },
+        "misses": { "type": "integer", "minimum": 0 },
+        "hitRateBasisPoints": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "byteSize": { "type": "integer", "minimum": 0 },
+        "evictions": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "rch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workersHealthy", "slotsAvailable", "queueDepth", "headOfLineAgeMs"],
+      "properties": {
+        "workersHealthy": { "type": "integer", "minimum": 0 },
+        "slotsAvailable": { "type": ["integer", "null"], "minimum": 0 },
+        "queueDepth": { "type": "integer", "minimum": 0 },
+        "headOfLineAgeMs": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "graphSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ageMs", "refreshedCount", "refreshLockWaitMsP99"],
+      "properties": {
+        "ageMs": { "type": ["integer", "null"], "minimum": 0 },
+        "refreshedCount": { "type": "integer", "minimum": 0 },
+        "refreshLockWaitMsP99": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "hostPressure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cpuUserPct",
+        "cpuIowaitPct",
+        "memoryRssMb",
+        "pageCacheMb",
+        "fsyncLatencyP99Ms"
+      ],
+      "properties": {
+        "cpuUserPct": { "type": ["number", "null"], "minimum": 0 },
+        "cpuIowaitPct": { "type": ["number", "null"], "minimum": 0 },
+        "memoryRssMb": { "type": ["integer", "null"], "minimum": 0 },
+        "pageCacheMb": { "type": ["integer", "null"], "minimum": 0 },
+        "fsyncLatencyP99Ms": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "beadActivity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["activeAgents", "readyBeads", "inProgressBeads", "blockedBeads"],
+      "properties": {
+        "activeAgents": { "type": "integer", "minimum": 0 },
+        "readyBeads": { "type": "integer", "minimum": 0 },
+        "inProgressBeads": { "type": "integer", "minimum": 0 },
+        "blockedBeads": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "source", "severity", "message", "repair"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "source": { "type": "string" },
+        "severity": { "type": "string" },
+        "message": { "type": "string" },
+        "repair": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

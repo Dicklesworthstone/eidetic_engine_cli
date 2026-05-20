@@ -5,7 +5,8 @@ use crate::models::{
     MESH_EVENT_SCHEMA_V1, MESH_PEER_GROUP_BINDING_SCHEMA_V1, MESH_PEER_POLICY_SCHEMA_V1,
     MESH_POLICY_DECISION_SCHEMA_V1, MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1,
     MESH_STORAGE_STATUS_SCHEMA_V1, RESPONSE_SCHEMA_V1, SINGLEFLIGHT_KEY_SCHEMA_V1,
-    SINGLEFLIGHT_POSTURE_SCHEMA_V1, SYMBOL_SNAPSHOT_SCHEMA_V1, UPDATE_PLAN_SCHEMA_V1,
+    SINGLEFLIGHT_POSTURE_SCHEMA_V1, SYMBOL_EVIDENCE_LINKS_SCHEMA_V1, SYMBOL_SNAPSHOT_SCHEMA_V1,
+    UPDATE_PLAN_SCHEMA_V1,
 };
 
 pub mod agent_detect;
@@ -65,6 +66,7 @@ pub mod model;
 pub mod outcome;
 pub mod ownership_snapshot;
 pub mod perf_forensics;
+pub mod perf_live;
 pub mod plan;
 pub mod preflight;
 pub mod preflight_guard;
@@ -229,6 +231,7 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
         SupportedSchema::new("error", ERROR_SCHEMA_V2),
         SupportedSchema::new("version_provenance", VERSION_PROVENANCE_SCHEMA_V1),
         SupportedSchema::new("symbol_snapshot", SYMBOL_SNAPSHOT_SCHEMA_V1),
+        SupportedSchema::new("symbol_evidence_links", SYMBOL_EVIDENCE_LINKS_SCHEMA_V1),
         SupportedSchema::new(
             "memory_drift_snapshot",
             memory_drift::MEMORY_DRIFT_SNAPSHOT_SCHEMA_V1,
@@ -267,6 +270,7 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
         ),
         SupportedSchema::new("compare_result", perf_forensics::COMPARE_RESULT_SCHEMA_V1),
         SupportedSchema::new("budget_check", perf_forensics::BUDGET_CHECK_SCHEMA_V1),
+        SupportedSchema::new("perf_live", perf_live::PERF_LIVE_SCHEMA_V1),
         SupportedSchema::new("swarm_brief", swarm_brief::SWARM_BRIEF_SCHEMA_V1),
         SupportedSchema::new("insights", "ee.insights.v1"),
         SupportedSchema::new("context_pack_dna", "ee.context.pack_dna.v1"),
@@ -623,6 +627,7 @@ mod tests {
                 "error",
                 "version_provenance",
                 "symbol_snapshot",
+                "symbol_evidence_links",
                 "memory_drift_snapshot",
                 "memory_drift_queue",
                 "memory_drift_report",
