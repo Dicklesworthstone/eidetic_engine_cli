@@ -4469,6 +4469,8 @@ pub fn assemble_draft_with_profile_and_options_seeded(
         }
         ContextPackProfile::Compact
         | ContextPackProfile::Balanced
+        | ContextPackProfile::Grounding
+        | ContextPackProfile::Orientation
         | ContextPackProfile::Thorough => {
             tracing::info!(
                 target: "ee::pack::submodular",
@@ -7317,6 +7319,8 @@ mod tests {
         let expected = [
             (ContextPackProfile::Compact, [50, 15, 20, 10, 5]),
             (ContextPackProfile::Balanced, [30, 20, 20, 20, 10]),
+            (ContextPackProfile::Grounding, [30, 20, 20, 20, 10]),
+            (ContextPackProfile::Orientation, [30, 20, 20, 20, 10]),
             (ContextPackProfile::Thorough, [20, 20, 20, 25, 15]),
             (ContextPackProfile::Submodular, [20, 20, 20, 25, 15]),
         ];
@@ -7500,6 +7504,16 @@ mod tests {
             &ContextPackProfile::Balanced.to_string().as_str(),
             &"balanced",
             "balanced profile display",
+        )?;
+        ensure_equal(
+            &ContextPackProfile::Grounding.as_str(),
+            &"grounding",
+            "grounding profile",
+        )?;
+        ensure_equal(
+            &ContextPackProfile::Orientation.as_str(),
+            &"orientation",
+            "orientation profile",
         )?;
         ensure_equal(
             &ContextPackProfile::Submodular.as_str(),

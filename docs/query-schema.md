@@ -578,7 +578,7 @@ This schema **does not**:
 | `budget.maxTokens` | **Implemented** | Token budget for context pack |
 | `budget.candidatePool` | **Implemented** | Candidate pool size |
 | `budget.maxResults` | **Implemented** | Caps candidates admitted to pack assembly |
-| `output.profile` | **Implemented** | compact, balanced, thorough, submodular |
+| `output.profile` | **Implemented** | compact, balanced, grounding, orientation, thorough, submodular |
 | `output.format` | **Implemented** | json, markdown, toon, human, jsonl, compact, hook |
 | `output.fields` | Validated | Projection controlled by `--fields` CLI flag |
 | `output.explain` | **Implemented** | Accepted; JSON packs already include selection audits and per-item `why` |

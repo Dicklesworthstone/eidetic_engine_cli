@@ -2040,7 +2040,7 @@ pub struct ContextArgs {
     #[arg(long, value_parser = parse_speed_mode_arg, default_value = "default")]
     pub speed: crate::search::SpeedMode,
 
-    /// Context profile: compact, balanced, thorough, submodular.
+    /// Context profile: compact, balanced, grounding, orientation, thorough, or submodular.
     #[arg(long, short = 'p', default_value = "balanced")]
     pub profile: String,
 
@@ -2243,7 +2243,7 @@ pub struct PackArgs {
     #[arg(long, value_parser = parse_speed_mode_arg)]
     pub speed: Option<crate::search::SpeedMode>,
 
-    /// Context profile: compact, balanced, thorough, or submodular.
+    /// Context profile: compact, balanced, grounding, orientation, thorough, or submodular.
     #[arg(long, short = 'p')]
     pub profile: Option<String>,
 
@@ -2349,7 +2349,7 @@ pub struct PackBuildArgs {
     #[arg(long, value_parser = parse_speed_mode_arg)]
     pub speed: Option<crate::search::SpeedMode>,
 
-    /// Context profile: compact, balanced, thorough, or submodular.
+    /// Context profile: compact, balanced, grounding, orientation, thorough, or submodular.
     #[arg(long, short = 'p')]
     pub profile: Option<String>,
 
@@ -26667,10 +26667,12 @@ fn parse_context_profile(value: &str) -> Result<ContextPackProfile, String> {
     match value.to_lowercase().as_str() {
         "compact" => Ok(ContextPackProfile::Compact),
         "balanced" => Ok(ContextPackProfile::Balanced),
+        "grounding" => Ok(ContextPackProfile::Grounding),
+        "orientation" => Ok(ContextPackProfile::Orientation),
         "thorough" => Ok(ContextPackProfile::Thorough),
         "submodular" => Ok(ContextPackProfile::Submodular),
         _ => Err(format!(
-            "Invalid context profile '{value}'. Expected compact, balanced, thorough, or submodular."
+            "Invalid context profile '{value}'. Expected compact, balanced, grounding, orientation, thorough, or submodular."
         )),
     }
 }
@@ -31482,7 +31484,7 @@ fn output_from_document(
             QueryFileErrorCode::UnsupportedFeature,
             "output must be a JSON object.",
             Some(
-                "Use {\"output\": {\"profile\": \"balanced\", \"format\": \"json\"}}.".to_string(),
+                "Use {\"output\": {\"profile\": \"grounding\", \"format\": \"json\"}}.".to_string(),
             ),
         )
     })?;
@@ -31490,20 +31492,28 @@ fn output_from_document(
     let profile = match output.get("profile").and_then(serde_json::Value::as_str) {
         Some("compact") => Some(ContextPackProfile::Compact),
         Some("balanced") => Some(ContextPackProfile::Balanced),
+        Some("grounding") => Some(ContextPackProfile::Grounding),
+        Some("orientation") => Some(ContextPackProfile::Orientation),
         Some("thorough" | "wide") => Some(ContextPackProfile::Thorough),
         Some("submodular") => Some(ContextPackProfile::Submodular),
         Some("custom") => {
             return Err(QueryFileError::new(
                 QueryFileErrorCode::UnsupportedFeature,
                 "output.profile 'custom' requires named custom profile support, which is not wired yet.",
-                Some("Use compact, balanced, wide, thorough, or submodular.".to_string()),
+                Some(
+                    "Use compact, balanced, grounding, orientation, wide, thorough, or submodular."
+                        .to_string(),
+                ),
             ));
         }
         Some(profile) => {
             return Err(QueryFileError::new(
                 QueryFileErrorCode::UnsupportedFeature,
                 format!("Unsupported output.profile '{profile}'."),
-                Some("Use compact, balanced, wide, thorough, or submodular.".to_string()),
+                Some(
+                    "Use compact, balanced, grounding, orientation, wide, thorough, or submodular."
+                        .to_string(),
+                ),
             ));
         }
         None => None,
@@ -46087,6 +46097,41 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_hits_context_profiles() -> TestResult {
+        for (profile, expected) in [
+            ("grounding", ContextPackProfile::Grounding),
+            ("orientation", ContextPackProfile::Orientation),
+            ("balanced", ContextPackProfile::Balanced),
+        ] {
+            let parsed_profile = parse_context_profile(profile)
+                .map_err(|error| format!("failed to parse {profile}: {error}"))?;
+            ensure_equal(
+                &parsed_profile,
+                &expected,
+                &format!("{profile} parsed profile"),
+            )?;
+
+            let parsed = Cli::try_parse_from([
+                "ee",
+                "context",
+                "map release evidence",
+                "--profile",
+                profile,
+                "--json",
+            ])
+            .map(|cli| cli.command)
+            .map_err(|error| format!("failed to parse context {profile}: {:?}", error.kind()))?;
+            match parsed {
+                Some(Command::Context(args)) => {
+                    ensure_equal(&args.profile, &profile.to_string(), "raw profile")
+                }
+                other => Err(format!("expected context command, got {other:?}")),
+            }?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn parser_accepts_graph_export_mermaid_format() -> TestResult {
         let parsed = Cli::try_parse_from(["ee", "graph", "export", "--format", "mermaid"])
             .map(|cli| (cli.format, cli.command))
@@ -54091,7 +54136,10 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Success, "exit Success")?;
         ensure_contains(&stdout, "Search indexed memories", "search description")?;
         ensure_contains(&stdout, "--json", "search help mentions --json")?;
-        ensure(stderr.is_empty(), "no stderr noise on successful help routing")
+        ensure(
+            stderr.is_empty(),
+            "no stderr noise on successful help routing",
+        )
     }
 
     #[test]

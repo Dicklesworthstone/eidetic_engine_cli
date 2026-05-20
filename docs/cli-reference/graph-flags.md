@@ -42,7 +42,7 @@ owns `--ppr-weight`, `--explain`, and `--no-pack-dna`.
 | `ee context` | `--max-tokens`, `-t` | integer | `4000` | Sets the context pack token budget. |
 | `ee context`, `ee pack`, `ee pack build` | `--candidate-pool` | integer | `100` for `context`; query-file/default for `pack` | Caps candidates retrieved before packing. |
 | `ee context`, `ee pack`, `ee pack build` | `--speed` | `instant`, `default`, `quality` | `default` for `context`; query-file/default for `pack` | Selects retrieval speed versus quality budget. |
-| `ee context`, `ee pack`, `ee pack build` | `--profile`, `-p` | `compact`, `balanced`, `thorough`, `submodular` | `balanced` for `context`; query-file/default for `pack` | Selects the context profile and section quota strategy. |
+| `ee context`, `ee pack`, `ee pack build` | `--profile`, `-p` | `compact`, `balanced`, `grounding`, `orientation`, `thorough`, `submodular` | `balanced` for `context`; query-file/default for `pack` | Selects the context profile, section quota strategy, and HITS profile boosts when available. |
 | `ee context` | `--ppr-weight <WEIGHT>` | float; clamped to `0.0..=1.0` | omitted | Blends Personalized PageRank graph pull into context ranking. |
 | `ee context`, `ee pack`, `ee pack build` | `--pack-profile <PROFILE>` | `lean`, `standard`, `verbose` | `standard` for `context`; query-file/default for `pack` | Controls optional pack metadata volume. |
 | `ee context`, `ee pack`, `ee pack build` | `--resource-profile <PROFILE>` | `lean`, `standard`, `swarm_heavy` | `standard` for `context`; query-file/default for `pack` | Selects pack assembly SLOs and resource assumptions. |
@@ -72,6 +72,8 @@ Example:
 ```bash
 ee context "prepare release" --workspace . --profile thorough \
   --ppr-weight 0.5 --explain --json
+ee context "ground release evidence" --workspace . --profile grounding --json
+ee context "map release dependencies" --workspace . --profile orientation --json
 ee context "prepare release" --workspace . --stream --format json
 ee context "prepare release" --workspace . --explain-performance --json
 ee context "prepare release" --workspace . --ppr-weight 0.4 \
