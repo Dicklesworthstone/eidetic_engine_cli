@@ -131,6 +131,10 @@ fi
 BEAD_STATUS="$(printf '%s' "$BEAD_JSON" | jq -r '.status // "unknown"')"
 BEAD_ASSIGNEE="$(printf '%s' "$BEAD_JSON" | jq -r '.assignee // ""')"
 BEAD_TITLE="$(printf '%s' "$BEAD_JSON" | jq -r '.title // ""')"
+SRR6_CLOSEOUT_ENABLED=false
+if [ "$BEAD_ID" = "bd-2vu8m" ]; then
+    SRR6_CLOSEOUT_ENABLED=true
+fi
 
 # Collect open dependencies (the bead is blocked by these).
 DEPS_JSON="$(printf '%s' "$BEAD_JSON" | jq -c '[.dependencies // [] | .[] | select(.type == "blocks") | .depends_on_id]')"
@@ -154,6 +158,87 @@ if [ "$DEPS_JSON" != "[]" ] && [ "$DEPS_JSON" != "null" ]; then
     done
     if [ -s "$OPEN_DEPS_BUFFER" ]; then
         OPEN_DEPS_JSON="$(jq -s '.' < "$OPEN_DEPS_BUFFER")"
+    fi
+fi
+
+# SRR6 final closeout has a stricter contract than ordinary bead closure:
+# every child must be closed/deferred and the optional mesh-off proof paths must
+# still exist. This keeps bd-2vu8m from being marked ready by a generic audit
+# while SRR6 rows are still unresolved.
+SRR6_CLOSEOUT_STATUS="not_applicable"
+SRR6_MATRIX_PATH=""
+SRR6_MATRIX_PRESENT=false
+SRR6_MATRIX_ROW_PRESENT=false
+SRR6_REQUIRED_PROOFS_JSON="[]"
+SRR6_MISSING_PROOFS_JSON="[]"
+SRR6_MISSING_PROOF_MARKERS_JSON="[]"
+SRR6_UNRESOLVED_DEPS_JSON="[]"
+if [ "$SRR6_CLOSEOUT_ENABLED" = "true" ]; then
+    SRR6_MATRIX_PATH="docs/mesh/verification_matrix.md"
+    SRR6_MATRIX_ABS="$WORKSPACE_ROOT/$SRR6_MATRIX_PATH"
+    if [ -f "$SRR6_MATRIX_ABS" ]; then
+        SRR6_MATRIX_PRESENT=true
+        if grep -F "| bd-2vu8m |" "$SRR6_MATRIX_ABS" >/dev/null 2>&1; then
+            SRR6_MATRIX_ROW_PRESENT=true
+        fi
+    fi
+
+    SRR6_REQUIRED_PROOFS=(
+        "docs/mesh/verification_matrix.md"
+        "scripts/e2e_overhaul/mesh_off_no_network.sh"
+        "tests/mesh_off_no_network.rs"
+        "tests/fixtures/golden/mesh/mesh_off_no_network.commands.json.golden"
+    )
+    SRR6_REQUIRED_PROOFS_JSON="$(printf '%s\n' "${SRR6_REQUIRED_PROOFS[@]}" \
+        | jq -Rn '[inputs | select(length > 0)]')"
+    SRR6_MISSING_PROOFS_LINES=""
+    for proof_path in "${SRR6_REQUIRED_PROOFS[@]}"; do
+        if [ ! -f "$WORKSPACE_ROOT/$proof_path" ]; then
+            SRR6_MISSING_PROOFS_LINES="${SRR6_MISSING_PROOFS_LINES}${proof_path}"$'\n'
+        fi
+    done
+    if [ -n "$SRR6_MISSING_PROOFS_LINES" ]; then
+        SRR6_MISSING_PROOFS_JSON="$(printf '%s' "$SRR6_MISSING_PROOFS_LINES" \
+            | jq -Rn '[inputs | select(length > 0)]')"
+    fi
+
+    SRR6_MISSING_PROOF_MARKERS_LINES=""
+    srr6_require_marker() {
+        local proof_path="${1:?proof_path required}"
+        local marker="${2:?marker required}"
+        if [ ! -f "$WORKSPACE_ROOT/$proof_path" ]; then
+            return
+        fi
+        if ! grep -F "$marker" "$WORKSPACE_ROOT/$proof_path" >/dev/null 2>&1; then
+            SRR6_MISSING_PROOF_MARKERS_LINES="${SRR6_MISSING_PROOF_MARKERS_LINES}${proof_path}"$'\t'"${marker}"$'\n'
+        fi
+    }
+    srr6_require_marker "docs/mesh/verification_matrix.md" "Tests must not require real Tailscale"
+    srr6_require_marker "docs/mesh/verification_matrix.md" "| bd-2vu8m |"
+    srr6_require_marker "scripts/e2e_overhaul/mesh_off_no_network.sh" "export EE_MESH_ENABLED=0"
+    srr6_require_marker "scripts/e2e_overhaul/mesh_off_no_network.sh" "mesh_off_status_opens_no_mesh_listener"
+    srr6_require_marker "tests/mesh_off_no_network.rs" ".env(\"EE_MESH_ENABLED\", \"0\")"
+    srr6_require_marker "tests/mesh_off_no_network.rs" "assert_no_new_mesh_listener"
+    srr6_require_marker "tests/mesh_off_no_network.rs" "mesh_off_no_network.commands.json.golden"
+    srr6_require_marker "tests/fixtures/golden/mesh/mesh_off_no_network.commands.json.golden" "\"meshOrPeerCodes\""
+    srr6_require_marker "tests/fixtures/golden/mesh/mesh_off_no_network.commands.json.golden" "\"meshOrPeerDataKeys\""
+    if [ -n "$SRR6_MISSING_PROOF_MARKERS_LINES" ]; then
+        SRR6_MISSING_PROOF_MARKERS_JSON="$(printf '%s' "$SRR6_MISSING_PROOF_MARKERS_LINES" \
+            | jq -R -s 'split("\n") | map(select(length > 0) | split("\t") | {path: .[0], marker: .[1]})')"
+    fi
+
+    SRR6_UNRESOLVED_DEPS_JSON="$OPEN_DEPS_JSON"
+    SRR6_MISSING_PROOFS_COUNT="$(printf '%s' "$SRR6_MISSING_PROOFS_JSON" | jq 'length')"
+    SRR6_MISSING_PROOF_MARKERS_COUNT="$(printf '%s' "$SRR6_MISSING_PROOF_MARKERS_JSON" | jq 'length')"
+    SRR6_UNRESOLVED_DEPS_COUNT="$(printf '%s' "$SRR6_UNRESOLVED_DEPS_JSON" | jq 'length')"
+    if [ "$SRR6_MATRIX_PRESENT" != "true" ] \
+        || [ "$SRR6_MATRIX_ROW_PRESENT" != "true" ] \
+        || [ "$SRR6_MISSING_PROOFS_COUNT" -gt 0 ] \
+        || [ "$SRR6_MISSING_PROOF_MARKERS_COUNT" -gt 0 ] \
+        || [ "$SRR6_UNRESOLVED_DEPS_COUNT" -gt 0 ]; then
+        SRR6_CLOSEOUT_STATUS="blocked"
+    else
+        SRR6_CLOSEOUT_STATUS="ready"
     fi
 fi
 
@@ -253,6 +338,29 @@ if [ "$OPEN_DEPS_COUNT" -gt 0 ]; then
     BLOCKERS+=("open_dependencies: ${OPEN_DEPS_COUNT} dep(s) not yet closed")
     NEXT_ACTIONS+=("close or force-close the open dependencies; review each via 'br show <id>'")
 fi
+if [ "$SRR6_CLOSEOUT_ENABLED" = "true" ]; then
+    SRR6_UNRESOLVED_DEPS_COUNT="$(printf '%s' "$SRR6_UNRESOLVED_DEPS_JSON" | jq 'length')"
+    SRR6_MISSING_PROOFS_COUNT="$(printf '%s' "$SRR6_MISSING_PROOFS_JSON" | jq 'length')"
+    if [ "$SRR6_UNRESOLVED_DEPS_COUNT" -gt 0 ]; then
+        BLOCKERS+=("srr6_unresolved_dependencies: ${SRR6_UNRESOLVED_DEPS_COUNT} SRR6 dep(s) are not closed/deferred")
+        NEXT_ACTIONS+=("defer or close every unresolved SRR6 dependency before closing bd-2vu8m")
+    fi
+    if [ "$SRR6_MATRIX_PRESENT" != "true" ]; then
+        BLOCKERS+=("srr6_matrix_missing: docs/mesh/verification_matrix.md is required")
+        NEXT_ACTIONS+=("restore the SRR6 verification matrix before closeout")
+    elif [ "$SRR6_MATRIX_ROW_PRESENT" != "true" ]; then
+        BLOCKERS+=("srr6_matrix_row_missing: bd-2vu8m row is required in docs/mesh/verification_matrix.md")
+        NEXT_ACTIONS+=("add or restore the bd-2vu8m matrix row before closeout")
+    fi
+    if [ "$SRR6_MISSING_PROOFS_COUNT" -gt 0 ]; then
+        BLOCKERS+=("srr6_mesh_off_proof_missing: ${SRR6_MISSING_PROOFS_COUNT} required proof path(s) missing")
+        NEXT_ACTIONS+=("restore the missing mesh-off proof files before closeout")
+    fi
+    if [ "$SRR6_MISSING_PROOF_MARKERS_COUNT" -gt 0 ]; then
+        BLOCKERS+=("srr6_mesh_off_marker_missing: ${SRR6_MISSING_PROOF_MARKERS_COUNT} required proof marker(s) missing")
+        NEXT_ACTIONS+=("restore the required mesh-off assertions before closeout")
+    fi
+fi
 UNCOMMITTED_REFS_COUNT="$(printf '%s' "$UNCOMMITTED_REFS_JSON" | jq 'length')"
 if [ "$UNCOMMITTED_REFS_COUNT" -gt 0 ]; then
     BLOCKERS+=("uncommitted_files_reference_bead: ${UNCOMMITTED_REFS_COUNT} file(s) still mention ${BEAD_ID}")
@@ -314,6 +422,27 @@ RESULT_JSON="$(jq -nc \
     --arg agent_mail_status "$AGENT_MAIL_STATUS" \
     --argjson j1_log_present "$J1_LOG_PRESENT" \
     --arg j1_log_path "$J1_LOG_PATH" \
+    --argjson srr6_closeout "$(jq -nc \
+        --argjson enabled "$SRR6_CLOSEOUT_ENABLED" \
+        --arg status "$SRR6_CLOSEOUT_STATUS" \
+        --arg matrix_path "$SRR6_MATRIX_PATH" \
+        --argjson matrix_present "$SRR6_MATRIX_PRESENT" \
+        --argjson matrix_row_present "$SRR6_MATRIX_ROW_PRESENT" \
+        --argjson required_proofs "$SRR6_REQUIRED_PROOFS_JSON" \
+        --argjson missing_proofs "$SRR6_MISSING_PROOFS_JSON" \
+        --argjson missing_proof_markers "$SRR6_MISSING_PROOF_MARKERS_JSON" \
+        --argjson unresolved_dependencies "$SRR6_UNRESOLVED_DEPS_JSON" \
+        '{
+            enabled: $enabled,
+            status: $status,
+            matrix_path: $matrix_path,
+            matrix_present: $matrix_present,
+            matrix_row_present: $matrix_row_present,
+            required_proofs: $required_proofs,
+            missing_proofs: $missing_proofs,
+            missing_proof_markers: $missing_proof_markers,
+            unresolved_dependencies: $unresolved_dependencies
+        }')" \
     --argjson blockers "$BLOCKERS_JSON" \
     --argjson caveats "$CAVEATS_JSON" \
     --argjson next_actions "$NEXT_ACTIONS_JSON" \
@@ -334,7 +463,8 @@ RESULT_JSON="$(jq -nc \
             rch_queued_builds: $rch_queued_builds,
             agent_mail_status: $agent_mail_status,
             j1_log_present: $j1_log_present,
-            j1_log_path: $j1_log_path
+            j1_log_path: $j1_log_path,
+            srr6_closeout: $srr6_closeout
         },
         blockers: $blockers,
         caveats: $caveats,

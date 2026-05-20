@@ -140,6 +140,7 @@ fn assert_envelope_shape(audit: &Value) -> TestResult {
         "agent_mail_status",
         "j1_log_present",
         "j1_log_path",
+        "srr6_closeout",
     ];
     for key in &required_evidence {
         if audit["evidence"].get(key).is_none() {
@@ -194,6 +195,9 @@ fn closeout_audit_script_tracks_current_coordination_surfaces() -> TestResult {
         "rch_queue_stale_active_records",
         "rch CLI rejects 'rch exec' as an unknown subcommand",
         "RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects RCH_ALIAS_PROJECT_ROOT=/data/projects rch queue --json",
+        "srr6_mesh_off_marker_missing",
+        "missing_proof_markers",
+        "mesh_off_status_opens_no_mesh_listener",
     ] {
         if !script.contains(needle) {
             return Err(format!("closeout audit script missing `{needle}`"));
@@ -306,6 +310,70 @@ fn rch_queue_fixture_relative_path_resolves_before_workspace_cd() -> TestResult 
         return Err(format!(
             "relative RCH_QUEUE_JSON should be resolved before workspace cd; got evidence: {}",
             audit["evidence"],
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn srr6_closeout_reports_unresolved_dependency_blockers() -> TestResult {
+    let audit = run_audit("srr6_blocked", "bd-2vu8m")?;
+    assert_envelope_shape(&audit)?;
+
+    if audit["readiness"].as_str() != Some("blocked") {
+        return Err(format!("SRR6 fixture must be blocked; got {audit}"));
+    }
+    let srr6 = &audit["evidence"]["srr6_closeout"];
+    if srr6["enabled"].as_bool() != Some(true) {
+        return Err(format!("SRR6 closeout block should be enabled: {srr6}"));
+    }
+    if srr6["status"].as_str() != Some("blocked") {
+        return Err(format!("SRR6 closeout status should be blocked: {srr6}"));
+    }
+    if srr6["matrix_row_present"].as_bool() != Some(true) {
+        return Err(format!("SRR6 matrix row should be detected: {srr6}"));
+    }
+    if srr6["missing_proofs"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty())
+    {
+        return Err(format!("fixture should seed required proof paths: {srr6}"));
+    }
+    if srr6["missing_proof_markers"].as_array().is_none() {
+        return Err(format!(
+            "SRR6 closeout evidence should expose missing_proof_markers: {srr6}",
+        ));
+    }
+    if srr6["missing_proof_markers"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty())
+    {
+        return Err(format!(
+            "fixture should seed required proof markers and block only on deps: {srr6}",
+        ));
+    }
+    let unresolved = srr6["unresolved_dependencies"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if !unresolved.iter().any(|dep| {
+        dep.get("id").and_then(Value::as_str) == Some("bd-srr6-open")
+            && dep.get("status").and_then(Value::as_str) == Some("open")
+    }) {
+        return Err(format!(
+            "SRR6 closeout should list the unresolved dependency; got {unresolved:?}",
+        ));
+    }
+    let blockers = audit["blockers"].as_array().cloned().unwrap_or_default();
+    if !blockers.iter().any(|blocker| {
+        blocker
+            .as_str()
+            .unwrap_or("")
+            .starts_with("srr6_unresolved_dependencies:")
+    }) {
+        return Err(format!(
+            "SRR6 closeout blocker missing from blockers: {blockers:?}",
         ));
     }
 
