@@ -95,6 +95,7 @@ const PACK_SLOT_RETRY_AFTER_MS: u64 = 250;
 pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V1: &str = "ee.pack.l2_cache_key.v1";
 const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V1: &str = "ee.pack.l2_context_response.v1";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
+const CONTEXT_CHANGED_SYMBOL_BOOST: f32 = 0.05;
 
 #[derive(Debug)]
 struct PackSlotGuard {
@@ -546,6 +547,8 @@ pub struct ContextPackOptions {
     pub memory_scope: MemoryScope,
     pub strict_scope: bool,
     pub ppr_weight: Option<f32>,
+    pub changed_symbols: Vec<String>,
+    pub changed_symbols_from_git: bool,
     pub pagination: Option<ContextPagination>,
     pub coordination_snapshot_path: Option<PathBuf>,
     pub coordination_stale_after_ms: u64,
@@ -1524,6 +1527,16 @@ fn run_context_pack_with_performance_inner(
     candidate_metrics.graph_boosted_candidates = candidate_metrics
         .graph_boosted_candidates
         .saturating_add(proximity_metrics.annotated_candidates);
+    let changed_symbol_metrics = apply_changed_symbol_context_boost(
+        &options.workspace_path,
+        &options.changed_symbols,
+        options.changed_symbols_from_git,
+        &mut candidates,
+        &mut degraded,
+    );
+    candidate_metrics.graph_boosted_candidates = candidate_metrics
+        .graph_boosted_candidates
+        .saturating_add(changed_symbol_metrics.boosted_candidates);
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let mut agent_profile =
         apply_agent_context_profile_bias(read_connection, &options.workspace_path, &mut candidates);
@@ -3670,6 +3683,16 @@ fn context_pack_l2_feature_flags_hash(
             .unwrap_or_default()
             .as_bytes(),
     );
+    hash_labeled_bool(
+        &mut hasher,
+        "changed_symbols_from_git",
+        options.changed_symbols_from_git,
+    );
+    hash_labeled_bytes(
+        &mut hasher,
+        "changed_symbols",
+        options.changed_symbols.join("\n").as_bytes(),
+    );
     hash_labeled_bytes(
         &mut hasher,
         "pagination",
@@ -5085,6 +5108,383 @@ fn apply_proximity_to_seed_scores(
     ProximityToSeedMetrics {
         annotated_candidates,
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ChangedSymbolBoostMetrics {
+    boosted_candidates: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SymbolSourceText {
+    relative_path: String,
+    contents: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CandidateSymbolEvidence {
+    memory_id: MemoryId,
+    provenance_uri: String,
+    target_path: String,
+    start_line: u32,
+    end_line: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ChangedSymbolMatch {
+    canonical_name: String,
+    reason: String,
+}
+
+fn apply_changed_symbol_context_boost(
+    workspace_path: &Path,
+    explicit_symbols: &[String],
+    derive_from_git: bool,
+    candidates: &mut [PackCandidate],
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> ChangedSymbolBoostMetrics {
+    let mut selectors = explicit_symbols
+        .iter()
+        .filter_map(|symbol| normalize_symbol_selector(symbol))
+        .collect::<BTreeSet<_>>();
+    let mut changed_paths = BTreeSet::new();
+    if derive_from_git {
+        match changed_rust_paths_from_git(workspace_path) {
+            Ok(paths) => changed_paths = paths,
+            Err(message) => push_symbol_index_stale_degradation(degraded, message),
+        }
+    }
+    if selectors.is_empty() && changed_paths.is_empty() {
+        return ChangedSymbolBoostMetrics::default();
+    }
+
+    let evidence = candidate_symbol_evidence(candidates, workspace_path);
+    if evidence.is_empty() {
+        push_symbol_index_stale_degradation(
+            degraded,
+            "Symbol index is stale: no file-span provenance was available for changed-symbol context boosting.",
+        );
+        return ChangedSymbolBoostMetrics::default();
+    }
+
+    let source_paths = evidence
+        .iter()
+        .map(|item| item.target_path.as_str())
+        .chain(changed_paths.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    let sources = symbol_sources_for_paths(workspace_path, &source_paths, degraded);
+    if sources.is_empty() {
+        push_symbol_index_stale_degradation(
+            degraded,
+            "Symbol index is stale: no readable Rust sources were available for changed-symbol context boosting.",
+        );
+        return ChangedSymbolBoostMetrics::default();
+    }
+    let source_inputs = sources
+        .iter()
+        .map(|source| {
+            crate::core::symbol_graph::RustSourceInput::new(
+                source.relative_path.as_str(),
+                source.contents.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let snapshot =
+        crate::core::symbol_graph::extract_rust_symbol_snapshot_from_sources(&source_inputs);
+    if !snapshot.degraded.is_empty() {
+        push_symbol_index_stale_degradation(
+            degraded,
+            "Symbol index is stale: source degradations were reported while extracting the changed-symbol snapshot.",
+        );
+    }
+
+    for symbol in &snapshot.symbols {
+        if changed_paths.contains(&symbol.path) {
+            selectors.insert(normalize_symbol_key(&symbol.canonical_name));
+            selectors.insert(normalize_symbol_key(&symbol.id));
+            if let Some(short_name) = symbol.canonical_name.rsplit("::").next() {
+                selectors.insert(normalize_symbol_key(short_name));
+            }
+        }
+    }
+    if selectors.is_empty() {
+        return ChangedSymbolBoostMetrics::default();
+    }
+
+    let evidence_inputs = evidence
+        .iter()
+        .map(|item| {
+            crate::core::symbol_graph::SymbolEvidenceInput::new(
+                crate::models::SymbolEvidenceSourceKind::Memory,
+                item.memory_id.to_string(),
+                item.provenance_uri.as_str(),
+                item.target_path.as_str(),
+                item.start_line,
+                item.end_line,
+                1.0,
+            )
+        })
+        .collect::<Vec<_>>();
+    let link_set = crate::core::symbol_graph::link_symbol_evidence(&snapshot, &evidence_inputs);
+    if !link_set.degraded.is_empty() {
+        push_symbol_index_stale_degradation(
+            degraded,
+            "Symbol index is stale: some memory evidence links could not be resolved against the changed-symbol snapshot.",
+        );
+    }
+
+    let symbols_by_id = snapshot
+        .symbols
+        .iter()
+        .map(|symbol| (symbol.id.as_str(), symbol))
+        .collect::<BTreeMap<_, _>>();
+    let mut matches = BTreeMap::<MemoryId, ChangedSymbolMatch>::new();
+    for link in &link_set.links {
+        let Some(symbol_id) = link.symbol_id.as_deref() else {
+            continue;
+        };
+        let Some(symbol) = symbols_by_id.get(symbol_id) else {
+            continue;
+        };
+        if symbol_matches_selectors(symbol, &selectors) {
+            let reason = format!(
+                "{}:{}:{}",
+                symbol.path,
+                symbol.canonical_name,
+                link.reason.as_str()
+            );
+            if let Ok(memory_id) = MemoryId::from_str(&link.evidence_id) {
+                matches.entry(memory_id).or_insert(ChangedSymbolMatch {
+                    canonical_name: symbol.canonical_name.clone(),
+                    reason,
+                });
+            }
+        }
+    }
+
+    let mut boosted_candidates = 0_usize;
+    for candidate in candidates {
+        let Some(symbol_match) = matches.get(&candidate.memory_id) else {
+            continue;
+        };
+        let base = candidate.relevance.into_inner();
+        let boosted = (base + CONTEXT_CHANGED_SYMBOL_BOOST).min(1.0);
+        if boosted <= base {
+            continue;
+        }
+        if let Some(score) = unit_score(boosted) {
+            candidate.relevance = score;
+            candidate.why = format!(
+                "{} symbolBoost changedSymbol={} boost={:.4} reason={}.",
+                candidate.why,
+                symbol_match.canonical_name,
+                boosted - base,
+                symbol_match.reason
+            );
+            boosted_candidates = boosted_candidates.saturating_add(1);
+        }
+    }
+
+    ChangedSymbolBoostMetrics { boosted_candidates }
+}
+
+fn candidate_symbol_evidence(
+    candidates: &[PackCandidate],
+    workspace_path: &Path,
+) -> Vec<CandidateSymbolEvidence> {
+    let mut evidence = Vec::new();
+    for candidate in candidates {
+        for provenance in &candidate.provenance {
+            let ProvenanceUri::File { path, span } = &provenance.uri else {
+                continue;
+            };
+            let Some(span) = span else {
+                continue;
+            };
+            let Some(target_path) = normalize_symbol_workspace_path(workspace_path, path) else {
+                continue;
+            };
+            if !target_path.ends_with(".rs") {
+                continue;
+            }
+            evidence.push(CandidateSymbolEvidence {
+                memory_id: candidate.memory_id,
+                provenance_uri: provenance.uri.to_string(),
+                target_path,
+                start_line: u32_saturating_from_u64(span.start),
+                end_line: u32_saturating_from_u64(span.end.unwrap_or(span.start)),
+            });
+        }
+    }
+    evidence.sort_by(|left, right| {
+        (
+            left.memory_id,
+            left.target_path.as_str(),
+            left.start_line,
+            left.end_line,
+            left.provenance_uri.as_str(),
+        )
+            .cmp(&(
+                right.memory_id,
+                right.target_path.as_str(),
+                right.start_line,
+                right.end_line,
+                right.provenance_uri.as_str(),
+            ))
+    });
+    evidence.dedup();
+    evidence
+}
+
+fn changed_rust_paths_from_git(workspace_path: &Path) -> Result<BTreeSet<String>, &'static str> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace_path)
+        .args(["status", "--porcelain=v1", "--untracked-files=no"])
+        .output()
+        .map_err(|_| {
+            "Symbol index is stale: git status could not be executed for changed-symbol context boosting."
+        })?;
+    if !output.status.success() {
+        return Err(
+            "Symbol index is stale: git status failed while deriving changed symbols from the workspace diff.",
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut paths = BTreeSet::new();
+    for line in stdout.lines() {
+        let Some(raw_path) = line.get(3..) else {
+            continue;
+        };
+        let path = raw_path
+            .split(" -> ")
+            .next_back()
+            .unwrap_or(raw_path)
+            .trim()
+            .trim_matches('"');
+        if let Some(relative_path) = normalize_symbol_workspace_path(workspace_path, path)
+            && relative_path.ends_with(".rs")
+        {
+            paths.insert(relative_path);
+        }
+    }
+    Ok(paths)
+}
+
+fn symbol_sources_for_paths(
+    workspace_path: &Path,
+    paths: &BTreeSet<&str>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Vec<SymbolSourceText> {
+    let mut sources = Vec::new();
+    for path in paths {
+        let Some(relative_path) = normalize_symbol_workspace_path(workspace_path, path) else {
+            continue;
+        };
+        if !relative_path.ends_with(".rs") {
+            continue;
+        }
+        let absolute_path = workspace_path.join(&relative_path);
+        match read_context_file_to_string_no_follow(&absolute_path) {
+            Ok(contents) => sources.push(SymbolSourceText {
+                relative_path,
+                contents,
+            }),
+            Err(_) => push_symbol_index_stale_degradation(
+                degraded,
+                "Symbol index is stale: a Rust source referenced by changed-symbol context boosting could not be read.",
+            ),
+        }
+    }
+    sources.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    sources.dedup_by(|left, right| left.relative_path == right.relative_path);
+    sources
+}
+
+fn normalize_symbol_workspace_path(workspace_path: &Path, raw_path: &str) -> Option<String> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(trimmed);
+    let relative = if path.is_absolute() {
+        path.strip_prefix(workspace_path).ok()?.to_path_buf()
+    } else {
+        path
+    };
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    }) {
+        return None;
+    }
+    let normalized = relative
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_string_lossy()),
+            std::path::Component::CurDir => None,
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn symbol_matches_selectors(
+    symbol: &crate::models::SymbolRecord,
+    selectors: &BTreeSet<String>,
+) -> bool {
+    let canonical = normalize_symbol_key(&symbol.canonical_name);
+    let id = normalize_symbol_key(&symbol.id);
+    if selectors.contains(&canonical) || selectors.contains(&id) {
+        return true;
+    }
+    symbol
+        .canonical_name
+        .rsplit("::")
+        .next()
+        .map(normalize_symbol_key)
+        .is_some_and(|name| selectors.contains(&name))
+}
+
+fn normalize_symbol_selector(raw: &str) -> Option<String> {
+    let normalized = normalize_symbol_key(raw);
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn normalize_symbol_key(raw: &str) -> String {
+    raw.trim()
+        .trim_end_matches("()")
+        .to_ascii_lowercase()
+        .replace('\\', "/")
+}
+
+fn u32_saturating_from_u64(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX).max(1)
+}
+
+fn push_symbol_index_stale_degradation(
+    degraded: &mut Vec<ContextResponseDegradation>,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    if degraded.iter().any(|entry| {
+        entry.code == crate::models::symbol::SYMBOL_INDEX_STALE_CODE && entry.message == message
+    }) {
+        return;
+    }
+    push_degradation(
+        degraded,
+        crate::models::symbol::SYMBOL_INDEX_STALE_CODE,
+        ContextResponseSeverity::Low,
+        message,
+        Some("ee symbol snapshot --workspace . --refresh".to_string()),
+    );
 }
 
 fn context_proximity_feature_enabled(workspace_path: &Path) -> Result<bool, String> {
@@ -6750,9 +7150,9 @@ mod tests {
         StoredAgentContextProfileForPack, StoredMemory,
     };
     use crate::models::{
-        AgentContextProfileCounts, FocusItem, FocusState, MemoryId, MemoryScope, MemoryScopeStats,
-        ProvenanceUri, QueryTemporalFilters, QueryTemporalValidity, QueryTemporalValidityPosture,
-        TrustClass, UnitScore, WorkspaceId,
+        AgentContextProfileCounts, FocusItem, FocusState, LineSpan, MemoryId, MemoryScope,
+        MemoryScopeStats, ProvenanceUri, QueryTemporalFilters, QueryTemporalValidity,
+        QueryTemporalValidityPosture, TrustClass, UnitScore, WorkspaceId,
     };
     use crate::pack::{
         ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponseSeverity,
@@ -6957,6 +7357,8 @@ mod tests {
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
             ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
             pagination: None,
             coordination_snapshot_path: Some(path),
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
@@ -7204,6 +7606,114 @@ mod tests {
         .map_err(|error| error.to_string())
     }
 
+    fn symbol_candidate(
+        memory_id: MemoryId,
+        relevance: f32,
+        workspace_path: &Path,
+        relative_path: &str,
+        line: u64,
+    ) -> Result<PackCandidate, String> {
+        let provenance = PackProvenance::new(
+            ProvenanceUri::File {
+                path: workspace_path.join(relative_path).display().to_string(),
+                span: Some(LineSpan::single(line).map_err(|error| error.to_string())?),
+            },
+            "context changed-symbol fixture",
+        )
+        .map_err(|error| error.to_string())?;
+        PackCandidate::new(PackCandidateInput {
+            memory_id,
+            section: PackSection::Failures,
+            content: format!("candidate {memory_id}"),
+            estimated_tokens: 8,
+            relevance: UnitScore::parse(relevance).map_err(|error| error.to_string())?,
+            utility: UnitScore::parse(0.8).map_err(|error| error.to_string())?,
+            provenance: vec![provenance],
+            why: "selected by fixture".to_string(),
+        })
+        .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn changed_symbol_context_boost_marks_reason_and_changes_rank() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let src_dir = tempdir.path().join("src");
+        std::fs::create_dir_all(&src_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            src_dir.join("lib.rs"),
+            "pub fn changed_symbol() -> u64 { 1 }\n\npub fn other_symbol() -> u64 { 2 }\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let changed = MemoryId::from_uuid(uuid::Uuid::from_u128(1201));
+        let other = MemoryId::from_uuid(uuid::Uuid::from_u128(1202));
+        let mut candidates = vec![
+            symbol_candidate(changed, 0.50, tempdir.path(), "src/lib.rs", 1)?,
+            symbol_candidate(other, 0.53, tempdir.path(), "src/lib.rs", 3)?,
+        ];
+        let mut degraded = Vec::new();
+
+        let metrics = super::apply_changed_symbol_context_boost(
+            tempdir.path(),
+            &["changed_symbol".to_owned()],
+            false,
+            &mut candidates,
+            &mut degraded,
+        );
+        super::sort_context_candidates(&mut candidates);
+
+        assert_eq!(metrics.boosted_candidates, 1);
+        assert_eq!(candidates[0].memory_id, changed);
+        assert!(
+            candidates[0].why.contains("symbolBoost changedSymbol="),
+            "boost should annotate candidate why: {}",
+            candidates[0].why
+        );
+        assert!(
+            degraded.is_empty(),
+            "fresh symbol extraction should not degrade: {degraded:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn changed_symbol_context_boost_ties_sort_by_memory_id() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let src_dir = tempdir.path().join("src");
+        std::fs::create_dir_all(&src_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            src_dir.join("lib.rs"),
+            "pub fn changed_symbol() -> u64 { 1 }\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let high_id = MemoryId::from_uuid(uuid::Uuid::from_u128(1302));
+        let low_id = MemoryId::from_uuid(uuid::Uuid::from_u128(1301));
+        let mut candidates = vec![
+            symbol_candidate(high_id, 0.50, tempdir.path(), "src/lib.rs", 1)?,
+            symbol_candidate(low_id, 0.50, tempdir.path(), "src/lib.rs", 1)?,
+        ];
+        let mut degraded = Vec::new();
+
+        let metrics = super::apply_changed_symbol_context_boost(
+            tempdir.path(),
+            &["changed_symbol".to_owned()],
+            false,
+            &mut candidates,
+            &mut degraded,
+        );
+        super::sort_context_candidates(&mut candidates);
+
+        assert_eq!(metrics.boosted_candidates, 2);
+        assert_eq!(candidates[0].relevance, candidates[1].relevance);
+        assert_eq!(candidates[0].memory_id, low_id);
+        assert!(
+            degraded.is_empty(),
+            "fresh symbol extraction should not degrade: {degraded:?}"
+        );
+        Ok(())
+    }
+
     fn stored_agent_profile(
         _agent_name: &str,
         memory_id: MemoryId,
@@ -7283,6 +7793,127 @@ mod tests {
         assert!(summary.cold_start);
         super::sort_context_candidates(&mut candidates);
         assert_eq!(candidates[0].memory_id, winner);
+        Ok(())
+    }
+
+    #[test]
+    fn changed_symbol_boost_promotes_linked_memory_and_explains_reason() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let source_dir = tempdir.path().join("src");
+        std::fs::create_dir_all(&source_dir).map_err(|error| error.to_string())?;
+        let relative_path = "src/symbol_context_boost.rs";
+        std::fs::write(
+            tempdir.path().join(relative_path),
+            "\
+pub fn render_context_boost() -> u64 {
+    42
+}
+
+pub fn unrelated_context() -> u64 {
+    7
+}
+",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let boosted_id = MemoryId::from_uuid(uuid::Uuid::from_u128(924));
+        let neutral_id = MemoryId::from_uuid(uuid::Uuid::from_u128(925));
+        let boosted_provenance = PackProvenance::new(
+            ProvenanceUri::File {
+                path: relative_path.to_string(),
+                span: Some(
+                    crate::models::LineSpan::range(1, 3).map_err(|error| error.to_string())?,
+                ),
+            },
+            "changed symbol fixture",
+        )
+        .map_err(|error| error.to_string())?;
+        let neutral_provenance = PackProvenance::new(
+            ProvenanceUri::File {
+                path: relative_path.to_string(),
+                span: Some(
+                    crate::models::LineSpan::range(5, 7).map_err(|error| error.to_string())?,
+                ),
+            },
+            "neutral symbol fixture",
+        )
+        .map_err(|error| error.to_string())?;
+        let mut candidates = vec![
+            PackCandidate::new(PackCandidateInput {
+                memory_id: boosted_id,
+                section: PackSection::Failures,
+                content: "Failure evidence for render_context_boost".to_string(),
+                estimated_tokens: 8,
+                relevance: UnitScore::parse(0.46).map_err(|error| error.to_string())?,
+                utility: UnitScore::parse(0.80).map_err(|error| error.to_string())?,
+                provenance: vec![boosted_provenance],
+                why: "selected by fixture".to_string(),
+            })
+            .map_err(|error| error.to_string())?,
+            PackCandidate::new(PackCandidateInput {
+                memory_id: neutral_id,
+                section: PackSection::Failures,
+                content: "Unrelated evidence".to_string(),
+                estimated_tokens: 8,
+                relevance: UnitScore::parse(0.49).map_err(|error| error.to_string())?,
+                utility: UnitScore::parse(0.80).map_err(|error| error.to_string())?,
+                provenance: vec![neutral_provenance],
+                why: "selected by fixture".to_string(),
+            })
+            .map_err(|error| error.to_string())?,
+        ];
+        let mut degraded = Vec::new();
+
+        let metrics = super::apply_changed_symbol_context_boost(
+            tempdir.path(),
+            &["render_context_boost".to_string()],
+            false,
+            &mut candidates,
+            &mut degraded,
+        );
+
+        assert_eq!(metrics.boosted_candidates, 1);
+        assert!(degraded.is_empty(), "{degraded:?}");
+        super::sort_context_candidates(&mut candidates);
+        assert_eq!(candidates[0].memory_id, boosted_id);
+        assert!(candidates[0].why.contains("symbolBoost"));
+        assert!(candidates[0].why.contains("render_context_boost"));
+        Ok(())
+    }
+
+    #[test]
+    fn changed_symbol_boost_reports_stale_index_without_file_provenance() -> Result<(), String> {
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(926));
+        let provenance = PackProvenance::new(ProvenanceUri::EeMemory(memory_id), "memory-only")
+            .map_err(|error| error.to_string())?;
+        let mut candidates = vec![
+            PackCandidate::new(PackCandidateInput {
+                memory_id,
+                section: PackSection::Evidence,
+                content: "memory-only evidence".to_string(),
+                estimated_tokens: 5,
+                relevance: UnitScore::parse(0.60).map_err(|error| error.to_string())?,
+                utility: UnitScore::parse(0.70).map_err(|error| error.to_string())?,
+                provenance: vec![provenance],
+                why: "selected by fixture".to_string(),
+            })
+            .map_err(|error| error.to_string())?,
+        ];
+        let mut degraded = Vec::new();
+
+        let metrics = super::apply_changed_symbol_context_boost(
+            Path::new("/tmp/ee-context-symbol-missing"),
+            &["render_context_boost".to_string()],
+            false,
+            &mut candidates,
+            &mut degraded,
+        );
+
+        assert_eq!(metrics.boosted_candidates, 0);
+        assert!(degraded.iter().any(|entry| {
+            entry.code == crate::models::symbol::SYMBOL_INDEX_STALE_CODE
+                && entry.repair.as_deref() == Some("ee symbol snapshot --workspace . --refresh")
+        }));
         Ok(())
     }
 
@@ -8860,6 +9491,8 @@ mod tests {
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
             ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
@@ -9018,6 +9651,8 @@ mod tests {
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
             ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
@@ -9125,6 +9760,8 @@ mod tests {
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
             ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
@@ -9227,6 +9864,8 @@ mod tests {
                     memory_scope: MemoryScope::Swarm,
                     strict_scope: false,
                     ppr_weight: None,
+                    changed_symbols: Vec::new(),
+                    changed_symbols_from_git: false,
                     pagination: None,
                     coordination_snapshot_path: None,
                     coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
@@ -9331,6 +9970,8 @@ mod tests {
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
             ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
@@ -9915,6 +10556,8 @@ mod tests {
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
             ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
@@ -10076,6 +10719,8 @@ mod tests {
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
             ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
             pagination: None,
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,

@@ -1974,6 +1974,14 @@ pub struct ContextArgs {
     #[arg(long = "ppr-weight", value_name = "WEIGHT", value_parser = parse_ppr_weight_arg)]
     pub ppr_weight: Option<f32>,
 
+    /// Boost memories linked to this changed symbol; repeat for multiple selectors.
+    #[arg(long = "changed-symbol", value_name = "SYMBOL", action = ArgAction::Append)]
+    pub changed_symbols: Vec<String>,
+
+    /// Derive changed-symbol boosts from the current git workspace diff.
+    #[arg(long = "changed-symbols-from-git", action = ArgAction::SetTrue)]
+    pub changed_symbols_from_git: bool,
+
     /// Pack output profile: lean omits bulky optional fields, standard is default, verbose adds extra metadata.
     #[arg(long = "pack-profile", value_enum, default_value_t = PackOutputProfileArg::Standard)]
     pub pack_profile: PackOutputProfileArg,
@@ -26858,7 +26866,9 @@ where
             && !args.explain
             && !args.explain_performance
             && !args.stream
-            && !include_deprecated_alias,
+            && !include_deprecated_alias
+            && args.changed_symbols.is_empty()
+            && !args.changed_symbols_from_git,
     );
     let redaction = effective_redaction_level(
         &workspace_path,
@@ -26890,6 +26900,8 @@ where
         memory_scope: args.memory_scope,
         strict_scope: args.strict_scope,
         ppr_weight: args.ppr_weight,
+        changed_symbols: args.changed_symbols.clone(),
+        changed_symbols_from_git: args.changed_symbols_from_git,
         pagination: None,
         coordination_snapshot_path: args.coordination_snapshot.clone(),
         coordination_stale_after_ms: args.coordination_stale_after_ms,
@@ -29332,6 +29344,8 @@ where
                 .clone()
                 .unwrap_or_else(|| "balanced".to_string()),
             ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
             pack_profile: args.pack_profile.unwrap_or_default(),
             resource_profile: args.resource_profile.unwrap_or_default(),
             database: args.database.clone(),
@@ -29485,6 +29499,8 @@ where
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,
         ppr_weight: None,
+        changed_symbols: Vec::new(),
+        changed_symbols_from_git: false,
         pagination,
         coordination_snapshot_path: args.coordination_snapshot.clone(),
         coordination_stale_after_ms: args.coordination_stale_after_ms,

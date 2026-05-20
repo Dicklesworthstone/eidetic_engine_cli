@@ -205,6 +205,8 @@ fn ee_context_writes_pack_assembled_and_included_mem_rows() -> TestResult {
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,
         ppr_weight: None,
+        changed_symbols: Vec::new(),
+        changed_symbols_from_git: false,
         pagination: None,
         coordination_snapshot_path: None,
         coordination_stale_after_ms: ee::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
