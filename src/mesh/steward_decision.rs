@@ -17,6 +17,9 @@
 //!   given the base interval and a ±jitter window. Pure: a caller-
 //!   supplied jitter value drives the result, so tests can pin a
 //!   deterministic seed.
+//! - [`build_steward_status`] and [`apply_steward_decision_to_state`]
+//!   pin the future `ee mesh steward status --json` contract without
+//!   doing filesystem or CLI work in this hot checkout.
 //!
 //! Why opt-in (not default-on): quietly mutating peer-group config on
 //! a schedule violates the SRR6.46.5 forensic-audit-row consent model.
@@ -61,6 +64,274 @@ pub const STEWARD_DEFAULT_JITTER_SECONDS: u64 = 60;
 /// `EE_MESH_STEWARD_RECONCILIATION_MAX_DAILY`. Prevents a buggy
 /// interval setting from running thousands of reconciliations.
 pub const STEWARD_DEFAULT_MAX_DAILY: u64 = 100;
+
+/// `EE_MESH_AUTO_ENROLL_ON_DEMAND` default: off. The steward may not
+/// mutate peer-group config on a schedule unless the user opts in.
+pub const STEWARD_AUTO_ENROLL_ON_DEMAND_ENV: &str = "EE_MESH_AUTO_ENROLL_ON_DEMAND";
+
+pub const STEWARD_RECONCILIATION_INTERVAL_ENV: &str =
+    "EE_MESH_STEWARD_RECONCILIATION_INTERVAL_SECONDS";
+pub const STEWARD_RECONCILIATION_JITTER_ENV: &str = "EE_MESH_STEWARD_RECONCILIATION_JITTER_SECONDS";
+pub const STEWARD_RECONCILIATION_MAX_DAILY_ENV: &str = "EE_MESH_STEWARD_RECONCILIATION_MAX_DAILY";
+
+pub const STEWARD_AUTO_ENROLL_DISABLED_CODE: &str = "steward_auto_enroll_disabled";
+pub const STEWARD_AUTO_ENROLL_DAILY_CAP_REACHED_CODE: &str =
+    "steward_auto_enroll_daily_cap_reached";
+pub const STEWARD_AUTO_ENROLL_CONSECUTIVE_FAILURES_CODE: &str =
+    "steward_auto_enroll_consecutive_failures";
+
+const STEWARD_CONSECUTIVE_FAILURE_WARNING_THRESHOLD: u64 = 3;
+
+// ============================================================================
+// Configuration + status contract
+// ============================================================================
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StewardConfig {
+    pub enabled: bool,
+    pub interval_seconds: u64,
+    pub jitter_seconds: u64,
+    pub max_daily: u64,
+}
+
+impl Default for StewardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_seconds: STEWARD_DEFAULT_INTERVAL_SECONDS,
+            jitter_seconds: STEWARD_DEFAULT_JITTER_SECONDS,
+            max_daily: STEWARD_DEFAULT_MAX_DAILY,
+        }
+    }
+}
+
+impl StewardConfig {
+    #[must_use]
+    pub const fn enabled(self) -> bool {
+        self.enabled
+    }
+
+    /// Resolve the steward config from already-read environment values.
+    ///
+    /// Callers must read `EE_*` variables through `src/config/env_registry.rs`;
+    /// this module accepts values as data so it does not bypass the registry.
+    pub fn from_env_values(
+        enabled: Option<&str>,
+        interval_seconds: Option<&str>,
+        jitter_seconds: Option<&str>,
+        max_daily: Option<&str>,
+    ) -> Result<Self, StewardConfigError> {
+        let defaults = Self::default();
+        Ok(Self {
+            enabled: parse_opt_in(STEWARD_AUTO_ENROLL_ON_DEMAND_ENV, enabled, defaults.enabled)?,
+            interval_seconds: parse_positive_u64(
+                STEWARD_RECONCILIATION_INTERVAL_ENV,
+                interval_seconds,
+                defaults.interval_seconds,
+            )?,
+            jitter_seconds: parse_u64(
+                STEWARD_RECONCILIATION_JITTER_ENV,
+                jitter_seconds,
+                defaults.jitter_seconds,
+            )?,
+            max_daily: parse_u64(
+                STEWARD_RECONCILIATION_MAX_DAILY_ENV,
+                max_daily,
+                defaults.max_daily,
+            )?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StewardConfigError {
+    InvalidBool {
+        env_var: &'static str,
+        value: String,
+    },
+    InvalidNumber {
+        env_var: &'static str,
+        value: String,
+    },
+    ZeroNotAllowed {
+        env_var: &'static str,
+    },
+}
+
+impl StewardConfigError {
+    #[must_use]
+    pub const fn env_var(&self) -> &'static str {
+        match self {
+            Self::InvalidBool { env_var, .. }
+            | Self::InvalidNumber { env_var, .. }
+            | Self::ZeroNotAllowed { env_var } => env_var,
+        }
+    }
+}
+
+fn parse_opt_in(
+    env_var: &'static str,
+    value: Option<&str>,
+    default: bool,
+) -> Result<bool, StewardConfigError> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(StewardConfigError::InvalidBool {
+            env_var,
+            value: value.to_owned(),
+        }),
+    }
+}
+
+fn parse_positive_u64(
+    env_var: &'static str,
+    value: Option<&str>,
+    default: u64,
+) -> Result<u64, StewardConfigError> {
+    let parsed = parse_u64(env_var, value, default)?;
+    if parsed == 0 {
+        return Err(StewardConfigError::ZeroNotAllowed { env_var });
+    }
+    Ok(parsed)
+}
+
+fn parse_u64(
+    env_var: &'static str,
+    value: Option<&str>,
+    default: u64,
+) -> Result<u64, StewardConfigError> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    value
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| StewardConfigError::InvalidNumber {
+            env_var,
+            value: value.to_owned(),
+        })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StewardStateSnapshot {
+    pub last_reconciliation_at: Option<String>,
+    pub last_reconciliation_outcome: StewardStatusOutcome,
+    pub reconciliations_today: u64,
+    pub consecutive_failures_24h: u64,
+}
+
+impl Default for StewardStateSnapshot {
+    fn default() -> Self {
+        Self {
+            last_reconciliation_at: None,
+            last_reconciliation_outcome: StewardStatusOutcome::NotYetRun,
+            reconciliations_today: 0,
+            consecutive_failures_24h: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StewardStatus {
+    pub schema: &'static str,
+    pub enabled: bool,
+    pub interval_seconds: u64,
+    pub last_reconciliation_at: Option<String>,
+    pub last_reconciliation_outcome: StewardStatusOutcome,
+    pub reconciliations_today: u64,
+    pub next_reconciliation_approx_at: Option<String>,
+    pub degraded: Vec<StewardDegradation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StewardDegradation {
+    pub code: &'static str,
+    pub severity: &'static str,
+    pub repair: &'static str,
+}
+
+#[must_use]
+pub fn build_steward_status(
+    config: StewardConfig,
+    state: &StewardStateSnapshot,
+    next_reconciliation_approx_at: Option<String>,
+) -> StewardStatus {
+    StewardStatus {
+        schema: STEWARD_STATUS_SCHEMA_V1,
+        enabled: config.enabled,
+        interval_seconds: config.interval_seconds,
+        last_reconciliation_at: state.last_reconciliation_at.clone(),
+        last_reconciliation_outcome: state.last_reconciliation_outcome,
+        reconciliations_today: state.reconciliations_today,
+        next_reconciliation_approx_at,
+        degraded: steward_status_degradations(config, state),
+    }
+}
+
+fn steward_status_degradations(
+    config: StewardConfig,
+    state: &StewardStateSnapshot,
+) -> Vec<StewardDegradation> {
+    let mut degraded = Vec::new();
+    if !config.enabled {
+        degraded.push(StewardDegradation {
+            code: STEWARD_AUTO_ENROLL_DISABLED_CODE,
+            severity: "info",
+            repair: "Set EE_MESH_AUTO_ENROLL_ON_DEMAND=1 to enable opt-in steward reconciliation.",
+        });
+    }
+    if config.enabled && state.reconciliations_today >= config.max_daily {
+        degraded.push(StewardDegradation {
+            code: STEWARD_AUTO_ENROLL_DAILY_CAP_REACHED_CODE,
+            severity: "warning",
+            repair: "Raise EE_MESH_STEWARD_RECONCILIATION_MAX_DAILY or investigate flapping drift.",
+        });
+    }
+    if state.consecutive_failures_24h >= STEWARD_CONSECUTIVE_FAILURE_WARNING_THRESHOLD {
+        degraded.push(StewardDegradation {
+            code: STEWARD_AUTO_ENROLL_CONSECUTIVE_FAILURES_CODE,
+            severity: "medium",
+            repair: "Review `ee audit timeline --event-type mesh.steward_reconciliation_failed`.",
+        });
+    }
+    degraded
+}
+
+#[must_use]
+pub fn apply_steward_decision_to_state(
+    mut state: StewardStateSnapshot,
+    decision: StewardDecision,
+    observed_at: impl Into<String>,
+) -> StewardStateSnapshot {
+    if decision.outcome == StewardOutcome::NotEnabled {
+        return state;
+    }
+    state.last_reconciliation_at = Some(observed_at.into());
+    state.last_reconciliation_outcome = decision.status_outcome();
+    if decision.outcome.increments_reconciliation_counter() {
+        state.reconciliations_today = state.reconciliations_today.saturating_add(1);
+    }
+    state.consecutive_failures_24h = 0;
+    state
+}
+
+#[must_use]
+pub fn record_steward_failure(
+    mut state: StewardStateSnapshot,
+    observed_at: impl Into<String>,
+) -> StewardStateSnapshot {
+    state.last_reconciliation_at = Some(observed_at.into());
+    state.consecutive_failures_24h = state.consecutive_failures_24h.saturating_add(1);
+    state
+}
 
 // ============================================================================
 // Input vocabulary
@@ -407,6 +678,168 @@ mod tests {
             reconciliations_today,
             max_daily,
         }
+    }
+
+    // ---- config / status ---------------------------------------------------
+
+    #[test]
+    fn steward_config_defaults_to_disabled_with_documented_limits() {
+        let config = StewardConfig::default();
+        assert!(!config.enabled());
+        assert_eq!(config.interval_seconds, STEWARD_DEFAULT_INTERVAL_SECONDS);
+        assert_eq!(config.jitter_seconds, STEWARD_DEFAULT_JITTER_SECONDS);
+        assert_eq!(config.max_daily, STEWARD_DEFAULT_MAX_DAILY);
+    }
+
+    #[test]
+    fn steward_config_resolves_env_values_without_reading_process_env() {
+        let config = StewardConfig::from_env_values(Some("1"), Some("1200"), Some("45"), Some("7"))
+            .expect("valid config");
+        assert!(config.enabled);
+        assert_eq!(config.interval_seconds, 1200);
+        assert_eq!(config.jitter_seconds, 45);
+        assert_eq!(config.max_daily, 7);
+    }
+
+    #[test]
+    fn steward_config_rejects_invalid_opt_in_value() {
+        let error =
+            StewardConfig::from_env_values(Some("maybe"), None, None, None).expect_err("invalid");
+        assert_eq!(error.env_var(), STEWARD_AUTO_ENROLL_ON_DEMAND_ENV);
+        assert!(matches!(error, StewardConfigError::InvalidBool { .. }));
+    }
+
+    #[test]
+    fn steward_config_rejects_zero_interval_but_allows_zero_daily_cap() {
+        let interval_error =
+            StewardConfig::from_env_values(None, Some("0"), None, None).expect_err("zero");
+        assert_eq!(
+            interval_error.env_var(),
+            STEWARD_RECONCILIATION_INTERVAL_ENV
+        );
+        assert!(matches!(
+            interval_error,
+            StewardConfigError::ZeroNotAllowed { .. }
+        ));
+
+        let config = StewardConfig::from_env_values(Some("true"), Some("1"), Some("0"), Some("0"))
+            .expect("zero cap is a valid never-reconcile cap");
+        assert_eq!(config.jitter_seconds, 0);
+        assert_eq!(config.max_daily, 0);
+    }
+
+    #[test]
+    fn steward_status_disabled_surfaces_info_degradation_only_when_requested() {
+        let status = build_steward_status(
+            StewardConfig::default(),
+            &StewardStateSnapshot::default(),
+            None,
+        );
+        assert_eq!(status.schema, STEWARD_STATUS_SCHEMA_V1);
+        assert!(!status.enabled);
+        assert_eq!(
+            status.last_reconciliation_outcome,
+            StewardStatusOutcome::NotYetRun
+        );
+        assert_eq!(status.degraded.len(), 1);
+        assert_eq!(status.degraded[0].code, STEWARD_AUTO_ENROLL_DISABLED_CODE);
+        assert_eq!(status.degraded[0].severity, "info");
+    }
+
+    #[test]
+    fn steward_status_daily_cap_and_consecutive_failures_are_degraded() {
+        let config = StewardConfig::from_env_values(Some("1"), Some("900"), Some("60"), Some("2"))
+            .expect("valid");
+        let state = StewardStateSnapshot {
+            reconciliations_today: 2,
+            consecutive_failures_24h: 3,
+            ..StewardStateSnapshot::default()
+        };
+
+        let status = build_steward_status(config, &state, Some("2026-05-20T12:15:00Z".to_owned()));
+
+        let codes: Vec<&str> = status
+            .degraded
+            .iter()
+            .map(|degradation| degradation.code)
+            .collect();
+        assert!(codes.contains(&STEWARD_AUTO_ENROLL_DAILY_CAP_REACHED_CODE));
+        assert!(codes.contains(&STEWARD_AUTO_ENROLL_CONSECUTIVE_FAILURES_CODE));
+        assert_eq!(
+            status.next_reconciliation_approx_at.as_deref(),
+            Some("2026-05-20T12:15:00Z")
+        );
+    }
+
+    #[test]
+    fn applying_triggered_decision_updates_status_state_and_daily_counter() {
+        let decision = decide_steward_outcome(&input(
+            true,
+            DriftSeverity::Warning,
+            DriftKind::NewPeersAvailable,
+            1,
+            STEWARD_DEFAULT_MAX_DAILY,
+        ));
+
+        let state = apply_steward_decision_to_state(
+            StewardStateSnapshot {
+                reconciliations_today: 1,
+                consecutive_failures_24h: 2,
+                ..StewardStateSnapshot::default()
+            },
+            decision,
+            "2026-05-20T12:30:00Z",
+        );
+
+        assert_eq!(
+            state.last_reconciliation_at.as_deref(),
+            Some("2026-05-20T12:30:00Z")
+        );
+        assert_eq!(
+            state.last_reconciliation_outcome,
+            StewardStatusOutcome::Triggered
+        );
+        assert_eq!(state.reconciliations_today, 2);
+        assert_eq!(state.consecutive_failures_24h, 0);
+    }
+
+    #[test]
+    fn disabled_decision_does_not_touch_state_file_projection() {
+        let original = StewardStateSnapshot {
+            last_reconciliation_at: Some("2026-05-20T11:00:00Z".to_owned()),
+            last_reconciliation_outcome: StewardStatusOutcome::Refused,
+            reconciliations_today: 4,
+            consecutive_failures_24h: 1,
+        };
+        let decision = decide_steward_outcome(&input(
+            false,
+            DriftSeverity::Warning,
+            DriftKind::NewPeersAvailable,
+            4,
+            STEWARD_DEFAULT_MAX_DAILY,
+        ));
+
+        assert_eq!(
+            apply_steward_decision_to_state(original.clone(), decision, "2026-05-20T12:30:00Z"),
+            original
+        );
+    }
+
+    #[test]
+    fn recording_steward_failure_increments_consecutive_failure_counter() {
+        let state = record_steward_failure(
+            StewardStateSnapshot {
+                consecutive_failures_24h: 2,
+                ..StewardStateSnapshot::default()
+            },
+            "2026-05-20T12:35:00Z",
+        );
+
+        assert_eq!(state.consecutive_failures_24h, 3);
+        assert_eq!(
+            state.last_reconciliation_at.as_deref(),
+            Some("2026-05-20T12:35:00Z")
+        );
     }
 
     // ---- enabled gate ------------------------------------------------------
