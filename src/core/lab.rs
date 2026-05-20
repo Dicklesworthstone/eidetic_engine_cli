@@ -2884,8 +2884,8 @@ mod tests {
                 .map_err(|error| error.message())?;
 
         ensure(
-            first.trace.trace_hash,
-            second.trace.trace_hash,
+            &first.trace.trace_hash,
+            &second.trace.trace_hash,
             "trace_hash",
         )?;
         ensure(&first.replay_hash, &second.replay_hash, "replay_hash")?;
