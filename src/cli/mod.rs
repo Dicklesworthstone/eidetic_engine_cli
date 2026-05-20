@@ -87,6 +87,7 @@ use crate::core::doctor::{
     DependencyDiagnosticsReport, DoctorReport, FrankenHealthReport, IntegrityDiagnosticsOptions,
     IntegrityDiagnosticsReport,
 };
+use crate::core::doctor_runtime::CapabilitiesReport;
 use crate::core::economy::{
     EconomyPrunePlanOptions, EconomyReportOptions, EconomyScoreOptions, EconomySimulateOptions,
     generate_economy_report, generate_prune_plan, score_artifact, simulate_budgets,
@@ -5908,6 +5909,18 @@ pub struct DoctorArgs {
     /// Output Franken stack dependency health diagnostics.
     #[arg(long, action = ArgAction::SetTrue, conflicts_with = "fix_plan")]
     pub franken_health: bool,
+
+    /// Emit the agent-facing `ee.doctor.capabilities.v1` JSON contract
+    /// (schema/doctor_version/contract_version/tool_version/blast_radius/
+    /// op_kinds/exit_codes/env_vars) and exit. Read-only; the chokepoint
+    /// at `src/core/doctor_runtime::mutate` is NOT invoked. Suppresses
+    /// the normal doctor health report.
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        conflicts_with_all = ["fix_plan", "franken_health"],
+    )]
+    pub capabilities: bool,
 }
 
 /// Arguments for `ee init`.
@@ -8777,6 +8790,19 @@ where
             DiagCommand::WriteSpool(args) => handle_diag_write_spool(&cli, args, stdout),
         },
         Some(Command::Doctor(ref args)) => {
+            if args.capabilities {
+                let workspace = cli.workspace.clone().unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                });
+                let report =
+                    CapabilitiesReport::build(env!("CARGO_PKG_VERSION"), workspace.as_path());
+                let json = serde_json::to_string(&report).unwrap_or_else(|_| {
+                    r#"{"schema":"ee.doctor.capabilities.v1","error":"serialization_failed"}"#
+                        .to_owned()
+                });
+                write_stdout(stdout, &(json + "\n"));
+                return ProcessExitCode::Success;
+            }
             let report = cli
                 .workspace
                 .as_deref()
@@ -13542,11 +13568,7 @@ fn clap_error_message(error: &clap::Error) -> String {
         }
     }
     let Some(header) = header else {
-        return full
-            .lines()
-            .next()
-            .unwrap_or("Unknown error")
-            .to_string();
+        return full.lines().next().unwrap_or("Unknown error").to_string();
     };
 
     // Capture continuation lines that belong to the same error block
@@ -46321,6 +46343,27 @@ mod tests {
         )?;
         ensure_contains(&stdout, "\"command\":\"help\"", "help-json command field")?;
         ensure(stderr.is_empty(), "help-json stderr must be empty")
+    }
+
+    #[test]
+    fn help_json_advertises_most_used_commands() -> TestResult {
+        // The `ee --help` prelude advertises six "Most-used commands" as the
+        // primary agent workflow path. Each one MUST appear in the machine
+        // manifest so an agent discovering capabilities through `--help-json`
+        // / MCP / `ee introspect` sees the same surface as a human.
+        let (exit, stdout, stderr) = invoke(&["ee", "--help-json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "help-json exit")?;
+        ensure(stderr.is_empty(), "help-json stderr must be empty")?;
+        for cmd in &[
+            "init", "note", "pack", "why", "search", "remember", "context",
+        ] {
+            ensure_contains(
+                &stdout,
+                &format!("\"name\":\"{cmd}\""),
+                &format!("help-json must list {cmd}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
