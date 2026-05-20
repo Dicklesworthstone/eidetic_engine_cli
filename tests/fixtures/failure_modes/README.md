@@ -105,6 +105,7 @@ in the same commit, keeping the catalog complete by construction.
 | `proof_tool_missing` | verify proofs | info | bd-nnfq4 (SRR2) |
 | `proof_violation_detected` | verify proofs | high | bd-nnfq4 (SRR2) |
 | `mesh_peer_policy_denied` | mesh import, mesh export, status, doctor, support bundle | high | bd-3i5q7 (SRR6.19) |
+| `mesh_secret_export_denied` | mesh export | high | bd-38dqk (SRR6.43) |
 | `consensus_no_clusters` | context | low | bd-1zb7k.9 (S8) |
 | `conflict_direct` | context | medium | bd-1zb7k.9 (S8) |
 | `conflict_trust_mismatch` | context | high | bd-1zb7k.9 (S8) |

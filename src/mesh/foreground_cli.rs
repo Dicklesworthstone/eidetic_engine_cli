@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 use crate::db::{
     MeshStorageStatus, StoredMeshImportLedgerEvent, StoredMeshPeer, StoredMeshPeerCursor,
 };
+use crate::policy::{
+    MeshExportPolicyAttestation, MeshExportSecretScanReport, MeshExportSecretScanSubject,
+    scan_mesh_export_subjects,
+};
 
 pub const MESH_CLI_STATUS_SCHEMA_V1: &str = "ee.mesh.cli.status.v1";
 pub const MESH_CLI_PEERS_SCHEMA_V1: &str = "ee.mesh.cli.peers.v1";
@@ -168,6 +172,8 @@ pub struct MeshEventRow {
     pub policy_failure_surface_json: Option<String>,
     pub policy_decision_json: Option<String>,
     pub event_json: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_attestation: Option<MeshExportPolicyAttestation>,
     pub imported_at: String,
 }
 
@@ -193,6 +199,7 @@ impl From<&StoredMeshImportLedgerEvent> for MeshEventRow {
             policy_failure_surface_json: event.policy_failure_surface_json.clone(),
             policy_decision_json: event.policy_decision_json.clone(),
             event_json: event.event_json.clone(),
+            policy_attestation: None,
             imported_at: event.imported_at.clone(),
         }
     }
@@ -234,6 +241,8 @@ pub struct MeshExportArtifact {
     pub schema: String,
     pub workspace_id: String,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_attestation: Option<MeshExportPolicyAttestation>,
     pub storage: MeshStorageCounts,
     pub peers: Vec<MeshPeerRow>,
     pub cursors: Vec<MeshCursorRow>,
@@ -250,6 +259,9 @@ pub struct MeshCliExportReport {
     pub peer_count: usize,
     pub cursor_count: usize,
     pub event_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_id: Option<String>,
+    pub secret_scan: MeshExportSecretScanReport,
     pub artifact: Option<MeshExportArtifact>,
     pub degraded: Vec<MeshCliDegradation>,
 }
@@ -296,6 +308,12 @@ pub struct MeshForegroundSnapshot {
     pub cursors: Vec<MeshCursorRow>,
     pub events: Vec<MeshEventRow>,
     pub degraded: Vec<MeshCliDegradation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshCheckedExportArtifact {
+    pub artifact: MeshExportArtifact,
+    pub secret_scan: MeshExportSecretScanReport,
 }
 
 impl MeshForegroundSnapshot {
@@ -357,11 +375,340 @@ impl MeshForegroundSnapshot {
             schema: MESH_EXPORT_ARTIFACT_SCHEMA_V1.to_owned(),
             workspace_id: self.workspace_id.clone(),
             source: "ee mesh export".to_owned(),
+            policy_attestation: None,
             storage: self.storage.clone(),
             peers: self.peers.clone(),
             cursors: self.cursors.clone(),
             events: self.events.clone(),
         }
+    }
+
+    pub fn checked_export_artifact(
+        &self,
+    ) -> Result<MeshCheckedExportArtifact, MeshExportSecretScanReport> {
+        let mut artifact = self.export_artifact();
+        let subjects = mesh_export_secret_subjects(&artifact);
+        let secret_scan = scan_mesh_export_subjects(&subjects);
+        if secret_scan.denied() {
+            return Err(secret_scan);
+        }
+
+        artifact.policy_attestation = Some(secret_scan.allowed_attestation());
+        for event in &mut artifact.events {
+            event.policy_attestation = Some(MeshExportPolicyAttestation::allowed(
+                mesh_event_secret_subjects(event).len() as u32,
+            ));
+        }
+        tracing::info!(
+            event = "attestation_recorded",
+            surface = "mesh export",
+            scanned_field_count = secret_scan.scanned_field_count,
+            event_count = artifact.events.len()
+        );
+        Ok(MeshCheckedExportArtifact {
+            artifact,
+            secret_scan,
+        })
+    }
+}
+
+fn mesh_export_secret_subjects(artifact: &MeshExportArtifact) -> Vec<MeshExportSecretScanSubject> {
+    let mut subjects = Vec::new();
+
+    for peer in &artifact.peers {
+        push_subject(
+            &mut subjects,
+            "peer",
+            &peer.peer_id,
+            "peerId",
+            &peer.peer_id,
+        );
+        push_subject(
+            &mut subjects,
+            "peer",
+            &peer.peer_id,
+            "originNodeId",
+            &peer.origin_node_id,
+        );
+        push_optional_subject(
+            &mut subjects,
+            "peer",
+            &peer.peer_id,
+            "displayName",
+            peer.display_name.as_deref(),
+        );
+        push_optional_json_subjects(
+            &mut subjects,
+            "peer",
+            &peer.peer_id,
+            "policySummaryJson",
+            peer.policy_summary_json.as_deref(),
+        );
+    }
+
+    for cursor in &artifact.cursors {
+        push_subject(
+            &mut subjects,
+            "cursor",
+            &cursor.peer_id,
+            "peerId",
+            &cursor.peer_id,
+        );
+        push_subject(
+            &mut subjects,
+            "cursor",
+            &cursor.peer_id,
+            "originNodeId",
+            &cursor.origin_node_id,
+        );
+        push_subject(
+            &mut subjects,
+            "cursor",
+            &cursor.peer_id,
+            "originWorkspaceId",
+            &cursor.origin_workspace_id,
+        );
+        push_optional_subject(
+            &mut subjects,
+            "cursor",
+            &cursor.peer_id,
+            "tipEventHash",
+            cursor.tip_event_hash.as_deref(),
+        );
+        push_optional_subject(
+            &mut subjects,
+            "cursor",
+            &cursor.peer_id,
+            "tipAuditHash",
+            cursor.tip_audit_hash.as_deref(),
+        );
+    }
+
+    for event in &artifact.events {
+        subjects.extend(mesh_event_secret_subjects(event));
+    }
+
+    subjects
+}
+
+fn mesh_event_secret_subjects(event: &MeshEventRow) -> Vec<MeshExportSecretScanSubject> {
+    let mut subjects = Vec::new();
+    push_subject(
+        &mut subjects,
+        "event",
+        &event.event_id,
+        "eventId",
+        &event.event_id,
+    );
+    push_subject(
+        &mut subjects,
+        "event",
+        &event.event_id,
+        "originNodeId",
+        &event.origin_node_id,
+    );
+    push_subject(
+        &mut subjects,
+        "event",
+        &event.event_id,
+        "originWorkspaceId",
+        &event.origin_workspace_id,
+    );
+    push_optional_subject(
+        &mut subjects,
+        "event",
+        &event.event_id,
+        "producerPeerId",
+        event.producer_peer_id.as_deref(),
+    );
+    push_optional_subject(
+        &mut subjects,
+        "event",
+        &event.event_id,
+        "prevEventHash",
+        event.prev_event_hash.as_deref(),
+    );
+    push_subject(
+        &mut subjects,
+        "event",
+        &event.event_id,
+        "eventHash",
+        &event.event_hash,
+    );
+    push_subject(
+        &mut subjects,
+        "event",
+        &event.event_id,
+        "eventKind",
+        &event.event_kind,
+    );
+    push_subject(
+        &mut subjects,
+        "event",
+        &event.event_id,
+        "logicalMemoryId",
+        &event.logical_memory_id,
+    );
+    push_subject(
+        &mut subjects,
+        "event",
+        &event.event_id,
+        "contentHash",
+        &event.content_hash,
+    );
+    push_subject(
+        &mut subjects,
+        "event",
+        &event.event_id,
+        "materialLane",
+        &event.material_lane,
+    );
+    push_subject(
+        &mut subjects,
+        "event",
+        &event.event_id,
+        "redactionClass",
+        &event.redaction_class,
+    );
+    push_subject(
+        &mut subjects,
+        "event",
+        &event.event_id,
+        "trustLane",
+        &event.trust_lane,
+    );
+    push_subject(
+        &mut subjects,
+        "event",
+        &event.event_id,
+        "importDecision",
+        &event.import_decision,
+    );
+    push_optional_subject(
+        &mut subjects,
+        "event",
+        &event.event_id,
+        "localMemoryId",
+        event.local_memory_id.as_deref(),
+    );
+    push_optional_subject(
+        &mut subjects,
+        "event",
+        &event.event_id,
+        "bodyCacheKey",
+        event.body_cache_key.as_deref(),
+    );
+    push_optional_json_subjects(
+        &mut subjects,
+        "event",
+        &event.event_id,
+        "policyFailureSurfaceJson",
+        event.policy_failure_surface_json.as_deref(),
+    );
+    push_optional_json_subjects(
+        &mut subjects,
+        "event",
+        &event.event_id,
+        "policyDecisionJson",
+        event.policy_decision_json.as_deref(),
+    );
+    push_json_subjects(
+        &mut subjects,
+        "event",
+        &event.event_id,
+        "eventJson",
+        &event.event_json,
+    );
+    subjects
+}
+
+fn push_subject(
+    subjects: &mut Vec<MeshExportSecretScanSubject>,
+    source_surface: &str,
+    source_id: &str,
+    field: &str,
+    value: &str,
+) {
+    subjects.push(MeshExportSecretScanSubject::new(
+        source_surface,
+        source_id,
+        field,
+        value,
+    ));
+}
+
+fn push_optional_subject(
+    subjects: &mut Vec<MeshExportSecretScanSubject>,
+    source_surface: &str,
+    source_id: &str,
+    field: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value {
+        push_subject(subjects, source_surface, source_id, field, value);
+    }
+}
+
+fn push_optional_json_subjects(
+    subjects: &mut Vec<MeshExportSecretScanSubject>,
+    source_surface: &str,
+    source_id: &str,
+    field: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value {
+        push_json_subjects(subjects, source_surface, source_id, field, value);
+    }
+}
+
+fn push_json_subjects(
+    subjects: &mut Vec<MeshExportSecretScanSubject>,
+    source_surface: &str,
+    source_id: &str,
+    field: &str,
+    value: &str,
+) {
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(value) {
+        push_json_value_subjects(subjects, source_surface, source_id, field, &parsed);
+    } else {
+        push_subject(subjects, source_surface, source_id, field, value);
+    }
+}
+
+fn push_json_value_subjects(
+    subjects: &mut Vec<MeshExportSecretScanSubject>,
+    source_surface: &str,
+    source_id: &str,
+    field_prefix: &str,
+    value: &serde_json::Value,
+) {
+    match value {
+        serde_json::Value::String(text) => {
+            push_subject(subjects, source_surface, source_id, field_prefix, text);
+        }
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                push_json_value_subjects(
+                    subjects,
+                    source_surface,
+                    source_id,
+                    &format!("{field_prefix}[{index}]"),
+                    item,
+                );
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, item) in map {
+                push_json_value_subjects(
+                    subjects,
+                    source_surface,
+                    source_id,
+                    &format!("{field_prefix}.{key}"),
+                    item,
+                );
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
 }
 

@@ -23,7 +23,7 @@ pub use security_profile::{
 pub use trust_decay::{DecayConfig, SourceTrustState, TrustAdvisory, TrustDecayCalculator};
 
 use crate::models::TrustClass;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const SUBSYSTEM: &str = "policy";
 
@@ -94,6 +94,9 @@ pub fn redaction_placeholder(scanner_name: &str) -> String {
 pub const TRUST_PROMOTION_EVIDENCE_REJECTED_CODE: &str = "trust_promotion_evidence_rejected";
 pub const SHARE_PREVIEW_SCHEMA_V1: &str = "ee.mesh.share_preview.v1";
 pub const SHARE_PREVIEW_CONSENT_AUDIT_SCHEMA_V1: &str = "ee.mesh.share_consent_audit.v1";
+pub const MESH_SECRET_EXPORT_DENIED_CODE: &str = "mesh_secret_export_denied";
+pub const MESH_EXPORT_SECRET_SCAN_SCHEMA_V1: &str = "ee.mesh.export_secret_scan.v1";
+pub const MESH_EXPORT_POLICY_ATTESTATION_SCHEMA_V1: &str = "ee.mesh.export_policy_attestation.v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SharePreviewCandidate<'a> {
@@ -173,6 +176,235 @@ pub struct SharePreviewConsentAudit {
     pub export_after_consent: bool,
     pub dry_run: bool,
     pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshExportSecretScanSubject {
+    pub source_surface: String,
+    pub source_id: String,
+    pub field: String,
+    pub value: String,
+}
+
+impl MeshExportSecretScanSubject {
+    #[must_use]
+    pub fn new(source_surface: &str, source_id: &str, field: &str, value: &str) -> Self {
+        Self {
+            source_surface: source_surface.to_owned(),
+            source_id: source_id.to_owned(),
+            field: field.to_owned(),
+            value: value.to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshExportSecretFinding {
+    pub source_surface: String,
+    pub source_id: String,
+    pub field: String,
+    pub pattern_ids: Vec<String>,
+    pub match_count: u32,
+    pub redacted_preview: String,
+    pub value_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshExportPolicyAttestation {
+    pub schema: String,
+    pub policy_id: String,
+    pub decision: String,
+    pub scanned_field_count: u32,
+    pub secret_finding_count: u32,
+    pub denied_secret_classes: Vec<String>,
+}
+
+impl MeshExportPolicyAttestation {
+    #[must_use]
+    pub fn allowed(scanned_field_count: u32) -> Self {
+        Self {
+            schema: MESH_EXPORT_POLICY_ATTESTATION_SCHEMA_V1.to_owned(),
+            policy_id: "mesh_pre_export_secret_scan_v1".to_owned(),
+            decision: "allow".to_owned(),
+            scanned_field_count,
+            secret_finding_count: 0,
+            denied_secret_classes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshExportSecretScanReport {
+    pub schema: String,
+    pub code: String,
+    pub status: String,
+    pub policy_action: String,
+    pub scanned_field_count: u32,
+    pub finding_count: u32,
+    pub denied_secret_classes: Vec<String>,
+    pub findings: Vec<MeshExportSecretFinding>,
+}
+
+impl MeshExportSecretScanReport {
+    #[must_use]
+    pub fn allowed_attestation(&self) -> MeshExportPolicyAttestation {
+        MeshExportPolicyAttestation::allowed(self.scanned_field_count)
+    }
+
+    #[must_use]
+    pub fn denied(&self) -> bool {
+        self.policy_action == "deny"
+    }
+}
+
+#[must_use]
+pub fn scan_mesh_export_subjects(
+    subjects: &[MeshExportSecretScanSubject],
+) -> MeshExportSecretScanReport {
+    tracing::info!(
+        event = "secret_scan_started",
+        surface = "mesh export",
+        scanned_field_count = subjects.len()
+    );
+
+    let mut findings = subjects
+        .iter()
+        .filter_map(mesh_export_secret_finding)
+        .collect::<Vec<_>>();
+    findings.sort_by(|left, right| {
+        left.source_surface
+            .cmp(&right.source_surface)
+            .then_with(|| left.source_id.cmp(&right.source_id))
+            .then_with(|| left.field.cmp(&right.field))
+            .then_with(|| left.pattern_ids.cmp(&right.pattern_ids))
+    });
+    findings.dedup();
+
+    let mut denied_secret_classes = findings
+        .iter()
+        .flat_map(|finding| finding.pattern_ids.iter().cloned())
+        .collect::<Vec<_>>();
+    denied_secret_classes.sort();
+    denied_secret_classes.dedup();
+
+    let finding_count = findings.len() as u32;
+    let report = MeshExportSecretScanReport {
+        schema: MESH_EXPORT_SECRET_SCAN_SCHEMA_V1.to_owned(),
+        code: MESH_SECRET_EXPORT_DENIED_CODE.to_owned(),
+        status: if finding_count == 0 {
+            "passed".to_owned()
+        } else {
+            "denied".to_owned()
+        },
+        policy_action: if finding_count == 0 {
+            "allow".to_owned()
+        } else {
+            "deny".to_owned()
+        },
+        scanned_field_count: subjects.len() as u32,
+        finding_count,
+        denied_secret_classes,
+        findings,
+    };
+
+    if report.denied() {
+        tracing::warn!(
+            event = "secret_scan_denied",
+            surface = "mesh export",
+            finding_count = report.finding_count,
+            denied_secret_classes = ?report.denied_secret_classes
+        );
+        tracing::info!(
+            event = "redaction_applied",
+            surface = "mesh export",
+            finding_count = report.finding_count
+        );
+    }
+
+    report
+}
+
+fn mesh_export_secret_finding(
+    subject: &MeshExportSecretScanSubject,
+) -> Option<MeshExportSecretFinding> {
+    if subject.value.trim().is_empty() {
+        return None;
+    }
+
+    let redaction = redact_secret_like_content(&subject.value);
+    let path_risk = mesh_export_path_secret_risk(&subject.field, &subject.value);
+    if !redaction.redacted && path_risk.is_empty() {
+        return None;
+    }
+
+    let mut pattern_ids = redaction
+        .redacted_reasons
+        .iter()
+        .map(ToString::to_string)
+        .chain(path_risk)
+        .collect::<Vec<_>>();
+    pattern_ids.sort();
+    pattern_ids.dedup();
+
+    let redacted_preview = if redaction.redacted {
+        mesh_secret_redacted_preview(&redaction.content)
+    } else {
+        redaction_placeholder("path_secret_risk")
+    };
+
+    Some(MeshExportSecretFinding {
+        source_surface: subject.source_surface.clone(),
+        source_id: subject.source_id.clone(),
+        field: subject.field.clone(),
+        pattern_ids,
+        match_count: redaction.matches.len().max(1) as u32,
+        redacted_preview,
+        value_hash: format!("blake3:{}", blake3::hash(subject.value.as_bytes()).to_hex()),
+    })
+}
+
+fn mesh_export_path_secret_risk(field: &str, value: &str) -> Vec<String> {
+    let field = field.to_ascii_lowercase();
+    let path_sensitive_field = field.contains("path")
+        || field.contains("artifact")
+        || field.contains("evidence")
+        || field.contains("credential")
+        || field.contains("key");
+    if !path_sensitive_field {
+        return Vec::new();
+    }
+    let report =
+        workspace_secret_risk_evidence(value, None, WORKSPACE_SECRET_RISK_DEFAULT_MAX_SCAN_BYTES);
+    if !report.secret_risk {
+        return Vec::new();
+    }
+    report
+        .risk_classes
+        .into_iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn mesh_secret_redacted_preview(content: &str) -> String {
+    let compact = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let path_report = workspace_secret_risk_evidence(
+        &compact,
+        None,
+        WORKSPACE_SECRET_RISK_DEFAULT_MAX_SCAN_BYTES,
+    );
+    if path_report.secret_risk {
+        return redaction_placeholder("mesh_export");
+    }
+    const MAX_CHARS: usize = 160;
+    if compact.chars().count() <= MAX_CHARS {
+        return compact;
+    }
+    let mut preview = compact.chars().take(MAX_CHARS - 3).collect::<String>();
+    preview.push_str("...");
+    preview
 }
 
 #[must_use]

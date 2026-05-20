@@ -10,6 +10,10 @@ use crate::config::{EnvVar, MeshCommandMode, read_env_var, workspace_config};
 use crate::db::{
     DbConnection, InsertMeshImportLedgerEventInput, UpsertMeshPeerCursorInput, UpsertMeshPeerInput,
 };
+use crate::mesh::audit::{
+    MeshAuditDetails, MeshAuditEventInput, MeshAuditEventKind, MeshAuditLedgerError,
+    append_mesh_audit_event, compute_mesh_audit_event,
+};
 use crate::mesh::foreground_cli::{
     MESH_CLI_EXPORT_SCHEMA_V1, MESH_CLI_IMPORT_SCHEMA_V1, MESH_CLI_SYNC_SCHEMA_V1,
     MESH_EXPORT_ARTIFACT_SCHEMA_V1, MeshCliDegradation, MeshCliExportReport, MeshCliImportReport,
@@ -18,6 +22,7 @@ use crate::mesh::foreground_cli::{
 };
 use crate::models::{DomainError, ProcessExitCode};
 use crate::output;
+use crate::policy::{MESH_SECRET_EXPORT_DENIED_CODE, MeshExportSecretScanReport};
 
 use super::{Cli, write_domain_error, write_stdout};
 
@@ -241,7 +246,33 @@ where
         Ok(snapshot) => snapshot,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-    let artifact = snapshot.export_artifact();
+    let checked_export = match snapshot.checked_export_artifact() {
+        Ok(checked_export) => checked_export,
+        Err(secret_scan) => {
+            let audit_id = match record_mesh_export_secret_scan_audit(
+                cli,
+                args.database.as_deref(),
+                &snapshot,
+                &secret_scan,
+            ) {
+                Ok(audit_id) => audit_id,
+                Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            };
+            let domain_error = mesh_secret_export_denied_error(&secret_scan, audit_id.as_deref());
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let artifact = checked_export.artifact;
+    let secret_scan = checked_export.secret_scan;
+    let audit_id = match record_mesh_export_secret_scan_audit(
+        cli,
+        args.database.as_deref(),
+        &snapshot,
+        &secret_scan,
+    ) {
+        Ok(audit_id) => audit_id,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
     if let Some(output_path) = &args.out {
         let artifact_json = match serde_json::to_string_pretty(&artifact) {
             Ok(value) => value,
@@ -274,10 +305,126 @@ where
         peer_count: artifact.peers.len(),
         cursor_count: artifact.cursors.len(),
         event_count: artifact.events.len(),
+        audit_id,
+        secret_scan,
         artifact: Some(artifact),
         degraded: snapshot.degraded.clone(),
     };
     write_mesh_report(cli, &report, &render_mesh_export_human(&report), stdout)
+}
+
+fn mesh_secret_export_denied_error(
+    secret_scan: &MeshExportSecretScanReport,
+    audit_id: Option<&str>,
+) -> DomainError {
+    let details_json = serde_json::json!({
+        "code": MESH_SECRET_EXPORT_DENIED_CODE,
+        "auditId": audit_id,
+        "secretScan": secret_scan,
+    })
+    .to_string();
+    let classes = if secret_scan.denied_secret_classes.is_empty() {
+        "unknown".to_owned()
+    } else {
+        secret_scan.denied_secret_classes.join(", ")
+    };
+    DomainError::PolicyDeniedWithDetails {
+        message: format!(
+            "mesh export denied because pre-export secret scanning found policy-denied material: {classes}"
+        ),
+        repair: Some(
+            "Redact or remove the flagged body, tag, evidence, artifact path, embedding surrogate, or policy JSON before retrying export."
+                .to_owned(),
+        ),
+        details_json,
+    }
+}
+
+fn record_mesh_export_secret_scan_audit(
+    cli: &Cli,
+    database_override: Option<&Path>,
+    snapshot: &MeshForegroundSnapshot,
+    secret_scan: &MeshExportSecretScanReport,
+) -> Result<Option<String>, DomainError> {
+    if !snapshot.initialized {
+        return Ok(None);
+    }
+
+    let workspace_path = cli.resolve_workspace();
+    let database_path = database_override
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    let connection = open_mesh_connection(&database_path)?;
+    let scan_hash = mesh_export_secret_scan_hash(secret_scan)?;
+    let mut details = MeshAuditDetails::default();
+    details
+        .insert_reference("scan_status", &secret_scan.status)
+        .map_err(mesh_audit_domain_error)?;
+    details
+        .insert_reference("policy_action", &secret_scan.policy_action)
+        .map_err(mesh_audit_domain_error)?;
+    details
+        .insert_bool("export_allowed", !secret_scan.denied())
+        .map_err(mesh_audit_domain_error)?;
+    details
+        .insert_count(
+            "scanned_field_count",
+            u64::from(secret_scan.scanned_field_count),
+        )
+        .map_err(mesh_audit_domain_error)?;
+    details
+        .insert_count("secret_finding_count", u64::from(secret_scan.finding_count))
+        .map_err(mesh_audit_domain_error)?;
+    details
+        .insert_digest("secret_scan_hash", &scan_hash)
+        .map_err(mesh_audit_domain_error)?;
+    if secret_scan.denied() {
+        details
+            .insert_redacted_text(
+                "denied_classes",
+                "class_digest",
+                &secret_scan.denied_secret_classes.join(","),
+            )
+            .map_err(mesh_audit_domain_error)?;
+    }
+
+    let event = compute_mesh_audit_event(&MeshAuditEventInput {
+        workspace_id: snapshot.workspace_id.clone(),
+        event_kind: MeshAuditEventKind::Export,
+        peer_id: None,
+        origin_workspace_id: None,
+        target_workspace_id: None,
+        workspace_scope: Some("foreground_export".to_owned()),
+        policy_decision_id: Some("preexport_scan".to_owned()),
+        local_row_refs: Vec::new(),
+        cached_body_refs: Vec::new(),
+        details,
+        previous_event_hash: None,
+    })
+    .map_err(mesh_audit_domain_error)?;
+    let audit_id = append_mesh_audit_event(&connection, &event, Some("ee mesh export"))
+        .map_err(mesh_audit_domain_error)?;
+    Ok(Some(audit_id))
+}
+
+fn mesh_export_secret_scan_hash(
+    secret_scan: &MeshExportSecretScanReport,
+) -> Result<String, DomainError> {
+    let bytes = serde_json::to_vec(secret_scan).map_err(|error| DomainError::Usage {
+        message: format!("Failed to serialize mesh export secret scan report: {error}"),
+        repair: Some("Retry the command or report the serialization failure.".to_owned()),
+    })?;
+    Ok(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
+}
+
+fn mesh_audit_domain_error(error: MeshAuditLedgerError) -> DomainError {
+    DomainError::Storage {
+        message: format!("mesh export secret-scan audit failed: {error}"),
+        repair: Some(
+            "Inspect `ee audit verify --json` and retry mesh export after the audit ledger is healthy."
+                .to_owned(),
+        ),
+    }
 }
 
 fn handle_mesh_import<W, E>(
@@ -735,11 +882,16 @@ fn render_mesh_peers_human(report: &MeshCliPeersReport) -> String {
 fn render_mesh_export_human(report: &MeshCliExportReport) -> String {
     let target = report.output_path.as_deref().unwrap_or("stdout envelope");
     let mut output = format!(
-        "Mesh export\n  Target: {target}\n  Peers: {peers}\n  Cursors: {cursors}\n  Events: {events}\n",
+        "Mesh export\n  Target: {target}\n  Peers: {peers}\n  Cursors: {cursors}\n  Events: {events}\n  Secret scan: {scan_status} ({scanned_fields} fields)\n",
         peers = report.peer_count,
         cursors = report.cursor_count,
         events = report.event_count,
+        scan_status = report.secret_scan.status,
+        scanned_fields = report.secret_scan.scanned_field_count,
     );
+    if let Some(audit_id) = &report.audit_id {
+        output.push_str(&format!("  Audit: {audit_id}\n"));
+    }
     append_degradations(&mut output, &report.degraded);
     output
 }
