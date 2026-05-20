@@ -24,7 +24,17 @@ doctor_fixture_corrupt() {
     local marker_dir
     marker_dir="$(doctor_fixture_marker_dir "$target")"
     mkdir -p "$marker_dir" "$target/.fixture_baseline"
-    find "$target" -type f -print | sort | shasum -a 256 > "$target/.fixture_baseline/before.sha256"
+    # Exclude the doctor's own audit trail, the fixture's baseline directory,
+    # the test wrapper's assert.* capture files, and macOS HFS+/ExFAT resource
+    # fork sidecars (the `._*` files that appear on non-HFS volumes).
+    find "$target" -type f \
+        -not -path '*/.doctor/*' \
+        -not -path '*/.fixture_baseline/*' \
+        -not -path '*/.ee/doctor-fixtures/*' \
+        -not -name '.assert.stdout' \
+        -not -name '.assert.stderr' \
+        -not -name '._*' \
+        -print | sort | shasum -a 256 > "$target/.fixture_baseline/before.sha256"
     printf '{"schema":"ee.doctor_fixture_marker.v1","fmId":"%s","severity":"%s","subsystem":"%s","state":"corrupt"}\n' \
         "$fm_id" "$severity" "$subsystem" > "$marker_dir/$fm_id.json"
     printf 'corrupt fixture prepared: %s\n' "$fm_id" >&2
@@ -42,10 +52,28 @@ doctor_fixture_assert() {
 
     if [ "${EE_DOCTOR_FIXTURE_RUN_EE:-0}" = "1" ]; then
         local ee_bin="${EE_DOCTOR_FIXTURE_BINARY:-ee}"
-        "$ee_bin" doctor --workspace "$target" --fix --only "$fm_id" --json > "$target/.fixture_baseline/doctor-fix.json"
+        # ee's CLI surface (bd-3boan): --fix and --undo <RUN_ID> are flags, not
+        # subcommands. The --fix flag declares `conflicts_with --only`, so we
+        # invoke --fix on its own and use --only on the read-only diagnose pass
+        # afterwards to scope the after-state inspection to this FM's code.
+        "$ee_bin" doctor --workspace "$target" --fix --json > "$target/.fixture_baseline/doctor-fix.json"
         "$ee_bin" doctor --workspace "$target" --only "$fm_id" --json > "$target/.fixture_baseline/doctor-after.json"
-        "$ee_bin" doctor --workspace "$target" undo --last --json > "$target/.fixture_baseline/doctor-undo.json"
-        find "$target" -type f -print | sort | shasum -a 256 > "$target/.fixture_baseline/after-undo.sha256"
+        local run_id
+        run_id="$(jq -r '.runId // .data.runId // empty' "$target/.fixture_baseline/doctor-fix.json")"
+        if [ -z "$run_id" ]; then
+            printf 'fixture assert: could not extract runId from fix output\n' >&2
+            cat "$target/.fixture_baseline/doctor-fix.json" >&2
+            return 1
+        fi
+        "$ee_bin" doctor --workspace "$target" --undo "$run_id" --json > "$target/.fixture_baseline/doctor-undo.json"
+        find "$target" -type f \
+            -not -path '*/.doctor/*' \
+            -not -path '*/.fixture_baseline/*' \
+            -not -path '*/.ee/doctor-fixtures/*' \
+            -not -name '.assert.stdout' \
+            -not -name '.assert.stderr' \
+            -not -name '._*' \
+            -print | sort | shasum -a 256 > "$target/.fixture_baseline/after-undo.sha256"
         cmp "$target/.fixture_baseline/before.sha256" "$target/.fixture_baseline/after-undo.sha256"
     fi
 

@@ -254,3 +254,6 @@ tests/audit_artifacts/install_pipeline_*.json
 # bv (beads viewer) lock file under .beads/. The upstream .beads/.gitignore
 # template does not cover this name, and locks are per-machine state.
 .beads/.bv.lock
+
+# World-class-doctor-mode workspace (in-repo per user choice 2026-05-20)
+/doctor_workspace/

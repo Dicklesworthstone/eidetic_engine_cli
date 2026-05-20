@@ -432,28 +432,51 @@ impl RunContext {
         let run_id = derive_run_id(target_sha);
         let started_at = Utc::now().to_rfc3339();
 
-        // Try to take the lock. If it exists, parse it for the holder and
-        // refuse. We use a plain text file with `{run_id}\n{pid}` content;
-        // race-window with a sibling start is documented and accepted (this
-        // is local single-host; agent scheduling on one host serializes
-        // through this lock at human-perceptible granularity).
-        if lock_path.exists() {
-            let holder = fs::read_to_string(&lock_path)
-                .ok()
-                .and_then(|s| s.lines().next().map(std::string::ToString::to_string));
-            return Err(DoctorRuntimeError::ConcurrencyLost {
-                lock_path,
-                holder_run_id: holder,
-            });
-        }
-
+        // Try to take the lock. Round-2 fresh-eyes (F2): use
+        // `OpenOptions::create_new(true)` which is atomic at the OS level —
+        // either we are the unique creator (success) or the file existed
+        // (fails with AlreadyExists). This closes the previous TOCTOU window
+        // between `lock_path.exists()` and the subsequent write.
+        //
+        // Round-3 self-review (Bug #5): if create_new succeeds but the
+        // subsequent write fails (e.g., disk full mid-write), the empty
+        // lock file persists and the next doctor invocation sees a
+        // phantom holder. Remove the lock on write failure before
+        // propagating the error.
         let lock_contents = format!("{}\n{}\n", run_id, std::process::id());
-        write_file_atomic(&lock_path, lock_contents.as_bytes()).map_err(|source| {
-            DoctorRuntimeError::Io {
-                context: format!("write lock file {}", lock_path.display()),
-                source,
+        match fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(mut f) => {
+                if let Err(source) = f
+                    .write_all(lock_contents.as_bytes())
+                    .and_then(|()| f.flush())
+                {
+                    let _ = fs::remove_file(&lock_path);
+                    return Err(DoctorRuntimeError::Io {
+                        context: format!("write lock file {}", lock_path.display()),
+                        source,
+                    });
+                }
             }
-        })?;
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                let holder = fs::read_to_string(&lock_path)
+                    .ok()
+                    .and_then(|s| s.lines().next().map(std::string::ToString::to_string));
+                return Err(DoctorRuntimeError::ConcurrencyLost {
+                    lock_path,
+                    holder_run_id: holder,
+                });
+            }
+            Err(source) => {
+                return Err(DoctorRuntimeError::Io {
+                    context: format!("create_new lock file {}", lock_path.display()),
+                    source,
+                });
+            }
+        }
 
         let run_dir = workspace.join(".doctor").join("runs").join(&run_id);
         let backups_dir = run_dir.join("backups");
@@ -608,7 +631,79 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
     };
     let before_mode = read_mode(path);
 
-    // Backup (only for writing ops on existing files).
+    // Round-3 self-review (Bug #1): pre-check idempotence BEFORE staging a
+    // backup. Previously `stage_backup` ran unconditionally for writing ops
+    // on existing files; if a NoOpIdempotent fired in the match arm below,
+    // the backup directory was created on disk but no action was recorded,
+    // and a subsequent mutate at the same sequence would trip the collision
+    // check in `stage_backup`. Round-3 also moves validation of
+    // `Op::QuarantineByRename`'s destination here so it errors before the
+    // backup is staged, and adds the missing destination-collision check
+    // (Bug #4) so two QuarantineByRename ops with the same dest in one run
+    // can't silently overwrite each other (`fs::rename` replaces on Unix).
+    match &op {
+        Op::WriteFile { bytes } => {
+            if let Some(existing) = before_hash.as_deref() {
+                if hash_bytes(bytes) == existing {
+                    return Err(DoctorRuntimeError::NoOpIdempotent);
+                }
+            }
+        }
+        Op::Chmod { mode } => {
+            #[cfg(unix)]
+            {
+                // Bug #2: `read_mode` returns the full `st_mode` (with
+                // file-type bits like `0o100000` for regular files), while
+                // the user-supplied `mode` is just the permission bits.
+                // Comparing them directly never matched, so the documented
+                // idempotence was unreachable in practice. Mask both to the
+                // permission-bit window (0o7777 covers sticky/setuid/setgid
+                // plus user/group/other rwx).
+                let cur = before_mode.map(|m| m & 0o7777);
+                let want = *mode & 0o7777;
+                if cur == Some(want) {
+                    return Err(DoctorRuntimeError::NoOpIdempotent);
+                }
+            }
+        }
+        Op::CreateDirAll { .. } => {
+            if path.is_dir() {
+                return Err(DoctorRuntimeError::NoOpIdempotent);
+            }
+        }
+        Op::QuarantineByRename {
+            dest_under_quarantine,
+        } => {
+            if !path.exists() {
+                return Err(DoctorRuntimeError::NoOpIdempotent);
+            }
+            // Path-traversal defense — round-1 fresh-eyes.
+            validate_relative_quarantine_dest(dest_under_quarantine, &ctx.run_dir)?;
+            // Bug #4: refuse if the quarantine destination is already
+            // occupied. `fs::rename` would silently overwrite on Unix.
+            let dest = ctx.run_dir.join("quarantine").join(dest_under_quarantine);
+            if dest.exists() {
+                return Err(DoctorRuntimeError::Io {
+                    context: format!(
+                        "quarantine destination already exists: {}",
+                        dest.display()
+                    ),
+                    source: io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "quarantine destination collision",
+                    ),
+                });
+            }
+        }
+        // Advisory ops (Manual, EmitDiagnostic, RunX, RewriteJsonl,
+        // AtomicRewriteToml, SnapshotBackup): no idempotence pre-check;
+        // they just record evidence.
+        _ => {}
+    }
+
+    // Backup (only for writing ops on existing files). Runs AFTER the
+    // idempotence + validation pre-check above so NoOp / validation
+    // failures don't leave orphan backup directories.
     let backup_rel_path = if op.is_writing() && path.is_file() {
         Some(stage_backup(ctx, path, &before_hash)?)
     } else {
@@ -622,12 +717,7 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
 
     match &op {
         Op::WriteFile { bytes } => {
-            // Idempotence guard: skip if bytes already match.
-            if let Some(existing) = before_hash.as_deref() {
-                if hash_bytes(bytes) == existing {
-                    return Err(DoctorRuntimeError::NoOpIdempotent);
-                }
-            }
+            // Idempotence already pre-checked above.
             if !ctx.dry_run {
                 write_file_atomic(path, bytes).map_err(|source| DoctorRuntimeError::Io {
                     context: format!("WriteFile({})", path.display()),
@@ -639,7 +729,6 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
             }
         }
         Op::Chmod { mode } => {
-            after_mode = Some(*mode);
             #[cfg(unix)]
             {
                 if !ctx.dry_run {
@@ -653,16 +742,18 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
             }
             #[cfg(not(unix))]
             {
-                // Windows: mode bits are advisory; record the intent.
+                // Windows: mode bits are advisory; record the intent but
+                // don't compare (the OS won't honor them anyway).
                 let _ = path;
             }
+            // Mask to permission bits — the OS only honors 0o7777 for chmod,
+            // and storing the user's input verbatim could mislead operators
+            // reading actions.jsonl into thinking we wrote file-type bits too.
+            after_mode = Some(*mode & 0o7777);
             after_hash = before_hash.clone();
         }
         Op::CreateDirAll { mode: _ } => {
-            // Idempotence: dir already exists → no-op.
-            if path.is_dir() {
-                return Err(DoctorRuntimeError::NoOpIdempotent);
-            }
+            // Idempotence already pre-checked.
             if !ctx.dry_run {
                 fs::create_dir_all(path).map_err(|source| DoctorRuntimeError::Io {
                     context: format!("CreateDirAll({})", path.display()),
@@ -673,10 +764,7 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
         Op::QuarantineByRename {
             dest_under_quarantine,
         } => {
-            // Idempotence: if source already gone, no-op.
-            if !path.exists() {
-                return Err(DoctorRuntimeError::NoOpIdempotent);
-            }
+            // Validation + collision check already done in pre-check.
             let dest = ctx.run_dir.join("quarantine").join(dest_under_quarantine);
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent).map_err(|source| DoctorRuntimeError::Io {
@@ -743,11 +831,17 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
     }
 
     // Build the line.
-    ctx.state.action_count += 1;
+    //
+    // Round-2 fresh-eyes (R2-P2-02): tentatively allocate the next
+    // sequence number but DO NOT increment ctx.state.action_count until
+    // the actions.jsonl append succeeds. Crashes between the increment
+    // and the append used to leave state.json one ahead of the log,
+    // breaking sequence-based undo semantics.
+    let proposed_seq = ctx.state.action_count + 1;
     let line = ActionLine {
         schema: ACTION_LINE_SCHEMA_V1.into(),
         run_id: ctx.run_id.clone(),
-        sequence: ctx.state.action_count,
+        sequence: proposed_seq,
         path: path.to_path_buf(),
         kind: op.kind_str().into(),
         before_hash,
@@ -760,7 +854,8 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
         notes,
     };
 
-    // Append to actions.jsonl.
+    // Append to actions.jsonl. Only after this succeeds do we commit the
+    // sequence advance into state.json.
     if let Some(handle) = ctx.actions_handle.as_mut() {
         let json = serde_json::to_string(&line).map_err(|e| DoctorRuntimeError::Io {
             context: "serialize ActionLine".into(),
@@ -776,8 +871,8 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
         })?;
     }
 
-    // Persist state snapshot (cheap; bounds action count growth in case
-    // of crash).
+    // Commit the sequence advance now that the action is durably logged.
+    ctx.state.action_count = proposed_seq;
     write_state(&ctx.run_dir, &ctx.state)?;
 
     Ok(line)
@@ -789,7 +884,26 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
 /// On partial failure, the function returns the count of actions reverted
 /// plus the first error encountered; the caller can inspect
 /// `<run-dir>/undo_log.jsonl` for line-level detail.
+///
+/// Round-2 fresh-eyes (R2-P1-01): acquires the workspace's
+/// `.ee/.doctor.lock` for the duration of the call via `OpenOptions::
+/// create_new` so two concurrent `ee doctor --undo <run-id>` invocations
+/// cannot race on the same `actions.jsonl` / `undo_log.jsonl`. The lock
+/// is held in a Drop guard so it's released even on partial-undo aborts.
+/// If the workspace lock is held by another doctor (concurrent --fix or
+/// --undo), returns `ConcurrencyLost` with exit semantics that match
+/// `RunContext::start`.
 pub fn replay_undo(run_dir: &Path) -> Result<UndoSummary, DoctorRuntimeError> {
+    // Acquire the workspace lock for the duration of this call. The state
+    // file at <run_dir>/state.json holds the workspace path; if it's
+    // missing or unparseable we can't take a lock and fall through to the
+    // best-effort undo (legacy behavior, preserved for forensic inspection
+    // of orphaned runs).
+    let _lock_guard = read_state(run_dir)
+        .ok()
+        .map(|state| acquire_undo_lock(&state.workspace))
+        .transpose()?;
+
     let actions_path = run_dir.join("actions.jsonl");
     let raw = fs::read_to_string(&actions_path).map_err(|source| DoctorRuntimeError::Io {
         context: format!("read {}", actions_path.display()),
@@ -887,8 +1001,31 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
             // Restore from backup. If `before_hash` is None, the file didn't
             // exist before — quarantine the current file (RULE 1 — no
             // deletion, even on undo of a create).
+            //
+            // Round-2 fresh-eyes (F5): before overwriting, verify the live
+            // file's current bytes match what `mutate()` originally wrote
+            // (`action.after_hash`). If not, an external writer modified the
+            // file after the doctor ran. Refuse with `UndoStateDrifted` rather
+            // than silently destroy that change.
             match (&action.before_hash, &action.backup_rel_path) {
                 (Some(expected_before), Some(rel)) => {
+                    // Round-3 self-review: only refuse on drift when the
+                    // post-mutate file is still present. If something deleted
+                    // it after the doctor ran, the user's most-likely intent
+                    // when calling --undo is "restore the pre-state" — i.e.,
+                    // recreate from backup. Drift detection should fire only
+                    // for the "bytes were modified" scenario, not "file
+                    // disappeared".
+                    if action.path.exists() {
+                        let live_hash = hash_file(&action.path)?;
+                        if Some(live_hash.as_str()) != action.after_hash.as_deref() {
+                            return Err(DoctorRuntimeError::UndoStateDrifted {
+                                path: action.path.clone(),
+                                expected_hash: action.after_hash.clone().unwrap_or_default(),
+                                observed_hash: live_hash,
+                            });
+                        }
+                    }
                     let backup = run_dir.join("backups").join(rel);
                     if !backup.exists() {
                         return Err(DoctorRuntimeError::UndoBackupCorrupt {
@@ -911,13 +1048,44 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
                 (None, _) => {
                     // The file didn't exist before. Quarantine instead of
                     // delete per AGENTS.md RULE 1.
+                    //
+                    // Round-2 fresh-eyes (F5 + R2-P0-03): only quarantine if
+                    // the live file still matches what we wrote. If someone
+                    // replaced it, refuse with UndoStateDrifted. Namespace
+                    // the quarantine destination by both action.sequence
+                    // AND the sanitized full source path (not just
+                    // file_name()) so two mutations that created files with
+                    // the same basename in different dirs don't collide on
+                    // undo.
                     if action.path.exists() {
+                        let live_hash = hash_file(&action.path)?;
+                        if action.after_hash.as_deref() != Some(live_hash.as_str()) {
+                            return Err(DoctorRuntimeError::UndoStateDrifted {
+                                path: action.path.clone(),
+                                expected_hash: action.after_hash.clone().unwrap_or_default(),
+                                observed_hash: live_hash,
+                            });
+                        }
+                        let path_rel = sanitize_path_for_run_dir(&action.path);
                         let quarantine_dest = run_dir
                             .join("quarantine")
                             .join("undo_created")
-                            .join(action.path.file_name().unwrap_or_default());
+                            .join(format!("{:06}", action.sequence))
+                            .join(&path_rel);
                         if let Some(parent) = quarantine_dest.parent() {
                             fs::create_dir_all(parent)?;
+                        }
+                        if quarantine_dest.exists() {
+                            return Err(DoctorRuntimeError::Io {
+                                context: format!(
+                                    "undo quarantine collision at {}",
+                                    quarantine_dest.display()
+                                ),
+                                source: io::Error::new(
+                                    io::ErrorKind::AlreadyExists,
+                                    "undo quarantine collision",
+                                ),
+                            });
                         }
                         fs::rename(&action.path, &quarantine_dest)?;
                     }
@@ -952,15 +1120,31 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
             // directory (RULE 1). Only undo if directory is empty — else
             // refuse (we may have created the dir but another agent put
             // something in it).
+            //
+            // Round-2 fresh-eyes (R2-P0-03 + R2-P1-05): namespace the
+            // quarantine destination by action.sequence + sanitized full
+            // path to prevent collisions; propagate read_dir errors instead
+            // of silently treating them as "non-empty".
             if action.path.is_dir() {
-                let is_empty = fs::read_dir(&action.path)
-                    .map(|mut it| it.next().is_none())
-                    .unwrap_or(false);
+                let is_empty = match fs::read_dir(&action.path) {
+                    Ok(mut it) => it.next().is_none(),
+                    Err(source) => {
+                        return Err(DoctorRuntimeError::Io {
+                            context: format!(
+                                "read_dir for undo of create_dir_all({})",
+                                action.path.display()
+                            ),
+                            source,
+                        });
+                    }
+                };
                 if is_empty {
+                    let path_rel = sanitize_path_for_run_dir(&action.path);
                     let quarantine_dest = run_dir
                         .join("quarantine")
                         .join("undo_created_dirs")
-                        .join(action.path.file_name().unwrap_or_default());
+                        .join(format!("{:06}", action.sequence))
+                        .join(&path_rel);
                     if let Some(parent) = quarantine_dest.parent() {
                         fs::create_dir_all(parent)?;
                     }
@@ -972,17 +1156,30 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
         }
         "quarantine_by_rename" => {
             // Restore: move the quarantined file back to its original path.
+            //
+            // Round-2 fresh-eyes (F6): if something has occupied the original
+            // path between quarantine and undo, refuse rather than overwrite.
+            // `UndoStateDrifted` is the right signal — the user can inspect
+            // both the new occupant and the quarantine and decide.
+            if action.path.exists() {
+                let live_hash = hash_file(&action.path)?;
+                return Err(DoctorRuntimeError::UndoStateDrifted {
+                    path: action.path.clone(),
+                    expected_hash: "<not present (quarantined)>".into(),
+                    observed_hash: live_hash,
+                });
+            }
             let quarantine_dest = action
                 .quarantine_dest_rel
                 .as_ref()
                 .map(|rel| run_dir.join("quarantine").join(rel));
-            if let Some(source) = quarantine_dest {
-                if source.exists() {
-                    if let Some(parent) = action.path.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
-                    fs::rename(&source, &action.path)?;
+            if let Some(source) = quarantine_dest
+                && source.exists()
+            {
+                if let Some(parent) = action.path.parent() {
+                    fs::create_dir_all(parent)?;
                 }
+                fs::rename(&source, &action.path)?;
             }
         }
         "manual"
@@ -1204,21 +1401,45 @@ fn read_mode(path: &Path) -> Option<u32> {
     }
 }
 
+/// Validate that a `dest_under_quarantine` PathBuf is a relative path containing
+/// only `Normal` components. Refuses absolute paths, `..` (`ParentDir`), Windows
+/// drive prefixes, etc. Returns `BlastRadiusExceeded` on failure so the caller
+/// surfaces it as exit 4 (refused_unsafe), matching the rest of the
+/// containment story.
+///
+/// This is defense-in-depth: callers are SUPPOSED to pass safe relative paths,
+/// but the runtime validates anyway so a buggy fixer can't escape the
+/// `<run-dir>/quarantine/` root.
+fn validate_relative_quarantine_dest(
+    dest: &Path,
+    run_dir: &Path,
+) -> Result<(), DoctorRuntimeError> {
+    for component in dest.components() {
+        match component {
+            std::path::Component::Normal(_) => continue,
+            _ => {
+                return Err(DoctorRuntimeError::BlastRadiusExceeded {
+                    path: dest.to_path_buf(),
+                    allowed_roots: vec![run_dir.join("quarantine")],
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn is_path_in_blast_radius(path: &Path, roots: &[PathBuf]) -> bool {
-    // Canonicalize the path's parent (the file itself may not yet exist).
+    // Round-2 fresh-eyes (R2-P1-03): walk upward to the nearest existing
+    // ancestor and canonicalize THAT, then re-append the tail. The prior
+    // implementation refused any path whose immediate parent didn't yet
+    // exist (so `WriteFile` to `<workspace>/.ee/cache/sub/leaf.json` was
+    // refused if `cache/sub/` didn't exist, even though `write_file_atomic`
+    // would have created it). This blocked legitimate Phase-4 fixer
+    // scenarios.
     let probe = if path.exists() {
         path.canonicalize().ok()
-    } else if let Some(parent) = path.parent() {
-        if parent.exists() {
-            parent
-                .canonicalize()
-                .ok()
-                .map(|p| p.join(path.file_name().unwrap_or_default()))
-        } else {
-            None
-        }
     } else {
-        None
+        nearest_existing_ancestor_canonical(path)
     };
     let probe = match probe {
         Some(p) => p,
@@ -1231,25 +1452,50 @@ fn is_path_in_blast_radius(path: &Path, roots: &[PathBuf]) -> bool {
     })
 }
 
-fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+/// Walk upward from `path` to the nearest existing ancestor, canonicalize
+/// it, then re-append the not-yet-existing tail. Returns the resulting
+/// concrete (canonical + tail) path if an existing ancestor was found.
+fn nearest_existing_ancestor_canonical(path: &Path) -> Option<PathBuf> {
+    let mut tail = PathBuf::new();
+    let mut p = path.to_path_buf();
+    loop {
+        if p.exists() {
+            let canon = p.canonicalize().ok()?;
+            return Some(canon.join(&tail));
+        }
+        let parent = p.parent()?.to_path_buf();
+        let name = p.file_name()?.to_os_string();
+        let mut new_tail = PathBuf::from(name);
+        new_tail.push(&tail);
+        tail = new_tail;
+        p = parent;
     }
-    let mut tmp = tempfile::NamedTempFile::new_in(path.parent().unwrap_or_else(|| Path::new(".")))?;
+}
+
+fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    // Round-2 fresh-eyes (R2-P1-04): refuse paths without a parent rather
+    // than falling back to "." (the CWD of an invoking shell, which could
+    // be outside the blast radius and break the cross-filesystem rename
+    // assumption that persist() relies on).
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("write_file_atomic: path has no parent: {}", path.display()),
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     tmp.write_all(bytes)?;
     tmp.flush()?;
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
 
-fn stage_backup(
-    ctx: &RunContext,
-    path: &Path,
-    expected_hash: &Option<String>,
-) -> Result<PathBuf, DoctorRuntimeError> {
-    // Backups are addressed by relative path under the run's backups/ root.
-    // Use a sanitized form of the absolute path so two backups of `/foo/bar`
-    // and `/baz/bar` don't collide.
+/// Compute the sanitized relative path under `<run-dir>/backups/<seq>/` (or
+/// quarantine equivalent) that maps an arbitrary absolute path to a safe
+/// destination. Drops `Prefix` / `RootDir` / `CurDir`, replaces `ParentDir`
+/// with the literal `__parent__` placeholder, keeps `Normal` components.
+fn sanitize_path_for_run_dir(path: &Path) -> PathBuf {
     let mut rel = PathBuf::new();
     for component in path.components() {
         match component {
@@ -1259,7 +1505,43 @@ fn stage_backup(
             std::path::Component::Normal(s) => rel.push(s),
         }
     }
+    rel
+}
+
+fn stage_backup(
+    ctx: &RunContext,
+    path: &Path,
+    expected_hash: &Option<String>,
+) -> Result<PathBuf, DoctorRuntimeError> {
+    // Backups are addressed by sequence-prefixed relative path under the
+    // run's backups/ root. Round-2 fresh-eyes (R2-P0-01) found that
+    // sharing the path-derived relative key for two mutations of the same
+    // target file silently overwrites the first backup, breaking the
+    // byte-identical-undo invariant the chokepoint advertises.
+    //
+    // The sequence prefix is `{:06}` of the action number we're about to
+    // commit (i.e. `ctx.state.action_count + 1`) since `mutate()` does
+    // `ctx.state.action_count += 1` AFTER calling stage_backup. Six digits
+    // keeps lexical sort = numerical sort up to 999,999 actions per run.
+    let path_rel = sanitize_path_for_run_dir(path);
+    let next_seq = ctx.state.action_count + 1;
+    let seq_dir = PathBuf::from(format!("{:06}", next_seq));
+    let rel = seq_dir.join(&path_rel);
     let backup_path = ctx.run_dir.join("backups").join(&rel);
+    // Defense in depth: the sequence-prefixed slot must not already exist.
+    // If it does, a prior mutate() partially completed at this sequence
+    // and the run state is inconsistent — refuse.
+    if backup_path.exists() {
+        return Err(DoctorRuntimeError::Io {
+            context: format!(
+                "backup collision at sequence {} target {}: {} already exists",
+                next_seq,
+                path.display(),
+                backup_path.display()
+            ),
+            source: io::Error::new(io::ErrorKind::AlreadyExists, "backup collision"),
+        });
+    }
     if let Some(parent) = backup_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1291,6 +1573,74 @@ fn stage_backup(
         }
     }
     Ok(rel)
+}
+
+/// Read the persisted [`RunState`] from `<run_dir>/state.json`.
+fn read_state(run_dir: &Path) -> Result<RunState, DoctorRuntimeError> {
+    let path = run_dir.join("state.json");
+    let bytes = fs::read(&path).map_err(|source| DoctorRuntimeError::Io {
+        context: format!("read state.json {}", path.display()),
+        source,
+    })?;
+    serde_json::from_slice(&bytes).map_err(|e| DoctorRuntimeError::Io {
+        context: format!("parse state.json {}", path.display()),
+        source: io::Error::new(io::ErrorKind::InvalidData, e),
+    })
+}
+
+/// Drop-guarded lock around `<workspace>/.ee/.doctor.lock` used by
+/// [`replay_undo`] to serialize against concurrent `--fix` or `--undo` runs.
+/// Round-2 fresh-eyes (R2-P1-01).
+struct UndoLockGuard {
+    lock_path: PathBuf,
+}
+
+impl Drop for UndoLockGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.lock_path);
+    }
+}
+
+fn acquire_undo_lock(workspace: &Path) -> Result<UndoLockGuard, DoctorRuntimeError> {
+    let ee_dir = workspace.join(".ee");
+    fs::create_dir_all(&ee_dir).map_err(|source| DoctorRuntimeError::Io {
+        context: format!("create_dir_all({}) for undo lock", ee_dir.display()),
+        source,
+    })?;
+    let lock_path = ee_dir.join(".doctor.lock");
+    let contents = format!("undo\n{}\n", std::process::id());
+    match fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&lock_path)
+    {
+        Ok(mut f) => {
+            // Round-3 self-review (Bug #5): clean up the lock file if the
+            // initial write fails, so a partial create doesn't strand a
+            // phantom holder for subsequent doctor invocations.
+            if let Err(source) = f.write_all(contents.as_bytes()).and_then(|()| f.flush()) {
+                let _ = fs::remove_file(&lock_path);
+                return Err(DoctorRuntimeError::Io {
+                    context: format!("write undo lock {}", lock_path.display()),
+                    source,
+                });
+            }
+            Ok(UndoLockGuard { lock_path })
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            let holder = fs::read_to_string(&lock_path)
+                .ok()
+                .and_then(|s| s.lines().next().map(std::string::ToString::to_string));
+            Err(DoctorRuntimeError::ConcurrencyLost {
+                lock_path,
+                holder_run_id: holder,
+            })
+        }
+        Err(source) => Err(DoctorRuntimeError::Io {
+            context: format!("create undo lock {}", lock_path.display()),
+            source,
+        }),
+    }
 }
 
 fn write_state(run_dir: &Path, state: &RunState) -> Result<(), DoctorRuntimeError> {
@@ -1514,12 +1864,32 @@ mod tests {
         }
 
         // After undo, the created file should NOT exist at its original
-        // path, but should be quarantined (RULE 1 — no delete).
+        // path, but should be quarantined under
+        // <run_dir>/quarantine/undo_created/<seq>/<sanitized-path>/created.txt
+        // per the round-2 sequence-prefixing fix (R2-P0-03).
         replay_undo(&run_dir).expect("undo");
         assert!(!target.exists());
-        let quarantine_dir = run_dir.join("quarantine").join("undo_created");
-        assert!(quarantine_dir.is_dir());
-        assert!(quarantine_dir.join("created.txt").exists());
+        let undo_root = run_dir.join("quarantine").join("undo_created");
+        assert!(undo_root.is_dir());
+        // Walk the tree and confirm exactly one `created.txt` exists somewhere
+        // under undo_created/<sequence>/.../created.txt.
+        let mut found = false;
+        let mut stack = vec![undo_root.clone()];
+        while let Some(d) = stack.pop() {
+            for entry in fs::read_dir(&d).unwrap().flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.file_name().and_then(|s| s.to_str()) == Some("created.txt") {
+                    found = true;
+                }
+            }
+        }
+        assert!(
+            found,
+            "quarantined created.txt not found under {}",
+            undo_root.display()
+        );
     }
 
     #[test]
@@ -1633,5 +2003,289 @@ mod tests {
 
         let result = mutate(&mut ctx, &target, Op::CreateDirAll { mode: 0o755 });
         assert!(matches!(result, Err(DoctorRuntimeError::NoOpIdempotent)));
+    }
+
+    #[test]
+    fn quarantine_refuses_path_traversal_with_parent_dir_components() {
+        // Defense-in-depth: a buggy fixer could pass `../../etc/passwd` as the
+        // quarantine destination. Validate that the chokepoint refuses with
+        // BlastRadiusExceeded rather than letting `fs::rename` resolve the `..`
+        // and escape the run-dir quarantine root. Round-1 fresh-eyes review.
+        let ws = fresh_workspace();
+        let target = ws.path().join("victim.txt");
+        fs::write(&target, b"hi").unwrap();
+
+        let mut ctx = start_run(ws.path());
+        let result = mutate(
+            &mut ctx,
+            &target,
+            Op::QuarantineByRename {
+                dest_under_quarantine: PathBuf::from("../../etc/passwd"),
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(DoctorRuntimeError::BlastRadiusExceeded { .. })
+        ));
+        // Victim is untouched.
+        assert!(target.exists());
+        assert_eq!(fs::read(&target).unwrap(), b"hi");
+    }
+
+    #[test]
+    fn undo_refuses_when_live_file_drifted_after_doctor_run() {
+        // Round-2 fresh-eyes (F5): if an external writer modified the file
+        // after the doctor's --fix, undo must NOT silently overwrite. Refuse
+        // with UndoStateDrifted; let the operator inspect.
+        let ws = fresh_workspace();
+        let target = ws.path().join("data.txt");
+        fs::write(&target, b"original").unwrap();
+
+        let run_dir;
+        {
+            let mut ctx = start_run(ws.path());
+            run_dir = ctx.run_dir().to_path_buf();
+            mutate(
+                &mut ctx,
+                &target,
+                Op::WriteFile {
+                    bytes: b"doctor_wrote".to_vec(),
+                },
+            )
+            .unwrap();
+            ctx.finish(RunStatus::CompletedOk).unwrap();
+        }
+
+        // Simulate external writer modifying the file after the doctor ran.
+        fs::write(&target, b"external_writer_changed_this").unwrap();
+
+        let result = replay_undo(&run_dir);
+        let summary = result.expect("replay_undo returns Ok with partial status");
+        // The undo refused this action; status reflects partial completion.
+        assert!(matches!(summary.status, RunStatus::UndonePartial));
+        assert!(summary.first_error.is_some());
+        let err = summary.first_error.unwrap();
+        assert!(
+            err.contains("drifted"),
+            "expected drift error, got: {}",
+            err
+        );
+        // Live file is untouched — the external writer's change is preserved.
+        assert_eq!(fs::read(&target).unwrap(), b"external_writer_changed_this");
+    }
+
+    #[test]
+    fn undo_refuses_when_path_reoccupied_after_quarantine() {
+        // Round-2 fresh-eyes (F6): if something landed at the original path
+        // between quarantine and undo, refuse rather than overwrite.
+        let ws = fresh_workspace();
+        let victim = ws.path().join("orphan.wal");
+        fs::write(&victim, b"original wal").unwrap();
+
+        let run_dir;
+        {
+            let mut ctx = start_run(ws.path());
+            run_dir = ctx.run_dir().to_path_buf();
+            mutate(
+                &mut ctx,
+                &victim,
+                Op::QuarantineByRename {
+                    dest_under_quarantine: PathBuf::from("orphan.wal"),
+                },
+            )
+            .unwrap();
+            ctx.finish(RunStatus::CompletedOk).unwrap();
+        }
+
+        // Simulate: an unrelated process creates a NEW file at the same
+        // path after the doctor quarantined the original.
+        fs::write(&victim, b"new_unrelated_file").unwrap();
+
+        let summary = replay_undo(&run_dir).expect("returns Ok with partial");
+        assert!(matches!(summary.status, RunStatus::UndonePartial));
+        let err = summary.first_error.unwrap();
+        assert!(err.contains("drifted"), "expected drift error, got: {}", err);
+        // The new unrelated file is preserved.
+        assert_eq!(fs::read(&victim).unwrap(), b"new_unrelated_file");
+        // The quarantined original is still safely in quarantine.
+        let quarantine = run_dir.join("quarantine").join("orphan.wal");
+        assert!(quarantine.exists());
+        assert_eq!(fs::read(&quarantine).unwrap(), b"original wal");
+    }
+
+    #[test]
+    fn two_writes_to_same_path_in_one_run_undo_byte_identical() {
+        // Round-2 fresh-eyes R2-P0-01: the headline finding. Two
+        // WriteFile mutations of the SAME target file in a single run
+        // must each store their own backup, so undo can walk both
+        // actions in reverse and end at the original bytes.
+        let ws = fresh_workspace();
+        let target = ws.path().join("data.txt");
+        fs::write(&target, b"orig").unwrap();
+
+        let run_dir;
+        {
+            let mut ctx = start_run(ws.path());
+            run_dir = ctx.run_dir().to_path_buf();
+            // First write.
+            mutate(
+                &mut ctx,
+                &target,
+                Op::WriteFile {
+                    bytes: b"v1".to_vec(),
+                },
+            )
+            .unwrap();
+            // Second write (same path, different bytes).
+            mutate(
+                &mut ctx,
+                &target,
+                Op::WriteFile {
+                    bytes: b"v2".to_vec(),
+                },
+            )
+            .unwrap();
+            ctx.finish(RunStatus::CompletedOk).unwrap();
+        }
+
+        // Two distinct backups must exist under their sequence-prefixed
+        // directories.
+        let b1 = run_dir.join("backups").join("000001");
+        let b2 = run_dir.join("backups").join("000002");
+        assert!(b1.is_dir(), "first backup dir missing: {}", b1.display());
+        assert!(b2.is_dir(), "second backup dir missing: {}", b2.display());
+
+        // Undo restores byte-identical original.
+        let summary = replay_undo(&run_dir).unwrap();
+        assert_eq!(summary.actions_undone, 2);
+        assert_eq!(fs::read(&target).unwrap(), b"orig");
+    }
+
+    #[test]
+    fn chmod_idempotent_when_mode_already_matches() {
+        // Round-2 fresh-eyes R2-P1-02: Chmod with the same mode the file
+        // already has must return NoOpIdempotent rather than spuriously
+        // recording a bumped-but-unchanged mtime in actions.jsonl.
+        // Unix-only because Windows treats mode bits as advisory.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let ws = fresh_workspace();
+            let target = ws.path().join("perm.txt");
+            fs::write(&target, b"x").unwrap();
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+
+            let mut ctx = start_run(ws.path());
+            let result = mutate(&mut ctx, &target, Op::Chmod { mode: 0o644 });
+            assert!(
+                matches!(result, Err(DoctorRuntimeError::NoOpIdempotent)),
+                "expected NoOpIdempotent, got: {:?}",
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn write_file_atomic_refuses_path_without_parent() {
+        // Round-2 fresh-eyes R2-P1-04: write_file_atomic used to fall back
+        // to `Path::new(".")` (the CWD of an invoking shell) when given a
+        // parentless path. Now it refuses with InvalidInput, so a bare
+        // filename can't accidentally write into wherever ee was launched
+        // from.
+        let bare = Path::new("");
+        let result = write_file_atomic(bare, b"x");
+        assert!(
+            result.is_err(),
+            "write_file_atomic should refuse parentless path"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err.kind(), io::ErrorKind::InvalidInput | io::ErrorKind::NotFound),
+            "unexpected error kind: {:?}",
+            err.kind()
+        );
+    }
+
+    #[test]
+    fn two_writes_to_different_paths_with_same_basename_undo_correctly() {
+        // Round-2 fresh-eyes R2-P0-03: undo of `Op::WriteFile { bytes: ... }`
+        // where two files share a basename (e.g., a/config.toml and
+        // b/config.toml) — previously the undo quarantine destination was
+        // namespaced only by `file_name()`, so the second undo would
+        // overwrite the first. Now namespaced by sequence + sanitized path.
+        let ws = fresh_workspace();
+        let a = ws.path().join("a/config.toml");
+        let b = ws.path().join("b/config.toml");
+        fs::create_dir_all(a.parent().unwrap()).unwrap();
+        fs::create_dir_all(b.parent().unwrap()).unwrap();
+        // Neither file exists initially.
+
+        let run_dir;
+        {
+            let mut ctx = start_run(ws.path());
+            run_dir = ctx.run_dir().to_path_buf();
+            mutate(
+                &mut ctx,
+                &a,
+                Op::WriteFile {
+                    bytes: b"contents-a".to_vec(),
+                },
+            )
+            .unwrap();
+            mutate(
+                &mut ctx,
+                &b,
+                Op::WriteFile {
+                    bytes: b"contents-b".to_vec(),
+                },
+            )
+            .unwrap();
+            ctx.finish(RunStatus::CompletedOk).unwrap();
+        }
+
+        // After undo, both files are quarantined; the doctor never deletes.
+        // Verify both quarantine destinations are distinct paths and both
+        // hold their original creation bytes.
+        replay_undo(&run_dir).unwrap();
+        assert!(!a.exists());
+        assert!(!b.exists());
+
+        let q_root = run_dir.join("quarantine").join("undo_created");
+        // Two sequence-prefixed quarantine dirs must exist.
+        let mut entries: Vec<String> = fs::read_dir(&q_root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        entries.sort();
+        assert_eq!(
+            entries,
+            vec!["000001".to_string(), "000002".to_string()],
+            "expected sequence-prefixed quarantine dirs, found: {:?}",
+            entries
+        );
+    }
+
+    #[test]
+    fn quarantine_refuses_absolute_path_destination() {
+        // Defense-in-depth: `Path::join(absolute)` replaces the prefix entirely.
+        // Without validation, `dest_under_quarantine = "/etc/passwd"` would
+        // overwrite or move to `/etc/passwd`. Refuse instead.
+        let ws = fresh_workspace();
+        let target = ws.path().join("victim.txt");
+        fs::write(&target, b"hi").unwrap();
+
+        let mut ctx = start_run(ws.path());
+        let result = mutate(
+            &mut ctx,
+            &target,
+            Op::QuarantineByRename {
+                dest_under_quarantine: PathBuf::from("/tmp/escape"),
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(DoctorRuntimeError::BlastRadiusExceeded { .. })
+        ));
+        assert!(target.exists());
     }
 }

@@ -1138,7 +1138,7 @@ fn doctor_mesh_auto_enrollment_action(
 ) -> Option<RepairAction> {
     let present_deps = |deps: &[&str]| -> Vec<String> {
         deps.iter()
-            .filter(|dep| required.contains(*dep))
+            .filter(|dep| required.contains(**dep))
             .map(|dep| (*dep).to_owned())
             .collect()
     };
