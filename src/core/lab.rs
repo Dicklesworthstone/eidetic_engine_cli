@@ -34,9 +34,12 @@ pub const LAB_RECONSTRUCT_SCHEMA_V1: &str = "ee.lab.reconstruct.v1";
 
 const FROZEN_EPISODE_SCHEMA_V1: &str = "ee.lab.frozen_episode.v1";
 const LAB_REPLAY_UNAVAILABLE_CODE: &str = "lab_replay_unavailable";
+pub const LAB_COUNTERFACTUAL_MULTI_SWAP_UNSUPPORTED_CODE: &str =
+    "lab_counterfactual_multi_swap_unsupported";
 pub const LAB_REPLAY_DETERMINISM_VIOLATION_CODE: &str = "lab_replay_determinism_violation";
 pub const LAB_REPLAY_NONDETERMINISTIC_CODE: &str = "lab_replay_nondeterministic";
 pub const LAB_DETERMINISM_DIFF_SCHEMA_V1: &str = "ee.lab.determinism_diff.v1";
+pub const LAB_COUNTERFACTUAL_PACK_DIFF_SCHEMA_V1: &str = "ee.lab.counterfactual_pack_diff.v1";
 const HYPOTHESIS_RECORD_ID_PREFIX: &str = "hyprec_";
 pub const WAL_RETENTION_KIND_HOLD: &str = "hold";
 pub const WAL_RETENTION_KIND_BEST_EFFORT: &str = "best_effort";
@@ -359,6 +362,15 @@ pub struct InterventionSpec {
     pub memory_content: Option<String>,
     /// Strength delta (-1.0 to 1.0) for strengthen/weaken.
     pub strength_delta: Option<f64>,
+    /// Dotted config path or query target for N15.5 single-input swaps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap_target: Option<String>,
+    /// Replacement value for config/query swaps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap_value: Option<String>,
+    /// Revision resolution mode for memory swaps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap_revision: Option<SwapRevisionMode>,
     /// Hypothesis about expected effect.
     pub hypothesis: Option<String>,
 }
@@ -371,6 +383,9 @@ impl InterventionSpec {
             memory_id: None,
             memory_content: Some(content.into()),
             strength_delta: None,
+            swap_target: None,
+            swap_value: None,
+            swap_revision: None,
             hypothesis: None,
         }
     }
@@ -382,6 +397,9 @@ impl InterventionSpec {
             memory_id: Some(id.into()),
             memory_content: None,
             strength_delta: None,
+            swap_target: None,
+            swap_value: None,
+            swap_revision: None,
             hypothesis: None,
         }
     }
@@ -393,6 +411,9 @@ impl InterventionSpec {
             memory_id: Some(id.into()),
             memory_content: None,
             strength_delta: Some(delta),
+            swap_target: None,
+            swap_value: None,
+            swap_revision: None,
             hypothesis: None,
         }
     }
@@ -404,14 +425,90 @@ impl InterventionSpec {
             memory_id: Some(id.into()),
             memory_content: None,
             strength_delta: Some(-delta.abs()),
+            swap_target: None,
+            swap_value: None,
+            swap_revision: None,
             hypothesis: None,
         }
+    }
+
+    #[must_use]
+    pub fn swap_memory_content(logical_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            intervention_type: InterventionType::MemoryContentSwap,
+            memory_id: Some(logical_id.into()),
+            memory_content: Some(content.into()),
+            strength_delta: None,
+            swap_target: None,
+            swap_value: None,
+            swap_revision: Some(SwapRevisionMode::AtCapture),
+            hypothesis: None,
+        }
+    }
+
+    #[must_use]
+    pub fn swap_memory_removed(logical_id: impl Into<String>) -> Self {
+        Self {
+            intervention_type: InterventionType::MemoryRemovedSwap,
+            memory_id: Some(logical_id.into()),
+            memory_content: None,
+            strength_delta: None,
+            swap_target: None,
+            swap_value: Some("true".to_string()),
+            swap_revision: Some(SwapRevisionMode::AtCapture),
+            hypothesis: None,
+        }
+    }
+
+    #[must_use]
+    pub fn swap_config(path: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            intervention_type: InterventionType::ConfigSwap,
+            memory_id: None,
+            memory_content: None,
+            strength_delta: None,
+            swap_target: Some(path.into()),
+            swap_value: Some(value.into()),
+            swap_revision: None,
+            hypothesis: None,
+        }
+    }
+
+    #[must_use]
+    pub fn swap_query(query: impl Into<String>) -> Self {
+        Self {
+            intervention_type: InterventionType::QuerySwap,
+            memory_id: None,
+            memory_content: None,
+            strength_delta: None,
+            swap_target: Some("query".to_string()),
+            swap_value: Some(query.into()),
+            swap_revision: None,
+            hypothesis: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_swap_revision(mut self, swap_revision: SwapRevisionMode) -> Self {
+        self.swap_revision = Some(swap_revision);
+        self
     }
 
     #[must_use]
     pub fn with_hypothesis(mut self, hypothesis: impl Into<String>) -> Self {
         self.hypothesis = Some(hypothesis.into());
         self
+    }
+
+    #[must_use]
+    pub const fn is_single_input_swap(&self) -> bool {
+        matches!(
+            self.intervention_type,
+            InterventionType::MemoryContentSwap
+                | InterventionType::MemoryRemovedSwap
+                | InterventionType::ConfigSwap
+                | InterventionType::QuerySwap
+        )
     }
 }
 
@@ -427,6 +524,14 @@ pub enum InterventionType {
     Strengthen,
     /// Decrease memory retrieval strength.
     Weaken,
+    /// Replace one captured memory revision's content.
+    MemoryContentSwap,
+    /// Exclude one captured memory revision from the counterfactual pack.
+    MemoryRemovedSwap,
+    /// Replace one config input used during pack assembly.
+    ConfigSwap,
+    /// Replace the query/task phrasing used during pack assembly.
+    QuerySwap,
 }
 
 impl InterventionType {
@@ -437,8 +542,70 @@ impl InterventionType {
             Self::Remove => "remove",
             Self::Strengthen => "strengthen",
             Self::Weaken => "weaken",
+            Self::MemoryContentSwap => "memory_content_swap",
+            Self::MemoryRemovedSwap => "memory_removed_swap",
+            Self::ConfigSwap => "config_swap",
+            Self::QuerySwap => "query_swap",
         }
     }
+}
+
+/// Revision resolution mode for memory swaps.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwapRevisionMode {
+    AtCapture,
+    Current,
+    Explicit,
+}
+
+impl Default for SwapRevisionMode {
+    fn default() -> Self {
+        Self::AtCapture
+    }
+}
+
+impl SwapRevisionMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AtCapture => "at_capture",
+            Self::Current => "current",
+            Self::Explicit => "explicit",
+        }
+    }
+}
+
+/// Deterministic summary of the single swap applied to a counterfactual run.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CounterfactualSwapSummary {
+    pub swap_kind: String,
+    pub target: String,
+    pub value_hash: Option<String>,
+    pub revision_mode: String,
+}
+
+/// Deterministic pack diff emitted for an N15.5 single-input swap.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CounterfactualPackDiff {
+    pub schema: String,
+    pub diff_hash: String,
+    pub included_changes: Vec<CounterfactualDiffEntry>,
+    pub excluded_changes: Vec<CounterfactualDiffEntry>,
+    pub why_changes: Vec<CounterfactualDiffEntry>,
+    pub score_changes: Vec<CounterfactualDiffEntry>,
+}
+
+/// One stable counterfactual diff row.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CounterfactualDiffEntry {
+    pub path: String,
+    pub before: String,
+    pub after: String,
+    pub reason: String,
 }
 
 /// Report from counterfactual analysis.
@@ -462,6 +629,10 @@ pub struct CounterfactualReport {
     pub behavior_claims: Vec<String>,
     pub interventions_applied: usize,
     pub hypothesis_records: Vec<HypothesisRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swap_summary: Option<CounterfactualSwapSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pack_diff: Option<CounterfactualPackDiff>,
     pub dry_run: bool,
     pub analyzed_at: String,
 }
@@ -488,6 +659,8 @@ impl CounterfactualReport {
             behavior_claims: Vec::new(),
             interventions_applied: 0,
             hypothesis_records: Vec::new(),
+            swap_summary: None,
+            pack_diff: None,
             dry_run: false,
             analyzed_at: Utc::now().to_rfc3339(),
         }
@@ -1175,9 +1348,30 @@ pub fn run_counterfactual(
 ) -> Result<CounterfactualReport, DomainError> {
     let run_id = format!("{}{}", COUNTERFACTUAL_RUN_ID_PREFIX, generate_id());
     let mut report = CounterfactualReport::new(options.episode_id.clone(), run_id.clone());
+    let swap_count = options
+        .interventions
+        .iter()
+        .filter(|intervention| intervention.is_single_input_swap())
+        .count();
+    report.interventions_applied = options.interventions.len();
+    if swap_count > 1 {
+        report.status = CounterfactualStatus::Failed;
+        report.confidence_state = "counterfactual_rejected_multi_swap".to_string();
+        report.assumptions = vec![
+            "single-input swaps preserve counterfactual interpretability".to_string(),
+            "multi-swap batches must be composed outside the lab report".to_string(),
+        ];
+        report
+            .degradation_codes
+            .push(LAB_COUNTERFACTUAL_MULTI_SWAP_UNSUPPORTED_CODE.to_string());
+        report.next_action =
+            "Run separate counterfactual invocations and compose diffs externally; multi-swap is rejected by design (see ADR 0028)"
+                .to_string();
+        return Ok(report);
+    }
+
     let replay_artifact = read_frozen_episode(&options.workspace, &options.episode_id)?;
     report.dry_run = options.dry_run;
-    report.interventions_applied = options.interventions.len();
     report.counterfactual_pack_hash = Some(format!(
         "blake3:{}",
         hash_content(counterfactual_pack_hash_input(options, replay_artifact.as_ref()).as_bytes())
@@ -1234,6 +1428,14 @@ pub fn run_counterfactual(
                 .push(LAB_REPLAY_UNAVAILABLE_CODE.to_string());
         }
     }
+    if let Some(swap) = single_input_swap(options) {
+        report.swap_summary = Some(counterfactual_swap_summary(swap));
+        report.pack_diff = Some(counterfactual_pack_diff(
+            &options.episode_id,
+            swap,
+            replay_artifact.as_ref(),
+        ));
+    }
     if options.dry_run {
         report
             .degradation_codes
@@ -1281,6 +1483,13 @@ pub fn run_counterfactual(
     Ok(report)
 }
 
+fn single_input_swap(options: &CounterfactualOptions) -> Option<&InterventionSpec> {
+    options
+        .interventions
+        .iter()
+        .find(|intervention| intervention.is_single_input_swap())
+}
+
 fn counterfactual_pack_hash_input(
     options: &CounterfactualOptions,
     artifact: Option<&FrozenEpisodeArtifact>,
@@ -1304,6 +1513,17 @@ fn counterfactual_pack_hash_input(
         input.push(':');
         input.push_str(intervention.memory_content.as_deref().unwrap_or_default());
         input.push(':');
+        input.push_str(intervention.swap_target.as_deref().unwrap_or_default());
+        input.push(':');
+        input.push_str(intervention.swap_value.as_deref().unwrap_or_default());
+        input.push(':');
+        input.push_str(
+            intervention
+                .swap_revision
+                .map(SwapRevisionMode::as_str)
+                .unwrap_or_default(),
+        );
+        input.push(':');
         input.push_str(
             &intervention
                 .strength_delta
@@ -1314,6 +1534,125 @@ fn counterfactual_pack_hash_input(
         input.push_str(intervention.hypothesis.as_deref().unwrap_or_default());
     }
     input
+}
+
+fn counterfactual_swap_summary(swap: &InterventionSpec) -> CounterfactualSwapSummary {
+    let value = swap
+        .memory_content
+        .as_deref()
+        .or(swap.swap_value.as_deref())
+        .map(|value| format!("blake3:{}", hash_content(value.as_bytes())));
+    CounterfactualSwapSummary {
+        swap_kind: swap.intervention_type.as_str().to_string(),
+        target: counterfactual_swap_target(swap),
+        value_hash: value,
+        revision_mode: swap.swap_revision.unwrap_or_default().as_str().to_string(),
+    }
+}
+
+fn counterfactual_pack_diff(
+    episode_id: &str,
+    swap: &InterventionSpec,
+    artifact: Option<&FrozenEpisodeArtifact>,
+) -> CounterfactualPackDiff {
+    let baseline_pack_hash = artifact
+        .and_then(|artifact| artifact.pack_hash.clone())
+        .unwrap_or_else(|| "missing_replay_evidence".to_string());
+    let target = counterfactual_swap_target(swap);
+    let replacement = swap
+        .memory_content
+        .clone()
+        .or_else(|| swap.swap_value.clone())
+        .unwrap_or_else(|| "true".to_string());
+    let replacement_hash = format!("blake3:{}", hash_content(replacement.as_bytes()));
+    let diff_hash = format!(
+        "blake3:{}",
+        hash_content(
+            format!(
+                "counterfactual-diff:{episode_id}:{}:{target}:{baseline_pack_hash}:{replacement_hash}",
+                swap.intervention_type.as_str()
+            )
+            .as_bytes()
+        )
+    );
+
+    let mut included_changes = Vec::new();
+    let mut excluded_changes = Vec::new();
+    let mut why_changes = Vec::new();
+    let mut score_changes = Vec::new();
+
+    match swap.intervention_type {
+        InterventionType::MemoryContentSwap => {
+            included_changes.push(CounterfactualDiffEntry {
+                path: format!("pack.items[{target}].content"),
+                before: "captured_revision_content".to_string(),
+                after: replacement_hash.clone(),
+                reason: "memory_content_swap".to_string(),
+            });
+            why_changes.push(CounterfactualDiffEntry {
+                path: format!("why[{target}].revisionMode"),
+                before: "at_capture".to_string(),
+                after: swap.swap_revision.unwrap_or_default().as_str().to_string(),
+                reason: "memory_swap_revision_resolution".to_string(),
+            });
+        }
+        InterventionType::MemoryRemovedSwap => {
+            excluded_changes.push(CounterfactualDiffEntry {
+                path: format!("pack.items[{target}]"),
+                before: "included_at_capture".to_string(),
+                after: "removed_by_counterfactual".to_string(),
+                reason: "memory_removed_swap".to_string(),
+            });
+            why_changes.push(CounterfactualDiffEntry {
+                path: format!("why[{target}].selection"),
+                before: "selected_at_capture".to_string(),
+                after: "excluded_by_single_input_swap".to_string(),
+                reason: "memory_removed_from_counterfactual_pack".to_string(),
+            });
+        }
+        InterventionType::ConfigSwap => {
+            score_changes.push(CounterfactualDiffEntry {
+                path: format!("config.{target}"),
+                before: "captured_config_value".to_string(),
+                after: replacement_hash.clone(),
+                reason: "config_swap_changes_pack_scoring_input".to_string(),
+            });
+        }
+        InterventionType::QuerySwap => {
+            why_changes.push(CounterfactualDiffEntry {
+                path: "query".to_string(),
+                before: "captured_query".to_string(),
+                after: replacement_hash.clone(),
+                reason: "query_swap_changes_pack_explanation_input".to_string(),
+            });
+            score_changes.push(CounterfactualDiffEntry {
+                path: "scores.query_similarity".to_string(),
+                before: "captured_query_scores".to_string(),
+                after: "counterfactual_query_scores".to_string(),
+                reason: "query_swap_reassembles_pack".to_string(),
+            });
+        }
+        InterventionType::Add
+        | InterventionType::Remove
+        | InterventionType::Strengthen
+        | InterventionType::Weaken => {}
+    }
+
+    CounterfactualPackDiff {
+        schema: LAB_COUNTERFACTUAL_PACK_DIFF_SCHEMA_V1.to_string(),
+        diff_hash,
+        included_changes,
+        excluded_changes,
+        why_changes,
+        score_changes,
+    }
+}
+
+fn counterfactual_swap_target(swap: &InterventionSpec) -> String {
+    swap.memory_id
+        .clone()
+        .or_else(|| swap.swap_target.clone())
+        .unwrap_or_else(|| "query".to_string())
 }
 
 fn counterfactual_behavior_claims(
@@ -1973,6 +2312,68 @@ mod tests {
     }
 
     #[test]
+    fn single_input_swap_builders_pin_revision_defaults() -> TestResult {
+        let memory_swap = InterventionSpec::swap_memory_content("mem_release_rule", "run fmt")
+            .with_swap_revision(SwapRevisionMode::Current);
+        ensure(
+            memory_swap.intervention_type,
+            InterventionType::MemoryContentSwap,
+            "memory content swap type",
+        )?;
+        ensure(
+            memory_swap.memory_id,
+            Some("mem_release_rule".to_string()),
+            "memory content swap target",
+        )?;
+        ensure(
+            memory_swap.swap_revision,
+            Some(SwapRevisionMode::Current),
+            "memory content swap revision mode",
+        )?;
+        ensure(
+            memory_swap.is_single_input_swap(),
+            true,
+            "memory content swap is single-input swap",
+        )?;
+
+        let removed = InterventionSpec::swap_memory_removed("mem_noisy");
+        ensure(
+            removed.intervention_type,
+            InterventionType::MemoryRemovedSwap,
+            "memory removed swap type",
+        )?;
+        ensure(
+            removed.swap_revision,
+            Some(SwapRevisionMode::AtCapture),
+            "memory removed default revision mode",
+        )?;
+
+        let config = InterventionSpec::swap_config("pack.max_tokens", "8000");
+        ensure(
+            config.swap_target,
+            Some("pack.max_tokens".to_string()),
+            "config swap target",
+        )?;
+        ensure(
+            config.swap_value,
+            Some("8000".to_string()),
+            "config swap value",
+        )?;
+
+        let query = InterventionSpec::swap_query("new query phrasing");
+        ensure(
+            query.intervention_type,
+            InterventionType::QuerySwap,
+            "query swap type",
+        )?;
+        ensure(
+            query.swap_target,
+            Some("query".to_string()),
+            "query swap target",
+        )
+    }
+
+    #[test]
     fn counterfactual_with_interventions() -> TestResult {
         let options = CounterfactualOptions {
             workspace: PathBuf::from("."),
@@ -2059,6 +2460,107 @@ mod tests {
             report.degradation_codes.is_empty(),
             true,
             "no replay degradation",
+        )
+    }
+
+    #[test]
+    fn counterfactual_single_memory_swap_emits_pack_diff() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let capture = capture_episode(&CaptureOptions {
+            workspace: tempdir.path().to_path_buf(),
+            task_input: Some("prepare release with captured context".to_string()),
+            dry_run: false,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        let report = run_counterfactual(&CounterfactualOptions {
+            workspace: tempdir.path().to_path_buf(),
+            episode_id: capture.episode_id,
+            interventions: vec![
+                InterventionSpec::swap_memory_content(
+                    "mem_release_rule",
+                    "run cargo fmt before release",
+                )
+                .with_swap_revision(SwapRevisionMode::AtCapture),
+            ],
+            generate_hypotheses: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            report.status,
+            CounterfactualStatus::HypothesisReady,
+            "single swap status",
+        )?;
+        ensure(
+            report
+                .swap_summary
+                .as_ref()
+                .map(|summary| summary.target.as_str()),
+            Some("mem_release_rule"),
+            "swap summary target",
+        )?;
+        let diff = report
+            .pack_diff
+            .as_ref()
+            .ok_or_else(|| "missing counterfactual pack diff".to_string())?;
+        ensure(
+            diff.schema.as_str(),
+            LAB_COUNTERFACTUAL_PACK_DIFF_SCHEMA_V1,
+            "pack diff schema",
+        )?;
+        ensure(
+            diff.included_changes.len(),
+            1,
+            "memory content swap included change count",
+        )?;
+        ensure(
+            diff.why_changes.len(),
+            1,
+            "memory content swap why change count",
+        )?;
+        ensure(
+            diff.excluded_changes.is_empty(),
+            true,
+            "memory content swap no exclusions",
+        )
+    }
+
+    #[test]
+    fn counterfactual_rejects_multiple_single_input_swaps() -> TestResult {
+        let report = run_counterfactual(&CounterfactualOptions {
+            episode_id: "ep_test_multi_swap".to_string(),
+            interventions: vec![
+                InterventionSpec::swap_query("first query"),
+                InterventionSpec::swap_config("profile", "thorough"),
+            ],
+            generate_hypotheses: false,
+            dry_run: false,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            report.status,
+            CounterfactualStatus::Failed,
+            "multi swap status",
+        )?;
+        ensure(
+            report.degradation_codes,
+            vec![LAB_COUNTERFACTUAL_MULTI_SWAP_UNSUPPORTED_CODE.to_string()],
+            "multi swap degraded code",
+        )?;
+        ensure(
+            report.pack_diff.is_none(),
+            true,
+            "multi swap has no pack diff",
+        )?;
+        ensure(
+            report.next_action.contains("multi-swap is rejected"),
+            true,
+            "multi swap repair text",
         )
     }
 

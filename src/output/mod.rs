@@ -11726,11 +11726,7 @@ pub fn render_lab_replay_toon(report: &ReplayReport) -> String {
 #[must_use]
 pub fn render_lab_counterfactual_json(report: &CounterfactualReport) -> String {
     let degraded = lab_counterfactual_degraded(report);
-    let json = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
-        "success": true,
-        "degraded": degraded,
-        "data": {
+    let mut data = serde_json::json!({
             "run_id": report.run_id,
             "episode_id": report.episode_id,
             "status": report.status.as_str(),
@@ -11752,7 +11748,18 @@ pub fn render_lab_counterfactual_json(report: &CounterfactualReport) -> String {
             "hypothesisKinds": report.hypothesis_records.iter().map(|record| &record.hypothesis_kind).collect::<Vec<_>>(),
             "dry_run": report.dry_run,
             "analyzed_at": report.analyzed_at,
-        }
+    });
+    if let Some(swap_summary) = &report.swap_summary {
+        data["swapSummary"] = serde_json::json!(swap_summary);
+    }
+    if let Some(pack_diff) = &report.pack_diff {
+        data["packDiff"] = serde_json::json!(pack_diff);
+    }
+    let json = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "degraded": degraded,
+        "data": data
     });
     json.to_string()
 }
