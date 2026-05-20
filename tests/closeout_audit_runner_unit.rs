@@ -218,6 +218,7 @@ fn closeout_audit_script_tracks_current_coordination_surfaces() -> TestResult {
         "rch_queue_timeout",
         "dependency_cycle_scan_timeout",
         "dependency_cycle_status",
+        "srr6_deferred_dependencies_missing_rationale",
         "rch_queue: %s (active=%s stale=%s queued=%s)",
         "rch_queue_stale_active_records",
         "rch CLI rejects 'rch exec' as an unknown subcommand",
@@ -485,6 +486,18 @@ fn srr6_closeout_reports_unresolved_dependency_blockers() -> TestResult {
             "SRR6 closeout should list the unresolved dependency; got {unresolved:?}",
         ));
     }
+    let missing_deferred_rationale = srr6["deferred_dependencies_missing_rationale"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if !missing_deferred_rationale.iter().any(|dep| {
+        dep.get("id").and_then(Value::as_str) == Some("bd-srr6-deferred-missing-rationale")
+            && dep.get("status").and_then(Value::as_str) == Some("deferred")
+    }) {
+        return Err(format!(
+            "SRR6 closeout should list deferred dependencies missing rationale; got {missing_deferred_rationale:?}",
+        ));
+    }
     let blockers = audit["blockers"].as_array().cloned().unwrap_or_default();
     if !blockers.iter().any(|blocker| {
         blocker
@@ -494,6 +507,16 @@ fn srr6_closeout_reports_unresolved_dependency_blockers() -> TestResult {
     }) {
         return Err(format!(
             "SRR6 closeout blocker missing from blockers: {blockers:?}",
+        ));
+    }
+    if !blockers.iter().any(|blocker| {
+        blocker
+            .as_str()
+            .unwrap_or("")
+            .starts_with("srr6_deferred_dependencies_missing_rationale:")
+    }) {
+        return Err(format!(
+            "deferred-rationale blocker missing from blockers: {blockers:?}",
         ));
     }
     if audit["evidence"]["dependency_cycle_count"]
