@@ -283,6 +283,9 @@ mod mesh_disable_revoke_schemas;
 #[path = "contracts/mesh_auto_status_schema.rs"]
 mod mesh_auto_status_schema;
 
+#[path = "contracts/closeout_audit_schema.rs"]
+mod closeout_audit_schema;
+
 #[path = "contracts/peer_conflict_schema.rs"]
 mod peer_conflict_schema;
 
