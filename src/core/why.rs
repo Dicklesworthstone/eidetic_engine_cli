@@ -1132,6 +1132,7 @@ fn explain_memory_inner(
                     graph_retrieval,
                     degraded: evidence_degradations,
                     agent_profile,
+                    dedup_link: find_embed_dedup_link(&conn, memory_id),
                 },
             )
             .with_content(memory.content.clone());
@@ -1170,6 +1171,7 @@ fn explain_memory_inner(
             graph_retrieval,
             degraded: evidence_degradations,
             agent_profile,
+            dedup_link: find_embed_dedup_link(&conn, memory_id),
         },
     )
     .with_content(memory.content.clone());
@@ -1686,6 +1688,7 @@ struct ReportSelectionInputs {
     graph_retrieval: GraphRetrievalExplanation,
     degraded: Vec<WhyDegradation>,
     agent_profile: Option<AgentProfileSelectionExplanation>,
+    dedup_link: Option<DedupLinkEvidence>,
 }
 
 fn build_report(
@@ -1719,6 +1722,7 @@ fn build_report(
         .with_verification_evidence(selection_inputs.verification_evidence)
         .with_coordination_fallback_evidence(selection_inputs.coordination_fallback_evidence)
         .with_degradations(selection_inputs.degraded)
+        .with_optional_dedup_link(selection_inputs.dedup_link)
 }
 
 fn lifecycle_for_memory(
@@ -2182,6 +2186,78 @@ fn fetch_contradictions(
             })
             .collect(),
     )
+}
+
+/// Look up the embedding-dedup link for `memory_id`, if any. Returns the
+/// first `memory_links` row whose `metadata_json` carries
+/// `schema=ee.embed_dedup.link.v1` so an agent can see which prior memory's
+/// embedding was reused. Returns `None` when the lookup fails, no link rows
+/// exist, or none of the link rows carry the dedup schema marker; the why
+/// surface is best-effort here because dedup linkage is supporting evidence,
+/// not load-bearing for the rest of the report.
+fn find_embed_dedup_link(conn: &DbConnection, memory_id: &str) -> Option<DedupLinkEvidence> {
+    let links = conn.list_memory_links_for_memory(memory_id, None).ok()?;
+    for link in links {
+        let Some(raw_metadata) = link.metadata_json.as_deref() else {
+            continue;
+        };
+        let Ok(metadata) = serde_json::from_str::<serde_json::Value>(raw_metadata) else {
+            continue;
+        };
+        if metadata.get("schema").and_then(serde_json::Value::as_str)
+            != Some(WHY_DEDUP_LINK_SCHEMA_REF)
+        {
+            continue;
+        }
+        let target_memory_id = if link.src_memory_id == memory_id {
+            link.dst_memory_id.clone()
+        } else {
+            link.src_memory_id.clone()
+        };
+        let decision = metadata
+            .get("decision")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let reason = metadata
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let relationship = metadata
+            .get("relationship")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("embedding_reuse")
+            .to_string();
+        let hamming_distance = metadata
+            .get("hammingDistance")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok());
+        let cosine_similarity = metadata
+            .get("cosineSimilarity")
+            .and_then(serde_json::Value::as_f64)
+            .map(|value| value as f32);
+        let cosine_floor = metadata
+            .get("cosineFloor")
+            .and_then(serde_json::Value::as_f64)
+            .map(|value| value as f32);
+        return Some(DedupLinkEvidence {
+            schema: WHY_DEDUP_LINK_SCHEMA_REF,
+            link_id: link.id,
+            target_memory_id,
+            decision,
+            reason,
+            relationship,
+            hamming_distance,
+            cosine_similarity,
+            cosine_floor,
+            link_source: link.source,
+            link_weight: link.weight,
+            link_confidence: link.confidence,
+            created_at: link.created_at,
+        });
+    }
+    None
 }
 
 /// Fetch memory links for a memory (EE-LINK-USAGE-001).
@@ -2754,6 +2830,7 @@ mod tests {
                 ),
                 degraded: Vec::new(),
                 agent_profile: None,
+                dedup_link: None,
             },
         );
 
