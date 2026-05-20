@@ -247,6 +247,9 @@ mod host_calibration_freshness_contract;
 #[path = "contracts/agent_workload_trace_schema.rs"]
 mod agent_workload_trace_schema;
 
+#[path = "contracts/agent_workload_replay_schema.rs"]
+mod agent_workload_replay_schema;
+
 #[path = "contracts/qos_lanes_e2e_contract.rs"]
 mod qos_lanes_e2e_contract;
 
@@ -255,3 +258,6 @@ mod spec_pack_schema;
 
 #[path = "contracts/prompt_budget_report.rs"]
 mod prompt_budget_report;
+
+#[path = "contracts/doctor_undo_replay_e2e.rs"]
+mod doctor_undo_replay_e2e;
