@@ -32765,6 +32765,18 @@ fn format_why_human(report: &crate::core::why::WhyReport) -> String {
             "  Centrality: {:.4}, authority: {:.4}, hub: {:.4}\n",
             graph.centrality_score, graph.authority_score, graph.hub_score
         ));
+        if let Some(ref hits) = graph.hits {
+            output.push_str(&format!(
+                "  HITS: role={}, authority={:.4} (rank {:?}, pct {:?}), hub={:.4} (rank {:?}, pct {:?})\n",
+                hits.role_label,
+                hits.authority.normalized,
+                hits.authority.rank,
+                hits.authority.percentile,
+                hits.hub.normalized,
+                hits.hub.rank,
+                hits.hub.percentile
+            ));
+        }
         output.push_str(&format!(
             "  Evidence support: {}, contradictions: {}\n",
             graph.evidence_support_count, graph.contradiction_count
@@ -33052,6 +33064,25 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             })
         });
         let degraded = aggregate_why_degraded_json("why_graph_retrieval", &graph.degraded);
+        let hits = graph.hits.as_ref().map(|hits| {
+            serde_json::json!({
+                "schema": hits.schema,
+                "authority": {
+                    "raw": graph_score_json_value(hits.authority.raw),
+                    "normalized": graph_score_json_value(hits.authority.normalized),
+                    "rank": hits.authority.rank,
+                    "percentile": hits.authority.percentile.map(graph_score_json_value),
+                },
+                "hub": {
+                    "raw": graph_score_json_value(hits.hub.raw),
+                    "normalized": graph_score_json_value(hits.hub.normalized),
+                    "rank": hits.hub.rank,
+                    "percentile": hits.hub.percentile.map(graph_score_json_value),
+                },
+                "roleLabel": hits.role_label,
+                "roleRationale": hits.role_rationale,
+            })
+        });
 
         serde_json::json!({
             "status": graph.status,
@@ -33064,6 +33095,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "centralityScore": graph_score_json_value(graph.centrality_score),
             "authorityScore": graph_score_json_value(graph.authority_score),
             "hubScore": graph_score_json_value(graph.hub_score),
+            "hits": hits,
             "communityId": graph.community_id,
             "distanceToQuerySeed": graph.distance_to_query_seed,
             "sameClusterAsTopResult": graph.same_cluster_as_top_result,
