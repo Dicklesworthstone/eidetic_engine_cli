@@ -1,12 +1,11 @@
-//! Situation heuristic tags and unavailable stored-situation surfaces (EE-421).
+//! Situation classifier, comparison, and link-planning surfaces (EE-421).
 //!
 //! Provides commands for:
-//! - Labeling task text with explicit keyword heuristic tags
-//! - Producing deterministic heuristic route hints without automatic planning
-//! - Returning no fake show/explain records when storage is not wired
+//! - Classifying task text with deterministic situation signals
+//! - Comparing situation-shaped task text for shared routing evidence
+//! - Planning reviewed situation links without mutating state implicitly
 
 use super::build_info;
-use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 pub use crate::models::{
     ROUTING_DECISION_SCHEMA_V1, RoutingDecision, SITUATION_CLASSIFY_SCHEMA_V1,
     SITUATION_EXPLAIN_SCHEMA_V1, SITUATION_LINK_SCHEMA_V1, SITUATION_SHOW_SCHEMA_V1,
@@ -18,7 +17,6 @@ pub const SITUATION_FIXTURE_METRICS_SCHEMA_V1: &str = "ee.situation.fixture_metr
 pub const SITUATION_COMPARE_SCHEMA_V1: &str = "ee.situation.compare.v1";
 pub const SITUATION_LINK_DRY_RUN_SCHEMA_V1: &str = "ee.situation.link_dry_run.v1";
 pub const SITUATION_HEURISTIC_SOURCE_V1: &str = "ee.situation.heuristics.v1";
-pub const SITUATION_DECISIONING_UNAVAILABLE_CODE: &str = "situation_decisioning_unavailable";
 const LINK_RECOMMENDATION_MIN_SCORE: f32 = 0.45;
 const DRY_RUN_CREATED_AT: &str = "1970-01-01T00:00:00Z";
 
@@ -128,8 +126,6 @@ impl ClassifyResult {
             })
             .collect();
 
-        let degraded = situation_classify_degraded_data_json();
-
         serde_json::json!({
             "command": "situation classify",
             "version": self.version,
@@ -149,7 +145,7 @@ impl ClassifyResult {
             "signals": signals,
             "alternativeCategories": alternatives,
             "routingDecisions": routing_decisions_json(&self.routing_decisions),
-            "degraded": degraded,
+            "degraded": [],
             "provenance": [
                 {
                     "sourceKind": "static_keyword_catalog",
@@ -159,27 +155,6 @@ impl ClassifyResult {
             ],
         })
     }
-}
-
-fn situation_classify_degraded_data_json() -> Vec<serde_json::Value> {
-    aggregate_degraded_entries([DegradationAggregationInput::new(
-        "situation_classify",
-        SITUATION_DECISIONING_UNAVAILABLE_CODE,
-        "warning",
-        "Situation routing is limited to deterministic heuristic hints; automatic planning, show, and explain require stored evidence.",
-        "ee status --json",
-    )])
-    .into_iter()
-    .map(|entry| {
-        serde_json::json!({
-            "code": entry.code,
-            "severity": entry.severity,
-            "message": entry.message,
-            "repair": entry.repair,
-            "sources": entry.sources,
-        })
-    })
-    .collect()
 }
 
 // ============================================================================
@@ -2112,28 +2087,19 @@ mod tests {
     }
 
     #[test]
-    fn classify_result_degraded_entries_are_aggregated() -> TestResult {
+    fn classify_result_has_no_unavailable_degradation() -> TestResult {
         let json = classify_task("fix bug in login").data_json();
         let degraded = json
             .get("degraded")
             .and_then(serde_json::Value::as_array)
             .ok_or_else(|| "classify degraded must be an array".to_string())?;
 
-        ensure(degraded.len(), 1, "aggregated degraded count")?;
+        let retired_code = "situation_decisioning_unavailable";
+        ensure(degraded.is_empty(), true, "classify degraded is empty")?;
         ensure(
-            degraded[0].get("code"),
-            Some(&serde_json::json!(SITUATION_DECISIONING_UNAVAILABLE_CODE)),
-            "degraded code",
-        )?;
-        ensure(
-            degraded[0].get("severity"),
-            Some(&serde_json::json!("warning")),
-            "degraded severity",
-        )?;
-        ensure(
-            degraded[0].get("sources"),
-            Some(&serde_json::json!(["situation_classify"])),
-            "degraded source label",
+            json.to_string().contains(retired_code),
+            false,
+            "retired unavailable code absent from classify JSON",
         )
     }
 
