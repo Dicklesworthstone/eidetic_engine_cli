@@ -108,6 +108,10 @@ RCH_PROBE_TIMEOUT_SECONDS="${RCH_PROBE_TIMEOUT_SECONDS:-4}"
 case "$RCH_PROBE_TIMEOUT_SECONDS" in
     ''|*[!0-9]*|0) RCH_PROBE_TIMEOUT_SECONDS=4 ;;
 esac
+DEPENDENCY_CYCLE_TIMEOUT_SECONDS="${DEPENDENCY_CYCLE_TIMEOUT_SECONDS:-8}"
+case "$DEPENDENCY_CYCLE_TIMEOUT_SECONDS" in
+    ''|*[!0-9]*|0) DEPENDENCY_CYCLE_TIMEOUT_SECONDS=8 ;;
+esac
 
 run_bounded_command() {
     local seconds="${1:?seconds required}"
@@ -198,25 +202,78 @@ fi
 # Check the dependency graph directly from JSONL so closeout does not rely on a
 # live br daemon. This mirrors the `br dep cycles` gate at the evidence level:
 # any cycle in the tracked bead graph blocks closure until the graph is fixed.
-DEPENDENCY_CYCLES_JSON="$(jq -s -c '
-    def dependency_targets($issue):
-        [($issue.dependencies // [])[]?
-            | (.depends_on_id // .id // empty)
-            | select(type == "string" and length > 0)];
-    (map(select(.id? != null))
-        | map({key: .id, value: dependency_targets(.)})
-        | from_entries) as $edges
-    | def walk($id; $path):
-        if ($path | index($id)) then
-            [($path + [$id])]
-        else
-            ([($edges[$id] // [])[]? as $next | walk($next; $path + [$id])] | add) // []
-        end;
-    [$edges | keys[] as $root | walk($root; [])[]]
-    | map(select(length > 1))
-    | map({path: ., cycle: join(" -> ")})
-    | unique_by(.cycle)
-' "$ISSUES_JSONL" 2>/dev/null || printf '[]')"
+DEPENDENCY_CYCLE_STATUS="ok"
+DEPENDENCY_CYCLE_SOURCE="br"
+DEPENDENCY_CYCLE_EXIT=0
+DEPENDENCY_CYCLES_JSON="[]"
+if command -v br >/dev/null 2>&1; then
+    DEPENDENCY_CYCLES_RAW="$(run_bounded_command "$DEPENDENCY_CYCLE_TIMEOUT_SECONDS" bash -c 'cd "$1" && br dep cycles --json --no-db' closeout-cycle "$WORKSPACE_ROOT" 2>/dev/null)" || DEPENDENCY_CYCLE_EXIT=$?
+    if is_timeout_status "$DEPENDENCY_CYCLE_EXIT"; then
+        DEPENDENCY_CYCLE_STATUS="timeout"
+    elif [ "$DEPENDENCY_CYCLE_EXIT" -eq 0 ] \
+        && [ -n "$DEPENDENCY_CYCLES_RAW" ] \
+        && printf '%s' "$DEPENDENCY_CYCLES_RAW" | jq -e '(.cycles | type == "array") and (.count | type == "number")' >/dev/null 2>&1; then
+        DEPENDENCY_CYCLES_JSON="$(printf '%s' "$DEPENDENCY_CYCLES_RAW" | jq -c '
+            (.cycles // [])
+            | map(
+                if type == "array" then
+                    {path: ., cycle: join(" -> ")}
+                elif type == "object" then
+                    {path: (.path // []), cycle: (.cycle // ((.path // []) | join(" -> ")))}
+                else
+                    {path: [], cycle: tostring}
+                end
+            )
+        ')"
+        DEPENDENCY_CYCLES_RAW="$DEPENDENCY_CYCLES_JSON"
+    else
+        DEPENDENCY_CYCLE_STATUS="br_unavailable"
+        DEPENDENCY_CYCLE_EXIT=1
+    fi
+else
+    DEPENDENCY_CYCLE_STATUS="br_unavailable"
+    DEPENDENCY_CYCLE_EXIT=1
+fi
+
+if [ "$DEPENDENCY_CYCLE_STATUS" != "timeout" ] \
+    && { [ "$DEPENDENCY_CYCLE_STATUS" = "br_unavailable" ] || [ "$DEPENDENCY_CYCLE_EXIT" -ne 0 ]; }; then
+    DEPENDENCY_CYCLE_SOURCE="jsonl"
+    DEPENDENCY_CYCLE_STATUS="ok"
+    DEPENDENCY_CYCLE_EXIT=0
+    DEPENDENCY_CYCLES_RAW="$(run_bounded_command "$DEPENDENCY_CYCLE_TIMEOUT_SECONDS" jq -s -c '
+        def dependency_targets($issue):
+            [($issue.dependencies // [])[]?
+                | (.depends_on_id // .id // empty)
+                | select(type == "string" and length > 0)];
+        (map(select(.id? != null))
+            | map({key: .id, value: dependency_targets(.)})
+            | from_entries) as $edges
+        | def walk($id; $path):
+            if ($path | index($id)) then
+                [($path + [$id])]
+            else
+                ([($edges[$id] // [])[]? as $next | walk($next; $path + [$id])] | add) // []
+            end;
+        [$edges | keys[] as $root | walk($root; [])[]]
+        | map(select(length > 1))
+        | map({path: ., cycle: join(" -> ")})
+        | unique_by(.cycle)
+    ' "$ISSUES_JSONL" 2>/dev/null)" || DEPENDENCY_CYCLE_EXIT=$?
+fi
+
+if is_timeout_status "$DEPENDENCY_CYCLE_EXIT"; then
+    DEPENDENCY_CYCLE_STATUS="timeout"
+    DEPENDENCY_CYCLES_JSON="[]"
+elif [ "$DEPENDENCY_CYCLE_EXIT" -ne 0 ] \
+    || [ -z "$DEPENDENCY_CYCLES_RAW" ] \
+    || ! printf '%s' "$DEPENDENCY_CYCLES_RAW" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    DEPENDENCY_CYCLE_STATUS="unavailable"
+    DEPENDENCY_CYCLES_JSON="[]"
+else
+    if [ "$DEPENDENCY_CYCLE_SOURCE" = "jsonl" ]; then
+        DEPENDENCY_CYCLES_JSON="$DEPENDENCY_CYCLES_RAW"
+    fi
+fi
 DEPENDENCY_CYCLE_COUNT="$(printf '%s' "$DEPENDENCY_CYCLES_JSON" | jq 'length')"
 
 # SRR6 final closeout has a stricter contract than ordinary bead closure:
@@ -414,6 +471,13 @@ if [ "$DEPENDENCY_CYCLE_COUNT" -gt 0 ]; then
     BLOCKERS+=("dependency_cycles: ${DEPENDENCY_CYCLE_COUNT} cycle(s) detected in the bead graph")
     NEXT_ACTIONS+=("break dependency cycles before closeout; verify with 'br dep cycles --json'")
 fi
+if [ "$DEPENDENCY_CYCLE_STATUS" = "timeout" ]; then
+    BLOCKERS+=("dependency_cycle_scan_timeout: cycle scan exceeded ${DEPENDENCY_CYCLE_TIMEOUT_SECONDS}s")
+    NEXT_ACTIONS+=("run 'br dep cycles --json' separately and record the result before closeout")
+elif [ "$DEPENDENCY_CYCLE_STATUS" = "unavailable" ]; then
+    BLOCKERS+=("dependency_cycle_scan_unavailable: cycle scan did not produce valid JSON")
+    NEXT_ACTIONS+=("repair .beads/issues.jsonl or rerun 'br dep cycles --json' before closeout")
+fi
 if [ "$SRR6_CLOSEOUT_ENABLED" = "true" ]; then
     SRR6_UNRESOLVED_DEPS_COUNT="$(printf '%s' "$SRR6_UNRESOLVED_DEPS_JSON" | jq 'length')"
     SRR6_MISSING_PROOFS_COUNT="$(printf '%s' "$SRR6_MISSING_PROOFS_JSON" | jq 'length')"
@@ -497,6 +561,8 @@ RESULT_JSON="$(jq -nc \
     --argjson open_deps "$OPEN_DEPS_JSON" \
     --argjson dependency_cycles "$DEPENDENCY_CYCLES_JSON" \
     --argjson dependency_cycle_count "$DEPENDENCY_CYCLE_COUNT" \
+    --arg dependency_cycle_status "$DEPENDENCY_CYCLE_STATUS" \
+    --arg dependency_cycle_source "$DEPENDENCY_CYCLE_SOURCE" \
     --argjson uncommitted_refs "$UNCOMMITTED_REFS_JSON" \
     --arg rch_status "$RCH_STATUS" \
     --arg rch_queue_status "$RCH_QUEUE_STATUS" \
@@ -541,6 +607,8 @@ RESULT_JSON="$(jq -nc \
             open_dependencies: $open_deps,
             dependency_cycles: $dependency_cycles,
             dependency_cycle_count: $dependency_cycle_count,
+            dependency_cycle_status: $dependency_cycle_status,
+            dependency_cycle_source: $dependency_cycle_source,
             uncommitted_files_referencing_bead: $uncommitted_refs,
             rch_status: $rch_status,
             rch_queue_status: $rch_queue_status,

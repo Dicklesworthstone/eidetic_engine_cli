@@ -154,3 +154,16 @@ Before closing an SRR6 implementation bead, record:
   optional real transport smoke.
 - The structured log path or artifact manifest path when a shell e2e ran.
 - Any matrix rows intentionally deferred to a child bead.
+
+Before closing `bd-2vu8m`, record the final rollup in the bead thread:
+
+- `br dep cycles --json --no-db` result and the command timestamp.
+- `scripts/closeout_audit.sh --bead bd-2vu8m --json` readiness, blockers,
+  caveats, and artifact path when retained.
+- Every SRR6 child bead that is not closed, with explicit status, deferral
+  rationale, owner, and the proof row that remains unverified.
+- Mesh-disabled proof status for
+  `scripts/e2e_overhaul/mesh_off_no_network.sh`, `tests/mesh_off_no_network.rs`,
+  and `tests/fixtures/golden/mesh/mesh_off_no_network.commands.json.golden`.
+- RCH posture for every Cargo command. If RCH refuses remote execution or reports
+  local fallback, record the reason and keep the Cargo proof gate unverified.

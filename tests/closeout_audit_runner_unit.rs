@@ -148,6 +148,8 @@ fn assert_envelope_shape(audit: &Value) -> TestResult {
         "open_dependencies",
         "dependency_cycles",
         "dependency_cycle_count",
+        "dependency_cycle_status",
+        "dependency_cycle_source",
         "uncommitted_files_referencing_bead",
         "rch_status",
         "rch_queue_status",
@@ -209,9 +211,13 @@ fn closeout_audit_script_tracks_current_coordination_surfaces() -> TestResult {
         "RCH_QUEUE_JSON_RESOLVED",
         "RCH_QUEUE_JSON",
         "RCH_PROBE_TIMEOUT_SECONDS",
+        "DEPENDENCY_CYCLE_TIMEOUT_SECONDS",
+        "br dep cycles --json --no-db",
         "run_bounded_command",
         "rch_health_check_timeout",
         "rch_queue_timeout",
+        "dependency_cycle_scan_timeout",
+        "dependency_cycle_status",
         "rch_queue: %s (active=%s stale=%s queued=%s)",
         "rch_queue_stale_active_records",
         "rch CLI rejects 'rch exec' as an unknown subcommand",
@@ -247,6 +253,49 @@ fn j11_operator_scripts_are_directly_executable() -> TestResult {
         if mode & 0o111 == 0 {
             return Err(format!("{relative_path} must be executable"));
         }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn dependency_cycle_scan_timeout_blocks_without_hanging() -> TestResult {
+    let bash_env = repo_root()
+        .join("tests")
+        .join("fixtures")
+        .join("closeout_audit")
+        .join("hanging_dependency_cycle_env.sh");
+    let audit = run_audit_with_env_strings(
+        "ready",
+        "bd-fxt-ready-1",
+        &[
+            ("BASH_ENV", bash_env.display().to_string()),
+            ("DEPENDENCY_CYCLE_TIMEOUT_SECONDS", "1".to_owned()),
+        ],
+    )?;
+    assert_envelope_shape(&audit)?;
+
+    if audit["readiness"].as_str() != Some("blocked") {
+        return Err(format!(
+            "dependency-cycle timeout should block closeout proof, got {audit}",
+        ));
+    }
+    if audit["evidence"]["dependency_cycle_status"].as_str() != Some("timeout") {
+        return Err(format!(
+            "expected dependency_cycle_status=timeout, got {:?}",
+            audit["evidence"]["dependency_cycle_status"],
+        ));
+    }
+    let blockers = audit["blockers"].as_array().cloned().unwrap_or_default();
+    if !blockers.iter().any(|blocker| {
+        blocker
+            .as_str()
+            .unwrap_or("")
+            .starts_with("dependency_cycle_scan_timeout:")
+    }) {
+        return Err(format!(
+            "expected dependency_cycle_scan_timeout blocker, got {blockers:?}",
+        ));
     }
 
     Ok(())
