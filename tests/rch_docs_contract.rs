@@ -202,6 +202,7 @@ fn rch_runbook_tracker_and_mail_examples_avoid_shell_substitution() -> TestResul
     let sensitive_commands = [
         "br close",
         "br comment",
+        "br comments add",
         "br update",
         "send_message",
         "reply_message",
@@ -264,6 +265,35 @@ fn rch_runbook_names_handoff_attribution_buckets() -> TestResult {
             "docs/rch_runbook.md handoff section is missing canonical attribution bucket(s): \
              {missing:?}. Each bucket name must appear so agents can paste the exact wording \
              into Agent Mail and Beads comments instead of inventing ad-hoc phrasing."
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn rch_runbook_documents_dirty_beads_proof_boundary() -> TestResult {
+    let runbook = read_doc("docs/rch_runbook.md")?;
+    let required_terms = [
+        "Dirty `.beads/issues.jsonl`",
+        "safe metadata churn",
+        "--require-clean-tree",
+        "br doctor --json",
+        "br sync --flush-only",
+        "reserved",
+        "live-checkout",
+        "committed-tree",
+    ];
+    let mut missing: Vec<&str> = Vec::new();
+    for term in required_terms {
+        if !runbook.contains(term) {
+            missing.push(term);
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "docs/rch_runbook.md is missing dirty Beads proof-boundary term(s): {missing:?}. \
+             bd-9ygik.4 requires agents to distinguish owned tracker metadata churn from \
+             checkout state that invalidates strict clean proof."
         ));
     }
     Ok(())
