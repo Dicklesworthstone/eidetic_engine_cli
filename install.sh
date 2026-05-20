@@ -861,14 +861,33 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
     err "git not found — required for --from-source"
     exit 1
   fi
-  local_target_arg=""
-  [ -n "$VERSION" ] && local_target_arg="--branch $VERSION"
+
+  # First attempt: pinned to the requested tag/branch if any. If that fails
+  # (tag doesn't exist, partial clone left a non-empty dest dir, etc.),
+  # remove the dest and retry without --branch. Git refuses to clone into a
+  # non-empty directory, so the cleanup is required for the fallback to
+  # succeed — the previous version silently lost the fallback when the first
+  # clone partially populated $TMP/src.
+  branch_args=""
+  [ -n "$VERSION" ] && branch_args="--branch $VERSION"
   # shellcheck disable=SC2086
-  git clone --depth 1 $local_target_arg "https://github.com/${OWNER}/${REPO}.git" "$TMP/src" 2>/dev/null \
-    || git clone --depth 1 "https://github.com/${OWNER}/${REPO}.git" "$TMP/src"
+  if ! git clone --depth 1 $branch_args "https://github.com/${OWNER}/${REPO}.git" "$TMP/src" 2>/dev/null; then
+    rm -rf "$TMP/src"
+    git clone --depth 1 "https://github.com/${OWNER}/${REPO}.git" "$TMP/src"
+  fi
+
   (cd "$TMP/src" && run_with_spinner "Building $BINARY (release profile)" cargo build --release)
+
+  # CARGO_TARGET_DIR may have redirected the build output (e.g., this project
+  # documents a USB-NVMe redirect on the canonical Mac dev host). Probe the
+  # default in-tree path first; if missing, ask cargo where it landed.
   SRC_BIN="$TMP/src/target/release/$BINARY"
-  [ -x "$SRC_BIN" ] || { err "Build failed: $SRC_BIN not produced"; exit 1; }
+  if [ ! -x "$SRC_BIN" ] && command -v cargo >/dev/null 2>&1; then
+    discovered=$(cd "$TMP/src" && cargo metadata --no-deps --format-version 1 2>/dev/null \
+                 | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' | head -1)
+    [ -n "$discovered" ] && [ -x "$discovered/release/$BINARY" ] && SRC_BIN="$discovered/release/$BINARY"
+  fi
+  [ -x "$SRC_BIN" ] || { err "Build failed: $BINARY not produced at $SRC_BIN"; exit 1; }
   install -m 0755 "$SRC_BIN" "$DEST/$BINARY"
   ok "Installed to $DEST/$BINARY (built from source)"
 else

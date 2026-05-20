@@ -378,23 +378,41 @@ function Test-Network {
 # ───────────────────────────────────────────────────────────────────────────
 
 function Lock-Acquire {
-    if (Test-Path $Script:LockDir) {
+    # Atomic acquisition: New-Item without -Force throws on existing dir, so
+    # two racing installers cannot both think they hold the lock. The prior
+    # "Test-Path then New-Item -Force" pattern had a TOCTOU race where both
+    # could pass the test, then both succeed (because -Force makes existing-
+    # dir not an error). Match bash's mkdir-without-flags atomicity.
+    $acquired = $false
+    try {
+        New-Item -ItemType Directory -Path $Script:LockDir -ErrorAction Stop | Out-Null
+        $acquired = $true
+    } catch {
+        # Existing lock: check if stale (owner process is gone). If stale,
+        # remove and retry once.
         $pidFile = Join-Path $Script:LockDir "pid"
         if (Test-Path $pidFile) {
             $oldPid = (Get-Content $pidFile -ErrorAction SilentlyContinue) -as [int]
             if ($oldPid -and -not (Get-Process -Id $oldPid -ErrorAction SilentlyContinue)) {
                 Remove-Item -Recurse -Force $Script:LockDir -ErrorAction SilentlyContinue
+                try {
+                    New-Item -ItemType Directory -Path $Script:LockDir -ErrorAction Stop | Out-Null
+                    $acquired = $true
+                } catch {
+                    # Race with another installer that grabbed the freshly-
+                    # released lock between our Remove-Item and New-Item.
+                    # Fall through to the "another installer is running" branch.
+                }
             }
         }
-        if (Test-Path $Script:LockDir) {
-            Write-ErrorExit "Another ee installer appears to be running (lock $Script:LockDir). Re-run after it finishes."
-        }
+    }
+    if (-not $acquired) {
+        Write-ErrorExit "Another ee installer appears to be running (lock $Script:LockDir). Re-run after it finishes."
     }
     try {
-        New-Item -ItemType Directory -Path $Script:LockDir -Force -ErrorAction Stop | Out-Null
         $PID | Out-File -Encoding ASCII -FilePath (Join-Path $Script:LockDir "pid")
     } catch {
-        Write-ErrorExit "Could not acquire installer lock $Script:LockDir`: $_"
+        Write-ErrorExit "Could not write pid file in installer lock ${Script:LockDir}: $_"
     }
 }
 
@@ -604,6 +622,11 @@ function Invoke-FromSource {
         if ($VersionTag) {
             & git clone --depth 1 --branch $VersionTag "https://github.com/$Script:RepoOwner/$Script:RepoName.git" $src 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) {
+                # Git refuses to clone into a non-empty directory. The pinned
+                # clone may have partially populated $src before failing
+                # (e.g., wrong tag); wipe it before the fallback so the
+                # default-branch retry has somewhere to go.
+                Remove-Item -Recurse -Force $src -ErrorAction SilentlyContinue
                 & git clone --depth 1 "https://github.com/$Script:RepoOwner/$Script:RepoName.git" $src 2>&1 | Out-Null
             }
         } else {
@@ -622,7 +645,23 @@ function Invoke-FromSource {
         } finally {
             Pop-Location
         }
+
+        # CARGO_TARGET_DIR may redirect the build output away from the
+        # in-tree default. Probe the in-tree path first; if missing, ask
+        # cargo where the binary landed.
         $built = Join-Path $src "target\release\$BinaryName"
+        if (-not (Test-Path $built)) {
+            Push-Location $src
+            try {
+                $meta = (& cargo metadata --no-deps --format-version 1 2>$null) -join ""
+                if ($meta -and $meta -match '"target_directory":"([^"]+)"') {
+                    $candidate = Join-Path $Matches[1] "release\$BinaryName"
+                    if (Test-Path $candidate) { $built = $candidate }
+                }
+            } finally {
+                Pop-Location
+            }
+        }
         if (-not (Test-Path $built)) {
             Write-ErrorExit "Build produced no $BinaryName at $built"
         }
