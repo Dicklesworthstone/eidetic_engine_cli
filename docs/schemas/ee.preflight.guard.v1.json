@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.preflight.guard.v1.json",
+  "title": "ee.preflight.guard.v1",
+  "description": "Structured response emitted by `ee preflight check --cmd \"<shell-command>\" --json`. This is the agent-facing trauma-guard surface called by hook integrations BEFORE running shell commands that may delete files, rewrite Git history, mutate clusters, destroy infrastructure, or write raw block devices. Exit code 7 means policy denied: the harness should stop and ask the user for explicit authorization instead of retrying. Exit code 0 means no enforced match. The schema is intentionally NOT wrapped in the ee.response.v1 envelope — this is a hook-targeted surface; callers consume the structured guard result directly.",
+  "type": "object",
+  "required": [
+    "schema",
+    "command",
+    "exitCode",
+    "checkedAt",
+    "matches",
+    "matchedMemories",
+    "degraded"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ee.preflight.guard.v1",
+      "description": "Pins the schema identity. Treat any other value as a contract drift."
+    },
+    "command": {
+      "type": "string",
+      "description": "The exact command string passed to `--cmd` (or the positional COMMAND arg)."
+    },
+    "exitCode": {
+      "type": "integer",
+      "enum": [0, 7],
+      "description": "Process exit code. 0 = no enforced match (the shell command may proceed). 7 = policy denied per AGENTS.md exit-code table; the harness MUST NOT retry."
+    },
+    "checkedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp at which the guard ran."
+    },
+    "matches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["ruleId", "pattern", "action", "message", "source", "resolution"],
+        "properties": {
+          "ruleId": {
+            "type": "string",
+            "description": "Stable identifier for the matched rule (e.g. core.filesystem:rm-rf-root-home)."
+          },
+          "pattern": {
+            "type": "string",
+            "description": "Pattern that matched the command string."
+          },
+          "action": {
+            "type": "string",
+            "enum": ["block", "warn", "log"],
+            "description": "How the rule classifies this match."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable explanation of why the rule fired."
+          },
+          "source": {
+            "type": "object",
+            "description": "Where this rule came from (built-in registry vs. user/workspace policy)."
+          },
+          "resolution": {
+            "type": "string",
+            "enum": ["enforced", "bypassed_with_token", "bypass_token_invalid", "bypass_secret_missing"],
+            "description": "Final outcome for this rule. `enforced` means the rule will block the command."
+          }
+        }
+      },
+      "description": "Rule matches with their resolution. Non-empty matches plus any resolution == 'enforced' results in exitCode 7."
+    },
+    "matchedMemories": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["memoryId", "kind", "content", "severity", "severitySource", "score", "matchedTerms"],
+        "properties": {
+          "memoryId": {
+            "type": "string",
+            "description": "Stable memory ID of the matched record."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Memory kind (risk, failure, anti-pattern, etc.)."
+          },
+          "content": {
+            "type": "string",
+            "description": "Memory content (post-redaction)."
+          },
+          "provenanceUri": {
+            "type": ["string", "null"],
+            "description": "Optional provenance URI for the matched memory."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["info", "low", "warning", "medium", "high", "critical"],
+            "description": "Severity tier."
+          },
+          "severitySource": {
+            "type": "string",
+            "description": "Where the severity was derived from."
+          },
+          "score": {
+            "type": "number",
+            "description": "Match relevance score."
+          },
+          "matchedTerms": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Terms from the command that matched memory content."
+          }
+        }
+      },
+      "description": "High-severity risk, failure, anti-pattern memories that matched the command. Per AGENTS.md bd-3usjw.6, full memory-query coverage is still in progress; matchedMemories may be empty in the current build."
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "severity", "message", "repair"],
+        "properties": {
+          "code": {"type": "string"},
+          "severity": {"type": "string"},
+          "message": {"type": "string"},
+          "repair": {"type": "string"}
+        }
+      },
+      "description": "Degraded-mode signals from the guard run (e.g. memory-query backend unavailable)."
+    }
+  }
+}

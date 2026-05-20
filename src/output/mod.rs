@@ -8223,6 +8223,474 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             category: "recorder",
             definition: recorder_events_list_schema_definition,
         },
+        // ─── R-009 (Pass 2): public registry entries for schemas that existed
+        //     in docs/schemas/ but were missing from `ee schema list --json`.
+        //     Each entry uses `include_str!` to embed the schema JSON at
+        //     compile time, the same pattern the original registry uses.
+        //     Categories follow the existing taxonomy (envelope/context/
+        //     memory/search/curate/graph/ops/mesh/coordination).
+        SchemaEntry {
+            id: "ee.agent_workload_replay.v1",
+            version: "1",
+            description: "Deterministic, side-effect-free replay summary derived from redacted ee.agent_workload_trace.v1 JSONL rows.",
+            category: "ops",
+            definition: agent_workload_replay_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.agent_workload_trace.v1",
+            version: "1",
+            description: "Redacted, local-only flight-recorder trace row for one agent-facing ee command invocation.",
+            category: "ops",
+            definition: agent_workload_trace_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.audit_lane.v1",
+            version: "1",
+            description: "Structured audit-lane telemetry event emitted by the Swarm-X audit queue.",
+            category: "ops",
+            definition: audit_lane_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.cache.hotset.v1",
+            version: "1",
+            description: "Redaction-safe hotset manifest capturing frequent search and pack cache shapes for prewarm.",
+            category: "ops",
+            definition: cache_hotset_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.closeout_audit.v1",
+            version: "1",
+            description: "Closeout audit envelope emitted by scripts/closeout_audit.sh before marking a bead closed.",
+            category: "ops",
+            definition: closeout_audit_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.completion_audit.report.v1",
+            version: "1",
+            description: "Completion audit response envelope for read-only objective-to-evidence checks.",
+            category: "ops",
+            definition: completion_audit_report_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.context.agent_profile.v1",
+            version: "1",
+            description: "Agent-specific retrieval bias summary emitted by ee context --explain --json.",
+            category: "context",
+            definition: context_agent_profile_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.context.bead_affinity.v1",
+            version: "1",
+            description: "Bead-aware retrieval-bias summary emitted by ee context --explain --json (and ee why --json).",
+            category: "context",
+            definition: context_bead_affinity_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.context.budget.v1",
+            version: "1",
+            description: "Adaptive context-pack token budget decision and contribution breakdown for ee context explain output.",
+            category: "context",
+            definition: context_budget_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.context.pack_dna.v1",
+            version: "1",
+            description: "Graph-derived Pack DNA explanation block for context packs.",
+            category: "context",
+            definition: context_pack_dna_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.context.v1",
+            version: "1",
+            description: "Augmentation contract for ee context output with graph-derived ranking fields.",
+            category: "context",
+            definition: context_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.curate.disposition.v1",
+            version: "1",
+            description: "ee curate disposition response envelope (structuralAdjustments documents graph-derived retention changes).",
+            category: "curate",
+            definition: curate_disposition_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.curate.peer_evidence.v1",
+            version: "1",
+            description: "Curation candidate envelope informed by cached peer-origin evidence.",
+            category: "curate",
+            definition: curate_peer_evidence_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.diag.plan_cache.v1",
+            version: "1",
+            description: "Diagnostic response envelope for `ee diag plan-cache --json` (EQL query plan cache).",
+            category: "ops",
+            definition: diag_plan_cache_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.disk_pressure.agent_harness_log_classifier.v1",
+            version: "1",
+            description: "Read-only per-file classification for oversized agent-harness logs found by ee diag disk-pressure.",
+            category: "ops",
+            definition: disk_pressure_agent_harness_log_classifier_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.error.v1",
+            version: "1",
+            description: "Legacy error envelope retained for v0/v1 consumers; v2 is canonical (see ee.error.v2).",
+            category: "envelope",
+            definition: error_v1_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.graph.rule_provenance_ego.v1",
+            version: "1",
+            description: "Bipartite ego subgraph for a single procedural rule.",
+            category: "graph",
+            definition: graph_rule_provenance_ego_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.health.structural.v1",
+            version: "1",
+            description: "Structural health report using graph-derived coherence signals.",
+            category: "ops",
+            definition: health_structural_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.hooks.git_readiness.v1",
+            version: "1",
+            description: "Read-only diagnostic report for local Git hook-chain readiness before agent commits and pushes.",
+            category: "ops",
+            definition: hooks_git_readiness_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.host_calibration.host_class.v1",
+            version: "1",
+            description: "Pure host-class classification derived from a caller-provided host profile probe.",
+            category: "ops",
+            definition: host_calibration_host_class_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.host_calibration.recommendation.v1",
+            version: "1",
+            description: "Deterministic, redaction-safe host calibration recommendation for operating profile and budget deltas.",
+            category: "ops",
+            definition: host_calibration_recommendation_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.insights.v1",
+            version: "1",
+            description: "Insights bundle response data for graph-accretion findings.",
+            category: "graph",
+            definition: insights_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.memory_drift.queue.v1",
+            version: "1",
+            description: "Deterministic, read-only queue of memories whose source provenance snapshots need explicit revalidation.",
+            category: "memory",
+            definition: memory_drift_queue_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.memory_drift.snapshot.v1",
+            version: "1",
+            description: "Compact provenance snapshot for read-only memory drift checks.",
+            category: "memory",
+            definition: memory_drift_snapshot_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.memory.delta.v1",
+            version: "1",
+            description: "Eidetic Engine memory delta — append-only change record for one memory.",
+            category: "memory",
+            definition: memory_delta_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.memory.impact_analysis.v1",
+            version: "1",
+            description: "Impact analysis for memory revision and dominance-frontier planning.",
+            category: "memory",
+            definition: memory_impact_analysis_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.mesh.anti_entropy.v1",
+            version: "1",
+            description: "Redaction-safe sync summary for mesh anti-entropy rounds.",
+            category: "mesh",
+            definition: mesh_anti_entropy_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.mesh.auto_enrollment_result.v1",
+            version: "1",
+            description: "Auto-enrollment apply / dry-run result envelope.",
+            category: "mesh",
+            definition: mesh_auto_enrollment_result_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.mesh.auto_enrollment_summary.v1",
+            version: "1",
+            description: "Forensic audit-row payload emitted by SRR6.46.5 before any durable auto-enrollment write.",
+            category: "mesh",
+            definition: mesh_auto_enrollment_summary_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.mesh.auto_status.v1",
+            version: "1",
+            description: "Read-only auto-enrollment posture block emitted by `ee mesh status --json`.",
+            category: "mesh",
+            definition: mesh_auto_status_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.mesh.disable_result.v1",
+            version: "1",
+            description: "Result envelope for `ee mesh disable [--reason \"...\"] [--dry-run] [--json]`.",
+            category: "ops",
+            definition: mesh_disable_result_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.mesh.discovery_policy.v1",
+            version: "1",
+            description: "Per-peer discovery policy posture emitted by `ee mesh discovery-policy --json`.",
+            category: "mesh",
+            definition: mesh_discovery_policy_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.mesh.event.v1",
+            version: "1",
+            description: "Append-only optional mesh memory event envelope for deterministic export and replay.",
+            category: "mesh",
+            definition: mesh_event_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.mesh.hello_responder.status.v1",
+            version: "1",
+            description: "Hello-handshake responder status report.",
+            category: "mesh",
+            definition: mesh_hello_responder_status_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.mesh.hello.error.v1",
+            version: "1",
+            description: "Hello-handshake decline response (no responder-side metadata leakage).",
+            category: "mesh",
+            definition: mesh_hello_error_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.mesh.hello.response.v1",
+            version: "1",
+            description: "Hello-handshake success response emitted by the SRR6.46.12 responder.",
+            category: "mesh",
+            definition: mesh_hello_response_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.mesh.hello.v1",
+            version: "1",
+            description: "Tiny bounded handshake request that SRR6.46.2 autodiscovery sends to candidate peers.",
+            category: "mesh",
+            definition: mesh_hello_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.mesh.lane_grant_preview.v1",
+            version: "1",
+            description: "Pre-grant lane visibility audit emitted by `ee mesh preview-grant <peer> --lane <lane>`.",
+            category: "mesh",
+            definition: mesh_lane_grant_preview_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.mesh.peer_group_binding.v1",
+            version: "1",
+            description: "Workspace-scoped peer-group binding for optional mesh memory authorization.",
+            category: "mesh",
+            definition: mesh_peer_group_binding_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.mesh.revoke_result.v1",
+            version: "1",
+            description: "Result envelope for `ee mesh revoke <node-key>`.",
+            category: "ops",
+            definition: mesh_revoke_result_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.mesh.surrogate.v1",
+            version: "1",
+            description: "Compatibility, privacy, and rebuild metadata for a single search surrogate (embedding, summary, minhash, lexical).",
+            category: "ops",
+            definition: mesh_surrogate_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.migration.shard_fanout.v1",
+            version: "1",
+            description: "Structured audit event for per-workspace shard fan-out migration planning, apply, rollback, and verification.",
+            category: "ops",
+            definition: migration_shard_fanout_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.pack.revision_token.v1",
+            version: "1",
+            description: "Explicit revisable-pack token metadata emitted only when mesh revisable mode is requested.",
+            category: "context",
+            definition: pack_revision_token_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.pack.stream.v1",
+            version: "1",
+            description: "NDJSON frame contract for ee context --stream. Each line is exactly one frame object.",
+            category: "context",
+            definition: pack_stream_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.peer_conflict.v1",
+            version: "1",
+            description: "Structured event row emitted by the SRR6.37 peer duplicate / contradiction surfacer.",
+            category: "coordination",
+            definition: peer_conflict_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.perf.live.v1",
+            version: "1",
+            description: "Read-only live performance snapshot for swarm observability.",
+            category: "ops",
+            definition: perf_live_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.prompt_budget_report.v1",
+            version: "1",
+            description: "Read-only prompt-budget bookkeeping report.",
+            category: "ops",
+            definition: prompt_budget_report_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.proof_check.v1",
+            version: "1",
+            description: "Machine-readable proof verification report (missing Lean4/TLC tooling reported as degraded).",
+            category: "ops",
+            definition: proof_check_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.proximity.v1",
+            version: "1",
+            description: "Pairwise memory proximity report derived from graph min-cut structures.",
+            category: "graph",
+            definition: proximity_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.repair_action_graph.v1",
+            version: "1",
+            description: "Structured graph of repair actions emitted by `ee mesh status` and `ee doctor`.",
+            category: "ops",
+            definition: repair_action_graph_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.search.revision_token.v1",
+            version: "1",
+            description: "Explicit revisable-search token metadata emitted only when mesh revisable mode is requested.",
+            category: "search",
+            definition: search_revision_token_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.search.score_interval.v1",
+            version: "1",
+            description: "Closed split-conformal relevance score interval emitted on each ee search result.",
+            category: "search",
+            definition: search_score_interval_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.singleflight.key.v1",
+            version: "1",
+            description: "Redaction-safe canonical key for coalescing duplicate in-process read-heavy ee commands.",
+            category: "ops",
+            definition: singleflight_key_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.spec_pack.v1",
+            version: "1",
+            description: "Telemetry event row for the swarmx.spec-pack speculative context pre-assembly driver.",
+            category: "context",
+            definition: spec_pack_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.status.graph.numa_pin.v1",
+            version: "1",
+            description: "NUMA-aware graph snapshot pinning posture surfaced under `ee status --json` at `data.graph.numaPin`.",
+            category: "ops",
+            definition: status_graph_numa_pin_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.status.search.lexical_ram_tier.v1",
+            version: "1",
+            description: "Lexical posting-list RAM-tier pinning posture surfaced under `ee status --json`.",
+            category: "ops",
+            definition: status_search_lexical_ram_tier_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.status.skyline.v1",
+            version: "1",
+            description: "Knowledge skyline block for ee status graph-accretion output.",
+            category: "ops",
+            definition: status_skyline_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.symbol_evidence_links.v1",
+            version: "1",
+            description: "Read-only derived links from memories, CASS evidence, failures, rules, and decisions to stable code symbols.",
+            category: "context",
+            definition: symbol_evidence_links_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.symbol_snapshot.v1",
+            version: "1",
+            description: "Read-only derived symbol snapshot for Rust source files.",
+            category: "context",
+            definition: symbol_snapshot_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.tailscale.autodiscovery.v1",
+            version: "1",
+            description: "Tailscale autodiscovery candidate peer list surface.",
+            category: "mesh",
+            definition: tailscale_autodiscovery_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.tailscale.local.v1",
+            version: "1",
+            description: "Local Tailscale identity and status surface.",
+            category: "mesh",
+            definition: tailscale_local_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.verification_evidence.v1",
+            version: "1",
+            description: "Normalized verification-evidence envelope ingesting heterogeneous proof artifacts.",
+            category: "ops",
+            definition: verification_evidence_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.why_not_selected.v1",
+            version: "1",
+            description: "Explanation block emitted by `ee why --json` for memories the retrieval considered but did not select.",
+            category: "context",
+            definition: why_not_selected_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.why.causal.v1",
+            version: "1",
+            description: "Causal explanation block for ee why graph-accretion output.",
+            category: "context",
+            definition: why_causal_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.why.v1",
+            version: "1",
+            description: "Augmentation contract for ee why output with graph-derived explanation blocks.",
+            category: "context",
+            definition: why_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::core::preflight_guard::PREFLIGHT_GUARD_SCHEMA_V1,
+            version: "1",
+            description: "Trauma-guard surface returned by `ee preflight check --cmd \"<shell-command>\" --json`. Exit code 7 = policy denied.",
+            category: "ops",
+            definition: preflight_guard_schema_definition,
+        },
     ]
 }
 
@@ -8786,6 +9254,274 @@ fn maintenance_job_row_schema_definition() -> String {
     .to_string()
 }
 
+// ─── R-009 (Pass 2): definition functions for the newly-registered schemas.
+// Each one uses `include_str!` to embed the on-disk schema JSON at compile
+// time, matching the established pattern used by all other public schemas.
+fn agent_workload_replay_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.agent_workload_replay.v1.json").to_string()
+}
+
+fn agent_workload_trace_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.agent_workload_trace.v1.json").to_string()
+}
+
+fn audit_lane_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.audit_lane.v1.json").to_string()
+}
+
+fn cache_hotset_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.cache.hotset.v1.json").to_string()
+}
+
+fn closeout_audit_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.closeout_audit.v1.json").to_string()
+}
+
+fn completion_audit_report_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.completion_audit.report.v1.json").to_string()
+}
+
+fn context_agent_profile_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.context.agent_profile.v1.json").to_string()
+}
+
+fn context_bead_affinity_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.context.bead_affinity.v1.json").to_string()
+}
+
+fn context_budget_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.context.budget.v1.json").to_string()
+}
+
+fn context_pack_dna_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.context.pack_dna.v1.json").to_string()
+}
+
+fn context_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.context.v1.json").to_string()
+}
+
+fn curate_disposition_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.curate.disposition.v1.json").to_string()
+}
+
+fn curate_peer_evidence_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.curate.peer_evidence.v1.json").to_string()
+}
+
+fn diag_plan_cache_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.diag.plan_cache.v1.json").to_string()
+}
+
+fn disk_pressure_agent_harness_log_classifier_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.disk_pressure.agent_harness_log_classifier.v1.json")
+        .to_string()
+}
+
+fn error_v1_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.error.v1.json").to_string()
+}
+
+fn graph_rule_provenance_ego_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.graph.rule_provenance_ego.v1.json").to_string()
+}
+
+fn health_structural_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.health.structural.v1.json").to_string()
+}
+
+fn hooks_git_readiness_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.hooks.git_readiness.v1.json").to_string()
+}
+
+fn host_calibration_host_class_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.host_calibration.host_class.v1.json").to_string()
+}
+
+fn host_calibration_recommendation_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.host_calibration.recommendation.v1.json").to_string()
+}
+
+fn insights_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.insights.v1.json").to_string()
+}
+
+fn memory_drift_queue_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.memory_drift.queue.v1.json").to_string()
+}
+
+fn memory_drift_snapshot_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.memory_drift.snapshot.v1.json").to_string()
+}
+
+fn memory_delta_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.memory.delta.v1.json").to_string()
+}
+
+fn memory_impact_analysis_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.memory.impact_analysis.v1.json").to_string()
+}
+
+fn mesh_anti_entropy_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.anti_entropy.v1.json").to_string()
+}
+
+fn mesh_auto_enrollment_result_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.auto_enrollment_result.v1.json").to_string()
+}
+
+fn mesh_auto_enrollment_summary_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.auto_enrollment_summary.v1.json").to_string()
+}
+
+fn mesh_auto_status_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.auto_status.v1.json").to_string()
+}
+
+fn mesh_disable_result_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.disable_result.v1.json").to_string()
+}
+
+fn mesh_discovery_policy_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.discovery_policy.v1.json").to_string()
+}
+
+fn mesh_event_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.event.v1.json").to_string()
+}
+
+fn mesh_hello_responder_status_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.hello_responder.status.v1.json").to_string()
+}
+
+fn mesh_hello_error_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.hello.error.v1.json").to_string()
+}
+
+fn mesh_hello_response_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.hello.response.v1.json").to_string()
+}
+
+fn mesh_hello_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.hello.v1.json").to_string()
+}
+
+fn mesh_lane_grant_preview_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.lane_grant_preview.v1.json").to_string()
+}
+
+fn mesh_peer_group_binding_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.peer_group_binding.v1.json").to_string()
+}
+
+fn mesh_revoke_result_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.revoke_result.v1.json").to_string()
+}
+
+fn mesh_surrogate_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.surrogate.v1.json").to_string()
+}
+
+fn migration_shard_fanout_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.migration.shard_fanout.v1.json").to_string()
+}
+
+fn pack_revision_token_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.pack.revision_token.v1.json").to_string()
+}
+
+fn pack_stream_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.pack.stream.v1.json").to_string()
+}
+
+fn peer_conflict_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.peer_conflict.v1.json").to_string()
+}
+
+fn perf_live_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.perf.live.v1.json").to_string()
+}
+
+fn prompt_budget_report_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.prompt_budget_report.v1.json").to_string()
+}
+
+fn proof_check_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.proof_check.v1.json").to_string()
+}
+
+fn proximity_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.proximity.v1.json").to_string()
+}
+
+fn repair_action_graph_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.repair_action_graph.v1.json").to_string()
+}
+
+fn search_revision_token_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.search.revision_token.v1.json").to_string()
+}
+
+fn search_score_interval_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.search.score_interval.v1.json").to_string()
+}
+
+fn singleflight_key_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.singleflight.key.v1.json").to_string()
+}
+
+fn spec_pack_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.spec_pack.v1.json").to_string()
+}
+
+fn status_graph_numa_pin_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.status.graph.numa_pin.v1.json").to_string()
+}
+
+fn status_search_lexical_ram_tier_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.status.search.lexical_ram_tier.v1.json").to_string()
+}
+
+fn status_skyline_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.status.skyline.v1.json").to_string()
+}
+
+fn symbol_evidence_links_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.symbol_evidence_links.v1.json").to_string()
+}
+
+fn symbol_snapshot_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.symbol_snapshot.v1.json").to_string()
+}
+
+fn tailscale_autodiscovery_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.tailscale.autodiscovery.v1.json").to_string()
+}
+
+fn tailscale_local_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.tailscale.local.v1.json").to_string()
+}
+
+fn verification_evidence_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.verification_evidence.v1.json").to_string()
+}
+
+fn why_not_selected_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.why_not_selected.v1.json").to_string()
+}
+
+fn why_causal_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.why.causal.v1.json").to_string()
+}
+
+fn why_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.why.v1.json").to_string()
+}
+
+fn preflight_guard_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.preflight.guard.v1.json").to_string()
+}
+
 fn recorder_events_list_schema_definition() -> String {
     serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -8876,6 +9612,28 @@ pub fn render_mcp_manifest_json() -> String {
             registry.field_raw("schemaCount", &public_schemas().len().to_string());
         });
         d.field_array_of_objects("tools", COMMAND_MANIFEST, render_mcp_tool_manifest_entry);
+        // R-010 (Pass 2): bring `ee mcp manifest` into compliance with the
+        // AGENTS.md promise that the manifest exposes specific nested tools
+        // like `ee_curate_candidates`, `ee_memory_show`, `ee_memory_list`.
+        // Each subcommand becomes its own flat tool entry under
+        // `subcommandTools`, separate from but parallel to `tools`. This
+        // matches the MCP convention of flat tool surfaces while preserving
+        // the existing parent-command tool shape that downstream consumers
+        // already serialize against.
+        let subcommand_tools: Vec<SubcommandToolEntry> = COMMAND_MANIFEST
+            .iter()
+            .flat_map(|cmd| {
+                cmd.subcommands.iter().map(move |sub| SubcommandToolEntry {
+                    parent: cmd,
+                    sub,
+                })
+            })
+            .collect();
+        d.field_array_of_objects(
+            "subcommandTools",
+            &subcommand_tools,
+            render_mcp_subcommand_tool_entry,
+        );
         d.field_array_of_objects("schemas", public_schemas(), render_public_schema_entry);
         d.field_raw("degraded", "[]");
     });
@@ -8934,6 +9692,55 @@ fn render_public_schema_entry(obj: &mut JsonBuilder, schema: &SchemaEntry) {
     obj.field_str("version", schema.version);
     obj.field_str("description", schema.description);
     obj.field_str("category", schema.category);
+}
+
+/// R-010 (Pass 2): flat (parent, subcommand) pair for the manifest's
+/// `subcommandTools` array. The lifetime is tied to `COMMAND_MANIFEST`'s
+/// static storage, so no allocation per entry beyond the surrounding Vec.
+struct SubcommandToolEntry {
+    parent: &'static CommandEntry,
+    sub: &'static SubcommandEntry,
+}
+
+fn render_mcp_subcommand_tool_entry(obj: &mut JsonBuilder, entry: &SubcommandToolEntry) {
+    let parent_normalized = entry.parent.name.replace('-', "_");
+    let sub_normalized = entry.sub.name.replace('-', "_");
+    let tool_name = format!("ee_{parent_normalized}_{sub_normalized}");
+    let command = format!("{} {}", entry.parent.name, entry.sub.name);
+    let parent_tool = format!("ee_{parent_normalized}");
+    obj.field_str("name", &tool_name);
+    obj.field_str("command", &command);
+    obj.field_str("description", entry.sub.description);
+    obj.field_bool("available", entry.parent.available);
+    obj.field_str("source", "public_command_manifest");
+    obj.field_str("responseEnvelope", RESPONSE_SCHEMA_V1);
+    obj.field_str("errorEnvelope", ERROR_SCHEMA_V2);
+    obj.field_str("parentTool", &parent_tool);
+    obj.field_str("parentCommand", entry.parent.name);
+    obj.field_object("inputSchema", |schema| {
+        schema.field_str("type", "object");
+        schema.field_object("properties", |properties| {
+            properties.field_object("workspace", |workspace| {
+                workspace.field_str("type", "string");
+                workspace.field_str(
+                    "description",
+                    "Workspace path, equivalent to the CLI --workspace option.",
+                );
+            });
+            properties.field_object("args", |args| {
+                args.field_str("type", "array");
+                args.field_str("description", "Subcommand-specific CLI arguments in order.");
+                args.field_object("items", |items| {
+                    items.field_str("type", "string");
+                });
+            });
+            properties.field_object("json", |json| {
+                json.field_str("type", "boolean");
+                json.field_str("description", "Request the stable JSON response envelope.");
+            });
+        });
+        schema.field_raw("required", "[]");
+    });
 }
 
 /// Render the MCP adapter manifest as human-readable text.
