@@ -1556,7 +1556,6 @@ pub struct MigrateShardFanoutArgs {
     pub shards_dir: Option<PathBuf>,
 
     /// Plan the migration without writing shard databases or mutating the source DB.
-    /// Required in this slice; apply mode is owned by a follow-up bead.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
 }
@@ -27559,20 +27558,9 @@ where
     W: Write,
     E: Write,
 {
-    use crate::db::shard::{
-        ShardFanoutMigrationPlanInput, ShardFanoutMigrationWorkspaceInput,
-        plan_shard_fanout_migration,
+    use crate::db::migrate::{
+        apply_shard_fanout_migration, plan_shard_fanout_migration_from_database,
     };
-
-    if !args.dry_run {
-        let domain_error = DomainError::Storage {
-            message:
-                "ee migrate shard-fanout currently supports --dry-run only; apply mode is owned by a follow-up bead."
-                    .to_string(),
-            repair: Some("ee migrate shard-fanout --dry-run --json".to_string()),
-        };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-    }
 
     let workspace_path = cli.resolve_workspace();
     let database_path = args
@@ -27580,53 +27568,56 @@ where
         .clone()
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
 
-    let workspaces = if database_path.exists() {
-        match DbConnection::open_file(&database_path) {
-            Ok(conn) => match conn.list_workspaces() {
-                Ok(rows) => rows
-                    .into_iter()
-                    .map(|w| ShardFanoutMigrationWorkspaceInput {
-                        workspace_id: w.id,
-                        workspace_root: PathBuf::from(w.path),
-                    })
-                    .collect::<Vec<_>>(),
-                Err(error) => {
-                    let domain_error = DomainError::Storage {
-                        message: format!("Failed to enumerate workspaces: {error}"),
-                        repair: Some("ee doctor".to_string()),
-                    };
-                    return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-                }
-            },
-            Err(error) => {
-                let domain_error = DomainError::Storage {
-                    message: format!("Failed to open source database: {error}"),
-                    repair: Some("ee doctor".to_string()),
-                };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-            }
-        }
-    } else {
-        Vec::new()
+    let plan = match plan_shard_fanout_migration_from_database(
+        database_path.clone(),
+        args.shards_dir.clone(),
+    ) {
+        Ok(plan) => plan,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
 
-    let plan = plan_shard_fanout_migration(ShardFanoutMigrationPlanInput {
-        source_database_path: database_path.clone(),
-        shards_dir_override: args.shards_dir.clone(),
-        workspaces,
-    });
-
     let plan_value = serde_json::to_value(&plan).unwrap_or_else(|_| serde_json::json!({}));
-    let response = serde_json::json!({
-        "schema": "ee.response.v1",
-        "success": true,
-        "data": {
-            "command": "migrate shard-fanout",
-            "databasePath": database_path.display().to_string(),
-            "plan": plan_value,
-        },
-        "degraded": [],
-    });
+    let apply_report = if args.dry_run {
+        None
+    } else {
+        match apply_shard_fanout_migration(&plan) {
+            Ok(report) => Some(report),
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        }
+    };
+    let degraded_value = apply_report
+        .as_ref()
+        .map(|report| {
+            serde_json::to_value(&report.degraded).unwrap_or_else(|_| serde_json::json!([]))
+        })
+        .unwrap_or_else(|| serde_json::json!([]));
+    let response = if let Some(report) = &apply_report {
+        let report_value = serde_json::to_value(report).unwrap_or_else(|_| serde_json::json!({}));
+        serde_json::json!({
+            "schema": "ee.response.v1",
+            "success": true,
+            "data": {
+                "command": "migrate shard-fanout",
+                "databasePath": database_path.display().to_string(),
+                "dryRun": false,
+                "plan": plan_value,
+                "apply": report_value,
+            },
+            "degraded": degraded_value,
+        })
+    } else {
+        serde_json::json!({
+            "schema": "ee.response.v1",
+            "success": true,
+            "data": {
+                "command": "migrate shard-fanout",
+                "databasePath": database_path.display().to_string(),
+                "dryRun": true,
+                "plan": plan_value,
+            },
+            "degraded": degraded_value,
+        })
+    };
 
     match cli.renderer() {
         output::Renderer::Json
@@ -27650,9 +27641,22 @@ where
             }
             out.push_str(&format!("Planned workspaces: {}\n", plan.workspaces.len()));
             out.push_str(&format!("Top-level blockers: {}\n", plan.blockers.len()));
-            out.push_str(
-                "\nThis is a dry-run plan only. Apply mode is owned by a follow-up bead.\n",
-            );
+            if let Some(report) = &apply_report {
+                out.push_str(&format!("Outcome: {}\n", report.outcome.as_str()));
+                out.push_str(&format!(
+                    "Catalog rows written: {}\n",
+                    report.catalog_rows_written
+                ));
+                out.push_str(&format!(
+                    "Preserved source ready: {}\n",
+                    report
+                        .preserved_source
+                        .as_ref()
+                        .is_some_and(|preserved| preserved.rollback_ready)
+                ));
+            } else {
+                out.push_str("\nThis is a dry-run plan only. Re-run without --dry-run to apply.\n");
+            }
             let _ = write_stdout(stdout, &out);
         }
     }

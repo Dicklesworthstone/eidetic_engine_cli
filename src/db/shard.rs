@@ -5,7 +5,7 @@
 //! idempotent so migration apply code can make the legacy database recoverable
 //! before any shard layout is marked authoritative.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File};
@@ -188,6 +188,7 @@ pub struct ShardFanoutMigrationWorkspacePlan {
     pub shard_path: Option<PathBuf>,
     pub source_database_path: PathBuf,
     pub planned_row_count: Option<u64>,
+    pub row_counts_by_table: BTreeMap<String, u64>,
     pub source_hash: Option<String>,
     pub expected_audit_rows: Vec<ShardFanoutMigrationAuditRowPlan>,
     pub blockers: Vec<ShardFanoutDegradation>,
@@ -766,6 +767,7 @@ pub fn plan_shard_fanout_migration(
                 shard_path,
                 source_database_path: source_database_path.clone(),
                 planned_row_count: None,
+                row_counts_by_table: BTreeMap::new(),
                 source_hash: source_database_hash.clone(),
                 expected_audit_rows: workspace_expected_audit_rows,
                 blockers: workspace_blockers,
