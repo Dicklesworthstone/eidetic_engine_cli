@@ -1,0 +1,135 @@
+{
+  "data": {
+    "autoEnrollment": {
+      "degraded": [
+        {
+          "code": "mesh_disabled",
+          "message": "Optional mesh memory is disabled; foreground commands remain local-only.",
+          "repair": "Set EE_MESH_ENABLED=1 or configure [mesh].enabled only when you want mesh surfaces.",
+          "severity": "info"
+        }
+      ],
+      "discovery": {
+        "degraded": [
+          {
+            "code": "tailscale_peer_list_unavailable",
+            "message": "Tailscale peer list was unavailable because the local probe did not run.",
+            "repair": "Enable mesh probing with EE_MESH_ENABLED=1 and re-run `ee mesh status --json`.",
+            "severity": "warning"
+          }
+        ],
+        "eeCapablePeers": [],
+        "eligiblePeerCount": 0,
+        "probedPeerCount": 0,
+        "schema": "ee.tailscale.autodiscovery.v1",
+        "selfNodeKey": null,
+        "skippedPeers": [],
+        "tailnetDisplayName": null,
+        "tailnetId": null
+      },
+      "discoveryCache": {
+        "hit": null,
+        "refreshedAt": null,
+        "schema": "ee.mesh.discovery_cache.status.v1",
+        "status": "not_loaded",
+        "ttlSeconds": 30
+      },
+      "drift": {
+        "actionGraph": {
+          "actions": [],
+          "estimatedTotalDurationSeconds": 0,
+          "parallelizableGroups": [],
+          "schema": "ee.repair_action_graph.v1",
+          "topologicallyOrderedExecution": []
+        },
+        "driftSeverity": "none",
+        "manualConflictPresent": false,
+        "newPeerCount": 0,
+        "newPeersAvailable": [],
+        "nextActionHint": "Mesh is disabled; set EE_MESH_ENABLED=1 or configure [mesh].enabled when this workspace should join a mesh.",
+        "nodeKeyChanged": false,
+        "stalePeersInConfig": [],
+        "tailnetChanged": false,
+        "transientUnreachable": []
+      },
+      "enabled": false,
+      "helloResponder": {
+        "listenAddr": null,
+        "running": null,
+        "schema": "ee.mesh.hello_responder.status.v1",
+        "status": "not_probed"
+      },
+      "materialized": null,
+      "peerStateBreakdown": {
+        "active": 0,
+        "denylisted": 0,
+        "hardStale": 0,
+        "softStale": 0
+      },
+      "readOnly": true,
+      "schema": "ee.mesh.auto_status.v1",
+      "stewardPosture": {
+        "enabled": false,
+        "lastReconciliationAt": null,
+        "schema": "ee.mesh.steward_posture.v1",
+        "status": "not_inspected"
+      },
+      "tailscale": {
+        "authenticated": null,
+        "binaryAuthentic": null,
+        "peerCount": 0,
+        "schema": "ee.tailscale.local.v1",
+        "shieldsUp": null,
+        "status": "not_probed",
+        "tailnetDisplayName": null
+      }
+    },
+    "command": "mesh status",
+    "databasePath": "/tmp/ee-mesh/.ee/ee.db",
+    "degraded": [
+      {
+        "code": "mesh_disabled",
+        "message": "Optional mesh memory is disabled; foreground commands remain local-only.",
+        "repair": "Set EE_MESH_ENABLED=1 or configure [mesh].enabled only when you want mesh surfaces.",
+        "severity": "info"
+      }
+    ],
+    "initialized": true,
+    "meshEnabled": false,
+    "mode": "off",
+    "posture": "disabled_local_only",
+    "repairCommands": [
+      "ee init --workspace \"/tmp/ee-mesh\" --json",
+      "ee mesh export --workspace \"/tmp/ee-mesh\" --out mesh-export.json --json",
+      "ee mesh import --workspace \"/tmp/ee-mesh\" --file mesh-export.json --json"
+    ],
+    "schema": "ee.mesh.cli.status.v1",
+    "selectiveSync": {
+      "bodyLanesDefaultAllowed": false,
+      "defaultProfileId": "starter.metadata_only",
+      "embeddingLanesAllowed": false,
+      "profileCount": 3,
+      "schema": "ee.mesh.selective_sync_status.v1",
+      "starterProfileIds": [
+        "starter.evidence_refs",
+        "starter.metadata_only",
+        "starter.trusted_bodies"
+      ],
+      "subscriptionCount": 0,
+      "subscriptionProfileIds": []
+    },
+    "storage": {
+      "cachedBodyCount": 0,
+      "cursorCount": 0,
+      "importedEventCount": 0,
+      "mappedMemoryCount": 0,
+      "peerCount": 0,
+      "policyDecisionEventCount": 0,
+      "policyFailureEventCount": 0
+    },
+    "workspaceId": "wsp_meshforeground0000000001",
+    "workspacePath": "/tmp/ee-mesh"
+  },
+  "schema": "ee.response.v1",
+  "success": true
+}

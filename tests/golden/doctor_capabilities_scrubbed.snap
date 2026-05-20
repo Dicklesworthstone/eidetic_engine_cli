@@ -1,0 +1,89 @@
+{
+  "schema": "ee.doctor.capabilities.v1",
+  "doctor_version": "[CARGO_PKG_VERSION]",
+  "doctor_contract_version": "1.0.0",
+  "tool_version": "[CARGO_PKG_VERSION]",
+  "run_artifact_schema": "ee.doctor.run_state.v1",
+  "blast_radius": [
+    "[WORKSPACE]/.ee",
+    "[WORKSPACE]/.doctor",
+    "[HOME]/.local/share/ee"
+  ],
+  "op_kinds": [
+    "write_file",
+    "create_dir_all",
+    "chmod",
+    "quarantine_by_rename",
+    "manual",
+    "emit_diagnostic",
+    "run_index_rebuild",
+    "run_graph_refresh",
+    "run_wal_checkpoint",
+    "run_migration",
+    "rewrite_jsonl",
+    "atomic_rewrite_toml",
+    "snapshot_backup"
+  ],
+  "exit_codes": [
+    {
+      "code": 0,
+      "name": "ok",
+      "meaning": "no findings, or all fixes applied successfully"
+    },
+    {
+      "code": 1,
+      "name": "findings_present",
+      "meaning": "diagnose mode: at least one finding (no --fix passed)"
+    },
+    {
+      "code": 2,
+      "name": "fix_partial",
+      "meaning": "fix attempted; some actions failed but state is consistent"
+    },
+    {
+      "code": 3,
+      "name": "fix_failed",
+      "meaning": "fix attempted; rolled back to pre-run state"
+    },
+    {
+      "code": 4,
+      "name": "refused_unsafe",
+      "meaning": "blast-radius / precondition refused; no mutations"
+    },
+    {
+      "code": 5,
+      "name": "concurrency_lost",
+      "meaning": "another doctor run is holding the workspace lock"
+    },
+    {
+      "code": 6,
+      "name": "online_required",
+      "meaning": "network probe needed but --online was not passed"
+    },
+    {
+      "code": 7,
+      "name": "policy_denied",
+      "meaning": "trauma-guard or other policy denied a precondition"
+    },
+    {
+      "code": 8,
+      "name": "migration_required",
+      "meaning": "doctor refuses because `ee migrate run` is needed first"
+    }
+  ],
+  "env_vars": [
+    {
+      "name": "EE_DOCTOR_BLAST_RADIUS",
+      "purpose": "Override default blast radius (colon-separated abs paths)"
+    },
+    {
+      "name": "EE_DOCTOR_LOCK_STALE_AFTER_SECS",
+      "purpose": "Treat lock files older than this as stale (default: never)"
+    },
+    {
+      "name": "EE_NO_COLOR",
+      "purpose": "Disables ANSI styling on stderr (inherited from ee)"
+    }
+  ],
+  "action_line_schema": "ee.doctor.action.v1"
+}
