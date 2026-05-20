@@ -20,7 +20,14 @@ pub use security_profile::{
     FilePermissionCheck, FilePermissionReport, ParseSecurityProfileError, SecurityProfile,
     check_workspace_permissions, load_profile_from_env,
 };
-pub use trust_decay::{DecayConfig, SourceTrustState, TrustAdvisory, TrustDecayCalculator};
+pub use trust_decay::{
+    DecayConfig, PEER_FEEDBACK_IGNORED_BY_POLICY_EVENT, PEER_FEEDBACK_RECEIVED_EVENT,
+    PEER_OUTCOME_FEEDBACK_SCHEMA_V1, PEER_RANKING_ADJUSTMENT_REASON_EVENT,
+    PEER_TRUST_DELTA_APPLIED_EVENT, PeerOutcomeFeedbackEvent, PeerOutcomeFeedbackKind,
+    PeerOutcomeFeedbackLog, PeerOutcomeFeedbackPolicy, PeerOutcomeFeedbackSignal,
+    PeerOutcomeFeedbackSummary, PeerOutcomePeerState, SourceTrustState, TrustAdvisory,
+    TrustDecayCalculator, summarize_peer_outcome_feedback,
+};
 
 use crate::models::TrustClass;
 use serde::{Deserialize, Serialize};

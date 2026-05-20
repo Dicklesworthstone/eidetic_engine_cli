@@ -7,6 +7,10 @@
 //! Decay factors are applied per signal type and accumulate multiplicatively.
 //! A source's effective trust is: base_trust * decay_factor.
 
+use std::collections::BTreeMap;
+
+use serde::Serialize;
+
 use crate::models::TrustClass;
 
 /// Harmful event count where positive recovery must keep source risk visible.
@@ -354,6 +358,460 @@ impl TrustAdvisory {
     }
 }
 
+/// Stable schema for peer outcome feedback summaries.
+pub const PEER_OUTCOME_FEEDBACK_SCHEMA_V1: &str = "ee.mesh.peer_outcome_feedback.v1";
+
+/// Structured audit event recorded when a peer feedback row is accepted for evaluation.
+pub const PEER_FEEDBACK_RECEIVED_EVENT: &str = "peer_feedback_received";
+/// Structured audit event recorded when peer trust is adjusted.
+pub const PEER_TRUST_DELTA_APPLIED_EVENT: &str = "trust_delta_applied";
+/// Structured audit event recorded when policy rejects or ignores feedback.
+pub const PEER_FEEDBACK_IGNORED_BY_POLICY_EVENT: &str = "feedback_ignored_by_policy";
+/// Structured audit event recorded when feedback changes candidate ranking.
+pub const PEER_RANKING_ADJUSTMENT_REASON_EVENT: &str = "ranking_adjustment_reason";
+
+/// Peer-reported outcome for a cached memory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerOutcomeFeedbackKind {
+    Helped,
+    Misled,
+    Stale,
+    Contradicted,
+    Withdrawn,
+}
+
+impl PeerOutcomeFeedbackKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Helped => "helped",
+            Self::Misled => "misled",
+            Self::Stale => "stale",
+            Self::Contradicted => "contradicted",
+            Self::Withdrawn => "withdrawn",
+        }
+    }
+
+    const fn trust_delta(self) -> f32 {
+        match self {
+            Self::Helped => 0.025,
+            Self::Misled => -0.060,
+            Self::Stale => -0.040,
+            Self::Contradicted => -0.070,
+            Self::Withdrawn => -0.050,
+        }
+    }
+
+    const fn quality_delta(self) -> f32 {
+        match self {
+            Self::Helped => 0.060,
+            Self::Misled => -0.080,
+            Self::Stale => -0.050,
+            Self::Contradicted => -0.100,
+            Self::Withdrawn => -0.070,
+        }
+    }
+
+    const fn ranking_delta(self) -> f32 {
+        match self {
+            Self::Helped => 0.050,
+            Self::Misled => -0.070,
+            Self::Stale => -0.045,
+            Self::Contradicted => -0.080,
+            Self::Withdrawn => -0.055,
+        }
+    }
+}
+
+/// Redacted peer feedback row. The text that originally led to the outcome is
+/// intentionally not part of this input.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PeerOutcomeFeedbackEvent<'a> {
+    pub peer_id: &'a str,
+    pub memory_id: &'a str,
+    pub kind: PeerOutcomeFeedbackKind,
+    pub peer_weight: f32,
+    pub evidence_ref: Option<&'a str>,
+}
+
+/// Local view of a peer's historical outcome quality.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PeerOutcomePeerState<'a> {
+    pub peer_id: &'a str,
+    pub trust_score: f32,
+    pub feedback_count: u32,
+    pub misleading_count: u32,
+    pub stale_count: u32,
+    pub contradiction_count: u32,
+    pub withdrawn_count: u32,
+}
+
+impl<'a> PeerOutcomePeerState<'a> {
+    #[must_use]
+    pub const fn new(peer_id: &'a str, trust_score: f32) -> Self {
+        Self {
+            peer_id,
+            trust_score,
+            feedback_count: 0,
+            misleading_count: 0,
+            stale_count: 0,
+            contradiction_count: 0,
+            withdrawn_count: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_counts(
+        mut self,
+        feedback_count: u32,
+        misleading_count: u32,
+        stale_count: u32,
+        contradiction_count: u32,
+        withdrawn_count: u32,
+    ) -> Self {
+        self.feedback_count = feedback_count;
+        self.misleading_count = misleading_count;
+        self.stale_count = stale_count;
+        self.contradiction_count = contradiction_count;
+        self.withdrawn_count = withdrawn_count;
+        self
+    }
+
+    #[must_use]
+    pub fn negative_count(&self) -> u32 {
+        self.misleading_count
+            .saturating_add(self.stale_count)
+            .saturating_add(self.contradiction_count)
+            .saturating_add(self.withdrawn_count)
+    }
+
+    #[must_use]
+    pub fn negative_rate(&self) -> f32 {
+        if self.feedback_count == 0 {
+            0.0
+        } else {
+            (self.negative_count() as f32 / self.feedback_count as f32).clamp(0.0, 1.0)
+        }
+    }
+}
+
+/// Local policy for receiving and using peer outcome feedback.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PeerOutcomeFeedbackPolicy {
+    pub receive_peer_feedback: bool,
+    pub use_feedback_for_ranking: bool,
+    pub max_peer_weight: f32,
+    pub min_peer_trust_for_ranking: f32,
+    pub max_single_peer_adjustment: f32,
+    pub bad_peer_weight_cap: f32,
+}
+
+impl Default for PeerOutcomeFeedbackPolicy {
+    fn default() -> Self {
+        Self {
+            receive_peer_feedback: true,
+            use_feedback_for_ranking: true,
+            max_peer_weight: 1.0,
+            min_peer_trust_for_ranking: 0.20,
+            max_single_peer_adjustment: 0.080,
+            bad_peer_weight_cap: 0.050,
+        }
+    }
+}
+
+/// One peer feedback signal after local policy and trust decay are applied.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerOutcomeFeedbackSignal {
+    pub peer_id: String,
+    pub memory_id: String,
+    pub kind: &'static str,
+    pub evidence_ref: Option<String>,
+    pub peer_weight: f32,
+    pub effective_weight: f32,
+    pub trust_delta: f32,
+    pub quality_delta: f32,
+    pub ranking_adjustment: f32,
+    pub ranking_adjustment_reason: &'static str,
+    pub ignored: bool,
+    pub ignore_reason: Option<&'static str>,
+}
+
+/// Structured audit log for peer outcome feedback handling.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerOutcomeFeedbackLog {
+    pub event: &'static str,
+    pub peer_id: String,
+    pub memory_id: String,
+    pub reason: &'static str,
+    pub trust_delta: f32,
+    pub ranking_adjustment: f32,
+}
+
+/// Deterministic local summary for peer feedback on one memory.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerOutcomeFeedbackSummary {
+    pub schema: &'static str,
+    pub memory_id: String,
+    pub local_truth_mutation_allowed: bool,
+    pub signal_count: usize,
+    pub ignored_count: usize,
+    pub ranking_adjustment: f32,
+    pub quality_delta: f32,
+    pub trust_delta_by_peer: BTreeMap<String, f32>,
+    pub signals: Vec<PeerOutcomeFeedbackSignal>,
+    pub logs: Vec<PeerOutcomeFeedbackLog>,
+}
+
+/// Summarize peer outcome feedback without mutating local truth.
+///
+/// The output is deterministic and advisory: both positive and negative peer
+/// signals remain visible, but rank/quality effects are capped by local policy
+/// and by the peer's historical trust state.
+#[must_use]
+pub fn summarize_peer_outcome_feedback(
+    memory_id: &str,
+    events: &[PeerOutcomeFeedbackEvent<'_>],
+    peer_states: &[PeerOutcomePeerState<'_>],
+    policy: PeerOutcomeFeedbackPolicy,
+) -> PeerOutcomeFeedbackSummary {
+    let peer_states_by_id = peer_states
+        .iter()
+        .map(|state| (state.peer_id, state))
+        .collect::<BTreeMap<_, _>>();
+    let mut ordered_events = events
+        .iter()
+        .filter(|event| event.memory_id == memory_id)
+        .collect::<Vec<_>>();
+    ordered_events.sort_by(|left, right| {
+        left.peer_id
+            .cmp(right.peer_id)
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.evidence_ref.cmp(&right.evidence_ref))
+    });
+
+    let mut signals = Vec::with_capacity(ordered_events.len());
+    let mut logs = Vec::new();
+    let mut trust_delta_by_peer = BTreeMap::<String, f32>::new();
+
+    for event in ordered_events {
+        let state = peer_states_by_id.get(event.peer_id).copied();
+        let (signal, mut signal_logs) = plan_peer_outcome_feedback(event, state, policy);
+        if !signal.ignored {
+            let entry = trust_delta_by_peer
+                .entry(signal.peer_id.clone())
+                .or_insert(0.0);
+            *entry = round_peer_feedback_metric(*entry + signal.trust_delta);
+        }
+        logs.append(&mut signal_logs);
+        signals.push(signal);
+    }
+
+    let ignored_count = signals.iter().filter(|signal| signal.ignored).count();
+    let ranking_adjustment = round_peer_feedback_metric(
+        signals
+            .iter()
+            .map(|signal| signal.ranking_adjustment)
+            .sum::<f32>(),
+    );
+    let quality_delta = round_peer_feedback_metric(
+        signals
+            .iter()
+            .map(|signal| signal.quality_delta)
+            .sum::<f32>(),
+    );
+
+    PeerOutcomeFeedbackSummary {
+        schema: PEER_OUTCOME_FEEDBACK_SCHEMA_V1,
+        memory_id: memory_id.to_owned(),
+        local_truth_mutation_allowed: false,
+        signal_count: signals.len(),
+        ignored_count,
+        ranking_adjustment,
+        quality_delta,
+        trust_delta_by_peer,
+        signals,
+        logs,
+    }
+}
+
+fn plan_peer_outcome_feedback(
+    event: &PeerOutcomeFeedbackEvent<'_>,
+    state: Option<&PeerOutcomePeerState<'_>>,
+    policy: PeerOutcomeFeedbackPolicy,
+) -> (PeerOutcomeFeedbackSignal, Vec<PeerOutcomeFeedbackLog>) {
+    let mut logs = Vec::new();
+    if !policy.receive_peer_feedback {
+        return (
+            ignored_peer_feedback_signal(event, "peer_feedback_opt_out"),
+            vec![peer_feedback_log(
+                PEER_FEEDBACK_IGNORED_BY_POLICY_EVENT,
+                event,
+                "peer_feedback_opt_out",
+                0.0,
+                0.0,
+            )],
+        );
+    }
+
+    logs.push(peer_feedback_log(
+        PEER_FEEDBACK_RECEIVED_EVENT,
+        event,
+        "received_redacted_peer_outcome",
+        0.0,
+        0.0,
+    ));
+
+    if !policy.use_feedback_for_ranking {
+        logs.push(peer_feedback_log(
+            PEER_FEEDBACK_IGNORED_BY_POLICY_EVENT,
+            event,
+            "ranking_feedback_opt_out",
+            0.0,
+            0.0,
+        ));
+        return (
+            ignored_peer_feedback_signal(event, "ranking_feedback_opt_out"),
+            logs,
+        );
+    }
+
+    let peer_trust = finite_clamped(
+        state.map_or(0.50, |state| state.trust_score),
+        0.0,
+        1.0,
+        0.50,
+    );
+    let min_peer_trust = finite_clamped(policy.min_peer_trust_for_ranking, 0.0, 1.0, 0.20);
+    if peer_trust < min_peer_trust {
+        logs.push(peer_feedback_log(
+            PEER_FEEDBACK_IGNORED_BY_POLICY_EVENT,
+            event,
+            "peer_trust_below_policy_floor",
+            0.0,
+            0.0,
+        ));
+        return (
+            ignored_peer_feedback_signal(event, "peer_trust_below_policy_floor"),
+            logs,
+        );
+    }
+
+    let max_peer_weight = finite_clamped(policy.max_peer_weight, 0.0, 1.0, 1.0);
+    let peer_weight = finite_clamped(event.peer_weight, 0.0, max_peer_weight, 1.0);
+    let effective_weight = effective_peer_feedback_weight(event, state, policy, peer_trust);
+    let trust_delta = round_peer_feedback_metric(event.kind.trust_delta() * effective_weight);
+    let quality_delta = round_peer_feedback_metric(event.kind.quality_delta() * effective_weight);
+    let max_adjustment = finite_clamped(policy.max_single_peer_adjustment, 0.0, 1.0, 0.080);
+    let ranking_adjustment = round_peer_feedback_metric(
+        (event.kind.ranking_delta() * effective_weight).clamp(-max_adjustment, max_adjustment),
+    );
+
+    logs.push(peer_feedback_log(
+        PEER_TRUST_DELTA_APPLIED_EVENT,
+        event,
+        event.kind.as_str(),
+        trust_delta,
+        0.0,
+    ));
+    logs.push(peer_feedback_log(
+        PEER_RANKING_ADJUSTMENT_REASON_EVENT,
+        event,
+        event.kind.as_str(),
+        0.0,
+        ranking_adjustment,
+    ));
+
+    (
+        PeerOutcomeFeedbackSignal {
+            peer_id: event.peer_id.to_owned(),
+            memory_id: event.memory_id.to_owned(),
+            kind: event.kind.as_str(),
+            evidence_ref: event.evidence_ref.map(str::to_owned),
+            peer_weight,
+            effective_weight,
+            trust_delta,
+            quality_delta,
+            ranking_adjustment,
+            ranking_adjustment_reason: event.kind.as_str(),
+            ignored: false,
+            ignore_reason: None,
+        },
+        logs,
+    )
+}
+
+fn effective_peer_feedback_weight(
+    event: &PeerOutcomeFeedbackEvent<'_>,
+    state: Option<&PeerOutcomePeerState<'_>>,
+    policy: PeerOutcomeFeedbackPolicy,
+    peer_trust: f32,
+) -> f32 {
+    let max_peer_weight = finite_clamped(policy.max_peer_weight, 0.0, 1.0, 1.0);
+    let peer_weight = finite_clamped(event.peer_weight, 0.0, max_peer_weight, 1.0);
+    let history_decay = state.map_or(1.0, |state| 1.0 - state.negative_rate());
+    let base_weight = peer_weight * peer_trust * history_decay.clamp(0.0, 1.0);
+    let capped_weight = if state.is_some_and(is_bad_peer_feedback_source) {
+        base_weight.min(finite_clamped(policy.bad_peer_weight_cap, 0.0, 1.0, 0.050))
+    } else {
+        base_weight
+    };
+    round_peer_feedback_metric(capped_weight.clamp(0.0, max_peer_weight))
+}
+
+fn is_bad_peer_feedback_source(state: &PeerOutcomePeerState<'_>) -> bool {
+    state.negative_count() >= 3 && state.negative_rate() >= 0.60
+}
+
+fn ignored_peer_feedback_signal(
+    event: &PeerOutcomeFeedbackEvent<'_>,
+    reason: &'static str,
+) -> PeerOutcomeFeedbackSignal {
+    PeerOutcomeFeedbackSignal {
+        peer_id: event.peer_id.to_owned(),
+        memory_id: event.memory_id.to_owned(),
+        kind: event.kind.as_str(),
+        evidence_ref: event.evidence_ref.map(str::to_owned),
+        peer_weight: 0.0,
+        effective_weight: 0.0,
+        trust_delta: 0.0,
+        quality_delta: 0.0,
+        ranking_adjustment: 0.0,
+        ranking_adjustment_reason: "ignored",
+        ignored: true,
+        ignore_reason: Some(reason),
+    }
+}
+
+fn peer_feedback_log(
+    event: &'static str,
+    feedback: &PeerOutcomeFeedbackEvent<'_>,
+    reason: &'static str,
+    trust_delta: f32,
+    ranking_adjustment: f32,
+) -> PeerOutcomeFeedbackLog {
+    PeerOutcomeFeedbackLog {
+        event,
+        peer_id: feedback.peer_id.to_owned(),
+        memory_id: feedback.memory_id.to_owned(),
+        reason,
+        trust_delta,
+        ranking_adjustment,
+    }
+}
+
+fn finite_clamped(value: f32, min: f32, max: f32, fallback: f32) -> f32 {
+    let normalized = if value.is_finite() { value } else { fallback };
+    normalized.clamp(min, max)
+}
+
+fn round_peer_feedback_metric(value: f32) -> f32 {
+    (value * 1_000.0).round() / 1_000.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,6 +1120,216 @@ mod tests {
             .permits_import(),
             false,
             "block does not permit",
+        )
+    }
+
+    #[test]
+    fn peer_outcome_feedback_keeps_conflicting_signals_advisory() -> TestResult {
+        let events = vec![
+            PeerOutcomeFeedbackEvent {
+                peer_id: "peer_beta",
+                memory_id: "mem_shared",
+                kind: PeerOutcomeFeedbackKind::Misled,
+                peer_weight: 1.0,
+                evidence_ref: Some("evidence://beta_run_001"),
+            },
+            PeerOutcomeFeedbackEvent {
+                peer_id: "peer_alpha",
+                memory_id: "mem_shared",
+                kind: PeerOutcomeFeedbackKind::Helped,
+                peer_weight: 1.0,
+                evidence_ref: Some("evidence://alpha_run_001"),
+            },
+        ];
+        let states = vec![
+            PeerOutcomePeerState::new("peer_alpha", 0.80),
+            PeerOutcomePeerState::new("peer_beta", 0.70),
+        ];
+
+        let summary = summarize_peer_outcome_feedback(
+            "mem_shared",
+            &events,
+            &states,
+            PeerOutcomeFeedbackPolicy::default(),
+        );
+
+        ensure(
+            summary.schema,
+            PEER_OUTCOME_FEEDBACK_SCHEMA_V1,
+            "peer outcome schema",
+        )?;
+        ensure(
+            summary.local_truth_mutation_allowed,
+            false,
+            "peer feedback never mutates local truth",
+        )?;
+        ensure(summary.signal_count, 2, "both peer signals visible")?;
+        ensure(summary.ignored_count, 0, "no peer signal ignored")?;
+        ensure(
+            summary
+                .signals
+                .iter()
+                .map(|signal| signal.kind)
+                .collect::<Vec<_>>(),
+            vec!["helped", "misled"],
+            "signals sorted deterministically",
+        )?;
+        ensure(
+            summary
+                .logs
+                .iter()
+                .any(|log| log.event == PEER_RANKING_ADJUSTMENT_REASON_EVENT),
+            true,
+            "ranking adjustment reason logged",
+        )
+    }
+
+    #[test]
+    fn peer_outcome_feedback_policy_opt_out_ignores_feedback() -> TestResult {
+        let events = vec![PeerOutcomeFeedbackEvent {
+            peer_id: "peer_alpha",
+            memory_id: "mem_shared",
+            kind: PeerOutcomeFeedbackKind::Helped,
+            peer_weight: 1.0,
+            evidence_ref: None,
+        }];
+        let policy = PeerOutcomeFeedbackPolicy {
+            receive_peer_feedback: false,
+            ..PeerOutcomeFeedbackPolicy::default()
+        };
+
+        let summary = summarize_peer_outcome_feedback("mem_shared", &events, &[], policy);
+
+        ensure(summary.ignored_count, 1, "feedback ignored by opt-out")?;
+        ensure_approx(
+            summary.ranking_adjustment,
+            0.0,
+            0.001,
+            "opt-out ranking adjustment",
+        )?;
+        ensure(
+            summary.signals[0].ignore_reason,
+            Some("peer_feedback_opt_out"),
+            "opt-out reason",
+        )?;
+        ensure(
+            summary
+                .logs
+                .iter()
+                .any(|log| log.event == PEER_FEEDBACK_IGNORED_BY_POLICY_EVENT),
+            true,
+            "policy ignore logged",
+        )
+    }
+
+    #[test]
+    fn peer_outcome_feedback_caps_weight_and_single_adjustment() -> TestResult {
+        let events = vec![PeerOutcomeFeedbackEvent {
+            peer_id: "peer_alpha",
+            memory_id: "mem_shared",
+            kind: PeerOutcomeFeedbackKind::Contradicted,
+            peer_weight: 42.0,
+            evidence_ref: Some("evidence://alpha_run_001"),
+        }];
+        let states = vec![PeerOutcomePeerState::new("peer_alpha", 1.0)];
+        let policy = PeerOutcomeFeedbackPolicy {
+            max_peer_weight: 0.50,
+            max_single_peer_adjustment: 0.030,
+            ..PeerOutcomeFeedbackPolicy::default()
+        };
+
+        let summary = summarize_peer_outcome_feedback("mem_shared", &events, &states, policy);
+
+        ensure_approx(
+            summary.signals[0].peer_weight,
+            0.50,
+            0.001,
+            "peer weight cap",
+        )?;
+        ensure_approx(
+            summary.signals[0].ranking_adjustment,
+            -0.030,
+            0.001,
+            "single peer ranking cap",
+        )
+    }
+
+    #[test]
+    fn peer_outcome_feedback_bad_peer_history_decays_influence() -> TestResult {
+        let events = vec![PeerOutcomeFeedbackEvent {
+            peer_id: "peer_bad",
+            memory_id: "mem_shared",
+            kind: PeerOutcomeFeedbackKind::Contradicted,
+            peer_weight: 1.0,
+            evidence_ref: Some("evidence://bad_run_001"),
+        }];
+        let states = vec![PeerOutcomePeerState::new("peer_bad", 1.0).with_counts(10, 7, 1, 1, 0)];
+        let policy = PeerOutcomeFeedbackPolicy {
+            bad_peer_weight_cap: 0.030,
+            ..PeerOutcomeFeedbackPolicy::default()
+        };
+
+        let summary = summarize_peer_outcome_feedback("mem_shared", &events, &states, policy);
+
+        ensure(
+            summary.signals[0].effective_weight <= 0.030,
+            true,
+            "bad peer effective weight capped",
+        )?;
+        ensure(
+            summary.ranking_adjustment.abs() <= 0.003,
+            true,
+            "bad peer cannot poison ranking",
+        )
+    }
+
+    #[test]
+    fn peer_outcome_feedback_trust_delta_is_per_peer_and_logged() -> TestResult {
+        let events = vec![
+            PeerOutcomeFeedbackEvent {
+                peer_id: "peer_alpha",
+                memory_id: "mem_shared",
+                kind: PeerOutcomeFeedbackKind::Helped,
+                peer_weight: 1.0,
+                evidence_ref: None,
+            },
+            PeerOutcomeFeedbackEvent {
+                peer_id: "peer_alpha",
+                memory_id: "mem_shared",
+                kind: PeerOutcomeFeedbackKind::Stale,
+                peer_weight: 0.5,
+                evidence_ref: None,
+            },
+        ];
+        let states = vec![PeerOutcomePeerState::new("peer_alpha", 0.80)];
+
+        let summary = summarize_peer_outcome_feedback(
+            "mem_shared",
+            &events,
+            &states,
+            PeerOutcomeFeedbackPolicy::default(),
+        );
+
+        ensure(
+            summary.trust_delta_by_peer.contains_key("peer_alpha"),
+            true,
+            "trust delta by peer",
+        )?;
+        ensure(
+            summary
+                .logs
+                .iter()
+                .any(|log| log.event == PEER_FEEDBACK_RECEIVED_EVENT),
+            true,
+            "peer feedback received log",
+        )?;
+        ensure(
+            summary
+                .logs
+                .iter()
+                .any(|log| log.event == PEER_TRUST_DELTA_APPLIED_EVENT),
+            true,
+            "trust delta log",
         )
     }
 }
