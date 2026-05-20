@@ -1,0 +1,36 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_peer_policy_denied",
+  "introduced_by": {
+    "bead": "bd-3i5q7",
+    "epic_letter": "SRR6.19"
+  },
+  "surfaces": [
+    "mesh import",
+    "mesh export",
+    "status",
+    "doctor",
+    "support bundle"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A peer attempts to import or export mesh body, preview, embedding, tag, or metadata material outside its policy grants.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "ee mesh peer add --workspace . --peer peer_mesh_metadata_only --grant metadata --deny body --deny embedding --json",
+      "ee mesh export --workspace . --peer peer_mesh_metadata_only --lane body --json"
+    ],
+    "invocation": "ee mesh export --workspace . --peer peer_mesh_metadata_only --lane body --json"
+  },
+  "expected_emission": {
+    "code": "mesh_peer_policy_denied",
+    "severity": "high",
+    "message_contains": [
+      "mesh policy",
+      "denied",
+      "policyRef"
+    ],
+    "repair_contains": "mesh peer policy"
+  }
+}

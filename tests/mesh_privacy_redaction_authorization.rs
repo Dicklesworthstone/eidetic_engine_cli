@@ -12,6 +12,10 @@ use ee::config::{MeshLane, MeshLaneDecision, MeshLaneGrants};
 use ee::core::memory_scope::{
     MeshDisplayProvenanceInput, MeshEventValidity, MeshImportDecisionKind, mesh_display_provenance,
 };
+use ee::mesh::audit::{
+    MeshAuditDetails, MeshAuditEventInput, MeshAuditEventKind, compute_mesh_audit_event,
+    support_bundle_entry,
+};
 use ee::mesh::policy::{
     MeshBodyFetchPolicy, MeshOutboundPolicyDecisionInput, MeshPeerPolicy,
     MeshPeerPolicyDecisionInput, MeshPeerPolicyRegistry, MeshRedactionDecision,
@@ -28,6 +32,9 @@ const ORIGIN_WORKSPACE: &str = "wsp_mesh_privacy_node02";
 const TRUSTED_PEER: &str = "peer_mesh_trusted_full";
 const METADATA_PEER: &str = "peer_mesh_metadata_only";
 const NO_BODY_PEER: &str = "peer_mesh_no_body";
+const DENIED_PEER: &str = "peer_mesh_denied";
+const STALE_PEER_WITH_SECRET: &str =
+    "peer_MESH_PRIVACY_SENTINEL_STALE_TOKEN_ghp_stale000000000000000000000000";
 
 const FIXTURE_JSON: &str =
     include_str!("fixtures/mesh/privacy_redaction_authorization_matrix.json");
@@ -149,6 +156,22 @@ fn registry() -> MeshPeerPolicyRegistry {
             ),
             MeshBodyFetchPolicy::denied(),
         ),
+        peer_policy(
+            "pol_privacy_denied",
+            DENIED_PEER,
+            MeshTrustLane::PeerAgent,
+            lane_grants(
+                MeshLaneDecision::Deny,
+                MeshLaneDecision::Deny,
+                MeshLaneDecision::Deny,
+            ),
+            redaction_policy(
+                MeshRedactionDecision::Deny,
+                MeshRedactionDecision::Deny,
+                MeshRedactionDecision::Deny,
+            ),
+            MeshBodyFetchPolicy::denied(),
+        ),
     ])
 }
 
@@ -203,6 +226,11 @@ fn assert_json_no_sentinel(
 }
 
 fn privacy_event(scenario: &str, decision: Value) -> Value {
+    let metadata_allowed = decision
+        .get("materialLane")
+        .and_then(Value::as_str)
+        .is_some_and(|lane| lane == "metadata");
+
     json!({
         "schema": "ee.test_event.v1",
         "surface": "mesh_privacy_redaction_authorization",
@@ -215,6 +243,24 @@ fn privacy_event(scenario: &str, decision: Value) -> Value {
             "embeddingStored": false,
             "bodyPreview": "[REDACTED:mesh_body_denied]",
             "embeddingPreview": "[REDACTED:mesh_embedding_denied]"
+        },
+        "exportedEvent": {
+            "metadataAllowed": metadata_allowed,
+            "bodyIncluded": false,
+            "preview": "[REDACTED:mesh_preview_policy]",
+            "embeddingIncluded": false,
+            "tags": ["mesh_policy_limited", "redacted_fixture"],
+            "metadata": {
+                "title": "redacted synthetic mesh material",
+                "origin": "origin_alias_node02"
+            }
+        },
+        "log": {
+            "event": "mesh.privacy.policy_decision",
+            "peerRef": "mesh_peer_redacted",
+            "policyRef": decision["policyRef"],
+            "bodySnippet": "[REDACTED:mesh_body_denied]",
+            "embeddingDigest": "blake3:redacted"
         },
         "status": {
             "posture": "degraded_recoverable",
@@ -247,8 +293,11 @@ fn privacy_matrix_fixture_covers_required_scenarios() -> TestResult {
         "metadata_only_body_export_denied",
         "metadata_only_embedding_export_denied",
         "metadata_result_then_body_fetch_denied",
+        "denied_peer_import_denied_without_side_effects",
+        "stale_peer_lookup_failure_redacted",
         "unknown_peer_lookup_failure_redacted",
         "context_pack_provenance_redacted",
+        "support_bundle_projection_redacts_mesh_audit",
     ] {
         if !scenarios.contains(required) {
             return Err(format!("privacy matrix missing scenario {required}"));
@@ -351,6 +400,36 @@ fn mesh_policy_e2e_denies_disallowed_material_without_leaking_sentinels() -> Tes
         &fixture,
     )?;
 
+    let denied_peer_import =
+        registry.decide_inbound(&inbound_input(DENIED_PEER, MeshLane::Metadata, None, false));
+    if denied_peer_import.import.workspace_scope_decision != MeshImportDecisionKind::Deny
+        || denied_peer_import.import.permits_local_truth_side_effects()
+        || denied_peer_import
+            .import
+            .permits_search_or_graph_side_effects()
+        || denied_peer_import.permits_body_fetch()
+    {
+        return Err(format!(
+            "denied peer import should deny without local side effects: {denied_peer_import:?}"
+        ));
+    }
+    let denied_peer_event = privacy_event(
+        "denied_peer_import_denied_without_side_effects",
+        denied_peer_import.to_json(),
+    );
+    assert_json_no_sentinel(
+        "denied_peer_import_denied_without_side_effects event",
+        &denied_peer_event,
+        &fixture,
+    )?;
+    if denied_peer_event["exportedEvent"]["bodyIncluded"] != Value::Bool(false)
+        || denied_peer_event["exportedEvent"]["embeddingIncluded"] != Value::Bool(false)
+    {
+        return Err(format!(
+            "denied peer event must prove body/embedding stayed out: {denied_peer_event}"
+        ));
+    }
+
     Ok(())
 }
 
@@ -387,6 +466,29 @@ fn lookup_failures_and_context_provenance_are_redaction_safe() -> TestResult {
     {
         return Err(format!(
             "secret-like peer id should be aliased: {lookup_json}"
+        ));
+    }
+
+    let stale_missing = registry
+        .select_inbound_policy(&MeshPeerPolicyDecisionInput {
+            local_workspace_id: LOCAL_WORKSPACE,
+            origin_workspace_id: ORIGIN_WORKSPACE,
+            producer_peer_id: STALE_PEER_WITH_SECRET,
+            material_lane: MeshLane::Metadata,
+            event_validity: MeshEventValidity::Valid,
+            requested_body_bytes: None,
+            body_fetch_consent: false,
+        })
+        .expect_err("stale/unknown peer should fail closed before authorization");
+    let stale_json = stale_missing.to_json();
+    assert_json_no_sentinel("stale_peer_lookup_failure_redacted", &stale_json, &fixture)?;
+    if stale_json["code"] != "mesh_peer_policy_lookup_missing"
+        || !stale_json["peerRef"]
+            .as_str()
+            .is_some_and(|peer_ref| peer_ref.starts_with("mesh_peer_"))
+    {
+        return Err(format!(
+            "stale secret-like peer id should be denied and aliased: {stale_json}"
         ));
     }
 
@@ -438,6 +540,86 @@ fn lookup_failures_and_context_provenance_are_redaction_safe() -> TestResult {
             "why explanation should mention policy-limited evidence: {provenance_json}"
         ));
     }
+
+    Ok(())
+}
+
+#[test]
+fn support_bundle_projection_and_failure_fixture_are_redaction_safe() -> TestResult {
+    let fixture = fixture()?;
+    let mut details = MeshAuditDetails::default();
+    details
+        .insert_count("denied_body_count", 1)
+        .map_err(|error| error.to_string())?;
+    details
+        .insert_bool("embedding_export_allowed", false)
+        .map_err(|error| error.to_string())?;
+    details
+        .insert_reference("policy_outcome", "mesh_peer_policy_denied")
+        .map_err(|error| error.to_string())?;
+    details
+        .insert_redacted_text(
+            "representative_body",
+            "body_preview",
+            "MESH_PRIVACY_SENTINEL_BODY_sk_live_51N0TREAL000000000000000000000000",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let event = compute_mesh_audit_event(&MeshAuditEventInput {
+        workspace_id: LOCAL_WORKSPACE.to_owned(),
+        event_kind: MeshAuditEventKind::PolicyDecision,
+        peer_id: Some(DENIED_PEER.to_owned()),
+        origin_workspace_id: Some(ORIGIN_WORKSPACE.to_owned()),
+        target_workspace_id: Some(LOCAL_WORKSPACE.to_owned()),
+        workspace_scope: Some("workspace:mesh-privacy-fixture".to_owned()),
+        policy_decision_id: Some("policy_decision_denied_001".to_owned()),
+        local_row_refs: vec!["mem_mesh_policy_denied".to_owned()],
+        cached_body_refs: vec!["body_cache_redacted_ref_001".to_owned()],
+        details,
+        previous_event_hash: None,
+    })
+    .map_err(|error| error.to_string())?;
+    let support_entry = support_bundle_entry(&event);
+    let support_json =
+        serde_json::to_value(&support_entry).map_err(|error| format!("support json: {error}"))?;
+
+    assert_json_no_sentinel(
+        "support_bundle_projection_redacts_mesh_audit",
+        &support_json,
+        &fixture,
+    )?;
+    if support_json.get("details").is_some()
+        || support_json
+            .to_string()
+            .contains("body_cache_redacted_ref_001")
+    {
+        return Err(format!(
+            "support bundle entry must exclude raw details and cached body refs: {support_json}"
+        ));
+    }
+    if support_entry.local_row_count != 1 || support_entry.cached_body_ref_count != 1 {
+        return Err(format!(
+            "support bundle entry should retain counts only: {support_json}"
+        ));
+    }
+
+    let failure_fixture: Value = serde_json::from_str(include_str!(
+        "fixtures/failure_modes/mesh_peer_policy_denied.json"
+    ))
+    .map_err(|error| format!("parse mesh_peer_policy_denied fixture: {error}"))?;
+    if failure_fixture["schema"] != "ee.failure_mode_fixture.v1"
+        || failure_fixture["code"] != "mesh_peer_policy_denied"
+        || failure_fixture["expected_emission"]["code"] != "mesh_peer_policy_denied"
+    {
+        return Err(format!(
+            "mesh policy denial failure fixture drifted: {failure_fixture}"
+        ));
+    }
+    assert_json_no_sentinel(
+        "mesh_peer_policy_denied failure fixture",
+        &failure_fixture,
+        &fixture,
+    )?;
 
     Ok(())
 }
