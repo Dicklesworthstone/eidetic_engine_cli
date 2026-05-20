@@ -1249,6 +1249,57 @@ git push                # Push to remote
 
 <!-- end-bv-agent-instructions -->
 
+## ee doctor — Agent First-Aid Surface
+
+`ee doctor` is the canonical first stop for workspace health, repair planning,
+and agent-readable recovery guidance. Use it before falling back to manual
+playbooks whenever a local environment, workspace, index, graph, migration, or
+coordination problem might be diagnosable by the CLI.
+
+Agent-safe read-only surfaces:
+
+```bash
+ee doctor --json
+ee doctor --robot-triage --json
+ee doctor --robot-docs --json
+ee doctor --capabilities --json
+ee doctor --franken-health --json
+ee doctor --list-runs --json
+ee doctor --gc-plan 30 --json
+```
+
+Mutation and audit rules:
+
+- `ee doctor --fix-plan --json` is a dry-run planning surface. It reports
+  proposed repairs and blast radius; it must not write files.
+- `ee doctor --robot-docs --json` is the machine-readable index of currently
+  wired doctor flags. Prefer it over scraping `ee doctor --help`.
+- `ee doctor --robot-triage --json` ranks non-ok checks for agents. Use
+  `topActionable[]` as the short list before inspecting the full report.
+- `ee doctor --capabilities --json` declares supported operation kinds,
+  blast-radius classes, exit codes, and environment controls.
+- `ee doctor --list-runs --json` and `ee doctor --gc-plan <days> --json` are
+  read-only run-ledger inspection surfaces. `--gc-plan` emits candidates only;
+  it never deletes anything.
+- `ee doctor --diff <RUN_A> --diff <RUN_B> --json` compares two prior runs'
+  `state.json` payloads and emits `ee.doctor.run_diff.v1` with
+  `actionCountDelta`, `sameTargetSha`, `finishedAtTransition`, and
+  `statusTransition`. Read-only.
+- `ee doctor --fix --json` invokes the runtime chokepoint (lock,
+  `<workspace>/.doctor/runs/<run-id>/` allocation, `RunContext::finish`) and
+  emits `ee.doctor.fix_summary.v1`. Until the per-FM fixer dispatch table
+  lands (`bd-tu4s8`), this surface returns `actionCount: 0` and
+  `fixerDispatchPending: true`. Pair with `--undo <run-id>` to release the
+  run state.
+- `ee doctor --undo <run-id> --json` replays a prior doctor run's undo log
+  through `src/core/doctor_runtime::replay_undo`. Per RULE NUMBER 1, undo
+  never deletes files; files created by the original run are quarantined by
+  rename instead.
+- Any future doctor fixer that writes must route every byte through
+  `src/core/doctor_runtime::mutate`, with backup, before/after BLAKE3 hashes,
+  `actions.jsonl`, a run directory under `<workspace>/.doctor/runs/`, and a
+  blast-radius check. Direct writes outside that chokepoint are bugs.
+
 ## Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below.
