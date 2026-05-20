@@ -2,6 +2,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use asupersync::{Cx, Outcome};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use serde_json::json;
@@ -16,9 +17,11 @@ use crate::mesh::audit::{
 };
 use crate::mesh::foreground_cli::{
     MESH_CLI_EXPORT_SCHEMA_V1, MESH_CLI_IMPORT_SCHEMA_V1, MESH_CLI_SYNC_SCHEMA_V1,
-    MESH_EXPORT_ARTIFACT_SCHEMA_V1, MeshCliDegradation, MeshCliExportReport, MeshCliImportReport,
-    MeshCliPeersReport, MeshCliStatusReport, MeshCliSyncReport, MeshExportArtifact,
-    MeshForegroundSnapshot, MeshStorageCounts, foreground_degradations,
+    MESH_EXPORT_ARTIFACT_SCHEMA_V1, MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE, MeshCliDegradation,
+    MeshCliExportReport, MeshCliImportReport, MeshCliPeersReport, MeshCliStatusReport,
+    MeshCliSyncReport, MeshExportArtifact, MeshForegroundSnapshot, MeshStorageCounts,
+    MeshSyncSupervisorOptions, MeshSyncSupervisorReport, foreground_degradations,
+    run_mesh_sync_supervisor_supervised,
 };
 use crate::mesh::peer::{
     MeshPeerCapabilityProfile, MeshPeerCommandReport, MeshPeerEndpoint, MeshPeerEnrollInput,
@@ -298,6 +301,26 @@ pub struct MeshSyncArgs {
     /// Run exactly one foreground cycle and exit.
     #[arg(long = "once", action = ArgAction::SetTrue, required = true)]
     pub once: bool,
+
+    /// Desired background sync cadence in milliseconds, reported for daemon hot-mode handoff.
+    #[arg(long = "cadence-ms", default_value_t = 0)]
+    pub cadence_ms: u64,
+
+    /// Maximum peers the supervisor may schedule concurrently.
+    #[arg(long = "peer-concurrency", default_value_t = 1)]
+    pub peer_concurrency: u32,
+
+    /// Maximum body bytes the supervisor may fetch during this foreground sync cycle.
+    #[arg(long = "body-fetch-budget-bytes", default_value_t = 65_536)]
+    pub body_fetch_budget_bytes: u64,
+
+    /// Maximum stale-read window tolerated for peer summaries.
+    #[arg(long = "stale-read-window-ms", default_value_t = 5_000)]
+    pub stale_read_window_ms: u64,
+
+    /// Wall-clock budget for the supervised foreground sync cycle.
+    #[arg(long = "time-budget-ms", default_value_t = 5_000)]
+    pub time_budget_ms: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -919,14 +942,33 @@ where
         Ok(snapshot) => snapshot,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
+    let supervisor_options = MeshSyncSupervisorOptions {
+        cadence_ms: args.cadence_ms,
+        tick_limit: 1,
+        peer_concurrency: args.peer_concurrency,
+        body_fetch_budget_bytes: args.body_fetch_budget_bytes,
+        stale_read_window_ms: args.stale_read_window_ms,
+        time_budget_ms: args.time_budget_ms,
+    };
+    let supervisor =
+        run_mesh_sync_supervisor(&snapshot, &supervisor_options).unwrap_or_else(|message| {
+            MeshSyncSupervisorReport::runtime_error(&snapshot, &supervisor_options, &message)
+        });
     let mut degraded = snapshot.degraded.clone();
-    degraded.push(MeshCliDegradation::sync_once_network_deferred());
+    degraded.extend(supervisor.degraded.clone());
+    if !degraded
+        .iter()
+        .any(|item| item.code == MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE)
+    {
+        degraded.push(MeshCliDegradation::sync_once_network_deferred());
+    }
     let report = MeshCliSyncReport {
         schema: MESH_CLI_SYNC_SCHEMA_V1,
         command: "mesh sync",
         once: args.once,
         mode: snapshot.mode.clone(),
-        contacted_peers: false,
+        contacted_peers: supervisor.contacted_peers,
+        supervisor,
         export_command: format!(
             "ee mesh export --workspace \"{}\" --out mesh-export.json --json",
             snapshot.workspace_path
@@ -938,6 +980,36 @@ where
         degraded,
     };
     write_mesh_report(cli, &report, &render_mesh_sync_human(&report), stdout)
+}
+
+fn run_mesh_sync_supervisor(
+    snapshot: &MeshForegroundSnapshot,
+    options: &MeshSyncSupervisorOptions,
+) -> Result<MeshSyncSupervisorReport, String> {
+    let runtime = crate::core::build_cli_runtime()
+        .map_err(|error| format!("Failed to build Asupersync mesh supervisor runtime: {error}"))?;
+    let task_snapshot = snapshot.clone();
+    let task_options = options.clone();
+    let join = runtime
+        .handle()
+        .try_spawn(async move {
+            let Some(cx) = Cx::current() else {
+                return Outcome::Err(
+                    "Asupersync mesh supervisor task started without an ambient Cx".to_owned(),
+                );
+            };
+            run_mesh_sync_supervisor_supervised(&cx, &task_snapshot, &task_options).await
+        })
+        .map_err(|error| format!("Failed to spawn Asupersync mesh supervisor: {error}"))?;
+    match runtime.block_on(join) {
+        Outcome::Ok(report) => Ok(report),
+        Outcome::Err(message) => Err(message),
+        Outcome::Cancelled(reason) => Err(format!(
+            "Mesh sync supervisor cancelled: {}",
+            crate::core::outcome::cancel_message(&reason)
+        )),
+        Outcome::Panicked(payload) => Err(format!("Mesh sync supervisor panicked: {payload}")),
+    }
 }
 
 fn build_snapshot(
@@ -1519,8 +1591,17 @@ fn render_mesh_import_human(report: &MeshCliImportReport) -> String {
 
 fn render_mesh_sync_human(report: &MeshCliSyncReport) -> String {
     let mut output = format!(
-        "Mesh sync --once\n  Mode: {}\n  Contacted peers: no\n  Export fallback: {}\n  Import fallback: {}\n",
-        report.mode, report.export_command, report.import_command,
+        "Mesh sync --once\n  Mode: {}\n  Supervisor: {} ({})\n  Peer slots: {}/{}\n  Body budget: {} bytes\n  Stale-read window: {} ms\n  Contacted peers: {}\n  Export fallback: {}\n  Import fallback: {}\n",
+        report.mode,
+        report.supervisor.supervisor,
+        report.supervisor.health,
+        report.supervisor.active_peer_count,
+        report.supervisor.config.peer_concurrency,
+        report.supervisor.config.body_fetch_budget_bytes,
+        report.supervisor.config.stale_read_window_ms,
+        if report.contacted_peers { "yes" } else { "no" },
+        report.export_command,
+        report.import_command,
     );
     append_degradations(&mut output, &report.degraded);
     output

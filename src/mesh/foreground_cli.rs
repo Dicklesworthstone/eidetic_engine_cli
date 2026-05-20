@@ -4,6 +4,11 @@
 //! safe to use with mesh disabled, with no Tailscale installation, and against a
 //! workspace that has no mesh rows yet.
 
+use std::time::Duration;
+
+use asupersync::runtime::yield_now::yield_now;
+use asupersync::time::sleep as asupersync_sleep;
+use asupersync::{CancelReason, Cx, Outcome};
 use serde::{Deserialize, Serialize};
 
 use crate::db::{
@@ -25,6 +30,15 @@ pub const MESH_EXPORT_ARTIFACT_SCHEMA_V1: &str = "ee.mesh.foreground_export.v1";
 pub const MESH_WORKSPACE_UNINITIALIZED_CODE: &str = "mesh_workspace_uninitialized";
 pub const MESH_DISABLED_POSTURE_CODE: &str = "mesh_disabled";
 pub const MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE: &str = "mesh_sync_once_network_deferred";
+pub const MESH_SYNC_SUPERVISOR_BUDGET_EXHAUSTED_CODE: &str =
+    "mesh_sync_supervisor_budget_exhausted";
+pub const MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE: &str = "mesh_sync_supervisor_backpressure";
+pub const MESH_SYNC_SUPERVISOR_RUNTIME_ERROR_CODE: &str = "mesh_sync_supervisor_runtime_error";
+
+const MESH_SYNC_SUPERVISOR_SCHEMA_V1: &str = "ee.mesh.sync_supervisor.v1";
+const MAX_MESH_SYNC_SUPERVISOR_TICKS: u32 = 64;
+const MAX_MESH_SYNC_SUPERVISOR_CADENCE_MS: u64 = 300_000;
+const MESH_SYNC_SUPERVISOR_SLEEP_SLICE_MS: u64 = 250;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,6 +82,44 @@ impl MeshCliDegradation {
             message: "Foreground sync --once did not contact peers because SRR6.7 anti-entropy transport is not implemented yet."
                 .to_owned(),
             repair: "Use `ee mesh export --out <file>` and `ee mesh import --file <file>` for local file exchange until peer sync lands."
+                .to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn sync_supervisor_budget_exhausted(resource: &str, limit: impl std::fmt::Display) -> Self {
+        Self {
+            code: MESH_SYNC_SUPERVISOR_BUDGET_EXHAUSTED_CODE,
+            severity: "warning",
+            message: format!(
+                "Mesh sync supervisor exhausted the {resource} budget before peer contact."
+            ),
+            repair: format!(
+                "Raise the {resource} budget above {limit} or reduce mesh peer fan-out for this sync run."
+            ),
+        }
+    }
+
+    #[must_use]
+    pub fn sync_supervisor_backpressure(active_peers: usize, peer_concurrency: u32) -> Self {
+        Self {
+            code: MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE,
+            severity: "info",
+            message: format!(
+                "Mesh sync supervisor limited {active_peers} active peers to {peer_concurrency} concurrent peer slots."
+            ),
+            repair: "Increase --peer-concurrency only if the current host has enough network and body-fetch budget."
+                .to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn sync_supervisor_runtime_error(message: &str) -> Self {
+        Self {
+            code: MESH_SYNC_SUPERVISOR_RUNTIME_ERROR_CODE,
+            severity: "warning",
+            message: format!("Mesh sync supervisor did not start: {message}"),
+            repair: "Retry after the Asupersync runtime is healthy; foreground export/import remains available."
                 .to_owned(),
         }
     }
@@ -292,9 +344,341 @@ pub struct MeshCliSyncReport {
     pub once: bool,
     pub mode: String,
     pub contacted_peers: bool,
+    pub supervisor: MeshSyncSupervisorReport,
     pub export_command: String,
     pub import_command: String,
     pub degraded: Vec<MeshCliDegradation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshSyncSupervisorOptions {
+    pub cadence_ms: u64,
+    pub tick_limit: u32,
+    pub peer_concurrency: u32,
+    pub body_fetch_budget_bytes: u64,
+    pub stale_read_window_ms: u64,
+    pub time_budget_ms: u64,
+}
+
+impl Default for MeshSyncSupervisorOptions {
+    fn default() -> Self {
+        Self {
+            cadence_ms: 0,
+            tick_limit: 1,
+            peer_concurrency: 1,
+            body_fetch_budget_bytes: 64 * 1024,
+            stale_read_window_ms: 5_000,
+            time_budget_ms: 5_000,
+        }
+    }
+}
+
+impl MeshSyncSupervisorOptions {
+    #[must_use]
+    pub fn config(&self) -> MeshSyncSupervisorConfig {
+        MeshSyncSupervisorConfig {
+            cadence_ms: self.cadence_ms,
+            tick_limit: self.tick_limit,
+            peer_concurrency: self.peer_concurrency,
+            body_fetch_budget_bytes: self.body_fetch_budget_bytes,
+            stale_read_window_ms: self.stale_read_window_ms,
+            time_budget_ms: self.time_budget_ms,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshSyncSupervisorConfig {
+    pub cadence_ms: u64,
+    pub tick_limit: u32,
+    pub peer_concurrency: u32,
+    pub body_fetch_budget_bytes: u64,
+    pub stale_read_window_ms: u64,
+    pub time_budget_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshSyncBudgetStatus {
+    pub time_budget_ms: u64,
+    pub body_fetch_budget_bytes: u64,
+    pub exhausted: bool,
+    pub exhausted_resource: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshSyncBackpressureStatus {
+    pub active_peer_count: usize,
+    pub peer_concurrency: u32,
+    pub queued_peer_count: usize,
+    pub backpressured: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshSyncSupervisorTickReport {
+    pub tick: u32,
+    pub health: String,
+    pub contacted_peers: bool,
+    pub anti_entropy_summary_count: usize,
+    pub replay_path: String,
+    pub imported_event_count: u32,
+    pub degraded: Vec<MeshCliDegradation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshSyncSupervisorReport {
+    pub schema: &'static str,
+    pub supervisor: &'static str,
+    pub health: String,
+    pub mode: String,
+    pub daemonized: bool,
+    pub config: MeshSyncSupervisorConfig,
+    pub peer_count: usize,
+    pub active_peer_count: usize,
+    pub contacted_peers: bool,
+    pub local_commands_blocked: bool,
+    pub budget: MeshSyncBudgetStatus,
+    pub backpressure: MeshSyncBackpressureStatus,
+    pub ticks: Vec<MeshSyncSupervisorTickReport>,
+    pub degraded: Vec<MeshCliDegradation>,
+}
+
+impl MeshSyncSupervisorReport {
+    #[must_use]
+    pub fn runtime_error(
+        snapshot: &MeshForegroundSnapshot,
+        options: &MeshSyncSupervisorOptions,
+        message: &str,
+    ) -> Self {
+        let degraded = vec![MeshCliDegradation::sync_supervisor_runtime_error(message)];
+        Self {
+            schema: MESH_SYNC_SUPERVISOR_SCHEMA_V1,
+            supervisor: "asupersync_foreground",
+            health: "runtime_error".to_owned(),
+            mode: snapshot.mode.clone(),
+            daemonized: false,
+            config: options.config(),
+            peer_count: snapshot.peers.len(),
+            active_peer_count: active_peer_count(snapshot),
+            contacted_peers: false,
+            local_commands_blocked: false,
+            budget: MeshSyncBudgetStatus {
+                time_budget_ms: options.time_budget_ms,
+                body_fetch_budget_bytes: options.body_fetch_budget_bytes,
+                exhausted: false,
+                exhausted_resource: None,
+            },
+            backpressure: backpressure_status(snapshot, options),
+            ticks: Vec::new(),
+            degraded,
+        }
+    }
+}
+
+pub async fn run_mesh_sync_supervisor_supervised(
+    cx: &Cx,
+    snapshot: &MeshForegroundSnapshot,
+    options: &MeshSyncSupervisorOptions,
+) -> Outcome<MeshSyncSupervisorReport, String> {
+    if let Err(message) = validate_mesh_sync_supervisor_options(options) {
+        return Outcome::Err(message);
+    }
+    if let Some(cancelled) = mesh_sync_checkpoint(cx) {
+        return cancelled;
+    }
+
+    let active_peer_count = active_peer_count(snapshot);
+    let peer_count = snapshot.peers.len();
+    let backpressure = backpressure_status(snapshot, options);
+    let budget = budget_status(active_peer_count, options);
+    let mut degraded = mesh_sync_supervisor_degradations(&budget, &backpressure);
+    let tick_capacity = match usize::try_from(options.tick_limit) {
+        Ok(capacity) => capacity,
+        Err(_) => {
+            return Outcome::Err(
+                "Mesh sync supervisor tick limit does not fit this platform".to_owned(),
+            );
+        }
+    };
+    let mut ticks = Vec::with_capacity(tick_capacity);
+
+    for tick in 1..=options.tick_limit {
+        if let Some(cancelled) = mesh_sync_checkpoint(cx) {
+            return cancelled;
+        }
+        ticks.push(MeshSyncSupervisorTickReport {
+            tick,
+            health: supervisor_health(&budget, &backpressure).to_owned(),
+            contacted_peers: false,
+            anti_entropy_summary_count: snapshot.cursors.len(),
+            replay_path: "mesh_import_replay".to_owned(),
+            imported_event_count: snapshot.storage.imported_event_count,
+            degraded: degraded.clone(),
+        });
+
+        if tick < options.tick_limit {
+            if let Some(cancelled) =
+                sleep_mesh_sync_supervisor_interval(cx, options.cadence_ms).await
+            {
+                return cancelled;
+            }
+        }
+    }
+
+    if snapshot.mesh_enabled {
+        degraded.push(MeshCliDegradation::sync_once_network_deferred());
+    }
+
+    Outcome::Ok(MeshSyncSupervisorReport {
+        schema: MESH_SYNC_SUPERVISOR_SCHEMA_V1,
+        supervisor: "asupersync_foreground",
+        health: supervisor_health(&budget, &backpressure).to_owned(),
+        mode: snapshot.mode.clone(),
+        daemonized: false,
+        config: options.config(),
+        peer_count,
+        active_peer_count,
+        contacted_peers: false,
+        local_commands_blocked: false,
+        budget,
+        backpressure,
+        ticks,
+        degraded,
+    })
+}
+
+fn validate_mesh_sync_supervisor_options(
+    options: &MeshSyncSupervisorOptions,
+) -> Result<(), String> {
+    if options.tick_limit == 0 {
+        return Err("Mesh sync supervisor tick limit must be at least one".to_owned());
+    }
+    if options.tick_limit > MAX_MESH_SYNC_SUPERVISOR_TICKS {
+        return Err(format!(
+            "Mesh sync supervisor tick limit must be no greater than {MAX_MESH_SYNC_SUPERVISOR_TICKS}"
+        ));
+    }
+    if options.cadence_ms > MAX_MESH_SYNC_SUPERVISOR_CADENCE_MS {
+        return Err(format!(
+            "Mesh sync supervisor cadence must be no greater than {MAX_MESH_SYNC_SUPERVISOR_CADENCE_MS} ms"
+        ));
+    }
+    Ok(())
+}
+
+fn mesh_sync_checkpoint<T>(cx: &Cx) -> Option<Outcome<T, String>> {
+    if cx.checkpoint().is_ok() {
+        return None;
+    }
+    Some(Outcome::Cancelled(
+        cx.cancel_reason()
+            .unwrap_or_else(CancelReason::parent_cancelled),
+    ))
+}
+
+async fn sleep_mesh_sync_supervisor_interval(
+    cx: &Cx,
+    cadence_ms: u64,
+) -> Option<Outcome<MeshSyncSupervisorReport, String>> {
+    if let Some(cancelled) = mesh_sync_checkpoint(cx) {
+        return Some(cancelled);
+    }
+    if cadence_ms == 0 {
+        yield_now().await;
+        return mesh_sync_checkpoint(cx);
+    }
+
+    let mut remaining_ms = cadence_ms;
+    while remaining_ms > 0 {
+        if let Some(cancelled) = mesh_sync_checkpoint(cx) {
+            return Some(cancelled);
+        }
+        let slice_ms = remaining_ms.min(MESH_SYNC_SUPERVISOR_SLEEP_SLICE_MS);
+        asupersync_sleep(cx.now(), Duration::from_millis(slice_ms)).await;
+        remaining_ms = remaining_ms.saturating_sub(slice_ms);
+    }
+    mesh_sync_checkpoint(cx)
+}
+
+fn active_peer_count(snapshot: &MeshForegroundSnapshot) -> usize {
+    snapshot.peers.iter().filter(|peer| peer.enabled).count()
+}
+
+fn backpressure_status(
+    snapshot: &MeshForegroundSnapshot,
+    options: &MeshSyncSupervisorOptions,
+) -> MeshSyncBackpressureStatus {
+    let active_peer_count = active_peer_count(snapshot);
+    let concurrency = usize::try_from(options.peer_concurrency).unwrap_or(usize::MAX);
+    let queued_peer_count = active_peer_count.saturating_sub(concurrency);
+    MeshSyncBackpressureStatus {
+        active_peer_count,
+        peer_concurrency: options.peer_concurrency,
+        queued_peer_count,
+        backpressured: queued_peer_count > 0,
+    }
+}
+
+fn budget_status(
+    active_peer_count: usize,
+    options: &MeshSyncSupervisorOptions,
+) -> MeshSyncBudgetStatus {
+    let exhausted_resource = if options.time_budget_ms == 0 {
+        Some("time".to_owned())
+    } else if active_peer_count > 0 && options.peer_concurrency == 0 {
+        Some("peerConcurrency".to_owned())
+    } else if active_peer_count > 0 && options.body_fetch_budget_bytes == 0 {
+        Some("bodyFetch".to_owned())
+    } else {
+        None
+    };
+    MeshSyncBudgetStatus {
+        time_budget_ms: options.time_budget_ms,
+        body_fetch_budget_bytes: options.body_fetch_budget_bytes,
+        exhausted: exhausted_resource.is_some(),
+        exhausted_resource,
+    }
+}
+
+fn mesh_sync_supervisor_degradations(
+    budget: &MeshSyncBudgetStatus,
+    backpressure: &MeshSyncBackpressureStatus,
+) -> Vec<MeshCliDegradation> {
+    let mut degraded = Vec::new();
+    if let Some(resource) = budget.exhausted_resource.as_deref() {
+        degraded.push(MeshCliDegradation::sync_supervisor_budget_exhausted(
+            resource,
+            match resource {
+                "time" => budget.time_budget_ms,
+                "bodyFetch" => budget.body_fetch_budget_bytes,
+                _ => u64::from(backpressure.peer_concurrency),
+            },
+        ));
+    }
+    if backpressure.backpressured {
+        degraded.push(MeshCliDegradation::sync_supervisor_backpressure(
+            backpressure.active_peer_count,
+            backpressure.peer_concurrency,
+        ));
+    }
+    degraded
+}
+
+fn supervisor_health(
+    budget: &MeshSyncBudgetStatus,
+    backpressure: &MeshSyncBackpressureStatus,
+) -> &'static str {
+    if budget.exhausted {
+        "budget_exhausted"
+    } else if backpressure.backpressured {
+        "backpressured"
+    } else {
+        "deferred"
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -734,9 +1118,16 @@ pub fn foreground_degradations(
 #[cfg(test)]
 mod tests {
     use super::{
-        MESH_EXPORT_ARTIFACT_SCHEMA_V1, MESH_WORKSPACE_UNINITIALIZED_CODE, MeshCliDegradation,
-        MeshForegroundSnapshot, MeshStorageCounts,
+        MESH_EXPORT_ARTIFACT_SCHEMA_V1, MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE,
+        MESH_SYNC_SUPERVISOR_BUDGET_EXHAUSTED_CODE, MESH_WORKSPACE_UNINITIALIZED_CODE,
+        MeshCliDegradation, MeshForegroundSnapshot, MeshPeerRow, MeshStorageCounts,
+        MeshSyncSupervisorOptions, run_mesh_sync_supervisor_supervised,
     };
+    use asupersync::runtime::JoinError;
+    use asupersync::{Budget, CancelReason, Cx, LabConfig, LabRuntime, Outcome};
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    type TestResult = Result<(), String>;
 
     #[test]
     fn status_posture_is_disabled_local_only_when_initialized_but_disabled() {
@@ -793,5 +1184,190 @@ mod tests {
         let degraded = MeshCliDegradation::workspace_uninitialized("/tmp/ee");
         assert_eq!(degraded.code, MESH_WORKSPACE_UNINITIALIZED_CODE);
         assert!(degraded.repair.contains("ee init --workspace"));
+    }
+
+    #[test]
+    fn sync_supervisor_lab_runtime_reports_backpressure() -> TestResult {
+        let snapshot = sample_snapshot(vec![
+            sample_peer("peer-a", true),
+            sample_peer("peer-b", true),
+        ]);
+        let options = MeshSyncSupervisorOptions {
+            peer_concurrency: 1,
+            ..MeshSyncSupervisorOptions::default()
+        };
+
+        let report = run_supervisor_in_lab(snapshot, options, 610)?;
+
+        assert_eq!(report.supervisor, "asupersync_foreground");
+        assert_eq!(report.health, "backpressured");
+        assert_eq!(report.backpressure.queued_peer_count, 1);
+        assert!(!report.contacted_peers);
+        assert!(!report.local_commands_blocked);
+        assert_eq!(report.ticks.len(), 1);
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|item| item.code == MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sync_supervisor_budget_exhaustion_is_mesh_specific() -> TestResult {
+        let snapshot = sample_snapshot(vec![sample_peer("peer-a", true)]);
+        let options = MeshSyncSupervisorOptions {
+            body_fetch_budget_bytes: 0,
+            ..MeshSyncSupervisorOptions::default()
+        };
+
+        let report = run_supervisor_in_lab(snapshot, options, 611)?;
+
+        assert_eq!(report.health, "budget_exhausted");
+        assert_eq!(
+            report.budget.exhausted_resource.as_deref(),
+            Some("bodyFetch")
+        );
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|item| item.code == MESH_SYNC_SUPERVISOR_BUDGET_EXHAUSTED_CODE)
+        );
+        assert_eq!(report.ticks[0].replay_path, "mesh_import_replay");
+        Ok(())
+    }
+
+    #[test]
+    fn sync_supervisor_observes_lab_runtime_cancellation() -> TestResult {
+        let mut lab = LabRuntime::new(LabConfig::new(612));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let snapshot = sample_snapshot(Vec::new());
+        let options = MeshSyncSupervisorOptions {
+            cadence_ms: 1_000,
+            tick_limit: 2,
+            ..MeshSyncSupervisorOptions::default()
+        };
+        let observed_cx: Arc<StdMutex<Option<Cx>>> = Arc::new(StdMutex::new(None));
+        let observed_cx_for_task = Arc::clone(&observed_cx);
+
+        let (task_id, mut handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let Some(cx) = Cx::current() else {
+                    return Outcome::Err("LabRuntime task should install Cx".to_owned());
+                };
+                {
+                    let Ok(mut slot) = observed_cx_for_task.lock() else {
+                        return Outcome::Err("mesh cancellation Cx slot poisoned".to_owned());
+                    };
+                    *slot = Some(cx.clone());
+                }
+                run_mesh_sync_supervisor_supervised(&cx, &snapshot, &options).await
+            })
+            .map_err(|error| error.to_string())?;
+        lab.scheduler.lock().schedule(task_id, 0);
+        lab.run_until_idle();
+        assert!(!handle.is_finished());
+
+        let reason = CancelReason::user("mesh sync cancellation test");
+        for (cancelled_task, priority) in lab.state.cancel_request(root, &reason, None) {
+            lab.scheduler.lock().schedule(cancelled_task, priority);
+        }
+        lab.scheduler.lock().schedule(task_id, 0);
+        lab.advance_time(1_000_000_000);
+        lab.run_until_quiescent();
+
+        let cancellation_reason = match handle.try_join() {
+            Ok(Some(Outcome::Cancelled(reason))) => reason,
+            Err(JoinError::Cancelled(reason))
+                if reason.message.as_deref() == Some("join channel closed") =>
+            {
+                observed_cx
+                    .lock()
+                    .map_err(|_| "mesh cancellation Cx slot poisoned".to_owned())?
+                    .as_ref()
+                    .and_then(Cx::cancel_reason)
+                    .ok_or_else(|| "mesh cancellation reason missing from Cx".to_owned())?
+            }
+            Err(JoinError::Cancelled(reason)) => reason,
+            Ok(Some(other)) => {
+                return Err(format!(
+                    "mesh cancellation outcome was not cancelled: {other:?}"
+                ));
+            }
+            Ok(None) => return Err("mesh cancellation task did not finish".to_owned()),
+            Err(error) => return Err(format!("mesh cancellation join failed: {error}")),
+        };
+        assert_eq!(
+            cancellation_reason.message.as_deref(),
+            Some("mesh sync cancellation test")
+        );
+        Ok(())
+    }
+
+    fn run_supervisor_in_lab(
+        snapshot: MeshForegroundSnapshot,
+        options: MeshSyncSupervisorOptions,
+        seed: u64,
+    ) -> Result<super::MeshSyncSupervisorReport, String> {
+        let mut lab = LabRuntime::new(LabConfig::new(seed));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task_id, mut handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let Some(cx) = Cx::current() else {
+                    return Outcome::Err("LabRuntime task should install Cx".to_owned());
+                };
+                run_mesh_sync_supervisor_supervised(&cx, &snapshot, &options).await
+            })
+            .map_err(|error| error.to_string())?;
+        lab.scheduler.lock().schedule(task_id, 0);
+        lab.run_until_quiescent();
+
+        match handle
+            .try_join()
+            .map_err(|error| format!("mesh supervisor lab join failed: {error}"))?
+            .ok_or_else(|| "mesh supervisor lab task did not finish".to_owned())?
+        {
+            Outcome::Ok(report) => Ok(report),
+            other => Err(format!("mesh supervisor lab outcome was not ok: {other:?}")),
+        }
+    }
+
+    fn sample_snapshot(peers: Vec<MeshPeerRow>) -> MeshForegroundSnapshot {
+        MeshForegroundSnapshot {
+            workspace_id: "wsp_test".to_owned(),
+            workspace_path: "/tmp/ee".to_owned(),
+            database_path: "/tmp/ee/.ee/ee.db".to_owned(),
+            initialized: true,
+            mesh_enabled: true,
+            mode: "cache".to_owned(),
+            storage: MeshStorageCounts {
+                peer_count: peers.len() as u32,
+                cursor_count: 0,
+                imported_event_count: 3,
+                policy_decision_event_count: 0,
+                policy_failure_event_count: 0,
+                mapped_memory_count: 0,
+                cached_body_count: 0,
+            },
+            peers,
+            cursors: Vec::new(),
+            events: Vec::new(),
+            degraded: Vec::new(),
+        }
+    }
+
+    fn sample_peer(peer_id: &str, enabled: bool) -> MeshPeerRow {
+        MeshPeerRow {
+            peer_id: peer_id.to_owned(),
+            origin_node_id: format!("{peer_id}-origin"),
+            display_name: Some(peer_id.to_owned()),
+            enabled,
+            last_seen_at: "2026-05-20T00:00:00Z".to_owned(),
+            policy_summary_json: None,
+        }
     }
 }
