@@ -2460,6 +2460,29 @@ fn add_swarm_brief_summary_to_resume(report: &mut ResumeReport, summary: &serde_
         .get("unverifiableCount")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
+    let symbol_risk = summary
+        .get("symbolRiskSummary")
+        .unwrap_or(&serde_json::Value::Null);
+    let symbol_risk_status = symbol_risk
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let symbol_risk_dirty_paths = symbol_risk
+        .get("dirtyPathCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let symbol_risk_high_risk = symbol_risk
+        .get("highRiskSymbolCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let symbol_risk_linked_evidence = symbol_risk
+        .get("linkedEvidenceCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let symbol_risk_agent_activity = symbol_risk
+        .get("recentAgentActivityCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
     let evidence_id = swarm_brief_summary_evidence_id(summary);
     let mut posture = format!(
         "Embedded swarm brief summary: ready={ready}, blocked={blocked}, active_conflicts={conflicts}, resource_pressure={pressure}, degraded_sources={degraded}; diagnostic_not_live=true."
@@ -2468,6 +2491,17 @@ fn add_swarm_brief_summary_to_resume(report: &mut ResumeReport, summary: &serde_
         posture.push('\n');
         posture.push_str(&format!(
             "Embedded memory drift posture: status={memory_drift_status}, affected={memory_drift_affected}, changed={memory_drift_changed}, missing_source={memory_drift_missing}, unverifiable={memory_drift_unverifiable}; source=swarm_brief_summary; raw_sources_included=false."
+        ));
+    }
+    if symbol_risk_status != "unknown"
+        && symbol_risk_status != "not_collected"
+        && (symbol_risk_dirty_paths > 0
+            || symbol_risk_high_risk > 0
+            || symbol_risk_linked_evidence > 0)
+    {
+        posture.push('\n');
+        posture.push_str(&format!(
+            "Embedded symbol-risk posture: status={symbol_risk_status}, dirty_paths={symbol_risk_dirty_paths}, high_risk_symbols={symbol_risk_high_risk}, linked_evidence={symbol_risk_linked_evidence}, recent_agent_activity={symbol_risk_agent_activity}; source=swarm_brief_summary; raw_symbol_names_included=false."
         ));
     }
     report.status_summary = Some(match report.status_summary.take() {
@@ -2495,6 +2529,18 @@ fn add_swarm_brief_summary_to_resume(report: &mut ResumeReport, summary: &serde_
                 "Embedded drift posture is redacted handoff context, not a live source check.",
             )
             .with_command("ee memory drift --mode recent-pack-items --json"),
+        );
+    }
+    if symbol_risk_status != "unknown"
+        && symbol_risk_status != "not_collected"
+        && symbol_risk_high_risk > 0
+    {
+        report.next_actions.push(
+            NextAction::new(2, "Review high-risk symbols before resuming code edits.")
+                .with_reason(
+                    "Embedded symbol-risk posture is redacted handoff context, not a live source check.",
+                )
+                .with_command("ee swarm brief --json"),
         );
     }
 
@@ -5458,6 +5504,76 @@ memories_revised = 3
                 format!("memory drift handoff status leaked forbidden text {forbidden:?}"),
             )?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn resume_handoff_surfaces_symbol_risk_posture_from_swarm_brief() -> TestResult {
+        let summary = serde_json::json!({
+            "schema": "ee.support_bundle.swarm_brief_summary.v1",
+            "reportHash": "blake3:abcdef1234567890",
+            "resourcePressurePosture": "low",
+            "counts": {
+                "readyWorkCount": 1,
+                "blockedWorkCount": 0,
+                "activeConflictCount": 0,
+                "degradedCount": 0
+            },
+            "degradedCodes": [],
+            "symbolRiskSummary": {
+                "schema": "ee.workspace_hygiene.symbol_risk.v1",
+                "status": "available",
+                "dirtyPathCount": 1,
+                "summarizedPathCount": 1,
+                "omittedPathCount": 0,
+                "touchedSymbolCount": 2,
+                "highRiskSymbolCount": 1,
+                "linkedEvidenceCount": 1,
+                "recentAgentActivityCount": 1,
+                "topPaths": [{
+                    "pathHash": "blake3:pathhash",
+                    "symbols": [{
+                        "symbolIdHash": "blake3:symbolhash",
+                        "canonicalNameHash": "blake3:namehash",
+                        "kind": "function",
+                        "publicSurface": true
+                    }],
+                    "rawPathIncluded": false,
+                    "rawSymbolNamesIncluded": false,
+                    "rawAgentNamesIncluded": false
+                }],
+                "rawPathsIncluded": false,
+                "rawSymbolNamesIncluded": false,
+                "rawAgentNamesIncluded": false
+            }
+        });
+        let mut report =
+            ResumeReport::new("hcap_symbol_risk".to_owned(), PathBuf::from("handoff.json"));
+
+        add_swarm_brief_summary_to_resume(&mut report, &summary);
+
+        let status = report
+            .status_summary
+            .as_deref()
+            .ok_or_else(|| "resume status summary missing".to_owned())?;
+        ensure(
+            status.contains("Embedded symbol-risk posture: status=available"),
+            "resume status includes symbol-risk posture",
+        )?;
+        ensure(
+            status.contains("dirty_paths=1")
+                && status.contains("high_risk_symbols=1")
+                && status.contains("linked_evidence=1")
+                && status.contains("raw_symbol_names_included=false"),
+            "resume status includes compact redaction-safe symbol-risk counts",
+        )?;
+        ensure(
+            report
+                .next_actions
+                .iter()
+                .any(|action| action.description.contains("Review high-risk symbols")),
+            "resume should tell agents to review high-risk symbols before edits",
+        )?;
         Ok(())
     }
 

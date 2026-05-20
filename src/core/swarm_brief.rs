@@ -2304,6 +2304,8 @@ pub fn summarize_swarm_brief_report(report: &SwarmBriefReport) -> Value {
             "memoryDriftTopAffectedCount": report.memory_drift.as_ref().map_or(0, |summary| summary.top_affected_memory_ids.len() as u32),
             "degradedCount": report.degraded.len(),
             "recommendationCount": report.recommendations.len(),
+            "symbolRiskPathCount": report.workspace_hygiene.as_ref().and_then(|summary| summary.symbol_risk_summary.as_ref()).map_or(0, |summary| summary.summarized_path_count),
+            "symbolRiskHighRiskSymbolCount": report.workspace_hygiene.as_ref().and_then(|summary| summary.symbol_risk_summary.as_ref()).map_or(0, |summary| summary.high_risk_symbol_count),
         },
         "bv": {
             "actionableCount": report.bv.as_ref().and_then(|summary| summary.actionable_count),
@@ -2322,6 +2324,7 @@ pub fn summarize_swarm_brief_report(report: &SwarmBriefReport) -> Value {
         "singleFlight": singleflight_posture_report(),
         "degradedCodes": degraded_codes,
         "fileSurfaceRiskSummary": swarm_brief_file_surface_risk_summary(report),
+        "symbolRiskSummary": swarm_brief_symbol_risk_summary(report),
         "topRecommendations": swarm_brief_summary_recommendations(report),
         "provenance": {
             "underlyingReportHash": report_hash,
@@ -2334,6 +2337,8 @@ pub fn summarize_swarm_brief_report(report: &SwarmBriefReport) -> Value {
             "rawQueryTextIncluded": false,
             "rawProvenanceTextIncluded": false,
             "fullFileListingsIncluded": false,
+            "rawSymbolNamesIncluded": false,
+            "rawAgentNamesIncluded": false,
             "recommendationEvidenceIncluded": "hashes_only",
         },
     })
@@ -2428,6 +2433,27 @@ pub fn render_swarm_brief_summary_for_handoff(summary: &Value) -> String {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let symbol_risk = summary.get("symbolRiskSummary").unwrap_or(&Value::Null);
+    let symbol_risk_status = symbol_risk
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let symbol_risk_dirty_paths = symbol_risk
+        .get("dirtyPathCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let symbol_risk_high_risk = symbol_risk
+        .get("highRiskSymbolCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let symbol_risk_linked_evidence = symbol_risk
+        .get("linkedEvidenceCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let symbol_risk_agent_activity = symbol_risk
+        .get("recentAgentActivityCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
 
     let mut lines = vec![
         format!(
@@ -2449,6 +2475,16 @@ pub fn render_swarm_brief_summary_for_handoff(summary: &Value) -> String {
     if memory_drift_status != "unknown" && memory_drift_affected > 0 {
         lines.push(format!(
             "Memory drift posture: status={memory_drift_status}, affected={memory_drift_affected}, changed={memory_drift_changed}, missing_source={memory_drift_missing}, unverifiable={memory_drift_unverifiable}."
+        ));
+    }
+    if symbol_risk_status != "unknown"
+        && symbol_risk_status != "not_collected"
+        && (symbol_risk_dirty_paths > 0
+            || symbol_risk_high_risk > 0
+            || symbol_risk_linked_evidence > 0)
+    {
+        lines.push(format!(
+            "Symbol-risk posture: status={symbol_risk_status}, dirty_paths={symbol_risk_dirty_paths}, high_risk_symbols={symbol_risk_high_risk}, linked_evidence={symbol_risk_linked_evidence}, recent_agent_activity={symbol_risk_agent_activity}, raw_symbol_names_included=false."
         ));
     }
     lines.join("\n")
@@ -2671,6 +2707,74 @@ fn swarm_brief_file_surface_risk_summary(report: &SwarmBriefReport) -> Value {
                 })
             })
             .collect::<Vec<_>>(),
+    })
+}
+
+fn swarm_brief_symbol_risk_summary(report: &SwarmBriefReport) -> Value {
+    let Some(symbol_risk) = report
+        .workspace_hygiene
+        .as_ref()
+        .and_then(|summary| summary.symbol_risk_summary.as_ref())
+    else {
+        return json!({
+            "schema": "ee.support_bundle.symbol_risk_summary.v1",
+            "status": "not_collected",
+            "dirtyPathCount": 0,
+            "summarizedPathCount": 0,
+            "omittedPathCount": 0,
+            "touchedSymbolCount": 0,
+            "highRiskSymbolCount": 0,
+            "linkedEvidenceCount": 0,
+            "recentAgentActivityCount": 0,
+            "topPaths": [],
+            "degradedCodes": [],
+            "rawPathsIncluded": false,
+            "rawSymbolNamesIncluded": false,
+            "rawAgentNamesIncluded": false,
+        });
+    };
+
+    json!({
+        "schema": symbol_risk.schema,
+        "status": symbol_risk.status,
+        "dirtyPathCount": symbol_risk.dirty_path_count,
+        "summarizedPathCount": symbol_risk.summarized_path_count,
+        "omittedPathCount": symbol_risk.omitted_path_count,
+        "touchedSymbolCount": symbol_risk.touched_symbol_count,
+        "highRiskSymbolCount": symbol_risk.high_risk_symbol_count,
+        "linkedEvidenceCount": symbol_risk.linked_evidence_count,
+        "recentAgentActivityCount": symbol_risk.recent_agent_activity_count,
+        "topPaths": symbol_risk.paths.iter().take(MAX_SWARM_BRIEF_SUMMARY_RECOMMENDATIONS).map(|path| {
+            json!({
+                "pathHash": &path.path_hash,
+                "symbolCount": path.symbol_count,
+                "highRiskSymbolCount": path.high_risk_symbol_count,
+                "linkedEvidenceCount": path.linked_evidence_count,
+                "recentAgentActivityCount": path.recent_agent_activity_count,
+                "agentNameHashes": &path.agent_name_hashes,
+                "evidenceSourceKinds": &path.evidence_source_kinds,
+                "symbols": path.symbols.iter().take(5).map(|symbol| {
+                    json!({
+                        "symbolIdHash": &symbol.symbol_id_hash,
+                        "canonicalNameHash": &symbol.canonical_name_hash,
+                        "kind": symbol.kind,
+                        "visibility": symbol.visibility,
+                        "publicSurface": symbol.public_surface,
+                        "startLine": symbol.start_line,
+                        "endLine": symbol.end_line,
+                        "linkedEvidenceCount": symbol.linked_evidence_count,
+                        "evidenceSourceKinds": &symbol.evidence_source_kinds,
+                    })
+                }).collect::<Vec<_>>(),
+                "rawPathIncluded": false,
+                "rawSymbolNamesIncluded": false,
+                "rawAgentNamesIncluded": false,
+            })
+        }).collect::<Vec<_>>(),
+        "degradedCodes": &symbol_risk.degraded_codes,
+        "rawPathsIncluded": false,
+        "rawSymbolNamesIncluded": false,
+        "rawAgentNamesIncluded": false,
     })
 }
 
@@ -6456,6 +6560,96 @@ mod tests {
         assert_eq!(
             summary.pointer("/memoryDrift/rawCommandBodiesIncluded"),
             Some(&json!(false))
+        );
+    }
+
+    #[test]
+    fn summary_and_handoff_text_surface_symbol_risk_without_raw_names() {
+        let mut report = report_with_ready_sources();
+        report.workspace_hygiene =
+            Some(crate::core::workspace::WorkspaceHygieneSwarmBriefSummary {
+                schema: crate::core::workspace::WORKSPACE_HYGIENE_SWARM_BRIEF_SUMMARY_SCHEMA_V1,
+                status: "available",
+                dirty_path_count: 1,
+                bucket_counts: Vec::new(),
+                kind_counts: Vec::new(),
+                needs_human_review_top: Vec::new(),
+                needs_human_review_total: 0,
+                needs_human_review_truncated: false,
+                coordination_blocker_count: 0,
+                coordination_blocker_patterns: Vec::new(),
+                beads_state_status: "beads_clean",
+                command_hint: crate::core::workspace::WORKSPACE_HYGIENE_SWARM_BRIEF_COMMAND_HINT,
+                degraded_codes: Vec::new(),
+                symbol_risk_summary: Some(
+                    crate::core::workspace::WorkspaceHygieneSymbolRiskSummary {
+                        schema: crate::core::workspace::WORKSPACE_HYGIENE_SYMBOL_RISK_SCHEMA_V1,
+                        status: "available",
+                        dirty_path_count: 1,
+                        summarized_path_count: 1,
+                        omitted_path_count: 0,
+                        touched_symbol_count: 1,
+                        high_risk_symbol_count: 1,
+                        linked_evidence_count: 1,
+                        recent_agent_activity_count: 1,
+                        paths: vec![crate::core::workspace::WorkspaceHygieneSymbolRiskPath {
+                            path: "src/core/private_symbol.rs".to_owned(),
+                            path_hash: blake3_summary_hash("src/core/private_symbol.rs"),
+                            symbol_count: 1,
+                            high_risk_symbol_count: 1,
+                            linked_evidence_count: 1,
+                            recent_agent_activity_count: 1,
+                            symbols: vec![
+                                crate::core::workspace::WorkspaceHygieneSymbolRiskSymbol {
+                                    symbol_id_hash: blake3_summary_hash("sym_private_symbol"),
+                                    canonical_name_hash: blake3_summary_hash("private_symbol"),
+                                    kind: "function",
+                                    visibility: "public",
+                                    public_surface: true,
+                                    start_line: 7,
+                                    end_line: 9,
+                                    linked_evidence_count: 1,
+                                    evidence_source_kinds: vec!["failure".to_owned()],
+                                },
+                            ],
+                            agent_name_hashes: vec![blake3_summary_hash("LavenderHollow")],
+                            evidence_source_kinds: vec!["failure".to_owned()],
+                        }],
+                        degraded_codes: vec!["symbol_evidence_links_unavailable".to_owned()],
+                    },
+                ),
+            });
+
+        let summary = summarize_swarm_brief_report(&report);
+        assert_eq!(
+            summary.pointer("/symbolRiskSummary/highRiskSymbolCount"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            summary.pointer("/symbolRiskSummary/topPaths/0/rawPathIncluded"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            summary.pointer("/counts/symbolRiskHighRiskSymbolCount"),
+            Some(&json!(1))
+        );
+
+        let rendered = stable_summary_json(&summary);
+        assert!(
+            !rendered.contains("src/core/private_symbol.rs")
+                && !rendered.contains("private_symbol")
+                && !rendered.contains("LavenderHollow"),
+            "support-bundle swarm summary must not leak raw paths, symbols, or agent names"
+        );
+
+        let handoff_text = render_swarm_brief_summary_for_handoff(&summary);
+        assert!(
+            handoff_text.contains("Symbol-risk posture: status=available"),
+            "handoff text should include compact symbol-risk posture"
+        );
+        assert!(
+            !handoff_text.contains("private_symbol") && !handoff_text.contains("LavenderHollow"),
+            "handoff text must not include raw symbol or agent labels"
         );
     }
 

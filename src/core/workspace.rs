@@ -36,6 +36,7 @@ use crate::core::swarm_brief::{
     SystemSwarmBriefCommandRunner, WorkspaceGitSnapshot, WorkspaceGitSnapshotOptions,
     collect_workspace_git_snapshot, parse_agent_mail_snapshot_json,
 };
+use crate::core::symbol_graph::SymbolGraphExtractor;
 use crate::db::{
     CreateAuditInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, StoredWorkspace,
     WorkspaceScopeFields, generate_audit_id,
@@ -44,7 +45,11 @@ use crate::models::degradation::{
     WORKSPACE_HYGIENE_AGENT_MAIL_UNAVAILABLE_CODE, WORKSPACE_HYGIENE_OUTPUT_TRUNCATED_CODE,
     WORKSPACE_HYGIENE_PARTIAL_METADATA_CODE, WORKSPACE_HYGIENE_SECRET_SCAN_SKIPPED_CODE,
 };
-use crate::models::{DomainError, WorkspaceId};
+use crate::models::{
+    DomainError, SymbolEvidenceLinkDegradationCode, SymbolEvidenceLinkSet,
+    SymbolEvidenceSourceKind, SymbolGraphDegradationCode, SymbolKind, SymbolRecord, SymbolSnapshot,
+    SymbolVisibility, WorkspaceId,
+};
 use crate::policy::{WORKSPACE_SECRET_RISK_DEFAULT_MAX_SCAN_BYTES, workspace_secret_risk_evidence};
 use crate::runtime::determinism::{Deterministic, Seed};
 
@@ -52,6 +57,7 @@ pub const WORKSPACE_REGISTRY_SCHEMA_V1: &str = "ee.workspace.registry.v1";
 pub const WORKSPACE_ALIAS_SCHEMA_V1: &str = "ee.workspace.alias.v1";
 pub const WORKSPACE_RESOLVE_SCHEMA_V1: &str = "ee.workspace.resolve.v1";
 pub const WORKSPACE_HYGIENE_SCHEMA_V1: &str = "ee.workspace_hygiene.v1";
+pub const WORKSPACE_HYGIENE_SYMBOL_RISK_SCHEMA_V1: &str = "ee.workspace_hygiene.symbol_risk.v1";
 pub const WORKSPACE_REGISTRY_ENV_VAR: &str = EnvVar::WorkspaceRegistry.name();
 
 const WORKSPACE_ALIAS_SET_ACTION: &str = "workspace.alias.set";
@@ -59,6 +65,8 @@ const WORKSPACE_ALIAS_CLEAR_ACTION: &str = "workspace.alias.clear";
 pub const WORKSPACE_HYGIENE_MAX_PATH_CLASSIFICATIONS: usize = 10_000;
 pub const WORKSPACE_HYGIENE_MAX_PATHS_PER_LIST: usize = 10_000;
 pub const WORKSPACE_HYGIENE_MAX_PATHS_PER_STAGING_GROUP: usize = 10_000;
+pub const WORKSPACE_HYGIENE_SYMBOL_RISK_MAX_PATHS: usize = 20;
+pub const WORKSPACE_HYGIENE_SYMBOL_RISK_MAX_SYMBOLS_PER_PATH: usize = 8;
 pub const WORKSPACE_HYGIENE_SECRET_SCAN_MAX_FILES: usize = 1_000;
 pub const WORKSPACE_HYGIENE_SECRET_SCAN_MAX_TOTAL_BYTES: usize = 1_000_000;
 pub const WORKSPACE_HYGIENE_AGENT_ADVISORY_TARGET_PRECOMMIT: &str = "precommit";
@@ -211,6 +219,8 @@ pub struct WorkspaceHygieneReport {
         skip_serializing_if = "Option::is_none"
     )]
     pub agent_harness_advisory: Option<WorkspaceHygieneAgentHarnessAdvisory>,
+    #[serde(rename = "symbolRiskSummary", skip_serializing_if = "Option::is_none")]
+    pub symbol_risk_summary: Option<WorkspaceHygieneSymbolRiskSummary>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -225,6 +235,56 @@ pub struct WorkspaceHygieneAgentHarnessAdvisory {
     pub recommended_exit_code: u8,
     pub reason_count: usize,
     pub reasons: Vec<WorkspaceHygieneAgentHarnessReason>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceHygieneSymbolRiskSummary {
+    pub schema: &'static str,
+    pub status: &'static str,
+    pub dirty_path_count: usize,
+    pub summarized_path_count: usize,
+    pub omitted_path_count: usize,
+    pub touched_symbol_count: usize,
+    pub high_risk_symbol_count: usize,
+    pub linked_evidence_count: usize,
+    pub recent_agent_activity_count: usize,
+    pub paths: Vec<WorkspaceHygieneSymbolRiskPath>,
+    pub degraded_codes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceHygieneSymbolRiskPath {
+    pub path: String,
+    pub path_hash: String,
+    pub symbol_count: usize,
+    pub high_risk_symbol_count: usize,
+    pub linked_evidence_count: usize,
+    pub recent_agent_activity_count: usize,
+    pub symbols: Vec<WorkspaceHygieneSymbolRiskSymbol>,
+    pub agent_name_hashes: Vec<String>,
+    pub evidence_source_kinds: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceHygieneSymbolRiskSymbol {
+    pub symbol_id_hash: String,
+    pub canonical_name_hash: String,
+    pub kind: &'static str,
+    pub visibility: &'static str,
+    pub public_surface: bool,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub linked_evidence_count: usize,
+    pub evidence_source_kinds: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceHygieneSymbolAgentActivity<'a> {
+    pub path: &'a str,
+    pub agent_name: &'a str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -496,6 +556,8 @@ pub struct WorkspaceHygieneSwarmBriefSummary {
     pub beads_state_status: &'static str,
     pub command_hint: &'static str,
     pub degraded_codes: Vec<&'static str>,
+    #[serde(rename = "symbolRiskSummary", skip_serializing_if = "Option::is_none")]
+    pub symbol_risk_summary: Option<WorkspaceHygieneSymbolRiskSummary>,
 }
 
 impl WorkspaceHygieneSwarmBriefSummary {
@@ -515,6 +577,7 @@ impl WorkspaceHygieneSwarmBriefSummary {
             beads_state_status: "unavailable",
             command_hint: WORKSPACE_HYGIENE_SWARM_BRIEF_COMMAND_HINT,
             degraded_codes: vec![degraded_code],
+            symbol_risk_summary: None,
         }
     }
 
@@ -580,6 +643,7 @@ impl WorkspaceHygieneSwarmBriefSummary {
             beads_state_status,
             command_hint: WORKSPACE_HYGIENE_SWARM_BRIEF_COMMAND_HINT,
             degraded_codes,
+            symbol_risk_summary: report.symbol_risk_summary.clone(),
         }
     }
 }
@@ -618,19 +682,22 @@ pub fn build_workspace_hygiene_report(
     let agent_mail_input =
         load_agent_mail_coordination_input(options.agent_mail_snapshot_path.as_deref());
 
-    Ok(build_workspace_hygiene_report_from_inputs(
-        WorkspaceHygieneReportInputs {
-            workspace_path: &options.workspace_path,
-            snapshot,
-            classifier_config: &classifier_config,
-            jsonl_content: jsonl_content.as_deref(),
-            self_agent_name: options.self_agent_name.as_deref(),
-            beads_metadata_signal,
-            beads_reservations: &[],
-            agent_mail_input: &agent_mail_input,
-            now: Utc::now(),
-        },
-    ))
+    let mut report = build_workspace_hygiene_report_from_inputs(WorkspaceHygieneReportInputs {
+        workspace_path: &options.workspace_path,
+        snapshot,
+        classifier_config: &classifier_config,
+        jsonl_content: jsonl_content.as_deref(),
+        self_agent_name: options.self_agent_name.as_deref(),
+        beads_metadata_signal,
+        beads_reservations: &[],
+        agent_mail_input: &agent_mail_input,
+        now: Utc::now(),
+    });
+    attach_workspace_hygiene_symbol_risk_summary_from_dirty_paths(
+        &mut report,
+        &options.workspace_path,
+    );
+    Ok(report)
 }
 
 fn build_workspace_hygiene_report_from_inputs(
@@ -731,6 +798,7 @@ fn build_workspace_hygiene_report_from_inputs(
         degraded_codes,
         next_actions,
         agent_harness_advisory: None,
+        symbol_risk_summary: None,
     }
 }
 
@@ -748,6 +816,221 @@ pub fn attach_workspace_hygiene_agent_harness_advisory(
     strict: bool,
 ) {
     report.agent_harness_advisory = Some(workspace_hygiene_agent_harness_advisory(report, strict));
+}
+
+pub fn attach_workspace_hygiene_symbol_risk_summary(
+    report: &mut WorkspaceHygieneReport,
+    symbol_snapshot: Option<&SymbolSnapshot>,
+    evidence_links: Option<&SymbolEvidenceLinkSet>,
+    recent_agent_activity: &[WorkspaceHygieneSymbolAgentActivity<'_>],
+) {
+    report.symbol_risk_summary = Some(workspace_hygiene_symbol_risk_summary(
+        report,
+        symbol_snapshot,
+        evidence_links,
+        recent_agent_activity,
+    ));
+}
+
+fn attach_workspace_hygiene_symbol_risk_summary_from_dirty_paths(
+    report: &mut WorkspaceHygieneReport,
+    workspace_path: &Path,
+) {
+    let rust_paths = report
+        .classifications
+        .iter()
+        .map(|row| row.path.as_str())
+        .filter(|path| path.ends_with(".rs"))
+        .take(WORKSPACE_HYGIENE_SYMBOL_RISK_MAX_PATHS)
+        .map(|path| workspace_path.join(path))
+        .collect::<Vec<_>>();
+
+    if rust_paths.is_empty() {
+        return;
+    }
+
+    let symbol_snapshot = SymbolGraphExtractor::default().extract_paths(workspace_path, rust_paths);
+    attach_workspace_hygiene_symbol_risk_summary(report, Some(&symbol_snapshot), None, &[]);
+}
+
+#[must_use]
+pub fn workspace_hygiene_symbol_risk_summary(
+    report: &WorkspaceHygieneReport,
+    symbol_snapshot: Option<&SymbolSnapshot>,
+    evidence_links: Option<&SymbolEvidenceLinkSet>,
+    recent_agent_activity: &[WorkspaceHygieneSymbolAgentActivity<'_>],
+) -> WorkspaceHygieneSymbolRiskSummary {
+    let dirty_paths = report
+        .classifications
+        .iter()
+        .map(|row| row.path.as_str())
+        .collect::<BTreeSet<_>>();
+    let Some(symbol_snapshot) = symbol_snapshot else {
+        return WorkspaceHygieneSymbolRiskSummary {
+            schema: WORKSPACE_HYGIENE_SYMBOL_RISK_SCHEMA_V1,
+            status: "unavailable",
+            dirty_path_count: dirty_paths.len(),
+            summarized_path_count: 0,
+            omitted_path_count: dirty_paths.len(),
+            touched_symbol_count: 0,
+            high_risk_symbol_count: 0,
+            linked_evidence_count: 0,
+            recent_agent_activity_count: 0,
+            paths: Vec::new(),
+            degraded_codes: vec!["symbol_snapshot_unavailable".to_owned()],
+        };
+    };
+
+    let mut symbols_by_path = BTreeMap::<&str, Vec<&SymbolRecord>>::new();
+    for symbol in &symbol_snapshot.symbols {
+        if dirty_paths.contains(symbol.path.as_str()) {
+            symbols_by_path
+                .entry(symbol.path.as_str())
+                .or_default()
+                .push(symbol);
+        }
+    }
+    for symbols in symbols_by_path.values_mut() {
+        symbols.sort_by(|left, right| {
+            (left.range.start_line, left.range.end_line, left.id.as_str()).cmp(&(
+                right.range.start_line,
+                right.range.end_line,
+                right.id.as_str(),
+            ))
+        });
+    }
+
+    let mut evidence_by_path = BTreeMap::<&str, Vec<&crate::models::SymbolEvidenceLink>>::new();
+    let mut evidence_by_symbol = BTreeMap::<&str, Vec<&crate::models::SymbolEvidenceLink>>::new();
+    if let Some(link_set) = evidence_links {
+        for link in &link_set.links {
+            if dirty_paths.contains(link.target_path.as_str()) {
+                evidence_by_path
+                    .entry(link.target_path.as_str())
+                    .or_default()
+                    .push(link);
+                if let Some(symbol_id) = link.symbol_id.as_deref() {
+                    evidence_by_symbol.entry(symbol_id).or_default().push(link);
+                }
+            }
+        }
+    }
+
+    let mut activity_by_path = BTreeMap::<&str, BTreeSet<String>>::new();
+    for activity in recent_agent_activity {
+        if dirty_paths.contains(activity.path) {
+            activity_by_path
+                .entry(activity.path)
+                .or_default()
+                .insert(redaction_hash("agent", activity.agent_name));
+        }
+    }
+
+    let mut paths = Vec::new();
+    let mut touched_symbol_count = 0_usize;
+    let mut high_risk_symbol_count = 0_usize;
+    let mut linked_evidence_count = 0_usize;
+    let mut recent_agent_activity_count = 0_usize;
+
+    for path in dirty_paths
+        .iter()
+        .take(WORKSPACE_HYGIENE_SYMBOL_RISK_MAX_PATHS)
+    {
+        let symbols = symbols_by_path.get(path).cloned().unwrap_or_default();
+        let path_evidence = evidence_by_path.get(path).cloned().unwrap_or_default();
+        let agent_name_hashes = activity_by_path
+            .get(path)
+            .map(|agents| agents.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let evidence_source_kinds =
+            symbol_risk_evidence_source_kinds(path_evidence.iter().copied());
+        let mut symbol_rows = Vec::new();
+        let path_high_risk_count = symbols
+            .iter()
+            .filter(|symbol| symbol_is_high_risk_surface(symbol))
+            .count();
+
+        for symbol in symbols
+            .iter()
+            .copied()
+            .take(WORKSPACE_HYGIENE_SYMBOL_RISK_MAX_SYMBOLS_PER_PATH)
+        {
+            let symbol_evidence = evidence_by_symbol
+                .get(symbol.id.as_str())
+                .cloned()
+                .unwrap_or_default();
+            let public_surface = symbol_is_high_risk_surface(symbol);
+            symbol_rows.push(WorkspaceHygieneSymbolRiskSymbol {
+                symbol_id_hash: redaction_hash("symbol_id", &symbol.id),
+                canonical_name_hash: redaction_hash("canonical_name", &symbol.canonical_name),
+                kind: symbol.kind.as_str(),
+                visibility: symbol_visibility_label(symbol.visibility),
+                public_surface,
+                start_line: symbol.range.start_line,
+                end_line: symbol.range.end_line,
+                linked_evidence_count: symbol_evidence.len(),
+                evidence_source_kinds: symbol_risk_evidence_source_kinds(
+                    symbol_evidence.iter().copied(),
+                ),
+            });
+        }
+
+        touched_symbol_count += symbols.len();
+        high_risk_symbol_count += symbols
+            .iter()
+            .filter(|symbol| symbol_is_high_risk_surface(symbol))
+            .count();
+        linked_evidence_count += path_evidence.len();
+        recent_agent_activity_count += agent_name_hashes.len();
+
+        paths.push(WorkspaceHygieneSymbolRiskPath {
+            path: (*path).to_owned(),
+            path_hash: redaction_hash("path", path),
+            symbol_count: symbols.len(),
+            high_risk_symbol_count: path_high_risk_count,
+            linked_evidence_count: path_evidence.len(),
+            recent_agent_activity_count: agent_name_hashes.len(),
+            symbols: symbol_rows,
+            agent_name_hashes,
+            evidence_source_kinds,
+        });
+    }
+
+    let omitted_path_count = dirty_paths
+        .len()
+        .saturating_sub(WORKSPACE_HYGIENE_SYMBOL_RISK_MAX_PATHS);
+    let mut degraded_codes = symbol_snapshot
+        .degraded
+        .iter()
+        .map(|item| symbol_graph_degradation_code(item.code).to_owned())
+        .collect::<BTreeSet<_>>();
+    if let Some(link_set) = evidence_links {
+        degraded_codes.extend(
+            link_set
+                .degraded
+                .iter()
+                .map(|item| symbol_evidence_link_degradation_code(item.code).to_owned()),
+        );
+    } else {
+        degraded_codes.insert("symbol_evidence_links_unavailable".to_owned());
+    }
+    if omitted_path_count > 0 {
+        degraded_codes.insert("symbol_risk_output_truncated".to_owned());
+    }
+
+    WorkspaceHygieneSymbolRiskSummary {
+        schema: WORKSPACE_HYGIENE_SYMBOL_RISK_SCHEMA_V1,
+        status: "available",
+        dirty_path_count: dirty_paths.len(),
+        summarized_path_count: paths.len(),
+        omitted_path_count,
+        touched_symbol_count,
+        high_risk_symbol_count,
+        linked_evidence_count,
+        recent_agent_activity_count,
+        paths,
+        degraded_codes: degraded_codes.into_iter().collect(),
+    }
 }
 
 #[must_use]
@@ -893,6 +1176,75 @@ fn workspace_hygiene_has_beads_conflict(report: &WorkspaceHygieneReport) -> bool
             | BeadsClassification::BeadsDbDirtyPendingFlush
             | BeadsClassification::BeadsExternalChangesPendingImport
     )
+}
+
+fn symbol_is_high_risk_surface(symbol: &SymbolRecord) -> bool {
+    symbol.visibility != SymbolVisibility::Private
+        || matches!(
+            symbol.kind,
+            SymbolKind::CliCommandHandler
+                | SymbolKind::JsonSchemaConstant
+                | SymbolKind::Trait
+                | SymbolKind::Enum
+                | SymbolKind::Struct
+        )
+}
+
+fn symbol_visibility_label(visibility: SymbolVisibility) -> &'static str {
+    match visibility {
+        SymbolVisibility::Public => "public",
+        SymbolVisibility::Restricted => "restricted",
+        SymbolVisibility::Private => "private",
+    }
+}
+
+fn symbol_risk_evidence_source_kinds<'a>(
+    links: impl IntoIterator<Item = &'a crate::models::SymbolEvidenceLink>,
+) -> Vec<String> {
+    links
+        .into_iter()
+        .map(|link| symbol_evidence_source_kind(link.source_kind).to_owned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn symbol_evidence_source_kind(kind: SymbolEvidenceSourceKind) -> &'static str {
+    kind.as_str()
+}
+
+fn symbol_graph_degradation_code(code: SymbolGraphDegradationCode) -> &'static str {
+    match code {
+        SymbolGraphDegradationCode::SourceMissing => "symbol_source_missing",
+        SymbolGraphDegradationCode::SourceNonRegular => "symbol_source_non_regular",
+        SymbolGraphDegradationCode::SourceTooLarge => "symbol_source_too_large",
+        SymbolGraphDegradationCode::SourceUnreadable => "symbol_source_unreadable",
+        SymbolGraphDegradationCode::SourceUnparsable => "symbol_source_unparsable",
+        SymbolGraphDegradationCode::SymbolIndexStale => "symbol_index_stale",
+    }
+}
+
+fn symbol_evidence_link_degradation_code(code: SymbolEvidenceLinkDegradationCode) -> &'static str {
+    match code {
+        SymbolEvidenceLinkDegradationCode::StaleLineSpan => "symbol_evidence_stale_line_span",
+        SymbolEvidenceLinkDegradationCode::SourceFileMissing => {
+            "symbol_evidence_source_file_missing"
+        }
+        SymbolEvidenceLinkDegradationCode::AmbiguousContainingSymbols => {
+            "symbol_evidence_ambiguous_containing_symbols"
+        }
+        SymbolEvidenceLinkDegradationCode::SymbolRenamed => "symbol_evidence_symbol_renamed",
+        SymbolEvidenceLinkDegradationCode::SymbolDeleted => "symbol_evidence_symbol_deleted",
+    }
+}
+
+fn redaction_hash(label: &str, value: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(label.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(&(value.len() as u64).to_be_bytes());
+    hasher.update(value.as_bytes());
+    format!("blake3:{}", hasher.finalize().to_hex())
 }
 
 fn load_agent_mail_coordination_input(path: Option<&Path>) -> AgentMailCoordinationInput {
@@ -3363,6 +3715,99 @@ mod tests {
             !serialized.contains("configs/10000/secrets.toml"),
             "needsHumanReview paths beyond the visible prefix must be omitted"
         );
+    }
+
+    #[test]
+    fn symbol_risk_summary_is_redaction_safe_and_embeds_in_swarm_brief() -> TestResult {
+        let mut report = hygiene_report_from_parts(
+            hygiene_snapshot(vec![status_entry("src/core/search.rs", ".", "M")]),
+            &AgentMailCoordinationInput::Available {
+                reservations: Vec::new(),
+                active_agents: Vec::new(),
+            },
+            BeadsMetadataSignal::Unknown,
+            &[],
+        );
+        let snapshot = crate::core::symbol_graph::extract_rust_symbol_snapshot_from_sources(&[
+            crate::core::symbol_graph::RustSourceInput::new(
+                "src/core/search.rs",
+                "pub fn run_search_command() {}\nfn private_helper() {}\n",
+            ),
+        ]);
+        let links = crate::core::symbol_graph::link_symbol_evidence(
+            &snapshot,
+            &[crate::core::symbol_graph::SymbolEvidenceInput::new(
+                SymbolEvidenceSourceKind::Failure,
+                "failure-memory-1",
+                "memory://failure-1",
+                "src/core/search.rs",
+                1,
+                1,
+                0.92,
+            )],
+        );
+
+        attach_workspace_hygiene_symbol_risk_summary(
+            &mut report,
+            Some(&snapshot),
+            Some(&links),
+            &[WorkspaceHygieneSymbolAgentActivity {
+                path: "src/core/search.rs",
+                agent_name: "SapphireHill",
+            }],
+        );
+
+        let summary = report
+            .symbol_risk_summary
+            .as_ref()
+            .ok_or_else(|| "symbol risk summary missing".to_string())?;
+        assert_eq!(summary.schema, WORKSPACE_HYGIENE_SYMBOL_RISK_SCHEMA_V1);
+        assert_eq!(summary.status, "available");
+        assert_eq!(summary.dirty_path_count, 1);
+        assert_eq!(summary.summarized_path_count, 1);
+        assert_eq!(summary.linked_evidence_count, 1);
+        assert_eq!(summary.recent_agent_activity_count, 1);
+        assert!(
+            summary.high_risk_symbol_count >= 1,
+            "public function should be counted as a high-risk public surface"
+        );
+
+        let path = &summary.paths[0];
+        assert_eq!(path.path, "src/core/search.rs");
+        assert!(path.path_hash.starts_with("blake3:"));
+        assert_eq!(path.evidence_source_kinds, vec!["failure"]);
+        assert_eq!(path.agent_name_hashes.len(), 1);
+        assert!(path.agent_name_hashes[0].starts_with("blake3:"));
+        assert!(
+            path.symbols
+                .iter()
+                .any(|symbol| symbol.public_surface && symbol.kind == "cli_command_handler"),
+            "CLI handler symbol should be surfaced as a high-risk public surface"
+        );
+        assert!(
+            path.symbols
+                .iter()
+                .all(|symbol| symbol.symbol_id_hash.starts_with("blake3:")
+                    && symbol.canonical_name_hash.starts_with("blake3:")),
+            "symbol identifiers and names must be hash-only"
+        );
+
+        let json = serde_json::to_string(summary).map_err(|error| error.to_string())?;
+        assert!(
+            !json.contains("run_search_command"),
+            "summary must not expose raw symbol names"
+        );
+        assert!(
+            !json.contains("SapphireHill"),
+            "summary must not expose raw agent names"
+        );
+
+        let swarm_summary = WorkspaceHygieneSwarmBriefSummary::from_report(&report);
+        assert!(
+            swarm_summary.symbol_risk_summary.is_some(),
+            "swarm brief projection should carry attached symbol risk summary"
+        );
+        Ok(())
     }
 
     #[test]
