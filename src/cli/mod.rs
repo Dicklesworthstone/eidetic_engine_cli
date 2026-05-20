@@ -5949,6 +5949,47 @@ pub struct DoctorArgs {
         conflicts_with_all = ["fix_plan", "franken_health", "capabilities", "robot_docs"],
     )]
     pub undo: Option<String>,
+
+    /// Run only the fast P0/P1 detector pass and skip the slower deep
+    /// diagnostics (see `doctor_workspace/playbook.md` ch.6). Mutually
+    /// exclusive with the report-only modes; intended for high-frequency
+    /// agent invocations that want an immediate readiness verdict
+    /// without paying the full diagnostic budget. Currently advisory —
+    /// detector wiring honoring the flag lands in the per-FM detector
+    /// slices that compose with bd-tu4s8.
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        conflicts_with_all = ["fix_plan", "franken_health", "capabilities", "robot_docs"],
+    )]
+    pub quick: bool,
+
+    /// Run only the named failure-mode detector (FM-style stable code,
+    /// e.g. `state_files_orphaned_sock`, `workspace_config_malformed_toml`).
+    /// May be repeated to filter to a subset. Mutually exclusive with
+    /// the report-only modes. Currently advisory — detector wiring
+    /// honoring the filter lands alongside the per-FM detectors that
+    /// compose with bd-tu4s8.
+    #[arg(
+        long = "only",
+        value_name = "FM_CODE",
+        conflicts_with_all = ["fix_plan", "franken_health", "capabilities", "robot_docs"],
+    )]
+    pub only: Vec<String>,
+
+    /// Replay the detector pass against the source tree as it stood at
+    /// the named prior `ee doctor` run id (resolved against
+    /// `<workspace>/.doctor/runs/<RUN_ID>`). Lets an operator answer
+    /// "what changed since that run?" without re-collecting baseline
+    /// evidence. Mutually exclusive with the report-only modes.
+    /// Currently advisory — replay wiring lands alongside the doctor
+    /// run-directory listing surface (`ls`/`diff`/`gc`).
+    #[arg(
+        long = "since",
+        value_name = "RUN_ID",
+        conflicts_with_all = ["fix_plan", "franken_health", "capabilities", "robot_docs", "undo"],
+    )]
+    pub since: Option<String>,
 }
 
 /// Arguments for `ee init`.
@@ -6983,6 +7024,9 @@ pub enum EvalCommand {
         /// Run the pack-quality evaluator over fixture expectations.
         #[arg(long = "pack-quality", action = ArgAction::SetTrue)]
         pack_quality: bool,
+        /// Attach outcome-backed pack-quality feedback from fixture outcome events.
+        #[arg(long = "from-outcomes", action = ArgAction::SetTrue)]
+        from_outcomes: bool,
         /// Filter pack-quality cases by scenario ID or case ID.
         #[arg(long, value_name = "ID")]
         scenario: Option<String>,
@@ -9268,15 +9312,17 @@ where
                 scenario_id,
                 fixture_dir,
                 pack_quality,
+                from_outcomes,
                 scenario,
                 science,
             } => {
-                if *pack_quality {
+                if *pack_quality || *from_outcomes {
                     handle_eval_pack_quality_run(
                         &cli,
                         scenario_id.as_deref(),
                         scenario.as_deref(),
                         fixture_dir.as_deref(),
+                        *from_outcomes,
                         stdout,
                         stderr,
                     )
@@ -10980,6 +11026,7 @@ fn handle_eval_pack_quality_run<W, E>(
     fixture_filter: Option<&str>,
     case_filter: Option<&str>,
     fixture_dir: Option<&std::path::Path>,
+    from_outcomes: bool,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -11073,11 +11120,17 @@ where
         degraded_branches.extend(pack_quality_degraded_branch_reports(
             fixture, &scenario, &cases,
         ));
-        reports.push(crate::eval::evaluate_pack_quality(
-            &fixture.fixture_id,
-            &cases,
-            &actuals,
-        ));
+        let report = if from_outcomes {
+            crate::eval::evaluate_pack_quality_with_outcomes(
+                &fixture.fixture_id,
+                &cases,
+                &actuals,
+                &expectations.outcome_events,
+            )
+        } else {
+            crate::eval::evaluate_pack_quality(&fixture.fixture_id, &cases, &actuals)
+        };
+        reports.push(report);
     }
 
     if reports.is_empty() {
@@ -45456,6 +45509,89 @@ mod tests {
             ))),
             "workspace hygiene human command",
         )
+    }
+
+    #[test]
+    fn parser_accepts_doctor_quick_flag() -> TestResult {
+        let cli = Cli::try_parse_from(["ee", "doctor", "--quick"])
+            .map_err(|error| format!("parse --quick failed: {:?}", error.kind()))?;
+        let Some(Command::Doctor(args)) = cli.command else {
+            return Err(format!("expected doctor command, got {:?}", cli.command));
+        };
+        ensure_equal(&args.quick, &true, "doctor --quick sets quick=true")?;
+        ensure_equal(
+            &args.only,
+            &Vec::<String>::new(),
+            "doctor --quick leaves only empty",
+        )?;
+        ensure_equal(&args.since, &None, "doctor --quick leaves since None")?;
+        Ok(())
+    }
+
+    #[test]
+    fn parser_accepts_doctor_only_repeated() -> TestResult {
+        let cli = Cli::try_parse_from([
+            "ee",
+            "doctor",
+            "--only",
+            "state_files_orphaned_sock",
+            "--only",
+            "workspace_config_malformed_toml",
+        ])
+        .map_err(|error| format!("parse --only failed: {:?}", error.kind()))?;
+        let Some(Command::Doctor(args)) = cli.command else {
+            return Err(format!("expected doctor command, got {:?}", cli.command));
+        };
+        ensure_equal(
+            &args.only,
+            &vec![
+                "state_files_orphaned_sock".to_string(),
+                "workspace_config_malformed_toml".to_string(),
+            ],
+            "doctor --only collects repeated FM codes",
+        )
+    }
+
+    #[test]
+    fn parser_accepts_doctor_since_run_id() -> TestResult {
+        let cli = Cli::try_parse_from(["ee", "doctor", "--since", "abc123"])
+            .map_err(|error| format!("parse --since failed: {:?}", error.kind()))?;
+        let Some(Command::Doctor(args)) = cli.command else {
+            return Err(format!("expected doctor command, got {:?}", cli.command));
+        };
+        ensure_equal(
+            &args.since,
+            &Some("abc123".to_string()),
+            "doctor --since captures the prior run id",
+        )
+    }
+
+    #[test]
+    fn parser_rejects_doctor_quick_combined_with_capabilities() {
+        let err = Cli::try_parse_from(["ee", "doctor", "--quick", "--capabilities"])
+            .expect_err("--quick + --capabilities must conflict");
+        let kind = err.kind();
+        assert!(
+            matches!(
+                kind,
+                clap::error::ErrorKind::ArgumentConflict | clap::error::ErrorKind::DisplayHelp
+            ),
+            "expected ArgumentConflict, got {kind:?}"
+        );
+    }
+
+    #[test]
+    fn parser_rejects_doctor_since_combined_with_undo() {
+        let err = Cli::try_parse_from(["ee", "doctor", "--since", "abc", "--undo", "def"])
+            .expect_err("--since + --undo must conflict");
+        let kind = err.kind();
+        assert!(
+            matches!(
+                kind,
+                clap::error::ErrorKind::ArgumentConflict | clap::error::ErrorKind::DisplayHelp
+            ),
+            "expected ArgumentConflict, got {kind:?}"
+        );
     }
 
     #[test]
