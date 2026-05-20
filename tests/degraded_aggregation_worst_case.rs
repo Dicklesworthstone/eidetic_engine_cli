@@ -223,6 +223,44 @@ fn worst_case_collapses_duplicates_escalates_severity_and_truncates_with_trailer
 }
 
 #[test]
+fn worst_case_serialized_degraded_array_has_one_snapshot_row_with_sources() {
+    let aggregates = aggregate_degraded_entries(worst_case_input());
+    let json = serde_json::to_value(&aggregates).expect("aggregates serialize to JSON");
+    let rows = json.as_array().expect("aggregates serialize as an array");
+    let snapshot_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row.get("code").and_then(serde_json::Value::as_str) == Some("snapshot_stale"))
+        .collect();
+
+    assert_eq!(
+        snapshot_rows.len(),
+        1,
+        "serialized degraded[] must contain one snapshot_stale aggregate"
+    );
+    let snapshot = snapshot_rows[0];
+    assert_eq!(snapshot["severity"], "high");
+    assert_eq!(snapshot["message"], "louvain saw stale snapshot");
+    assert_eq!(
+        snapshot["repair"],
+        "ee graph snapshot refresh --graph louvain"
+    );
+    assert_eq!(
+        snapshot["sources"],
+        serde_json::json!([
+            "betweenness",
+            "ego",
+            "hits",
+            "kcore",
+            "louvain",
+            "pack_dna",
+            "ppr",
+            "voronoi"
+        ]),
+        "serialized sources[] must preserve every stale-snapshot emitter"
+    );
+}
+
+#[test]
 fn worst_case_output_is_byte_stable_across_shuffled_input() {
     let mut entries_a = worst_case_input();
     let mut entries_b = entries_a.clone();
