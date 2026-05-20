@@ -1080,11 +1080,20 @@ RCH offloads `cargo build`, `cargo test`, `cargo clippy`, and other compilation 
 
 **RCH is installed at `~/.local/bin/rch` and is hooked into Claude Code's PreToolUse automatically.** Most of the time you don't need to do anything if you are Claude Code — builds are intercepted and offloaded transparently.
 
-To manually offload a build:
+To manually offload a build from this Mac, use the current RCH binary, fail
+closed to remote execution, and set `TMPDIR=/tmp` both for the RCH client and
+for the remote Cargo process. Do not run bare `rch exec -- cargo ...` from
+Codex; it can inherit the Mac USB `TMPDIR` and can fall back to local Cargo.
+
 ```bash
-rch exec -- cargo build --release
-rch exec -- cargo test
-rch exec -- cargo clippy
+TMPDIR=/tmp \
+RCH_REQUIRE_REMOTE=1 \
+RCH_VISIBILITY=summary \
+RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects \
+RCH_ALIAS_PROJECT_ROOT=/data/projects \
+/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch exec -- \
+  env TMPDIR=/tmp CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target \
+  cargo test --lib
 ```
 
 Quick commands:
@@ -1095,9 +1104,14 @@ rch status                    # Overview of current state
 rch queue                     # See active/waiting builds
 ```
 
-If rch or its workers are unavailable, it fails open — builds run locally as normal.
+If rch or its workers are unavailable, do not let Codex/GPT agents fall back to
+local Cargo. Treat remote refusal as a verification blocker unless the user
+explicitly authorizes a local run.
 
-**Note for Codex/GPT-5.2:** Codex does not have the automatic PreToolUse hook, but you can (and should) still manually offload compute-intensive compilation commands using `rch exec -- <command>`. This avoids local resource contention when multiple agents are building simultaneously.
+**Note for Codex/GPT-5.2:** Codex does not have the automatic PreToolUse hook,
+but you can (and should) still manually offload compute-intensive compilation
+commands using the fail-closed command shape above. This avoids local resource
+contention when multiple agents are building simultaneously.
 
 ---
 

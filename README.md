@@ -1626,7 +1626,9 @@ Benchmark profiles are explicit so agents and CI can pick the right cost tier:
 
 ```bash
 # Small no-mock smoke run, suitable for agent closeout through rch
-rch exec -- env TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target ./scripts/bench.sh --profile ci-smoke --json
+TMPDIR=/tmp RCH_REQUIRE_REMOTE=1 rch exec -- \
+  env TMPDIR=/tmp CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target \
+  ./scripts/bench.sh --profile ci-smoke --json
 
 # Broader nightly profile over all benchmark groups
 ./scripts/bench.sh --profile nightly
@@ -1664,17 +1666,20 @@ the current RCH client by absolute path and fail closed to remote execution:
 
 ```bash
 RCH_REQUIRE_REMOTE=1 \
+TMPDIR=/tmp \
 RCH_VISIBILITY=summary \
 RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects \
 RCH_ALIAS_PROJECT_ROOT=/data/projects \
 /Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch exec -- \
-  env CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target \
+  env TMPDIR=/tmp CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target \
   cargo test --lib search_sync_attaches_rebuilt_lexical_index_for_literal_queries -- --nocapture
 ```
 
 RCH rewrites the local USB-NVMe `CARGO_TARGET_DIR` to a worker-local target path
 for remote execution, so the external-drive setting is safe for both local
-artifact retrieval and remote Linux workers.
+artifact retrieval and remote Linux workers. `TMPDIR=/tmp` is still required:
+the Mac USB scratch path is not present on Linux workers, and Rust tests using
+`tempfile` inherit `TMPDIR`.
 
 ---
 
