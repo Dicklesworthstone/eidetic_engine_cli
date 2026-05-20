@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "flight_recorder_directory_unwritable",
+  "introduced_by": {
+    "bead": "bd-1zb7k.19.1",
+    "epic_letter": "AFR"
+  },
+  "surfaces": [
+    "status",
+    "doctor"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The flight recorder directory (defaults to <workspace>/obs/flight_recorder/, or EE_FLIGHT_RECORDER_DIR override) is not writable by the ee process. Trace rows cannot be appended; the recorder degrades to advisory and the foreground command path is unaffected.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "mkdir -p .ee/obs/flight_recorder",
+      "chmod 0500 .ee/obs/flight_recorder",
+      "EE_FLIGHT_RECORDER=1 ee status --workspace . --json"
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "flight_recorder_directory_unwritable",
+    "severity": "medium",
+    "message_contains": [
+      "flight recorder",
+      "directory"
+    ],
+    "repair_contains": "EE_FLIGHT_RECORDER_DIR"
+  }
+}

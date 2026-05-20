@@ -3246,6 +3246,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
         render_curation_health_json(d, &report.curation_health);
         render_feedback_health_json(d, &report.feedback_health);
         render_singleflight_posture_json(d, &report.singleflight_posture);
+        render_flight_recorder_status_json(d, &report.flight_recorder);
         render_graph_compute_json(d, &report.graph_compute);
         render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
         render_search_status_json(d, &report.lexical_ram_tier);
@@ -3410,6 +3411,24 @@ fn render_singleflight_posture_json(
             }
             obj.field_str("suggestedAction", &surface.suggested_action);
         });
+    });
+}
+
+fn render_flight_recorder_status_json(
+    parent: &mut JsonBuilder,
+    report: &crate::core::status::FlightRecorderStatusReport,
+) {
+    parent.field_object("flightRecorder", |recorder| {
+        recorder.field_str("schema", report.schema);
+        recorder.field_str("status", report.posture.as_str());
+        recorder.field_bool("enabled", report.enabled);
+        recorder.field_bool("writing", report.writing);
+        recorder.field_str("directory", &report.directory.display().to_string());
+        recorder.field_u32("retentionDays", report.retention_days);
+        recorder.field_raw("maxBytes", &report.max_bytes.to_string());
+        recorder.field_str("redactionLevel", report.redaction_level);
+        field_optional_str(recorder, "reason", report.reason);
+        field_optional_str(recorder, "repair", report.repair);
     });
 }
 
@@ -4204,6 +4223,7 @@ pub fn render_status_json_with_meta(
         render_shard_fanout_status_json(d, &report.shard_fanout);
         render_pack_budget_buckets_json(d, &report.pack_budget_buckets);
         render_memory_health_json(d, &report.memory_health);
+        render_flight_recorder_status_json(d, &report.flight_recorder);
         render_graph_compute_json(d, &report.graph_compute);
         render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
         render_search_status_json(d, &report.lexical_ram_tier);
@@ -4432,6 +4452,7 @@ pub fn render_doctor_json(report: &DoctorReport) -> String {
         d.field_str("posture", report.posture.as_str());
         d.field_bool("healthy", report.overall_healthy);
         render_singleflight_posture_json(d, &report.singleflight_posture);
+        render_flight_recorder_status_json(d, &report.flight_recorder);
         render_qos_status_json(d, &report.qos_posture, false);
         render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
         d.field_array_of_objects("checks", &report.checks, |obj, check| {
@@ -4472,6 +4493,13 @@ pub fn render_doctor_human(report: &DoctorReport) -> String {
         report.singleflight_posture.active_leader_count,
         report.singleflight_posture.follower_wait_count,
         report.singleflight_posture.follower_timeout_count
+    ));
+    output.push_str(&format!(
+        "flight recorder: {} (retention: {}d, max bytes: {}, redaction: {})\n",
+        report.flight_recorder.posture.as_str(),
+        report.flight_recorder.retention_days,
+        report.flight_recorder.max_bytes,
+        report.flight_recorder.redaction_level
     ));
     output.push_str(&format!(
         "qos: foreground active {}, background active {}, verification active {}, maintenance active {}, registry {}\n",
@@ -10596,6 +10624,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
         if profile.include_summary_metrics() {
             render_status_posture_json(d, &report.posture);
             render_singleflight_posture_json(d, &report.singleflight_posture);
+            render_flight_recorder_status_json(d, &report.flight_recorder);
             render_qos_status_json(d, &report.qos_posture, profile.include_verbose_details());
             render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
             d.field_object("capabilities", |c| {
@@ -10752,6 +10781,7 @@ pub fn render_doctor_json_filtered(report: &DoctorReport, profile: FieldProfile)
 
         if profile.include_summary_metrics() {
             render_singleflight_posture_json(d, &report.singleflight_posture);
+            render_flight_recorder_status_json(d, &report.flight_recorder);
             render_qos_status_json(d, &report.qos_posture, profile.include_verbose_details());
             render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
         }
@@ -17544,6 +17574,28 @@ mod tests {
         ensure(
             singleflight.contains_key("surfaces"),
             "singleFlight includes surface summaries",
+        )
+    }
+
+    #[test]
+    fn render_doctor_json_exposes_flight_recorder_posture() -> TestResult {
+        let report = DoctorReport::gather();
+        let json = render_doctor_json_filtered(&report, FieldProfile::Standard);
+        let value = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("doctor JSON should parse: {error}"))?;
+        let recorder = value
+            .pointer("/data/flightRecorder")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| "doctor JSON has data.flightRecorder object".to_string())?;
+
+        ensure_equal(
+            &recorder.get("schema").and_then(serde_json::Value::as_str),
+            &Some("ee.flight_recorder.status.v1"),
+            "flightRecorder schema",
+        )?;
+        ensure(
+            recorder.contains_key("retentionDays") && recorder.contains_key("redactionLevel"),
+            "flightRecorder includes retention and redaction posture",
         )
     }
 

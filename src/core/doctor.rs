@@ -28,7 +28,10 @@ use super::curate::stable_workspace_id;
 use super::index::{IndexHealth, IndexStatusOptions, get_index_status};
 use super::qos::{QosLaneSummary, summarize_qos_lane_registry};
 use super::singleflight::singleflight_posture_report;
-use super::status::{default_workspace_path, gather_rch_worker_pressure, probe_cass_capability};
+use super::status::{
+    FlightRecorderStatusReport, default_workspace_path, gather_flight_recorder_status,
+    gather_rch_worker_pressure, probe_cass_capability,
+};
 use super::swarm_brief::RchWorkerPressureReport;
 
 pub const DEPENDENCY_DIAGNOSTICS_SCHEMA_V1: &str = "ee.diag.dependencies.v1";
@@ -215,6 +218,8 @@ pub struct DoctorReport {
     pub qos_posture: QosLaneSummary,
     /// Redaction-safe remote compilation worker pressure posture.
     pub rch_worker_pressure: RchWorkerPressureReport,
+    /// Redaction-safe command flight-recorder posture.
+    pub flight_recorder: FlightRecorderStatusReport,
     pub checks: Vec<CheckResult>,
 }
 
@@ -236,11 +241,13 @@ impl DoctorReport {
         let singleflight_posture = singleflight_posture_report();
         let qos_posture = gather_qos_posture(workspace_path);
         let rch_worker_pressure = gather_rch_worker_pressure(workspace_path);
+        let flight_recorder = gather_flight_recorder_status(workspace_path);
         let checks = vec![
             check_runtime(),
             check_workspace(workspace_path),
             check_database(workspace_path),
             check_shard_fanout(workspace_path),
+            check_flight_recorder(&flight_recorder),
             check_search_index(workspace_path),
             check_rch_worker_pressure(&rch_worker_pressure),
             check_cass(),
@@ -261,6 +268,7 @@ impl DoctorReport {
             singleflight_posture,
             qos_posture,
             rch_worker_pressure,
+            flight_recorder,
             checks,
         }
     }
@@ -1511,6 +1519,42 @@ fn check_shard_fanout(workspace_path: Option<&Path>) -> CheckResult {
     }
 }
 
+fn check_flight_recorder(report: &FlightRecorderStatusReport) -> CheckResult {
+    let posture = report.posture.as_str();
+    let detail = format!(
+        "posture={posture}; retentionDays={}; maxBytes={}; redaction={}; directory={}",
+        report.retention_days,
+        report.max_bytes,
+        report.redaction_level,
+        report.directory.display()
+    );
+    match report.posture {
+        crate::obs::FlightRecorderPosture::Disabled => CheckResult::ok(
+            "flight_recorder",
+            format!("Flight recorder is disabled by default; {detail}."),
+        ),
+        crate::obs::FlightRecorderPosture::Enabled => CheckResult::ok(
+            "flight_recorder",
+            format!("Flight recorder is enabled and writable; {detail}."),
+        ),
+        crate::obs::FlightRecorderPosture::RetentionOutOfRange => CheckResult::warning(
+            "flight_recorder",
+            format!("Flight recorder retention is outside the supported range; {detail}."),
+            error_codes::CONFIG_INVALID_VALUE,
+        ),
+        crate::obs::FlightRecorderPosture::DirectoryUnwritable => CheckResult::warning(
+            "flight_recorder",
+            format!("Flight recorder directory is not writable; {detail}."),
+            error_codes::CONFIG_INVALID_VALUE,
+        ),
+        crate::obs::FlightRecorderPosture::DirectoryInsideGit => CheckResult::warning(
+            "flight_recorder",
+            format!("Flight recorder directory points inside .git; {detail}."),
+            error_codes::CONFIG_INVALID_VALUE,
+        ),
+    }
+}
+
 fn check_search_index(workspace_path: Option<&Path>) -> CheckResult {
     let Some(workspace_path) = workspace_path else {
         return CheckResult::warning(
@@ -2152,6 +2196,9 @@ mod tests {
             singleflight_posture: singleflight_posture_report(),
             qos_posture: super::gather_qos_posture(None),
             rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+            flight_recorder: FlightRecorderStatusReport::disabled(PathBuf::from(
+                "obs/flight_recorder",
+            )),
             checks: vec![
                 CheckResult::ok("test1", "All good"),
                 CheckResult::ok("test2", "Also good"),
@@ -2173,6 +2220,9 @@ mod tests {
             singleflight_posture: singleflight_posture_report(),
             qos_posture: super::gather_qos_posture(None),
             rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+            flight_recorder: FlightRecorderStatusReport::disabled(PathBuf::from(
+                "obs/flight_recorder",
+            )),
             checks: vec![],
         };
         let plan = report.to_fix_plan();
@@ -2209,6 +2259,9 @@ mod tests {
             singleflight_posture: singleflight_posture_report(),
             qos_posture: super::gather_qos_posture(None),
             rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+            flight_recorder: FlightRecorderStatusReport::disabled(PathBuf::from(
+                "obs/flight_recorder",
+            )),
             checks: vec![CheckResult::warning(
                 "cass",
                 "CASS import dry-run recommended.",
@@ -2786,6 +2839,9 @@ mod tests {
             singleflight_posture: singleflight_posture_report(),
             qos_posture: super::gather_qos_posture(None),
             rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+            flight_recorder: FlightRecorderStatusReport::disabled(PathBuf::from(
+                "obs/flight_recorder",
+            )),
             checks: vec![CheckResult::ok("runtime", "ok")],
         };
         assert_eq!(report.posture, Posture::Ok);

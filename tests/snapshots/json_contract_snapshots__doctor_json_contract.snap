@@ -38,5 +38,5 @@ expression: doctor
   },
   "fields": "standard",
   "schema": "ee.response.v1",
-  "success": false
+  "success": true
 }

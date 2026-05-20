@@ -38,6 +38,7 @@ use crate::models::posture::{
     OperationPostureReport, SubsystemPostureReport, SubsystemPostureStatus, WorkspacePostureReport,
 };
 use crate::models::{CapabilityStatus, MemoryId, SingleFlightPostureReport};
+use crate::obs::flight_recorder::{FlightRecorderPosture, classify_flight_recorder_posture};
 use crate::policy::{MEMORY_DECAY_SOURCE, MemoryDecayThresholds, evaluate_memory_decay};
 use crate::search::lexical_ram_tier::{
     LEXICAL_HUGEPAGES_UNAVAILABLE_CODE, LEXICAL_RAM_TIER_HUGEPAGES_ENV,
@@ -100,6 +101,10 @@ const GRAPH_COMPUTE_ALGORITHMS: &[&str] = &[
 ];
 const PACK_BUDGET_BUCKET_SCHEMA_V1: &str = "ee.status.pack_budget_buckets.v1";
 const PACK_BUDGET_BUCKET_WINDOW_HOURS: u32 = 24;
+pub const FLIGHT_RECORDER_STATUS_SCHEMA_V1: &str = "ee.flight_recorder.status.v1";
+const FLIGHT_RECORDER_DEFAULT_RETENTION_DAYS: u32 = 7;
+const FLIGHT_RECORDER_DEFAULT_MAX_BYTES: u64 = 268_435_456;
+const FLIGHT_RECORDER_DEFAULT_REDACTION_LEVEL: &str = "strict";
 const DEFAULT_WAL_CHECKPOINT_BYTES_THRESHOLD: u64 = 64 * 1024 * 1024;
 const RCH_WORKER_PRESSURE_TIMEOUT_MS: u64 = 1_500;
 const RCH_WORKER_PRESSURE_COMMAND: &str = "rch status --workers --jobs --json";
@@ -1624,6 +1629,35 @@ pub struct MeshStorageStatusReport {
     pub cached_body_count: u32,
 }
 
+/// Redaction-safe flight-recorder posture for status and doctor surfaces.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FlightRecorderStatusReport {
+    pub schema: &'static str,
+    pub posture: FlightRecorderPosture,
+    pub enabled: bool,
+    pub writing: bool,
+    pub directory: PathBuf,
+    pub retention_days: u32,
+    pub max_bytes: u64,
+    pub redaction_level: &'static str,
+    pub reason: Option<&'static str>,
+    pub repair: Option<&'static str>,
+}
+
+impl FlightRecorderStatusReport {
+    #[must_use]
+    pub fn disabled(directory: PathBuf) -> Self {
+        flight_recorder_status_from_parts(
+            false,
+            directory,
+            FLIGHT_RECORDER_DEFAULT_RETENTION_DAYS,
+            FLIGHT_RECORDER_DEFAULT_MAX_BYTES,
+            true,
+            false,
+        )
+    }
+}
+
 impl MeshStorageStatusReport {
     fn add(&mut self, status: &MeshStorageStatus) {
         self.peer_count = self.peer_count.saturating_add(status.peer_count);
@@ -1675,6 +1709,7 @@ pub struct StatusReport {
     pub curation_health: CurationHealthReport,
     pub feedback_health: FeedbackHealthReport,
     pub singleflight_posture: SingleFlightPostureReport,
+    pub flight_recorder: FlightRecorderStatusReport,
     pub graph_compute: GraphComputeReport,
     pub graph_snapshot_artifact: GraphSnapshotArtifactReport,
     pub derived_assets: Vec<DerivedAssetReport>,
@@ -1770,6 +1805,7 @@ impl StatusReport {
         let (feedback_health, feedback_degradations) =
             gather_feedback_health(options.workspace_path.as_deref());
         let singleflight_posture = super::singleflight::singleflight_posture_report();
+        let flight_recorder = gather_flight_recorder_status(options.workspace_path.as_deref());
         let mesh_storage = gather_mesh_storage_status(options.workspace_path.as_deref());
         let tailscale_local = gather_tailscale_local_report();
         let agent_inventory = AgentInventoryReport::not_inspected();
@@ -1797,6 +1833,7 @@ impl StatusReport {
         push_wal_degradations(&mut degradations, &wal);
         push_read_pool_degradations(&mut degradations, &read_pool);
         push_shard_fanout_degradations(&mut degradations, &shard_fanout);
+        push_flight_recorder_degradation(&mut degradations, &flight_recorder);
         push_lexical_ram_tier_degradations(&mut degradations, &lexical_ram_tier);
 
         degradations.extend(memory_health_degradations);
@@ -1813,6 +1850,7 @@ impl StatusReport {
             &curation_health,
             &feedback_health,
             &singleflight_posture,
+            &flight_recorder,
             &rch_worker_pressure,
             &graph_compute,
             &shard_fanout,
@@ -1836,6 +1874,7 @@ impl StatusReport {
             curation_health,
             feedback_health,
             singleflight_posture,
+            flight_recorder,
             graph_compute,
             graph_snapshot_artifact,
             derived_assets,
@@ -1846,6 +1885,136 @@ impl StatusReport {
             degradations,
         }
     }
+}
+
+#[must_use]
+pub(crate) fn gather_flight_recorder_status(
+    workspace_path: Option<&Path>,
+) -> FlightRecorderStatusReport {
+    let enabled =
+        flight_recorder_enabled_from_env_value(read_env_var(EnvVar::FlightRecorder).as_deref());
+    let retention_days = flight_recorder_retention_days_from_env_value(
+        read_env_var_or_default(EnvVar::FlightRecorderRetentionDays).as_deref(),
+    );
+    let directory = flight_recorder_directory(workspace_path);
+    let directory_inside_git_tree =
+        flight_recorder_directory_inside_git_tree(&directory, workspace_path);
+    let directory_writable = if enabled {
+        flight_recorder_directory_writable(&directory)
+    } else {
+        true
+    };
+
+    flight_recorder_status_from_parts(
+        enabled,
+        directory,
+        retention_days,
+        FLIGHT_RECORDER_DEFAULT_MAX_BYTES,
+        directory_writable,
+        directory_inside_git_tree,
+    )
+}
+
+#[must_use]
+fn flight_recorder_status_from_parts(
+    enabled: bool,
+    directory: PathBuf,
+    retention_days: u32,
+    max_bytes: u64,
+    directory_writable: bool,
+    directory_inside_git_tree: bool,
+) -> FlightRecorderStatusReport {
+    let posture = classify_flight_recorder_posture(
+        enabled,
+        retention_days,
+        enabled.then_some(directory_writable),
+        directory_inside_git_tree,
+    );
+    FlightRecorderStatusReport {
+        schema: FLIGHT_RECORDER_STATUS_SCHEMA_V1,
+        posture,
+        enabled,
+        writing: posture.is_writing(),
+        directory,
+        retention_days,
+        max_bytes,
+        redaction_level: FLIGHT_RECORDER_DEFAULT_REDACTION_LEVEL,
+        reason: posture.reason_code(),
+        repair: posture.repair_command(),
+    }
+}
+
+#[must_use]
+fn flight_recorder_enabled_from_env_value(value: Option<&str>) -> bool {
+    value.is_some_and(|raw| {
+        matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+#[must_use]
+fn flight_recorder_retention_days_from_env_value(value: Option<&str>) -> u32 {
+    value
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .unwrap_or(FLIGHT_RECORDER_DEFAULT_RETENTION_DAYS)
+}
+
+#[must_use]
+fn flight_recorder_directory(workspace_path: Option<&Path>) -> PathBuf {
+    if let Some(override_dir) = read_env_var_os(EnvVar::FlightRecorderDir) {
+        return PathBuf::from(override_dir);
+    }
+    workspace_path
+        .unwrap_or_else(|| Path::new("."))
+        .join("obs")
+        .join("flight_recorder")
+}
+
+#[must_use]
+fn flight_recorder_directory_writable(directory: &Path) -> bool {
+    match fs::metadata(directory) {
+        Ok(metadata) => metadata.is_dir() && !metadata.permissions().readonly(),
+        Err(_) => nearest_existing_parent(directory)
+            .and_then(|parent| fs::metadata(parent).ok())
+            .is_some_and(|metadata| metadata.is_dir() && !metadata.permissions().readonly()),
+    }
+}
+
+fn nearest_existing_parent(path: &Path) -> Option<&Path> {
+    path.ancestors()
+        .skip(1)
+        .find(|ancestor| fs::metadata(ancestor).is_ok())
+}
+
+#[must_use]
+fn flight_recorder_directory_inside_git_tree(
+    directory: &Path,
+    workspace_path: Option<&Path>,
+) -> bool {
+    let Some(workspace_path) = workspace_path else {
+        return false;
+    };
+    let git_dir = workspace_path.join(".git");
+    directory.starts_with(&git_dir)
+}
+
+fn push_flight_recorder_degradation(
+    degradations: &mut Vec<DegradationReport>,
+    report: &FlightRecorderStatusReport,
+) {
+    let Some(code) = report.reason else {
+        return;
+    };
+    degradations.push(DegradationReport {
+        code,
+        severity: "medium",
+        message: "Flight recorder is enabled but its posture prevents safe trace writes.",
+        repair: report
+            .repair
+            .unwrap_or("Disable EE_FLIGHT_RECORDER or repair the configured trace directory."),
+    });
 }
 
 fn gather_lexical_ram_tier_status(workspace_path: Option<&Path>) -> LexicalRamTierResult {
@@ -2196,6 +2365,7 @@ fn status_posture_report(
     curation_health: &CurationHealthReport,
     feedback_health: &FeedbackHealthReport,
     singleflight_posture: &SingleFlightPostureReport,
+    flight_recorder: &FlightRecorderStatusReport,
     rch_worker_pressure: &RchWorkerPressureReport,
     graph_compute: &GraphComputeReport,
     shard_fanout: &ShardFanoutStatusReport,
@@ -2273,6 +2443,12 @@ fn status_posture_report(
             singleflight_posture_fallback(singleflight_posture),
         ),
         posture_row(
+            "flight_recorder",
+            flight_recorder_posture_status(flight_recorder),
+            flight_recorder.reason,
+            flight_recorder.repair,
+        ),
+        posture_row(
             "rch_worker_pressure",
             rch_worker_pressure_status,
             rch_worker_pressure_posture_reason(rch_worker_pressure),
@@ -2307,6 +2483,7 @@ fn status_posture_report(
             "curate",
             "feedback",
             "singleflight",
+            "flight_recorder",
             "rch_worker_pressure",
             "maintenance",
             "agent_detection",
@@ -2780,6 +2957,19 @@ fn singleflight_posture_fallback(report: &SingleFlightPostureReport) -> Option<&
         SubsystemPostureStatus::Unimplemented => {
             Some("enable a single-flight surface before expecting coalescing")
         }
+    }
+}
+
+const fn flight_recorder_posture_status(
+    report: &FlightRecorderStatusReport,
+) -> SubsystemPostureStatus {
+    match report.posture {
+        FlightRecorderPosture::Disabled | FlightRecorderPosture::Enabled => {
+            SubsystemPostureStatus::Ok
+        }
+        FlightRecorderPosture::RetentionOutOfRange
+        | FlightRecorderPosture::DirectoryUnwritable
+        | FlightRecorderPosture::DirectoryInsideGit => SubsystemPostureStatus::DegradedRequired,
     }
 }
 
@@ -4638,6 +4828,60 @@ mod tests {
 
     struct FakeRchRunner {
         output: Result<SwarmBriefCommandOutput, SwarmBriefCommandError>,
+    }
+
+    #[test]
+    fn flight_recorder_status_defaults_to_disabled_redacted_posture() -> TestResult {
+        let report = flight_recorder_status_from_parts(
+            false,
+            PathBuf::from("/workspace/obs/flight_recorder"),
+            FLIGHT_RECORDER_DEFAULT_RETENTION_DAYS,
+            FLIGHT_RECORDER_DEFAULT_MAX_BYTES,
+            true,
+            false,
+        );
+
+        ensure(report.posture, FlightRecorderPosture::Disabled, "posture")?;
+        ensure(report.enabled, false, "enabled")?;
+        ensure(report.writing, false, "writing")?;
+        ensure(report.retention_days, 7, "retention")?;
+        ensure(report.max_bytes, 268_435_456, "quota")?;
+        ensure(report.redaction_level, "strict", "redaction")
+    }
+
+    #[test]
+    fn flight_recorder_status_blocks_git_directory_before_writes() -> TestResult {
+        let report = flight_recorder_status_from_parts(
+            true,
+            PathBuf::from("/workspace/.git/flight_recorder"),
+            7,
+            FLIGHT_RECORDER_DEFAULT_MAX_BYTES,
+            true,
+            true,
+        );
+
+        ensure(
+            report.posture,
+            FlightRecorderPosture::DirectoryInsideGit,
+            "posture",
+        )?;
+        ensure(report.writing, false, "writing")?;
+        ensure(
+            report.reason,
+            Some("flight_recorder_directory_inside_git"),
+            "reason",
+        )
+    }
+
+    #[test]
+    fn flight_recorder_writable_probe_allows_missing_leaf_under_existing_workspace() -> TestResult {
+        let workspace = unique_test_dir("flight-recorder-writable-probe");
+        let trace_dir = workspace.join("obs").join("flight_recorder");
+
+        ensure(
+            flight_recorder_directory_writable(&trace_dir),
+            "missing trace leaf should be writable when an ancestor directory is writable",
+        )
     }
 
     impl SwarmBriefCommandRunner for FakeRchRunner {

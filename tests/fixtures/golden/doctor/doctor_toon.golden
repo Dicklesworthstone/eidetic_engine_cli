@@ -1,5 +1,5 @@
 schema: ee.response.v1
-success: false
+success: true
 data:
   command: doctor
   version: 0.1.0

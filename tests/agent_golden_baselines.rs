@@ -17,7 +17,7 @@ use ee::core::doctor::{CheckResult, DoctorReport, Posture};
 use ee::core::qos::{QOS_ACTIVE_LANE_SUMMARY_SCHEMA_V1, QosLaneSummary};
 use ee::core::status::{
     CapabilityReport, CurationHealthReport, DegradationReport, DerivedAssetReport,
-    DerivedAssetStatus, FeedbackHealthReport, FeedbackHealthStatus,
+    DerivedAssetStatus, FeedbackHealthReport, FeedbackHealthStatus, FlightRecorderStatusReport,
     GraphAlgorithmResultCacheReport, GraphComputeReport, GraphComputeStatus,
     GraphSnapshotArtifactReport, GraphSnapshotMemoryGraphReport, MemoryHealthReport,
     MemoryHealthStatus, PackBudgetBucketReport, ReadPoolStatusReport, RuntimeReport, StatusReport,
@@ -1265,6 +1265,8 @@ fn fixture_status_posture(
                 .with_checks_passed(1),
             SubsystemPostureReport::new("singleflight", SubsystemPostureStatus::Ok)
                 .with_checks_passed(1),
+            SubsystemPostureReport::new("flight_recorder", SubsystemPostureStatus::Ok)
+                .with_checks_passed(1),
             SubsystemPostureReport::new("maintenance", SubsystemPostureStatus::Ok)
                 .with_checks_passed(1),
             SubsystemPostureReport::new("agent_detection", SubsystemPostureStatus::Ok)
@@ -1280,6 +1282,7 @@ fn fixture_status_posture(
             "curate",
             "feedback",
             "singleflight",
+            "flight_recorder",
             "maintenance",
             "agent_detection",
         ]),
@@ -1295,6 +1298,10 @@ fn fixture_singleflight_posture() -> SingleFlightPostureReport {
         30_000,
         None,
     )])
+}
+
+fn fixture_flight_recorder() -> FlightRecorderStatusReport {
+    FlightRecorderStatusReport::disabled(PathBuf::from("/fixture/workspace/obs/flight_recorder"))
 }
 
 fn fixture_capabilities(storage: CapabilityStatus, search: CapabilityStatus) -> CapabilityReport {
@@ -1345,6 +1352,7 @@ fn status_missing_db_report() -> StatusReport {
         curation_health: CurationHealthReport::unavailable(),
         feedback_health: unavailable_feedback_health(),
         singleflight_posture: fixture_singleflight_posture(),
+        flight_recorder: fixture_flight_recorder(),
         graph_compute: graph_compute_available(),
         graph_snapshot_artifact: graph_snapshot_empty_report(),
         derived_assets: vec![
@@ -1411,6 +1419,7 @@ fn status_pending_migration_report() -> StatusReport {
         curation_health: CurationHealthReport::unavailable(),
         feedback_health: unavailable_feedback_health(),
         singleflight_posture: fixture_singleflight_posture(),
+        flight_recorder: fixture_flight_recorder(),
         graph_compute: graph_compute_available(),
         graph_snapshot_artifact: graph_snapshot_empty_report(),
         derived_assets: vec![
@@ -1477,6 +1486,7 @@ fn status_stale_index_lexical_only_report() -> StatusReport {
         curation_health: CurationHealthReport::not_inspected(),
         feedback_health: healthy_feedback_health(),
         singleflight_posture: fixture_singleflight_posture(),
+        flight_recorder: fixture_flight_recorder(),
         graph_compute: graph_compute_available(),
         graph_snapshot_artifact: graph_snapshot_empty_report(),
         derived_assets: vec![
@@ -1532,6 +1542,7 @@ fn status_search_unimplemented_report() -> StatusReport {
         curation_health: CurationHealthReport::not_inspected(),
         feedback_health: healthy_feedback_health(),
         singleflight_posture: fixture_singleflight_posture(),
+        flight_recorder: fixture_flight_recorder(),
         graph_compute: graph_compute_available(),
         graph_snapshot_artifact: graph_snapshot_empty_report(),
         derived_assets: vec![
@@ -1626,6 +1637,7 @@ fn doctor_missing_db_report() -> DoctorReport {
         overall_healthy: false,
         posture: Posture::DegradedRecoverable,
         singleflight_posture: fixture_singleflight_posture(),
+        flight_recorder: fixture_flight_recorder(),
         qos_posture: fixture_qos_posture(),
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
         checks: vec![
@@ -1660,6 +1672,7 @@ fn doctor_pending_migration_report() -> DoctorReport {
         overall_healthy: false,
         posture: Posture::Blocked,
         singleflight_posture: fixture_singleflight_posture(),
+        flight_recorder: fixture_flight_recorder(),
         qos_posture: fixture_qos_posture(),
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
         checks: vec![
