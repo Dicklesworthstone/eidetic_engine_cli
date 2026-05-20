@@ -7,6 +7,39 @@ surfaces. These tools coordinate access to remote ee memory; they do not
 replace `ee context`, `ee search`, or `ee why` — those still drive the
 local-first retrieval that mesh accelerates.
 
+## Agent Use/No-Use Checklist
+
+Start from local-only behavior unless the task, operator, or bead explicitly
+asks for optional mesh. Ordinary `ee` workflows do not require Tailscale,
+auto-enrollment, a daemon, or any peer configuration.
+
+Before running mutating mesh commands, check the decision lane:
+
+| Situation | Agent action | Why |
+|---|---|---|
+| Single-machine work, CI, or ordinary `ee context` / `ee search` | Do not enroll mesh; keep `--mesh off` or the default mode. | Local Tier 1 is the source of truth and remains deterministic. |
+| User asks whether mesh is available | Run read-only status/doctor commands only. | Availability diagnosis should not create peer bindings or grants. |
+| Two operator-owned machines need shared hints | Start with status, dry-run auto-enroll, then metadata/revision preview. | Metadata-only keeps bodies, embeddings, and graph lanes denied by default. |
+| A pack should stay usable now but report fresher peer material later | Use revisable mode and inspect the revision token. | The local pack must not be silently rewritten after emission. |
+| A body, embedding, or search-surrogate lane is requested | Stop for preview and policy review before any grant. | Tailscale reachability is not authorization, and semantic lanes can leak sensitive information. |
+| Peer status is stale, unreachable, or denied by policy | Surface the typed code and keep local workflows valid. | Mesh failures degrade optional peer work, not core local `ee` commands. |
+
+The safe agent order is:
+
+```bash
+ee status --workspace . --json
+ee mesh status --workspace . --json
+ee mesh auto-enroll --workspace . --dry-run --json
+ee mesh preview-grant <node-key> --lane metadata --workspace . --json
+ee context "audit release readiness" --workspace . --mesh revisable --json
+```
+
+Stop before the mutating `ee mesh auto-enroll --json`, `ee mesh disable`,
+`ee mesh revoke`, `ee mesh discovery-policy set|allow|deny`, or any body /
+embedding grant unless the operator has asked for that exact state change.
+Never describe a mesh denial as a broken local memory system; it is usually the
+policy layer doing its job.
+
 ## TL;DR
 
 If `tailscaled` is running and authenticated, and at least one peer on the

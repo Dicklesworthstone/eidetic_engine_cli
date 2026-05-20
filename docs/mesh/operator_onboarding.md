@@ -13,6 +13,11 @@ need to decide whether mesh is appropriate for a workflow, how to enable it
 safely, and how to explain degraded mesh results without overstating what was
 verified.
 
+For agent-specific decision rules, pair this guide with
+`docs/agent-ux/auto_enrollment_onboarding.md`. Agents should treat that
+onboarding note as the operational checklist for staying local-only, inspecting
+mesh read-only, dry-running enrollment, and handling revisable packs.
+
 The default remains local-first:
 
 - `ee init`, `ee remember`, `ee search`, `ee context`, `ee why`, and
