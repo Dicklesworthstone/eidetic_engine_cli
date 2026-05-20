@@ -1,0 +1,359 @@
+{
+  "data": {
+    "applied": false,
+    "budgets": {
+      "cache": {
+        "entryCap": 1024,
+        "hotsetPrewarmLimit": 64,
+        "memoryCapMb": 512
+      },
+      "diagnostics": {
+        "redaction": "strict",
+        "supportBundleProfile": "standard"
+      },
+      "pack": {
+        "explanationVerbosity": "standard",
+        "maxCandidateMemories": 48,
+        "maxTokens": 4500
+      },
+      "search": {
+        "candidateLimit": 96,
+        "concurrentIndexReaders": 2,
+        "staleIndexTolerance": "strict"
+      },
+      "steward": {
+        "daemonPrewarm": false,
+        "graphRefreshBudget": 256,
+        "maintenanceWindowMs": 1000
+      },
+      "verification": {
+        "heavyStrategy": "rch_preferred",
+        "recipe": "workspace",
+        "targetDirPosture": "isolated",
+        "timeoutClass": "standard"
+      },
+      "writeSpool": {
+        "batchCap": 64,
+        "queueCap": 1024,
+        "retryBudget": 5
+      }
+    },
+    "command": "profile config plan",
+    "configExists": false,
+    "configPath": "[WORKSPACE]/.ee/config.toml",
+    "conflicts": [],
+    "dryRun": true,
+    "edits": [
+      {
+        "after": "portable",
+        "before": null,
+        "key": "profile.selected",
+        "status": "planned"
+      },
+      {
+        "after": "96",
+        "before": null,
+        "key": "profile.budgets.search_candidate_limit",
+        "status": "planned"
+      },
+      {
+        "after": "2",
+        "before": null,
+        "key": "profile.budgets.search_concurrent_index_readers",
+        "status": "planned"
+      },
+      {
+        "after": "strict",
+        "before": null,
+        "key": "profile.budgets.search_stale_index_tolerance",
+        "status": "planned"
+      },
+      {
+        "after": "4500",
+        "before": null,
+        "key": "profile.budgets.pack_max_tokens",
+        "status": "planned"
+      },
+      {
+        "after": "48",
+        "before": null,
+        "key": "profile.budgets.pack_max_candidate_memories",
+        "status": "planned"
+      },
+      {
+        "after": "standard",
+        "before": null,
+        "key": "profile.budgets.pack_explanation_verbosity",
+        "status": "planned"
+      },
+      {
+        "after": "512",
+        "before": null,
+        "key": "profile.budgets.cache_memory_cap_mb",
+        "status": "planned"
+      },
+      {
+        "after": "1024",
+        "before": null,
+        "key": "profile.budgets.cache_entry_cap",
+        "status": "planned"
+      },
+      {
+        "after": "64",
+        "before": null,
+        "key": "profile.budgets.cache_hotset_prewarm_limit",
+        "status": "planned"
+      },
+      {
+        "after": "1024",
+        "before": null,
+        "key": "profile.budgets.write_spool_queue_cap",
+        "status": "planned"
+      },
+      {
+        "after": "64",
+        "before": null,
+        "key": "profile.budgets.write_spool_batch_cap",
+        "status": "planned"
+      },
+      {
+        "after": "5",
+        "before": null,
+        "key": "profile.budgets.write_spool_retry_budget",
+        "status": "planned"
+      },
+      {
+        "after": "1000",
+        "before": null,
+        "key": "profile.budgets.steward_maintenance_window_ms",
+        "status": "planned"
+      },
+      {
+        "after": "256",
+        "before": null,
+        "key": "profile.budgets.steward_graph_refresh_budget",
+        "status": "planned"
+      },
+      {
+        "after": "false",
+        "before": null,
+        "key": "profile.budgets.steward_daemon_prewarm",
+        "status": "planned"
+      },
+      {
+        "after": "workspace",
+        "before": null,
+        "key": "profile.budgets.verification_recipe",
+        "status": "planned"
+      },
+      {
+        "after": "isolated",
+        "before": null,
+        "key": "profile.budgets.verification_target_dir_posture",
+        "status": "planned"
+      },
+      {
+        "after": "standard",
+        "before": null,
+        "key": "profile.budgets.verification_timeout_class",
+        "status": "planned"
+      },
+      {
+        "after": "rch_preferred",
+        "before": null,
+        "key": "profile.budgets.verification_heavy_strategy",
+        "status": "planned"
+      },
+      {
+        "after": "standard",
+        "before": null,
+        "key": "profile.budgets.diagnostics_support_bundle_profile",
+        "status": "planned"
+      },
+      {
+        "after": "strict",
+        "before": null,
+        "key": "profile.budgets.diagnostics_redaction",
+        "status": "planned"
+      }
+    ],
+    "overrides": [
+      {
+        "key": "profile.effective",
+        "source": "cli",
+        "value": "portable"
+      }
+    ],
+    "pathRedaction": "operator_requested_config_path",
+    "plannedToml": "profile = { selected = \"portable\", budgets = { search_candidate_limit = 96, search_concurrent_index_readers = 2, search_stale_index_tolerance = \"strict\", pack_max_tokens = 4500, pack_max_candidate_memories = 48, pack_explanation_verbosity = \"standard\", cache_memory_cap_mb = 512, cache_entry_cap = 1024, cache_hotset_prewarm_limit = 64, write_spool_queue_cap = 1024, write_spool_batch_cap = 64, write_spool_retry_budget = 5, steward_maintenance_window_ms = 1000, steward_graph_refresh_budget = 256, steward_daemon_prewarm = false, verification_recipe = \"workspace\", verification_target_dir_posture = \"isolated\", verification_timeout_class = \"standard\", verification_heavy_strategy = \"rch_preferred\", diagnostics_support_bundle_profile = \"standard\", diagnostics_redaction = \"strict\" } }\n",
+    "probe": {
+      "complete": "[BOOL]",
+      "cpu": {
+        "logicalCores": "[CPU]",
+        "physicalCores": "[CPU_OR_NULL]",
+        "source": "std_thread_available_parallelism"
+      },
+      "degraded": "[HOST_PROBE_DEGRADATIONS]",
+      "environment": {
+        "cargoTargetDirConfigured": "[BOOL]",
+        "rchHintConfigured": "[BOOL]",
+        "redaction": "presence_only",
+        "tmpdirConfigured": "[BOOL]"
+      },
+      "memory": {
+        "availableBytes": "[BYTES_OR_NULL]",
+        "cgroupLimitBytes": "[BYTES_OR_NULL]",
+        "source": "[MEMORY_SOURCE]",
+        "totalBytes": "[BYTES_OR_NULL]"
+      },
+      "paths": [
+        {
+          "availableBytes": "[BYTES_OR_NULL]",
+          "exists": "[BOOL]",
+          "label": "workspace",
+          "nearestExistingAncestor": "[BOOL]",
+          "redaction": "path_not_emitted",
+          "role": "workspace_root",
+          "sameFilesystemAsWorkspace": "[BOOL_OR_NULL]",
+          "totalBytes": "[BYTES_OR_NULL]"
+        },
+        {
+          "availableBytes": "[BYTES_OR_NULL]",
+          "exists": "[BOOL]",
+          "label": "ee_state",
+          "nearestExistingAncestor": "[BOOL]",
+          "redaction": "path_not_emitted",
+          "role": "workspace_state_dir",
+          "sameFilesystemAsWorkspace": "[BOOL_OR_NULL]",
+          "totalBytes": "[BYTES_OR_NULL]"
+        },
+        {
+          "availableBytes": "[BYTES_OR_NULL]",
+          "exists": "[BOOL]",
+          "label": "database",
+          "nearestExistingAncestor": "[BOOL]",
+          "redaction": "path_not_emitted",
+          "role": "frankensqlite_database",
+          "sameFilesystemAsWorkspace": "[BOOL_OR_NULL]",
+          "totalBytes": "[BYTES_OR_NULL]"
+        },
+        {
+          "availableBytes": "[BYTES_OR_NULL]",
+          "exists": "[BOOL]",
+          "label": "index",
+          "nearestExistingAncestor": "[BOOL]",
+          "redaction": "path_not_emitted",
+          "role": "frankensearch_index",
+          "sameFilesystemAsWorkspace": "[BOOL_OR_NULL]",
+          "totalBytes": "[BYTES_OR_NULL]"
+        },
+        {
+          "availableBytes": "[BYTES_OR_NULL]",
+          "exists": "[BOOL]",
+          "label": "cache",
+          "nearestExistingAncestor": "[BOOL]",
+          "redaction": "path_not_emitted",
+          "role": "derived_cache",
+          "sameFilesystemAsWorkspace": "[BOOL_OR_NULL]",
+          "totalBytes": "[BYTES_OR_NULL]"
+        },
+        {
+          "availableBytes": "[BYTES_OR_NULL]",
+          "exists": "[BOOL]",
+          "label": "temp",
+          "nearestExistingAncestor": "[BOOL]",
+          "redaction": "path_not_emitted",
+          "role": "temporary_directory",
+          "sameFilesystemAsWorkspace": "[BOOL_OR_NULL]",
+          "totalBytes": "[BYTES_OR_NULL]"
+        },
+        {
+          "availableBytes": "[BYTES_OR_NULL]",
+          "exists": "[BOOL]",
+          "label": "cargo_target",
+          "nearestExistingAncestor": "[BOOL]",
+          "redaction": "path_not_emitted",
+          "role": "build_cache_directory",
+          "sameFilesystemAsWorkspace": "[BOOL_OR_NULL]",
+          "totalBytes": "[BYTES_OR_NULL]"
+        }
+      ],
+      "redaction": "label_only_paths_presence_only_env",
+      "schema": "ee.host_profile.v1",
+      "sideEffectFree": true,
+      "tools": [
+        {
+          "available": "[BOOL]",
+          "name": "cargo",
+          "source": "path_lookup_presence_only"
+        },
+        {
+          "available": "[BOOL]",
+          "name": "rustfmt",
+          "source": "path_lookup_presence_only"
+        },
+        {
+          "available": "[BOOL]",
+          "name": "clippy",
+          "source": "path_lookup_presence_only"
+        },
+        {
+          "available": "[BOOL]",
+          "name": "br",
+          "source": "path_lookup_presence_only"
+        },
+        {
+          "available": "[BOOL]",
+          "name": "bv",
+          "source": "path_lookup_presence_only"
+        },
+        {
+          "available": "[BOOL]",
+          "name": "rch",
+          "source": "path_lookup_presence_only"
+        },
+        {
+          "available": "[BOOL]",
+          "name": "gh",
+          "source": "path_lookup_presence_only"
+        }
+      ],
+      "topology": {
+        "rch": {
+          "available": "[BOOL]",
+          "message": "[RCH_MESSAGE]",
+          "posture": "[RCH_POSTURE]",
+          "repair": "[RCH_REPAIR_OR_NULL]",
+          "source": "path_lookup_presence_only",
+          "status": "[RCH_STATUS]"
+        }
+      },
+      "workspace": {
+        "initialized": "[BOOL]",
+        "label": "workspace",
+        "redaction": "path_not_emitted"
+      }
+    },
+    "profile": {
+      "confidence": "[HOST_CONFIDENCE]",
+      "effective": "portable",
+      "reasons": [
+        "[HOST_REASON]"
+      ],
+      "recommended": "[HOST_PROFILE]"
+    },
+    "repair": "Review plannedToml, then run `ee profile config apply` without `--dry-run`.",
+    "schema": "ee.profile.config.plan.v1",
+    "wouldWrite": true
+  },
+  "degraded": [
+    {
+      "code": "heavy_gates_skipped",
+      "message": "2 heavy verification gate(s) skipped by profile: integration_tests, e2e_tests",
+      "repair": "Run skipped gates manually or upgrade to a higher-resource profile.",
+      "severity": "info"
+    }
+  ],
+  "schema": "ee.response.v1",
+  "success": true
+}
