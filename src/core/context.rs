@@ -37,6 +37,11 @@ use rustix::fs::{FlockOperation, flock};
 #[cfg(unix)]
 use rustix::io::Errno;
 
+use crate::cache::pack_l2::{
+    DEFAULT_MAX_BYTES as PACK_L2_DEFAULT_MAX_BYTES, PackL2Cache, PackL2CacheError,
+    PackL2CacheLookup, PackL2CacheMiss, PackL2CacheMissReason, PackL2CacheOptions,
+    PackL2WriteOutcome,
+};
 use crate::config::{
     ConfigFile, EnvVar, GRAPH_FEATURE_PACK_DNA_ENABLED_KEY, GRAPH_FEATURE_PPR_ENABLED_KEY,
     GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, ReadPoolConfig, WorkspaceLocation, read_env_var,
@@ -88,6 +93,7 @@ static PACK_SLOT_PROCESS_GATES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::n
 const PACK_SLOT_RETRY_AFTER_MS: u64 = 250;
 #[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
 pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V1: &str = "ee.pack.l2_cache_key.v1";
+const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V1: &str = "ee.pack.l2_context_response.v1";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
 
 #[derive(Debug)]
@@ -569,6 +575,7 @@ impl ContextPackOutputProfile {
 pub struct ContextPackOutputOptions {
     pub profile: ContextPackOutputProfile,
     pub resource_profile: PackResourceProfile,
+    pub cache_json_response: bool,
     pub include_coverage_fill: bool,
     pub include_rendered_text: bool,
     pub include_skipped: bool,
@@ -598,6 +605,7 @@ impl ContextPackOutputOptions {
             ContextPackOutputProfile::Lean => Self {
                 profile,
                 resource_profile: PackResourceProfile::Standard,
+                cache_json_response: false,
                 include_coverage_fill: false,
                 include_rendered_text: false,
                 include_skipped: false,
@@ -608,6 +616,7 @@ impl ContextPackOutputOptions {
             ContextPackOutputProfile::Standard => Self {
                 profile,
                 resource_profile: PackResourceProfile::Standard,
+                cache_json_response: false,
                 include_coverage_fill: true,
                 include_rendered_text: true,
                 include_skipped: true,
@@ -618,6 +627,7 @@ impl ContextPackOutputOptions {
             ContextPackOutputProfile::Verbose => Self {
                 profile,
                 resource_profile: PackResourceProfile::Standard,
+                cache_json_response: false,
                 include_coverage_fill: true,
                 include_rendered_text: true,
                 include_skipped: true,
@@ -633,6 +643,7 @@ impl ContextPackOutputOptions {
         Self {
             profile: self.profile,
             resource_profile: self.resource_profile,
+            cache_json_response: self.cache_json_response,
             include_coverage_fill: overrides
                 .no_coverage_fill
                 .map_or(self.include_coverage_fill, |value| !value),
@@ -653,6 +664,12 @@ impl ContextPackOutputOptions {
     #[must_use]
     pub const fn with_resource_profile(mut self, resource_profile: PackResourceProfile) -> Self {
         self.resource_profile = resource_profile;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_cache_json_response(mut self, cache_json_response: bool) -> Self {
+        self.cache_json_response = cache_json_response;
         self
     }
 }
@@ -1112,6 +1129,34 @@ fn run_context_pack_with_performance_inner(
             Some("ee profile config plan --json".to_string()),
         );
     }
+
+    let l2_cache_context = if options.output_options.cache_json_response {
+        let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+        let l2_context = context_pack_l2_prepare(
+            options,
+            read_connection,
+            &request,
+            &effective_filters,
+            output_redaction_enabled,
+            &mut degraded,
+        );
+        if let Some(context) = &l2_context
+            && let Some(cached_run) = context_pack_l2_try_hit(
+                context,
+                command,
+                options,
+                &request,
+                total_start,
+                &mut trace,
+                &mut degraded,
+            )
+        {
+            return Ok(cached_run);
+        }
+        l2_context
+    } else {
+        None
+    };
 
     let search_start = Instant::now();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
@@ -1673,6 +1718,10 @@ fn run_context_pack_with_performance_inner(
     response.data.consensus = consensus_conflicts.consensus;
     response.data.conflicts = consensus_conflicts.conflicts;
     response.data.coordination = coordination;
+
+    if let Some(l2_context) = &l2_cache_context {
+        context_pack_l2_store(l2_context, options, &mut response);
+    }
 
     // Bead bd-17c65.7.7 (G8): best-effort audit-log instrumentation for
     // pack assembly. One `pack.assembled` row per call + one
@@ -3196,8 +3245,588 @@ fn push_coordination_snapshot_degradations(
     }
 }
 
+#[derive(Clone, Debug)]
+struct ContextPackL2Context {
+    cache: PackL2Cache,
+    key: String,
+}
+
+fn context_pack_l2_prepare(
+    options: &ContextPackOptions,
+    connection: &DbConnection,
+    request: &ContextRequest,
+    filters: &crate::models::QueryFilters,
+    output_redaction_enabled: bool,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Option<ContextPackL2Context> {
+    let workspace_id = context_pack_l2_workspace_id(connection, &options.workspace_path);
+    let cache = match context_pack_l2_cache(&options.workspace_path, &workspace_id) {
+        Ok(Some(cache)) => cache,
+        Ok(None) => return None,
+        Err(message) => {
+            push_pack_l2_unavailable(degraded, message);
+            return None;
+        }
+    };
+    let database_generation = match context_pack_l2_database_generation(connection) {
+        Ok(generation) => generation,
+        Err(message) => {
+            push_pack_l2_unavailable(
+                degraded,
+                format!("L2 pack cache key generation could not read database posture: {message}"),
+            );
+            return None;
+        }
+    };
+    let graph_generation = match context_pack_l2_graph_generation(connection) {
+        Ok(generation) => generation,
+        Err(message) => {
+            push_pack_l2_unavailable(
+                degraded,
+                format!("L2 pack cache key generation could not read graph posture: {message}"),
+            );
+            return None;
+        }
+    };
+    let personalization_generation = match context_pack_l2_personalization_generation(connection) {
+        Ok(generation) => generation,
+        Err(message) => {
+            push_pack_l2_unavailable(
+                degraded,
+                format!(
+                    "L2 pack cache key generation could not read personalization posture: {message}"
+                ),
+            );
+            return None;
+        }
+    };
+    let key = compute_pack_l2_cache_key(&PackL2CacheKeyInput {
+        workspace_id,
+        database_generation,
+        index_generation: context_pack_l2_index_generation(options),
+        graph_generation,
+        redaction_level: options.redaction_level,
+        request: request.clone(),
+        output_options: options.output_options,
+        memory_scope: options.memory_scope,
+        strict_scope: options.strict_scope,
+        context_feature_flags_hash: context_pack_l2_feature_flags_hash(
+            options,
+            filters,
+            output_redaction_enabled,
+        ),
+        personalization_generation,
+    });
+
+    Some(ContextPackL2Context { cache, key })
+}
+
+fn context_pack_l2_try_hit(
+    l2_context: &ContextPackL2Context,
+    command: &'static str,
+    options: &ContextPackOptions,
+    request: &ContextRequest,
+    total_start: Instant,
+    trace: &mut ContextPerformanceTrace,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Option<ContextPackPerformanceRun> {
+    let lookup_start = Instant::now();
+    match l2_context.cache.get(&l2_context.key) {
+        Ok(PackL2CacheLookup::Hit(hit)) => {
+            match context_pack_l2_cached_response_json(&hit.pack_json) {
+                Ok(cached_json) => {
+                    trace.record_elapsed("packL2Lookup", lookup_start);
+                    trace.record_elapsed("total", total_start);
+                    tracing::info!(
+                        target: "ee::pack_l2",
+                        event = "pack_l2_cache_hit",
+                        command,
+                        key = %l2_context.key,
+                        path = %hit.path.display(),
+                        byte_len = hit.byte_len,
+                        stored_at_epoch_seconds = hit.stored_at_epoch_seconds,
+                    );
+                    return Some(ContextPackPerformanceRun {
+                        response: ContextResponse::from_cached_json(request.clone(), cached_json),
+                        performance: context_pack_l2_hit_performance_json(
+                            command,
+                            options,
+                            request,
+                            trace,
+                            &l2_context.key,
+                            hit.byte_len,
+                        ),
+                    });
+                }
+                Err(message) => {
+                    push_pack_l2_corruption(degraded, message);
+                    tracing::warn!(
+                        target: "ee::pack_l2",
+                        event = "pack_l2_cache_corruption",
+                        command,
+                        key = %l2_context.key,
+                        path = %hit.path.display(),
+                    );
+                }
+            }
+        }
+        Ok(PackL2CacheLookup::Miss(miss)) => {
+            if pack_l2_miss_is_corruption(&miss) {
+                push_pack_l2_corruption(
+                    degraded,
+                    format!(
+                        "L2 pack cache entry {} was rejected: {}",
+                        miss.path.display(),
+                        pack_l2_miss_reason(&miss.reason)
+                    ),
+                );
+            }
+            tracing::debug!(
+                target: "ee::pack_l2",
+                event = "pack_l2_cache_miss",
+                command,
+                key = %l2_context.key,
+                reason = %pack_l2_miss_reason(&miss.reason),
+            );
+        }
+        Err(error) => {
+            push_pack_l2_cache_error(degraded, error);
+        }
+    }
+    trace.record_elapsed("packL2Lookup", lookup_start);
+    None
+}
+
+fn context_pack_l2_store(
+    l2_context: &ContextPackL2Context,
+    options: &ContextPackOptions,
+    response: &mut ContextResponse,
+) {
+    let rendered = crate::output::render_context_response_json_with_options(
+        response,
+        crate::output::ContextJsonRenderOptions::from(options.output_options),
+    );
+    let payload = serde_json::json!({
+        "schema": PACK_L2_CONTEXT_RESPONSE_SCHEMA_V1,
+        "responseJson": rendered,
+    });
+
+    match l2_context.cache.put(&l2_context.key, &payload) {
+        Ok(report) => {
+            tracing::info!(
+                target: "ee::pack_l2",
+                event = "pack_l2_cache_write",
+                key = %l2_context.key,
+                path = %report.path.display(),
+                byte_len = report.byte_len,
+                outcome = %pack_l2_write_outcome(&report.outcome),
+                evicted = report.eviction.removed,
+                bytes_removed = report.eviction.bytes_removed,
+            );
+        }
+        Err(error) => {
+            push_pack_l2_cache_error(&mut response.data.degraded, error);
+        }
+    }
+}
+
+fn context_pack_l2_cache(
+    workspace_path: &Path,
+    workspace_id: &str,
+) -> Result<Option<PackL2Cache>, String> {
+    let Some(config) = context_pack_l2_config(workspace_path)? else {
+        return Ok(None);
+    };
+    let root = if config.root.as_os_str().is_empty() {
+        context_pack_l2_default_root()
+    } else {
+        config.root
+    };
+    let workspace_root = root.join(pack_l2_workspace_component(workspace_id));
+    Ok(Some(PackL2Cache::new(
+        workspace_root,
+        PackL2CacheOptions::new(config.max_bytes, config.max_age)
+            .with_max_entry_bytes(config.max_entry_bytes),
+    )))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
+struct ContextPackL2Config {
+    root: PathBuf,
+    max_bytes: u64,
+    max_entry_bytes: u64,
+    max_age: Duration,
+}
+
+fn context_pack_l2_config(workspace_path: &Path) -> Result<Option<ContextPackL2Config>, String> {
+    let project = context_workspace_config(workspace_path, "L2 pack cache")?;
+    let project_l2 = project.as_ref().map(|config| &config.cache.pack_l2);
+    let disabled_by_env = read_env_bool(EnvVar::L2PackCacheDisable).unwrap_or(false);
+    let enabled = !disabled_by_env && project_l2.and_then(|config| config.enabled).unwrap_or(true);
+    if !enabled {
+        return Ok(None);
+    }
+
+    let root = read_env_var(EnvVar::L2PackCacheDir)
+        .map(PathBuf::from)
+        .or_else(|| project_l2.and_then(|config| config.directory.clone()))
+        .unwrap_or_default();
+    let max_bytes = read_env_u64(EnvVar::L2PackCacheBytes)
+        .or_else(|| project_l2.and_then(|config| config.max_bytes))
+        .unwrap_or(PACK_L2_DEFAULT_MAX_BYTES);
+    let max_age_days = project_l2
+        .and_then(|config| config.max_age_days)
+        .unwrap_or(30);
+
+    Ok(Some(ContextPackL2Config {
+        root,
+        max_bytes,
+        max_entry_bytes: crate::cache::pack_l2::DEFAULT_MAX_ENTRY_BYTES,
+        max_age: Duration::from_secs(max_age_days.saturating_mul(24 * 60 * 60)),
+    }))
+}
+
+fn context_pack_l2_default_root() -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        let shm = Path::new("/dev/shm");
+        if shm.is_dir() {
+            shm.join("ee").join("pack-l2")
+        } else {
+            std::env::temp_dir().join("ee").join("pack-l2")
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::env::temp_dir().join("ee").join("pack-l2")
+    }
+}
+
+fn context_pack_l2_workspace_id(connection: &DbConnection, workspace_path: &Path) -> String {
+    for path in context_workspace_path_keys(workspace_path) {
+        if let Ok(Some(workspace)) = connection.get_workspace_by_path(&path.to_string_lossy()) {
+            return workspace.id;
+        }
+    }
+    stable_context_workspace_id(workspace_path)
+}
+
+fn pack_l2_workspace_component(workspace_id: &str) -> String {
+    workspace_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn context_pack_l2_database_generation(connection: &DbConnection) -> Result<u64, String> {
+    context_pack_l2_query_generation(
+        connection,
+        "SELECT \
+            (SELECT COUNT(*) FROM workspaces), \
+            (SELECT COALESCE(MAX(updated_at), '') FROM workspaces), \
+            (SELECT COUNT(*) FROM memories), \
+            (SELECT COALESCE(MAX(updated_at), '') FROM memories), \
+            (SELECT COUNT(*) FROM memory_links), \
+            (SELECT COALESCE(MAX(created_at), '') FROM memory_links)",
+    )
+}
+
+fn context_pack_l2_graph_generation(connection: &DbConnection) -> Result<Option<u64>, String> {
+    let generation = context_pack_l2_query_generation(
+        connection,
+        "SELECT \
+            COUNT(*), \
+            COALESCE(MAX(snapshot_version), 0), \
+            COALESCE(MAX(source_generation), 0), \
+            COALESCE(MAX(created_at), '') \
+         FROM graph_snapshots \
+         WHERE status = 'valid'",
+    )?;
+    Ok((generation != 0).then_some(generation))
+}
+
+fn context_pack_l2_personalization_generation(
+    connection: &DbConnection,
+) -> Result<Option<u64>, String> {
+    let generation = context_pack_l2_query_generation(
+        connection,
+        "SELECT \
+            COUNT(*), \
+            COALESCE(MAX(updated_at), ''), \
+            COALESCE(MAX(last_seen_at), '') \
+         FROM agent_context_profiles",
+    )?;
+    Ok((generation != 0).then_some(generation))
+}
+
+fn context_pack_l2_query_generation(connection: &DbConnection, sql: &str) -> Result<u64, String> {
+    let rows = connection
+        .query(sql, &[])
+        .map_err(|error| error.to_string())?;
+    let mut hasher = blake3::Hasher::new();
+    hash_labeled_u64(&mut hasher, "row_count", rows.len() as u64);
+    for row in rows {
+        for index in 0..8 {
+            if let Some(value) = row.get(index) {
+                hash_labeled_bytes(
+                    &mut hasher,
+                    &format!("column_{index}"),
+                    format!("{value:?}").as_bytes(),
+                );
+            }
+        }
+    }
+    Ok(blake3_u64(hasher))
+}
+
+fn context_pack_l2_index_generation(options: &ContextPackOptions) -> u64 {
+    let index_dir = options
+        .index_dir
+        .clone()
+        .unwrap_or_else(|| options.workspace_path.join(".ee").join("index"));
+    let Ok(metadata) = fs::metadata(&index_dir) else {
+        return 0;
+    };
+    let mut hasher = blake3::Hasher::new();
+    hash_labeled_bytes(
+        &mut hasher,
+        "index_dir",
+        index_dir.to_string_lossy().as_bytes(),
+    );
+    hash_labeled_u64(&mut hasher, "len", metadata.len());
+    hash_labeled_u64(
+        &mut hasher,
+        "modified",
+        metadata
+            .modified()
+            .ok()
+            .and_then(system_time_epoch_seconds)
+            .unwrap_or(0),
+    );
+    blake3_u64(hasher)
+}
+
+fn context_pack_l2_feature_flags_hash(
+    options: &ContextPackOptions,
+    filters: &crate::models::QueryFilters,
+    output_redaction_enabled: bool,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hash_labeled_bool(
+        &mut hasher,
+        "output_redaction_enabled",
+        output_redaction_enabled,
+    );
+    hash_labeled_bytes(&mut hasher, "speed", options.speed.as_str().as_bytes());
+    hash_labeled_bool(
+        &mut hasher,
+        "include_tombstoned",
+        options.include_tombstoned,
+    );
+    hash_labeled_bool(&mut hasher, "include_expired", options.include_expired);
+    hash_labeled_bool(&mut hasher, "include_future", options.include_future);
+    hash_labeled_bool(&mut hasher, "include_stale", options.include_stale);
+    hash_labeled_bytes(
+        &mut hasher,
+        "as_of",
+        options
+            .as_of
+            .map(|timestamp| timestamp.to_rfc3339())
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    hash_labeled_bytes(&mut hasher, "filters", format!("{filters:?}").as_bytes());
+    hash_labeled_bytes(
+        &mut hasher,
+        "ppr_weight",
+        options
+            .ppr_weight
+            .map(|weight| weight.to_bits().to_string())
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    hash_labeled_bytes(
+        &mut hasher,
+        "pagination",
+        format!("{:?}", options.pagination).as_bytes(),
+    );
+    hash_labeled_bytes(
+        &mut hasher,
+        "coordination_snapshot",
+        options
+            .coordination_snapshot_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    hash_labeled_u64(
+        &mut hasher,
+        "coordination_stale_after_ms",
+        options.coordination_stale_after_ms,
+    );
+    finalize_blake3(hasher)
+}
+
+fn context_pack_l2_cached_response_json(payload: &serde_json::Value) -> Result<String, String> {
+    let schema = payload
+        .get("schema")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "L2 pack cache payload is missing schema".to_string())?;
+    if schema != PACK_L2_CONTEXT_RESPONSE_SCHEMA_V1 {
+        return Err(format!(
+            "L2 pack cache payload has unexpected schema {schema}"
+        ));
+    }
+    let response_json = payload
+        .get("responseJson")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "L2 pack cache payload is missing responseJson".to_string())?;
+    serde_json::from_str::<serde_json::Value>(response_json)
+        .map_err(|error| format!("L2 pack cache responseJson is malformed: {error}"))?;
+    Ok(response_json.to_owned())
+}
+
+fn context_pack_l2_hit_performance_json(
+    command: &'static str,
+    options: &ContextPackOptions,
+    request: &ContextRequest,
+    trace: &ContextPerformanceTrace,
+    key: &str,
+    byte_len: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": PERFORMANCE_EXPLAIN_SCHEMA_V1,
+        "success": true,
+        "data": {
+            "command": command,
+            "query": query_observation_json(&request.query),
+            "queryPlan": {
+                "retrievalMode": options.speed.as_str(),
+                "requestedCandidatePool": request.candidate_pool,
+                "maxResults": request.max_results,
+                "effectiveCandidatePool": request.candidate_pool,
+                "maxTokens": request.budget.max_tokens(),
+                "profile": request.profile.as_str(),
+                "filtersApplied": !options.filters.is_empty()
+                    || options.as_of.is_some()
+                    || options.include_expired
+                    || options.include_future
+                    || options.include_stale,
+                "memoryScope": options.memory_scope.as_str(),
+                "strictScope": options.strict_scope,
+            },
+            "dbReads": context_db_reads_json(trace),
+            "cache": {
+                "status": "hit",
+                "tier": "l2",
+                "key": key,
+                "byteLen": byte_len,
+                "selectedItemsUnaffected": true,
+            },
+            "timings": trace.timings.iter().map(performance_timing_json).collect::<Vec<_>>(),
+            "fallbacks": [],
+            "redaction": performance_redaction_json(),
+        },
+    })
+}
+
+fn pack_l2_miss_is_corruption(miss: &PackL2CacheMiss) -> bool {
+    matches!(
+        miss.reason,
+        PackL2CacheMissReason::Corrupt(_)
+            | PackL2CacheMissReason::BodyHashMismatch { .. }
+            | PackL2CacheMissReason::KeyMismatch { .. }
+    )
+}
+
+fn pack_l2_miss_reason(reason: &PackL2CacheMissReason) -> String {
+    match reason {
+        PackL2CacheMissReason::NotFound => "not_found".to_string(),
+        PackL2CacheMissReason::Expired {
+            stored_at_epoch_seconds,
+        } => format!("expired stored_at_epoch_seconds={stored_at_epoch_seconds}"),
+        PackL2CacheMissReason::Corrupt(message) => format!("corrupt {message}"),
+        PackL2CacheMissReason::BodyHashMismatch { expected, actual } => {
+            format!("body_hash_mismatch expected={expected} actual={actual}")
+        }
+        PackL2CacheMissReason::KeyMismatch { stored_key } => {
+            format!("key_mismatch stored_key={stored_key}")
+        }
+        PackL2CacheMissReason::TooLarge {
+            byte_len,
+            max_entry_bytes,
+        } => format!("too_large byte_len={byte_len} max_entry_bytes={max_entry_bytes}"),
+    }
+}
+
+fn pack_l2_write_outcome(outcome: &PackL2WriteOutcome) -> &'static str {
+    match outcome {
+        PackL2WriteOutcome::Stored => "stored",
+        PackL2WriteOutcome::SkippedTooLarge { .. } => "skipped_too_large",
+    }
+}
+
+fn push_pack_l2_cache_error(
+    degraded: &mut Vec<ContextResponseDegradation>,
+    error: PackL2CacheError,
+) {
+    push_pack_l2_unavailable(
+        degraded,
+        format!("L2 pack cache was unavailable; assembled fresh context instead: {error}"),
+    );
+}
+
+fn push_pack_l2_unavailable(degraded: &mut Vec<ContextResponseDegradation>, message: String) {
+    let message = if message.contains("assembled fresh context") {
+        message
+    } else {
+        format!("{message}; assembled fresh context instead.")
+    };
+    push_degradation(
+        degraded,
+        "l2_pack_cache_unavailable",
+        ContextResponseSeverity::Low,
+        message,
+        Some("Check [cache.pack_l2] configuration and cache directory permissions.".to_string()),
+    );
+}
+
+fn push_pack_l2_corruption(degraded: &mut Vec<ContextResponseDegradation>, message: String) {
+    let message = if message.contains("rejected") {
+        message
+    } else {
+        format!("L2 pack cache entry rejected: {message}")
+    };
+    push_degradation(
+        degraded,
+        "l2_pack_cache_corruption",
+        ContextResponseSeverity::Low,
+        message,
+        Some("Remove the corrupt cache entry or lower the L2 cache TTL.".to_string()),
+    );
+}
+
+fn system_time_epoch_seconds(time: std::time::SystemTime) -> Option<u64> {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
+}
+
+fn blake3_u64(hasher: blake3::Hasher) -> u64 {
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest.as_bytes()[..8]);
+    u64::from_le_bytes(bytes)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PackL2CacheKeyInput {
     pub(crate) workspace_id: String,
     pub(crate) database_generation: u64,
@@ -3212,7 +3841,6 @@ pub(crate) struct PackL2CacheKeyInput {
     pub(crate) personalization_generation: Option<u64>,
 }
 
-#[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
 pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     let mut hasher = blake3::Hasher::new();
     hash_labeled_bytes(
@@ -3271,6 +3899,11 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
         &mut hasher,
         "resource_profile",
         input.output_options.resource_profile.as_str().as_bytes(),
+    );
+    hash_labeled_bool(
+        &mut hasher,
+        "cache_json_response",
+        input.output_options.cache_json_response,
     );
     hash_labeled_bool(
         &mut hasher,
@@ -8352,6 +8985,113 @@ mod tests {
             .collect();
         assert!(degraded_codes.contains("index_missing"));
         assert!(degraded_codes.contains("context_lexical_fallback"));
+        Ok(())
+    }
+
+    #[test]
+    fn context_pack_l2_hit_replays_fresh_json_byte_identically() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let db_path = ee_dir.join("ee.db");
+        let empty_index_dir = tempdir.path().join("empty-index");
+        std::fs::create_dir_all(&empty_index_dir).map_err(|error| error.to_string())?;
+        let cache_root = tempdir.path().join("pack-l2");
+        std::fs::write(
+            ee_dir.join("config.toml"),
+            format!(
+                "[cache.pack_l2]\ndirectory = {:?}\n",
+                cache_root.to_string_lossy()
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let connection = DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = super::stable_context_workspace_id(&workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("workspace".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(43)).to_string();
+        connection
+            .insert_memory(
+                &memory_id,
+                &CreateMemoryInput {
+                    workspace_id,
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Run cargo fmt --check before release.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.95,
+                    utility: 0.80,
+                    importance: 0.70,
+                    provenance_uri: None,
+                    trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                    trust_subclass: Some("test".to_owned()),
+                    tags: vec!["release".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let options = super::ContextPackOptions {
+            workspace_path: workspace,
+            database_path: Some(db_path),
+            index_dir: Some(empty_index_dir),
+            query: "format before release".to_owned(),
+            speed: crate::search::SpeedMode::Default,
+            filters: crate::models::QueryFilters::default(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(400),
+            candidate_pool: Some(10),
+            max_results: None,
+            include_tombstoned: false,
+            as_of: None,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            redaction_level: crate::models::RedactionLevel::Minimal,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            ppr_weight: None,
+            pagination: None,
+            coordination_snapshot_path: None,
+            coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            output_options: super::ContextPackOutputOptions::default()
+                .with_cache_json_response(true),
+        };
+
+        let fresh = super::run_context_pack(&options).map_err(|error| error.to_string())?;
+        assert!(
+            fresh.cached_json.is_none(),
+            "first run should assemble fresh output"
+        );
+        let cached = super::run_context_pack(&options).map_err(|error| error.to_string())?;
+        assert!(
+            cached.cached_json.is_some(),
+            "second run should return the L2 cached JSON response"
+        );
+        let render_options = crate::output::ContextJsonRenderOptions::from(options.output_options);
+        let fresh_json =
+            crate::output::render_context_response_json_with_options(&fresh, render_options);
+        let cached_json =
+            crate::output::render_context_response_json_with_options(&cached, render_options);
+        assert_eq!(
+            fresh_json, cached_json,
+            "L2 hit must replay byte-identical JSON"
+        );
         Ok(())
     }
 

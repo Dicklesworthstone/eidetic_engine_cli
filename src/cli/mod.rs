@@ -25160,6 +25160,13 @@ where
         args.no_skipped,
         args.no_meta,
         args.include_non_affecting_degradations,
+    )
+    .with_cache_json_response(
+        cli.context_renderer() == output::Renderer::Json
+            && !args.explain
+            && !args.explain_performance
+            && !args.stream
+            && !include_deprecated_alias,
     );
     let redaction = effective_redaction_level(
         &workspace_path,

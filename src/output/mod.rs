@@ -2082,6 +2082,10 @@ pub fn render_context_response_json_with_options(
     response: &ContextResponse,
     options: ContextJsonRenderOptions,
 ) -> String {
+    if let Some(cached_json) = &response.cached_json {
+        return cached_json.clone();
+    }
+
     let rendered_text = options
         .include_rendered_text
         .then(|| render_context_response_markdown(response));

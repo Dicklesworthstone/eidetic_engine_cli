@@ -2366,6 +2366,7 @@ pub struct ContextResponse {
     pub schema: &'static str,
     pub success: bool,
     pub data: ContextResponseData,
+    pub cached_json: Option<String>,
 }
 
 impl ContextResponse {
@@ -2391,6 +2392,7 @@ impl ContextResponse {
         Ok(Self {
             schema: RESPONSE_SCHEMA_V1,
             success: true,
+            cached_json: None,
             data: ContextResponseData {
                 command: CONTEXT_COMMAND,
                 request,
@@ -2406,6 +2408,52 @@ impl ContextResponse {
                 degraded,
             },
         })
+    }
+
+    #[must_use]
+    pub fn from_cached_json(request: ContextRequest, cached_json: String) -> Self {
+        Self {
+            schema: RESPONSE_SCHEMA_V1,
+            success: true,
+            cached_json: Some(cached_json),
+            data: ContextResponseData {
+                command: CONTEXT_COMMAND,
+                request: request.clone(),
+                pack: PackDraft {
+                    query: request.query.clone(),
+                    budget: request.budget,
+                    used_tokens: 0,
+                    items: Vec::new(),
+                    omitted: Vec::new(),
+                    selection_audit: PackSelectionAudit {
+                        profile: request.profile,
+                        objective: PackSelectionObjective::MmrRedundancy,
+                        algorithm_id: "cached_context_response_v1",
+                        algorithm_description: "Context response served from the L2 pack cache.",
+                        candidate_count: 0,
+                        selected_count: 0,
+                        omitted_count: 0,
+                        budget_limit: request.budget.max_tokens(),
+                        budget_used: 0,
+                        total_objective_value: 0.0,
+                        monotone: false,
+                        submodular: false,
+                        selected_items: Vec::new(),
+                        steps: Vec::new(),
+                    },
+                    hash: None,
+                },
+                agent_profile: None,
+                slo: None,
+                scope_stats: None,
+                consensus: Vec::new(),
+                conflicts: Vec::new(),
+                coordination: None,
+                pack_dna: None,
+                adaptive_budget: None,
+                degraded: Vec::new(),
+            },
+        }
     }
 }
 
