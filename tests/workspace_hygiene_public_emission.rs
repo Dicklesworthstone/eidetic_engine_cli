@@ -765,6 +765,8 @@ fn workspace_hygiene_public_surfaces_do_not_leak_secret_file_content() -> TestRe
 fn workspace_hygiene_precommit_advisory_reports_strict_reasons() -> TestResult {
     let workspace = init_dirty_git_workspace()?;
     write_synthetic_secret_fixture(&workspace)?;
+    fs::write(workspace.join("scratch.tmp"), "scratch output\n")
+        .map_err(|error| format!("write scratch fixture: {error}"))?;
 
     let advisory_output = run_ee(
         &[
@@ -793,6 +795,20 @@ fn workspace_hygiene_precommit_advisory_reports_strict_reasons() -> TestResult {
             .and_then(Value::as_u64),
         Some(0)
     );
+    if !advisory_value
+        .pointer("/data/pathClassifications")
+        .and_then(Value::as_array)
+        .is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row.pointer("/path").and_then(Value::as_str) == Some("scratch.tmp")
+                    && row.pointer("/kind").and_then(Value::as_str) == Some("scratch")
+            })
+        })
+    {
+        return Err(format!(
+            "precommit advisory fixture did not classify scratch.tmp as scratch; response={advisory_value}"
+        ));
+    }
 
     let strict_output = run_ee(
         &[
