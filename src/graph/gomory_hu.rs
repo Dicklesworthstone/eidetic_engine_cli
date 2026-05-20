@@ -531,6 +531,25 @@ mod tests {
     }
 
     #[test]
+    fn proximity_report_marks_same_memory_as_self() -> TestResult {
+        let mut graph = Graph::strict();
+        graph.add_node("a");
+
+        let tree = graph_result(build_gomory_hu_tree(&graph))?;
+        let report = query_proximity(&tree, "a", "a", 11);
+
+        assert_eq!(report.schema, PROXIMITY_SCHEMA_V1);
+        assert_eq!(report.memory_a, "a");
+        assert_eq!(report.memory_b, "a");
+        assert_eq!(report.snapshot_version, 11);
+        assert_eq!(report.min_cut, Some(0.0));
+        assert_eq!(report.interpretation, "self");
+        assert_eq!(report.tree_path, Some(vec!["a".to_owned()]));
+        assert!(report.degraded.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn gomory_hu_complete_graph_has_three_way_cut() -> TestResult {
         let mut graph = Graph::strict();
         for left in ["a", "b", "c", "d"] {
