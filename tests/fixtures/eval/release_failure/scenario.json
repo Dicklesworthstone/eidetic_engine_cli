@@ -221,6 +221,54 @@
         },
         "stable_first_failure_label": "missing_release_failure_context"
       }
+    ],
+    "outcome_events": [
+      {
+        "event_id": "out.release_failure.helpful.v1",
+        "case_id": "pq.release_failure.context.v1",
+        "pack_profile": "balanced",
+        "feature_set": [
+          "lexical",
+          "provenance"
+        ],
+        "signal": "helpful",
+        "memory_ids": [
+          "mem_00000000000000000000000101"
+        ],
+        "evidence_backed": true,
+        "rationale": "The release command checklist was used before the agent attempted to publish."
+      },
+      {
+        "event_id": "out.release_failure.verification_saved.v1",
+        "case_id": "pq.release_failure.context.v1",
+        "pack_profile": "balanced",
+        "feature_set": [
+          "lexical",
+          "provenance"
+        ],
+        "signal": "verification_saved_by_pack_evidence",
+        "memory_ids": [
+          "mem_00000000000000000000000101",
+          "mem_00000000000000000000000102"
+        ],
+        "evidence_backed": true,
+        "rationale": "The pack surfaced the prior clippy failure before commit."
+      },
+      {
+        "event_id": "out.release_failure.counterfactual.v1",
+        "case_id": "pq.release_failure.context.v1",
+        "pack_profile": "balanced",
+        "feature_set": [
+          "lexical",
+          "provenance"
+        ],
+        "signal": "counterfactual_candidate",
+        "counterfactual_memory_ids": [
+          "mem_release_asset_checklist"
+        ],
+        "evidence_backed": false,
+        "rationale": "A release-asset checklist might reduce follow-up verification misses, but this fixture has no observed outcome yet."
+      }
     ]
   },
   "degraded_branches": [

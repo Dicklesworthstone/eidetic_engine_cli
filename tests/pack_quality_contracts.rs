@@ -331,3 +331,86 @@ fn pack_quality_verdict_values_are_stable() -> TestResult {
 
     Ok(())
 }
+
+#[test]
+fn pack_quality_from_outcomes_reports_feedback_loop_metrics() -> TestResult {
+    let output = run_ee(&[
+        "--json",
+        "eval",
+        "run",
+        "release_failure",
+        "--pack-quality",
+        "--from-outcomes",
+        "--scenario",
+        "usr_pre_task_brief",
+    ])?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "eval run --pack-quality --from-outcomes failed: {stderr}"
+        ));
+    }
+
+    let stdout = String::from_utf8(output.stdout).map_err(|e| format!("stdout not UTF-8: {e}"))?;
+    let value: Value =
+        serde_json::from_str(&stdout).map_err(|e| format!("output not JSON: {e}"))?;
+
+    let feedback = value
+        .pointer("/data/report/outcome_feedback")
+        .ok_or("missing /data/report/outcome_feedback")?;
+
+    if feedback
+        .pointer("/schema")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        != "ee.eval.pack_quality_outcome_feedback.v1"
+    {
+        return Err(format!("unexpected feedback schema: {feedback:?}"));
+    }
+
+    if feedback
+        .pointer("/evidence_backed_event_count")
+        .and_then(Value::as_u64)
+        != Some(2)
+    {
+        return Err(format!(
+            "expected two evidence-backed events, got: {feedback:?}"
+        ));
+    }
+
+    if feedback
+        .pointer("/hypothesis_event_count")
+        .and_then(Value::as_u64)
+        != Some(1)
+    {
+        return Err(format!("expected one hypothesis event, got: {feedback:?}"));
+    }
+
+    if feedback
+        .pointer("/verification_saved_by_pack_evidence")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err(format!(
+            "expected verification-saved evidence, got: {feedback:?}"
+        ));
+    }
+
+    let candidates = feedback
+        .pointer("/counterfactual_candidates")
+        .and_then(Value::as_array)
+        .ok_or("missing counterfactual candidates")?;
+    if !candidates.iter().any(|candidate| {
+        candidate
+            .get("memory_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id == "mem_release_asset_checklist")
+    }) {
+        return Err(format!(
+            "expected release checklist counterfactual, got: {candidates:?}"
+        ));
+    }
+
+    Ok(())
+}

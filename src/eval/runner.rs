@@ -3,7 +3,7 @@
 //! Loads fixtures from `tests/fixtures/eval/`, seeds a deterministic workspace,
 //! runs queries, and computes retrieval metrics (P@k, nDCG@k, MRR).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,10 @@ pub const EVAL_REPORT_SCHEMA_V1: &str = "ee.eval.report.v1";
 
 /// Schema version for pack-quality expectations embedded in eval fixtures.
 pub const PACK_QUALITY_EXPECTATIONS_SCHEMA_V1: &str = "ee.eval.pack_quality_expectations.v1";
+
+/// Schema version for outcome-backed pack-quality feedback summaries.
+pub const PACK_QUALITY_OUTCOME_FEEDBACK_SCHEMA_V1: &str =
+    "ee.eval.pack_quality_outcome_feedback.v1";
 
 /// Schema version for structural-recall expectations embedded in eval fixtures.
 pub const STRUCTURAL_RECALL_EXPECTATIONS_SCHEMA_V1: &str =
@@ -153,6 +157,8 @@ pub struct PackQualityExpectations {
     pub schema: String,
     #[serde(default)]
     pub cases: Vec<PackQualityCase>,
+    #[serde(default)]
+    pub outcome_events: Vec<PackQualityOutcomeEvent>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -191,6 +197,31 @@ pub struct PackQualityTokenBudget {
     pub expected_used_tokens_max: u32,
     #[serde(default)]
     pub expect_truncation: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PackQualityOutcomeEvent {
+    pub event_id: String,
+    pub case_id: String,
+    #[serde(default)]
+    pub pack_profile: String,
+    #[serde(default)]
+    pub feature_set: Vec<String>,
+    pub signal: String,
+    #[serde(default)]
+    pub memory_ids: Vec<String>,
+    #[serde(default)]
+    pub unused_memory_ids: Vec<String>,
+    #[serde(default)]
+    pub duplicated_memory_ids: Vec<String>,
+    #[serde(default)]
+    pub counterfactual_memory_ids: Vec<String>,
+    #[serde(default)]
+    pub token_waste_estimate: u32,
+    #[serde(default)]
+    pub evidence_backed: bool,
+    #[serde(default)]
+    pub rationale: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1560,6 +1591,45 @@ pub struct PackQualityComparison {
     pub failure_reasons: Vec<String>,
 }
 
+/// Evidence-backed usefulness metrics derived from observed pack outcomes.
+#[derive(Clone, Debug, Serialize)]
+pub struct PackQualityOutcomeFeedbackReport {
+    pub schema: &'static str,
+    pub evidence_backed_event_count: usize,
+    pub hypothesis_event_count: usize,
+    pub helped_outcome_rate_by_profile: Vec<PackQualityOutcomeRateBucket>,
+    pub harmful_or_ignored_memory_rate: f64,
+    pub risk_memory_surfaced_before_destructive_action: bool,
+    pub verification_saved_by_pack_evidence: bool,
+    pub token_waste_estimate: u32,
+    pub counterfactual_candidates: Vec<PackQualityCounterfactualCandidate>,
+    pub hypotheses: Vec<PackQualityOutcomeHypothesis>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PackQualityOutcomeRateBucket {
+    pub pack_profile: String,
+    pub feature_set: Vec<String>,
+    pub event_count: usize,
+    pub helped_count: usize,
+    pub helped_outcome_rate: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PackQualityCounterfactualCandidate {
+    pub memory_id: String,
+    pub case_ids: Vec<String>,
+    pub evidence_backed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PackQualityOutcomeHypothesis {
+    pub event_id: String,
+    pub case_id: String,
+    pub signal: String,
+    pub rationale: Option<String>,
+}
+
 /// Aggregate pack-quality report for all cases in a fixture.
 #[derive(Clone, Debug, Serialize)]
 pub struct PackQualityReport {
@@ -1572,6 +1642,8 @@ pub struct PackQualityReport {
     pub cases_regression: usize,
     pub cases_inconclusive: usize,
     pub comparisons: Vec<PackQualityComparison>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome_feedback: Option<PackQualityOutcomeFeedbackReport>,
 }
 
 impl PackQualityReport {
@@ -1587,6 +1659,7 @@ impl PackQualityReport {
             cases_regression: 0,
             cases_inconclusive: 0,
             comparisons: Vec::new(),
+            outcome_feedback: None,
         }
     }
 
@@ -1623,6 +1696,18 @@ pub struct PackQualityActual {
     pub redaction_leaks: Vec<String>,
     pub tokens_used: u32,
     pub provenance_density: f64,
+}
+
+#[derive(Default)]
+struct PackQualityOutcomeRateAccumulator {
+    event_count: usize,
+    helped_count: usize,
+}
+
+#[derive(Default)]
+struct PackQualityCounterfactualAccumulator {
+    case_ids: BTreeSet<String>,
+    evidence_backed: bool,
 }
 
 /// Compare actual pack output against a single pack-quality case expectation.
@@ -1789,6 +1874,175 @@ pub fn evaluate_pack_quality(
     }
 
     report
+}
+
+/// Evaluate pack quality and attach outcome-backed usefulness metrics.
+#[must_use]
+pub fn evaluate_pack_quality_with_outcomes(
+    fixture_id: &str,
+    cases: &[PackQualityCase],
+    actuals: &[PackQualityActual],
+    outcome_events: &[PackQualityOutcomeEvent],
+) -> PackQualityReport {
+    let mut report = evaluate_pack_quality(fixture_id, cases, actuals);
+    report.outcome_feedback = Some(summarize_pack_quality_outcomes(cases, outcome_events));
+    report
+}
+
+/// Summarize observed outcome events without inferring success from pack presence alone.
+#[must_use]
+pub fn summarize_pack_quality_outcomes(
+    cases: &[PackQualityCase],
+    outcome_events: &[PackQualityOutcomeEvent],
+) -> PackQualityOutcomeFeedbackReport {
+    let case_ids: BTreeSet<_> = cases.iter().map(|case| case.case_id.as_str()).collect();
+    let mut buckets: BTreeMap<(String, Vec<String>), PackQualityOutcomeRateAccumulator> =
+        BTreeMap::new();
+    let mut counterfactuals: BTreeMap<String, PackQualityCounterfactualAccumulator> =
+        BTreeMap::new();
+    let mut hypotheses = Vec::new();
+    let mut evidence_backed_event_count = 0_usize;
+    let mut hypothesis_event_count = 0_usize;
+    let mut memory_signal_count = 0_usize;
+    let mut harmful_or_ignored_memory_count = 0_usize;
+    let mut risk_memory_surfaced_before_destructive_action = false;
+    let mut verification_saved_by_pack_evidence = false;
+    let mut token_waste_estimate = 0_u32;
+
+    for event in outcome_events
+        .iter()
+        .filter(|event| case_ids.contains(event.case_id.as_str()))
+    {
+        token_waste_estimate = token_waste_estimate.saturating_add(event.token_waste_estimate);
+        for memory_id in &event.counterfactual_memory_ids {
+            let entry = counterfactuals.entry(memory_id.clone()).or_default();
+            entry.case_ids.insert(event.case_id.clone());
+            entry.evidence_backed |= event.evidence_backed;
+        }
+
+        if !event.evidence_backed {
+            hypothesis_event_count += 1;
+            hypotheses.push(PackQualityOutcomeHypothesis {
+                event_id: event.event_id.clone(),
+                case_id: event.case_id.clone(),
+                signal: event.signal.clone(),
+                rationale: event.rationale.clone(),
+            });
+            continue;
+        }
+
+        evidence_backed_event_count += 1;
+        let signal = event.signal.as_str();
+        let key = (
+            normalize_pack_profile(&event.pack_profile),
+            stable_feature_set(&event.feature_set),
+        );
+        let bucket = buckets.entry(key).or_default();
+        bucket.event_count += 1;
+
+        if is_pack_quality_helpful_signal(signal) {
+            bucket.helped_count += 1;
+        }
+        if signal == "risk_memory_surfaced_before_destructive_action" {
+            risk_memory_surfaced_before_destructive_action = true;
+        }
+        if signal == "verification_saved_by_pack_evidence" {
+            verification_saved_by_pack_evidence = true;
+        }
+        if !event.memory_ids.is_empty()
+            || !event.unused_memory_ids.is_empty()
+            || !event.duplicated_memory_ids.is_empty()
+        {
+            memory_signal_count += 1;
+            if matches!(signal, "harmful" | "ignored") {
+                harmful_or_ignored_memory_count += 1;
+            }
+        }
+    }
+
+    hypotheses.sort_by(|left, right| {
+        (
+            left.case_id.as_str(),
+            left.event_id.as_str(),
+            left.signal.as_str(),
+        )
+            .cmp(&(
+                right.case_id.as_str(),
+                right.event_id.as_str(),
+                right.signal.as_str(),
+            ))
+    });
+
+    PackQualityOutcomeFeedbackReport {
+        schema: PACK_QUALITY_OUTCOME_FEEDBACK_SCHEMA_V1,
+        evidence_backed_event_count,
+        hypothesis_event_count,
+        helped_outcome_rate_by_profile: buckets
+            .into_iter()
+            .map(
+                |((pack_profile, feature_set), accumulator)| PackQualityOutcomeRateBucket {
+                    pack_profile,
+                    feature_set,
+                    event_count: accumulator.event_count,
+                    helped_count: accumulator.helped_count,
+                    helped_outcome_rate: rate(accumulator.helped_count, accumulator.event_count),
+                },
+            )
+            .collect(),
+        harmful_or_ignored_memory_rate: rate(harmful_or_ignored_memory_count, memory_signal_count),
+        risk_memory_surfaced_before_destructive_action,
+        verification_saved_by_pack_evidence,
+        token_waste_estimate,
+        counterfactual_candidates: counterfactuals
+            .into_iter()
+            .map(
+                |(memory_id, accumulator)| PackQualityCounterfactualCandidate {
+                    memory_id,
+                    case_ids: accumulator.case_ids.into_iter().collect(),
+                    evidence_backed: accumulator.evidence_backed,
+                },
+            )
+            .collect(),
+        hypotheses,
+    }
+}
+
+fn normalize_pack_profile(pack_profile: &str) -> String {
+    let trimmed = pack_profile.trim();
+    if trimmed.is_empty() {
+        "default".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn stable_feature_set(feature_set: &[String]) -> Vec<String> {
+    let mut features = feature_set
+        .iter()
+        .map(|feature| feature.trim())
+        .filter(|feature| !feature.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    features.sort();
+    features.dedup();
+    features
+}
+
+fn is_pack_quality_helpful_signal(signal: &str) -> bool {
+    matches!(
+        signal,
+        "helpful"
+            | "risk_memory_surfaced_before_destructive_action"
+            | "verification_saved_by_pack_evidence"
+    )
+}
+
+fn rate(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
 }
 
 #[cfg(test)]
@@ -2175,6 +2429,27 @@ mod tests {
         }
     }
 
+    fn make_pack_quality_outcome_event(
+        event_id: &str,
+        signal: &str,
+        evidence_backed: bool,
+    ) -> PackQualityOutcomeEvent {
+        PackQualityOutcomeEvent {
+            event_id: event_id.into(),
+            case_id: "case1".into(),
+            pack_profile: "balanced".into(),
+            feature_set: vec!["ppr".into(), "pack_dna".into(), "ppr".into()],
+            signal: signal.into(),
+            memory_ids: vec!["mem_001".into()],
+            unused_memory_ids: Vec::new(),
+            duplicated_memory_ids: Vec::new(),
+            counterfactual_memory_ids: Vec::new(),
+            token_waste_estimate: 0,
+            evidence_backed,
+            rationale: Some("fixture outcome event".into()),
+        }
+    }
+
     #[test]
     fn pack_quality_verdict_strings_stable() -> TestResult {
         ensure(PackQualityVerdict::Within.as_str(), "within", "within")?;
@@ -2393,6 +2668,91 @@ mod tests {
             report.aggregate_verdict,
             PackQualityVerdict::Within,
             "aggregate",
+        )
+    }
+
+    #[test]
+    fn pack_quality_outcome_feedback_counts_only_evidence_backed_events() -> TestResult {
+        let case = make_pack_quality_case("case1", vec!["mem_001"], vec![]);
+        let mut helpful = make_pack_quality_outcome_event("out_001", "helpful", true);
+        helpful.feature_set = vec!["pack_dna".into(), "ppr".into(), "pack_dna".into()];
+        let risk = make_pack_quality_outcome_event(
+            "out_002",
+            "risk_memory_surfaced_before_destructive_action",
+            true,
+        );
+        let mut ignored = make_pack_quality_outcome_event("out_003", "ignored", true);
+        ignored.unused_memory_ids = vec!["mem_unused".into()];
+        ignored.token_waste_estimate = 64;
+        let mut hypothesis =
+            make_pack_quality_outcome_event("out_004", "counterfactual_candidate", false);
+        hypothesis.memory_ids.clear();
+        hypothesis.counterfactual_memory_ids = vec!["mem_missing".into()];
+
+        let feedback =
+            summarize_pack_quality_outcomes(&[case], &[helpful, risk, ignored, hypothesis]);
+
+        ensure(
+            feedback.evidence_backed_event_count,
+            3,
+            "evidence-backed events",
+        )?;
+        ensure(feedback.hypothesis_event_count, 1, "hypotheses")?;
+        ensure(
+            feedback.risk_memory_surfaced_before_destructive_action,
+            true,
+            "risk memory surfaced",
+        )?;
+        ensure(feedback.token_waste_estimate, 64, "token waste")?;
+        ensure(feedback.hypotheses.len(), 1, "hypothesis count")?;
+        ensure(
+            feedback.counterfactual_candidates.len(),
+            1,
+            "counterfactual candidates",
+        )?;
+        ensure_close(
+            feedback.helped_outcome_rate_by_profile[0].helped_outcome_rate,
+            2.0 / 3.0,
+            0.000_001,
+            "helped rate",
+        )?;
+        ensure_close(
+            feedback.harmful_or_ignored_memory_rate,
+            1.0 / 3.0,
+            0.000_001,
+            "harmful or ignored rate",
+        )?;
+        ensure(
+            feedback.helped_outcome_rate_by_profile[0]
+                .feature_set
+                .clone(),
+            vec!["pack_dna".to_string(), "ppr".to_string()],
+            "stable feature set",
+        )
+    }
+
+    #[test]
+    fn pack_quality_report_attaches_outcome_feedback_when_requested() -> TestResult {
+        let case = make_pack_quality_case("case1", vec!["mem_001"], vec![]);
+        let actual = make_pack_quality_actual(vec!["mem_001"], 2000, 0.8);
+        let event =
+            make_pack_quality_outcome_event("out_001", "verification_saved_by_pack_evidence", true);
+
+        let report =
+            evaluate_pack_quality_with_outcomes("test_fixture", &[case], &[actual], &[event]);
+        let feedback = report
+            .outcome_feedback
+            .ok_or("missing outcome feedback report")?;
+
+        ensure(
+            feedback.verification_saved_by_pack_evidence,
+            true,
+            "verification saved",
+        )?;
+        ensure(
+            feedback.schema,
+            PACK_QUALITY_OUTCOME_FEEDBACK_SCHEMA_V1,
+            "feedback schema",
         )
     }
 
