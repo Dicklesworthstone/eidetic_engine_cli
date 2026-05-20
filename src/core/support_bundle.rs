@@ -3329,19 +3329,34 @@ mod tests {
             "minimal support bundle redaction should redact secret-like values"
         );
 
-        let standard = redact_support_bundle_content(raw, RedactionLevel::Standard);
-        assert!(standard.redacted);
-        assert!(
-            !standard.content.contains("/Users/alice/private"),
-            "standard support bundle redaction should redact path-like segments"
-        );
-        assert!(
-            standard
-                .redacted_reasons
-                .iter()
-                .any(|reason| reason == "path_like_segment"),
-            "standard support bundle redaction should report path-like redaction"
-        );
+        for level in [
+            RedactionLevel::Standard,
+            RedactionLevel::Strict,
+            RedactionLevel::Paranoid,
+        ] {
+            let redacted = redact_support_bundle_content(raw, level);
+            assert!(
+                redacted.redacted,
+                "{level} support bundle redaction should apply the diagnostic redactor"
+            );
+            assert!(
+                !redacted.content.contains("/Users/alice/private"),
+                "{level} support bundle redaction should redact path-like segments"
+            );
+            assert!(
+                !redacted
+                    .content
+                    .contains("sk-test_123456789abcdefghijklmnop"),
+                "{level} support bundle redaction should redact secret-like values"
+            );
+            assert!(
+                redacted
+                    .redacted_reasons
+                    .iter()
+                    .any(|reason| reason == "path_like_segment"),
+                "{level} support bundle redaction should report path-like redaction"
+            );
+        }
     }
 
     #[test]
