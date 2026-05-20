@@ -235,8 +235,14 @@ mod mesh_anti_entropy_schema;
 #[path = "contracts/curate_peer_evidence_schema.rs"]
 mod curate_peer_evidence_schema;
 
+#[path = "contracts/why_not_selected_schema.rs"]
+mod why_not_selected_schema;
+
 #[path = "contracts/host_calibration_recommendation_schema.rs"]
 mod host_calibration_recommendation_schema;
 
 #[path = "contracts/agent_workload_trace_schema.rs"]
 mod agent_workload_trace_schema;
+
+#[path = "contracts/qos_lanes_e2e_contract.rs"]
+mod qos_lanes_e2e_contract;
