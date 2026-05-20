@@ -6,10 +6,12 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
+use crate::config::env_registry::{EnvVar, read};
 use crate::core::why::{DedupLinkEvidence, find_embed_dedup_link};
 use crate::db::{
     CreateAuditInput, DbConnection, audit_actions, generate_audit_id, generate_audit_id_seeded,
 };
+use crate::models::query::{EqlQuery, EqlSpeedMode, EqlTagsMode};
 use crate::models::{
     MemoryId, MemoryScope, MemoryScopeStats, ProvenanceUri, TrustClass, UnitScore,
 };
@@ -37,6 +39,10 @@ use crate::search::lexical_ram_tier::{
     LEXICAL_HUGEPAGES_UNAVAILABLE_CODE, LEXICAL_RAM_TIER_HUGEPAGES_ENV,
     LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE, LEXICAL_RAM_TIER_PIN_RAM_ENV, LexicalRamTierConfig,
     LexicalRamTierResult, pin_lexical_index_files, trace_lexical_ram_tier,
+};
+use crate::search::plan_cache::{
+    CompiledPlan, DEFAULT_PLAN_CACHE_ENTRIES, PlanCacheKey, compute_eql_hash,
+    compute_search_config_hash, lookup_or_insert_process_plan,
 };
 use crate::search::{
     Embedder, HashEmbedder, SpeedMode, TwoTierConfig, TwoTierIndex, TwoTierSearcher,
@@ -3529,6 +3535,193 @@ fn canonicalize_equivalent_component_scores(
     }
 }
 
+fn search_plan_cache_key(
+    index_dir: &Path,
+    query: &str,
+    limit: usize,
+    config: &TwoTierConfig,
+    explain: bool,
+    source_mode: SearchSourceMode,
+) -> PlanCacheKey {
+    PlanCacheKey::new(
+        compute_eql_hash(query.as_bytes()),
+        index_manifest_version_for_plan_cache(index_dir),
+        search_config_hash_for_plan_cache(config, limit, explain, source_mode),
+    )
+}
+
+fn compiled_search_plan(
+    query: &str,
+    limit: usize,
+    explain: bool,
+    source_mode: SearchSourceMode,
+) -> CompiledPlan {
+    let parsed_query = EqlQuery {
+        q: query.to_owned(),
+        workspace: None,
+        levels: Vec::new(),
+        kinds: Vec::new(),
+        tags: Vec::new(),
+        tags_mode: EqlTagsMode::Any,
+        scope: Vec::new(),
+        time: None,
+        confidence: None,
+        graph: None,
+        limit: u32::try_from(limit).unwrap_or(u32::MAX).max(1),
+        speed: EqlSpeedMode::Default,
+        rerank: false,
+        return_subgraph: false,
+        explain,
+    };
+    CompiledPlan {
+        parsed_query,
+        bound_index: Some(source_mode.as_str().to_owned()),
+        join_strategy: Some(
+            match source_mode {
+                SearchSourceMode::LexicalOnly => "lexical_only",
+                SearchSourceMode::SemanticOnly => "semantic_two_tier",
+                SearchSourceMode::Hybrid => "hybrid_two_tier",
+            }
+            .to_owned(),
+        ),
+    }
+}
+
+fn resolved_query_plan_cache_capacity() -> usize {
+    read(EnvVar::QueryPlanCacheEntries)
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_PLAN_CACHE_ENTRIES)
+}
+
+fn search_config_hash_for_plan_cache(
+    config: &TwoTierConfig,
+    limit: usize,
+    explain: bool,
+    source_mode: SearchSourceMode,
+) -> u64 {
+    let mut bytes = Vec::new();
+    append_hash_str(&mut bytes, "v1");
+    append_hash_u64(&mut bytes, u64::try_from(limit).unwrap_or(u64::MAX));
+    append_hash_bool(&mut bytes, explain);
+    append_hash_str(&mut bytes, source_mode.as_str());
+    append_hash_f64(&mut bytes, config.quality_weight);
+    append_hash_f64(&mut bytes, config.rrf_k);
+    append_hash_u64(
+        &mut bytes,
+        u64::try_from(config.candidate_multiplier).unwrap_or(u64::MAX),
+    );
+    append_hash_u64(&mut bytes, config.quality_timeout_ms);
+    append_hash_bool(&mut bytes, config.fast_only);
+    append_hash_bool(&mut bytes, config.graph_ranking_enabled);
+    append_hash_f64(&mut bytes, config.graph_ranking_weight);
+    append_hash_bool(&mut bytes, config.explain);
+    append_hash_u64(
+        &mut bytes,
+        u64::try_from(config.hnsw_ef_search).unwrap_or(u64::MAX),
+    );
+    append_hash_u64(
+        &mut bytes,
+        u64::try_from(config.hnsw_ef_construction).unwrap_or(u64::MAX),
+    );
+    append_hash_u64(&mut bytes, u64::try_from(config.hnsw_m).unwrap_or(u64::MAX));
+    append_hash_u64(
+        &mut bytes,
+        u64::try_from(config.hnsw_threshold).unwrap_or(u64::MAX),
+    );
+    append_hash_u64(
+        &mut bytes,
+        u64::try_from(config.mrl_search_dims).unwrap_or(u64::MAX),
+    );
+    append_hash_u64(
+        &mut bytes,
+        u64::try_from(config.mrl_rescore_top_k).unwrap_or(u64::MAX),
+    );
+    compute_search_config_hash(&bytes)
+}
+
+fn index_manifest_version_for_plan_cache(index_dir: &Path) -> u64 {
+    const DOMAIN: &[u8] = b"ee.search.plan_cache.index_manifest.v1";
+    for relative in ["meta.json", "manifest.json"] {
+        let path = index_dir.join(relative);
+        if let Ok(bytes) = std::fs::read(&path) {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(DOMAIN);
+            append_blake3_str(&mut hasher, relative);
+            hasher.update(&(bytes.len() as u64).to_le_bytes());
+            hasher.update(&bytes);
+            return truncate_blake3_to_u64(hasher.finalize().as_bytes());
+        }
+    }
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(DOMAIN);
+    let index_dir_display = index_dir.as_os_str().to_string_lossy();
+    append_blake3_str(&mut hasher, index_dir_display.as_ref());
+    if let Ok(metadata) = std::fs::metadata(index_dir) {
+        if let Ok(modified) = metadata.modified() {
+            if let Ok(duration) = modified.duration_since(std::time::SystemTime::UNIX_EPOCH) {
+                hasher.update(&duration.as_secs().to_le_bytes());
+                hasher.update(&duration.subsec_nanos().to_le_bytes());
+            }
+        }
+        hasher.update(&metadata.len().to_le_bytes());
+    }
+    truncate_blake3_to_u64(hasher.finalize().as_bytes())
+}
+
+fn append_hash_str(bytes: &mut Vec<u8>, value: &str) {
+    bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(value.as_bytes());
+}
+
+fn append_hash_u64(bytes: &mut Vec<u8>, value: u64) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn append_hash_bool(bytes: &mut Vec<u8>, value: bool) {
+    bytes.push(u8::from(value));
+}
+
+fn append_hash_f64(bytes: &mut Vec<u8>, value: f64) {
+    bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+}
+
+fn append_blake3_str(hasher: &mut blake3::Hasher, value: &str) {
+    hasher.update(&(value.len() as u64).to_le_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn truncate_blake3_to_u64(hash: &[u8; 32]) -> u64 {
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&hash[0..8]);
+    u64::from_le_bytes(buf)
+}
+
+fn trace_query_plan_cache_lookup(
+    index_dir: &Path,
+    key: &PlanCacheKey,
+    lookup: &crate::search::plan_cache::PlanCacheLookup,
+    capacity: usize,
+    elapsed: Duration,
+    source_mode: SearchSourceMode,
+) {
+    tracing::debug!(
+        target: "ee::search::plan_cache",
+        workspace_id = %index_dir.display(),
+        eql_hash = key.eql_hash,
+        index_manifest_version = key.index_manifest_version,
+        search_config_hash = key.search_config_hash,
+        plan_tree_hash = %lookup.plan_tree_hash,
+        cache_decision = lookup.decision.as_str(),
+        capacity = capacity.min(crate::search::plan_cache::MAX_PLAN_CACHE_ENTRIES),
+        evicted = lookup.evicted.len(),
+        degraded_codes = "[]",
+        elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+        source_mode = source_mode.as_str(),
+        "query plan cache lookup"
+    );
+}
+
 fn search_sync(
     index_dir: &Path,
     query: &str,
@@ -3538,8 +3731,24 @@ fn search_sync(
     source_mode: SearchSourceMode,
     determinism: &Deterministic<Seed>,
 ) -> Result<(Vec<SearchHit>, Vec<String>), String> {
+    let plan_cache_key =
+        search_plan_cache_key(index_dir, query, limit, &config, explain, source_mode);
+    let plan_cache_capacity = resolved_query_plan_cache_capacity();
+    let plan_cache_start = Instant::now();
+    let plan_lookup = lookup_or_insert_process_plan(plan_cache_capacity, plan_cache_key, || {
+        compiled_search_plan(query, limit, explain, source_mode)
+    });
+    trace_query_plan_cache_lookup(
+        index_dir,
+        &plan_cache_key,
+        &plan_lookup,
+        plan_cache_capacity,
+        plan_cache_start.elapsed(),
+        source_mode,
+    );
+
     let index_dir_owned = index_dir.to_path_buf();
-    let query_owned = query.to_string();
+    let query_owned = plan_lookup.plan.parsed_query.q.clone();
     let rerank_seed = determinism.shared_child("search.rerank");
     tracing::debug!(
         target: "ee::search::determinism",

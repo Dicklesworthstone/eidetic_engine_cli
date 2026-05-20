@@ -16,12 +16,12 @@
 //!   The plan cache helps **after** the in-flight wave ends and the same plan
 //!   is reused across new callers.
 //!
-//! Bead: `bd-2mey5`. Honesty: this slice ships the cache module, stats, and
-//! key/hash discipline; hooking `run_search_inner` to actually consult the
-//! cache (and the matching `ee diag plan-cache --json` surface) is tracked
-//! separately and will land in a follow-up bead before `bd-2mey5` closes.
+//! Bead: `bd-2mey5`. `run_search_inner` consults this process cache before
+//! opening Frankensearch so repeated identical searches reuse parse/bind/index
+//! selection work while still executing fresh retrieval against live indexes.
 
 use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
 
@@ -44,6 +44,8 @@ pub const DEFAULT_PLAN_CACHE_ENTRIES: usize = 1024;
 /// Hard upper bound on cache size to keep memory bounded even when callers
 /// hand in a misconfigured value.
 pub const MAX_PLAN_CACHE_ENTRIES: usize = 1 << 20;
+
+static PROCESS_PLAN_CACHE: OnceLock<Mutex<PlanCache>> = OnceLock::new();
 
 /// Composite key for the EQL plan cache. All fields are 64-bit content hashes
 /// so the key itself is cheap to compare and clone.
@@ -122,6 +124,33 @@ pub struct PlanCacheInsert {
 pub struct PlanCacheHit {
     pub plan: CompiledPlan,
     pub plan_tree_hash: String,
+}
+
+/// Whether a process-cache lookup reused an existing plan or compiled a new
+/// one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlanCacheDecision {
+    Hit,
+    Miss,
+}
+
+impl PlanCacheDecision {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+        }
+    }
+}
+
+/// Result returned by the synchronized process-cache helper.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlanCacheLookup {
+    pub decision: PlanCacheDecision,
+    pub plan: CompiledPlan,
+    pub plan_tree_hash: String,
+    pub evicted: Vec<PlanCacheKey>,
 }
 
 #[derive(Clone, Debug)]
@@ -335,6 +364,72 @@ impl PlanCache {
         };
         compute_plan_tree_hash(key, &entry.plan) == entry.plan_tree_hash
     }
+}
+
+/// Look up a compiled plan in the process-wide cache, compiling and inserting
+/// on miss. The `capacity` argument is the resolved runtime cap; changing it
+/// resets the process cache so diagnostics and search behavior agree.
+pub fn lookup_or_insert_process_plan<F>(
+    capacity: usize,
+    key: PlanCacheKey,
+    compile: F,
+) -> PlanCacheLookup
+where
+    F: FnOnce() -> CompiledPlan,
+{
+    let cache = PROCESS_PLAN_CACHE.get_or_init(|| Mutex::new(PlanCache::new(capacity)));
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.capacity() != capacity.min(MAX_PLAN_CACHE_ENTRIES) {
+        *guard = PlanCache::new(capacity);
+    }
+
+    if let Some(hit) = guard.get(&key) {
+        return PlanCacheLookup {
+            decision: PlanCacheDecision::Hit,
+            plan: hit.plan,
+            plan_tree_hash: hit.plan_tree_hash,
+            evicted: Vec::new(),
+        };
+    }
+
+    let plan = compile();
+    let inserted = guard.insert(key, plan.clone());
+    PlanCacheLookup {
+        decision: PlanCacheDecision::Miss,
+        plan,
+        plan_tree_hash: inserted.plan_tree_hash,
+        evicted: inserted.evicted,
+    }
+}
+
+/// Build a diagnostic snapshot from the live process cache.
+#[must_use]
+pub fn process_plan_cache_diag_report(
+    capacity: usize,
+    env_var_value_source: EnvVarValueSource,
+    top_keys_limit: usize,
+) -> PlanCacheDiagReport {
+    let cache = PROCESS_PLAN_CACHE.get_or_init(|| Mutex::new(PlanCache::new(capacity)));
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.capacity() != capacity.min(MAX_PLAN_CACHE_ENTRIES) {
+        *guard = PlanCache::new(capacity);
+    }
+    guard.diag_report(env_var_value_source, top_keys_limit)
+}
+
+/// Test-only reset hook for the process cache. Kept public so integration tests
+/// can pin the live-counter contract without reaching into private statics.
+#[doc(hidden)]
+pub fn reset_process_plan_cache_for_tests(capacity: usize) {
+    let cache = PROCESS_PLAN_CACHE.get_or_init(|| Mutex::new(PlanCache::new(capacity)));
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = PlanCache::new(capacity);
 }
 
 /// Compute the 64-bit EQL request hash used as the first cache-key component.

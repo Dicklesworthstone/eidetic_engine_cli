@@ -251,7 +251,9 @@ use crate::pack::{
     ContextPackProfile, ContextResponse, ContextResponseDegradation, ContextResponseSeverity,
     PackResourceProfile,
 };
-use crate::search::plan_cache::{DEFAULT_PLAN_CACHE_ENTRIES, EnvVarValueSource, PlanCache};
+use crate::search::plan_cache::{
+    DEFAULT_PLAN_CACHE_ENTRIES, EnvVarValueSource, process_plan_cache_diag_report,
+};
 use crate::search::{
     CanonicalSearchDocument, DocumentSource, Embedder, EmbedderStack, HashEmbedder, IndexBuilder,
     SpeedMode,
@@ -20234,8 +20236,7 @@ where
     W: Write,
 {
     let (capacity, env_var_value_source) = resolve_plan_cache_diag_capacity();
-    let cache = PlanCache::new(capacity);
-    let report = cache.diag_report(env_var_value_source, 16);
+    let report = process_plan_cache_diag_report(capacity, env_var_value_source, 16);
     let degraded = plan_cache_diag_degraded(&report);
     let response = plan_cache_diag_response_json(&report, &degraded);
 
@@ -20302,12 +20303,7 @@ fn plan_cache_diag_degraded(
         })];
     }
 
-    vec![serde_json::json!({
-        "code": "plan_cache_not_yet_integrated",
-        "severity": "warning",
-        "message": "Plan cache module is present but search_sync does not consult it yet; counters will remain zero until the run_search_inner hook lands.",
-        "repair": "Tracked under bd-2mey5; pick up the run_search_inner integration slice or wait for it to land."
-    })]
+    Vec::new()
 }
 
 fn plan_cache_diag_response_json(
@@ -48626,9 +48622,9 @@ mod tests {
             "env var name",
         )?;
         ensure_equal(
-            &response["degraded"][0]["code"],
-            &serde_json::json!("plan_cache_not_yet_integrated"),
-            "integration degraded code",
+            &response["degraded"],
+            &serde_json::json!([]),
+            "integrated plan cache has no degraded code by default",
         )
     }
 

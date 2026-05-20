@@ -9,8 +9,10 @@
 use ee::models::query::{EqlQuery, EqlSpeedMode, EqlTagsMode};
 use ee::search::plan_cache::{
     CompiledPlan, DEFAULT_PLAN_CACHE_ENTRIES, EnvVarValueSource, MAX_PLAN_CACHE_ENTRIES,
-    PLAN_CACHE_DIAG_SCHEMA_V1, PLAN_CACHE_ENV_VAR_NAME, PlanCache, PlanCacheDiagKey, PlanCacheKey,
-    compute_eql_hash, compute_plan_tree_hash, compute_search_config_hash,
+    PLAN_CACHE_DIAG_SCHEMA_V1, PLAN_CACHE_ENV_VAR_NAME, PlanCache, PlanCacheDecision,
+    PlanCacheDiagKey, PlanCacheKey, compute_eql_hash, compute_plan_tree_hash,
+    compute_search_config_hash, lookup_or_insert_process_plan, process_plan_cache_diag_report,
+    reset_process_plan_cache_for_tests,
 };
 
 fn sample_query(q: &str, limit: u32) -> EqlQuery {
@@ -164,4 +166,25 @@ fn diag_report_key_conversion_preserves_components() {
     assert_eq!(into.eql_hash, 11);
     assert_eq!(into.index_manifest_version, 22);
     assert_eq!(into.search_config_hash, 33);
+}
+
+#[test]
+fn process_cache_reuses_compiled_plan_and_diag_reports_live_counters() {
+    reset_process_plan_cache_for_tests(8);
+    let key = PlanCacheKey::new(101, 202, 303);
+    let first = lookup_or_insert_process_plan(8, key, || sample_plan("release", 10));
+    let second = lookup_or_insert_process_plan(8, key, || sample_plan("should not compile", 99));
+
+    assert_eq!(first.decision, PlanCacheDecision::Miss);
+    assert_eq!(second.decision, PlanCacheDecision::Hit);
+    assert_eq!(second.plan.parsed_query.q, "release");
+    assert_eq!(second.plan_tree_hash, first.plan_tree_hash);
+
+    let report = process_plan_cache_diag_report(8, EnvVarValueSource::RegistryDefault, 4);
+    assert!(report.enabled);
+    assert_eq!(report.current_size, 1);
+    assert_eq!(report.misses, 1);
+    assert_eq!(report.hits, 1);
+    assert_eq!(report.inserts, 1);
+    assert_eq!(report.top_keys, vec![PlanCacheDiagKey::from(key)]);
 }
