@@ -722,6 +722,7 @@ struct ContextPerformanceTrace {
 struct ReadSnapshotTrace {
     pinned: bool,
     slot_id: Option<u64>,
+    snapshot_generation: Option<u64>,
     lease_held_ms: u64,
     expired: bool,
     poisoned: bool,
@@ -764,10 +765,15 @@ impl ContextPerformanceTrace {
         });
     }
 
-    fn record_read_snapshot(&mut self, snapshot: &SnapshotPin<'_>) {
+    fn record_read_snapshot(
+        &mut self,
+        snapshot: &SnapshotPin<'_>,
+        snapshot_generation: Option<u64>,
+    ) {
         self.read_snapshot = Some(ReadSnapshotTrace {
             pinned: snapshot.is_pinned(),
             slot_id: snapshot.slot_id(),
+            snapshot_generation,
             lease_held_ms: duration_millis_u64(snapshot.age()),
             expired: snapshot.is_expired(),
             poisoned: snapshot.is_poisoned(),
@@ -1105,6 +1111,9 @@ fn run_context_pack_with_performance_inner(
     .map_err(|error| ContextPackError::Storage(format!("Failed to open database: {error}")))?;
     trace.db_open_count = trace.db_open_count.saturating_add(1);
     trace.record_elapsed("dbOpen", snapshot_open_start);
+    let read_snapshot_generation = checked_context_read_snapshot(&read_pool, &read_snapshot)
+        .ok()
+        .and_then(|connection| context_read_snapshot_generation(connection).ok());
 
     let output_redaction_enabled =
         crate::config::workspace_output_redaction_enabled(&options.workspace_path);
@@ -1620,13 +1629,16 @@ fn run_context_pack_with_performance_inner(
 
     let coordination = load_coordination_snapshot(options, &mut degraded);
 
-    draft.hash = Some(compute_pack_hash_with_output_options_and_coordination(
-        &request,
-        &draft,
-        &degraded,
-        options.output_options,
-        coordination.as_ref(),
-    ));
+    draft.hash = Some(
+        compute_pack_hash_with_output_options_coordination_and_snapshot(
+            &request,
+            &draft,
+            &degraded,
+            options.output_options,
+            coordination.as_ref(),
+            read_snapshot_generation,
+        ),
+    );
     if let Some(profile) = agent_profile.as_mut() {
         set_agent_profile_base_pack_hash(profile, draft.hash.as_deref());
     }
@@ -1691,7 +1703,7 @@ fn run_context_pack_with_performance_inner(
     }
     trace.record_elapsed("packPersistence", persist_start);
     trace.record_elapsed("total", total_start);
-    trace.record_read_snapshot(&read_snapshot);
+    trace.record_read_snapshot(&read_snapshot, read_snapshot_generation);
 
     let consensus_conflicts = crate::pack::analyze_pack_consensus_conflicts(&draft);
     push_consensus_conflict_degradations(
@@ -1925,7 +1937,7 @@ fn context_read_snapshot_json(snapshot: Option<&ReadSnapshotTrace>) -> serde_jso
             "leaseHeldMs": snapshot.lease_held_ms,
             "expired": snapshot.expired,
             "poisoned": snapshot.poisoned,
-            "snapshotGeneration": null,
+            "snapshotGeneration": snapshot.snapshot_generation,
             "pageCacheHitRatio": null,
             "forkCostUs": null,
         }),
@@ -3527,6 +3539,10 @@ fn pack_l2_workspace_component(workspace_id: &str) -> String {
         .collect()
 }
 
+fn context_read_snapshot_generation(connection: &DbConnection) -> Result<u64, String> {
+    context_pack_l2_database_generation(connection)
+}
+
 fn context_pack_l2_database_generation(connection: &DbConnection) -> Result<u64, String> {
     context_pack_l2_query_generation(
         connection,
@@ -4023,8 +4039,32 @@ fn compute_pack_hash_with_output_options_and_coordination(
     output_options: ContextPackOutputOptions,
     coordination: Option<&PackCoordinationSnapshot>,
 ) -> String {
-    let components =
-        compute_pack_hash_components(request, draft, degraded, output_options, coordination);
+    compute_pack_hash_with_output_options_coordination_and_snapshot(
+        request,
+        draft,
+        degraded,
+        output_options,
+        coordination,
+        None,
+    )
+}
+
+fn compute_pack_hash_with_output_options_coordination_and_snapshot(
+    request: &ContextRequest,
+    draft: &crate::pack::PackDraft,
+    degraded: &[ContextResponseDegradation],
+    output_options: ContextPackOutputOptions,
+    coordination: Option<&PackCoordinationSnapshot>,
+    read_snapshot_generation: Option<u64>,
+) -> String {
+    let components = compute_pack_hash_components(
+        request,
+        draft,
+        degraded,
+        output_options,
+        coordination,
+        read_snapshot_generation,
+    );
     log_pack_hash_components(&components);
     components.composite_hash
 }
@@ -4044,6 +4084,7 @@ fn compute_pack_hash_components(
     degraded: &[ContextResponseDegradation],
     output_options: ContextPackOutputOptions,
     coordination: Option<&PackCoordinationSnapshot>,
+    read_snapshot_generation: Option<u64>,
 ) -> PackHashComponents {
     use blake3::Hasher;
 
@@ -4058,6 +4099,11 @@ fn compute_pack_hash_components(
     request_hasher.update(&[u8::from(output_options.include_skipped)]);
     request_hasher.update(&[u8::from(output_options.include_meta)]);
     request_hasher.update(&[u8::from(output_options.include_verbose_meta)]);
+    hash_labeled_optional_u64(
+        &mut request_hasher,
+        "read_snapshot_generation",
+        read_snapshot_generation,
+    );
 
     let mut draft_hasher = Hasher::new();
     draft_hasher.update(&draft.used_tokens.to_le_bytes());
@@ -4084,6 +4130,11 @@ fn compute_pack_hash_components(
     composite_hasher.update(&[u8::from(output_options.include_skipped)]);
     composite_hasher.update(&[u8::from(output_options.include_meta)]);
     composite_hasher.update(&[u8::from(output_options.include_verbose_meta)]);
+    hash_labeled_optional_u64(
+        &mut composite_hasher,
+        "read_snapshot_generation",
+        read_snapshot_generation,
+    );
     composite_hasher.update(&draft.used_tokens.to_le_bytes());
     if output_options.include_rendered_text {
         composite_hasher.update(rendered_text.as_bytes());
@@ -8821,6 +8872,7 @@ mod tests {
             read_snapshot: Some(ReadSnapshotTrace {
                 pinned: true,
                 slot_id: Some(7),
+                snapshot_generation: Some(42),
                 lease_held_ms: 12,
                 expired: false,
                 poisoned: false,
@@ -8875,6 +8927,10 @@ mod tests {
         );
         assert_eq!(json["data"]["dbReads"]["readSnapshot"]["pinned"], true);
         assert_eq!(json["data"]["dbReads"]["readSnapshot"]["slotId"], 7);
+        assert_eq!(
+            json["data"]["dbReads"]["readSnapshot"]["snapshotGeneration"],
+            42
+        );
         assert_eq!(json["data"]["dbReads"]["readSnapshot"]["leaseHeldMs"], 12);
         assert_eq!(json["data"]["candidates"]["convertedCandidates"], 2);
         assert_eq!(json["data"]["pack"]["pruning"]["tokenBudgetExceeded"], 2);
@@ -10647,6 +10703,7 @@ mod tests {
         use super::{
             ContextPackOutputOptions, ContextPackOutputProfile, ContextResponseDegradation,
             ContextResponseSeverity, compute_pack_hash, compute_pack_hash_with_output_options,
+            compute_pack_hash_with_output_options_coordination_and_snapshot,
         };
         use crate::models::{ProvenanceUri, TrustClass, UnitScore};
         use crate::pack::{
@@ -10715,6 +10772,44 @@ mod tests {
         let base_degraded: Vec<ContextResponseDegradation> = vec![];
 
         let hash_base = compute_pack_hash(&request, &base_draft, &base_degraded);
+        let hash_snapshot_generation_one =
+            compute_pack_hash_with_output_options_coordination_and_snapshot(
+                &request,
+                &base_draft,
+                &base_degraded,
+                ContextPackOutputOptions::default(),
+                None,
+                Some(1),
+            );
+        let hash_snapshot_generation_two =
+            compute_pack_hash_with_output_options_coordination_and_snapshot(
+                &request,
+                &base_draft,
+                &base_degraded,
+                ContextPackOutputOptions::default(),
+                None,
+                Some(2),
+            );
+        assert_ne!(
+            hash_base, hash_snapshot_generation_one,
+            "pack hash must include pinned read snapshot generation"
+        );
+        assert_ne!(
+            hash_snapshot_generation_one, hash_snapshot_generation_two,
+            "different read snapshot generations must produce different pack hashes"
+        );
+        assert_eq!(
+            hash_snapshot_generation_one,
+            compute_pack_hash_with_output_options_coordination_and_snapshot(
+                &request,
+                &base_draft,
+                &base_degraded,
+                ContextPackOutputOptions::default(),
+                None,
+                Some(1),
+            ),
+            "fixed read snapshot generation must reproduce"
+        );
         let hash_lean = compute_pack_hash_with_output_options(
             &request,
             &base_draft,
