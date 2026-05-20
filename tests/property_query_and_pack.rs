@@ -800,6 +800,18 @@ fn validate_regression_fixture_metadata(
     file_name: &str,
     fixture: &DeterminismRegressionFixture,
 ) -> Result<(), String> {
+    let captured_at =
+        parse_fixture_timestamp(&format!("{file_name} captured_at"), &fixture.captured_at)?;
+    let last_verified_at = parse_fixture_timestamp(
+        &format!("{file_name} last_verified_at"),
+        &fixture.last_verified_at,
+    )?;
+    if last_verified_at < captured_at {
+        return Err(format!(
+            "parse {file_name}: last_verified_at {} predates captured_at {}",
+            fixture.last_verified_at, fixture.captured_at
+        ));
+    }
     if fixture.observed_hash_run1 != fixture.expected_hash {
         return Err(format!(
             "parse {file_name}: observed_hash_run1 {} must equal expected_hash {}",
@@ -1594,6 +1606,26 @@ fn determinism_regression_fixture_loader_rejects_seed_drift() -> Result<(), Stri
 
     assert!(error.contains("fixture seed 99"));
     assert!(error.contains("input seed 42"));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_loader_rejects_time_order_drift() -> Result<(), String> {
+    let mut fixture = regression_fixture_for_mismatch(7, b"time-order", b"expected", b"observed")
+        .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    let file_name = regression_fixture_file_name(&fixture.input_hash)?;
+    fixture.captured_at = "2026-05-17T00:00:00Z".to_string();
+    fixture.last_verified_at = "2026-05-16T23:59:59Z".to_string();
+
+    let error = parse_regression_fixture_entries(vec![(
+        file_name.clone(),
+        serialize_regression_fixture(&fixture)?,
+    )])
+    .expect_err("loaded fixture metadata should reject impossible timestamp order");
+
+    assert!(error.contains(&file_name));
+    assert!(error.contains("last_verified_at 2026-05-16T23:59:59Z"));
+    assert!(error.contains("captured_at 2026-05-17T00:00:00Z"));
     Ok(())
 }
 
