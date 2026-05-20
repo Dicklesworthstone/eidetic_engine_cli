@@ -39,6 +39,7 @@ use crate::pack::{
 use crate::policy::{redact_secret_like_content, redaction_placeholder};
 use crate::search::{SearchCacheGovernor, SearchHotset, SearchHotsetEntry, prewarm_search_hotset};
 
+use super::derived_asset::gather_default_derived_asset_store_summary;
 use super::doctor::DoctorReport;
 use super::singleflight::singleflight_posture_report;
 use super::status::{
@@ -1145,6 +1146,7 @@ fn cache_reports_json(workspace: &Path) -> String {
         PackCacheGovernor::new(snapshot.generation, CacheBudget::new(16, 64 * 1024))
             .with_current_usage(cache_state.pack.entries, cache_state.pack.bytes),
     );
+    let derived_asset_store = gather_default_derived_asset_store_summary();
 
     stable_json(&json!({
         "schema": "ee.support_bundle.scale_cache_reports.v1",
@@ -1171,6 +1173,7 @@ fn cache_reports_json(workspace: &Path) -> String {
             "search": search_report.data_json(),
             "pack": pack_report.data_json(),
         },
+        "derivedAssetStore": derived_asset_store.data_json(),
     }))
 }
 
@@ -4623,6 +4626,18 @@ mod tests {
         assert_eq!(
             value.pointer("/reports/pack/requestedEntries"),
             Some(&json!(3))
+        );
+        assert_eq!(
+            value.pointer("/derivedAssetStore/schema"),
+            Some(&json!("ee.derived_asset_store.summary.v1"))
+        );
+        assert_eq!(
+            value.pointer("/derivedAssetStore/reuseMode"),
+            Some(&json!("read_only"))
+        );
+        assert_eq!(
+            value.pointer("/derivedAssetStore/cleanup/automaticDeletion"),
+            Some(&json!(false))
         );
 
         let search_admitted = value

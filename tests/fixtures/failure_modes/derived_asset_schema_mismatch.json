@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "derived_asset_schema_mismatch",
+  "introduced_by": {
+    "bead": "bd-1nxz4.2",
+    "epic_letter": "SRR6"
+  },
+  "surfaces": [
+    "support bundle"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A content-addressed derived asset object's metadata schema, key, descriptor, or reference schema is not the current validated store contract.",
+    "setup_commands": [
+      "ee support bundle --out <dir> --workspace . --json",
+      "# inspect derivedAssetStore.degraded[] when stored metadata is stale or malformed"
+    ],
+    "invocation": "ee support bundle --out <dir> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "derived_asset_schema_mismatch",
+    "severity": "high",
+    "message_contains": [
+      "derived asset object",
+      "metadata"
+    ],
+    "repair_contains": "rebuild affected derived assets locally",
+    "repair_string": "rebuild affected derived assets locally; do not reuse invalid objects"
+  }
+}

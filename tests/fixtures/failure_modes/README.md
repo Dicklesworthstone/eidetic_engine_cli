@@ -108,6 +108,9 @@ in the same commit, keeping the catalog complete by construction.
 | `proof_violation_detected` | verify proofs | high | bd-nnfq4 (SRR2) |
 | `mesh_peer_policy_denied` | mesh import, mesh export, status, doctor, support bundle | high | bd-3i5q7 (SRR6.19) |
 | `mesh_secret_export_denied` | mesh export | high | bd-38dqk (SRR6.43) |
+| `mesh_sync_supervisor_backpressure` | mesh sync | info | bd-1ylr3 (SRR6.10) |
+| `mesh_sync_supervisor_budget_exhausted` | mesh sync | warning | bd-1ylr3 (SRR6.10) |
+| `mesh_sync_supervisor_runtime_error` | mesh sync | warning | bd-1ylr3 (SRR6.10) |
 | `consensus_no_clusters` | context | low | bd-1zb7k.9 (S8) |
 | `conflict_direct` | context | medium | bd-1zb7k.9 (S8) |
 | `conflict_trust_mismatch` | context | high | bd-1zb7k.9 (S8) |
@@ -115,6 +118,8 @@ in the same commit, keeping the catalog complete by construction.
 | `coordination_source_unavailable` | context, pack | medium | bd-1zb7k.4 (S3) |
 | `qos_registry_unavailable` | qos registry, status, doctor, swarm brief | medium | bd-1zb7k.20.2 |
 | `cache_hotset_stale` | cache hotset | medium | bd-1zb7k.10.2 (O2) |
+| `derived_asset_hash_mismatch` | support bundle | high | bd-1nxz4.2 |
+| `derived_asset_schema_mismatch` | support bundle | high | bd-1nxz4.2 |
 | `l2_pack_cache_unavailable` | context | low | bd-ndzfg.4 (L) |
 | `l2_pack_cache_corruption` | context | low | bd-ndzfg.4 (L) |
 | `audit_backpressure` | audit lane | warning | bd-wp5ac.1 |

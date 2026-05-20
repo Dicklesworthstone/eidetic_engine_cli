@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_sync_supervisor_budget_exhausted",
+  "introduced_by": {
+    "bead": "bd-1ylr3",
+    "epic_letter": "SRR6.10"
+  },
+  "surfaces": [
+    "mesh sync"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Foreground mesh sync is asked to run with an exhausted time, body-fetch, or peer-concurrency budget while active peers exist.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "enroll one enabled mesh peer"
+    ],
+    "invocation": "ee mesh sync --once --body-fetch-budget-bytes 0 --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "mesh_sync_supervisor_budget_exhausted",
+    "severity": "warning",
+    "message_contains": [
+      "Mesh sync supervisor exhausted",
+      "budget before peer contact"
+    ],
+    "repair_contains": "Raise the"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_sync_supervisor_runtime_error",
+  "introduced_by": {
+    "bead": "bd-1ylr3",
+    "epic_letter": "SRR6.10"
+  },
+  "surfaces": [
+    "mesh sync"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "The foreground mesh sync command cannot build or spawn its Asupersync supervisor runtime, so it returns the export/import fallback without a supervised tick.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "simulate an unavailable Asupersync runtime in the foreground sync harness"
+    ],
+    "invocation": "ee mesh sync --once --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "mesh_sync_supervisor_runtime_error",
+    "severity": "warning",
+    "message_contains": [
+      "Mesh sync supervisor did not start"
+    ],
+    "repair_contains": "Asupersync runtime"
+  }
+}

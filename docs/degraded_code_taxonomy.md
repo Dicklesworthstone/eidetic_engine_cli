@@ -443,6 +443,13 @@ memory bodies in `sources[]`.
 | `discovery_policy_no_ee_mesh_tag` | info | bd-36bbk.1.7 |
 | `discovery_policy_empty_allowlist` | info | bd-36bbk.1.7 |
 
+#### Mesh foreground sync (3)
+| Code | Severity | Bead |
+|------|----------|------|
+| `mesh_sync_supervisor_backpressure` | info | bd-1ylr3 (SRR6.10) |
+| `mesh_sync_supervisor_budget_exhausted` | warning | bd-1ylr3 (SRR6.10) |
+| `mesh_sync_supervisor_runtime_error` | warning | bd-1ylr3 (SRR6.10) |
+
 #### Causal lab (13)
 | Code | Severity | Bead |
 |------|----------|------|
@@ -632,6 +639,8 @@ bd-21xbi; see `docs/architecture/lexical-ram-tier.md`.
 | `redaction_round_trip_marker_preserved` | info | bd-17c65.11.6 (K6) — import surfaces preserved markers |
 | `redaction_uncertain` | warning | bd-17c65.11.6 (K6) |
 | `derived_asset_corrupt` | high | bd-17c65.12.6 (derived backup assets) |
+| `derived_asset_hash_mismatch` | high | bd-1nxz4.2 (content-addressed derived asset store) |
+| `derived_asset_schema_mismatch` | high | bd-1nxz4.2 (content-addressed derived asset store) |
 | `semantic_dimension_exceeds_budget` | warning | (TBD) — composes with semantic-model gating |
 | `tombstone_visibility_unavailable` | medium | bd-17c65.2.8 (B8) |
 | `tripwire_inputs_incomplete` | low | (TBD) |
