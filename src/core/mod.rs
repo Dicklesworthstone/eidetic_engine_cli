@@ -17,6 +17,7 @@ pub mod audit_lane;
 pub mod backup;
 pub mod bayes;
 pub mod budget;
+pub mod budget_delta_recommender;
 pub mod capabilities;
 pub mod causal;
 pub mod certificate;
@@ -28,9 +29,11 @@ pub mod context;
 pub mod curate;
 pub mod degraded_aggregation;
 pub mod degraded_honesty;
+pub mod derived_asset;
 pub mod determinism;
 pub mod disk_pressure;
 pub mod doctor;
+pub mod doctor_runtime;
 pub mod economy;
 pub mod effect;
 pub mod feedback;
@@ -249,6 +252,10 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
         SupportedSchema::new("runtime_profile", profile::RUNTIME_PROFILE_SCHEMA_V1),
         SupportedSchema::new("update_plan", UPDATE_PLAN_SCHEMA_V1),
         SupportedSchema::new("artifact_summary", ARTIFACT_SUMMARY_SCHEMA_V1),
+        SupportedSchema::new(
+            "derived_asset_store_summary",
+            derived_asset::DERIVED_ASSET_STORE_SUMMARY_SCHEMA_V1,
+        ),
         SupportedSchema::new(
             "artifact_relocation",
             artifact_relocation::ARTIFACT_RELOCATION_SCHEMA_V1,

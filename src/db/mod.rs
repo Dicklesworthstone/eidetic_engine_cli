@@ -483,14 +483,39 @@ fn ensure_database_write_lock_path_has_no_symlink_components(lock_path: &Path) -
             ),
         })?
     {
-        return Err(DbError::InvalidPath {
-            operation: DbOperation::BeginTransaction,
-            path: lock_path.to_path_buf(),
-            message: format!(
+        // bd-2xdom Gap 6: include the canonical-path suggestion so agents on
+        // macOS (where `/tmp` is always a symlink to `/private/tmp`) get an
+        // actionable next step instead of an opaque refusal. We canonicalize
+        // the lock_path's parent (which exists since the symlink check
+        // succeeded up to that component) and reconstruct the canonical lock
+        // path by joining the file name. Canonicalization failures degrade
+        // silently — the base message is still correct on its own.
+        let canonical_suggestion = lock_path
+            .parent()
+            .and_then(|parent| std::fs::canonicalize(parent).ok())
+            .and_then(|canonical_parent| {
+                lock_path
+                    .file_name()
+                    .map(|name| canonical_parent.join(name))
+            })
+            .filter(|canonical_lock| canonical_lock.as_path() != lock_path);
+        let message = match canonical_suggestion {
+            Some(canonical) => format!(
+                "refusing to open database write lock '{}': path traverses symbolic link '{}'. Retry with the canonical path '{}' to bypass the symlink (use the parent of '.ee' as --workspace).",
+                lock_path.display(),
+                symlink_path.display(),
+                canonical.display(),
+            ),
+            None => format!(
                 "refusing to open database write lock '{}': path traverses symbolic link '{}'",
                 lock_path.display(),
                 symlink_path.display()
             ),
+        };
+        return Err(DbError::InvalidPath {
+            operation: DbOperation::BeginTransaction,
+            path: lock_path.to_path_buf(),
+            message,
         });
     }
     Ok(())

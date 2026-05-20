@@ -234,3 +234,6 @@ mod mesh_anti_entropy_schema;
 
 #[path = "contracts/curate_peer_evidence_schema.rs"]
 mod curate_peer_evidence_schema;
+
+#[path = "contracts/host_calibration_recommendation_schema.rs"]
+mod host_calibration_recommendation_schema;
