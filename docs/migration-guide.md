@@ -506,6 +506,11 @@ is byte-identical to v0.2.x. This invariant is gated by
 
 | Env var | Default | Owner bead | Purpose |
 |---|---|---|---|
+| `EE_MESH_DISCOVERY_CACHE_TTL_SECONDS` | `30` | bd-36bbk.1.13 | Autodiscovery cache TTL for `ee mesh status` and auto-enroll readiness checks |
+| `EE_MESH_DRIFT_SOFT_STALE_AFTER` | `1` | bd-36bbk.1.13 | Missed hello-probe count before a peer enters soft-stale drift grace |
+| `EE_MESH_DRIFT_SOFT_STALE_AFTER_SECONDS` | `300` | bd-36bbk.1.13 | Minimum seconds since last success before soft-stale drift grace applies |
+| `EE_MESH_DRIFT_HARD_STALE_AFTER` | `3` | bd-36bbk.1.13 | Missed hello-probe count before a peer enters hard-stale drift |
+| `EE_MESH_DRIFT_HARD_STALE_AFTER_SECONDS` | `3600` | bd-36bbk.1.13 | Minimum seconds since last success before hard-stale drift applies |
 | `EE_MESH_ENABLED` | `0` | bd-36bbk umbrella | Master kill-switch; `0` disables every mesh code path |
 | `EE_MESH_MODE` | `off` | bd-36bbk umbrella | Default mesh command mode; accepted values are `off`, `cache`, `revisable`, and `blocking` |
 | `EE_TAILSCALE_BINARY_OVERRIDE` | unset | bd-36bbk.1.1 | Test-only: pin the `tailscale` binary path (production code rejects relative paths) |
@@ -514,11 +519,11 @@ is byte-identical to v0.2.x. This invariant is gated by
 | `EE_TAILSCALE_DISCOVERY_MODE` | `service_tag` | bd-36bbk.1.7 | Caller-side mesh peer discovery policy; accepted values are `service_tag`, `auto_admit`, `allowlist` |
 | `EE_TAILSCALE_RESPOND_MODE` | `service_tag` | bd-36bbk.1.7 | Responder-side mesh discovery consent policy; same value space as `EE_TAILSCALE_DISCOVERY_MODE` |
 
-Future v0.3.x point releases will register further `EE_MESH_*` and
+Future v0.3.x point releases may register further `EE_MESH_*` and
 `EE_TAILSCALE_*` env vars as the remaining SRR6.46 sub-beads land
-(discovery cache TTL, drift grace thresholds, hello port, steward
-interval, daily cap, etc.). Every new var is registered in
-`src/config/env_registry.rs` and documented in `docs/env_vars.md`.
+(hello port, steward interval, daily cap, etc.). Every new var is
+registered in `src/config/env_registry.rs` and documented in
+`docs/env_vars.md`.
 
 ### Schemas added
 

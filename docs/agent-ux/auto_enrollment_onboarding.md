@@ -422,7 +422,18 @@ ee audit timeline \
   design decisions captured in writing
 - `docs/mesh/peer_policy.md` — peer policy + lane semantics
 - `docs/mesh/workspace_scope.md` — workspace-scope and namespace isolation
-- `docs/schemas/ee.mesh.*.v1.json` — the contract schemas for every command
-  on the cheat-sheet table above
+- `docs/schemas/ee.tailscale.local.v1.json` — local Tailscale probe posture
+- `docs/schemas/ee.mesh.auto_enrollment_summary.v1.json` — forensic
+  audit-row payload before any durable peer-group write
+- `docs/schemas/ee.mesh.discovery_policy.v1.json` — service-tag,
+  allowlist, denylist, and consent-policy posture
+- `docs/schemas/ee.mesh.hello.v1.json` — bounded hello request
+- `docs/schemas/ee.mesh.hello.response.v1.json` — successful hello response
+- `docs/schemas/ee.mesh.hello.error.v1.json` — privacy-preserving decline
+  response
+- `docs/schemas/ee.mesh.lane_grant_preview.v1.json` — pre-grant visibility
+  audit
+- `docs/schemas/ee.repair_action_graph.v1.json` — shared status/doctor
+  remediation graph
 - `docs/migration-guide.md` — v0.3.0 migration notes (added when
   bd-36bbk.1.20 lands)
