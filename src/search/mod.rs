@@ -20,9 +20,8 @@ pub use frankensearch::{
 pub use frankensearch::{LexicalSearch, TantivyIndex};
 pub use query::{ParsedSearchQuery, SearchQueryClause, parse_search_query};
 pub use scoring::{
-    BeadAffinityCandidateSignals, BeadAffinityContext, BeadAffinityScore,
-    DEFAULT_BEAD_AFFINITY_BIAS_CAP, ParseSpeedModeError, RetrievalMaturity, SearchScoreComponents,
-    SearchScoringConfig, SearchScoringSignals, SpeedMode, bead_affinity_score, final_score,
+    ParseSpeedModeError, RetrievalMaturity, SearchScoreComponents, SearchScoringConfig,
+    SearchScoringSignals, SpeedMode, final_score,
 };
 
 pub const SUBSYSTEM: &str = "search";

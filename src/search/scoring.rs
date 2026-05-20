@@ -3,9 +3,7 @@
 //! Frankensearch owns candidate retrieval and fused base scores. This module
 //! only applies the project-specific, explainable multipliers from the ee
 //! retrieval contract: freshness, confidence, utility, maturity, harmful
-//! feedback, scope, graph centrality, redundancy, and opt-in bead affinity.
-
-use std::collections::BTreeSet;
+//! feedback, scope, graph centrality, and redundancy.
 
 /// Default recency time constant from the retrieval contract.
 pub const DEFAULT_RECENCY_TAU_DAYS: f32 = 30.0;
@@ -23,8 +21,6 @@ pub const DEFAULT_SCOPE_MATCH_BONUS: f32 = 1.2;
 pub const DEFAULT_GRAPH_CENTRALITY_WEIGHT: f32 = 0.10;
 /// Default MMR lambda used to dampen redundant candidates.
 pub const DEFAULT_REDUNDANCY_LAMBDA: f32 = 0.7;
-/// Default hard cap for bead-aware additive retrieval bias.
-pub const DEFAULT_BEAD_AFFINITY_BIAS_CAP: f32 = 0.05;
 
 /// Scoring constants normally sourced from the `[scoring]` config block.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -37,7 +33,6 @@ pub struct SearchScoringConfig {
     pub scope_match_bonus: f32,
     pub graph_centrality_weight: f32,
     pub redundancy_lambda: f32,
-    pub bead_affinity_bias_cap: f32,
 }
 
 impl Default for SearchScoringConfig {
@@ -51,95 +46,7 @@ impl Default for SearchScoringConfig {
             scope_match_bonus: DEFAULT_SCOPE_MATCH_BONUS,
             graph_centrality_weight: DEFAULT_GRAPH_CENTRALITY_WEIGHT,
             redundancy_lambda: DEFAULT_REDUNDANCY_LAMBDA,
-            bead_affinity_bias_cap: DEFAULT_BEAD_AFFINITY_BIAS_CAP,
         }
-    }
-}
-
-/// Redacted, local bead context used to bias retrieval without reading raw
-/// tracker internals at every candidate comparison.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BeadAffinityContext {
-    pub bead_id: String,
-    pub labels: BTreeSet<String>,
-    pub tokens: BTreeSet<String>,
-}
-
-impl BeadAffinityContext {
-    #[must_use]
-    pub fn new(
-        bead_id: impl Into<String>,
-        labels: impl IntoIterator<Item = impl Into<String>>,
-        text: &str,
-    ) -> Self {
-        Self {
-            bead_id: bead_id.into(),
-            labels: normalize_label_set(labels),
-            tokens: bead_affinity_tokens(text),
-        }
-    }
-
-    #[must_use]
-    pub fn is_cold_start(&self) -> bool {
-        self.labels.is_empty() && self.tokens.is_empty()
-    }
-}
-
-/// Candidate-side signals used by the bead-affinity soft prior.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct BeadAffinityCandidateSignals {
-    pub tags: BTreeSet<String>,
-    pub content_tokens: BTreeSet<String>,
-    pub content_hash: Option<String>,
-    pub link_refs: BTreeSet<String>,
-}
-
-impl BeadAffinityCandidateSignals {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    #[must_use]
-    pub fn with_tags(mut self, tags: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.tags = normalize_label_set(tags);
-        self
-    }
-
-    #[must_use]
-    pub fn with_content(mut self, content: &str) -> Self {
-        self.content_tokens = bead_affinity_tokens(content);
-        self
-    }
-
-    #[must_use]
-    pub fn with_content_hash(mut self, content_hash: Option<impl Into<String>>) -> Self {
-        self.content_hash = content_hash.map(Into::into);
-        self
-    }
-
-    #[must_use]
-    pub fn with_link_refs(mut self, refs: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.link_refs = normalize_label_set(refs);
-        self
-    }
-}
-
-/// Explanation for the additive bead-affinity score.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct BeadAffinityScore {
-    pub value: f32,
-    pub tag_overlap: usize,
-    pub content_token_overlap: usize,
-    pub content_hash_overlap: bool,
-    pub link_overlap: usize,
-    pub capped: bool,
-}
-
-impl BeadAffinityScore {
-    #[must_use]
-    pub fn applied(self) -> bool {
-        self.value > 0.0
     }
 }
 
@@ -289,7 +196,6 @@ pub struct SearchScoringSignals {
     pub scope_match: bool,
     pub graph_centrality: Option<f32>,
     pub redundancy: Option<f32>,
-    pub bead_affinity: Option<f32>,
 }
 
 impl SearchScoringSignals {
@@ -305,7 +211,6 @@ impl SearchScoringSignals {
             scope_match: false,
             graph_centrality: None,
             redundancy: None,
-            bead_affinity: None,
         }
     }
 }
@@ -322,7 +227,6 @@ pub struct SearchScoreComponents {
     pub scope_match: f32,
     pub graph_centrality: f32,
     pub redundancy: f32,
-    pub bead_affinity: f32,
     pub final_score: f32,
 }
 
@@ -355,7 +259,7 @@ impl SearchScoreComponents {
             + finite_unit(signals.graph_centrality.unwrap_or(0.0))
                 * config.graph_centrality_weight.max(0.0);
         let redundancy = redundancy_multiplier(signals.redundancy, config.redundancy_lambda);
-        let multiplicative_score = base
+        let final_score = base
             * recency
             * confidence
             * utility
@@ -364,11 +268,6 @@ impl SearchScoreComponents {
             * scope_match
             * graph_centrality
             * redundancy;
-        let bead_affinity = finite_signed(signals.bead_affinity.unwrap_or(0.0)).clamp(
-            -config.bead_affinity_bias_cap.abs(),
-            config.bead_affinity_bias_cap.abs(),
-        );
-        let final_score = (multiplicative_score + bead_affinity).max(0.0);
 
         SearchScoreComponents {
             base,
@@ -380,55 +279,8 @@ impl SearchScoreComponents {
             scope_match,
             graph_centrality,
             redundancy,
-            bead_affinity,
             final_score,
         }
-    }
-}
-
-/// Score bead affinity as an additive soft prior capped to the configured
-/// magnitude. This function is deterministic and side-effect free; callers
-/// decide whether to attach the returned value to [`SearchScoringSignals`].
-#[must_use]
-pub fn bead_affinity_score(
-    context: &BeadAffinityContext,
-    candidate: &BeadAffinityCandidateSignals,
-    max_abs_bias: f32,
-) -> BeadAffinityScore {
-    if context.is_cold_start() {
-        return BeadAffinityScore::default();
-    }
-
-    let tag_overlap = intersection_count(&context.labels, &candidate.tags);
-    let content_token_overlap = intersection_count(&context.tokens, &candidate.content_tokens);
-    let content_hash_overlap = candidate
-        .content_hash
-        .as_deref()
-        .is_some_and(|hash| context.tokens.iter().any(|token| hash.contains(token)));
-    let link_overlap = context
-        .tokens
-        .iter()
-        .filter(|token| {
-            candidate
-                .link_refs
-                .iter()
-                .any(|link| link.contains(token.as_str()))
-        })
-        .count();
-
-    let raw = tag_overlap as f32 * 0.025
-        + content_token_overlap as f32 * 0.015
-        + if content_hash_overlap { 0.01 } else { 0.0 }
-        + link_overlap as f32 * 0.01;
-    let cap = finite_nonnegative(max_abs_bias).min(DEFAULT_BEAD_AFFINITY_BIAS_CAP);
-    let value = raw.min(cap);
-    BeadAffinityScore {
-        value,
-        tag_overlap,
-        content_token_overlap,
-        content_hash_overlap,
-        link_overlap,
-        capped: raw > cap,
     }
 }
 
@@ -477,10 +329,6 @@ fn finite_nonnegative(value: f32) -> f32 {
     }
 }
 
-fn finite_signed(value: f32) -> f32 {
-    if value.is_finite() { value } else { 0.0 }
-}
-
 fn finite_positive(value: f32) -> Option<f32> {
     if value.is_finite() && value > 0.0 {
         Some(value)
@@ -489,40 +337,11 @@ fn finite_positive(value: f32) -> Option<f32> {
     }
 }
 
-fn bead_affinity_tokens(text: &str) -> BTreeSet<String> {
-    text.split(|ch: char| !ch.is_ascii_alphanumeric())
-        .map(str::trim)
-        .filter(|token| token.len() >= 2)
-        .map(str::to_ascii_lowercase)
-        .collect()
-}
-
-fn normalize_label_set(values: impl IntoIterator<Item = impl Into<String>>) -> BTreeSet<String> {
-    values
-        .into_iter()
-        .map(Into::into)
-        .flat_map(|value| {
-            value
-                .split(|ch: char| !ch.is_ascii_alphanumeric())
-                .map(str::trim)
-                .filter(|token| token.len() >= 2)
-                .map(str::to_ascii_lowercase)
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
-
-fn intersection_count(left: &BTreeSet<String>, right: &BTreeSet<String>) -> usize {
-    left.intersection(right).count()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        BeadAffinityCandidateSignals, BeadAffinityContext, DEFAULT_BEAD_AFFINITY_BIAS_CAP,
         DEFAULT_GRAPH_CENTRALITY_WEIGHT, DEFAULT_RECENCY_TAU_DAYS, RetrievalMaturity,
-        SearchScoreComponents, SearchScoringConfig, SearchScoringSignals, SpeedMode,
-        bead_affinity_score, final_score,
+        SearchScoreComponents, SearchScoringConfig, SearchScoringSignals, SpeedMode, final_score,
     };
 
     fn assert_close(actual: f32, expected: f32) {
@@ -629,7 +448,6 @@ mod tests {
             scope_match: true,
             graph_centrality: Some(0.5),
             redundancy: Some(0.25),
-            bead_affinity: Some(0.03),
         };
 
         let components = SearchScoreComponents::from_signals(signals, config);
@@ -645,7 +463,6 @@ mod tests {
             1.0 + DEFAULT_GRAPH_CENTRALITY_WEIGHT * 0.5,
         );
         assert_close(components.redundancy, 0.925);
-        assert_close(components.bead_affinity, 0.03);
         assert_close(components.final_score, final_score(signals, config));
     }
 
@@ -660,7 +477,6 @@ mod tests {
             scope_match_bonus: -3.0,
             graph_centrality_weight: f32::NAN,
             redundancy_lambda: 2.0,
-            bead_affinity_bias_cap: DEFAULT_BEAD_AFFINITY_BIAS_CAP,
         };
         let components = SearchScoreComponents::from_signals(
             SearchScoringSignals {
@@ -673,7 +489,6 @@ mod tests {
                 scope_match: true,
                 graph_centrality: Some(7.0),
                 redundancy: Some(9.0),
-                bead_affinity: Some(f32::NAN),
             },
             config,
         );
@@ -687,65 +502,6 @@ mod tests {
         assert_close(components.graph_centrality, 1.0);
         assert_close(components.redundancy, 1.0);
         assert_close(components.final_score, 0.0);
-    }
-
-    #[test]
-    fn bead_affinity_matches_labels_content_hash_and_links_under_cap() {
-        let context = BeadAffinityContext::new(
-            "bd-2942u",
-            ["swarmx", "retrieval"],
-            "bead-aware retrieval prioritization for context and search",
-        );
-        let candidate = BeadAffinityCandidateSignals::new()
-            .with_tags(["retrieval", "agent-ux"])
-            .with_content("context retrieval ranking should use bead tokens")
-            .with_content_hash(Some("blake3:retrieval-deadbeef"))
-            .with_link_refs(["source_uri:bd-2942u-parent"]);
-
-        let score = bead_affinity_score(&context, &candidate, DEFAULT_BEAD_AFFINITY_BIAS_CAP);
-
-        assert!(score.applied());
-        assert_eq!(score.tag_overlap, 1);
-        assert!(score.content_token_overlap > 0);
-        assert!(score.content_hash_overlap);
-        assert_eq!(score.link_overlap, 1);
-        assert!(score.value <= DEFAULT_BEAD_AFFINITY_BIAS_CAP);
-        assert!(score.capped);
-    }
-
-    #[test]
-    fn bead_affinity_cold_start_and_non_matches_are_zero() {
-        let cold = BeadAffinityContext::new("bd-empty", std::iter::empty::<String>(), "");
-        let candidate = BeadAffinityCandidateSignals::new()
-            .with_tags(["release"])
-            .with_content("formatting release notes");
-
-        assert_eq!(
-            bead_affinity_score(&cold, &candidate, DEFAULT_BEAD_AFFINITY_BIAS_CAP).value,
-            0.0
-        );
-
-        let context = BeadAffinityContext::new("bd-2942u", ["swarmx"], "retrieval prioritization");
-        assert_eq!(
-            bead_affinity_score(&context, &candidate, DEFAULT_BEAD_AFFINITY_BIAS_CAP).value,
-            0.0
-        );
-    }
-
-    #[test]
-    fn bead_affinity_is_additive_and_clamped_in_final_score() {
-        let config = SearchScoringConfig::default();
-        let base = SearchScoringSignals::new(0.50, RetrievalMaturity::Semantic);
-        let boosted = SearchScoreComponents::from_signals(
-            SearchScoringSignals {
-                bead_affinity: Some(1.0),
-                ..base
-            },
-            config,
-        );
-
-        assert_close(boosted.bead_affinity, DEFAULT_BEAD_AFFINITY_BIAS_CAP);
-        assert_close(boosted.final_score, 0.55);
     }
 
     #[test]

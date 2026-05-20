@@ -119,9 +119,10 @@ use crate::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
 use crate::core::lab::{
     AgentWorkloadReplayOptions as LabAgentWorkloadReplayOptions,
     CaptureOptions as LabCaptureOptions, CounterfactualOptions as LabCounterfactualOptions,
-    InterventionSpec, LAB_COUNTERFACTUAL_MULTI_SWAP_UNSUPPORTED_CODE,
-    ReplayOptions as LabReplayOptions, SwapRevisionMode, capture_episode,
-    replay_agent_workload_trace, replay_episode, run_counterfactual,
+    DEFAULT_AGENT_WORKLOAD_REPLAY_AGENTS, InterventionSpec,
+    LAB_COUNTERFACTUAL_MULTI_SWAP_UNSUPPORTED_CODE, ReplayOptions as LabReplayOptions,
+    SwapRevisionMode, capture_episode, replay_agent_workload_trace, replay_episode,
+    run_counterfactual,
 };
 use crate::core::learn::{
     LearnCloseOptions, LearnExperimentProposeOptions, LearnExperimentRunOptions,
@@ -3830,6 +3831,10 @@ pub struct LabReplayArgs {
     #[arg(long, value_name = "TRACE_JSONL", conflicts_with = "episode_id")]
     pub trace: Option<PathBuf>,
 
+    /// Synthetic agent count for trace fan-out workload playback.
+    #[arg(long, default_value_t = DEFAULT_AGENT_WORKLOAD_REPLAY_AGENTS)]
+    pub agents: u16,
+
     /// Query override to run against the frozen episode.
     #[arg(long, value_name = "TEXT", conflicts_with = "trace")]
     pub query: Option<String>,
@@ -6159,6 +6164,30 @@ pub struct DoctorArgs {
         ],
     )]
     pub robot_triage: bool,
+
+    /// Diff two prior `ee doctor --fix` runs by their state.json
+    /// contents. Each `--diff` argument is a `RUN_ID` resolved against
+    /// `<workspace>/.doctor/runs/<RUN_ID>/state.json`. Pass the flag
+    /// exactly twice: the first run is the baseline, the second is the
+    /// comparison. Emits `ee.doctor.run_diff.v1` with the deserialized
+    /// state for each side, deltas for the integer fields
+    /// (action_count delta + finished_at presence transition) and a
+    /// boolean `same_target_sha`. Read-only; the
+    /// `src/core/doctor_runtime::mutate` chokepoint is NOT invoked.
+    /// This is the `diff` surface from the bd-3boan pass-2 backlog,
+    /// expressed as a repeatable flag so it composes with the existing
+    /// flat DoctorArgs shape; once the doctor command surface migrates
+    /// to a clap Subcommand it lifts to `ee doctor diff <A> <B>`.
+    #[arg(
+        long = "diff",
+        value_name = "RUN_ID",
+        num_args = 1..=2,
+        conflicts_with_all = [
+            "fix_plan", "franken_health", "capabilities", "robot_docs", "undo",
+            "quick", "only", "since", "list_runs", "gc_plan", "robot_triage",
+        ],
+    )]
+    pub diff: Vec<String>,
 }
 
 /// Arguments for `ee init`.
@@ -9076,6 +9105,28 @@ where
                     .as_deref()
                     .map_or_else(DoctorReport::gather, DoctorReport::gather_for_workspace);
                 write_stdout(stdout, &(doctor_robot_triage_json(&report) + "\n"));
+                return ProcessExitCode::Success;
+            }
+            if !args.diff.is_empty() {
+                if args.diff.len() != 2 {
+                    let json = serde_json::json!({
+                        "schema": "ee.doctor.run_diff.v1",
+                        "error": "ee doctor --diff requires exactly two RUN_ID arguments",
+                        "repair": "Invoke as: ee doctor --diff <RUN_A> --diff <RUN_B>",
+                        "received": args.diff,
+                    });
+                    write_stdout(stdout, &(json.to_string() + "\n"));
+                    return ProcessExitCode::Configuration;
+                }
+                let workspace = cli.workspace.clone().unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                });
+                let baseline = args.diff[0].as_str();
+                let comparison = args.diff[1].as_str();
+                write_stdout(
+                    stdout,
+                    &(doctor_run_diff_json(&workspace, baseline, comparison) + "\n"),
+                );
                 return ProcessExitCode::Success;
             }
             if let Some(run_id) = args.undo.as_deref() {
@@ -14211,6 +14262,104 @@ fn doctor_robot_triage_json(report: &DoctorReport) -> String {
     .to_string()
 }
 
+/// Emit the agent-facing `ee.doctor.run_diff.v1` JSON envelope diffing
+/// two prior `ee doctor --fix` runs. Reads each side's
+/// `<workspace>/.doctor/runs/<RUN_ID>/state.json`, deserializes the
+/// payload, and surfaces a compact delta: `actionCountDelta`,
+/// `sameTargetSha`, `finishedAtTransition` (one of `both_finished`,
+/// `only_baseline_finished`, `only_comparison_finished`, `neither_finished`),
+/// and `statusTransition` (`<from> -> <to>`). Read-only; the
+/// `src/core/doctor_runtime::mutate` chokepoint is NOT invoked. Missing
+/// or unparseable state.json surfaces in the corresponding side's
+/// `parseError` field rather than failing the whole envelope.
+fn doctor_run_diff_json(workspace: &Path, baseline_id: &str, comparison_id: &str) -> String {
+    fn load_side(workspace: &Path, run_id: &str) -> serde_json::Value {
+        let run_dir = workspace.join(".doctor").join("runs").join(run_id);
+        let state_path = run_dir.join("state.json");
+        match std::fs::read_to_string(&state_path) {
+            Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(value) => serde_json::json!({
+                    "runId": run_id,
+                    "runDir": run_dir.display().to_string(),
+                    "state": value,
+                }),
+                Err(error) => serde_json::json!({
+                    "runId": run_id,
+                    "runDir": run_dir.display().to_string(),
+                    "parseError": error.to_string(),
+                }),
+            },
+            Err(error) => serde_json::json!({
+                "runId": run_id,
+                "runDir": run_dir.display().to_string(),
+                "parseError": format!("read state.json: {error}"),
+            }),
+        }
+    }
+    let baseline = load_side(workspace, baseline_id);
+    let comparison = load_side(workspace, comparison_id);
+    let action_count_delta = match (
+        baseline
+            .pointer("/state/action_count")
+            .and_then(serde_json::Value::as_i64),
+        comparison
+            .pointer("/state/action_count")
+            .and_then(serde_json::Value::as_i64),
+    ) {
+        (Some(b), Some(c)) => Some(c - b),
+        _ => None,
+    };
+    let same_target_sha = match (
+        baseline
+            .pointer("/state/target_sha")
+            .and_then(serde_json::Value::as_str),
+        comparison
+            .pointer("/state/target_sha")
+            .and_then(serde_json::Value::as_str),
+    ) {
+        (Some(b), Some(c)) => Some(b == c),
+        _ => None,
+    };
+    let baseline_finished = baseline
+        .pointer("/state/finished_at")
+        .map(|v| !v.is_null())
+        .unwrap_or(false);
+    let comparison_finished = comparison
+        .pointer("/state/finished_at")
+        .map(|v| !v.is_null())
+        .unwrap_or(false);
+    let finished_at_transition = match (baseline_finished, comparison_finished) {
+        (true, true) => "both_finished",
+        (true, false) => "only_baseline_finished",
+        (false, true) => "only_comparison_finished",
+        (false, false) => "neither_finished",
+    };
+    let baseline_status = baseline
+        .pointer("/state/status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned();
+    let comparison_status = comparison
+        .pointer("/state/status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned();
+    serde_json::json!({
+        "schema": "ee.doctor.run_diff.v1",
+        "doctor_version": env!("CARGO_PKG_VERSION"),
+        "workspace": workspace.display().to_string(),
+        "baseline": baseline,
+        "comparison": comparison,
+        "actionCountDelta": action_count_delta,
+        "sameTargetSha": same_target_sha,
+        "finishedAtTransition": finished_at_transition,
+        "statusTransition": format!("{baseline_status} -> {comparison_status}"),
+        "sideEffectFree": true,
+        "configMutation": "never",
+    })
+    .to_string()
+}
+
 fn clap_error_message(error: &clap::Error) -> String {
     let full = error.to_string();
     let mut lines_iter = full.lines();
@@ -14922,6 +15071,7 @@ where
     if let Some(trace_path) = &args.trace {
         let options = LabAgentWorkloadReplayOptions {
             trace_path: trace_path.clone(),
+            agent_count: args.agents,
             verify_determinism: args.verify_determinism,
         };
         return match replay_agent_workload_trace(&options) {

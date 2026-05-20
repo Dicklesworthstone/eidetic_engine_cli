@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.spec_pack.v1.json",
+  "title": "ee.spec_pack.v1",
+  "description": "Telemetry event row for the swarmx.spec-pack speculative context pre-assembly driver (bd-20bdb). One row per phase of the speculative tick: admission gate decision, candidate prepare, speculative run, abort (cooperative cancellation by foreground pressure), and L2 store. The schema pins the QoS-aware shape — every row records the qosLaneSnapshotHash and the surfacePackId so an audit can prove speculative work never ran while foreground pressure was active, and that the produced pack was the one the next foreground call resolved from L2.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "sideEffectFree",
+    "phase",
+    "ts",
+    "workspaceIdHash",
+    "queryShapeHash",
+    "qosLaneSnapshotHash",
+    "admissionVerdict"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.spec_pack.v1"
+    },
+    "sideEffectFree": {
+      "description": "Spec-pack telemetry rows describe completed phases; they cannot mutate the L2 cache or any source-of-truth state. The `store` phase records the fact that the speculative run wrote to L2, but the row itself is observation-only.",
+      "type": "boolean",
+      "const": true
+    },
+    "phase": {
+      "$ref": "#/$defs/phase"
+    },
+    "ts": {
+      "$ref": "#/$defs/rfc3339"
+    },
+    "workspaceIdHash": {
+      "description": "Hashed workspace identity. Raw workspace path is never emitted.",
+      "type": "string",
+      "pattern": "^blake3:[A-Fa-f0-9]{32,128}$"
+    },
+    "queryShapeHash": {
+      "description": "Hashed query identity (workspace_id + query + bead_id + max_tokens + profile + agent_name_when_bias_active). Raw query text never appears.",
+      "type": "string",
+      "pattern": "^blake3:[A-Fa-f0-9]{32,128}$"
+    },
+    "qosLaneSnapshotHash": {
+      "description": "Hash of the QoS active-lane snapshot at admission time. Every phase row records the same snapshot hash from the admission decision so an audit can prove the speculative work ran under the lane state it was admitted under.",
+      "type": "string",
+      "pattern": "^blake3:[A-Fa-f0-9]{32,128}$"
+    },
+    "admissionVerdict": {
+      "$ref": "#/$defs/admissionVerdict"
+    },
+    "surfacePackId": {
+      "description": "L2 pack ID produced by the speculative run. Required on `prepare`, `run`, `store` phases; absent on `admission` denials and `abort` rows that did not produce a pack.",
+      "type": "string",
+      "pattern": "^pack_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "ttlSeconds": {
+      "description": "Speculative pack TTL in L2 cache. Default 30s per EE_SPEC_PACK_TTL_SECONDS.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3600
+    },
+    "tokensUsed": {
+      "description": "Token budget consumed by the speculative run.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "elapsedMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "abortReason": {
+      "description": "Required on `abort` phase. Documents the cooperative-cancellation cause.",
+      "$ref": "#/$defs/abortReason"
+    },
+    "degradedCodes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]*$"
+      }
+    }
+  },
+  "$defs": {
+    "phase": {
+      "description": "Lifecycle phase for one speculative tick. The five phases are exactly what the bead acceptance pins: admission | prepare | run | abort | store. Adding more is allowed in a minor revision; removing any breaks consumers that switch on the closed set.",
+      "type": "string",
+      "enum": ["admission", "prepare", "run", "abort", "store"]
+    },
+    "admissionVerdict": {
+      "description": "Decision made by the speculative admission gate. `admitted` means the tick ran; the four `denied_*` values cover the bead's hard QoS gates: foreground request id present in the active-pin registry, read-pool pins held by a foreground worker, qos.foreground_active > 0, and the per-workspace concurrent-speculation cap (default 4, EE_SPEC_PACK_CONCURRENCY).",
+      "type": "string",
+      "enum": [
+        "admitted",
+        "denied_foreground_request_id_active",
+        "denied_read_pool_foreground_pin_held",
+        "denied_qos_foreground_pressure",
+        "denied_per_workspace_concurrency_cap"
+      ]
+    },
+    "abortReason": {
+      "description": "Cooperative-cancellation cause for `abort` phase rows. `foreground_request_arrived` is the primary case — a real foreground ee context Cx kills in-flight speculative work via the Cx tree.",
+      "type": "string",
+      "enum": [
+        "foreground_request_arrived",
+        "shutdown",
+        "memory_pressure",
+        "ttl_expired_before_store",
+        "selection_no_longer_top_k"
+      ]
+    },
+    "rfc3339": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

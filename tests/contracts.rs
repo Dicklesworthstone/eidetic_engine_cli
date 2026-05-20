@@ -246,3 +246,6 @@ mod agent_workload_trace_schema;
 
 #[path = "contracts/qos_lanes_e2e_contract.rs"]
 mod qos_lanes_e2e_contract;
+
+#[path = "contracts/spec_pack_schema.rs"]
+mod spec_pack_schema;
