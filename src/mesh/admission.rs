@@ -12,6 +12,7 @@ use serde::Serialize;
 
 pub const MESH_ADMISSION_SCHEMA_V1: &str = "ee.mesh.admission.v1";
 pub const MESH_ADMISSION_STATUS_SCHEMA_V1: &str = "ee.mesh.admission_status.v1";
+pub const MESH_ADMISSION_DOCTOR_SCHEMA_V1: &str = "ee.mesh.admission_doctor.v1";
 pub const MESH_ADMISSION_E2E_SURFACE: &str = "mesh_admission_control";
 pub const TEST_EVENT_SCHEMA_V1: &str = "ee.test_event.v1";
 
@@ -271,6 +272,43 @@ pub struct MeshAdmissionPeerStatus {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum MeshAdmissionDoctorPosture {
+    Ok,
+    DegradedRecoverable,
+}
+
+impl MeshAdmissionDoctorPosture {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::DegradedRecoverable => "degraded_recoverable",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshAdmissionDoctorSignal {
+    pub code: &'static str,
+    pub severity: &'static str,
+    pub peer_count: usize,
+    pub message: &'static str,
+    pub repair: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshAdmissionDoctorReport {
+    pub schema: &'static str,
+    pub posture: MeshAdmissionDoctorPosture,
+    pub peer_count: usize,
+    pub local_tier1_unaffected: bool,
+    pub signals: Vec<MeshAdmissionDoctorSignal>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MeshAdmissionScenario {
     PeerThrottled,
     PayloadRejected,
@@ -424,37 +462,37 @@ pub fn computed_backoff_until_epoch_ms(
 #[must_use]
 pub fn admission_status(decisions: &[MeshAdmissionDecision]) -> MeshAdmissionStatus {
     let mut degraded = BTreeMap::<&'static str, ()>::new();
-    let mut per_peer = decisions
-        .iter()
-        .map(|decision| {
-            if decision.reason != MeshAdmissionReason::WithinBudget {
-                degraded.insert(decision.code, ());
-            }
-            MeshAdmissionPeerStatus {
-                peer_alias: peer_alias(&decision.peer_id),
-                action: decision.action,
-                reason: decision.reason,
-                backoff_until_epoch_ms: decision.backoff_until_epoch_ms,
-            }
-        })
-        .collect::<Vec<_>>();
-    per_peer.sort_by(|left, right| {
-        left.peer_alias
-            .cmp(&right.peer_alias)
-            .then_with(|| left.reason.cmp(&right.reason))
-    });
+    let mut per_peer_by_alias = BTreeMap::<String, MeshAdmissionPeerStatus>::new();
+    for decision in decisions {
+        if decision.reason != MeshAdmissionReason::WithinBudget {
+            degraded.insert(decision.code, ());
+        }
 
-    let throttled_peer_count = decisions
+        let alias = peer_alias(&decision.peer_id);
+        let candidate = MeshAdmissionPeerStatus {
+            peer_alias: alias.clone(),
+            action: decision.action,
+            reason: decision.reason,
+            backoff_until_epoch_ms: decision.backoff_until_epoch_ms,
+        };
+        per_peer_by_alias
+            .entry(alias)
+            .and_modify(|current| *current = stronger_peer_status(current, &candidate))
+            .or_insert(candidate);
+    }
+
+    let per_peer = per_peer_by_alias.into_values().collect::<Vec<_>>();
+    let throttled_peer_count = per_peer
         .iter()
-        .filter(|decision| decision.action == MeshAdmissionAction::Throttle)
+        .filter(|peer| peer.action == MeshAdmissionAction::Throttle)
         .count();
-    let rejected_peer_count = decisions
+    let rejected_peer_count = per_peer
         .iter()
-        .filter(|decision| decision.action == MeshAdmissionAction::Reject)
+        .filter(|peer| peer.action == MeshAdmissionAction::Reject)
         .count();
-    let budget_exhausted_peer_count = decisions
+    let budget_exhausted_peer_count = per_peer
         .iter()
-        .filter(|decision| decision.reason == MeshAdmissionReason::BudgetExhausted)
+        .filter(|peer| peer.reason == MeshAdmissionReason::BudgetExhausted)
         .count();
     let local_tier1_unaffected = decisions
         .iter()
@@ -476,6 +514,69 @@ pub fn admission_status(decisions: &[MeshAdmissionDecision]) -> MeshAdmissionSta
 }
 
 #[must_use]
+pub fn admission_doctor_report(status: &MeshAdmissionStatus) -> MeshAdmissionDoctorReport {
+    let mut signals = Vec::new();
+    let throttled = peer_count_for_reason(status, MeshAdmissionReason::PeerThrottled)
+        + peer_count_for_reason(status, MeshAdmissionReason::BackoffActive);
+    if throttled > 0 {
+        signals.push(MeshAdmissionDoctorSignal {
+            code: degraded_codes::PEER_THROTTLED,
+            severity: "warning",
+            peer_count: throttled,
+            message: "mesh admission throttled one or more peers before local work was affected",
+            repair: "Inspect mesh admission status and wait for peer backoff windows before accepting more peer work.",
+        });
+    }
+
+    let payload_rejected = peer_count_for_reason(status, MeshAdmissionReason::PayloadRejected);
+    if payload_rejected > 0 {
+        signals.push(MeshAdmissionDoctorSignal {
+            code: degraded_codes::PAYLOAD_REJECTED,
+            severity: "medium",
+            peer_count: payload_rejected,
+            message: "mesh admission rejected oversized peer payloads",
+            repair: "Reduce event batch or body fetch size for the affected peer.",
+        });
+    }
+
+    let budget_exhausted = peer_count_for_reason(status, MeshAdmissionReason::BudgetExhausted);
+    if budget_exhausted > 0 {
+        signals.push(MeshAdmissionDoctorSignal {
+            code: degraded_codes::BUDGET_EXHAUSTED,
+            severity: "medium",
+            peer_count: budget_exhausted,
+            message: "mesh admission rejected peer work that would exceed local resource budgets",
+            repair: "Drain queued peer index work or lower requested index jobs before retrying.",
+        });
+    }
+
+    if status.local_tier1_unaffected {
+        signals.push(MeshAdmissionDoctorSignal {
+            code: degraded_codes::LOCAL_TIER1_UNAFFECTED,
+            severity: "info",
+            peer_count: status.peer_count,
+            message: "local Tier-1 memory capacity remained reserved despite peer pressure",
+            repair: "No repair needed; this signal confirms peer isolation worked.",
+        });
+    }
+
+    MeshAdmissionDoctorReport {
+        schema: MESH_ADMISSION_DOCTOR_SCHEMA_V1,
+        posture: if status.throttled_peer_count == 0
+            && status.rejected_peer_count == 0
+            && status.budget_exhausted_peer_count == 0
+        {
+            MeshAdmissionDoctorPosture::Ok
+        } else {
+            MeshAdmissionDoctorPosture::DegradedRecoverable
+        },
+        peer_count: status.peer_count,
+        local_tier1_unaffected: status.local_tier1_unaffected,
+        signals,
+    }
+}
+
+#[must_use]
 pub fn admission_test_event(
     scenario: MeshAdmissionScenario,
     decision: &MeshAdmissionDecision,
@@ -492,6 +593,40 @@ pub fn admission_test_event(
         backoff_until_epoch_ms: decision.backoff_until_epoch_ms,
         local_tier1_unaffected: decision.local_tier1_unaffected,
     }
+}
+
+fn stronger_peer_status(
+    current: &MeshAdmissionPeerStatus,
+    candidate: &MeshAdmissionPeerStatus,
+) -> MeshAdmissionPeerStatus {
+    let current_rank = admission_reporting_rank(current.action, current.reason);
+    let candidate_rank = admission_reporting_rank(candidate.action, candidate.reason);
+    if candidate_rank > current_rank
+        || (candidate_rank == current_rank
+            && candidate.backoff_until_epoch_ms > current.backoff_until_epoch_ms)
+    {
+        candidate.clone()
+    } else {
+        current.clone()
+    }
+}
+
+const fn admission_reporting_rank(action: MeshAdmissionAction, reason: MeshAdmissionReason) -> u8 {
+    match (action, reason) {
+        (MeshAdmissionAction::Reject, MeshAdmissionReason::BudgetExhausted) => 50,
+        (MeshAdmissionAction::Reject, MeshAdmissionReason::PayloadRejected) => 40,
+        (MeshAdmissionAction::Throttle, MeshAdmissionReason::BackoffActive) => 30,
+        (MeshAdmissionAction::Throttle, MeshAdmissionReason::PeerThrottled) => 20,
+        _ => 0,
+    }
+}
+
+fn peer_count_for_reason(status: &MeshAdmissionStatus, reason: MeshAdmissionReason) -> usize {
+    status
+        .per_peer
+        .iter()
+        .filter(|peer| peer.reason == reason)
+        .count()
 }
 
 fn decision(
@@ -666,5 +801,90 @@ mod tests {
         let json = serde_json::to_string(&status).expect("serialize status");
         assert!(json.contains("peer_"));
         assert!(!json.contains("peer-secret-node-key"));
+    }
+
+    #[test]
+    fn status_reports_unique_peers_and_strongest_admission_reason() {
+        let limits = MeshAdmissionLimits::conservative_default();
+        let peer = MeshPeerAdmissionState::new("peer-noisy")
+            .with_in_flight_requests(limits.max_concurrent_requests_per_peer);
+        let throttled = decide_admission(
+            limits,
+            &peer,
+            &MeshAdmissionRequest::new("peer-noisy", MeshAdmissionRequestKind::Hello, NOW),
+        );
+        let rejected = decide_admission(
+            limits,
+            &MeshPeerAdmissionState::new("peer-noisy"),
+            &MeshAdmissionRequest::new("peer-noisy", MeshAdmissionRequestKind::EventBatch, NOW)
+                .with_event_count(limits.max_event_batch_count + 1),
+        );
+        let ok = decide_admission(
+            limits,
+            &MeshPeerAdmissionState::new("peer-ok"),
+            &MeshAdmissionRequest::new("peer-ok", MeshAdmissionRequestKind::TipAdvertise, NOW),
+        );
+
+        let status = admission_status(&[throttled, rejected, ok]);
+
+        assert_eq!(status.peer_count, 2);
+        assert_eq!(status.throttled_peer_count, 0);
+        assert_eq!(status.rejected_peer_count, 1);
+        assert_eq!(status.per_peer.len(), 2);
+        let noisy = status
+            .per_peer
+            .iter()
+            .find(|peer| peer.reason == MeshAdmissionReason::PayloadRejected)
+            .expect("noisy peer should be represented by strongest rejection");
+        assert_eq!(noisy.action, MeshAdmissionAction::Reject);
+        assert_eq!(noisy.reason, MeshAdmissionReason::PayloadRejected);
+    }
+
+    #[test]
+    fn doctor_report_summarizes_peer_pressure_without_peer_ids() {
+        let limits = MeshAdmissionLimits::conservative_default();
+        let throttled = decide_admission(
+            limits,
+            &MeshPeerAdmissionState::new("peer-secret-node-key")
+                .with_backoff_until(NOW.saturating_add(30_000)),
+            &MeshAdmissionRequest::new(
+                "peer-secret-node-key",
+                MeshAdmissionRequestKind::RangeRequest,
+                NOW,
+            ),
+        );
+        let budget_exhausted = decide_admission(
+            limits,
+            &MeshPeerAdmissionState::new("peer-index")
+                .with_queued_index_jobs(limits.max_index_jobs_per_round),
+            &MeshAdmissionRequest::new("peer-index", MeshAdmissionRequestKind::IndexJobs, NOW)
+                .with_requested_index_jobs(1),
+        );
+        let status = admission_status(&[throttled, budget_exhausted]);
+        let doctor = admission_doctor_report(&status);
+
+        assert_eq!(doctor.schema, MESH_ADMISSION_DOCTOR_SCHEMA_V1);
+        assert_eq!(
+            doctor.posture,
+            MeshAdmissionDoctorPosture::DegradedRecoverable
+        );
+        assert_eq!(doctor.peer_count, 2);
+        assert!(doctor.local_tier1_unaffected);
+        assert_eq!(
+            doctor
+                .signals
+                .iter()
+                .map(|signal| signal.code)
+                .collect::<Vec<_>>(),
+            vec![
+                degraded_codes::PEER_THROTTLED,
+                degraded_codes::BUDGET_EXHAUSTED,
+                degraded_codes::LOCAL_TIER1_UNAFFECTED,
+            ]
+        );
+
+        let json = serde_json::to_string(&doctor).expect("serialize doctor report");
+        assert!(!json.contains("peer-secret-node-key"));
+        assert!(!json.contains("peer-index"));
     }
 }
