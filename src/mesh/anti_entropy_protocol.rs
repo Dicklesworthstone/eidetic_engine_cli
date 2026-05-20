@@ -16,6 +16,9 @@ pub const ANTI_ENTROPY_PROTOCOL_DOC: &str = "docs/mesh/anti_entropy.md";
 /// Public schema emitted by [`build_sync_summary`].
 pub const MESH_ANTI_ENTROPY_SYNC_SUMMARY_SCHEMA_V1: &str = "ee.mesh.anti_entropy.v1";
 
+/// Public schema emitted by [`build_freshness_probe_summary`].
+pub const MESH_FRESHNESS_PROBE_SUMMARY_SCHEMA_V1: &str = "ee.mesh.freshness_probe.v1";
+
 /// Default initial retry delay from `docs/mesh/anti_entropy.md`.
 pub const DEFAULT_INITIAL_BACKOFF_MS: u64 = 1_000;
 
@@ -34,6 +37,8 @@ pub mod degraded_codes {
     pub const SUPERVISOR_BUDGET_EXCEEDED: &str = "mesh_anti_entropy_supervisor_budget_exceeded";
     pub const PEER_POLICY_REFUSED: &str = "mesh_anti_entropy_peer_policy_refused";
     pub const TRANSPORT_UNAVAILABLE: &str = "mesh_anti_entropy_transport_unavailable";
+    pub const FRESHNESS_PEER_TIMEOUT: &str = "mesh_freshness_peer_timeout";
+    pub const FRESHNESS_PEER_POLICY_REFUSED: &str = "mesh_freshness_peer_policy_refused";
 }
 
 /// Executable scenario names referenced by the SRR6.7 e2e wrapper.
@@ -585,6 +590,132 @@ pub struct MeshAntiEntropySyncSummary {
     pub degraded: Vec<String>,
 }
 
+/// Redaction-safe query summary used by the async freshness probe.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshFreshnessQuerySummary {
+    pub query_fingerprint: String,
+    pub summary_hash: String,
+}
+
+impl MeshFreshnessQuerySummary {
+    #[must_use]
+    pub fn new(query_fingerprint: impl Into<String>) -> Self {
+        let raw_query_fingerprint = query_fingerprint.into();
+        let summary_hash = format!("query_{}", stable_hash_hex(&raw_query_fingerprint, 16));
+        Self {
+            query_fingerprint: summary_hash.clone(),
+            summary_hash,
+        }
+    }
+}
+
+/// One peer's non-blocking freshness probe result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshPeerFreshnessProbe {
+    pub peer_id: String,
+    pub policy_allowed: bool,
+    pub timed_out: bool,
+    pub peer_tips: Vec<MeshPeerTip>,
+    pub query_summary: Option<MeshFreshnessQuerySummary>,
+}
+
+impl MeshPeerFreshnessProbe {
+    #[must_use]
+    pub fn allowed(peer_id: impl Into<String>, peer_tips: Vec<MeshPeerTip>) -> Self {
+        Self {
+            peer_id: peer_id.into(),
+            policy_allowed: true,
+            timed_out: false,
+            peer_tips,
+            query_summary: None,
+        }
+    }
+
+    #[must_use]
+    pub fn denied(peer_id: impl Into<String>) -> Self {
+        Self {
+            peer_id: peer_id.into(),
+            policy_allowed: false,
+            timed_out: false,
+            peer_tips: Vec::new(),
+            query_summary: None,
+        }
+    }
+
+    #[must_use]
+    pub fn timeout(peer_id: impl Into<String>) -> Self {
+        Self {
+            peer_id: peer_id.into(),
+            policy_allowed: true,
+            timed_out: true,
+            peer_tips: Vec::new(),
+            query_summary: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_query_summary(mut self, summary: MeshFreshnessQuerySummary) -> Self {
+        self.query_summary = Some(summary);
+        self
+    }
+}
+
+/// Inputs for rendering an async peer freshness summary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshFreshnessProbeInput {
+    pub mesh_enabled: bool,
+    pub local_query_summary: Option<MeshFreshnessQuerySummary>,
+    pub local_cursors: Vec<MeshPeerCursor>,
+    pub peer_probes: Vec<MeshPeerFreshnessProbe>,
+    pub peer_timeout_ms: u64,
+    pub checked_at: Option<String>,
+}
+
+/// Redaction-safe result from the non-blocking freshness probe path.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshFreshnessProbeSummary {
+    pub schema: &'static str,
+    pub status: String,
+    pub checked_at: Option<String>,
+    pub local_answer_blocking: bool,
+    pub probe_execution: &'static str,
+    pub body_transfer_allowed: bool,
+    pub peer_timeout_ms: u64,
+    pub peer_count: usize,
+    pub peer_probes_scheduled: usize,
+    pub query_summary: Option<MeshFreshnessQuerySummary>,
+    pub revision_availability: Vec<MeshRevisionAvailabilitySignal>,
+    pub per_peer: Vec<MeshFreshnessPeerSummary>,
+    pub degraded: Vec<String>,
+}
+
+/// Signal that a peer may hold newer relevant material for the answered query.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshRevisionAvailabilitySignal {
+    pub peer_alias: String,
+    pub origin_alias: String,
+    pub local_last_durable_seq: u64,
+    pub peer_last_contiguous_seq: u64,
+    pub missing_event_count: u64,
+    pub relevance_basis: String,
+    pub evidence_id: String,
+}
+
+/// Per-peer redaction-safe probe status.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshFreshnessPeerSummary {
+    pub peer_alias: String,
+    pub status: String,
+    pub advertised_origin_count: usize,
+    pub max_missing_event_count: u64,
+    pub query_summary_matched: Option<bool>,
+    pub body_transfer_allowed: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshPeerSyncCounts {
@@ -693,6 +824,178 @@ pub fn build_sync_summary(input: MeshSyncSummaryInput) -> MeshAntiEntropySyncSum
     }
 }
 
+/// Build the non-blocking peer freshness result consumed after a local answer
+/// has already returned. The probe compares tips and optional query summaries
+/// only; it never schedules body transfer.
+#[must_use]
+pub fn build_freshness_probe_summary(input: MeshFreshnessProbeInput) -> MeshFreshnessProbeSummary {
+    if !input.mesh_enabled {
+        return MeshFreshnessProbeSummary {
+            schema: MESH_FRESHNESS_PROBE_SUMMARY_SCHEMA_V1,
+            status: "disabled".to_owned(),
+            checked_at: input.checked_at,
+            local_answer_blocking: false,
+            probe_execution: "mesh_disabled_noop",
+            body_transfer_allowed: false,
+            peer_timeout_ms: input.peer_timeout_ms,
+            peer_count: 0,
+            peer_probes_scheduled: 0,
+            query_summary: input.local_query_summary,
+            revision_availability: Vec::new(),
+            per_peer: Vec::new(),
+            degraded: Vec::new(),
+        };
+    }
+
+    let mut degraded = BTreeSet::new();
+    let mut per_peer = Vec::new();
+    let mut revision_availability = Vec::new();
+    let local_query_summary = input.local_query_summary.clone();
+
+    for probe in input.peer_probes {
+        let peer_alias = peer_alias(&probe.peer_id);
+        if !probe.policy_allowed {
+            degraded.insert(degraded_codes::FRESHNESS_PEER_POLICY_REFUSED.to_owned());
+            per_peer.push(MeshFreshnessPeerSummary {
+                peer_alias,
+                status: "denied".to_owned(),
+                advertised_origin_count: 0,
+                max_missing_event_count: 0,
+                query_summary_matched: None,
+                body_transfer_allowed: false,
+            });
+            continue;
+        }
+
+        if probe.timed_out {
+            degraded.insert(degraded_codes::FRESHNESS_PEER_TIMEOUT.to_owned());
+            per_peer.push(MeshFreshnessPeerSummary {
+                peer_alias,
+                status: "timeout".to_owned(),
+                advertised_origin_count: 0,
+                max_missing_event_count: 0,
+                query_summary_matched: None,
+                body_transfer_allowed: false,
+            });
+            continue;
+        }
+
+        let query_summary_matched = freshness_query_summary_matches(
+            local_query_summary.as_ref(),
+            probe.query_summary.as_ref(),
+        );
+        let tips_by_origin = freshness_tips_by_origin(&probe.peer_tips);
+        let advertised_origin_count = tips_by_origin.len();
+        if query_summary_matched == Some(false) {
+            per_peer.push(MeshFreshnessPeerSummary {
+                peer_alias,
+                status: "query_summary_miss".to_owned(),
+                advertised_origin_count,
+                max_missing_event_count: 0,
+                query_summary_matched,
+                body_transfer_allowed: false,
+            });
+            continue;
+        }
+
+        let local_by_origin = cursor_map_for_peer(&probe.peer_id, &input.local_cursors);
+        let mut max_missing_event_count = 0u64;
+        let mut peer_signal_count = 0usize;
+
+        for (origin, peer_seq) in tips_by_origin {
+            let local_seq = local_by_origin.get(&origin).copied().unwrap_or(0);
+            if peer_seq <= local_seq {
+                continue;
+            }
+            let missing_event_count = peer_seq.saturating_sub(local_seq);
+            max_missing_event_count = max_missing_event_count.max(missing_event_count);
+            peer_signal_count = peer_signal_count.saturating_add(1);
+            let origin_alias = origin.redacted_alias();
+            let relevance_basis = if query_summary_matched == Some(true) {
+                "query_summary_match"
+            } else {
+                "peer_tip_advanced"
+            }
+            .to_owned();
+            let evidence_id = freshness_evidence_id(
+                &peer_alias,
+                &origin_alias,
+                local_query_summary
+                    .as_ref()
+                    .map(|summary| summary.summary_hash.as_str()),
+                local_seq,
+                peer_seq,
+            );
+            revision_availability.push(MeshRevisionAvailabilitySignal {
+                peer_alias: peer_alias.clone(),
+                origin_alias,
+                local_last_durable_seq: local_seq,
+                peer_last_contiguous_seq: peer_seq,
+                missing_event_count,
+                relevance_basis,
+                evidence_id,
+            });
+        }
+
+        per_peer.push(MeshFreshnessPeerSummary {
+            peer_alias,
+            status: if peer_signal_count == 0 {
+                "stale_or_current".to_owned()
+            } else {
+                "fresher".to_owned()
+            },
+            advertised_origin_count,
+            max_missing_event_count,
+            query_summary_matched,
+            body_transfer_allowed: false,
+        });
+    }
+
+    revision_availability.sort_by(|left, right| {
+        left.peer_alias
+            .cmp(&right.peer_alias)
+            .then_with(|| left.origin_alias.cmp(&right.origin_alias))
+            .then_with(|| {
+                left.local_last_durable_seq
+                    .cmp(&right.local_last_durable_seq)
+            })
+            .then_with(|| {
+                left.peer_last_contiguous_seq
+                    .cmp(&right.peer_last_contiguous_seq)
+            })
+    });
+    revision_availability.dedup_by(|left, right| {
+        left.peer_alias == right.peer_alias
+            && left.origin_alias == right.origin_alias
+            && left.peer_last_contiguous_seq == right.peer_last_contiguous_seq
+    });
+    per_peer.sort_by(|left, right| left.peer_alias.cmp(&right.peer_alias));
+
+    let status = if !revision_availability.is_empty() {
+        "revision_available"
+    } else if !degraded.is_empty() {
+        "degraded"
+    } else {
+        "current"
+    };
+
+    MeshFreshnessProbeSummary {
+        schema: MESH_FRESHNESS_PROBE_SUMMARY_SCHEMA_V1,
+        status: status.to_owned(),
+        checked_at: input.checked_at,
+        local_answer_blocking: false,
+        probe_execution: "async_after_local_answer",
+        body_transfer_allowed: false,
+        peer_timeout_ms: input.peer_timeout_ms,
+        peer_count: per_peer.len(),
+        peer_probes_scheduled: per_peer.len(),
+        query_summary: local_query_summary,
+        revision_availability,
+        per_peer,
+        degraded: degraded.into_iter().collect(),
+    }
+}
+
 #[must_use]
 pub fn peer_alias(peer_id: &str) -> String {
     format!("peer_{}", stable_hash_hex(peer_id, 12))
@@ -719,6 +1022,46 @@ fn cursor_map_for_peer(
         }
     }
     by_origin
+}
+
+fn freshness_tips_by_origin(peer_tips: &[MeshPeerTip]) -> BTreeMap<MeshOriginKey, u64> {
+    let mut tips_by_origin = BTreeMap::new();
+    for tip in peer_tips {
+        tips_by_origin
+            .entry(tip.origin.clone())
+            .and_modify(|existing: &mut u64| {
+                *existing = (*existing).max(tip.last_contiguous_seq);
+            })
+            .or_insert(tip.last_contiguous_seq);
+    }
+    tips_by_origin
+}
+
+fn freshness_query_summary_matches(
+    local: Option<&MeshFreshnessQuerySummary>,
+    peer: Option<&MeshFreshnessQuerySummary>,
+) -> Option<bool> {
+    match (local, peer) {
+        (Some(local), Some(peer)) => Some(local.summary_hash == peer.summary_hash),
+        _ => None,
+    }
+}
+
+fn freshness_evidence_id(
+    peer_alias: &str,
+    origin_alias: &str,
+    query_summary_hash: Option<&str>,
+    local_seq: u64,
+    peer_seq: u64,
+) -> String {
+    let query = query_summary_hash.unwrap_or("query_unspecified");
+    format!(
+        "freshness_{}",
+        stable_hash_hex(
+            &format!("{peer_alias}|{origin_alias}|{query}|{local_seq}|{peer_seq}"),
+            16
+        )
+    )
 }
 
 fn stable_hash_hex(value: &str, width: usize) -> String {
