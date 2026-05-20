@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
+use crate::core::why::{DedupLinkEvidence, find_embed_dedup_link};
 use crate::db::{
     CreateAuditInput, DbConnection, audit_actions, generate_audit_id, generate_audit_id_seeded,
 };
@@ -399,6 +400,32 @@ pub struct SearchHit {
     pub rerank_score: Option<f32>,
     pub metadata: Option<serde_json::Value>,
     pub explanation: Option<ScoreExplanation>,
+}
+
+/// Read-only search-side dedup-link projection helper (bd-1iltv.3).
+///
+/// Mirrors [`crate::core::audit::audit_entry_dedup_link`] for the search
+/// surface: when a [`SearchHit::doc_id`] resolves to a memory id that
+/// carries an `ee.embed_dedup.link.v1` row in `memory_links`, returns the
+/// corresponding [`DedupLinkEvidence`]. Returns `None` when the hit is
+/// not memory-scoped, when `doc_id` is empty, or when the memory was not
+/// deduped at insert time — the same honest-degradation contract pinned
+/// by the why surface tests.
+///
+/// Callers can compose this helper to enrich `SearchHit.metadata`
+/// without re-implementing the JSON-parsing path in
+/// `find_embed_dedup_link`. The lookup is intentionally per-hit so the
+/// hot `run_search` path is not perturbed; provenance enrichers that
+/// already iterate top-k hits should call this helper instead.
+#[must_use]
+pub fn search_hit_dedup_link(conn: &DbConnection, hit: &SearchHit) -> Option<DedupLinkEvidence> {
+    if hit.doc_id.is_empty() {
+        return None;
+    }
+    if !hit.doc_id.starts_with("mem_") {
+        return None;
+    }
+    find_embed_dedup_link(conn, hit.doc_id.as_str())
 }
 
 #[derive(Clone, Debug)]
