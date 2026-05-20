@@ -1,0 +1,72 @@
+{
+  "schema": "ee.memory_drift.no_mock_replay.golden.v1",
+  "phase": "baseline",
+  "driftReport": {
+    "schema": "ee.response.v2",
+    "success": true,
+    "data": {
+      "schema": "ee.memory_drift.report.v1",
+      "mode": "all_memories",
+      "summary": {
+        "totalMemories": 2,
+        "current": 2,
+        "changed": 0,
+        "missingSource": 0,
+        "staleAnchor": 0,
+        "unverifiable": 0,
+        "suppressed": 0
+      },
+      "items": [
+        {
+          "memoryId": "mem_changed",
+          "driftStatus": "current",
+          "topReason": "provenance_chain_verified",
+          "evidenceCount": 1,
+          "degradedCode": null,
+          "severity": "info",
+          "revalidationCommand": "ee memory drift mem_changed --json"
+        },
+        {
+          "memoryId": "mem_stable",
+          "driftStatus": "current",
+          "topReason": "provenance_chain_verified",
+          "evidenceCount": 1,
+          "degradedCode": null,
+          "severity": "info",
+          "revalidationCommand": "ee memory drift mem_stable --json"
+        }
+      ],
+      "recoveryActionKinds": [
+        "rerun_source_validation",
+        "revise_memory",
+        "mark_source_unavailable",
+        "ignore_with_audit"
+      ],
+      "degraded": []
+    },
+    "degradedCodes": []
+  },
+  "search": {
+    "schema": "ee.response.v1",
+    "success": true,
+    "command": "search",
+    "status": "success",
+    "query": "drift sentinel evidence replay",
+    "resultCount": 2,
+    "results": [
+      {
+        "docId": "mem_changed",
+        "source": "lexical",
+        "hasDriftHint": false,
+        "driftHint": null
+      },
+      {
+        "docId": "mem_stable",
+        "source": "lexical",
+        "hasDriftHint": false,
+        "driftHint": null
+      }
+    ],
+    "degradedCodes": []
+  }
+}

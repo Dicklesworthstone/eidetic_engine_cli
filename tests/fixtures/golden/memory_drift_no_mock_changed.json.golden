@@ -1,0 +1,81 @@
+{
+  "schema": "ee.memory_drift.no_mock_replay.golden.v1",
+  "phase": "changed_source",
+  "driftReport": {
+    "schema": "ee.response.v2",
+    "success": true,
+    "data": {
+      "schema": "ee.memory_drift.report.v1",
+      "mode": "all_memories",
+      "summary": {
+        "totalMemories": 2,
+        "current": 1,
+        "changed": 1,
+        "missingSource": 0,
+        "staleAnchor": 0,
+        "unverifiable": 0,
+        "suppressed": 0
+      },
+      "items": [
+        {
+          "memoryId": "mem_changed",
+          "driftStatus": "changed",
+          "topReason": "provenance_chain_mismatch",
+          "evidenceCount": 1,
+          "degradedCode": "memory_drift_source_changed",
+          "severity": "high",
+          "revalidationCommand": "ee memory drift mem_changed --json"
+        },
+        {
+          "memoryId": "mem_stable",
+          "driftStatus": "current",
+          "topReason": "provenance_chain_verified",
+          "evidenceCount": 1,
+          "degradedCode": null,
+          "severity": "info",
+          "revalidationCommand": "ee memory drift mem_stable --json"
+        }
+      ],
+      "recoveryActionKinds": [
+        "rerun_source_validation",
+        "revise_memory",
+        "mark_source_unavailable",
+        "ignore_with_audit"
+      ],
+      "degraded": []
+    },
+    "degradedCodes": [
+      "memory_drift_source_changed"
+    ]
+  },
+  "search": {
+    "schema": "ee.response.v1",
+    "success": true,
+    "command": "search",
+    "status": "success",
+    "query": "drift sentinel evidence replay",
+    "resultCount": 2,
+    "results": [
+      {
+        "docId": "mem_changed",
+        "source": "lexical",
+        "hasDriftHint": true,
+        "driftHint": {
+          "driftStatus": "changed",
+          "topReason": "provenance_chain_mismatch",
+          "evidenceCount": 1,
+          "revalidationCommand": "ee memory drift mem_changed --json"
+        }
+      },
+      {
+        "docId": "mem_stable",
+        "source": "lexical",
+        "hasDriftHint": false,
+        "driftHint": null
+      }
+    ],
+    "degradedCodes": [
+      "memory_drift_source_changed"
+    ]
+  }
+}
