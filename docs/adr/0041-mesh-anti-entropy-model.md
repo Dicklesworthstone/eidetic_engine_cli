@@ -123,13 +123,20 @@ specific to convergence:
 ## Scenarios (executable test contract)
 
 The constants in `src/mesh/anti_entropy_model.rs::ANTI_ENTROPY_MODEL_SCENARIOS`
-name the five reference scenarios this ADR commits to:
+name the reference scenarios this ADR commits to:
 
 1. `cursor_advances_only_after_contiguous_replay`
 2. `partition_rejoin_duplicate_out_of_order_delivery`
 3. `conflicting_revisions_are_visible`
 4. `stale_tier1_read_gets_revision_notice`
 5. `deterministic_replay_order_independent`
+6. `withdrawal_propagates_as_provenance_tombstone`
+7. `validity_expiry_filters_without_peer_cache_purge`
+8. `tombstone_hides_from_search_without_body_purge`
+9. `withdrawal_wins_over_tombstone_and_validity_expiry`
+10. `malformed_hash_body_policy_schema_events_enter_quarantine`
+11. `crash_after_insert_before_cursor_requires_repair`
+12. `quarantine_repair_actions_are_audited`
 
 Adding a scenario requires both an ADR amendment and a corresponding entry
 in that constant array, so the test list and the contract cannot drift.

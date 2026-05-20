@@ -26,6 +26,9 @@ pub const ANTI_ENTROPY_MODEL_SCENARIOS: &[&str] = &[
     "validity_expiry_filters_without_peer_cache_purge",
     "tombstone_hides_from_search_without_body_purge",
     "withdrawal_wins_over_tombstone_and_validity_expiry",
+    "malformed_hash_body_policy_schema_events_enter_quarantine",
+    "crash_after_insert_before_cursor_requires_repair",
+    "quarantine_repair_actions_are_audited",
 ];
 
 pub const WITHDRAWAL_VISIBILITY_REASON: &str =
@@ -34,6 +37,12 @@ pub const TOMBSTONE_VISIBILITY_REASON: &str =
     "tombstone_preserves_provenance_without_peer_cache_purge";
 pub const VALIDITY_EXPIRY_VISIBILITY_REASON: &str =
     "validity_expiry_filters_reads_without_peer_cache_purge";
+pub const MESH_EVENT_QUARANTINED_CODE: &str = "mesh_event_quarantined";
+pub const MESH_CURSOR_REPAIR_REQUIRED_CODE: &str = "mesh_cursor_repair_required";
+pub const QUARANTINE_ENTERED_LOG: &str = "quarantine_entered";
+pub const CURSOR_NOT_ADVANCED_LOG: &str = "cursor_not_advanced";
+pub const REPAIR_ACTION_LOG: &str = "repair_action";
+pub const REPLAY_RECOVERED_LOG: &str = "replay_recovered";
 
 /// Stream position for one origin node.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -184,12 +193,99 @@ pub struct LogicalVisibility {
 pub enum ReplayOutcome {
     Accepted,
     Duplicate,
+    Quarantined(ReplayQuarantineRecord),
     RejectedForkedStream {
         origin_node_id: String,
         seq: u64,
         existing_event_id: String,
         incoming_event_id: String,
     },
+}
+
+/// Fail-closed reason for an event that must be kept out of local memory.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ReplayQuarantineReason {
+    MalformedEvent,
+    HashChainMismatch,
+    BodyHashMismatch,
+    PolicyDenied,
+    IncompatibleSchema,
+}
+
+impl ReplayQuarantineReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MalformedEvent => "malformed_event",
+            Self::HashChainMismatch => "hash_chain_mismatch",
+            Self::BodyHashMismatch => "body_hash_mismatch",
+            Self::PolicyDenied => "policy_denied",
+            Self::IncompatibleSchema => "incompatible_schema",
+        }
+    }
+}
+
+/// Validation outcome supplied by the import/policy/hash-check layer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplayValidation {
+    Accept,
+    Quarantine(ReplayQuarantineReason),
+}
+
+/// Repair commands the future CLI may expose for a quarantined event.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ReplayRepairAction {
+    Retry,
+    SkipWithAudit,
+    RevokePeer,
+    ResetCache,
+}
+
+impl ReplayRepairAction {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Retry => "retry",
+            Self::SkipWithAudit => "skip_with_audit",
+            Self::RevokePeer => "revoke_peer",
+            Self::ResetCache => "reset_cache",
+        }
+    }
+}
+
+/// Redaction-safe quarantine record for one rejected replay event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplayQuarantineRecord {
+    pub key: EventKey,
+    pub incoming_event_id: String,
+    pub reason: ReplayQuarantineReason,
+    pub degraded_code: &'static str,
+    pub cursor_before: u64,
+    pub cursor_after: u64,
+    pub repair_actions: Vec<ReplayRepairAction>,
+    pub structured_log_events: Vec<&'static str>,
+}
+
+/// Audit record emitted by a deterministic repair action.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplayRepairAuditRecord {
+    pub key: EventKey,
+    pub action: ReplayRepairAction,
+    pub degraded_code: &'static str,
+    pub cursor_before: u64,
+    pub cursor_after: u64,
+    pub structured_log_events: Vec<&'static str>,
+}
+
+/// Cursor state that can be repaired after a crash between event insert and
+/// cursor update.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CursorRepairRecord {
+    pub origin_node_id: String,
+    pub cursor_before: u64,
+    pub repaired_cursor: u64,
+    pub degraded_code: &'static str,
+    pub structured_log_events: Vec<&'static str>,
 }
 
 /// Missing contiguous range requested from a peer during anti-entropy.
@@ -236,6 +332,9 @@ pub struct FrontierAdvance {
 pub struct ModelNode {
     accepted: BTreeMap<EventKey, ModelEvent>,
     frontier: BTreeMap<String, u64>,
+    quarantined: BTreeMap<EventKey, ReplayQuarantineRecord>,
+    audited_skips: BTreeSet<EventKey>,
+    repair_audit: Vec<ReplayRepairAuditRecord>,
 }
 
 impl ModelNode {
@@ -262,6 +361,19 @@ impl ModelNode {
         self.frontier.get(origin_node_id).copied().unwrap_or(0)
     }
 
+    pub fn replay_with_validation(
+        &mut self,
+        event: ModelEvent,
+        validation: ReplayValidation,
+    ) -> ReplayOutcome {
+        match validation {
+            ReplayValidation::Accept => self.replay(event),
+            ReplayValidation::Quarantine(reason) => {
+                self.quarantine_event(event.key, event.event_id, reason)
+            }
+        }
+    }
+
     pub fn replay(&mut self, event: ModelEvent) -> ReplayOutcome {
         match self.accepted.get(&event.key) {
             Some(existing) if existing.event_id == event.event_id => ReplayOutcome::Duplicate,
@@ -278,6 +390,87 @@ impl ModelNode {
                 ReplayOutcome::Accepted
             }
         }
+    }
+
+    #[must_use]
+    pub fn quarantine_records(&self) -> Vec<ReplayQuarantineRecord> {
+        self.quarantined.values().cloned().collect()
+    }
+
+    #[must_use]
+    pub fn repair_audit(&self) -> Vec<ReplayRepairAuditRecord> {
+        self.repair_audit.clone()
+    }
+
+    pub fn repair_quarantined_event(
+        &mut self,
+        key: &EventKey,
+        action: ReplayRepairAction,
+    ) -> Option<ReplayRepairAuditRecord> {
+        let record = self.quarantined.get(key)?.clone();
+        let origin_node_id = record.key.origin_node_id.clone();
+        let cursor_before = self.cursor_for(&origin_node_id);
+        if action == ReplayRepairAction::SkipWithAudit {
+            self.audited_skips.insert(record.key.clone());
+            self.advance_frontier_for(&origin_node_id);
+        }
+        let cursor_after = self.cursor_for(&origin_node_id);
+        let audit = ReplayRepairAuditRecord {
+            key: record.key.clone(),
+            action,
+            degraded_code: MESH_EVENT_QUARANTINED_CODE,
+            cursor_before,
+            cursor_after,
+            structured_log_events: vec![REPAIR_ACTION_LOG],
+        };
+        self.repair_audit.push(audit.clone());
+        Some(audit)
+    }
+
+    #[must_use]
+    pub fn cursor_repair_requirements(&self) -> Vec<CursorRepairRecord> {
+        let origins = self
+            .accepted
+            .keys()
+            .chain(self.audited_skips.iter())
+            .map(|key| key.origin_node_id.clone())
+            .collect::<BTreeSet<_>>();
+
+        origins
+            .into_iter()
+            .filter_map(|origin_node_id| {
+                let cursor_before = self.cursor_for(&origin_node_id);
+                let repaired_cursor = self.repairable_cursor_for(&origin_node_id);
+                (repaired_cursor > cursor_before).then_some(CursorRepairRecord {
+                    origin_node_id,
+                    cursor_before,
+                    repaired_cursor,
+                    degraded_code: MESH_CURSOR_REPAIR_REQUIRED_CODE,
+                    structured_log_events: vec![CURSOR_NOT_ADVANCED_LOG],
+                })
+            })
+            .collect()
+    }
+
+    pub fn repair_cursor_after_crash(
+        &mut self,
+        origin_node_id: &str,
+    ) -> Option<CursorRepairRecord> {
+        let cursor_before = self.cursor_for(origin_node_id);
+        let repaired_cursor = self.repairable_cursor_for(origin_node_id);
+        if repaired_cursor <= cursor_before {
+            return None;
+        }
+
+        self.frontier
+            .insert(origin_node_id.to_owned(), repaired_cursor);
+        Some(CursorRepairRecord {
+            origin_node_id: origin_node_id.to_owned(),
+            cursor_before,
+            repaired_cursor,
+            degraded_code: MESH_CURSOR_REPAIR_REQUIRED_CODE,
+            structured_log_events: vec![REPLAY_RECOVERED_LOG],
+        })
     }
 
     /// Return the ranges this node should request from a peer that advertises
@@ -493,14 +686,59 @@ impl ModelNode {
     }
 
     fn advance_frontier_for(&mut self, origin_node_id: &str) {
-        let mut next_seq = self.cursor_for(origin_node_id) + 1;
-        while self
-            .accepted
-            .contains_key(&EventKey::new(origin_node_id.to_owned(), next_seq))
-        {
-            self.frontier.insert(origin_node_id.to_owned(), next_seq);
-            next_seq += 1;
+        let repaired_cursor = self.repairable_cursor_for(origin_node_id);
+        if repaired_cursor > self.cursor_for(origin_node_id) {
+            self.frontier
+                .insert(origin_node_id.to_owned(), repaired_cursor);
         }
+    }
+
+    fn quarantine_event(
+        &mut self,
+        key: EventKey,
+        incoming_event_id: String,
+        reason: ReplayQuarantineReason,
+    ) -> ReplayOutcome {
+        let cursor_before = self.cursor_for(&key.origin_node_id);
+        let record = ReplayQuarantineRecord {
+            key: key.clone(),
+            incoming_event_id,
+            reason,
+            degraded_code: MESH_EVENT_QUARANTINED_CODE,
+            cursor_before,
+            cursor_after: cursor_before,
+            repair_actions: vec![
+                ReplayRepairAction::Retry,
+                ReplayRepairAction::SkipWithAudit,
+                ReplayRepairAction::RevokePeer,
+                ReplayRepairAction::ResetCache,
+            ],
+            structured_log_events: vec![QUARANTINE_ENTERED_LOG, CURSOR_NOT_ADVANCED_LOG],
+        };
+        self.quarantined.insert(key, record.clone());
+        ReplayOutcome::Quarantined(record)
+    }
+
+    fn repairable_cursor_for(&self, origin_node_id: &str) -> u64 {
+        let mut cursor = self.cursor_for(origin_node_id);
+        if cursor == u64::MAX {
+            return cursor;
+        }
+
+        let mut next_seq = cursor.saturating_add(1);
+        while self.has_durable_or_audited_skip(origin_node_id, next_seq) {
+            cursor = next_seq;
+            if cursor == u64::MAX {
+                break;
+            }
+            next_seq = next_seq.saturating_add(1);
+        }
+        cursor
+    }
+
+    fn has_durable_or_audited_skip(&self, origin_node_id: &str, seq: u64) -> bool {
+        let key = EventKey::new(origin_node_id.to_owned(), seq);
+        self.accepted.contains_key(&key) || self.audited_skips.contains(&key)
     }
 
     fn logical_heads(&self) -> BTreeMap<String, Vec<String>> {
@@ -535,8 +773,10 @@ impl ModelNode {
 #[cfg(test)]
 mod tests {
     use super::{
-        ANTI_ENTROPY_MODEL_SCENARIOS, EventRange, LogicalVisibilityStatus, ModelEvent,
-        ModelEventKind, ModelNode, ReplayOutcome, TOMBSTONE_VISIBILITY_REASON,
+        ANTI_ENTROPY_MODEL_SCENARIOS, CURSOR_NOT_ADVANCED_LOG, EventRange, LogicalVisibilityStatus,
+        MESH_CURSOR_REPAIR_REQUIRED_CODE, MESH_EVENT_QUARANTINED_CODE, ModelEvent, ModelEventKind,
+        ModelNode, QUARANTINE_ENTERED_LOG, REPAIR_ACTION_LOG, REPLAY_RECOVERED_LOG, ReplayOutcome,
+        ReplayQuarantineReason, ReplayRepairAction, ReplayValidation, TOMBSTONE_VISIBILITY_REASON,
         VALIDITY_EXPIRY_VISIBILITY_REASON, WITHDRAWAL_VISIBILITY_REASON,
     };
 
@@ -594,6 +834,15 @@ mod tests {
         assert_eq!(node.cursor_for("node_a"), 2);
         assert_eq!(node.replay(first), ReplayOutcome::Duplicate);
         assert_eq!(node.accepted_event_ids().len(), 2);
+
+        let mut accepted_node = ModelNode::new();
+        assert_eq!(
+            accepted_node.replay_with_validation(
+                event("node_accept", 1, "mem_accept", None, "hash_accept"),
+                ReplayValidation::Accept,
+            ),
+            ReplayOutcome::Accepted
+        );
     }
 
     #[test]
@@ -873,6 +1122,154 @@ mod tests {
         assert_eq!(
             visibility[0].residual_metadata_reason,
             Some(WITHDRAWAL_VISIBILITY_REASON)
+        );
+    }
+
+    #[test]
+    fn malformed_hash_body_policy_schema_events_enter_quarantine() {
+        let scenario = "malformed_hash_body_policy_schema_events_enter_quarantine";
+        assert!(ANTI_ENTROPY_MODEL_SCENARIOS.contains(&scenario));
+
+        let cases = [
+            (ReplayQuarantineReason::MalformedEvent, "malformed_event"),
+            (
+                ReplayQuarantineReason::HashChainMismatch,
+                "hash_chain_mismatch",
+            ),
+            (
+                ReplayQuarantineReason::BodyHashMismatch,
+                "body_hash_mismatch",
+            ),
+            (ReplayQuarantineReason::PolicyDenied, "policy_denied"),
+            (
+                ReplayQuarantineReason::IncompatibleSchema,
+                "incompatible_schema",
+            ),
+        ];
+
+        for (idx, (reason, reason_name)) in cases.into_iter().enumerate() {
+            let mut node = ModelNode::new();
+            let incoming = event(
+                "node_a",
+                idx as u64 + 1,
+                "mem_rejected_peer_event",
+                None,
+                reason_name,
+            );
+            let outcome =
+                node.replay_with_validation(incoming.clone(), ReplayValidation::Quarantine(reason));
+
+            let ReplayOutcome::Quarantined(record) = outcome else {
+                panic!("{scenario}: {reason_name} must fail closed into quarantine");
+            };
+            assert_eq!(reason.as_str(), reason_name);
+            assert_eq!(record.key, incoming.key);
+            assert_eq!(record.incoming_event_id, incoming.event_id);
+            assert_eq!(record.reason, reason);
+            assert_eq!(record.degraded_code, MESH_EVENT_QUARANTINED_CODE);
+            assert_eq!(record.cursor_before, 0);
+            assert_eq!(record.cursor_after, 0);
+            assert_eq!(
+                record.structured_log_events,
+                vec![QUARANTINE_ENTERED_LOG, CURSOR_NOT_ADVANCED_LOG]
+            );
+            assert_eq!(node.cursor_for("node_a"), 0);
+            assert!(node.accepted_event_ids().is_empty());
+            assert_eq!(node.quarantine_records(), vec![record]);
+        }
+    }
+
+    #[test]
+    fn crash_after_insert_before_cursor_requires_repair() {
+        let scenario = "crash_after_insert_before_cursor_requires_repair";
+        assert!(ANTI_ENTROPY_MODEL_SCENARIOS.contains(&scenario));
+
+        let crashed = event("node_a", 1, "mem_crash_recovery", None, "hash_crashed");
+        let mut node = ModelNode::new();
+        node.accepted.insert(crashed.key.clone(), crashed);
+        assert_eq!(node.cursor_for("node_a"), 0);
+
+        let requirements = node.cursor_repair_requirements();
+        assert_eq!(requirements.len(), 1);
+        assert_eq!(requirements[0].origin_node_id, "node_a");
+        assert_eq!(requirements[0].cursor_before, 0);
+        assert_eq!(requirements[0].repaired_cursor, 1);
+        assert_eq!(
+            requirements[0].degraded_code,
+            MESH_CURSOR_REPAIR_REQUIRED_CODE
+        );
+        assert_eq!(
+            requirements[0].structured_log_events,
+            vec![CURSOR_NOT_ADVANCED_LOG]
+        );
+
+        let repaired = node
+            .repair_cursor_after_crash("node_a")
+            .expect("repairable cursor after crash");
+        assert_eq!(repaired.cursor_before, 0);
+        assert_eq!(repaired.repaired_cursor, 1);
+        assert_eq!(repaired.structured_log_events, vec![REPLAY_RECOVERED_LOG]);
+        assert_eq!(node.cursor_for("node_a"), 1);
+        assert!(node.cursor_repair_requirements().is_empty());
+    }
+
+    #[test]
+    fn quarantine_repair_actions_are_audited() {
+        let scenario = "quarantine_repair_actions_are_audited";
+        assert!(ANTI_ENTROPY_MODEL_SCENARIOS.contains(&scenario));
+
+        let mut node = ModelNode::new();
+        let rejected = event("node_a", 1, "mem_repairable", None, "hash_bad");
+        let key = rejected.key.clone();
+        let outcome = node.replay_with_validation(
+            rejected,
+            ReplayValidation::Quarantine(ReplayQuarantineReason::BodyHashMismatch),
+        );
+        let ReplayOutcome::Quarantined(record) = outcome else {
+            panic!("{scenario}: body hash mismatch must quarantine");
+        };
+        assert_eq!(
+            record.repair_actions,
+            vec![
+                ReplayRepairAction::Retry,
+                ReplayRepairAction::SkipWithAudit,
+                ReplayRepairAction::RevokePeer,
+                ReplayRepairAction::ResetCache,
+            ]
+        );
+        for action in [
+            ReplayRepairAction::Retry,
+            ReplayRepairAction::RevokePeer,
+            ReplayRepairAction::ResetCache,
+        ] {
+            let audit = node
+                .repair_quarantined_event(&key, action)
+                .expect("quarantined event can be repaired");
+            assert!(!action.as_str().is_empty());
+            assert_eq!(audit.action, action);
+            assert_eq!(audit.degraded_code, MESH_EVENT_QUARANTINED_CODE);
+            assert_eq!(audit.cursor_before, 0);
+            assert_eq!(audit.cursor_after, 0);
+            assert_eq!(audit.structured_log_events, vec![REPAIR_ACTION_LOG]);
+        }
+
+        let skip = node
+            .repair_quarantined_event(&key, ReplayRepairAction::SkipWithAudit)
+            .expect("quarantined event can be skipped with audit");
+        assert_eq!(skip.cursor_before, 0);
+        assert_eq!(skip.cursor_after, 1);
+        assert_eq!(node.cursor_for("node_a"), 1);
+        assert_eq!(
+            node.repair_audit()
+                .into_iter()
+                .map(|audit| audit.action)
+                .collect::<Vec<_>>(),
+            vec![
+                ReplayRepairAction::Retry,
+                ReplayRepairAction::RevokePeer,
+                ReplayRepairAction::ResetCache,
+                ReplayRepairAction::SkipWithAudit,
+            ]
         );
     }
 }

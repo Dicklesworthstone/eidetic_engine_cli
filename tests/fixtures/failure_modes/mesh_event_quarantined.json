@@ -1,0 +1,34 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_event_quarantined",
+  "introduced_by": {
+    "bead": "bd-3a2q4",
+    "epic_letter": "SRR6.32"
+  },
+  "surfaces": [
+    "mesh import",
+    "mesh status",
+    "doctor"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A peer event is malformed, hash-mismatched, policy-denied, or schema-incompatible and must be retained as quarantine evidence without advancing the import cursor.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "ee mesh import --workspace . --file quarantined-event.json --json"
+    ],
+    "invocation": "ee mesh status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "mesh_event_quarantined",
+    "severity": "high",
+    "message_contains": [
+      "quarantine",
+      "cursor",
+      "peer event"
+    ],
+    "repair_contains": "ee mesh repair",
+    "repair_string": "Run `ee mesh repair --workspace . --event <event-id> --action retry|skip-with-audit|revoke-peer|reset-cache --json`."
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_cursor_repair_required",
+  "introduced_by": {
+    "bead": "bd-3a2q4",
+    "epic_letter": "SRR6.32"
+  },
+  "surfaces": [
+    "mesh import",
+    "mesh status",
+    "doctor"
+  ],
+  "severity": "critical",
+  "repair_present": true,
+  "trigger": {
+    "description": "Replay crashed after durably inserting a contiguous peer event but before advancing the peer cursor, so status and doctor must require cursor repair before more sync.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "ee mesh import --workspace . --file crash-after-insert-before-cursor.json --json"
+    ],
+    "invocation": "ee doctor --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "mesh_cursor_repair_required",
+    "severity": "critical",
+    "message_contains": [
+      "cursor",
+      "repair",
+      "replay"
+    ],
+    "repair_contains": "ee mesh repair",
+    "repair_string": "Run `ee mesh repair --workspace . --cursor --json` before resuming peer sync."
+  }
+}
