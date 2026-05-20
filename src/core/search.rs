@@ -10,7 +10,8 @@ use crate::config::MeshCommandMode;
 use crate::config::env_registry::{EnvVar, read};
 use crate::core::why::{DedupLinkEvidence, find_embed_dedup_link};
 use crate::db::{
-    CreateAuditInput, DbConnection, audit_actions, generate_audit_id, generate_audit_id_seeded,
+    CreateAuditInput, DbConnection, StoredFeedbackEvent, audit_actions, generate_audit_id,
+    generate_audit_id_seeded,
 };
 use crate::models::degradation::{
     CONFORMAL_CALIBRATION_INSUFFICIENT_CODE, SEARCH_SCORE_CALIBRATION_ROWS_CORRUPT_CODE,
@@ -691,7 +692,7 @@ impl SearchDegradation {
                 required = MIN_SEARCH_SCORE_CALIBRATION_SAMPLES,
             ),
             repair: Some(
-                "Add outcome-backed rows to .ee/search/calibration.jsonl with score and groundTruthRelevance fields, or run the calibrated search refresh workflow when available."
+                "Add outcome-backed rows to .ee/search/calibration.jsonl, or record outcome/curation feedback events whose evidence_json includes score and groundTruthRelevance."
                     .to_string(),
             ),
         }
@@ -1565,6 +1566,8 @@ impl SearchScoreCalibrationStatus {
 struct SearchScoreCalibration {
     status: SearchScoreCalibrationStatus,
     sample_count: usize,
+    jsonl_sample_count: usize,
+    feedback_event_sample_count: usize,
     corrupt_row_count: usize,
     corrupt_line_numbers: Vec<usize>,
     residual_quantile: Option<f32>,
@@ -1572,54 +1575,70 @@ struct SearchScoreCalibration {
 
 impl SearchScoreCalibration {
     fn for_workspace(workspace_path: &Path) -> Self {
+        Self::for_workspace_with_feedback_events(workspace_path, &[])
+    }
+
+    fn for_workspace_with_feedback_events(
+        workspace_path: &Path,
+        feedback_events: &[StoredFeedbackEvent],
+    ) -> Self {
         let path = workspace_path
             .join(".ee")
             .join("search")
             .join("calibration.jsonl");
-        let Ok(contents) = std::fs::read_to_string(path) else {
+
+        let mut residuals = Vec::new();
+        let mut corrupt_line_numbers = Vec::new();
+        let mut jsonl_sample_count = 0usize;
+        let mut feedback_event_sample_count = 0usize;
+        let jsonl_exists = match std::fs::read_to_string(path) {
+            Ok(contents) => {
+                for (line_number, line) in contents
+                    .lines()
+                    .enumerate()
+                    .map(|(index, line)| (index + 1, line.trim()))
+                    .filter(|(_, line)| !line.is_empty())
+                {
+                    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                        corrupt_line_numbers.push(line_number);
+                        continue;
+                    };
+                    let Some(residual) = calibration_residual_from_value(&value) else {
+                        corrupt_line_numbers.push(line_number);
+                        continue;
+                    };
+                    residuals.push(residual);
+                    jsonl_sample_count = jsonl_sample_count.saturating_add(1);
+                }
+                true
+            }
+            Err(_) => false,
+        };
+
+        for event in feedback_events {
+            let Some(evidence_json) = &event.evidence_json else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(evidence_json) else {
+                continue;
+            };
+            let Some(residual) = calibration_residual_from_value(&value) else {
+                continue;
+            };
+            residuals.push(residual);
+            feedback_event_sample_count = feedback_event_sample_count.saturating_add(1);
+        }
+
+        if !jsonl_exists && feedback_event_sample_count == 0 {
             return Self {
                 status: SearchScoreCalibrationStatus::Absent,
                 sample_count: 0,
+                jsonl_sample_count: 0,
+                feedback_event_sample_count: 0,
                 corrupt_row_count: 0,
                 corrupt_line_numbers: Vec::new(),
                 residual_quantile: None,
             };
-        };
-
-        let mut residuals = Vec::new();
-        let mut corrupt_line_numbers = Vec::new();
-        for (line_number, line) in contents
-            .lines()
-            .enumerate()
-            .map(|(index, line)| (index + 1, line.trim()))
-            .filter(|(_, line)| !line.is_empty())
-        {
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-                corrupt_line_numbers.push(line_number);
-                continue;
-            };
-            let Some(score) = calibration_number(
-                &value,
-                &["score", "predictedScore", "predicted_score", "fusionScore"],
-            ) else {
-                corrupt_line_numbers.push(line_number);
-                continue;
-            };
-            let Some(truth) = calibration_number(
-                &value,
-                &[
-                    "groundTruthRelevance",
-                    "ground_truth_relevance",
-                    "relevance",
-                    "label",
-                ],
-            ) else {
-                corrupt_line_numbers.push(line_number);
-                continue;
-            };
-            let scale = score_uncertainty_scale(score);
-            residuals
-                .push(((score.clamp(0.0, 1.0) - truth.clamp(0.0, 1.0)).abs() / scale).min(20.0));
         }
 
         if !corrupt_line_numbers.is_empty() {
@@ -1634,6 +1653,8 @@ impl SearchScoreCalibration {
             return Self {
                 status: SearchScoreCalibrationStatus::Corrupt,
                 sample_count: residuals.len(),
+                jsonl_sample_count,
+                feedback_event_sample_count,
                 corrupt_row_count: corrupt_line_numbers.len(),
                 corrupt_line_numbers,
                 residual_quantile,
@@ -1644,6 +1665,8 @@ impl SearchScoreCalibration {
             return Self {
                 status: SearchScoreCalibrationStatus::Insufficient,
                 sample_count: residuals.len(),
+                jsonl_sample_count,
+                feedback_event_sample_count,
                 corrupt_row_count: 0,
                 corrupt_line_numbers: Vec::new(),
                 residual_quantile: None,
@@ -1653,6 +1676,8 @@ impl SearchScoreCalibration {
         Self {
             status: SearchScoreCalibrationStatus::Calibrated,
             sample_count: residuals.len(),
+            jsonl_sample_count,
+            feedback_event_sample_count,
             corrupt_row_count: 0,
             corrupt_line_numbers: Vec::new(),
             residual_quantile: Some(split_conformal_quantile(
@@ -1686,11 +1711,47 @@ impl SearchScoreCalibration {
             "coverage": round_metric_f32(SEARCH_SCORE_COVERAGE_GUARANTEE),
             "sampleCount": self.sample_count,
             "minimumSamples": MIN_SEARCH_SCORE_CALIBRATION_SAMPLES,
+            "sourceBreakdown": {
+                "jsonl": self.jsonl_sample_count,
+                "feedbackEvents": self.feedback_event_sample_count,
+            },
             "corruptRowCount": self.corrupt_row_count,
             "corruptLineNumbers": &self.corrupt_line_numbers,
             "residualQuantile": self.residual_quantile.map(round_metric_f32),
         })
     }
+}
+
+fn calibration_residual_from_value(value: &serde_json::Value) -> Option<f32> {
+    calibration_residual_from_object(value).or_else(|| {
+        [
+            "searchCalibration",
+            "search_calibration",
+            "calibration",
+            "scoreCalibration",
+            "score_calibration",
+        ]
+        .iter()
+        .find_map(|key| value.get(*key).and_then(calibration_residual_from_object))
+    })
+}
+
+fn calibration_residual_from_object(value: &serde_json::Value) -> Option<f32> {
+    let score = calibration_number(
+        value,
+        &["score", "predictedScore", "predicted_score", "fusionScore"],
+    )?;
+    let truth = calibration_number(
+        value,
+        &[
+            "groundTruthRelevance",
+            "ground_truth_relevance",
+            "relevance",
+            "label",
+        ],
+    )?;
+    let scale = score_uncertainty_scale(score);
+    Some(((score.clamp(0.0, 1.0) - truth.clamp(0.0, 1.0)).abs() / scale).min(20.0))
 }
 
 fn line_number_summary(line_numbers: &[usize]) -> String {
@@ -1743,10 +1804,17 @@ fn split_conformal_quantile(mut residuals: Vec<f32>, coverage: f32) -> f32 {
 
 fn annotate_hits_with_score_calibration(
     workspace_path: &Path,
+    database_path: Option<&Path>,
+    read_connection: Option<&DbConnection>,
     hits: &mut [SearchHit],
     degraded: &mut Vec<SearchDegradation>,
 ) {
-    let calibration = SearchScoreCalibration::for_workspace(workspace_path);
+    let feedback_events =
+        search_score_calibration_feedback_events(workspace_path, database_path, read_connection);
+    let calibration = SearchScoreCalibration::for_workspace_with_feedback_events(
+        workspace_path,
+        &feedback_events,
+    );
     match calibration.status {
         SearchScoreCalibrationStatus::Insufficient => {
             degraded.push(SearchDegradation::conformal_calibration_insufficient(
@@ -1781,6 +1849,28 @@ fn annotate_hits_with_score_calibration(
         metadata.insert("scoreCalibration".to_string(), calibration.data_json());
         hit.metadata = Some(serde_json::Value::Object(metadata));
     }
+}
+
+fn search_score_calibration_feedback_events(
+    workspace_path: &Path,
+    database_path: Option<&Path>,
+    read_connection: Option<&DbConnection>,
+) -> Vec<StoredFeedbackEvent> {
+    let workspace_id = crate::core::curate::stable_workspace_id(workspace_path);
+    if let Some(connection) = read_connection {
+        return connection
+            .list_feedback_events(&workspace_id)
+            .unwrap_or_default();
+    }
+
+    let default_database_path = workspace_path.join(".ee").join("ee.db");
+    let database_path = database_path.unwrap_or(&default_database_path);
+    if !database_path.exists() {
+        return Vec::new();
+    }
+    DbConnection::open_file(database_path)
+        .and_then(|connection| connection.list_feedback_events(&workspace_id))
+        .unwrap_or_default()
 }
 
 fn search_hit_score_interval_json(hit: &SearchHit) -> serde_json::Value {
@@ -3008,6 +3098,8 @@ fn run_search_inner(
             let mut above_floor = apply_mesh_query_visibility(above_floor, &mut degraded);
             annotate_hits_with_score_calibration(
                 &options.workspace_path,
+                options.database_path.as_deref(),
+                read_connection,
                 &mut above_floor,
                 &mut degraded,
             );
@@ -3261,7 +3353,13 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
     });
     let (mut above_floor, scope_stats) =
         apply_memory_scope_visibility(options, above_floor, &mut degraded, None);
-    annotate_hits_with_score_calibration(&options.workspace_path, &mut above_floor, &mut degraded);
+    annotate_hits_with_score_calibration(
+        &options.workspace_path,
+        options.database_path.as_deref(),
+        None,
+        &mut above_floor,
+        &mut degraded,
+    );
     let kept = above_floor.len();
     let dropped = below_floor.len();
     let floor = user_floor_override.unwrap_or_else(|| {
@@ -4909,7 +5007,9 @@ fn open_lexical_searcher(_index_dir: &Path) -> Result<Option<Arc<dyn LexicalSear
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
+    use crate::db::{
+        CreateFeedbackEventInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection,
+    };
     #[cfg(feature = "lexical-bm25")]
     use crate::search::{EmbedderStack, IndexBuilder, IndexableDocument};
 
@@ -5232,7 +5332,7 @@ mod tests {
 
         let mut hits = vec![synthetic_hit("mem_score_calibration_corrupt", 0.8)];
         let mut degraded = Vec::new();
-        annotate_hits_with_score_calibration(&workspace, &mut hits, &mut degraded);
+        annotate_hits_with_score_calibration(&workspace, None, None, &mut hits, &mut degraded);
 
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0].code, SEARCH_SCORE_CALIBRATION_ROWS_CORRUPT_CODE);
@@ -5281,6 +5381,118 @@ mod tests {
         assert!(
             (high[1] - high[0]) <= (low[1] - low[0]),
             "higher scores should have tighter or equal score intervals"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn search_score_calibration_bootstraps_from_feedback_events() -> TestResult {
+        let workspace = unique_test_dir("score-calibration-feedback-events");
+        let database_path = workspace.join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or_else(|| "database path must have a parent".to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::curate::stable_workspace_id(&workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("score-calibration-feedback-events".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        for index in 0..MIN_SEARCH_SCORE_CALIBRATION_SAMPLES {
+            let score = 0.50 + (index as f32 * 0.01);
+            let truth = score - 0.04;
+            let evidence = serde_json::json!({
+                "schema": "ee.search.calibration_feedback.v1",
+                "searchCalibration": {
+                    "predictedScore": score,
+                    "ground_truth_relevance": truth,
+                },
+                "query": "candidate validated by curate"
+            })
+            .to_string();
+            connection
+                .insert_feedback_event(
+                    &format!("fb_{index:026}"),
+                    &CreateFeedbackEventInput {
+                        workspace_id: workspace_id.clone(),
+                        target_type: "candidate".to_owned(),
+                        target_id: format!("cand_{index:02}"),
+                        signal: "confirmation".to_owned(),
+                        weight: 1.0,
+                        source_type: "outcome_observed".to_owned(),
+                        source_id: Some("curate-validation".to_owned()),
+                        reason: Some("curate validation accepted relevance label".to_owned()),
+                        evidence_json: Some(evidence),
+                        session_id: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        let feedback_events = search_score_calibration_feedback_events(
+            &workspace,
+            Some(&database_path),
+            Some(&connection),
+        );
+        let calibration = SearchScoreCalibration::for_workspace_with_feedback_events(
+            &workspace,
+            &feedback_events,
+        );
+
+        assert_eq!(calibration.status, SearchScoreCalibrationStatus::Calibrated);
+        assert_eq!(
+            calibration.sample_count,
+            MIN_SEARCH_SCORE_CALIBRATION_SAMPLES
+        );
+        assert_eq!(calibration.jsonl_sample_count, 0);
+        assert_eq!(
+            calibration.feedback_event_sample_count,
+            MIN_SEARCH_SCORE_CALIBRATION_SAMPLES
+        );
+        assert_ne!(calibration.interval_for_score(0.8), [0.0, 1.0]);
+
+        let mut hits = vec![synthetic_hit("mem_feedback_calibration", 0.8)];
+        let mut degraded = Vec::new();
+        annotate_hits_with_score_calibration(
+            &workspace,
+            Some(&database_path),
+            Some(&connection),
+            &mut hits,
+            &mut degraded,
+        );
+
+        assert!(
+            degraded.is_empty(),
+            "calibrated feedback rows should not degrade"
+        );
+        assert_eq!(
+            hits[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/scoreCalibration/sourceBreakdown/jsonl"))
+                .and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            hits[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| {
+                    metadata.pointer("/scoreCalibration/sourceBreakdown/feedbackEvents")
+                })
+                .and_then(serde_json::Value::as_u64),
+            Some(MIN_SEARCH_SCORE_CALIBRATION_SAMPLES as u64)
         );
         Ok(())
     }

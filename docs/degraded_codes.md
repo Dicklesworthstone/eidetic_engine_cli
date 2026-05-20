@@ -1745,7 +1745,7 @@ ee search 'format before release' --workspace . --json
 
 **Expected emission.** Message contains: `Search score calibration ... required for split-conformal score intervals`
 
-**Repair hint.** `.ee/search/calibration.jsonl`
+**Repair hint.** Add outcome-backed rows to `.ee/search/calibration.jsonl`, or record outcome/curation feedback events whose `evidence_json` includes `score` and `groundTruthRelevance`.
 
 **Fixture.** [`tests/fixtures/failure_modes/conformal_calibration_insufficient.json`](../tests/fixtures/failure_modes/conformal_calibration_insufficient.json)
 
