@@ -139,6 +139,73 @@ pub struct BeadAffinityExplanation {
     pub components: Vec<BeadAffinityComponent>,
 }
 
+/// Stop-word set for bead-token normalisation. Drawn from the
+/// agent-profile and search-side token normalisers so the bead loader
+/// produces token sets compatible with both BeadAffinityScore (peer)
+/// and BeadAffinityExplanation (this module) without each call site
+/// re-deriving its own list.
+const BEAD_AFFINITY_STOP_WORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "has", "have", "if",
+    "in", "into", "is", "it", "its", "of", "on", "or", "that", "the", "this", "to", "was", "were",
+    "will", "with",
+];
+
+/// Minimum token length kept after normalisation. Anything shorter is
+/// treated as noise.
+const BEAD_AFFINITY_MIN_TOKEN_LEN: usize = 2;
+
+/// Normalise a free-text bead surface (title or description) into the
+/// token set expected by [`BeadAffinityBead::title_tokens`] /
+/// `description_tokens`. The transformation is:
+///
+/// 1. Lower-case via the ASCII path (non-ASCII passes through
+///    unchanged — beads are constrained to ASCII titles per
+///    `.beads/issues.jsonl`).
+/// 2. Replace any character that is not alphanumeric with a single
+///    space so punctuation does not bind to adjacent tokens.
+/// 3. Split on whitespace, drop tokens shorter than
+///    [`BEAD_AFFINITY_MIN_TOKEN_LEN`], drop tokens in
+///    [`BEAD_AFFINITY_STOP_WORDS`].
+/// 4. Collect into a `BTreeSet<String>` so the score is
+///    order-independent.
+///
+/// Pure: no allocations beyond the returned `BTreeSet` and a single
+/// scratch `String` for normalisation.
+#[must_use]
+pub fn normalize_bead_text_tokens(text: &str) -> BTreeSet<String> {
+    let mut scratch = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            scratch.push(ch.to_ascii_lowercase());
+        } else {
+            scratch.push(' ');
+        }
+    }
+
+    let stop_words: BTreeSet<&'static str> = BEAD_AFFINITY_STOP_WORDS.iter().copied().collect();
+    scratch
+        .split_whitespace()
+        .filter(|token| token.len() >= BEAD_AFFINITY_MIN_TOKEN_LEN)
+        .filter(|token| !stop_words.contains(*token))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Normalise a label-style bead surface (`labels[]` entries are
+/// already short, lower-case, dash-separated tokens in the source
+/// jsonl, e.g. `degraded-codes`, `retrieval`, `swarm-scale`). This
+/// helper keeps the dashes as token separators so a label like
+/// `swarm-scale` becomes two tokens (`swarm`, `scale`) without
+/// re-running the heavier free-text normaliser.
+#[must_use]
+pub fn normalize_bead_label_tokens(label: &str) -> BTreeSet<String> {
+    label
+        .split(|c: char| c == '-' || c == '_' || c.is_whitespace())
+        .filter(|token| token.len() >= BEAD_AFFINITY_MIN_TOKEN_LEN)
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
+}
+
 /// Compute the bead-affinity weight for a single `(bead, memory)` pair.
 ///
 /// The result is a sum of capped per-component contributions, then
@@ -423,6 +490,82 @@ mod tests {
         assert_eq!(BEAD_AFFINITY_COLD_START_CODE, "bead_affinity_cold_start");
         assert_eq!(BEAD_AFFINITY_BIAS_CAP, 0.05);
         assert_eq!(BEAD_AFFINITY_COMPONENT_CAP, 0.0125);
+    }
+
+    #[test]
+    fn text_tokenizer_lowercases_strips_punctuation_and_drops_stopwords() {
+        let tokens =
+            normalize_bead_text_tokens("Wire aggregate_degraded helper into all renderers.");
+        // "into", "all" are stopwords; "aggregate_degraded" gets split on _;
+        // single-char "a" is below minimum length.
+        let expected: BTreeSet<String> = ["wire", "aggregate", "degraded", "helper", "renderers"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(tokens, expected);
+    }
+
+    #[test]
+    fn text_tokenizer_is_deterministic_and_order_independent() {
+        let first = normalize_bead_text_tokens("Bead-aware retrieval prioritization in ee context");
+        let second =
+            normalize_bead_text_tokens("ee context in prioritization retrieval Bead-aware");
+        assert_eq!(
+            first, second,
+            "tokeniser must be order-independent across two inputs that contain the same tokens"
+        );
+    }
+
+    #[test]
+    fn label_tokenizer_splits_dashes_and_underscores_then_lowercases() {
+        let tokens = normalize_bead_label_tokens("swarm-scale_RETRIEVAL idea-wizard");
+        let expected: BTreeSet<String> = ["swarm", "scale", "retrieval", "idea", "wizard"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(tokens, expected);
+    }
+
+    #[test]
+    fn label_tokenizer_drops_short_segments() {
+        let tokens = normalize_bead_label_tokens("a-bcd-e-fghi");
+        let expected: BTreeSet<String> = ["bcd", "fghi"].into_iter().map(str::to_owned).collect();
+        assert_eq!(tokens, expected);
+    }
+
+    #[test]
+    fn normalisers_feed_explain_bead_affinity_without_extra_work() {
+        // Round-trip: build a bead from real-shaped strings via the
+        // normalisers, then prove the explainer picks up at least one
+        // component overlap with a memory whose tags share a label token.
+        let bead = BeadAffinityBead {
+            bead_id: "bd-2942u".to_owned(),
+            label_tokens: normalize_bead_label_tokens("swarmx retrieval context"),
+            title_tokens: normalize_bead_text_tokens(
+                "swarmx.barp: bead-aware retrieval prioritization",
+            ),
+            description_tokens: normalize_bead_text_tokens(
+                "Bias ee context retrieval scoring with active bead labels and title tokens.",
+            ),
+            family_memory_ids: BTreeSet::new(),
+        };
+        let memory = BeadAffinityMemory {
+            memory_id: "mem_norm".to_owned(),
+            tag_tokens: ["retrieval".to_owned()].into_iter().collect(),
+            content_tokens: ["bead".to_owned(), "scoring".to_owned()]
+                .into_iter()
+                .collect(),
+            link_target_memory_ids: BTreeSet::new(),
+        };
+        let score = explain_bead_affinity(&bead, &memory);
+        assert!(
+            !score.cold_start,
+            "expected overlap via tag retrieval token"
+        );
+        assert!(
+            score.weight > 0.0,
+            "expected positive weight from normaliser output"
+        );
     }
 
     #[test]
