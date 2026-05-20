@@ -6,7 +6,7 @@ use asupersync::{Cx, Outcome};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use serde_json::json;
-use toml_edit::{DocumentMut, value};
+use toml_edit::{Array, DocumentMut, Item, Value, value};
 
 use crate::config::{EnvVar, MeshCommandMode, read_env_var, workspace_config};
 use crate::core::tailscale_probe::{
@@ -21,6 +21,13 @@ use crate::db::{
 use crate::mesh::audit::{
     MeshAuditDetails, MeshAuditEventInput, MeshAuditEventKind, MeshAuditLedgerError,
     append_mesh_audit_event, compute_mesh_audit_event,
+};
+use crate::mesh::auto_enrollment::{
+    AutoEnrollmentCandidate, AutoEnrollmentInput, AutoEnrollmentOptions, AutoEnrollmentResult,
+    AutoEnrollmentSyncOnceMode, ExistingAutoEnrollmentPeer, plan_auto_enrollment,
+};
+use crate::mesh::auto_enrollment_safety::{
+    emit_safety_snapshot_audit, update_materialization_outcome,
 };
 use crate::mesh::discovery_policy::{
     DISCOVERY_ALLOWLIST_FILE, DISCOVERY_DENYLIST_FILE, DISCOVERY_POLICY_SCHEMA_V1,
@@ -56,6 +63,7 @@ use super::{Cli, write_domain_error, write_stdout};
 
 const MESH_CLI_INIT_SCHEMA_V1: &str = "ee.mesh.cli.init.v1";
 const DISCOVERY_POLICY_CONFIG_FILE: &str = "discovery_policy.toml";
+const AUTO_ENROLL_OVERRIDES_FILE: &str = "auto_enroll_overrides.toml";
 
 /// Subcommands for foreground `ee mesh` operations.
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -68,6 +76,8 @@ pub enum MeshCommand {
     Peer(MeshPeerArgs),
     /// Report local mesh posture, cache counts, and repair commands.
     Status(MeshStatusArgs),
+    /// Materialize zero-touch Tailscale mesh peers from fresh autodiscovery.
+    AutoEnroll(MeshAutoEnrollArgs),
     /// Inspect or update Tailscale peer discovery policy.
     DiscoveryPolicy(MeshDiscoveryPolicyArgs),
     /// Inspect the local mesh hello responder lifecycle job.
@@ -427,6 +437,38 @@ pub struct MeshStatusArgs {
     pub database: Option<PathBuf>,
 }
 
+/// Arguments for `ee mesh auto-enroll`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshAutoEnrollArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Emit the intended config and audit row without writing peer rows.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Force-include a Tailscale node key for this and later reconciliations.
+    #[arg(long = "include", value_name = "NODE_KEY", action = ArgAction::Append)]
+    pub include: Vec<String>,
+
+    /// Force-exclude a Tailscale node key and append it to the denylist.
+    #[arg(long = "exclude", value_name = "NODE_KEY", action = ArgAction::Append)]
+    pub exclude: Vec<String>,
+
+    /// Print the per-peer decision tree without durable peer writes.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub explain: bool,
+
+    /// Explain one skipped node key.
+    #[arg(long = "explain-skip", value_name = "NODE_KEY", action = ArgAction::Append)]
+    pub explain_skip: Vec<String>,
+
+    /// Explicitly migrate existing manual mesh rows into the auto-managed lifecycle.
+    #[arg(long = "replace-manual-with-auto", action = ArgAction::SetTrue)]
+    pub replace_manual_with_auto: bool,
+}
+
 /// Arguments for `ee mesh export`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct MeshExportArgs {
@@ -573,6 +615,7 @@ where
         MeshCommand::Peers(args) => handle_mesh_peers(cli, args, stdout, stderr),
         MeshCommand::Peer(args) => handle_mesh_peer(cli, args, stdout, stderr),
         MeshCommand::Status(args) => handle_mesh_status(cli, args, stdout, stderr),
+        MeshCommand::AutoEnroll(args) => handle_mesh_auto_enroll(cli, args, stdout, stderr),
         MeshCommand::DiscoveryPolicy(args) => {
             handle_mesh_discovery_policy(cli, args, stdout, stderr)
         }
@@ -763,8 +806,16 @@ fn build_tailscale_autodiscovery_report(
     cli: &Cli,
     snapshot: &MeshForegroundSnapshot,
 ) -> TailscaleAutodiscoveryReport {
-    let workspace_path = cli.resolve_workspace();
     let local = gather_mesh_status_tailscale_local_report(snapshot.mesh_enabled);
+    build_tailscale_autodiscovery_report_from_local(cli, snapshot, local.as_ref())
+}
+
+fn build_tailscale_autodiscovery_report_from_local(
+    cli: &Cli,
+    snapshot: &MeshForegroundSnapshot,
+    local: Option<&TailscaleLocalReport>,
+) -> TailscaleAutodiscoveryReport {
+    let workspace_path = cli.resolve_workspace();
     let lists = load_workspace_lists(&workspace_path).unwrap_or_default();
     let mut config = TailscaleAutodiscoveryConfig::new(
         snapshot.mesh_enabled,
@@ -780,7 +831,7 @@ fn build_tailscale_autodiscovery_report(
         read_env_var(EnvVar::TailscaleDiscoveryBudgetMs).as_deref(),
     );
     let mut probe = TailscaleStatusCapabilityHelloProbe;
-    autodiscover_tailscale_peers(local.as_ref(), &config, &mut probe)
+    autodiscover_tailscale_peers(local, &config, &mut probe)
 }
 
 fn gather_mesh_status_tailscale_local_report(mesh_enabled: bool) -> Option<TailscaleLocalReport> {
@@ -842,6 +893,148 @@ fn write_mesh_status_json_with_autodiscovery<W: Write>(
         "data": data,
     });
     write_stdout(stdout, &(json.to_string() + "\n"))
+}
+
+fn handle_mesh_auto_enroll<W, E>(
+    cli: &Cli,
+    args: &MeshAutoEnrollArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
+        Ok(store) => store,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let workspace_path = cli.resolve_workspace();
+    let local = gather_mesh_status_tailscale_local_report(snapshot.mesh_enabled);
+    let discovery = build_tailscale_autodiscovery_report_from_local(cli, &snapshot, local.as_ref());
+    let existing_peers = match auto_enrollment_existing_peers(&snapshot) {
+        Ok(peers) => peers,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut report = plan_auto_enrollment(AutoEnrollmentInput {
+        workspace_id: snapshot.workspace_id.clone(),
+        workspace_path: snapshot.workspace_path.clone(),
+        now: now.clone(),
+        fresh_probe_invocations: u32::from(local.is_some()),
+        tailnet_id: discovery.tailnet_id.clone(),
+        tailnet_display_name: discovery.tailnet_display_name.clone(),
+        self_node_key: discovery.self_node_key.clone(),
+        discovered_peers: auto_enrollment_candidates_from_discovery(&discovery),
+        tailnet_peers: auto_enrollment_candidates_from_local(local.as_ref()),
+        existing_peers,
+        options: AutoEnrollmentOptions {
+            dry_run: args.dry_run,
+            explain: args.explain,
+            replace_manual_with_auto: args.replace_manual_with_auto,
+            include_overrides: args.include.clone(),
+            exclude_overrides: args.exclude.clone(),
+            explain_skip: args.explain_skip.clone(),
+            sync_once: AutoEnrollmentSyncOnceMode::DeferredToCaller,
+            ..AutoEnrollmentOptions::default()
+        },
+    });
+
+    let audit_id = match emit_safety_snapshot_audit(
+        &connection,
+        &report.safety_summary,
+        Some("ee mesh auto-enroll"),
+        report.peer_group_id.as_deref(),
+    ) {
+        Ok(audit_id) => audit_id,
+        Err(error) => {
+            return write_domain_error(
+                &auto_enrollment_audit_domain_error(error),
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+    report.attach_audit_row_id(audit_id.clone());
+
+    if report.materialization.writes_peer_rows {
+        if let Err(error) = persist_auto_enroll_overrides(
+            &workspace_path,
+            &report.materialization.append_denylist_node_keys,
+            &args.include,
+            &args.exclude,
+        ) {
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+        let upserts = match auto_enrollment_peer_upserts(
+            &snapshot.workspace_id,
+            discovery.tailnet_id.as_deref().unwrap_or("tailnet_unknown"),
+            discovery.tailnet_display_name.as_deref(),
+            &now,
+            &report.materialization.peers_to_upsert,
+        ) {
+            Ok(upserts) => upserts,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        if let Err(error) = connection.with_transaction(|| {
+            for upsert in &upserts {
+                connection.upsert_mesh_peer(upsert)?;
+            }
+            Ok(())
+        }) {
+            return write_domain_error(
+                &storage_error("Failed to materialize mesh auto-enrollment peers", error),
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    }
+
+    if let Err(error) = update_materialization_outcome(
+        &connection,
+        &audit_id,
+        &snapshot.workspace_id,
+        report.materialization.outcome_to_record,
+        Some("ee mesh auto-enroll"),
+        report.peer_group_id.as_deref(),
+    ) {
+        return write_domain_error(
+            &auto_enrollment_audit_domain_error(error),
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
+
+    if report.materialization.sync_once_after_materialization {
+        let sync_options = MeshSyncSupervisorOptions::default();
+        match run_mesh_sync_supervisor(&snapshot, &sync_options) {
+            Ok(sync_report) => {
+                if sync_report.degraded.is_empty() {
+                    report.record_sync_once_success(sync_report.contacted_peers);
+                } else {
+                    report.record_sync_once_failure(
+                        sync_report
+                            .degraded
+                            .iter()
+                            .map(|item| item.code)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    );
+                }
+            }
+            Err(message) => report.record_sync_once_failure(message),
+        }
+    }
+
+    write_mesh_report(
+        cli,
+        &report,
+        &render_mesh_auto_enroll_human(&report),
+        stdout,
+    )
 }
 
 fn handle_mesh_discovery_policy<W, E>(
@@ -1995,6 +2188,263 @@ fn redacted_node_key_hash(node_key: &str) -> String {
     format!("blake3:{}", blake3::hash(node_key.as_bytes()).to_hex())
 }
 
+fn auto_enrollment_existing_peers(
+    snapshot: &MeshForegroundSnapshot,
+) -> Result<Vec<ExistingAutoEnrollmentPeer>, DomainError> {
+    let mut peers = Vec::new();
+    for row in &snapshot.peers {
+        let record = enrolled_peer_record_from_policy_summary(
+            row.policy_summary_json.as_deref(),
+            &row.peer_id,
+        )?;
+        if let Some(record) = record {
+            peers.push(ExistingAutoEnrollmentPeer {
+                peer_id: row.peer_id.clone(),
+                node_key: record.endpoint.tailscale_node_key,
+                tailnet_id: Some(record.endpoint.tailnet_id),
+                hostname: record.alias,
+                tailscale_ip: record.endpoint.endpoint,
+                magic_dns_name: record.endpoint.magic_dns_name,
+                ee_protocol_version: record.handshake.responder_protocol_version,
+                enrollment_source: record.trust_established_by,
+                enabled: row.enabled,
+            });
+        } else {
+            peers.push(ExistingAutoEnrollmentPeer {
+                peer_id: row.peer_id.clone(),
+                node_key: row.origin_node_id.clone(),
+                tailnet_id: None,
+                hostname: row
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| row.origin_node_id.clone()),
+                tailscale_ip: row.origin_node_id.clone(),
+                magic_dns_name: None,
+                ee_protocol_version: "unknown".to_owned(),
+                enrollment_source: "manual".to_owned(),
+                enabled: row.enabled,
+            });
+        }
+    }
+    Ok(peers)
+}
+
+fn auto_enrollment_candidates_from_discovery(
+    report: &TailscaleAutodiscoveryReport,
+) -> Vec<AutoEnrollmentCandidate> {
+    report
+        .ee_capable_peers
+        .iter()
+        .map(|peer| AutoEnrollmentCandidate {
+            node_key: peer.node_key.clone(),
+            tailscale_ip: peer.tailscale_ip.clone(),
+            magic_dns_name: peer.magic_dns_name.clone(),
+            hostname: peer
+                .hostname
+                .clone()
+                .unwrap_or_else(|| peer.node_key.clone()),
+            ee_protocol_version: peer.ee_protocol_version.clone(),
+            discovery_policy_decision: peer.discovery_policy_decision.clone(),
+        })
+        .collect()
+}
+
+fn auto_enrollment_candidates_from_local(
+    local: Option<&TailscaleLocalReport>,
+) -> Vec<AutoEnrollmentCandidate> {
+    local
+        .into_iter()
+        .flat_map(|report| report.peers.iter())
+        .filter_map(|peer| {
+            let tailscale_ip = peer.tailscale_ips.first()?.clone();
+            let capability = peer.ee_capability.as_ref();
+            Some(AutoEnrollmentCandidate {
+                node_key: peer.node_key.clone(),
+                tailscale_ip,
+                magic_dns_name: peer.magic_dns_name.clone(),
+                hostname: peer
+                    .hostname
+                    .clone()
+                    .unwrap_or_else(|| peer.node_key.clone()),
+                ee_protocol_version: capability
+                    .map(|capability| capability.ee_protocol_version.clone())
+                    .unwrap_or_else(|| "1.0".to_owned()),
+                discovery_policy_decision: "force_include_override".to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn auto_enrollment_peer_upserts(
+    workspace_id: &str,
+    tailnet_id: &str,
+    tailnet_display_name: Option<&str>,
+    now: &str,
+    candidates: &[AutoEnrollmentCandidate],
+) -> Result<Vec<UpsertMeshPeerInput>, DomainError> {
+    let mut upserts = Vec::new();
+    for candidate in candidates {
+        let report = enroll_peer(MeshPeerEnrollInput {
+            workspace_id: workspace_id.to_owned(),
+            alias: candidate.hostname.clone(),
+            endpoint: MeshPeerEndpoint {
+                tailscale_node_key: candidate.node_key.clone(),
+                tailnet_id: tailnet_id.to_owned(),
+                tailnet_display_name: tailnet_display_name.map(str::to_owned),
+                endpoint: candidate.tailscale_ip.clone(),
+                magic_dns_name: candidate.magic_dns_name.clone(),
+            },
+            capability_profile: MeshPeerCapabilityProfile::MetadataOnly,
+            handshake: MeshPeerHandshake::granted(
+                format!("auto_enroll:{}", candidate.node_key),
+                candidate.ee_protocol_version.clone(),
+                candidate.node_key.clone(),
+                vec!["metadata".to_owned(), "revisionNotice".to_owned()],
+            ),
+            public_key_fingerprint: auto_enrollment_public_key_fingerprint(&candidate.node_key),
+            now: now.to_owned(),
+            explicit_human_consent: true,
+        });
+        let peer_message = report.message.clone();
+        let mut peer = report.peer.ok_or_else(|| DomainError::PolicyDenied {
+            message: format!(
+                "Auto-enrollment could not compose peer enrollment for {}: {}",
+                candidate.node_key, peer_message
+            ),
+            repair: Some(
+                "Inspect the candidate hello response and retry auto-enrollment.".to_owned(),
+            ),
+        })?;
+        peer.trust_established_by = "tailscale_auto_enrollment".to_owned();
+        let policy_summary_json =
+            serde_json::to_string(&peer).map_err(|error| DomainError::Usage {
+                message: format!("Failed to serialize auto-enrolled mesh peer: {error}"),
+                repair: Some("Retry the command or report the serialization failure.".to_owned()),
+            })?;
+        upserts.push(UpsertMeshPeerInput {
+            workspace_id: workspace_id.to_owned(),
+            peer_id: peer.peer_id,
+            origin_node_id: build_peer_origin_node_id(&candidate.node_key),
+            display_name: Some(candidate.hostname.clone()),
+            policy_summary_json: Some(policy_summary_json),
+            enabled: true,
+            last_seen_at: Some(now.to_owned()),
+        });
+    }
+    Ok(upserts)
+}
+
+fn auto_enrollment_public_key_fingerprint(node_key: &str) -> String {
+    format!("auto:{}", blake3::hash(node_key.as_bytes()).to_hex())
+}
+
+fn persist_auto_enroll_overrides(
+    workspace_path: &Path,
+    denylist_node_keys: &[String],
+    include_node_keys: &[String],
+    exclude_node_keys: &[String],
+) -> Result<(), DomainError> {
+    let valid_includes = valid_node_key_set(include_node_keys);
+    let valid_excludes = valid_node_key_set(exclude_node_keys);
+    if !valid_includes.is_empty() || !valid_excludes.is_empty() {
+        write_auto_enroll_overrides_file(workspace_path, &valid_includes, &valid_excludes)?;
+    }
+    let valid_denylist = valid_node_key_set(denylist_node_keys);
+    if valid_denylist.is_empty() {
+        return Ok(());
+    }
+    let deny_path = workspace_path.join(".ee").join(DISCOVERY_DENYLIST_FILE);
+    let mut denylist = load_node_key_list_for_cli(&deny_path)?;
+    denylist.extend(valid_denylist);
+    write_node_key_list(&deny_path, &denylist)
+}
+
+fn valid_node_key_set(node_keys: &[String]) -> std::collections::BTreeSet<String> {
+    node_keys
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| validate_node_key(value).is_ok())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn write_auto_enroll_overrides_file(
+    workspace_path: &Path,
+    include_node_keys: &std::collections::BTreeSet<String>,
+    exclude_node_keys: &std::collections::BTreeSet<String>,
+) -> Result<(), DomainError> {
+    let path = workspace_path.join(".ee").join(AUTO_ENROLL_OVERRIDES_FILE);
+    ensure_writable_regular_file(&path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
+            message: format!("Failed to create mesh auto-enroll override directory: {error}"),
+            repair: Some("Check workspace .ee directory permissions.".to_owned()),
+        })?;
+    }
+    let mut document = if path.is_file() {
+        fs::read_to_string(&path)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to read {}: {error}", path.display()),
+                repair: Some("Check workspace .ee directory permissions.".to_owned()),
+            })?
+            .parse::<DocumentMut>()
+            .map_err(|error| DomainError::Configuration {
+                message: format!("Failed to parse {}: {error}", path.display()),
+                repair: Some("Fix the invalid auto-enroll override TOML and retry.".to_owned()),
+            })?
+    } else {
+        DocumentMut::new()
+    };
+    let mut includes = node_key_set_from_document(&document, "include_node_keys");
+    includes.extend(include_node_keys.iter().cloned());
+    let mut excludes = node_key_set_from_document(&document, "exclude_node_keys");
+    excludes.extend(exclude_node_keys.iter().cloned());
+    set_document_node_key_array(&mut document, "include_node_keys", &includes);
+    set_document_node_key_array(&mut document, "exclude_node_keys", &excludes);
+    fs::write(&path, document.to_string()).map_err(|error| DomainError::Storage {
+        message: format!("Failed to write {}: {error}", path.display()),
+        repair: Some("Check workspace .ee directory permissions and retry.".to_owned()),
+    })
+}
+
+fn node_key_set_from_document(
+    document: &DocumentMut,
+    key: &'static str,
+) -> std::collections::BTreeSet<String> {
+    document
+        .get(key)
+        .and_then(Item::as_array)
+        .into_iter()
+        .flat_map(|array| array.iter())
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn set_document_node_key_array(
+    document: &mut DocumentMut,
+    key: &'static str,
+    node_keys: &std::collections::BTreeSet<String>,
+) {
+    let mut array = Array::default();
+    for node_key in node_keys {
+        array.push(node_key.as_str());
+    }
+    document[key] = Item::Value(Value::Array(array));
+}
+
+fn auto_enrollment_audit_domain_error(
+    error: crate::mesh::auto_enrollment_safety::SafetySnapshotError,
+) -> DomainError {
+    DomainError::Storage {
+        message: format!("auto_enrollment_audit_failed: {error}"),
+        repair: Some(
+            "Inspect the audit chain with `ee audit verify --json` before retrying auto-enrollment."
+                .to_owned(),
+        ),
+    }
+}
+
 fn record_discovery_policy_changed_audit(
     connection: &DbConnection,
     workspace_id: &str,
@@ -2549,6 +2999,53 @@ fn render_mesh_status_human(report: &MeshCliStatusReport) -> String {
         }
     }
     append_degradations(&mut output, &report.degraded);
+    output
+}
+
+fn render_mesh_auto_enroll_human(report: &AutoEnrollmentResult) -> String {
+    let mut output = format!(
+        "Mesh auto-enroll: {outcome}\n  Peer group: {peer_group}\n  Peer set hash: {peer_set_hash}\n  Audit: {audit}\n  Peers selected: {peer_count}\n  Lane policy: metadata={metadata} body={body} embedding={embedding} graphLink={graph_link} revisionNotice={revision_notice} curationSignal={curation_signal}\n  Sync-once: attempted={sync_attempted} success={sync_success}\n",
+        outcome = report.outcome,
+        peer_group = report.peer_group_id.as_deref().unwrap_or("none"),
+        peer_set_hash = report.peer_set_hash.as_deref().unwrap_or("none"),
+        audit = report.audit_row_id.as_deref().unwrap_or("not written"),
+        peer_count = report.enrollment_outcomes.len(),
+        metadata = report.lane_policy.metadata,
+        body = report.lane_policy.body,
+        embedding = report.lane_policy.embedding,
+        graph_link = report.lane_policy.graph_link,
+        revision_notice = report.lane_policy.revision_notice,
+        curation_signal = report.lane_policy.curation_signal,
+        sync_attempted = report.sync_once_result.attempted,
+        sync_success = report.sync_once_result.success,
+    );
+    if !report.overrides_applied.is_empty() {
+        output.push_str("  Overrides:\n");
+        for item in &report.overrides_applied {
+            output.push_str(&format!(
+                "    - {} {} applied={}: {}\n",
+                item.kind, item.node_key, item.applied, item.reason
+            ));
+        }
+    }
+    if !report.explanation.is_empty() {
+        output.push_str("  Explanation:\n");
+        for item in &report.explanation {
+            output.push_str(&format!(
+                "    - {} => {} ({})\n",
+                item.node_key, item.decision, item.reason
+            ));
+        }
+    }
+    if !report.degraded.is_empty() {
+        output.push_str("  Degraded:\n");
+        for item in &report.degraded {
+            output.push_str(&format!(
+                "    - {} [{}]: {} Repair: {}\n",
+                item.code, item.severity, item.message, item.repair
+            ));
+        }
+    }
     output
 }
 

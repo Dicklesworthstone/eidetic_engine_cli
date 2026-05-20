@@ -13,6 +13,7 @@
 
 pub mod admission;
 pub mod audit;
+pub mod auto_enrollment;
 pub mod auto_enrollment_safety;
 pub mod cache;
 pub mod discovery_cache;
