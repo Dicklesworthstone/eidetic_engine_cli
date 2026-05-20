@@ -296,7 +296,7 @@ pub fn link_symbol_evidence(
 
     let mut links = Vec::with_capacity(sorted_inputs.len());
     let mut degraded = Vec::new();
-    for input in sorted_inputs {
+    for input in &sorted_inputs {
         let (link, maybe_degraded) =
             resolve_symbol_evidence_input(snapshot, input, &symbols_by_path, &symbols_by_id);
         if let Some(item) = maybe_degraded {
