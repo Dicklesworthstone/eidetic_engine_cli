@@ -469,6 +469,138 @@ pub fn resolve_workspace_report(
     resolve_path_report(&registry_path, None, options.workspace_path.clone())
 }
 
+pub const WORKSPACE_HYGIENE_SWARM_BRIEF_SUMMARY_SCHEMA_V1: &str =
+    "ee.workspace_hygiene.swarm_brief_summary.v1";
+pub const WORKSPACE_HYGIENE_SWARM_BRIEF_TOP_PATHS_LIMIT: usize = 10;
+pub const WORKSPACE_HYGIENE_SWARM_BRIEF_TOP_PATTERNS_LIMIT: usize = 5;
+pub const WORKSPACE_HYGIENE_SWARM_BRIEF_COMMAND_HINT: &str = "ee workspace-hygiene --json";
+
+/// Compact, redaction-safe projection of a workspace hygiene report suitable
+/// for embedding in the swarm brief and support bundle surfaces. Drops
+/// classification rows, full path lists, and staging recommendations; keeps
+/// counts, the top capped `needsHumanReview` slice, coordination blocker
+/// posture, beads classification status, command hint, and degraded codes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceHygieneSwarmBriefSummary {
+    pub schema: &'static str,
+    pub status: &'static str,
+    pub dirty_path_count: usize,
+    pub bucket_counts: Vec<WorkspaceHygieneCount>,
+    pub kind_counts: Vec<WorkspaceHygieneCount>,
+    pub needs_human_review_top: Vec<String>,
+    pub needs_human_review_total: usize,
+    pub needs_human_review_truncated: bool,
+    pub coordination_blocker_count: usize,
+    pub coordination_blocker_patterns: Vec<String>,
+    pub beads_state_status: &'static str,
+    pub command_hint: &'static str,
+    pub degraded_codes: Vec<&'static str>,
+}
+
+impl WorkspaceHygieneSwarmBriefSummary {
+    #[must_use]
+    pub fn unavailable(degraded_code: &'static str) -> Self {
+        Self {
+            schema: WORKSPACE_HYGIENE_SWARM_BRIEF_SUMMARY_SCHEMA_V1,
+            status: "unavailable",
+            dirty_path_count: 0,
+            bucket_counts: Vec::new(),
+            kind_counts: Vec::new(),
+            needs_human_review_top: Vec::new(),
+            needs_human_review_total: 0,
+            needs_human_review_truncated: false,
+            coordination_blocker_count: 0,
+            coordination_blocker_patterns: Vec::new(),
+            beads_state_status: "unavailable",
+            command_hint: WORKSPACE_HYGIENE_SWARM_BRIEF_COMMAND_HINT,
+            degraded_codes: vec![degraded_code],
+        }
+    }
+
+    #[must_use]
+    pub fn from_report(report: &WorkspaceHygieneReport) -> Self {
+        let needs_total = report.needs_human_review.len();
+        let needs_top: Vec<String> = report
+            .needs_human_review
+            .iter()
+            .take(WORKSPACE_HYGIENE_SWARM_BRIEF_TOP_PATHS_LIMIT)
+            .cloned()
+            .collect();
+        let needs_truncated = needs_total > needs_top.len();
+
+        let coordination_blocker_count = report.coordination.blocked_by_coordination.len();
+        let mut pattern_set: BTreeSet<String> = BTreeSet::new();
+        for blocked in &report.coordination.blocked_by_coordination {
+            if pattern_set.len() >= WORKSPACE_HYGIENE_SWARM_BRIEF_TOP_PATTERNS_LIMIT
+                && !pattern_set.contains(&blocked.path_pattern)
+            {
+                continue;
+            }
+            pattern_set.insert(blocked.path_pattern.clone());
+        }
+        let coordination_blocker_patterns: Vec<String> = pattern_set.into_iter().collect();
+
+        let beads_state_status: &'static str = match report.beads_state.classification {
+            BeadsClassification::BeadsClean => "beads_clean",
+            BeadsClassification::BeadsExportOnly => "beads_export_only",
+            BeadsClassification::BeadsDbDirtyPendingFlush => "beads_db_dirty_pending_flush",
+            BeadsClassification::BeadsExternalChangesPendingImport => {
+                "beads_external_changes_pending_import"
+            }
+            BeadsClassification::BeadsConflictOrParseError => "beads_conflict_or_parse_error",
+            BeadsClassification::BeadsReservedByOtherAgent => "beads_reserved_by_other_agent",
+            BeadsClassification::BeadsLikelyCommitReady => "beads_likely_commit_ready",
+        };
+
+        let mut degraded_codes: Vec<&'static str> = Vec::new();
+        for code in report
+            .degraded_codes
+            .iter()
+            .chain(report.coordination.degraded_codes.iter())
+            .chain(report.beads_state.degraded_codes.iter())
+            .copied()
+        {
+            if !degraded_codes.contains(&code) {
+                degraded_codes.push(code);
+            }
+        }
+
+        Self {
+            schema: WORKSPACE_HYGIENE_SWARM_BRIEF_SUMMARY_SCHEMA_V1,
+            status: "available",
+            dirty_path_count: report.dirty_path_count,
+            bucket_counts: report.bucket_counts.clone(),
+            kind_counts: report.kind_counts.clone(),
+            needs_human_review_top: needs_top,
+            needs_human_review_total: needs_total,
+            needs_human_review_truncated: needs_truncated,
+            coordination_blocker_count,
+            coordination_blocker_patterns,
+            beads_state_status,
+            command_hint: WORKSPACE_HYGIENE_SWARM_BRIEF_COMMAND_HINT,
+            degraded_codes,
+        }
+    }
+}
+
+/// Build a compact swarm-brief / support-bundle projection of the workspace
+/// hygiene report. When the underlying hygiene report cannot be built, returns
+/// an `unavailable`-status summary tagged with
+/// [`WORKSPACE_HYGIENE_PARTIAL_METADATA_CODE`] so the swarm brief remains
+/// usable in degraded modes.
+#[must_use]
+pub fn build_workspace_hygiene_swarm_brief_summary(
+    options: &WorkspaceHygieneOptions,
+) -> WorkspaceHygieneSwarmBriefSummary {
+    match build_workspace_hygiene_report(options) {
+        Ok(report) => WorkspaceHygieneSwarmBriefSummary::from_report(&report),
+        Err(_) => {
+            WorkspaceHygieneSwarmBriefSummary::unavailable(WORKSPACE_HYGIENE_PARTIAL_METADATA_CODE)
+        }
+    }
+}
+
 pub fn build_workspace_hygiene_report(
     options: &WorkspaceHygieneOptions,
 ) -> Result<WorkspaceHygieneReport, DomainError> {
