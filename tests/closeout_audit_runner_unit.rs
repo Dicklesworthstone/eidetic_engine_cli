@@ -68,6 +68,21 @@ fn run_audit_with_env(
     bead_id: &str,
     envs: &[(&str, PathBuf)],
 ) -> Result<Value, String> {
+    run_audit_with_env_strings(
+        scenario,
+        bead_id,
+        &envs
+            .iter()
+            .map(|(key, value)| (*key, value.display().to_string()))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn run_audit_with_env_strings(
+    scenario: &str,
+    bead_id: &str,
+    envs: &[(&str, String)],
+) -> Result<Value, String> {
     let fixture = fixture_path(scenario);
     if !fixture.exists() {
         return Err(format!("fixture not found: {}", fixture.display(),));
@@ -193,6 +208,10 @@ fn closeout_audit_script_tracks_current_coordination_surfaces() -> TestResult {
         "WORKSPACE_ROOT=\"$ORIGINAL_CWD/$WORKSPACE_ROOT\"",
         "RCH_QUEUE_JSON_RESOLVED",
         "RCH_QUEUE_JSON",
+        "RCH_PROBE_TIMEOUT_SECONDS",
+        "run_bounded_command",
+        "rch_health_check_timeout",
+        "rch_queue_timeout",
         "rch_queue: %s (active=%s stale=%s queued=%s)",
         "rch_queue_stale_active_records",
         "rch CLI rejects 'rch exec' as an unknown subcommand",
@@ -227,6 +246,55 @@ fn j11_operator_scripts_are_directly_executable() -> TestResult {
             .mode();
         if mode & 0o111 == 0 {
             return Err(format!("{relative_path} must be executable"));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn rch_probe_timeout_is_bounded_and_reported_as_caveat() -> TestResult {
+    let bash_env = repo_root()
+        .join("tests")
+        .join("fixtures")
+        .join("closeout_audit")
+        .join("hanging_rch_env.sh");
+    let audit = run_audit_with_env_strings(
+        "ready",
+        "bd-fxt-ready-1",
+        &[
+            ("BASH_ENV", bash_env.display().to_string()),
+            ("RCH_PROBE_TIMEOUT_SECONDS", "1".to_owned()),
+        ],
+    )?;
+    assert_envelope_shape(&audit)?;
+
+    if audit["readiness"].as_str() == Some("blocked") {
+        return Err(format!(
+            "hung RCH probes should caveat, not block closeout by themselves: {audit}",
+        ));
+    }
+    if audit["evidence"]["rch_status"].as_str() != Some("timeout") {
+        return Err(format!(
+            "expected rch_status=timeout, got {:?}",
+            audit["evidence"]["rch_status"],
+        ));
+    }
+    if audit["evidence"]["rch_queue_status"].as_str() != Some("timeout") {
+        return Err(format!(
+            "expected rch_queue_status=timeout, got {:?}",
+            audit["evidence"]["rch_queue_status"],
+        ));
+    }
+    let caveats = audit["caveats"].as_array().cloned().unwrap_or_default();
+    for expected in ["rch_health_check_timeout", "rch_queue_timeout"] {
+        if !caveats
+            .iter()
+            .any(|caveat| caveat.as_str().unwrap_or("").starts_with(expected))
+        {
+            return Err(format!(
+                "expected {expected} caveat for hung RCH probes, got {caveats:?}",
+            ));
         }
     }
 

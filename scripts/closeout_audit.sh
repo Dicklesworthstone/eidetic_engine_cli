@@ -104,6 +104,40 @@ if [ -n "$RCH_QUEUE_JSON_RESOLVED" ]; then
         *) RCH_QUEUE_JSON_RESOLVED="$ORIGINAL_CWD/$RCH_QUEUE_JSON_RESOLVED" ;;
     esac
 fi
+RCH_PROBE_TIMEOUT_SECONDS="${RCH_PROBE_TIMEOUT_SECONDS:-4}"
+case "$RCH_PROBE_TIMEOUT_SECONDS" in
+    ''|*[!0-9]*|0) RCH_PROBE_TIMEOUT_SECONDS=4 ;;
+esac
+
+run_bounded_command() {
+    local seconds="${1:?seconds required}"
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "${seconds}s" bash -c '"$@"' closeout-audit "$@"
+        return $?
+    fi
+    if command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "${seconds}s" bash -c '"$@"' closeout-audit "$@"
+        return $?
+    fi
+    "$@" &
+    local command_pid=$!
+    (
+        sleep "$seconds"
+        kill "$command_pid" 2>/dev/null || true
+    ) &
+    local watchdog_pid=$!
+    local status=0
+    wait "$command_pid" || status=$?
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    return "$status"
+}
+
+is_timeout_status() {
+    local status="${1:?status required}"
+    [ "$status" -eq 124 ] || [ "$status" -ge 128 ]
+}
 
 # Tool preflight. jq is required for JSONL parsing; git is required
 # for uncommitted-references scan.
@@ -292,20 +326,34 @@ RCH_ACTIVE_BUILDS=0
 RCH_STALE_ACTIVE_BUILDS=0
 RCH_QUEUED_BUILDS=0
 if command -v rch >/dev/null 2>&1; then
-    if rch check >/dev/null 2>&1; then
+    RCH_CHECK_EXIT=0
+    if run_bounded_command "$RCH_PROBE_TIMEOUT_SECONDS" rch check >/dev/null 2>&1; then
         RCH_STATUS="ready"
     else
-        RCH_STATUS="local_fallback_likely"
+        RCH_CHECK_EXIT=$?
+        if is_timeout_status "$RCH_CHECK_EXIT"; then
+            RCH_STATUS="timeout"
+        else
+            RCH_STATUS="local_fallback_likely"
+        fi
     fi
 fi
 
+RCH_QUEUE_TIMED_OUT=false
 RCH_QUEUE_RAW=""
 if [ -n "$RCH_QUEUE_JSON_RESOLVED" ] && [ -f "$RCH_QUEUE_JSON_RESOLVED" ]; then
     RCH_QUEUE_RAW="$(cat "$RCH_QUEUE_JSON_RESOLVED" 2>/dev/null || true)"
 elif command -v rch >/dev/null 2>&1; then
-    RCH_QUEUE_RAW="$(rch queue --json 2>/dev/null || true)"
+    RCH_QUEUE_EXIT=0
+    RCH_QUEUE_RAW="$(run_bounded_command "$RCH_PROBE_TIMEOUT_SECONDS" rch queue --json 2>/dev/null)" || RCH_QUEUE_EXIT=$?
+    if is_timeout_status "$RCH_QUEUE_EXIT"; then
+        RCH_QUEUE_TIMED_OUT=true
+        RCH_QUEUE_RAW=""
+    fi
 fi
-if [ -n "$RCH_QUEUE_RAW" ] && printf '%s' "$RCH_QUEUE_RAW" | jq -e '.success == true and (.data | type == "object")' >/dev/null 2>&1; then
+if [ "$RCH_QUEUE_TIMED_OUT" = "true" ]; then
+    RCH_QUEUE_STATUS="timeout"
+elif [ -n "$RCH_QUEUE_RAW" ] && printf '%s' "$RCH_QUEUE_RAW" | jq -e '.success == true and (.data | type == "object")' >/dev/null 2>&1; then
     RCH_ACTIVE_BUILDS="$(printf '%s' "$RCH_QUEUE_RAW" | jq '[.data.active_builds[]?] | length')"
     RCH_STALE_ACTIVE_BUILDS="$(printf '%s' "$RCH_QUEUE_RAW" | jq '[.data.active_builds[]? | select((.last_heartbeat_at == null) and (.last_progress_at == null))] | length')"
     RCH_QUEUED_BUILDS="$(printf '%s' "$RCH_QUEUE_RAW" | jq '[.data.queued_builds[]?] | length')"
@@ -399,6 +447,9 @@ fi
 if [ "$RCH_STATUS" = "local_fallback_likely" ]; then
     CAVEATS+=("rch_health_check_failed: cargo evidence captured this session may have been local fallback rather than offloaded; verify before closure if the bead required remote builds")
     NEXT_ACTIONS+=("re-run cargo verification with explicit rch routing OR document the local-fallback context in the close_reason")
+elif [ "$RCH_STATUS" = "timeout" ]; then
+    CAVEATS+=("rch_health_check_timeout: rch check exceeded ${RCH_PROBE_TIMEOUT_SECONDS}s; cargo evidence remains unverified until a bounded remote exec succeeds")
+    NEXT_ACTIONS+=("rerun RCH health checks separately before treating Cargo evidence as available")
 fi
 if [ "$RCH_QUEUE_STATUS" = "stale_active_records" ]; then
     CAVEATS+=("rch_queue_stale_active_records: ${RCH_STALE_ACTIVE_BUILDS} active RCH record(s) have no heartbeat/progress timestamp; cargo submissions may time out querying the daemon and fall back locally")
@@ -407,6 +458,9 @@ if [ "$RCH_QUEUE_STATUS" = "stale_active_records" ]; then
     NEXT_ACTIONS+=("if this host's rch CLI rejects 'rch exec' as an unknown subcommand, do not run Cargo locally; record the remote-exec surface mismatch and keep the Cargo gate unverified")
 elif [ "$RCH_QUEUE_STATUS" = "queued" ]; then
     CAVEATS+=("rch_queue_busy: ${RCH_QUEUED_BUILDS} queued RCH job(s); cargo verification may wait behind other agents")
+elif [ "$RCH_QUEUE_STATUS" = "timeout" ]; then
+    CAVEATS+=("rch_queue_timeout: rch queue exceeded ${RCH_PROBE_TIMEOUT_SECONDS}s; closeout audit kept running but queue evidence is unavailable")
+    NEXT_ACTIONS+=("capture RCH queue evidence separately before closing beads that require remote Cargo proof")
 fi
 if [ "$AGENT_MAIL_STATUS" = "unreachable" ]; then
     CAVEATS+=("agent_mail_unreachable: reservation/inbox evidence could not be captured at audit time; rely on commit-message coordination")
