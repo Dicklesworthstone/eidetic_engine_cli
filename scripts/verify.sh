@@ -524,6 +524,14 @@ run_stage "Advanced E2E Scripts" "./scripts/e2e_advanced.sh"
 # Gate 8: Boundary Migration
 run_stage "Boundary Migration Scripts" "./scripts/e2e_boundary_migration.sh"
 
+# Gate 8.5: ee doctor safety harness (bd-21joy)
+# Wraps verify-undo.sh, verify-idempotence.sh, verify-crash-recovery.sh,
+# verify-concurrency.sh, verify-metamorphic.sh against the per-FM
+# fixture suite under tests/doctor_fixtures/ (owned by bd-2oh15).
+# Advisory while fixtures or sub-scripts are missing; set
+# EE_SAFETY_HARNESS_STRICT=1 to fail closed.
+run_stage "ee doctor Safety Harness (bd-21joy)" "./scripts/run-safety-harness.sh"
+
 # Gate 9: Performance Benchmarks (optional, gated behind --include-bench)
 if [ "$INCLUDE_BENCH" = "true" ]; then
     run_stage "Performance Benchmarks" "./scripts/bench_perf_regression.sh --check-regression"
