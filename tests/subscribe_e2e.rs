@@ -1,4 +1,5 @@
 use std::process::{Command, Output};
+use std::time::Instant;
 
 type TestResult = Result<(), String>;
 
@@ -33,6 +34,20 @@ fn expect_success(output: &Output, label: &str) -> TestResult {
             String::from_utf8_lossy(&output.stderr)
         ),
     )
+}
+
+fn log_event(suite: &str, test: &str, phase: &str, event: &str, data: serde_json::Value) {
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "schema": "ee.test_event.v1",
+            "suite": suite,
+            "test": test,
+            "phase": phase,
+            "event": event,
+            "data": data,
+        })
+    );
 }
 
 fn remember(workspace: &str, index: usize, tags: &str) -> TestResult {
@@ -137,5 +152,210 @@ fn subscribe_poll_and_stream_replay_memory_deltas() -> TestResult {
     ensure(
         cursors.windows(2).all(|window| window[0] < window[1]),
         "stream cursors must be strictly monotonic",
+    )
+}
+
+#[test]
+fn subscribe_poll_filters_and_paginates_real_audit_deltas() -> TestResult {
+    let suite = "subscribe_e2e";
+    let test = "subscribe_poll_filters_and_paginates_real_audit_deltas";
+    let started = Instant::now();
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    log_event(
+        suite,
+        test,
+        "setup",
+        "workspace_created",
+        serde_json::json!({ "workspace": workspace }),
+    );
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    expect_success(&init, "init")?;
+
+    for (index, tags) in ["release,ci", "audit,ops", "release,audit"]
+        .iter()
+        .enumerate()
+    {
+        remember(&workspace, index, tags)?;
+        log_event(
+            suite,
+            test,
+            "setup",
+            "memory_seeded",
+            serde_json::json!({ "index": index, "tags": tags }),
+        );
+    }
+
+    let all_match_first_page = run_ee(&[
+        "--workspace",
+        &workspace,
+        "subscribe",
+        "poll",
+        "--cursor",
+        "0",
+        "--filter",
+        "LEVEL=procedural,KIND=rule,TAG=release+audit,TAG_MODE=any,CHANGED_FIELDS=tags",
+        "--limit",
+        "2",
+        "--json",
+    ])?;
+    expect_success(&all_match_first_page, "subscribe paginated poll")?;
+    let first_page = stdout_json(&all_match_first_page, "subscribe paginated poll")?;
+    log_event(
+        suite,
+        test,
+        "act",
+        "first_page",
+        serde_json::json!({
+            "deltaCount": first_page["data"]["deltaCount"],
+            "nextCursor": first_page["data"]["nextCursor"],
+        }),
+    );
+    ensure(
+        first_page["data"]["deltaCount"] == serde_json::json!(2),
+        "first page should inspect two matching real audit rows",
+    )?;
+
+    let first_page_deltas = first_page["data"]["deltas"]
+        .as_array()
+        .ok_or_else(|| "first page deltas should be an array".to_string())?;
+    for delta in first_page_deltas {
+        ensure(
+            delta["schema"] == serde_json::json!("ee.memory.delta.v1"),
+            "delta schema should be stable",
+        )?;
+        ensure(
+            delta["kind"] == serde_json::json!("created"),
+            "remembered memories should surface created deltas",
+        )?;
+        let changed_fields = delta["changedFields"]
+            .as_array()
+            .ok_or_else(|| "changedFields should be an array".to_string())?;
+        ensure(
+            changed_fields
+                .iter()
+                .any(|field| field == &serde_json::json!("tags")),
+            "created deltas should expose tags as a changed field",
+        )?;
+    }
+
+    let next_cursor = first_page["data"]["nextCursor"]
+        .as_u64()
+        .ok_or_else(|| "first page nextCursor must be u64".to_string())?;
+    let all_match_second_page = run_ee(&[
+        "--workspace",
+        &workspace,
+        "subscribe",
+        "poll",
+        "--cursor",
+        &next_cursor.to_string(),
+        "--filter",
+        "LEVEL=procedural,KIND=rule,TAG=release+audit,TAG_MODE=any,CHANGED_FIELDS=tags",
+        "--limit",
+        "2",
+        "--json",
+    ])?;
+    expect_success(&all_match_second_page, "subscribe paginated second poll")?;
+    let second_page = stdout_json(&all_match_second_page, "subscribe paginated second poll")?;
+    log_event(
+        suite,
+        test,
+        "act",
+        "second_page",
+        serde_json::json!({
+            "deltaCount": second_page["data"]["deltaCount"],
+            "nextCursor": second_page["data"]["nextCursor"],
+        }),
+    );
+    ensure(
+        second_page["data"]["deltaCount"] == serde_json::json!(1),
+        "second page should continue from nextCursor without replay",
+    )?;
+
+    let all_tags = run_ee(&[
+        "--workspace",
+        &workspace,
+        "subscribe",
+        "poll",
+        "--cursor",
+        "0",
+        "--filter",
+        "TAG=release+audit,TAG_MODE=all",
+        "--json",
+    ])?;
+    expect_success(&all_tags, "subscribe all-tags poll")?;
+    let all_tags_json = stdout_json(&all_tags, "subscribe all-tags poll")?;
+    log_event(
+        suite,
+        test,
+        "assert",
+        "all_tags_filter",
+        serde_json::json!({
+            "deltaCount": all_tags_json["data"]["deltaCount"],
+            "elapsedMs": started.elapsed().as_millis(),
+        }),
+    );
+    ensure(
+        all_tags_json["data"]["deltaCount"] == serde_json::json!(1),
+        "TAG_MODE=all should keep only the memory carrying both tags",
+    )
+}
+
+#[test]
+fn subscribe_poll_reports_stale_cursor_with_real_database() -> TestResult {
+    let suite = "subscribe_e2e";
+    let test = "subscribe_poll_reports_stale_cursor_with_real_database";
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    log_event(
+        suite,
+        test,
+        "setup",
+        "workspace_created",
+        serde_json::json!({ "workspace": workspace }),
+    );
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    expect_success(&init, "init")?;
+    remember(&workspace, 0, "release,subscribe")?;
+
+    let stale = run_ee(&[
+        "--workspace",
+        &workspace,
+        "subscribe",
+        "poll",
+        "--cursor",
+        "999999",
+        "--filter",
+        "LEVEL=procedural",
+        "--json",
+    ])?;
+    expect_success(&stale, "subscribe stale cursor poll")?;
+    let stale_json = stdout_json(&stale, "subscribe stale cursor poll")?;
+    log_event(
+        suite,
+        test,
+        "assert",
+        "stale_cursor_degradation",
+        serde_json::json!({
+            "deltaCount": stale_json["data"]["deltaCount"],
+            "nextCursor": stale_json["data"]["nextCursor"],
+            "degraded": stale_json["data"]["degraded"],
+        }),
+    );
+
+    ensure(
+        stale_json["data"]["deltaCount"] == serde_json::json!(0),
+        "stale cursor should not replay existing audit deltas",
+    )?;
+    let degraded = stale_json["data"]["degraded"]
+        .as_array()
+        .ok_or_else(|| "degraded should be an array".to_string())?;
+    ensure(
+        degraded
+            .iter()
+            .any(|entry| entry["code"] == serde_json::json!("subscribe_cursor_stale")),
+        "stale cursor should emit subscribe_cursor_stale degradation",
     )
 }
