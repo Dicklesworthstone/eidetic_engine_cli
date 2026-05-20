@@ -6497,7 +6497,11 @@ pub struct RememberArgs {
     #[arg(long, short = 'l', default_value = "episodic")]
     pub level: String,
 
-    /// Memory kind (rule, fact, decision, failure, etc.).
+    /// Memory kind. Canonical values: `rule`, `fact`, `decision`, `failure`,
+    /// `command`, `convention`, `anti-pattern`, `risk`, `playbook-step`.
+    /// Free-form strings are accepted to allow project-specific extensions,
+    /// but agents should prefer the canonical set to keep retrieval filters
+    /// portable across workspaces.
     #[arg(long, short = 'k', default_value = "fact")]
     pub kind: String,
 
