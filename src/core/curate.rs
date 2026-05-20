@@ -1558,6 +1558,19 @@ pub fn review_session_proposals(
     let mut durable_mutation = false;
     if options.propose && !options.dry_run {
         for candidate in &mut candidates {
+            // bd-2d32o: bootstrap (propose_new_memory) candidates carry an
+            // empty target_memory_id sentinel because no existing memory has
+            // been linked yet. The curation_candidates table currently
+            // enforces a FK to memories.id, so persisting an empty string
+            // would fail. Skip persistence for bootstrap candidates and let
+            // the dry-run surface still return them so an agent can act on
+            // them via `ee curate accept` / `ee curate retire`. Persisting
+            // bootstrap candidates needs a schema follow-up to relax the FK
+            // or to materialize a placeholder memory at accept time; tracked
+            // for a downstream slice.
+            if candidate.target_memory_id.is_empty() {
+                continue;
+            }
             if connection
                 .get_curation_candidate(&prepared.workspace_id, &candidate.candidate_id)
                 .map_err(|error| DomainError::Storage {
@@ -1746,6 +1759,23 @@ fn build_review_session_candidates(
         .filter(|candidate| candidate.confidence >= min_confidence)
         .collect::<Vec<_>>();
 
+    // bd-2d32o: the linker pass above strictly requires `span.memory_id` to be
+    // set, but `ee import cass` writes evidence spans with `memory_id: null`
+    // for first-window onboarding. Without a bootstrap path the proposer
+    // returns `candidateCount: 0` for every fresh CASS import, breaking the
+    // documented `ee import cass` -> `ee review session --propose` chain.
+    //
+    // Surface `propose_new_memory` candidates from spans the linker rejected
+    // (null/empty `memory_id`) so an agent can promote bootstrap rules out of
+    // a brand-new cass corpus. The linker semantics (target_memory_id non-empty,
+    // candidate_kind in {failure, decision, rule}) remain untouched.
+    candidates.extend(build_bootstrap_session_candidates(
+        workspace_id,
+        session,
+        evidence_spans,
+        min_confidence,
+    ));
+
     candidates.sort_by(|left, right| {
         right
             .confidence
@@ -1755,6 +1785,118 @@ fn build_review_session_candidates(
     });
     candidates.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
     candidates
+}
+
+/// Candidate kind for bootstrap-from-cass review candidates. Distinct from
+/// the linker kinds (`failure`, `decision`, `rule`) so downstream consumers
+/// can recognize "propose a NEW memory" candidates without re-classifying
+/// the span content.
+pub const REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY: &str = "propose_new_memory";
+
+/// Build review candidates from evidence spans that the linker rejected
+/// because they carry no `memory_id` (typical for fresh `ee import cass`
+/// rows). Per bd-2d32o, this is the "Option A — preserve linking semantics"
+/// minimal fix path.
+///
+/// Bootstrap differs from the linker pass in three deliberate ways:
+///
+/// * **Inverse filter** — only spans with `memory_id` NULL or empty.
+/// * **`candidate_kind = "propose_new_memory"`** — surfaces that the
+///   candidate is a brand-new rule, not a link to an existing memory.
+/// * **Single-span clusters allowed** — first-window cass imports often
+///   produce one span per session, so requiring `evidence_ids.len() >= 2`
+///   would defeat the bootstrap path. Confidence still scales with span
+///   count so a 1-span proposal stays at the low end of the band.
+fn build_bootstrap_session_candidates(
+    workspace_id: &str,
+    session: &StoredSession,
+    evidence_spans: &[StoredEvidenceSpan],
+    min_confidence: f32,
+) -> Vec<ReviewSessionCandidate> {
+    let mut grouped: BTreeMap<String, Vec<&StoredEvidenceSpan>> = BTreeMap::new();
+    for span in evidence_spans {
+        if !span.memory_id.as_deref().is_none_or(str::is_empty) {
+            continue;
+        }
+        let topic_key = review_topic_key(&span.excerpt);
+        if topic_key == "noise" {
+            continue;
+        }
+        grouped.entry(topic_key).or_default().push(span);
+    }
+
+    grouped
+        .into_iter()
+        .filter_map(|(topic_key, mut spans)| {
+            spans.sort_by(|left, right| {
+                left.start_line
+                    .cmp(&right.start_line)
+                    .then_with(|| left.end_line.cmp(&right.end_line))
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            build_bootstrap_candidate(workspace_id, session, &topic_key, &spans)
+        })
+        .filter(|candidate| candidate.confidence >= min_confidence)
+        .collect()
+}
+
+fn build_bootstrap_candidate(
+    workspace_id: &str,
+    session: &StoredSession,
+    topic_key: &str,
+    spans: &[&StoredEvidenceSpan],
+) -> Option<ReviewSessionCandidate> {
+    let evidence_ids = spans
+        .iter()
+        .map(|span| span.id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if evidence_ids.is_empty() {
+        return None;
+    }
+    let proposed_content = review_candidate_content(topic_key, "rule", spans);
+    let confidence = review_candidate_confidence(spans.len());
+    let content_hash = format!(
+        "blake3:{}",
+        blake3::hash(proposed_content.as_bytes()).to_hex()
+    );
+    let candidate_id = deterministic_curate_id(&[
+        workspace_id,
+        session.id.as_str(),
+        session.cass_session_id.as_str(),
+        "bootstrap",
+        topic_key,
+        evidence_ids.join(",").as_str(),
+        content_hash.as_str(),
+    ]);
+    let reason = format!(
+        "Bootstrap candidate: clustered {} cass-imported span(s) for topic `{topic_key}` from session `{}` (no existing memory linked yet — promote to a new memory via `ee curate accept`).",
+        evidence_ids.len(),
+        session.cass_session_id
+    );
+
+    Some(ReviewSessionCandidate {
+        candidate_id,
+        candidate_type: CandidateType::Rule.as_str().to_owned(),
+        candidate_kind: REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY.to_owned(),
+        topic_key: topic_key.to_owned(),
+        // Sentinel: empty target_memory_id signals a bootstrap candidate
+        // that has not yet been linked to any persisted memory. The
+        // persistence guard at the caller site skips these to avoid
+        // tripping the curation_candidates FK against memories.id; the
+        // dry-run proposer surface returns them so an agent can act on
+        // them via `ee curate accept` / `ee curate retire`.
+        target_memory_id: String::new(),
+        proposed_content,
+        proposed_confidence: confidence,
+        source_type: CandidateSource::AgentInference.as_str().to_owned(),
+        source_ids: evidence_ids,
+        reason,
+        confidence,
+        content_hash,
+        persisted: false,
+    })
 }
 
 fn build_review_candidate(
@@ -6385,16 +6527,18 @@ mod tests {
         CURATE_UNTOMBSTONE_SCHEMA_V1, CURATE_VALIDATE_SCHEMA_V1, CurateCandidatesDegradation,
         CurateCandidatesFilter, CurateCandidatesOptions, CurateCandidatesReport,
         CurateDispositionOptions, CurateReviewAction, CurateReviewOptions,
-        REVIEW_SESSION_SCHEMA_V1, REVIEW_WORKSPACE_SCHEMA_V1, ReviewSessionCandidate,
-        ReviewSessionOptions, ReviewSessionReport, apply_curation_candidate,
-        candidate_summary_from_stored, list_curation_candidates, review_curation_candidate,
-        review_session_proposals, run_curation_disposition, stable_workspace_id,
-        validate_curation_candidate,
+        REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY, REVIEW_SESSION_SCHEMA_V1,
+        REVIEW_WORKSPACE_SCHEMA_V1, ReviewSessionCandidate, ReviewSessionOptions,
+        ReviewSessionReport, apply_curation_candidate, build_bootstrap_session_candidates,
+        build_review_session_candidates, candidate_summary_from_stored, list_curation_candidates,
+        review_curation_candidate, review_session_proposals, run_curation_disposition,
+        stable_workspace_id, validate_curation_candidate,
     };
     use crate::db::{
         CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateFeedbackEventInput,
         CreateMemoryInput, CreateMemoryLinkInput, CreateSessionInput, CreateWorkspaceInput,
-        DbConnection, MemoryLinkRelation, MemoryLinkSource, StoredCurationCandidate, audit_actions,
+        DbConnection, MemoryLinkRelation, MemoryLinkSource, StoredCurationCandidate,
+        StoredEvidenceSpan, StoredSession, audit_actions,
     };
     use crate::models::degradation::GRAPH_CURATE_DISCONNECTED_GRAPH_CODE;
     use crate::models::{CandidateId, EvidenceId, MemoryId, SessionId};
@@ -9299,5 +9443,117 @@ mod tests {
 
     fn feedback_id(seed: u128) -> String {
         format!("fb_{seed:026}")
+    }
+
+    fn synthetic_stored_session() -> StoredSession {
+        StoredSession {
+            id: "ses_test00000000000000000000000".to_owned(),
+            workspace_id: "wsp_test00000000000000000000000".to_owned(),
+            cass_session_id: "cass-session-bd-2d32o".to_owned(),
+            source_path: None,
+            agent_name: None,
+            model: None,
+            started_at: Some("2026-05-20T03:00:00Z".to_owned()),
+            ended_at: Some("2026-05-20T03:10:00Z".to_owned()),
+            message_count: 0,
+            token_count: None,
+            content_hash: "blake3:0000000000".to_owned(),
+            metadata_json: None,
+            imported_at: "2026-05-20T03:30:00Z".to_owned(),
+            updated_at: "2026-05-20T03:30:00Z".to_owned(),
+        }
+    }
+
+    fn synthetic_span(id: &str, memory_id: Option<&str>, excerpt: &str) -> StoredEvidenceSpan {
+        StoredEvidenceSpan {
+            id: id.to_owned(),
+            workspace_id: "wsp_test00000000000000000000000".to_owned(),
+            session_id: "ses_test00000000000000000000000".to_owned(),
+            memory_id: memory_id.map(str::to_owned),
+            cass_span_id: format!("cass-span-{id}"),
+            span_kind: "message".to_owned(),
+            start_line: 1,
+            end_line: 2,
+            start_byte: None,
+            end_byte: None,
+            role: Some("user".to_owned()),
+            excerpt: excerpt.to_owned(),
+            content_hash: format!("blake3:span-{id}"),
+            metadata_json: None,
+            created_at: "2026-05-20T03:05:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn bootstrap_session_candidates_surface_propose_new_memory_for_null_memory_id_spans() {
+        // bd-2d32o: with `ee import cass` writing memory_id=null spans, the
+        // linker path must NOT be the only proposer. Verify the bootstrap
+        // path produces a propose_new_memory candidate even when the linker
+        // rejects every span.
+        let session = synthetic_stored_session();
+        let spans = vec![
+            synthetic_span(
+                "span_aa00000000000000000000000000",
+                None,
+                "Always run cargo fmt --check before cutting a release tag.",
+            ),
+            synthetic_span(
+                "span_bb00000000000000000000000000",
+                Some(""),
+                "Run cargo fmt --check before any rust-tag release step.",
+            ),
+        ];
+
+        let candidates = build_review_session_candidates(
+            "wsp_test00000000000000000000000",
+            &session,
+            &spans,
+            0.40,
+            10,
+        );
+
+        assert!(
+            !candidates.is_empty(),
+            "bootstrap path must surface at least one candidate from null/empty memory_id spans"
+        );
+        let bootstrap = candidates
+            .iter()
+            .find(|candidate| candidate.candidate_kind == REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY)
+            .expect("candidate_kind=propose_new_memory must appear for null memory_id input");
+        assert!(
+            bootstrap.target_memory_id.is_empty(),
+            "bootstrap candidate target_memory_id must be the empty sentinel until accept-time materialization"
+        );
+        assert!(
+            !bootstrap.source_ids.is_empty(),
+            "bootstrap candidate must carry the source evidence span ids"
+        );
+        assert!(bootstrap.confidence >= 0.40);
+        assert!(bootstrap.reason.contains("Bootstrap candidate"));
+    }
+
+    #[test]
+    fn bootstrap_session_candidates_ignore_linker_eligible_spans() {
+        // The bootstrap pass must NOT poach spans that already carry a
+        // memory_id (those belong to the linker pass) so the two passes do
+        // not double-count the same evidence.
+        let session = synthetic_stored_session();
+        let spans = vec![synthetic_span(
+            "span_cc00000000000000000000000000",
+            Some("mem_linked0000000000000000000000"),
+            "Always run cargo fmt --check before cutting a release tag.",
+        )];
+
+        let bootstrap = build_bootstrap_session_candidates(
+            "wsp_test00000000000000000000000",
+            &session,
+            &spans,
+            0.40,
+        );
+
+        assert!(
+            bootstrap.is_empty(),
+            "bootstrap pass must skip spans with non-empty memory_id (those are linker territory)"
+        );
     }
 }
