@@ -59,6 +59,7 @@ pub const REQUIRED_GRAPH_ENGINE: &str = "franken_networkx";
 pub const GRAPH_ALGORITHM_WITNESS_SCHEMA_V1: &str = "ee.graph.algorithm_witness.v1";
 pub const GRAPH_ALGORITHM_RESULT_CACHE_KEY_SCHEMA_V1: &str =
     "ee.graph.algorithm_result_cache_key.v1";
+pub const GRAPH_REMOTE_PROJECTION_STALE_CODE: &str = "graph_remote_projection_stale";
 
 pub type GraphResult<T> = std::result::Result<T, GraphError>;
 
@@ -1189,6 +1190,58 @@ pub struct MemoryGraphProjection {
     pub snapshot_version: u64,
 }
 
+/// Origin metadata attached to graph edges that may have been materialized from
+/// cached mesh memory. Local edges deliberately use the same shape so graph
+/// surfaces can distinguish local evidence from cached peer evidence without
+/// consulting raw memory-link metadata.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct GraphProjectionEdgeOrigin {
+    pub origin_kind: String,
+    pub origin_node: Option<String>,
+    pub origin_workspace_id: Option<String>,
+    pub producer_peer_id: Option<String>,
+    pub cached_material_id: Option<String>,
+    pub material_lane: Option<String>,
+    pub trust_lane: Option<String>,
+    pub redaction_posture: Option<String>,
+    pub provenance: Option<String>,
+    pub remote_graph_stale: bool,
+}
+
+impl GraphProjectionEdgeOrigin {
+    #[must_use]
+    pub fn local() -> Self {
+        Self {
+            origin_kind: "local".to_owned(),
+            origin_node: None,
+            origin_workspace_id: None,
+            producer_peer_id: None,
+            cached_material_id: None,
+            material_lane: None,
+            trust_lane: None,
+            redaction_posture: None,
+            provenance: None,
+            remote_graph_stale: false,
+        }
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "originKind": self.origin_kind,
+            "originNode": self.origin_node,
+            "originWorkspaceId": self.origin_workspace_id,
+            "producerPeerId": self.producer_peer_id,
+            "cachedMaterialId": self.cached_material_id,
+            "materialLane": self.material_lane,
+            "trustLane": self.trust_lane,
+            "redactionPosture": self.redaction_posture,
+            "provenance": self.provenance,
+            "remoteGraphStale": self.remote_graph_stale,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct CausalEvidenceGraphRow {
     edge_id: String,
@@ -1814,30 +1867,7 @@ fn build_memory_graph_from_links(
 
     let mut graph = DiGraph::new(CompatibilityMode::Strict);
     for link in links {
-        let mut attrs = AttrMap::new();
-        attrs.insert(
-            "weight".to_string(),
-            CgseValue::Float(f64::from(link.weight)),
-        );
-        attrs.insert(
-            "confidence".to_string(),
-            CgseValue::Float(f64::from(link.confidence)),
-        );
-        attrs.insert(
-            "relation".to_string(),
-            CgseValue::String(link.relation.clone()),
-        );
-        attrs.insert("source".to_string(), CgseValue::String(link.source.clone()));
-        attrs.insert(
-            "evidence_count".to_string(),
-            CgseValue::Int(i64::from(link.evidence_count)),
-        );
-        if let Some(ref reinforced) = link.last_reinforced_at {
-            attrs.insert(
-                "last_reinforced_at".to_string(),
-                CgseValue::String(reinforced.clone()),
-            );
-        }
+        let attrs = graph_projection_edge_attrs(link);
 
         graph.add_node(&link.src_memory_id);
         graph.add_node(&link.dst_memory_id);
@@ -1867,6 +1897,69 @@ fn build_memory_graph_from_links(
         build_ms,
         snapshot_version,
     })
+}
+
+fn graph_projection_edge_attrs(link: &StoredMemoryLink) -> AttrMap {
+    let mut attrs = AttrMap::new();
+    attrs.insert(
+        "weight".to_string(),
+        CgseValue::Float(f64::from(link.weight)),
+    );
+    attrs.insert(
+        "confidence".to_string(),
+        CgseValue::Float(f64::from(link.confidence)),
+    );
+    attrs.insert(
+        "relation".to_string(),
+        CgseValue::String(link.relation.clone()),
+    );
+    attrs.insert("source".to_string(), CgseValue::String(link.source.clone()));
+    attrs.insert(
+        "evidence_count".to_string(),
+        CgseValue::Int(i64::from(link.evidence_count)),
+    );
+    if let Some(ref reinforced) = link.last_reinforced_at {
+        attrs.insert(
+            "last_reinforced_at".to_string(),
+            CgseValue::String(reinforced.clone()),
+        );
+    }
+
+    let origin = graph_projection_edge_origin(link.metadata_json.as_deref());
+    attrs.insert(
+        "graph_origin".to_string(),
+        CgseValue::String(origin.origin_kind.clone()),
+    );
+    if let Some(value) = origin.origin_node {
+        attrs.insert("origin_node".to_string(), CgseValue::String(value));
+    }
+    if let Some(value) = origin.origin_workspace_id {
+        attrs.insert("origin_workspace_id".to_string(), CgseValue::String(value));
+    }
+    if let Some(value) = origin.producer_peer_id {
+        attrs.insert("producer_peer_id".to_string(), CgseValue::String(value));
+    }
+    if let Some(value) = origin.cached_material_id {
+        attrs.insert("cached_material_id".to_string(), CgseValue::String(value));
+    }
+    if let Some(value) = origin.material_lane {
+        attrs.insert("material_lane".to_string(), CgseValue::String(value));
+    }
+    if let Some(value) = origin.trust_lane {
+        attrs.insert("trust_lane".to_string(), CgseValue::String(value));
+    }
+    if let Some(value) = origin.redaction_posture {
+        attrs.insert("redaction_posture".to_string(), CgseValue::String(value));
+    }
+    if let Some(value) = origin.provenance {
+        attrs.insert("provenance".to_string(), CgseValue::String(value));
+    }
+    attrs.insert(
+        "remote_graph_stale".to_string(),
+        CgseValue::Bool(origin.remote_graph_stale),
+    );
+
+    attrs
 }
 
 fn graph_row_text(row: &Row, index: usize, column: &'static str) -> GraphResult<String> {
@@ -1960,6 +2053,57 @@ pub(crate) fn memory_link_mesh_metadata_visible(metadata_json: Option<&str>) -> 
         && graph_link_mesh_string(&metadata, &["redactionPosture", "redaction_posture"]).is_some()
 }
 
+fn graph_projection_edge_origin(metadata_json: Option<&str>) -> GraphProjectionEdgeOrigin {
+    let Some(metadata_json) = metadata_json else {
+        return GraphProjectionEdgeOrigin::local();
+    };
+    let Ok(metadata) = serde_json::from_str::<serde_json::Value>(metadata_json) else {
+        return GraphProjectionEdgeOrigin::local();
+    };
+    if !graph_link_metadata_contains_mesh_marker(&metadata) {
+        return GraphProjectionEdgeOrigin::local();
+    }
+
+    let origin_workspace_id =
+        graph_link_mesh_string(&metadata, &["originWorkspaceId", "origin_workspace_id"])
+            .map(str::to_owned);
+    let producer_peer_id =
+        graph_link_mesh_string(&metadata, &["producerPeerId", "producer_peer_id"])
+            .map(str::to_owned);
+    let cached_material_id =
+        graph_link_mesh_string(&metadata, &["cachedMaterialId", "cached_material_id"])
+            .map(str::to_owned);
+    let material_lane =
+        graph_link_mesh_string(&metadata, &["materialLane", "material_lane"]).map(str::to_owned);
+    let trust_lane =
+        graph_link_mesh_string(&metadata, &["trustLane", "trust_lane"]).map(str::to_owned);
+    let redaction_posture =
+        graph_link_mesh_string(&metadata, &["redactionPosture", "redaction_posture"])
+            .map(str::to_owned);
+    let origin_node = graph_link_mesh_string(&metadata, &["originNode", "origin_node"])
+        .map(str::to_owned)
+        .or_else(|| producer_peer_id.clone());
+    let provenance = match (producer_peer_id.as_deref(), cached_material_id.as_deref()) {
+        (Some(peer), Some(material)) => Some(format!("mesh://{peer}/{material}")),
+        _ => cached_material_id
+            .as_deref()
+            .map(|material| format!("mesh-cache://{material}")),
+    };
+
+    GraphProjectionEdgeOrigin {
+        origin_kind: "remote_cached".to_owned(),
+        origin_node,
+        origin_workspace_id,
+        producer_peer_id,
+        cached_material_id,
+        material_lane,
+        trust_lane,
+        redaction_posture,
+        provenance,
+        remote_graph_stale: graph_link_mesh_remote_graph_stale(&metadata),
+    }
+}
+
 fn graph_link_metadata_contains_mesh_marker(metadata: &serde_json::Value) -> bool {
     [
         "mesh",
@@ -2034,6 +2178,54 @@ fn graph_link_mesh_lane_is_known(lane: &str) -> bool {
         lane,
         "metadata" | "body" | "embedding" | "graphSignal" | "curationSignal"
     )
+}
+
+fn graph_link_mesh_remote_graph_stale(metadata: &serde_json::Value) -> bool {
+    graph_link_mesh_bool(
+        metadata,
+        &[
+            "remoteGraphStale",
+            "remote_graph_stale",
+            "graphDataStale",
+            "graph_data_stale",
+            "cacheStale",
+            "cache_stale",
+            "stale",
+        ],
+    ) || graph_link_mesh_string(
+        metadata,
+        &[
+            "remoteGraphStatus",
+            "remote_graph_status",
+            "graphDataStatus",
+            "graph_data_status",
+            "cacheStatus",
+            "cache_status",
+            "snapshotStatus",
+            "snapshot_status",
+        ],
+    )
+    .is_some_and(|status| {
+        matches!(
+            status,
+            "stale" | "expired" | "outdated" | "invalid" | "invalidated"
+        )
+    })
+}
+
+fn graph_link_mesh_bool(metadata: &serde_json::Value, keys: &[&str]) -> bool {
+    keys.iter()
+        .find_map(|key| graph_link_json_bool(metadata, key))
+        .or_else(|| {
+            metadata
+                .get("mesh")
+                .and_then(|mesh| keys.iter().find_map(|key| graph_link_json_bool(mesh, key)))
+        })
+        .unwrap_or(false)
+}
+
+fn graph_link_json_bool(metadata: &serde_json::Value, key: &str) -> Option<bool> {
+    metadata.get(key).and_then(serde_json::Value::as_bool)
 }
 
 fn add_projection_edge(
@@ -3327,6 +3519,7 @@ fn graph_snapshot_metrics_json(
     let edges: Vec<_> = links
         .iter()
         .map(|link| {
+            let origin = graph_projection_edge_origin(link.metadata_json.as_deref());
             serde_json::json!({
                 "id": link.id,
                 "source": link.src_memory_id,
@@ -3339,9 +3532,11 @@ fn graph_snapshot_metrics_json(
                 "confidence": link.confidence,
                 "evidenceCount": link.evidence_count,
                 "sourceKind": link.source,
+                "origin": origin.data_json(),
             })
         })
         .collect();
+    let remote_graph = graph_snapshot_remote_graph_summary(links);
 
     let metrics = serde_json::json!({
         "schema": "ee.graph.snapshot.metrics.v1",
@@ -3349,9 +3544,11 @@ fn graph_snapshot_metrics_json(
         "graph": {
             "nodes": nodes.clone(),
             "edges": edges.clone(),
+            "remoteGraph": remote_graph.clone(),
         },
         "nodes": nodes,
         "edges": edges,
+        "remoteGraph": remote_graph,
         "centrality": {
             "status": centrality.status.as_str(),
             "topPagerank": centrality
@@ -3369,6 +3566,65 @@ fn graph_snapshot_metrics_json(
 
     serde_json::to_string(&metrics)
         .map_err(|error| GraphError::json("serialize graph snapshot metrics", error))
+}
+
+fn graph_snapshot_remote_graph_summary(links: &[StoredMemoryLink]) -> serde_json::Value {
+    let mut cached_edge_count = 0usize;
+    let mut stale_edge_count = 0usize;
+    let mut origin_nodes = BTreeSet::new();
+    let mut origin_workspace_ids = BTreeSet::new();
+    let mut producer_peer_ids = BTreeSet::new();
+    let mut material_lanes = BTreeSet::new();
+    let mut trust_lanes = BTreeSet::new();
+    let mut provenance = BTreeSet::new();
+
+    for link in links {
+        let origin = graph_projection_edge_origin(link.metadata_json.as_deref());
+        if origin.origin_kind != "remote_cached" {
+            continue;
+        }
+        cached_edge_count += 1;
+        if origin.remote_graph_stale {
+            stale_edge_count += 1;
+        }
+        if let Some(value) = origin.origin_node {
+            origin_nodes.insert(value);
+        }
+        if let Some(value) = origin.origin_workspace_id {
+            origin_workspace_ids.insert(value);
+        }
+        if let Some(value) = origin.producer_peer_id {
+            producer_peer_ids.insert(value);
+        }
+        if let Some(value) = origin.material_lane {
+            material_lanes.insert(value);
+        }
+        if let Some(value) = origin.trust_lane {
+            trust_lanes.insert(value);
+        }
+        if let Some(value) = origin.provenance {
+            provenance.insert(value);
+        }
+    }
+
+    let degraded_codes = if stale_edge_count > 0 {
+        vec![GRAPH_REMOTE_PROJECTION_STALE_CODE]
+    } else {
+        Vec::new()
+    };
+
+    serde_json::json!({
+        "status": if stale_edge_count > 0 { "stale" } else { "current" },
+        "cachedEdgeCount": cached_edge_count,
+        "staleEdgeCount": stale_edge_count,
+        "originNodes": origin_nodes.into_iter().collect::<Vec<_>>(),
+        "originWorkspaceIds": origin_workspace_ids.into_iter().collect::<Vec<_>>(),
+        "producerPeerIds": producer_peer_ids.into_iter().collect::<Vec<_>>(),
+        "materialLanes": material_lanes.into_iter().collect::<Vec<_>>(),
+        "trustLanes": trust_lanes.into_iter().collect::<Vec<_>>(),
+        "provenance": provenance.into_iter().collect::<Vec<_>>(),
+        "degradedCodes": degraded_codes,
+    })
 }
 
 struct TypedGraphSnapshotTopology {
@@ -5091,6 +5347,7 @@ pub struct GraphNeighborhoodEdge {
     pub evidence_count: u32,
     pub source: String,
     pub created_at: String,
+    pub origin: GraphProjectionEdgeOrigin,
 }
 
 /// Report returned by graph neighborhood queries.
@@ -5138,6 +5395,7 @@ impl GraphNeighborhoodReport {
                     "evidenceCount": edge.evidence_count,
                     "source": edge.source,
                     "createdAt": edge.created_at,
+                    "origin": edge.origin.data_json(),
                 })
             })
             .collect();
@@ -5174,8 +5432,19 @@ impl GraphNeighborhoodReport {
                 .count()
         );
         for edge in &self.edges {
+            let origin = if edge.origin.origin_kind == "remote_cached" {
+                format!(
+                    ", origin={}",
+                    edge.origin
+                        .origin_node
+                        .as_deref()
+                        .unwrap_or("remote_cached")
+                )
+            } else {
+                String::new()
+            };
             output.push_str(&format!(
-                "  {} {} {} via {} ({:.3}/{:.3})\n",
+                "  {} {} {} via {} ({:.3}/{:.3}{origin})\n",
                 edge.relative_direction.as_str(),
                 edge.src_memory_id,
                 edge.dst_memory_id,
@@ -5262,6 +5531,7 @@ fn neighborhood_edge_for_link(
         evidence_count: link.evidence_count,
         source: link.source.clone(),
         created_at: link.created_at.clone(),
+        origin: graph_projection_edge_origin(link.metadata_json.as_deref()),
     })
 }
 
@@ -7247,6 +7517,58 @@ mod tests {
         connection.close().map_err(|error| error.to_string())
     }
 
+    #[cfg(feature = "graph")]
+    #[test]
+    fn projection_attaches_cached_remote_origin_edge_attrs() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link_with_metadata(
+            &connection,
+            "link_00000000000000000000000032",
+            MEMORY_B,
+            MEMORY_C,
+            true,
+            0.9,
+            0.9,
+            Some(mesh_link_metadata_with_stale_cache(
+                "allow",
+                "graphSignal",
+                true,
+            )),
+        )?;
+
+        let projection = graph_result(super::build_memory_graph(
+            &connection,
+            &super::ProjectionOptions::default(),
+        ))?;
+        let attrs = projection
+            .graph
+            .edge_attrs(MEMORY_B, MEMORY_C)
+            .ok_or_else(|| "cached remote graph edge should exist".to_string())?;
+
+        assert_eq!(
+            attrs.get("graph_origin"),
+            Some(&CgseValue::String("remote_cached".to_owned()))
+        );
+        assert_eq!(
+            attrs.get("origin_node"),
+            Some(&CgseValue::String("peer_builder_one".to_owned()))
+        );
+        assert_eq!(
+            attrs.get("origin_workspace_id"),
+            Some(&CgseValue::String("wsp_remote_beta".to_owned()))
+        );
+        assert_eq!(
+            attrs.get("trust_lane"),
+            Some(&CgseValue::String("mesh_metadata".to_owned()))
+        );
+        assert_eq!(
+            attrs.get("remote_graph_stale"),
+            Some(&CgseValue::Bool(true))
+        );
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
     fn mesh_link_metadata(
         workspace_scope_decision: &str,
         material_lane: &str,
@@ -7314,6 +7636,26 @@ mod tests {
                     "{\"schema\":\"ee.mesh.policy_decision.v1\",\"direction\":\"inbound\",\"action\":\"allow\"}"
                 ),
             );
+        }
+        metadata.to_string()
+    }
+
+    fn mesh_link_metadata_with_stale_cache(
+        workspace_scope_decision: &str,
+        material_lane: &str,
+        complete: bool,
+    ) -> String {
+        let mut metadata = serde_json::from_str::<serde_json::Value>(&mesh_link_metadata(
+            workspace_scope_decision,
+            material_lane,
+            complete,
+        ))
+        .expect("mesh link metadata fixture should be valid JSON");
+        if let Some(mesh) = metadata
+            .get_mut("mesh")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            mesh.insert("cacheStatus".to_owned(), serde_json::json!("stale"));
         }
         metadata.to_string()
     }
@@ -7629,6 +7971,80 @@ mod tests {
 
         assert_eq!(node_count, 3);
         assert_eq!(edge_count, 3);
+    }
+
+    #[test]
+    fn graph_snapshot_metrics_reports_cached_remote_origin_summary() -> TestResult {
+        let mut remote = stored_memory_link("link_remote_cached", MEMORY_A, MEMORY_B);
+        remote.metadata_json = Some(mesh_link_metadata_with_stale_cache(
+            "allow",
+            "graphSignal",
+            true,
+        ));
+        let centrality = CentralityRefreshReport {
+            version: env!("CARGO_PKG_VERSION"),
+            status: CentralityRefreshStatus::Refreshed,
+            dry_run: false,
+            node_count: 2,
+            edge_count: 1,
+            projection_ms: 0.0,
+            pagerank_ms: 0.0,
+            betweenness_ms: 0.0,
+            hits_ms: 0.0,
+            total_ms: 0.0,
+            scores: vec![
+                MemoryCentralityScore {
+                    memory_id: MEMORY_A.to_owned(),
+                    pagerank: 0.5,
+                    betweenness: 0.0,
+                    hub: 0.0,
+                    authority: 0.0,
+                },
+                MemoryCentralityScore {
+                    memory_id: MEMORY_B.to_owned(),
+                    pagerank: 0.5,
+                    betweenness: 0.0,
+                    hub: 0.0,
+                    authority: 0.0,
+                },
+            ],
+            top_pagerank: Vec::new(),
+            top_betweenness: Vec::new(),
+            top_hubs: Vec::new(),
+            top_authorities: Vec::new(),
+        };
+
+        let first = graph_result(super::graph_snapshot_metrics_json(
+            GraphSnapshotType::MemoryLinks,
+            &centrality,
+            &[remote.clone()],
+        ))?;
+        let second = graph_result(super::graph_snapshot_metrics_json(
+            GraphSnapshotType::MemoryLinks,
+            &centrality,
+            &[remote],
+        ))?;
+        assert_eq!(first, second);
+        let value: serde_json::Value =
+            serde_json::from_str(&first).map_err(|error| error.to_string())?;
+
+        assert_eq!(value["remoteGraph"]["status"], "stale");
+        assert_eq!(value["remoteGraph"]["cachedEdgeCount"], 1);
+        assert_eq!(value["remoteGraph"]["staleEdgeCount"], 1);
+        assert_eq!(
+            value["remoteGraph"]["degradedCodes"][0],
+            super::GRAPH_REMOTE_PROJECTION_STALE_CODE
+        );
+        assert_eq!(value["edges"][0]["origin"]["originKind"], "remote_cached");
+        assert_eq!(
+            value["edges"][0]["origin"]["originNode"],
+            "peer_builder_one"
+        );
+        assert_eq!(
+            value["edges"][0]["origin"]["provenance"],
+            "mesh://peer_builder_one/mesh_link_123"
+        );
+        Ok(())
     }
 
     #[test]
@@ -8312,6 +8728,44 @@ mod tests {
                 .iter()
                 .any(|edge| edge.neighbor_memory_id == MEMORY_C)
         );
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn graph_neighborhood_reports_cached_remote_origin() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link_with_metadata(
+            &connection,
+            "link_00000000000000000000000046",
+            MEMORY_A,
+            MEMORY_C,
+            true,
+            0.7,
+            0.6,
+            Some(mesh_link_metadata_with_stale_cache(
+                "allow",
+                "graphSignal",
+                true,
+            )),
+        )?;
+
+        let report = graph_result(super::graph_neighborhood(
+            &connection,
+            &super::GraphNeighborhoodOptions::new(MEMORY_A),
+        ))?;
+
+        assert_eq!(report.edges.len(), 1);
+        assert_eq!(report.edges[0].origin.origin_kind, "remote_cached");
+        assert_eq!(
+            report.edges[0].origin.origin_node.as_deref(),
+            Some("peer_builder_one")
+        );
+        assert!(report.edges[0].origin.remote_graph_stale);
+        let json = report.data_json();
+        assert_eq!(json["edges"][0]["origin"]["originKind"], "remote_cached");
+        assert_eq!(json["edges"][0]["origin"]["trustLane"], "mesh_metadata");
+        assert_eq!(json["edges"][0]["origin"]["remoteGraphStale"], true);
 
         connection.close().map_err(|error| error.to_string())
     }

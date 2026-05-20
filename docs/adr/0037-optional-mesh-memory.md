@@ -51,6 +51,16 @@ import ledger provenance. A peer cannot write directly into the local truth
 store without passing through append-only event import, policy checks, and audit
 recording. Remote failures degrade only mesh-enabled surfaces.
 
+Graph features follow the same rule. `ee` may project cached remote memories
+and links into the local graph only after replay/cache/index has materialized
+them in the local snapshot. Those edges remain local graph inputs with explicit
+`remote_cached` origin, origin node, origin workspace, producer peer, trust
+lane, redaction posture, and provenance metadata. V1 explicitly rejects live
+federated graph algorithms and a single mutable global graph: Pack DNA,
+proximity, link-neighborhood, graph export, and graph-health surfaces must make
+cached-peer provenance visible, and stale remote graph material must degrade
+instead of being treated as fresh local topology.
+
 Tailscale is a transport and discovery convenience, not a trust boundary.
 Being reachable over Tailscale does not make a peer authorized to share bodies,
 embeddings, graph links, or revision notifications. Authorization, redaction,
