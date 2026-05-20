@@ -271,6 +271,9 @@ mod doctor_undo_replay_e2e;
 #[path = "contracts/flight_recorder_e2e.rs"]
 mod flight_recorder_e2e;
 
+#[path = "contracts/mesh_lane_grant_preview_schema.rs"]
+mod mesh_lane_grant_preview_schema;
+
 #[path = "contracts/peer_conflict_schema.rs"]
 mod peer_conflict_schema;
 
