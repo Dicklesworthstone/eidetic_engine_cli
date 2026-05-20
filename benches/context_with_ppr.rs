@@ -218,6 +218,8 @@ fn options(
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,
         ppr_weight,
+        changed_symbols: Vec::new(),
+        changed_symbols_from_git: false,
         pagination: None,
         coordination_snapshot_path: None,
         coordination_stale_after_ms: DEFAULT_COORDINATION_STALE_AFTER_MS,
