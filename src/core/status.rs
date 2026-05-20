@@ -18,15 +18,15 @@ use crate::config::{
     read_env_var_or_default, read_env_var_os, resolve_workspace, workspace_config,
 };
 use crate::db::{
-    CreateWorkspaceInput, DbConnection, FeedbackSourceHarmfulCount, GraphSnapshotStatus,
-    GraphSnapshotType, MeshStorageStatus, PROVENANCE_CHAIN_HASH_VERSION,
+    CreateWorkspaceInput, DatabaseConfig, DbConnection, FeedbackSourceHarmfulCount,
+    GraphSnapshotStatus, GraphSnapshotType, MeshStorageStatus, PROVENANCE_CHAIN_HASH_VERSION,
     PROVENANCE_STATUS_UNVERIFIED, StoredAuditEntry, StoredCurationCandidate,
     StoredCurationTtlPolicy, StoredMemory, StoredMemoryLink, WalStatus, audit_actions,
     default_curation_ttl_policy_id_for_review_state,
     read_pool::{
         CheckpointBlocker, PoolStats, READ_POOL_ACQUIRE_TIMEOUT_CODE, READ_POOL_UNDERSIZED_CODE,
         READ_POOL_UNDERSIZED_P99_THRESHOLD, READ_POOL_UNDERSIZED_SAMPLE_FLOOR,
-        SnapshotPinReleaseState,
+        SnapshotPinReleaseState, process_read_pool_stats_for_database,
     },
     shard::{
         ShardFanoutPosture, ShardFanoutResolverInput, ShardFanoutStatusReport,
@@ -1362,6 +1362,26 @@ impl ReadPoolStatusReport {
             checkpoint_blocked_by: None,
         }
     }
+
+    #[must_use]
+    pub fn gather_for_workspace(workspace_path: Option<&Path>) -> Self {
+        let Some(workspace_path) = workspace_path else {
+            return Self::gather();
+        };
+        let database = DatabaseConfig::file(workspace_path.join(".ee").join("ee.db"));
+        let Some(stats) = process_read_pool_stats_for_database(&database) else {
+            return Self::gather();
+        };
+        Self::from(stats).with_workspace_id(Some(workspace_path.display().to_string()))
+    }
+
+    #[must_use]
+    pub fn with_workspace_id(mut self, workspace_id: Option<String>) -> Self {
+        if let Some(blocker) = self.checkpoint_blocked_by.take() {
+            self.checkpoint_blocked_by = Some(blocker.with_workspace_id(workspace_id));
+        }
+        self
+    }
 }
 
 impl From<PoolStats> for ReadPoolStatusReport {
@@ -1722,7 +1742,8 @@ impl StatusReport {
         let capabilities =
             CapabilityReport::gather_with_workspace(options.workspace_path.as_deref());
         let runtime = RuntimeReport::gather();
-        let read_pool = ReadPoolStatusReport::gather();
+        let read_pool =
+            ReadPoolStatusReport::gather_for_workspace(options.workspace_path.as_deref());
         let wal = WalStatusReport::gather(options.workspace_path.as_deref());
         let shard_fanout = gather_shard_fanout_status(options.workspace_path.as_deref());
         let pack_budget_buckets = gather_pack_budget_buckets(options.workspace_path.as_deref());

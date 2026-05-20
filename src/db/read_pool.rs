@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use super::{DatabaseConfig, DbConnection, DbError, DbOperation, Result};
@@ -147,6 +147,9 @@ pub struct ReadConnectionPool {
     state: Mutex<PoolState>,
 }
 
+static PROCESS_READ_POOL_REGISTRY: OnceLock<Mutex<BTreeMap<String, Weak<ReadConnectionPool>>>> =
+    OnceLock::new();
+
 #[derive(Clone, Debug)]
 pub struct ReadConnectionPoolBuilder {
     database: DatabaseConfig,
@@ -252,6 +255,19 @@ pub struct CheckpointBlocker {
     pub max_pin_duration_ms: u128,
     pub poisoned: bool,
     pub release_state: SnapshotPinReleaseState,
+}
+
+/// Process-local checkpoint attribution from the read-pool registry.
+///
+/// This never claims cross-process visibility. A standalone `ee maintenance`
+/// invocation can only see pools registered in the same OS process; readers in
+/// other CLI processes may still pin WAL pages but do not expose SnapshotPin
+/// identity through this registry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessCheckpointOutcome {
+    pub checkpoint_busy: bool,
+    pub process_pool_visible: bool,
+    pub blocker: Option<CheckpointBlocker>,
 }
 
 impl From<ActiveSnapshotPin> for CheckpointBlocker {
@@ -657,6 +673,88 @@ impl ReadConnectionPool {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Build or reuse a process-local read pool and register it weakly by database.
+///
+/// The registry stores only `Weak` handles, so it does not extend pool lifetime
+/// or retain stale SnapshotPin state after the command-local owner drops the
+/// pool. This is intentionally process-local and is not a cross-process WAL
+/// blocker registry.
+#[must_use]
+pub fn registered_process_read_pool(
+    database: DatabaseConfig,
+    config: PoolConfig,
+) -> Arc<ReadConnectionPool> {
+    let key = process_read_pool_registry_key(&database);
+    let mut registry = process_read_pool_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(pool) = registry.get(&key).and_then(Weak::upgrade) {
+        return pool;
+    }
+
+    let pool = Arc::new(ReadConnectionPool::new(database, config));
+    registry.insert(key, Arc::downgrade(&pool));
+    pool
+}
+
+/// Return same-process read-pool stats for a database if a live pool is
+/// registered. `None` means no process-local pool is visible, not that no other
+/// process has a WAL reader.
+#[must_use]
+pub fn process_read_pool_stats_for_database(database: &DatabaseConfig) -> Option<PoolStats> {
+    process_read_pool_for_database(database).map(|pool| pool.stats())
+}
+
+/// Attribute a real WAL checkpoint outcome to the visible process-local pool.
+///
+/// If `checkpoint_busy` is true but `process_pool_visible` is false, callers
+/// must report an honest null blocker with a cross-process visibility caveat.
+#[must_use]
+pub fn note_process_checkpoint_outcome(
+    database: &DatabaseConfig,
+    checkpoint_busy: bool,
+) -> ProcessCheckpointOutcome {
+    let Some(pool) = process_read_pool_for_database(database) else {
+        return ProcessCheckpointOutcome {
+            checkpoint_busy,
+            process_pool_visible: false,
+            blocker: None,
+        };
+    };
+
+    ProcessCheckpointOutcome {
+        checkpoint_busy,
+        process_pool_visible: true,
+        blocker: pool.note_checkpoint_outcome(checkpoint_busy),
+    }
+}
+
+fn process_read_pool_for_database(database: &DatabaseConfig) -> Option<Arc<ReadConnectionPool>> {
+    let key = process_read_pool_registry_key(database);
+    let mut registry = process_read_pool_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let pool = registry.get(&key).and_then(Weak::upgrade);
+    if pool.is_none() {
+        registry.remove(&key);
+    }
+    pool
+}
+
+fn process_read_pool_registry() -> &'static Mutex<BTreeMap<String, Weak<ReadConnectionPool>>> {
+    PROCESS_READ_POOL_REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn process_read_pool_registry_key(database: &DatabaseConfig) -> String {
+    match database.location() {
+        super::DatabaseLocation::Memory => "memory".to_owned(),
+        super::DatabaseLocation::File(path) => {
+            let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            format!("file:{}", path.display())
+        }
     }
 }
 
@@ -1832,6 +1930,67 @@ mod tests {
         assert!(
             pool.note_checkpoint_outcome(true).is_none(),
             "busy checkpoint without a process-local pin reports no blocker"
+        );
+    }
+
+    #[test]
+    fn process_registry_reports_visible_pool_blocker_for_busy_checkpoint() {
+        let tempdir = must(tempfile::tempdir(), "tempdir creates");
+        let database_path = tempdir.path().join("read-pool-registry-visible.db");
+        seed_snapshot_database(&database_path);
+        let database = DatabaseConfig::file(database_path);
+        let pool = registered_process_read_pool(
+            database.clone(),
+            PoolConfig::new(1, Duration::from_secs(30)),
+        );
+        let _pin = must(
+            pool.pin_snapshot_with_metadata(SnapshotPinMetadata {
+                workflow_id: Some("workflow-registry".to_owned()),
+                request_id: Some("request-registry".to_owned()),
+            }),
+            "registered pool snapshot pin opens",
+        );
+
+        let outcome = note_process_checkpoint_outcome(&database, true);
+
+        assert!(outcome.checkpoint_busy);
+        assert!(outcome.process_pool_visible);
+        let blocker = must_some(outcome.blocker, "registered pool exposes blocker");
+        assert_eq!(blocker.workflow_id.as_deref(), Some("workflow-registry"));
+        assert_eq!(blocker.request_id.as_deref(), Some("request-registry"));
+    }
+
+    #[test]
+    fn process_registry_reports_no_pool_visibility_without_registered_pool() {
+        let tempdir = must(tempfile::tempdir(), "tempdir creates");
+        let database = DatabaseConfig::file(tempdir.path().join("not-registered.db"));
+
+        let outcome = note_process_checkpoint_outcome(&database, true);
+
+        assert!(outcome.checkpoint_busy);
+        assert!(!outcome.process_pool_visible);
+        assert!(outcome.blocker.is_none());
+        assert!(process_read_pool_stats_for_database(&database).is_none());
+    }
+
+    #[test]
+    fn process_registry_does_not_extend_pool_lifetime() {
+        let tempdir = must(tempfile::tempdir(), "tempdir creates");
+        let database_path = tempdir.path().join("read-pool-registry-lifetime.db");
+        seed_snapshot_database(&database_path);
+        let database = DatabaseConfig::file(database_path);
+        {
+            let pool = registered_process_read_pool(
+                database.clone(),
+                PoolConfig::new(1, Duration::from_secs(30)),
+            );
+            assert!(process_read_pool_stats_for_database(&database).is_some());
+            drop(pool);
+        }
+
+        assert!(
+            process_read_pool_stats_for_database(&database).is_none(),
+            "registry must store Weak handles so command-local pools can drop"
         );
     }
 

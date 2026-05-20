@@ -63,7 +63,7 @@ use crate::core::search::{
 use crate::db::read_pool::{
     PoolConfig, PoolStats, READ_POOL_ACQUIRE_TIMEOUT_CODE, READ_POOL_UNDERSIZED_CODE,
     READ_POOL_UNDERSIZED_P99_THRESHOLD, READ_POOL_UNDERSIZED_SAMPLE_FLOOR, ReadConnectionPool,
-    SnapshotPin, SnapshotPinMetadata,
+    SnapshotPin, SnapshotPinMetadata, registered_process_read_pool,
 };
 use crate::db::{
     CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, DatabaseConfig,
@@ -1093,7 +1093,7 @@ fn run_context_pack_with_performance_inner(
     let (read_pool_config, pin_snapshot) =
         context_read_pool_config(&options.workspace_path, &mut degraded);
     let snapshot_open_start = Instant::now();
-    let read_pool = ReadConnectionPool::new(
+    let read_pool = registered_process_read_pool(
         DatabaseConfig::file(database_path.clone()),
         read_pool_config,
     );
@@ -2298,10 +2298,9 @@ fn sort_scored_memory_score_tie_by_workspace_then_memory_id(scored: &mut [(Store
             run_end += 1;
         }
         let mut run_slice: Vec<(StoredMemory, f32)> = scored[run_start..run_end].to_vec();
-        sort_by_ulid_payload_or_lexical(
-            &mut run_slice,
-            |(memory, _): &(StoredMemory, f32)| memory.id.as_str(),
-        );
+        sort_by_ulid_payload_or_lexical(&mut run_slice, |(memory, _): &(StoredMemory, f32)| {
+            memory.id.as_str()
+        });
         scored[run_start..run_end].clone_from_slice(&run_slice);
         run_start = run_end;
     }
