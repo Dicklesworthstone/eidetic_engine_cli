@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.closeout_audit.v1.json",
+  "title": "ee.closeout_audit.v1",
+  "description": "JSON envelope emitted by scripts/closeout_audit.sh (J11.4 / bd-17c65.10.11.4). Run BEFORE marking a bead closed to summarize verification evidence, retained artifacts, dependencies, and known caveats. Reports closure readiness as `ready`, `ready_with_caveats`, or `blocked`, with structured reasons an agent can act on or paste verbatim into a `br close --reason` invocation. Non-destructive contract: the audit never mutates beads, git, files, agent-mail reservations, or the cargo target. Pinned by bd-2vu8m (SRR6.23 final hardening) because the SRR6 closeout matrix routes through this envelope.",
+  "type": "object",
+  "required": [
+    "schema",
+    "bead_id",
+    "readiness",
+    "evidence",
+    "blockers",
+    "caveats",
+    "next_actions"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.closeout_audit.v1"
+    },
+    "bead_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Bead id passed via --bead (e.g. `bd-2vu8m`)."
+    },
+    "readiness": {
+      "type": "string",
+      "enum": ["ready", "ready_with_caveats", "blocked"],
+      "description": "`ready`: zero blockers + zero caveats. `ready_with_caveats`: zero blockers + >=1 caveat. `blocked`: >=1 blocker (the operator must resolve before closing)."
+    },
+    "evidence": {
+      "$ref": "#/$defs/evidence"
+    },
+    "blockers": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Hard blockers that prevent closure. The operator must resolve every entry before `br close` is safe."
+    },
+    "caveats": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Non-blocking caveats the operator should record in the `br close --reason` text so the closure rationale is auditable."
+    },
+    "next_actions": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Concrete commands or steps the operator can run to clear the blockers/caveats."
+    }
+  },
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "required": [
+        "bead_status",
+        "bead_assignee",
+        "bead_title",
+        "open_dependencies",
+        "dependency_cycles",
+        "dependency_cycle_count",
+        "dependency_cycle_status",
+        "dependency_cycle_source",
+        "uncommitted_files_referencing_bead",
+        "rch_status",
+        "rch_queue_status",
+        "rch_active_builds",
+        "rch_stale_active_builds",
+        "rch_queued_builds",
+        "agent_mail_status",
+        "j1_log_present",
+        "j1_log_path",
+        "srr6_closeout"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "bead_status": {
+          "type": "string",
+          "description": "Live `br show` status for the bead at audit time (e.g. `open`, `in_progress`, `closed`)."
+        },
+        "bead_assignee": {
+          "type": ["string", "null"]
+        },
+        "bead_title": {
+          "type": ["string", "null"]
+        },
+        "open_dependencies": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Bead ids of dependencies that are still open. Non-empty entries normally produce a blocker."
+        },
+        "dependency_cycles": {
+          "type": "array",
+          "items": { "type": "array", "items": { "type": "string" } },
+          "description": "Cycles surfaced by `br dep cycles`. Each inner array is one cycle; the bead's `dependency_cycle_count` mirrors `length`."
+        },
+        "dependency_cycle_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dependency_cycle_status": {
+          "type": "string",
+          "enum": ["ok", "timeout", "br_unavailable", "unavailable"]
+        },
+        "dependency_cycle_source": {
+          "type": "string",
+          "description": "How the cycles were discovered (`live_br`, `fixture`, `cached`, etc.). Pinned so support bundles can audit replay."
+        },
+        "uncommitted_files_referencing_bead": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Paths in the working tree that mention the bead id but are not yet committed. Each entry usually becomes a caveat or blocker depending on file class."
+        },
+        "rch_status": {
+          "type": "string",
+          "enum": ["unknown", "ready", "timeout", "local_fallback_likely"]
+        },
+        "rch_queue_status": {
+          "type": "string",
+          "enum": [
+            "unknown",
+            "idle",
+            "active",
+            "queued",
+            "stale_active_records",
+            "timeout",
+            "unavailable"
+          ]
+        },
+        "rch_active_builds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rch_stale_active_builds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rch_queued_builds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "agent_mail_status": {
+          "type": "string",
+          "enum": ["unknown", "reachable", "unreachable"]
+        },
+        "j1_log_present": {
+          "type": "boolean",
+          "description": "Whether the bead has a J1 evidence log on disk; missing logs convert to caveats for beads where a J1 log was expected."
+        },
+        "j1_log_path": {
+          "type": ["string", "null"]
+        },
+        "srr6_closeout": {
+          "$ref": "#/$defs/srr6Closeout"
+        }
+      }
+    },
+    "srr6Closeout": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "status",
+        "matrix_path",
+        "matrix_present",
+        "matrix_row_present",
+        "required_proofs",
+        "missing_proofs",
+        "missing_proof_markers",
+        "unresolved_dependencies",
+        "deferred_dependencies_missing_rationale"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "True when the audited bead is the SRR6 final hardening parent (bd-2vu8m) or a direct child; false otherwise. When false the rest of the block reports `not_applicable` / empty arrays / matrix_present=false."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["ready", "blocked", "not_applicable"]
+        },
+        "matrix_path": {
+          "type": ["string", "null"],
+          "description": "Resolved path to the SRR6 closeout matrix (typically `scripts/shard_fanout_closeout_matrix.sh` or the docs-shipped matrix file)."
+        },
+        "matrix_present": {
+          "type": "boolean"
+        },
+        "matrix_row_present": {
+          "type": "boolean",
+          "description": "Whether the matrix has a row pinning this bead's required proofs."
+        },
+        "required_proofs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "missing_proofs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "missing_proof_markers": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Stable text markers an operator can grep for to locate the missing-proof origin in the matrix file."
+        },
+        "unresolved_dependencies": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "SRR6 dependency bead ids still open. Any entry blocks SRR6 closeout until either closed or explicitly deferred with rationale."
+        },
+        "deferred_dependencies_missing_rationale": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Deferred dependencies that lack a rationale comment in the matrix. Each entry is a blocker — explicit deferral with rationale is required by bd-2vu8m acceptance."
+        }
+      }
+    }
+  }
+}
