@@ -351,10 +351,6 @@ fn build_registry_section(
             let scores = load_hits_scores(workspace)?;
             Ok(hubs_section_from_scores(&scores))
         }
-        "loadBearingMemories" => {
-            let items = load_bearing_memory_items(workspace)?;
-            Ok(load_bearing_memories_section_from_items(&items))
-        }
         "proximityHotspots" => {
             let reports = load_proximity_hotspot_reports(workspace)?;
             Ok(proximity_hotspots_section_from_reports(&reports))
@@ -541,63 +537,6 @@ fn load_hits_scores(workspace: Option<&Path>) -> Result<HitsScores, DomainError>
                     .to_owned(),
             ),
         })
-}
-
-fn load_bearing_memory_items(
-    workspace: Option<&Path>,
-) -> Result<Vec<crate::graph::bipartite_provenance::LoadBearingMemoryItem>, DomainError> {
-    let Some(workspace) = workspace else {
-        return Ok(Vec::new());
-    };
-    let database_path = workspace.join(".ee").join("ee.db");
-    if !database_path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let connection =
-        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
-            message: format!("Failed to open workspace database: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
-        })?;
-    let Some(workspace_id) = insights_workspace_id(&connection, workspace)? else {
-        return Ok(Vec::new());
-    };
-    let graph =
-        crate::graph::build_rule_provenance_bipartite_from_tables(&connection, &workspace_id)
-            .map_err(|error| DomainError::Graph {
-                message: format!("Failed to build rule-provenance bipartite projection: {error}"),
-                repair: Some(
-                    "Run `ee graph snapshot refresh --graph rule_provenance --workspace . --json`."
-                        .to_owned(),
-                ),
-            })?;
-    if graph.node_count() == 0 {
-        return Ok(Vec::new());
-    }
-    let snapshot_version = connection
-        .get_latest_graph_snapshot(&workspace_id, crate::db::GraphSnapshotType::RuleProvenance)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query rule-provenance graph snapshot: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
-        })?
-        .map_or(0, |snapshot| u64::from(snapshot.snapshot_version));
-    let hits =
-        crate::graph::bipartite_provenance::compute_bipartite_hits(&graph).map_err(|error| {
-            DomainError::Graph {
-                message: format!("Failed to compute bipartite HITS insights: {error}"),
-                repair: Some(
-                    "Run `ee graph snapshot refresh --graph rule_provenance --workspace . --json`."
-                        .to_owned(),
-                ),
-            }
-        })?;
-    Ok(
-        crate::graph::bipartite_provenance::load_bearing_memory_items(
-            &graph,
-            &hits,
-            snapshot_version,
-        ),
-    )
 }
 
 fn insights_workspace_id(
@@ -1097,25 +1036,13 @@ fn knowledge_skyline_section() -> InsightsSection {
 }
 
 fn load_bearing_memories_section() -> InsightsSection {
-    load_bearing_memories_section_from_items(&[])
-}
-
-fn load_bearing_memories_section_from_items(
-    items: &[crate::graph::bipartite_provenance::LoadBearingMemoryItem],
-) -> InsightsSection {
-    let items = items
-        .iter()
-        .filter_map(|item| serde_json::to_value(item).ok())
-        .collect();
-
-    InsightsSection {
-        name: "loadBearingMemories",
-        title: "Load-Bearing Memories",
-        summary: "Memories with high influence in rule-to-source provenance projections.",
-        why_it_matters: "Load-bearing memories should be preserved or reviewed carefully because many rules depend on them.",
-        items,
-        next_commands: vec!["ee insights --section loadBearingMemories --workspace . --json"],
-    }
+    placeholder_section(
+        "loadBearingMemories",
+        "Load-Bearing Memories",
+        "Memories with high influence in rule-to-source provenance projections.",
+        "Load-bearing memories should be preserved or reviewed carefully because many rules depend on them.",
+        vec!["ee insights --section loadBearingMemories --workspace . --json"],
+    )
 }
 
 fn proximity_hotspots_section() -> InsightsSection {
@@ -1205,7 +1132,6 @@ fn placeholder_section(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{CreateMemoryInput, CreateProceduralRuleInput, CreateWorkspaceInput};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1244,93 +1170,6 @@ mod tests {
             ),
         )
         .map_err(|error| error.to_string())
-    }
-
-    fn seed_load_bearing_workspace(workspace: &std::path::Path) -> Result<String, String> {
-        let database_path = workspace.join(".ee").join("ee.db");
-        let connection =
-            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
-        connection.migrate().map_err(|error| error.to_string())?;
-        let workspace_id = "wsp_loadbearinginsights000000";
-        connection
-            .insert_workspace(
-                workspace_id,
-                &CreateWorkspaceInput {
-                    path: workspace.to_string_lossy().into_owned(),
-                    name: Some("load-bearing insights".to_owned()),
-                },
-            )
-            .map_err(|error| error.to_string())?;
-
-        for (id, content) in [
-            (
-                "mem_loadbearinganchor000000001",
-                "Load-bearing source memory for release rules.",
-            ),
-            (
-                "mem_loadbearingsolo0000000001",
-                "Solo source memory for one release rule.",
-            ),
-        ] {
-            connection
-                .insert_memory(
-                    id,
-                    &CreateMemoryInput {
-                        workspace_id: workspace_id.to_owned(),
-                        level: "semantic".to_owned(),
-                        kind: "fact".to_owned(),
-                        content: content.to_owned(),
-                        workflow_id: None,
-                        confidence: 0.9,
-                        utility: 0.8,
-                        importance: 0.7,
-                        provenance_uri: None,
-                        trust_class: "human_explicit".to_owned(),
-                        trust_subclass: None,
-                        tags: Vec::new(),
-                        valid_from: Some("2026-05-20T00:00:00Z".to_owned()),
-                        valid_to: None,
-                    },
-                )
-                .map_err(|error| error.to_string())?;
-        }
-
-        for (rule_id, sources) in [
-            (
-                "rule_loadbearingalpha00000001",
-                vec!["mem_loadbearinganchor000000001".to_owned()],
-            ),
-            (
-                "rule_loadbearingbeta000000001",
-                vec![
-                    "mem_loadbearinganchor000000001".to_owned(),
-                    "mem_loadbearingsolo0000000001".to_owned(),
-                ],
-            ),
-        ] {
-            connection
-                .insert_procedural_rule(
-                    rule_id,
-                    &CreateProceduralRuleInput {
-                        workspace_id: workspace_id.to_owned(),
-                        content: format!("Rule {rule_id} cites source memories."),
-                        confidence: 0.9,
-                        utility: 0.8,
-                        importance: 0.7,
-                        trust_class: "human_explicit".to_owned(),
-                        scope: "workspace".to_owned(),
-                        scope_pattern: None,
-                        maturity: "validated".to_owned(),
-                        protected: false,
-                        source_memory_ids: sources,
-                        tags: Vec::new(),
-                    },
-                )
-                .map_err(|error| error.to_string())?;
-        }
-
-        connection.close().map_err(|error| error.to_string())?;
-        Ok("mem_loadbearinganchor000000001".to_owned())
     }
 
     #[test]
@@ -1592,51 +1431,6 @@ mod tests {
             assert_eq!(report.degraded_signals[0].repair.as_deref(), Some(repair));
             assert_eq!(report.degraded_signals[0].sources, vec![section.to_owned()]);
         }
-
-        Ok(())
-    }
-
-    #[test]
-    fn load_bearing_section_reads_rule_provenance_projection() -> TestResult {
-        let workspace = unique_insights_workspace("load-bearing")?;
-        write_graph_feature_config(&workspace, true)?;
-        let load_bearing_memory_id = seed_load_bearing_workspace(&workspace)?;
-
-        let report = build_insights_report_with_options(
-            &InsightsArgs {
-                section: Some("loadBearingMemories".to_owned()),
-                explain: None,
-                limit: DEFAULT_SECTION_LIMIT,
-                offset: 0,
-            },
-            InsightsBuildOptions {
-                workspace: Some(&workspace),
-            },
-        )
-        .map_err(|error| error.to_string())?;
-
-        assert_eq!(report.mode, InsightsMode::Section);
-        assert_eq!(
-            report.selected_section.as_deref(),
-            Some("loadBearingMemories")
-        );
-        assert!(report.degraded_signals.is_empty());
-        let item = report
-            .sections
-            .first()
-            .and_then(|section| section.items.first())
-            .ok_or_else(|| "load-bearing section should emit an item".to_owned())?;
-        assert_eq!(
-            item["memoryId"].as_str(),
-            Some(load_bearing_memory_id.as_str())
-        );
-        assert_eq!(item["rank"].as_u64(), Some(1));
-        assert_eq!(item["citingRuleCount"].as_u64(), Some(2));
-        assert_eq!(item["interpretation"].as_str(), Some("load_bearing"));
-        assert_eq!(
-            item["evidence"]["algorithm"].as_str(),
-            Some("bipartite_hits")
-        );
 
         Ok(())
     }

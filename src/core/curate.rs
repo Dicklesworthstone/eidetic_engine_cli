@@ -124,8 +124,6 @@ pub struct CurateApplyOptions<'a> {
     pub actor: Option<&'a str>,
     /// Preview the durable mutation without writing memory, candidate, or audit rows.
     pub dry_run: bool,
-    /// Permit tombstoning a memory cited by rule-provenance load-bearing analysis.
-    pub allow_tombstone_load_bearing: bool,
 }
 
 /// Explicit curation review lifecycle action.
@@ -256,8 +254,6 @@ pub struct CurateTombstoneOptions<'a> {
     pub actor: Option<&'a str>,
     /// Preview without writing tombstone record.
     pub dry_run: bool,
-    /// Permit tombstoning a memory cited by rule-provenance load-bearing analysis.
-    pub allow_tombstone_load_bearing: bool,
     /// Tombstone reason for audit trail.
     pub reason: Option<&'a str>,
 }
@@ -2444,27 +2440,7 @@ pub fn apply_curation_candidate(
         })?;
 
     let now = Utc::now().to_rfc3339();
-    let mut decision = evaluate_candidate_for_apply(&stored, target_memory.as_ref(), &now);
-    if decision.tombstone_memory
-        && !options.allow_tombstone_load_bearing
-        && let Some(protection) = load_bearing_tombstone_protection(
-            &connection,
-            &prepared.workspace_id,
-            &stored.target_memory_id,
-        )?
-    {
-        decision = blocked_apply(
-            &stored,
-            decision.target_before.clone(),
-            vec![load_bearing_tombstone_issue(
-                &stored.target_memory_id,
-                &protection,
-                "ee curate apply <candidate-id> --allow-tombstone-load-bearing",
-            )],
-            decision.application.warnings,
-            "ee why <memory-id> --json".to_owned(),
-        );
-    }
+    let decision = evaluate_candidate_for_apply(&stored, target_memory.as_ref(), &now);
     let from_status = stored.status.clone();
     let mut applied_at = None;
     let mut persisted = false;
@@ -3015,48 +2991,6 @@ pub fn run_curate_tombstone(
 
     let next_action = "ee memory list --json".to_owned();
 
-    let connection = open_existing_database(&prepared.database_path)?;
-    let memory = connection
-        .get_memory(options.memory_id)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to fetch memory: {error}"),
-            repair: Some("ee memory list --json".to_owned()),
-        })?
-        .ok_or_else(|| DomainError::NotFound {
-            resource: "memory".to_owned(),
-            id: options.memory_id.to_owned(),
-            repair: Some("ee memory list --json".to_owned()),
-        })?;
-
-    if memory.tombstoned_at.is_some() {
-        return Err(DomainError::Usage {
-            message: format!("Memory {} is already tombstoned.", options.memory_id),
-            repair: Some("ee memory list --json".to_owned()),
-        });
-    }
-
-    if !options.allow_tombstone_load_bearing
-        && options.reason.is_none()
-        && let Some(protection) = load_bearing_tombstone_protection(
-            &connection,
-            &prepared.workspace_id,
-            options.memory_id,
-        )?
-    {
-        return Err(DomainError::Usage {
-            message: load_bearing_tombstone_issue(
-                options.memory_id,
-                &protection,
-                "ee curate tombstone <memory-id> --allow-tombstone-load-bearing",
-            )
-            .message,
-            repair: Some(
-                "Re-run with --allow-tombstone-load-bearing after reviewing `ee why <memory-id> --json`."
-                    .to_owned(),
-            ),
-        });
-    }
-
     if options.dry_run {
         return Ok(CurateTombstoneReport {
             schema: CURATE_TOMBSTONE_SCHEMA_V1,
@@ -3074,6 +3008,26 @@ pub fn run_curate_tombstone(
             audit_id: None,
             degraded: Vec::new(),
             next_action,
+        });
+    }
+
+    let connection = open_existing_database(&prepared.database_path)?;
+    let memory = connection
+        .get_memory(options.memory_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to fetch memory: {error}"),
+            repair: Some("ee memory list --json".to_owned()),
+        })?
+        .ok_or_else(|| DomainError::NotFound {
+            resource: "memory".to_owned(),
+            id: options.memory_id.to_owned(),
+            repair: Some("ee memory list --json".to_owned()),
+        })?;
+
+    if memory.tombstoned_at.is_some() {
+        return Err(DomainError::Usage {
+            message: format!("Memory {} is already tombstoned.", options.memory_id),
+            repair: Some("ee memory list --json".to_owned()),
         });
     }
 
@@ -3113,71 +3067,6 @@ pub fn run_curate_tombstone(
         degraded: Vec::new(),
         next_action,
     })
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct LoadBearingTombstoneProtection {
-    load_bearing_score: f64,
-    authority_rank: usize,
-    citing_rule_count: usize,
-}
-
-fn load_bearing_tombstone_protection(
-    connection: &DbConnection,
-    workspace_id: &str,
-    memory_id: &str,
-) -> Result<Option<LoadBearingTombstoneProtection>, DomainError> {
-    let graph = crate::graph::build_rule_provenance_bipartite_from_tables(connection, workspace_id)
-        .map_err(|error| DomainError::Storage {
-            message: format!(
-                "Failed to build rule-provenance graph for load-bearing guard: {error}"
-            ),
-            repair: Some("ee graph refresh --type rule_provenance".to_owned()),
-        })?;
-    if graph.node_count() == 0 {
-        return Ok(None);
-    }
-    let hits =
-        crate::graph::bipartite_provenance::compute_bipartite_hits(&graph).map_err(|error| {
-            DomainError::Storage {
-                message: format!("Failed to score rule-provenance load-bearing memories: {error}"),
-                repair: Some("ee insights --section loadBearingMemories --json".to_owned()),
-            }
-        })?;
-    let snapshot_version = connection
-        .get_latest_graph_snapshot(workspace_id, crate::db::GraphSnapshotType::RuleProvenance)
-        .ok()
-        .flatten()
-        .map_or(0, |snapshot| u64::from(snapshot.snapshot_version));
-    let items = crate::graph::bipartite_provenance::load_bearing_memory_items(
-        &graph,
-        &hits,
-        snapshot_version,
-    );
-
-    Ok(items
-        .into_iter()
-        .find(|item| item.memory_id == memory_id)
-        .map(|item| LoadBearingTombstoneProtection {
-            load_bearing_score: item.load_bearing_score,
-            authority_rank: item.rank,
-            citing_rule_count: item.citing_rule_count,
-        }))
-}
-
-fn load_bearing_tombstone_issue(
-    memory_id: &str,
-    protection: &LoadBearingTombstoneProtection,
-    repair: &str,
-) -> CurateValidationIssue {
-    validation_issue(
-        "load_bearing_tombstone_requires_override",
-        format!(
-            "Memory {memory_id} is load-bearing in the rule-provenance graph: rank {}, score {:.4}, cited by {} rules.",
-            protection.authority_rank, protection.load_bearing_score, protection.citing_rule_count
-        ),
-        repair,
-    )
 }
 
 /// Restore a tombstoned memory row and record an audit entry.
@@ -8127,7 +8016,6 @@ mod tests {
             candidate_id: &candidate_id,
             actor: Some("MistySalmon"),
             dry_run: false,
-            allow_tombstone_load_bearing: false,
         })
         .map_err(|error| error.message())?;
 
@@ -8307,7 +8195,6 @@ mod tests {
             candidate_id: &candidate_id,
             actor: Some("MistySalmon"),
             dry_run: false,
-            allow_tombstone_load_bearing: false,
         })
         .map_err(|error| error.message())?;
 
@@ -8406,7 +8293,6 @@ mod tests {
             candidate_id: &spoof_id,
             actor: Some("MistySalmon"),
             dry_run: false,
-            allow_tombstone_load_bearing: false,
         })
         .map_err(|error| error.message())?;
 
@@ -8456,7 +8342,6 @@ mod tests {
             candidate_id: &candidate_id,
             actor: Some("MistySalmon"),
             dry_run: false,
-            allow_tombstone_load_bearing: false,
         })
         .map_err(|error| error.message())?;
 
@@ -8514,7 +8399,6 @@ mod tests {
             candidate_id: &candidate_id,
             actor: Some("MistySalmon"),
             dry_run: true,
-            allow_tombstone_load_bearing: false,
         })
         .map_err(|error| error.message())?;
 
