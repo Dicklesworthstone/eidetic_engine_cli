@@ -9,6 +9,11 @@ use serde_json::json;
 use toml_edit::{DocumentMut, value};
 
 use crate::config::{EnvVar, MeshCommandMode, read_env_var, workspace_config};
+use crate::core::tailscale_probe::{
+    SystemTailscaleCliProbeRunner, SystemTailscaleSocketProbeRunner, TailscaleCliProbeConfig,
+    TailscaleLocalReport, TailscalePlatform, TailscaleSocketProbeConfig,
+    probe_tailscale_local_with_runners, tailscale_probe_timeout_ms_from_env_value,
+};
 use crate::db::{
     CreateAuditInput, DbConnection, InsertMeshImportLedgerEventInput, UpsertMeshPeerCursorInput,
     UpsertMeshPeerInput, audit_actions, generate_audit_id,
@@ -37,6 +42,11 @@ use crate::mesh::peer::{
     MeshPeerCapabilityProfile, MeshPeerCommandReport, MeshPeerEndpoint, MeshPeerEnrollInput,
     MeshPeerHandshake, MeshPeerRecord, MeshPeerRotateInput, build_peer_origin_node_id, enroll_peer,
     list_peers, revoke_peer, rotate_peer_key, show_peer, unknown_peer_attempt_report,
+};
+use crate::mesh::tailscale_autodiscovery::{
+    TailscaleAutodiscoveryConfig, TailscaleAutodiscoveryReport,
+    TailscaleStatusCapabilityHelloProbe, autodiscover_tailscale_peers,
+    tailscale_discovery_budget_ms_from_env_value, tailscale_peer_probe_timeout_ms_from_env_value,
 };
 use crate::models::{DomainError, ProcessExitCode};
 use crate::output;
@@ -742,7 +752,96 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let report = snapshot.status_report();
+    if cli.wants_json() {
+        let autodiscovery = build_tailscale_autodiscovery_report(cli, &snapshot);
+        return write_mesh_status_json_with_autodiscovery(stdout, &report, &autodiscovery);
+    }
     write_mesh_report(cli, &report, &render_mesh_status_human(&report), stdout)
+}
+
+fn build_tailscale_autodiscovery_report(
+    cli: &Cli,
+    snapshot: &MeshForegroundSnapshot,
+) -> TailscaleAutodiscoveryReport {
+    let workspace_path = cli.resolve_workspace();
+    let local = gather_mesh_status_tailscale_local_report(snapshot.mesh_enabled);
+    let lists = load_workspace_lists(&workspace_path).unwrap_or_default();
+    let mut config = TailscaleAutodiscoveryConfig::new(
+        snapshot.mesh_enabled,
+        &snapshot.workspace_id,
+        DiscoveryMode::from_env_discovery(|_| {}),
+        &lists.allowlist,
+        &lists.denylist,
+    );
+    config.peer_probe_timeout_ms = tailscale_peer_probe_timeout_ms_from_env_value(
+        read_env_var(EnvVar::TailscalePeerProbeTimeoutMs).as_deref(),
+    );
+    config.total_budget_ms = tailscale_discovery_budget_ms_from_env_value(
+        read_env_var(EnvVar::TailscaleDiscoveryBudgetMs).as_deref(),
+    );
+    let mut probe = TailscaleStatusCapabilityHelloProbe;
+    autodiscover_tailscale_peers(local.as_ref(), &config, &mut probe)
+}
+
+fn gather_mesh_status_tailscale_local_report(mesh_enabled: bool) -> Option<TailscaleLocalReport> {
+    if !mesh_enabled {
+        return None;
+    }
+    let timeout_ms = tailscale_probe_timeout_ms_from_env_value(
+        read_env_var(EnvVar::TailscaleProbeTimeoutMs).as_deref(),
+    );
+    let mut cli_config = TailscaleCliProbeConfig::mesh_enabled();
+    cli_config.timeout_ms = timeout_ms;
+    cli_config.binary_override = read_env_var(EnvVar::TailscaleBinaryOverride).map(PathBuf::from);
+    cli_config.platform_hint = current_tailscale_platform();
+
+    let mut socket_config = TailscaleSocketProbeConfig::mesh_enabled();
+    socket_config.timeout_ms = timeout_ms;
+    socket_config.platform_hint = current_tailscale_platform();
+    if let Some(path) = read_env_var(EnvVar::TailscaleProbeSocketOverride)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        socket_config.socket_candidates = vec![PathBuf::from(path)];
+    }
+
+    let mut socket_runner = SystemTailscaleSocketProbeRunner;
+    let mut cli_runner = SystemTailscaleCliProbeRunner;
+    Some(probe_tailscale_local_with_runners(
+        &socket_config,
+        &cli_config,
+        &mut socket_runner,
+        &mut cli_runner,
+    ))
+}
+
+fn current_tailscale_platform() -> TailscalePlatform {
+    if cfg!(target_os = "linux") {
+        TailscalePlatform::Linux
+    } else if cfg!(target_os = "macos") {
+        TailscalePlatform::MacosOpen
+    } else if cfg!(target_os = "windows") {
+        TailscalePlatform::Windows
+    } else {
+        TailscalePlatform::Other
+    }
+}
+
+fn write_mesh_status_json_with_autodiscovery<W: Write>(
+    stdout: &mut W,
+    report: &MeshCliStatusReport,
+    autodiscovery: &TailscaleAutodiscoveryReport,
+) -> ProcessExitCode {
+    let mut data = serde_json::to_value(report).unwrap_or(serde_json::Value::Null);
+    if let Some(discovery_slot) = data.pointer_mut("/autoEnrollment/discovery") {
+        *discovery_slot = serde_json::to_value(autodiscovery).unwrap_or(serde_json::Value::Null);
+    }
+    let json = json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "success": true,
+        "data": data,
+    });
+    write_stdout(stdout, &(json.to_string() + "\n"))
 }
 
 fn handle_mesh_discovery_policy<W, E>(

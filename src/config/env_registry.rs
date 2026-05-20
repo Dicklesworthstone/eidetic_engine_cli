@@ -150,6 +150,10 @@ pub enum EnvVar {
     TailscaleProbeSocketOverride,
     /// `EE_TAILSCALE_DISCOVERY_MODE`
     TailscaleDiscoveryMode,
+    /// `EE_TAILSCALE_PEER_PROBE_TIMEOUT_MS`
+    TailscalePeerProbeTimeoutMs,
+    /// `EE_TAILSCALE_DISCOVERY_BUDGET_MS`
+    TailscaleDiscoveryBudgetMs,
     /// `EE_TAILSCALE_RESPOND_MODE`
     TailscaleRespondMode,
     /// `EE_WORKSPACE_HYGIENE_ALWAYS_REVIEW_PATTERNS`
@@ -245,6 +249,8 @@ impl EnvVar {
             Self::TailscaleProbeTimeoutMs,
             Self::TailscaleProbeSocketOverride,
             Self::TailscaleDiscoveryMode,
+            Self::TailscalePeerProbeTimeoutMs,
+            Self::TailscaleDiscoveryBudgetMs,
             Self::TailscaleRespondMode,
             Self::WorkspaceHygieneAlwaysReviewPatterns,
             Self::WorkspaceHygieneGeneratedPatterns,
@@ -333,6 +339,8 @@ impl EnvVar {
             Self::TailscaleProbeTimeoutMs => "EE_TAILSCALE_PROBE_TIMEOUT_MS",
             Self::TailscaleProbeSocketOverride => "EE_TAILSCALE_PROBE_SOCKET_OVERRIDE",
             Self::TailscaleDiscoveryMode => "EE_TAILSCALE_DISCOVERY_MODE",
+            Self::TailscalePeerProbeTimeoutMs => "EE_TAILSCALE_PEER_PROBE_TIMEOUT_MS",
+            Self::TailscaleDiscoveryBudgetMs => "EE_TAILSCALE_DISCOVERY_BUDGET_MS",
             Self::TailscaleRespondMode => "EE_TAILSCALE_RESPOND_MODE",
             Self::WorkspaceHygieneAlwaysReviewPatterns => {
                 "EE_WORKSPACE_HYGIENE_ALWAYS_REVIEW_PATTERNS"
@@ -496,6 +504,12 @@ impl EnvVar {
             Self::TailscaleDiscoveryMode => {
                 "Select the caller-side mesh peer discovery policy (service_tag, auto_admit, allowlist)."
             }
+            Self::TailscalePeerProbeTimeoutMs => {
+                "Override the per-peer Tailscale hello probe timeout budget."
+            }
+            Self::TailscaleDiscoveryBudgetMs => {
+                "Override the total Tailscale peer autodiscovery wall-clock budget."
+            }
             Self::TailscaleRespondMode => {
                 "Select the responder-side mesh discovery consent policy (service_tag, auto_admit, allowlist)."
             }
@@ -538,6 +552,8 @@ impl EnvVar {
             Self::MeshHelloPort => Some("41888"),
             Self::MeshHelloResponderDisabled => Some("false"),
             Self::TailscaleDiscoveryMode => Some("service_tag"),
+            Self::TailscalePeerProbeTimeoutMs => Some("750"),
+            Self::TailscaleDiscoveryBudgetMs => Some("5000"),
             Self::TailscaleRespondMode => Some("service_tag"),
             Self::EmbedDedupCosineFloor => Some("0.97"),
             Self::EmbedDedupEnabled => Some("false"),
@@ -615,6 +631,8 @@ impl EnvVar {
             | Self::TailscaleProbeTimeoutMs
             | Self::TailscaleProbeSocketOverride
             | Self::TailscaleDiscoveryMode
+            | Self::TailscalePeerProbeTimeoutMs
+            | Self::TailscaleDiscoveryBudgetMs
             | Self::TailscaleRespondMode => "mesh",
             Self::HarmfulBurstWindowSeconds
             | Self::AuditLaneBatchMax

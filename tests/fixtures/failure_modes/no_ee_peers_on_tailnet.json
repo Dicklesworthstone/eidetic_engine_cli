@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "no_ee_peers_on_tailnet",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.2",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "mesh status"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "The local Tailscale probe is healthy, but no peer answers as an eligible ee peer for this workspace.",
+    "setup_commands": [
+      "source scripts/e2e_overhaul/lib/fake_tailscale.sh",
+      "ft_init /tmp/ee-tailnet-empty"
+    ],
+    "invocation": "EE_MESH_ENABLED=1 ee mesh status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "no_ee_peers_on_tailnet",
+    "severity": "info",
+    "message_contains": [
+      "no eligible ee peers",
+      "tailnet"
+    ],
+    "repair_contains": "mesh enabled"
+  }
+}

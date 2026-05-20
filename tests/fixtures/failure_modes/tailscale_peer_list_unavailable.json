@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "tailscale_peer_list_unavailable",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.2",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "mesh status"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Autodiscovery cannot inspect peer rows because mesh probing is disabled or tailscaled is unavailable.",
+    "setup_commands": [
+      "source scripts/e2e_overhaul/lib/fake_tailscale.sh",
+      "ft_init /tmp/ee-tailnet-unavailable",
+      "ft_set_daemon_state unreachable"
+    ],
+    "invocation": "EE_MESH_ENABLED=1 ee mesh status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "tailscale_peer_list_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "peer list",
+      "unavailable"
+    ],
+    "repair_contains": "tailscale"
+  }
+}

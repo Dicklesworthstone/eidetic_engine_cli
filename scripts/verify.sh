@@ -518,11 +518,15 @@ run_stage "Fake Tailscale Harness E2E (SRR6.46.10)" "./scripts/e2e_overhaul/lib/
 # no-network status surface covered by the deterministic fake Tailscale CLI.
 run_stage "Tailscale Local Probe E2E (SRR6.46.1)" "./scripts/e2e_overhaul/tailscale_local_probe.sh"
 
-# Gate 6.9: Mesh hello protocol contract (SRR6.46.6). Static/no-Cargo gate
+# Gate 6.9: Tailscale peer autodiscovery harness (SRR6.46.2). Uses fake
+# Tailscale peer metadata; the script itself never invokes cargo.
+run_stage "Tailscale Peer Autodiscovery E2E (SRR6.46.2)" "./scripts/e2e_overhaul/tailscale_peer_autodiscovery.sh"
+
+# Gate 6.10: Mesh hello protocol contract (SRR6.46.6). Static/no-Cargo gate
 # covering the bounded hello request/response/error schemas and fixtures.
 run_stage "Mesh Hello Handshake E2E (SRR6.46.6)" "./scripts/e2e_overhaul/mesh_hello_handshake.sh"
 
-# Gate 6.10: Mesh hello responder lifecycle contract (SRR6.46.12). Static
+# Gate 6.11: Mesh hello responder lifecycle contract (SRR6.46.12). Static
 # no-Cargo gate covering daemon/status wiring, degraded fixtures, and audit names.
 run_stage "Mesh Hello Responder Lifecycle E2E (SRR6.46.12)" "./scripts/e2e_overhaul/hello_responder_lifecycle.sh"
 
