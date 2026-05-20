@@ -6140,6 +6140,25 @@ pub struct DoctorArgs {
         ],
     )]
     pub gc_plan: Option<u32>,
+
+    /// Emit an agent-facing ranked triage of the doctor checks under
+    /// `ee.doctor.robot_triage.v1`. Projects every `CheckResult` into
+    /// stable rows ordered by severity (error first, then warning,
+    /// then ok) with a stable secondary order by `name`. Includes
+    /// `counts.error/warning/ok`, `posture`, `overallHealthy`, and a
+    /// `topActionable[]` slice of the first five non-ok findings with
+    /// their `errorCode` and `repair` strings so an agent harness can
+    /// pick what to act on without parsing the human report. Read-only;
+    /// the `src/core/doctor_runtime::mutate` chokepoint is NOT invoked.
+    #[arg(
+        long = "robot-triage",
+        action = ArgAction::SetTrue,
+        conflicts_with_all = [
+            "fix_plan", "franken_health", "capabilities", "robot_docs", "undo",
+            "quick", "only", "since", "list_runs", "gc_plan",
+        ],
+    )]
+    pub robot_triage: bool,
 }
 
 /// Arguments for `ee init`.
@@ -9049,6 +9068,14 @@ where
                     stdout,
                     &(doctor_gc_plan_json(&workspace, &runs_root, days) + "\n"),
                 );
+                return ProcessExitCode::Success;
+            }
+            if args.robot_triage {
+                let report = cli
+                    .workspace
+                    .as_deref()
+                    .map_or_else(DoctorReport::gather, DoctorReport::gather_for_workspace);
+                write_stdout(stdout, &(doctor_robot_triage_json(&report) + "\n"));
                 return ProcessExitCode::Success;
             }
             if let Some(run_id) = args.undo.as_deref() {
@@ -14078,6 +14105,106 @@ fn doctor_gc_plan_json(workspace: &Path, runs_root: &Path, threshold_days: u32) 
         "eligible": eligible,
         "ineligibleCount": ineligible.len(),
         "ineligible": ineligible,
+        "sideEffectFree": true,
+        "configMutation": "never",
+    })
+    .to_string()
+}
+
+/// Emit the agent-facing `ee.doctor.robot_triage.v1` JSON envelope.
+/// Projects every `CheckResult` from a `DoctorReport` into a stable
+/// triage shape ordered by severity descending (error > warning > ok)
+/// with a secondary stable order by `name`. Includes severity counts,
+/// the three-state `posture`, the legacy `overallHealthy` boolean, and
+/// a `topActionable[]` slice of the first five non-ok findings with
+/// their `errorCode` + `repair` so an agent harness can act on the
+/// highest-impact items without parsing the human report or the full
+/// `checks[]` array. Read-only; the `src/core/doctor_runtime::mutate`
+/// chokepoint is NOT invoked.
+fn doctor_robot_triage_json(report: &DoctorReport) -> String {
+    fn severity_rank(s: crate::core::doctor::CheckSeverity) -> u8 {
+        use crate::core::doctor::CheckSeverity;
+        match s {
+            CheckSeverity::Error => 0,
+            CheckSeverity::Warning => 1,
+            CheckSeverity::Ok => 2,
+        }
+    }
+    let mut entries: Vec<serde_json::Value> = report
+        .checks
+        .iter()
+        .map(|check| {
+            serde_json::json!({
+                "name": check.name,
+                "severity": check.severity.as_str(),
+                "message": check.message,
+                "errorCode": check.error_code.as_ref().map(|c| c.as_str()),
+                "repair": check.repair,
+            })
+        })
+        .collect();
+    entries.sort_by(|left, right| {
+        let lsev = left
+            .get("severity")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("ok");
+        let rsev = right
+            .get("severity")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("ok");
+        use crate::core::doctor::CheckSeverity;
+        let lsev = match lsev {
+            "error" => CheckSeverity::Error,
+            "warning" => CheckSeverity::Warning,
+            _ => CheckSeverity::Ok,
+        };
+        let rsev = match rsev {
+            "error" => CheckSeverity::Error,
+            "warning" => CheckSeverity::Warning,
+            _ => CheckSeverity::Ok,
+        };
+        severity_rank(lsev).cmp(&severity_rank(rsev)).then_with(|| {
+            let lname = left
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let rname = right
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            lname.cmp(rname)
+        })
+    });
+    let mut errors = 0usize;
+    let mut warnings = 0usize;
+    let mut oks = 0usize;
+    for check in &report.checks {
+        use crate::core::doctor::CheckSeverity;
+        match check.severity {
+            CheckSeverity::Error => errors += 1,
+            CheckSeverity::Warning => warnings += 1,
+            CheckSeverity::Ok => oks += 1,
+        }
+    }
+    let top_actionable: Vec<serde_json::Value> = entries
+        .iter()
+        .filter(|entry| entry.get("severity").and_then(serde_json::Value::as_str) != Some("ok"))
+        .take(5)
+        .cloned()
+        .collect();
+    serde_json::json!({
+        "schema": "ee.doctor.robot_triage.v1",
+        "doctor_version": env!("CARGO_PKG_VERSION"),
+        "overallHealthy": report.overall_healthy,
+        "posture": report.posture.as_str(),
+        "counts": {
+            "error": errors,
+            "warning": warnings,
+            "ok": oks,
+            "total": entries.len(),
+        },
+        "topActionable": top_actionable,
+        "entries": entries,
         "sideEffectFree": true,
         "configMutation": "never",
     })
