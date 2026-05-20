@@ -812,12 +812,36 @@ if [ "$FROM_SOURCE" -eq 0 ] && [ "$FORCE_INSTALL" -eq 0 ] && [ -n "$VERSION" ] \
   exit 0
 fi
 
+# Install the cleanup trap BEFORE acquiring resources. The previous order
+# (acquire lock → mktemp → set trap) had a window where a failure between
+# `mkdir "$LOCK_DIR"` and `trap cleanup EXIT` would leave the lock dir
+# orphaned (e.g., `echo $$ > pid` fails under disk pressure, or `mktemp -d`
+# fails on a removed external TMPDIR). Pre-initialize the state the cleanup
+# closure consults so an early-fire trap is a safe no-op.
+LOCKED=0
+LOCK_DIR=""
+TMP=""
+cleanup() {
+  [ -n "$TMP" ] && rm -rf "$TMP" 2>/dev/null || true
+  if [ "$LOCKED" -eq 1 ] && [ -n "$LOCK_DIR" ]; then
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
 # Cross-platform locking via mkdir (atomic on every POSIX FS).
 LOCK_DIR="${LOCK_FILE}.d"
-LOCKED=0
 if mkdir "$LOCK_DIR" 2>/dev/null; then
   LOCKED=1
-  echo $$ > "$LOCK_DIR/pid"
+  # If writing the pid file fails (disk full, read-only FS), explicitly
+  # release the lock dir so the next installer is not blocked by a stale
+  # ownerless lock the stale-PID recovery cannot fix.
+  if ! echo $$ > "$LOCK_DIR/pid" 2>/dev/null; then
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+    LOCKED=0
+    err "Could not write pid file to $LOCK_DIR (disk full or read-only?)"
+    exit 1
+  fi
 else
   if [ -f "$LOCK_DIR/pid" ]; then
     OLD_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
@@ -825,7 +849,12 @@ else
       rm -rf "$LOCK_DIR"
       if mkdir "$LOCK_DIR" 2>/dev/null; then
         LOCKED=1
-        echo $$ > "$LOCK_DIR/pid"
+        if ! echo $$ > "$LOCK_DIR/pid" 2>/dev/null; then
+          rm -rf "$LOCK_DIR" 2>/dev/null || true
+          LOCKED=0
+          err "Could not write pid file to $LOCK_DIR (disk full or read-only?)"
+          exit 1
+        fi
       fi
     fi
   fi
@@ -836,11 +865,6 @@ else
 fi
 
 TMP=$(mktemp -d)
-cleanup() {
-  rm -rf "$TMP" 2>/dev/null || true
-  [ "$LOCKED" -eq 1 ] && rm -rf "$LOCK_DIR" 2>/dev/null || true
-}
-trap cleanup EXIT
 
 # ───────────────────────────────────────────────────────────────────────────
 # Download or build

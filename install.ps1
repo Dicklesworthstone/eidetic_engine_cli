@@ -377,12 +377,19 @@ function Test-Network {
 # Lock
 # ───────────────────────────────────────────────────────────────────────────
 
+# Track whether THIS process owns the lock. Lock-Release must not delete
+# a lock another installer holds, e.g., when Lock-Acquire fails because
+# someone else got there first.
+$Script:LockOwned = $false
+
 function Lock-Acquire {
-    # Atomic acquisition: New-Item without -Force throws on existing dir, so
-    # two racing installers cannot both think they hold the lock. The prior
-    # "Test-Path then New-Item -Force" pattern had a TOCTOU race where both
-    # could pass the test, then both succeed (because -Force makes existing-
-    # dir not an error). Match bash's mkdir-without-flags atomicity.
+    # Atomic acquisition. PowerShell's `New-Item -ItemType Directory` without
+    # -Force on an existing dir is rejected by the FileSystem provider, so
+    # exactly one of two racing installers wins. The prior "Test-Path then
+    # New-Item -Force" pattern had an explicit TOCTOU where both racers
+    # could pass the existence test and then both `-Force`-succeed. (Note:
+    # this is still not as tight as bash's kernel-level mkdir(2), but it is
+    # the strongest portable PowerShell primitive without dropping to P/Invoke.)
     $acquired = $false
     try {
         New-Item -ItemType Directory -Path $Script:LockDir -ErrorAction Stop | Out-Null
@@ -407,18 +414,37 @@ function Lock-Acquire {
         }
     }
     if (-not $acquired) {
+        # Do NOT set LockOwned and do NOT attempt to remove $LockDir: it
+        # belongs to another live installer (or a stale-PID lock that the
+        # retry above failed to recover). Lock-Release will be a no-op.
         Write-ErrorExit "Another ee installer appears to be running (lock $Script:LockDir). Re-run after it finishes."
     }
+    # Mark ownership immediately so even a fatal Write-ErrorExit below leaves
+    # the global catch block (line ~end of file) eligible to clean up via
+    # Lock-Release. The prior version exited without releasing the freshly-
+    # created lock dir if the pid-file write failed.
+    $Script:LockOwned = $true
     try {
         $PID | Out-File -Encoding ASCII -FilePath (Join-Path $Script:LockDir "pid")
     } catch {
+        # We own the lock dir; clean it up so the next installer is not
+        # blocked by a pid-less ownerless lock that stale-PID recovery
+        # cannot fix.
+        Remove-Item -Recurse -Force $Script:LockDir -ErrorAction SilentlyContinue
+        $Script:LockOwned = $false
         Write-ErrorExit "Could not write pid file in installer lock ${Script:LockDir}: $_"
     }
 }
 
 function Lock-Release {
-    if (Test-Path $Script:LockDir) {
+    # Only release a lock this process owns. The previous version would
+    # delete the lock dir of a different installer if Main reached the
+    # `finally` block after Lock-Acquire reported "another installer is
+    # running" — a real risk because we cannot guarantee Lock-Acquire is
+    # always called outside the outer try.
+    if ($Script:LockOwned -and (Test-Path $Script:LockDir)) {
         Remove-Item -Recurse -Force $Script:LockDir -ErrorAction SilentlyContinue
+        $Script:LockOwned = $false
     }
 }
 
@@ -915,7 +941,11 @@ try {
 } catch {
     Write-Host ""
     Write-Host "Installation failed: $_" -ForegroundColor Red
-    if (Test-Path $Script:LockDir) {
+    # Only release a lock we own. The previous version unconditionally
+    # deleted $Script:LockDir if it existed — that could clobber another
+    # installer's live lock when Main died for unrelated reasons before
+    # Lock-Acquire ran.
+    if ($Script:LockOwned -and (Test-Path $Script:LockDir)) {
         Remove-Item -Recurse -Force $Script:LockDir -ErrorAction SilentlyContinue
     }
     exit 1
