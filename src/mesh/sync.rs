@@ -499,6 +499,7 @@ pub struct SelectiveSyncCandidate {
     pub created_at_secs: i64,
     pub has_evidence_refs: bool,
     pub estimated_bytes: u64,
+    pub withdrawn: bool,
     pub tombstoned: bool,
 }
 
@@ -522,6 +523,7 @@ impl SelectiveSyncCandidate {
             created_at_secs: 0,
             has_evidence_refs: false,
             estimated_bytes: 0,
+            withdrawn: false,
             tombstoned: false,
         }
     }
@@ -555,6 +557,18 @@ impl SelectiveSyncCandidate {
         self.estimated_bytes = estimated_bytes;
         self
     }
+
+    #[must_use]
+    pub fn with_withdrawn(mut self, withdrawn: bool) -> Self {
+        self.withdrawn = withdrawn;
+        self
+    }
+
+    #[must_use]
+    pub fn with_tombstoned(mut self, tombstoned: bool) -> Self {
+        self.tombstoned = tombstoned;
+        self
+    }
 }
 
 /// Deterministic allow/deny outcome.
@@ -585,6 +599,7 @@ pub enum SyncDenyReason {
     ProfileNotSubscribed,
     OriginWorkspaceDenied,
     OriginWorkspaceNotAllowed,
+    Withdrawn,
     Tombstoned,
     LevelDenied,
     KindDenied,
@@ -609,6 +624,7 @@ impl SyncDenyReason {
             Self::ProfileNotSubscribed => "profile_not_subscribed",
             Self::OriginWorkspaceDenied => "origin_workspace_denied",
             Self::OriginWorkspaceNotAllowed => "origin_workspace_not_allowed",
+            Self::Withdrawn => "withdrawn",
             Self::Tombstoned => "tombstoned",
             Self::LevelDenied => "level_denied",
             Self::KindDenied => "kind_denied",
@@ -801,6 +817,9 @@ fn deny_reason(
     {
         return Some(SyncDenyReason::OriginWorkspaceNotAllowed);
     }
+    if candidate.withdrawn {
+        return Some(SyncDenyReason::Withdrawn);
+    }
     if candidate.tombstoned {
         return Some(SyncDenyReason::Tombstoned);
     }
@@ -912,6 +931,32 @@ mod tests {
         assert_eq!(preview.denied_count, 1);
         assert_eq!(preview.rows[0].deny_reason, Some(SyncDenyReason::TagDenied));
         assert_eq!(preview.denied_by_reason.get("tag_denied"), Some(&1));
+    }
+
+    #[test]
+    fn withdrawn_lifecycle_blocks_export_before_content_filters() {
+        let preview = build_selective_sync_preview(SelectiveSyncPreviewInput {
+            subscription: subscription("profile-a"),
+            profile: profile(SelectiveSyncShape::body_without_embeddings())
+                .with_allowed_tags(["public"])
+                .with_denied_tags(["secret"]),
+            candidates: vec![
+                candidate("mem-withdrawn", SyncMaterialLane::Body)
+                    .with_withdrawn(true)
+                    .with_tags(["public", "secret"]),
+            ],
+        });
+
+        assert_eq!(preview.candidate_count, 1);
+        assert_eq!(preview.allowed_count, 0);
+        assert_eq!(preview.denied_count, 1);
+        assert_eq!(preview.rows[0].deny_reason, Some(SyncDenyReason::Withdrawn));
+        assert_eq!(preview.denied_by_reason.get("withdrawn"), Some(&1));
+        assert!(
+            preview.rows[0]
+                .explanation
+                .contains("denied by profile profile-a: withdrawn")
+        );
     }
 
     #[test]
