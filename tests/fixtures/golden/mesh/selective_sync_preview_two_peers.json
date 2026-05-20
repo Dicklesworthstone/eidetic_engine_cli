@@ -1,0 +1,156 @@
+{
+  "schema": "ee.mesh.selective_sync_preview_set.v1",
+  "previews": [
+    {
+      "schema": "ee.mesh.selective_sync_preview.v1",
+      "profileId": "starter.metadata_only",
+      "peerId": "peer-a-metadata",
+      "candidateCount": 4,
+      "allowedCount": 1,
+      "deniedCount": 3,
+      "allowedBytes": 10,
+      "deniedBytes": 30,
+      "deniedByReason": {
+        "evidence_refs_excluded": 1,
+        "material_lane_not_allowed": 2
+      },
+      "allowedByMaterialLane": {
+        "metadata": 1
+      },
+      "rows": [
+        {
+          "profileId": "starter.metadata_only",
+          "peerId": "peer-a-metadata",
+          "memoryId": "mem-a",
+          "originWorkspaceId": "workspace-a",
+          "materialLane": "metadata",
+          "level": "procedural",
+          "kind": "rule",
+          "trustClass": "agent_validated",
+          "decision": "allow",
+          "denyReason": null,
+          "explanation": "allowed by profile starter.metadata_only for metadata lane",
+          "estimatedBytes": 10
+        },
+        {
+          "profileId": "starter.metadata_only",
+          "peerId": "peer-a-metadata",
+          "memoryId": "mem-a",
+          "originWorkspaceId": "workspace-a",
+          "materialLane": "body",
+          "level": "procedural",
+          "kind": "rule",
+          "trustClass": "agent_validated",
+          "decision": "deny",
+          "denyReason": "material_lane_not_allowed",
+          "explanation": "denied by profile starter.metadata_only: material_lane_not_allowed",
+          "estimatedBytes": 10
+        },
+        {
+          "profileId": "starter.metadata_only",
+          "peerId": "peer-a-metadata",
+          "memoryId": "mem-a",
+          "originWorkspaceId": "workspace-a",
+          "materialLane": "embedding",
+          "level": "procedural",
+          "kind": "rule",
+          "trustClass": "agent_validated",
+          "decision": "deny",
+          "denyReason": "material_lane_not_allowed",
+          "explanation": "denied by profile starter.metadata_only: material_lane_not_allowed",
+          "estimatedBytes": 10
+        },
+        {
+          "profileId": "starter.metadata_only",
+          "peerId": "peer-a-metadata",
+          "memoryId": "mem-a",
+          "originWorkspaceId": "workspace-a",
+          "materialLane": "evidence_ref",
+          "level": "procedural",
+          "kind": "rule",
+          "trustClass": "agent_validated",
+          "decision": "deny",
+          "denyReason": "evidence_refs_excluded",
+          "explanation": "denied by profile starter.metadata_only: evidence_refs_excluded",
+          "estimatedBytes": 10
+        }
+      ]
+    },
+    {
+      "schema": "ee.mesh.selective_sync_preview.v1",
+      "profileId": "starter.trusted_bodies",
+      "peerId": "peer-b-body",
+      "candidateCount": 4,
+      "allowedCount": 3,
+      "deniedCount": 1,
+      "allowedBytes": 30,
+      "deniedBytes": 10,
+      "deniedByReason": {
+        "material_lane_not_allowed": 1
+      },
+      "allowedByMaterialLane": {
+        "body": 1,
+        "evidence_ref": 1,
+        "metadata": 1
+      },
+      "rows": [
+        {
+          "profileId": "starter.trusted_bodies",
+          "peerId": "peer-b-body",
+          "memoryId": "mem-a",
+          "originWorkspaceId": "workspace-a",
+          "materialLane": "metadata",
+          "level": "procedural",
+          "kind": "rule",
+          "trustClass": "agent_validated",
+          "decision": "allow",
+          "denyReason": null,
+          "explanation": "allowed by profile starter.trusted_bodies for metadata lane",
+          "estimatedBytes": 10
+        },
+        {
+          "profileId": "starter.trusted_bodies",
+          "peerId": "peer-b-body",
+          "memoryId": "mem-a",
+          "originWorkspaceId": "workspace-a",
+          "materialLane": "body",
+          "level": "procedural",
+          "kind": "rule",
+          "trustClass": "agent_validated",
+          "decision": "allow",
+          "denyReason": null,
+          "explanation": "allowed by profile starter.trusted_bodies for body lane",
+          "estimatedBytes": 10
+        },
+        {
+          "profileId": "starter.trusted_bodies",
+          "peerId": "peer-b-body",
+          "memoryId": "mem-a",
+          "originWorkspaceId": "workspace-a",
+          "materialLane": "embedding",
+          "level": "procedural",
+          "kind": "rule",
+          "trustClass": "agent_validated",
+          "decision": "deny",
+          "denyReason": "material_lane_not_allowed",
+          "explanation": "denied by profile starter.trusted_bodies: material_lane_not_allowed",
+          "estimatedBytes": 10
+        },
+        {
+          "profileId": "starter.trusted_bodies",
+          "peerId": "peer-b-body",
+          "memoryId": "mem-a",
+          "originWorkspaceId": "workspace-a",
+          "materialLane": "evidence_ref",
+          "level": "procedural",
+          "kind": "rule",
+          "trustClass": "agent_validated",
+          "decision": "allow",
+          "denyReason": null,
+          "explanation": "allowed by profile starter.trusted_bodies for evidence_ref lane",
+          "estimatedBytes": 10
+        }
+      ]
+    }
+  ]
+}

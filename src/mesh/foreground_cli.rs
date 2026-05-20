@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::db::{
     MeshStorageStatus, StoredMeshImportLedgerEvent, StoredMeshPeer, StoredMeshPeerCursor,
 };
+use crate::mesh::sync::{SelectiveSyncConfig, SelectiveSyncStatusSummary};
 use crate::policy::{
     MeshExportPolicyAttestation, MeshExportSecretScanReport, MeshExportSecretScanSubject,
     scan_mesh_export_subjects,
@@ -218,6 +219,7 @@ pub struct MeshCliStatusReport {
     pub mode: String,
     pub posture: String,
     pub storage: MeshStorageCounts,
+    pub selective_sync: SelectiveSyncStatusSummary,
     pub repair_commands: Vec<String>,
     pub degraded: Vec<MeshCliDegradation>,
 }
@@ -340,6 +342,7 @@ impl MeshForegroundSnapshot {
             mode: self.mode.clone(),
             posture: posture.to_owned(),
             storage: self.storage.clone(),
+            selective_sync: SelectiveSyncConfig::safe_starter_config().summary(),
             repair_commands: vec![
                 format!("ee init --workspace \"{}\" --json", self.workspace_path),
                 format!(

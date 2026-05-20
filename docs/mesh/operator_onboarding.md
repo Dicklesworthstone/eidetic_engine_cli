@@ -258,6 +258,19 @@ Treat sharing profiles as a ladder, not a switch. A profile should move to the
 next rung only when the current rung has produced useful evidence and no
 unexpected peers, workspaces, or degraded codes.
 
+Starter profiles are intentionally narrow and inspectable:
+
+| Profile ID | Shape | Default use |
+| --- | --- | --- |
+| `starter.metadata_only` | Metadata lane only; no evidence refs, bodies, or embeddings | First profile for a newly enrolled peer. |
+| `starter.evidence_refs` | Metadata plus evidence-reference lane; no bodies or embeddings | Use only when the peer needs provenance pointers and the artifact paths are redaction-safe aliases. |
+| `starter.trusted_bodies` | Metadata, evidence refs, and body lane; embeddings remain local | Use only for reviewed or validated memories shared with an owned/trusted peer. |
+
+Every profile preview should log `profile_id`, `candidate_count`,
+`allowed_count`, `denied_count`, and `deny_reason` before a peer receives new
+material. Deny rows are not errors; they are the audit trail explaining why a
+memory, body, evidence reference, or embedding surrogate did not sync.
+
 | From | To | Required evidence before promotion |
 | --- | --- | --- |
 | Local only | Metadata only | `ee mesh status --json` names only expected peers and workspaces. |

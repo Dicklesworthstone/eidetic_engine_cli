@@ -4,6 +4,11 @@ use ee::mesh::foreground_cli::{
     MESH_EXPORT_ARTIFACT_SCHEMA_V1, MeshCliDegradation, MeshEventRow, MeshExportArtifact,
     MeshForegroundSnapshot, MeshStorageCounts,
 };
+use ee::mesh::sync::{
+    PeerSyncSubscription, STARTER_PROFILE_METADATA_ONLY, STARTER_PROFILE_TRUSTED_BODIES,
+    SelectiveSyncCandidate, SelectiveSyncConfig, SelectiveSyncPreview, SyncMaterialLane,
+    SyncTrustClass,
+};
 use ee::policy::MESH_SECRET_EXPORT_DENIED_CODE;
 
 fn pretty_json<T: serde::Serialize>(value: &T) -> String {
@@ -18,6 +23,9 @@ fn fixture(name: &str) -> &'static str {
             include_str!("fixtures/golden/mesh/foreground_status_disabled.json")
         }
         "export_empty" => include_str!("fixtures/golden/mesh/foreground_export_empty.json"),
+        "selective_sync_preview_two_peers" => {
+            include_str!("fixtures/golden/mesh/selective_sync_preview_two_peers.json")
+        }
         other => panic!("unknown fixture {other}"),
     }
 }
@@ -88,10 +96,49 @@ fn mesh_event(event_json: String) -> MeshEventRow {
     }
 }
 
+fn selective_sync_candidates() -> Vec<SelectiveSyncCandidate> {
+    [
+        SyncMaterialLane::Metadata,
+        SyncMaterialLane::Body,
+        SyncMaterialLane::Embedding,
+        SyncMaterialLane::EvidenceRef,
+    ]
+    .into_iter()
+    .map(|lane| {
+        SelectiveSyncCandidate::new("mem-a", "workspace-a", "procedural", "rule", lane)
+            .with_trust_class(SyncTrustClass::AgentValidated)
+            .with_evidence_refs(lane == SyncMaterialLane::EvidenceRef)
+            .with_estimated_bytes(10)
+    })
+    .collect()
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SelectiveSyncPreviewSet<'a> {
+    schema: &'static str,
+    previews: &'a [SelectiveSyncPreview],
+}
+
 #[test]
 fn foreground_status_json_matches_golden_fixture() {
     let report = disabled_snapshot().status_report();
     assert_eq!(pretty_json(&report), fixture("status_disabled"));
+}
+
+#[test]
+fn selective_sync_profile_preview_matches_golden_fixture() {
+    let config = SelectiveSyncConfig::safe_starter_config().with_subscriptions([
+        PeerSyncSubscription::new("peer-a-metadata", STARTER_PROFILE_METADATA_ONLY),
+        PeerSyncSubscription::new("peer-b-body", STARTER_PROFILE_TRUSTED_BODIES),
+    ]);
+    let previews = config.previews_for_candidates(&selective_sync_candidates());
+    let rendered = pretty_json(&SelectiveSyncPreviewSet {
+        schema: "ee.mesh.selective_sync_preview_set.v1",
+        previews: &previews,
+    });
+
+    assert_eq!(rendered, fixture("selective_sync_preview_two_peers"));
 }
 
 #[test]

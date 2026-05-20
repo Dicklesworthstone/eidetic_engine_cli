@@ -854,6 +854,12 @@ fn render_mesh_status_human(report: &MeshCliStatusReport) -> String {
         failures = report.storage.policy_failure_event_count,
         bodies = report.storage.cached_body_count,
     );
+    output.push_str(&format!(
+        "  Selective sync: {profiles} profiles, {subscriptions} subscriptions, default {default_profile}\n",
+        profiles = report.selective_sync.profile_count,
+        subscriptions = report.selective_sync.subscription_count,
+        default_profile = report.selective_sync.default_profile_id,
+    ));
     if !report.repair_commands.is_empty() {
         output.push_str("  Repair commands:\n");
         for command in &report.repair_commands {

@@ -17,6 +17,20 @@
     "mappedMemoryCount": 0,
     "cachedBodyCount": 0
   },
+  "selectiveSync": {
+    "schema": "ee.mesh.selective_sync_status.v1",
+    "defaultProfileId": "starter.metadata_only",
+    "profileCount": 3,
+    "subscriptionCount": 0,
+    "starterProfileIds": [
+      "starter.evidence_refs",
+      "starter.metadata_only",
+      "starter.trusted_bodies"
+    ],
+    "subscriptionProfileIds": [],
+    "bodyLanesDefaultAllowed": false,
+    "embeddingLanesAllowed": false
+  },
   "repairCommands": [
     "ee init --workspace \"/tmp/ee-mesh\" --json",
     "ee mesh export --workspace \"/tmp/ee-mesh\" --out mesh-export.json --json",

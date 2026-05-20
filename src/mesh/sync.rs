@@ -13,6 +13,13 @@ use serde::{Deserialize, Serialize};
 /// Stable schema identifier for selective sync profile/config records.
 pub const SELECTIVE_SYNC_PROFILE_SCHEMA_V1: &str = "ee.mesh.selective_sync_profile.v1";
 
+/// Stable schema identifier for the local selective sync config surface.
+pub const SELECTIVE_SYNC_CONFIG_SCHEMA_V1: &str = "ee.mesh.selective_sync_config.v1";
+
+/// Stable schema identifier for status summaries derived from selective sync
+/// config.
+pub const SELECTIVE_SYNC_STATUS_SCHEMA_V1: &str = "ee.mesh.selective_sync_status.v1";
+
 /// Stable schema identifier for dry-run preview output.
 pub const SELECTIVE_SYNC_PREVIEW_SCHEMA_V1: &str = "ee.mesh.selective_sync_preview.v1";
 
@@ -284,6 +291,149 @@ pub fn safe_starter_profiles() -> Vec<SelectiveSyncProfile> {
     ]
 }
 
+/// Serializable config representation for named profiles and per-peer
+/// subscriptions.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectiveSyncConfig {
+    pub schema: String,
+    pub profiles: Vec<SelectiveSyncProfile>,
+    pub subscriptions: Vec<PeerSyncSubscription>,
+}
+
+impl SelectiveSyncConfig {
+    #[must_use]
+    pub fn new(
+        profiles: impl IntoIterator<Item = SelectiveSyncProfile>,
+        subscriptions: impl IntoIterator<Item = PeerSyncSubscription>,
+    ) -> Self {
+        let mut profiles = profiles.into_iter().collect::<Vec<_>>();
+        profiles.sort_by(|left, right| left.profile_id.cmp(&right.profile_id));
+        let mut subscriptions = subscriptions.into_iter().collect::<Vec<_>>();
+        subscriptions.sort_by(|left, right| {
+            left.peer_id
+                .cmp(&right.peer_id)
+                .then_with(|| left.profile_id.cmp(&right.profile_id))
+        });
+        Self {
+            schema: SELECTIVE_SYNC_CONFIG_SCHEMA_V1.to_owned(),
+            profiles,
+            subscriptions,
+        }
+    }
+
+    #[must_use]
+    pub fn safe_starter_config() -> Self {
+        Self::new(
+            safe_starter_profiles(),
+            std::iter::empty::<PeerSyncSubscription>(),
+        )
+    }
+
+    #[must_use]
+    pub fn with_subscriptions(
+        mut self,
+        subscriptions: impl IntoIterator<Item = PeerSyncSubscription>,
+    ) -> Self {
+        self.subscriptions.extend(subscriptions);
+        self.subscriptions.sort_by(|left, right| {
+            left.peer_id
+                .cmp(&right.peer_id)
+                .then_with(|| left.profile_id.cmp(&right.profile_id))
+        });
+        self
+    }
+
+    #[must_use]
+    pub fn profile(&self, profile_id: &str) -> Option<&SelectiveSyncProfile> {
+        self.profiles
+            .iter()
+            .find(|profile| profile.profile_id == profile_id)
+    }
+
+    #[must_use]
+    pub fn summary(&self) -> SelectiveSyncStatusSummary {
+        let starter_profile_ids = self
+            .profiles
+            .iter()
+            .map(|profile| profile.profile_id.clone())
+            .collect::<Vec<_>>();
+        let subscription_profile_ids = self
+            .subscriptions
+            .iter()
+            .map(|subscription| subscription.profile_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let default_profile_id = if starter_profile_ids
+            .iter()
+            .any(|profile_id| profile_id == STARTER_PROFILE_METADATA_ONLY)
+        {
+            STARTER_PROFILE_METADATA_ONLY.to_owned()
+        } else {
+            starter_profile_ids
+                .first()
+                .cloned()
+                .unwrap_or_else(|| STARTER_PROFILE_METADATA_ONLY.to_owned())
+        };
+        SelectiveSyncStatusSummary {
+            schema: SELECTIVE_SYNC_STATUS_SCHEMA_V1.to_owned(),
+            default_profile_id,
+            profile_count: self.profiles.len(),
+            subscription_count: self.subscriptions.len(),
+            starter_profile_ids,
+            subscription_profile_ids,
+            body_lanes_default_allowed: false,
+            embedding_lanes_allowed: false,
+        }
+    }
+
+    #[must_use]
+    pub fn preview_for_subscription(
+        &self,
+        subscription: &PeerSyncSubscription,
+        candidates: &[SelectiveSyncCandidate],
+    ) -> SelectiveSyncPreview {
+        let profile = self.profile(&subscription.profile_id).cloned().unwrap_or_else(|| {
+            SelectiveSyncProfile::new(
+                "__missing_profile__",
+                "Missing profile placeholder; every candidate denies with profile_not_subscribed.",
+                SelectiveSyncShape::metadata_only(),
+            )
+        });
+        build_selective_sync_preview(SelectiveSyncPreviewInput {
+            subscription: subscription.clone(),
+            profile,
+            candidates: candidates.to_vec(),
+        })
+    }
+
+    #[must_use]
+    pub fn previews_for_candidates(
+        &self,
+        candidates: &[SelectiveSyncCandidate],
+    ) -> Vec<SelectiveSyncPreview> {
+        self.subscriptions
+            .iter()
+            .map(|subscription| self.preview_for_subscription(subscription, candidates))
+            .collect()
+    }
+}
+
+/// Compact status block embedded in foreground mesh status reports.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectiveSyncStatusSummary {
+    pub schema: String,
+    pub default_profile_id: String,
+    pub profile_count: usize,
+    pub subscription_count: usize,
+    pub starter_profile_ids: Vec<String>,
+    pub subscription_profile_ids: Vec<String>,
+    pub body_lanes_default_allowed: bool,
+    pub embedding_lanes_allowed: bool,
+}
+
 /// Per-peer subscription binding. The subscription chooses the profile and can
 /// further constrain which origin workspaces the peer receives.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -491,6 +641,7 @@ pub struct SelectiveSyncDecisionRow {
     pub trust_class: SyncTrustClass,
     pub decision: SyncFilterDecision,
     pub deny_reason: Option<SyncDenyReason>,
+    pub explanation: String,
     pub estimated_bytes: u64,
 }
 
@@ -586,6 +737,7 @@ fn decision_row(
     candidate: SelectiveSyncCandidate,
 ) -> SelectiveSyncDecisionRow {
     let deny_reason = deny_reason(subscription, profile, &candidate);
+    let explanation = decision_explanation(profile, candidate.material_lane, deny_reason);
     SelectiveSyncDecisionRow {
         profile_id: profile.profile_id.clone(),
         peer_id: subscription.peer_id.clone(),
@@ -601,7 +753,27 @@ fn decision_row(
             SyncFilterDecision::Allow
         },
         deny_reason,
+        explanation,
         estimated_bytes: candidate.estimated_bytes,
+    }
+}
+
+fn decision_explanation(
+    profile: &SelectiveSyncProfile,
+    material_lane: SyncMaterialLane,
+    deny_reason: Option<SyncDenyReason>,
+) -> String {
+    match deny_reason {
+        Some(reason) => format!(
+            "denied by profile {}: {}",
+            profile.profile_id,
+            reason.as_str()
+        ),
+        None => format!(
+            "allowed by profile {} for {} lane",
+            profile.profile_id,
+            material_lane.as_str()
+        ),
     }
 }
 
@@ -852,5 +1024,65 @@ mod tests {
             preview.rows[2].deny_reason,
             Some(SyncDenyReason::EvidenceRefsExcluded)
         );
+    }
+
+    #[test]
+    fn config_previews_split_two_peers_with_structured_counts() {
+        let candidates = vec![
+            candidate("mem-a", SyncMaterialLane::Metadata),
+            candidate("mem-a", SyncMaterialLane::Body),
+            candidate("mem-a", SyncMaterialLane::Embedding),
+            candidate("mem-b", SyncMaterialLane::EvidenceRef).with_evidence_refs(true),
+        ];
+        let config = SelectiveSyncConfig::safe_starter_config().with_subscriptions([
+            PeerSyncSubscription::new("peer-a-metadata", STARTER_PROFILE_METADATA_ONLY),
+            PeerSyncSubscription::new("peer-b-body", STARTER_PROFILE_TRUSTED_BODIES),
+        ]);
+
+        let previews = config.previews_for_candidates(&candidates);
+        assert_eq!(previews.len(), 2);
+
+        let metadata_preview = &previews[0];
+        assert_eq!(metadata_preview.profile_id, STARTER_PROFILE_METADATA_ONLY);
+        assert_eq!(metadata_preview.peer_id, "peer-a-metadata");
+        assert_eq!(metadata_preview.candidate_count, 4);
+        assert_eq!(metadata_preview.allowed_count, 1);
+        assert_eq!(metadata_preview.denied_count, 3);
+        assert_eq!(
+            metadata_preview
+                .denied_by_reason
+                .get("material_lane_not_allowed"),
+            Some(&2)
+        );
+        assert_eq!(
+            metadata_preview
+                .denied_by_reason
+                .get("evidence_refs_excluded"),
+            Some(&1)
+        );
+        assert!(
+            metadata_preview.rows[0]
+                .explanation
+                .contains("allowed by profile starter.metadata_only")
+        );
+
+        let body_preview = &previews[1];
+        assert_eq!(body_preview.profile_id, STARTER_PROFILE_TRUSTED_BODIES);
+        assert_eq!(body_preview.peer_id, "peer-b-body");
+        assert_eq!(body_preview.candidate_count, 4);
+        assert_eq!(body_preview.allowed_count, 3);
+        assert_eq!(body_preview.denied_count, 1);
+        assert_eq!(
+            body_preview
+                .denied_by_reason
+                .get("material_lane_not_allowed"),
+            Some(&1)
+        );
+
+        let summary = config.summary();
+        assert_eq!(summary.profile_count, 3);
+        assert_eq!(summary.subscription_count, 2);
+        assert!(!summary.body_lanes_default_allowed);
+        assert!(!summary.embedding_lanes_allowed);
     }
 }
