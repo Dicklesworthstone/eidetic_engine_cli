@@ -18,6 +18,8 @@ pub const PEER_ENROLLMENT_EXPLICIT_CONSENT_REQUIRED_CODE: &str =
     "mesh_peer_explicit_consent_required";
 pub const PEER_ENROLLMENT_HANDSHAKE_DENIED_CODE: &str = "mesh_peer_handshake_denied";
 pub const PEER_ENROLLMENT_NETWORK_ONLY_DENIED_CODE: &str = "mesh_peer_network_only_denied";
+pub const PEER_ENROLLMENT_CAPABILITY_MISMATCH_CODE: &str =
+    "mesh_peer_capability_handshake_mismatch";
 pub const PEER_KEY_ROTATION_REVOKED_CODE: &str = "mesh_peer_key_rotation_revoked";
 pub const PEER_UNKNOWN_ATTEMPT_DENIED_CODE: &str = "mesh_peer_unknown_attempt_denied";
 
@@ -76,6 +78,15 @@ impl MeshPeerCapabilityProfile {
                 revision_notice: false,
                 curation_signal: false,
             },
+        }
+    }
+
+    #[must_use]
+    pub const fn required_material_capabilities(self) -> &'static [&'static str] {
+        match self {
+            Self::MetadataOnly => &["metadata"],
+            Self::BodyAllowed | Self::EmbeddingsDenied => &["metadata", "body"],
+            Self::FullyDenied => &[],
         }
     }
 }
@@ -369,6 +380,17 @@ pub fn enroll_peer(input: MeshPeerEnrollInput) -> MeshPeerCommandReport {
             "reachable endpoint identity does not match the granted handshake",
         );
     }
+    if let Some(missing_capability) =
+        first_missing_material_capability(input.capability_profile, &input.handshake)
+    {
+        return MeshPeerCommandReport::denied(
+            "mesh peer add",
+            PEER_ENROLLMENT_CAPABILITY_MISMATCH_CODE,
+            format!(
+                "granted handshake did not advertise required capability: mesh:{missing_capability}"
+            ),
+        );
+    }
 
     let peer_id = build_peer_id(&input.workspace_id, &input.endpoint.tailscale_node_key);
     let record = MeshPeerRecord {
@@ -402,6 +424,49 @@ pub fn enroll_peer(input: MeshPeerEnrollInput) -> MeshPeerCommandReport {
             format!("ee mesh peer revoke {peer_id} --json"),
         ],
     )
+}
+
+#[must_use]
+pub fn first_missing_material_capability(
+    profile: MeshPeerCapabilityProfile,
+    handshake: &MeshPeerHandshake,
+) -> Option<&'static str> {
+    profile
+        .required_material_capabilities()
+        .iter()
+        .copied()
+        .find(|required| !handshake_advertises_material_capability(handshake, required))
+}
+
+#[must_use]
+pub fn handshake_advertises_material_capability(
+    handshake: &MeshPeerHandshake,
+    material_capability: &str,
+) -> bool {
+    handshake.responder_capabilities.iter().any(|capability| {
+        material_capability_aliases(material_capability).contains(&capability.as_str())
+    })
+}
+
+fn material_capability_aliases(material_capability: &str) -> &'static [&'static str] {
+    match material_capability {
+        "metadata" => &[
+            "metadata",
+            "mesh:metadata",
+            "send:metadata",
+            "receive:metadata",
+        ],
+        "body" => &["body", "mesh:body", "send:body", "receive:body"],
+        "embedding" => &[
+            "embedding",
+            "embeddings",
+            "mesh:embedding",
+            "mesh:embeddings",
+            "send:embedding",
+            "receive:embedding",
+        ],
+        _ => &[],
+    }
 }
 
 #[must_use]
@@ -496,4 +561,98 @@ pub fn unknown_peer_attempt_report(
         PEER_UNKNOWN_ATTEMPT_DENIED_CODE,
         "network reachability is not trust; enroll the peer explicitly first",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MeshPeerCapabilityProfile, MeshPeerEndpoint, MeshPeerEnrollInput, MeshPeerHandshake,
+        PEER_ENROLLMENT_CAPABILITY_MISMATCH_CODE, enroll_peer, first_missing_material_capability,
+        handshake_advertises_material_capability,
+    };
+
+    const WORKSPACE_ID: &str = "wsp_peer_capability_contract";
+    const NODE_KEY: &str = "nodekey:peer-capability";
+    const NOW: &str = "2026-05-20T00:05:00Z";
+
+    fn endpoint() -> MeshPeerEndpoint {
+        MeshPeerEndpoint {
+            tailscale_node_key: NODE_KEY.to_owned(),
+            tailnet_id: "tn_peer_capability".to_owned(),
+            tailnet_display_name: Some("capability-tailnet".to_owned()),
+            endpoint: "100.64.20.2:4747".to_owned(),
+            magic_dns_name: Some("peer-capability.tailnet.ts.net".to_owned()),
+        }
+    }
+
+    fn handshake(capabilities: &[&str]) -> MeshPeerHandshake {
+        MeshPeerHandshake::granted(
+            "hello_req_capability",
+            "1.0",
+            NODE_KEY,
+            capabilities
+                .iter()
+                .map(|capability| (*capability).to_owned())
+                .collect(),
+        )
+    }
+
+    fn enroll_with_capabilities(
+        profile: MeshPeerCapabilityProfile,
+        capabilities: &[&str],
+    ) -> super::MeshPeerCommandReport {
+        enroll_peer(MeshPeerEnrollInput {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            alias: "peer-capability".to_owned(),
+            endpoint: endpoint(),
+            capability_profile: profile,
+            handshake: handshake(capabilities),
+            public_key_fingerprint: "blake3:pubkey-capability".to_owned(),
+            now: NOW.to_owned(),
+            explicit_human_consent: true,
+        })
+    }
+
+    #[test]
+    fn enrollment_requires_handshake_capabilities_for_requested_profile() {
+        let metadata =
+            enroll_with_capabilities(MeshPeerCapabilityProfile::MetadataOnly, &["mesh:metadata"]);
+        assert!(metadata.success);
+
+        let body = enroll_with_capabilities(
+            MeshPeerCapabilityProfile::BodyAllowed,
+            &["mesh:metadata", "mesh:body"],
+        );
+        assert!(body.success);
+
+        let missing_body =
+            enroll_with_capabilities(MeshPeerCapabilityProfile::BodyAllowed, &["mesh:metadata"]);
+        assert!(!missing_body.success);
+        assert_eq!(
+            missing_body.denied_code,
+            Some(PEER_ENROLLMENT_CAPABILITY_MISMATCH_CODE)
+        );
+    }
+
+    #[test]
+    fn capability_contract_accepts_stable_wire_aliases() {
+        let handshake = handshake(&["send:metadata", "receive:body"]);
+        assert!(handshake_advertises_material_capability(
+            &handshake, "metadata"
+        ));
+        assert!(handshake_advertises_material_capability(&handshake, "body"));
+        assert_eq!(
+            first_missing_material_capability(MeshPeerCapabilityProfile::BodyAllowed, &handshake),
+            None
+        );
+    }
+
+    #[test]
+    fn fully_denied_profile_needs_no_material_lanes_but_still_records_handshake() {
+        let report = enroll_with_capabilities(MeshPeerCapabilityProfile::FullyDenied, &[]);
+        let peer = report.peer.expect("fully denied enrollment record");
+        assert!(report.success);
+        assert!(peer.capabilities.wire_capability_names().is_empty());
+        assert!(peer.handshake.responder_capabilities.is_empty());
+    }
 }
