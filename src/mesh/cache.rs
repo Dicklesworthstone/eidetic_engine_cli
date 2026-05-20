@@ -714,6 +714,298 @@ pub struct MeshCacheBodyFetchDecision {
     pub quarantine_reason: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum MeshCachedBodyLocation {
+    MetadataOnly,
+    CachedRemoteBody,
+    FetchableRemoteBody,
+    QuarantinedRemoteBody,
+}
+
+impl MeshCachedBodyLocation {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MetadataOnly => "metadata_only",
+            Self::CachedRemoteBody => "cached_remote_body",
+            Self::FetchableRemoteBody => "fetchable_remote_body",
+            Self::QuarantinedRemoteBody => "quarantined_remote_body",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshCachedBodyProvenance {
+    pub body_cache_key: String,
+    pub location: MeshCachedBodyLocation,
+    pub content_hash: String,
+    pub local_body_hash: Option<String>,
+    pub freshness_ref: Option<String>,
+    pub reason: &'static str,
+}
+
+impl MeshCachedBodyProvenance {
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "ee.mesh.cached_body_provenance.v1",
+            "bodyCacheKey": self.body_cache_key,
+            "location": self.location.as_str(),
+            "contentHash": self.content_hash,
+            "localBodyHash": self.local_body_hash,
+            "freshnessRef": self.freshness_ref,
+            "reason": self.reason,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshEagerMetadataCacheInput {
+    pub body_cache_key: String,
+    pub peer_id: String,
+    pub origin_workspace_id: String,
+    pub logical_memory_id: String,
+    pub content_hash: String,
+    pub body_ref_json: Option<String>,
+    pub preview_hash: Option<String>,
+    pub metadata_size_bytes: u64,
+    pub advertised_body_bytes: Option<u64>,
+    pub policy_allows_metadata_index: bool,
+    pub policy_body_fetch_allowed: bool,
+    pub local_body_hash: Option<String>,
+    pub freshness_ref: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshEagerMetadataCachePlan {
+    pub metadata_entry: MeshCacheEntry,
+    pub body_cache_key: String,
+    pub body_ref_json: Option<String>,
+    pub preview_hash: Option<String>,
+    pub advertised_body_bytes: Option<u64>,
+    pub cache_status: MeshCacheStatus,
+    pub local_body_hash: Option<String>,
+    pub metadata_index_allowed: bool,
+    pub body_fetch_allowed: bool,
+    pub provenance: MeshCachedBodyProvenance,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum MeshLazyBodyFetchAction {
+    UseCachedBody,
+    FetchRemoteBody,
+    KeepMetadataOnly,
+    QuarantineBody,
+}
+
+impl MeshLazyBodyFetchAction {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UseCachedBody => "use_cached_body",
+            Self::FetchRemoteBody => "fetch_remote_body",
+            Self::KeepMetadataOnly => "keep_metadata_only",
+            Self::QuarantineBody => "quarantine_body",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshLazyBodyFetchInput<'a> {
+    pub body_cache_key: &'a str,
+    pub expected_content_hash: &'a str,
+    pub policy_body_fetch_allowed: bool,
+    pub query_requires_body: bool,
+    pub remote_body_available: bool,
+    pub cached_local_body_hash: Option<&'a str>,
+    pub fetched_body: Option<&'a [u8]>,
+    pub freshness_ref: Option<&'a str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshLazyBodyFetchPlan {
+    pub action: MeshLazyBodyFetchAction,
+    pub cache_status: MeshCacheStatus,
+    pub body_persist_allowed: bool,
+    pub actual_local_body_hash: Option<String>,
+    pub denial_reason: Option<&'static str>,
+    pub degraded_codes: Vec<&'static str>,
+    pub provenance: MeshCachedBodyProvenance,
+}
+
+#[must_use]
+pub fn plan_eager_metadata_cache(
+    input: &MeshEagerMetadataCacheInput,
+) -> MeshEagerMetadataCachePlan {
+    let (cache_status, local_body_hash, location, reason) = match input.local_body_hash.as_deref() {
+        Some(hash) if hash == input.content_hash && input.policy_body_fetch_allowed => (
+            MeshCacheStatus::Available,
+            Some(hash.to_owned()),
+            MeshCachedBodyLocation::CachedRemoteBody,
+            "local_body_hash_matches_content_hash",
+        ),
+        Some(hash) => (
+            MeshCacheStatus::Quarantined,
+            Some(hash.to_owned()),
+            MeshCachedBodyLocation::QuarantinedRemoteBody,
+            "local_body_hash_mismatch_or_policy_denied",
+        ),
+        None if input.policy_body_fetch_allowed && input.body_ref_json.is_some() => (
+            MeshCacheStatus::MetadataOnly,
+            None,
+            MeshCachedBodyLocation::FetchableRemoteBody,
+            "metadata_cached_body_fetch_policy_allows_later_fetch",
+        ),
+        None => (
+            MeshCacheStatus::MetadataOnly,
+            None,
+            MeshCachedBodyLocation::MetadataOnly,
+            "metadata_cached_without_body",
+        ),
+    };
+    let metadata_entry = MeshCacheEntry::derived(
+        input.body_cache_key.clone(),
+        input.peer_id.clone(),
+        MeshCacheLane::Metadata,
+        input.metadata_size_bytes,
+    )
+    .with_origin_workspace_id(input.origin_workspace_id.clone())
+    .with_logical_memory_id(input.logical_memory_id.clone())
+    .with_content_hash(input.content_hash.clone());
+
+    MeshEagerMetadataCachePlan {
+        metadata_entry,
+        body_cache_key: input.body_cache_key.clone(),
+        body_ref_json: input.body_ref_json.clone(),
+        preview_hash: input.preview_hash.clone(),
+        advertised_body_bytes: input.advertised_body_bytes,
+        cache_status,
+        local_body_hash: local_body_hash.clone(),
+        metadata_index_allowed: input.policy_allows_metadata_index,
+        body_fetch_allowed: input.policy_body_fetch_allowed,
+        provenance: MeshCachedBodyProvenance {
+            body_cache_key: input.body_cache_key.clone(),
+            location,
+            content_hash: input.content_hash.clone(),
+            local_body_hash,
+            freshness_ref: input.freshness_ref.clone(),
+            reason,
+        },
+    }
+}
+
+#[must_use]
+pub fn plan_policy_gated_lazy_body_fetch(
+    input: &MeshLazyBodyFetchInput<'_>,
+) -> MeshLazyBodyFetchPlan {
+    if let Some(cached_hash) = input.cached_local_body_hash {
+        if cached_hash == input.expected_content_hash {
+            return lazy_body_plan(
+                input,
+                MeshLazyBodyFetchAction::UseCachedBody,
+                MeshCacheStatus::Available,
+                true,
+                Some(cached_hash.to_owned()),
+                MeshCachedBodyLocation::CachedRemoteBody,
+                None,
+                Vec::new(),
+                "cached_body_hash_verified",
+            );
+        }
+        return lazy_body_plan(
+            input,
+            MeshLazyBodyFetchAction::QuarantineBody,
+            MeshCacheStatus::Quarantined,
+            false,
+            Some(cached_hash.to_owned()),
+            MeshCachedBodyLocation::QuarantinedRemoteBody,
+            Some("cached_body_hash_mismatch"),
+            vec!["mesh_cached_body_hash_mismatch"],
+            "cached_body_hash_mismatch",
+        );
+    }
+
+    if !input.query_requires_body {
+        return lazy_body_plan(
+            input,
+            MeshLazyBodyFetchAction::KeepMetadataOnly,
+            MeshCacheStatus::MetadataOnly,
+            false,
+            None,
+            MeshCachedBodyLocation::MetadataOnly,
+            Some("lazy_body_not_required"),
+            Vec::new(),
+            "lazy_body_not_required",
+        );
+    }
+    if !input.policy_body_fetch_allowed {
+        return lazy_body_plan(
+            input,
+            MeshLazyBodyFetchAction::KeepMetadataOnly,
+            MeshCacheStatus::MetadataOnly,
+            false,
+            None,
+            MeshCachedBodyLocation::MetadataOnly,
+            Some("body_fetch_denied_by_policy"),
+            vec!["mesh_body_fetch_denied_by_policy"],
+            "body_fetch_denied_by_policy",
+        );
+    }
+    if !input.remote_body_available {
+        return lazy_body_plan(
+            input,
+            MeshLazyBodyFetchAction::KeepMetadataOnly,
+            MeshCacheStatus::MetadataOnly,
+            false,
+            None,
+            MeshCachedBodyLocation::MetadataOnly,
+            Some("remote_body_unavailable"),
+            vec!["mesh_remote_body_unavailable"],
+            "remote_body_unavailable",
+        );
+    }
+
+    let Some(fetched_body) = input.fetched_body else {
+        return lazy_body_plan(
+            input,
+            MeshLazyBodyFetchAction::FetchRemoteBody,
+            MeshCacheStatus::MetadataOnly,
+            false,
+            None,
+            MeshCachedBodyLocation::FetchableRemoteBody,
+            None,
+            Vec::new(),
+            "body_fetch_allowed_pending_remote_read",
+        );
+    };
+    let decision = decide_body_fetch_lifecycle(input.expected_content_hash, fetched_body);
+    if decision.body_persist_allowed {
+        lazy_body_plan(
+            input,
+            MeshLazyBodyFetchAction::FetchRemoteBody,
+            MeshCacheStatus::Available,
+            true,
+            Some(decision.actual_local_body_hash),
+            MeshCachedBodyLocation::CachedRemoteBody,
+            None,
+            Vec::new(),
+            "fetched_body_hash_verified",
+        )
+    } else {
+        lazy_body_plan(
+            input,
+            MeshLazyBodyFetchAction::QuarantineBody,
+            MeshCacheStatus::Quarantined,
+            false,
+            Some(decision.actual_local_body_hash),
+            MeshCachedBodyLocation::QuarantinedRemoteBody,
+            Some("content_hash_mismatch"),
+            vec!["mesh_fetched_body_hash_mismatch"],
+            "fetched_body_hash_mismatch",
+        )
+    }
+}
+
 #[must_use]
 pub fn decide_body_fetch_lifecycle(
     expected_content_hash: &str,
@@ -744,6 +1036,35 @@ pub fn decide_body_fetch_lifecycle(
 #[must_use]
 pub fn blake3_content_hash(body: &[u8]) -> String {
     format!("blake3:{}", blake3::hash(body).to_hex())
+}
+
+fn lazy_body_plan(
+    input: &MeshLazyBodyFetchInput<'_>,
+    action: MeshLazyBodyFetchAction,
+    cache_status: MeshCacheStatus,
+    body_persist_allowed: bool,
+    actual_local_body_hash: Option<String>,
+    location: MeshCachedBodyLocation,
+    denial_reason: Option<&'static str>,
+    degraded_codes: Vec<&'static str>,
+    provenance_reason: &'static str,
+) -> MeshLazyBodyFetchPlan {
+    MeshLazyBodyFetchPlan {
+        action,
+        cache_status,
+        body_persist_allowed,
+        actual_local_body_hash: actual_local_body_hash.clone(),
+        denial_reason,
+        degraded_codes,
+        provenance: MeshCachedBodyProvenance {
+            body_cache_key: input.body_cache_key.to_owned(),
+            location,
+            content_hash: input.expected_content_hash.to_owned(),
+            local_body_hash: actual_local_body_hash,
+            freshness_ref: input.freshness_ref.map(str::to_owned),
+            reason: provenance_reason,
+        },
+    }
 }
 
 fn usage_for_all(entries: &[MeshCacheEntry]) -> MeshCacheUsage {
@@ -1193,6 +1514,138 @@ mod tests {
             plan.replay_targets
                 .iter()
                 .all(|target| { target.reason == WITHDRAWAL_UNAVAILABLE_PEER_REPLAY_REASON })
+        );
+    }
+
+    #[test]
+    fn eager_metadata_cache_is_indexable_without_materializing_body() {
+        let content_hash = blake3_content_hash(b"remote body");
+        let plan = plan_eager_metadata_cache(&MeshEagerMetadataCacheInput {
+            body_cache_key: "body-cache-alpha".to_owned(),
+            peer_id: "peer_alpha".to_owned(),
+            origin_workspace_id: "wsp_remote".to_owned(),
+            logical_memory_id: "mem_remote".to_owned(),
+            content_hash: content_hash.clone(),
+            body_ref_json: Some(r#"{"kind":"remoteAvailable"}"#.to_owned()),
+            preview_hash: Some(blake3_content_hash(b"preview")),
+            metadata_size_bytes: 96,
+            advertised_body_bytes: Some(11),
+            policy_allows_metadata_index: true,
+            policy_body_fetch_allowed: false,
+            local_body_hash: None,
+            freshness_ref: Some("seq:42".to_owned()),
+        });
+
+        assert_eq!(plan.metadata_entry.lane, MeshCacheLane::Metadata);
+        assert_eq!(
+            plan.metadata_entry.content_hash.as_deref(),
+            Some(&content_hash)
+        );
+        assert_eq!(plan.cache_status, MeshCacheStatus::MetadataOnly);
+        assert!(plan.metadata_index_allowed);
+        assert!(!plan.body_fetch_allowed);
+        assert_eq!(plan.local_body_hash, None);
+        assert_eq!(
+            plan.provenance.location,
+            MeshCachedBodyLocation::MetadataOnly
+        );
+        assert_eq!(plan.provenance.reason, "metadata_cached_without_body");
+    }
+
+    #[test]
+    fn lazy_body_fetch_is_policy_gated_and_body_free_when_denied() {
+        let plan = plan_policy_gated_lazy_body_fetch(&MeshLazyBodyFetchInput {
+            body_cache_key: "body-cache-alpha",
+            expected_content_hash: &blake3_content_hash(b"remote body"),
+            policy_body_fetch_allowed: false,
+            query_requires_body: true,
+            remote_body_available: true,
+            cached_local_body_hash: None,
+            fetched_body: Some(b"remote body"),
+            freshness_ref: Some("seq:42"),
+        });
+
+        assert_eq!(plan.action, MeshLazyBodyFetchAction::KeepMetadataOnly);
+        assert_eq!(plan.cache_status, MeshCacheStatus::MetadataOnly);
+        assert!(!plan.body_persist_allowed);
+        assert_eq!(plan.actual_local_body_hash, None);
+        assert_eq!(plan.denial_reason, Some("body_fetch_denied_by_policy"));
+        assert_eq!(
+            plan.degraded_codes,
+            vec!["mesh_body_fetch_denied_by_policy"]
+        );
+        assert_eq!(
+            plan.provenance.location,
+            MeshCachedBodyLocation::MetadataOnly
+        );
+    }
+
+    #[test]
+    fn lazy_body_fetch_waits_until_body_is_needed() {
+        let plan = plan_policy_gated_lazy_body_fetch(&MeshLazyBodyFetchInput {
+            body_cache_key: "body-cache-alpha",
+            expected_content_hash: &blake3_content_hash(b"remote body"),
+            policy_body_fetch_allowed: true,
+            query_requires_body: false,
+            remote_body_available: true,
+            cached_local_body_hash: None,
+            fetched_body: Some(b"remote body"),
+            freshness_ref: Some("seq:42"),
+        });
+
+        assert_eq!(plan.action, MeshLazyBodyFetchAction::KeepMetadataOnly);
+        assert_eq!(plan.denial_reason, Some("lazy_body_not_required"));
+        assert_eq!(plan.actual_local_body_hash, None);
+    }
+
+    #[test]
+    fn lazy_body_fetch_verifies_hash_before_body_becomes_available() {
+        let expected = blake3_content_hash(b"remote body");
+        let plan = plan_policy_gated_lazy_body_fetch(&MeshLazyBodyFetchInput {
+            body_cache_key: "body-cache-alpha",
+            expected_content_hash: &expected,
+            policy_body_fetch_allowed: true,
+            query_requires_body: true,
+            remote_body_available: true,
+            cached_local_body_hash: None,
+            fetched_body: Some(b"remote body"),
+            freshness_ref: Some("seq:42"),
+        });
+
+        assert_eq!(plan.action, MeshLazyBodyFetchAction::FetchRemoteBody);
+        assert_eq!(plan.cache_status, MeshCacheStatus::Available);
+        assert!(plan.body_persist_allowed);
+        assert_eq!(
+            plan.actual_local_body_hash.as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            plan.provenance.location,
+            MeshCachedBodyLocation::CachedRemoteBody
+        );
+    }
+
+    #[test]
+    fn lazy_body_fetch_quarantines_hash_mismatch() {
+        let plan = plan_policy_gated_lazy_body_fetch(&MeshLazyBodyFetchInput {
+            body_cache_key: "body-cache-alpha",
+            expected_content_hash: &blake3_content_hash(b"expected body"),
+            policy_body_fetch_allowed: true,
+            query_requires_body: true,
+            remote_body_available: true,
+            cached_local_body_hash: None,
+            fetched_body: Some(b"tampered body"),
+            freshness_ref: Some("seq:42"),
+        });
+
+        assert_eq!(plan.action, MeshLazyBodyFetchAction::QuarantineBody);
+        assert_eq!(plan.cache_status, MeshCacheStatus::Quarantined);
+        assert!(!plan.body_persist_allowed);
+        assert_eq!(plan.denial_reason, Some("content_hash_mismatch"));
+        assert_eq!(plan.degraded_codes, vec!["mesh_fetched_body_hash_mismatch"]);
+        assert_eq!(
+            plan.provenance.location,
+            MeshCachedBodyLocation::QuarantinedRemoteBody
         );
     }
 
