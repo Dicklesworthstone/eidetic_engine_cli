@@ -419,17 +419,26 @@ function Lock-Acquire {
         # retry above failed to recover). Lock-Release will be a no-op.
         Write-ErrorExit "Another ee installer appears to be running (lock $Script:LockDir). Re-run after it finishes."
     }
-    # Mark ownership immediately so even a fatal Write-ErrorExit below leaves
-    # the global catch block (line ~end of file) eligible to clean up via
-    # Lock-Release. The prior version exited without releasing the freshly-
-    # created lock dir if the pid-file write failed.
+    # Record ownership before attempting any further work. Two mechanisms
+    # then guarantee the lock dir is released on every exit path:
+    #   (a) For uncaught exceptions in Main (anything throw-shaped), Main's
+    #       `finally { Lock-Release }` runs first (and Lock-Release honors
+    #       this flag), and the script-level `catch { ... }` at the bottom
+    #       of this file also rechecks the flag as a belt-and-suspenders.
+    #   (b) For an explicit `exit` (e.g., Write-ErrorExit), PowerShell runs
+    #       `finally` blocks of currently-active try statements but does NOT
+    #       trigger `catch` blocks — so any code path that calls exit while
+    #       holding the lock MUST clean up the lock dir explicitly before
+    #       exiting. The inner catch below is the only such path in this
+    #       function and does exactly that.
     $Script:LockOwned = $true
     try {
         $PID | Out-File -Encoding ASCII -FilePath (Join-Path $Script:LockDir "pid")
     } catch {
-        # We own the lock dir; clean it up so the next installer is not
-        # blocked by a pid-less ownerless lock that stale-PID recovery
-        # cannot fix.
+        # We own the lock dir but failed to write the pid file. Clean up
+        # explicitly because the global script-level catch won't run on
+        # `exit`, and the next installer's stale-PID recovery is gated on
+        # the pid file existing — a pid-less orphan lock would block forever.
         Remove-Item -Recurse -Force $Script:LockDir -ErrorAction SilentlyContinue
         $Script:LockOwned = $false
         Write-ErrorExit "Could not write pid file in installer lock ${Script:LockDir}: $_"
