@@ -18,6 +18,10 @@ use serde_json::{Value, json};
 use crate::core::agent_detect::{AgentInventoryStatus, AgentStatusOptions, gather_agent_status};
 use crate::core::profile::{HostResourceProbeReport, recommend_operating_profile};
 use crate::core::singleflight::singleflight_posture_report;
+use crate::core::workspace::{
+    WorkspaceHygieneOptions, WorkspaceHygieneSwarmBriefSummary,
+    build_workspace_hygiene_swarm_brief_summary,
+};
 use crate::policy::redact_secret_like_content;
 
 pub const SWARM_BRIEF_SCHEMA_V1: &str = "ee.swarm.brief.v1";
@@ -128,6 +132,13 @@ pub struct SwarmBriefReport {
     pub memory_drift: Option<SwarmBriefMemoryDriftSummary>,
     pub recommendations: Vec<SwarmBriefRecommendation>,
     pub degraded: Vec<SwarmBriefDegradation>,
+    /// Compact workspace-hygiene posture (bd-1eq3l.6). `None` when the
+    /// hygiene summary was not collected for this brief; the collector
+    /// itself returns a `status="unavailable"` summary rather than `None`
+    /// when the underlying report fails, so a `None` here means "skipped",
+    /// not "broken".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_hygiene: Option<WorkspaceHygieneSwarmBriefSummary>,
 }
 
 impl SwarmBriefReport {
@@ -154,6 +165,7 @@ impl SwarmBriefReport {
             memory_drift: None,
             recommendations: Vec::new(),
             degraded: Vec::new(),
+            workspace_hygiene: None,
         }
     }
 
@@ -1947,6 +1959,20 @@ pub fn collect_swarm_brief(
         || MemoryDriftSourceAdapter.collect(options),
     );
     attach_qos_resource_pressure(&mut report, &options.workspace);
+    // bd-1eq3l.6: embed the compact workspace-hygiene summary so the swarm
+    // brief surfaces counts/dirtyPathCount/needsHumanReviewTop/coordination
+    // blockers/beadsStateStatus without forcing a separate
+    // `ee workspace-hygiene --json` shell-out. The summary builder returns
+    // an `unavailable`-status payload (not None) on report-build failure,
+    // so the field stays serializable in degraded modes.
+    let hygiene_options = WorkspaceHygieneOptions {
+        workspace_path: options.workspace.clone(),
+        self_agent_name: None,
+        agent_mail_snapshot_path: None,
+    };
+    report.workspace_hygiene = Some(build_workspace_hygiene_swarm_brief_summary(
+        &hygiene_options,
+    ));
     apply_swarm_brief_advice(&mut report);
     report.finalize();
     report
