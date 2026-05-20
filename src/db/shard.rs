@@ -1,12 +1,15 @@
-//! Read-only planning primitives for per-workspace database shard fan-out.
+//! Planning and rollback-preservation primitives for per-workspace database shard fan-out.
 //!
-//! This module intentionally does not open or create databases. It only derives
-//! the catalog and shard paths that later migration/router beads can materialize.
+//! Most functions only derive the catalog and shard paths that later migration
+//! beads can materialize. Rollback preservation is intentionally file-local and
+//! idempotent so migration apply code can make the legacy database recoverable
+//! before any shard layout is marked authoritative.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
@@ -19,6 +22,7 @@ pub const SHARD_FANOUT_ATTACH_PLAN_SCHEMA_V1: &str = "ee.shard_fanout.attach_pla
 pub const SHARD_FANOUT_ATTACH_EXECUTION_SCHEMA_V1: &str = "ee.shard_fanout.attach_execution.v1";
 pub const SHARD_FANOUT_MIGRATION_PLAN_SCHEMA_V1: &str = "ee.shard_fanout.migration_plan.v1";
 pub const SHARD_FANOUT_MIGRATION_AUDIT_SCHEMA_V1: &str = "ee.shard_fanout.migration_audit.v1";
+pub const SHARD_FANOUT_PRESERVE_SOURCE_SCHEMA_V1: &str = "ee.shard_fanout.preserve_source.v1";
 pub const SHARD_FANOUT_CATALOG_SCHEMA_VERSION: u32 = 1;
 pub const SHARD_CATALOG_FILE_NAME: &str = "catalog.db";
 pub const SHARD_FILE_EXTENSION: &str = "db";
@@ -204,6 +208,87 @@ pub struct ShardFanoutMigrationPlan {
     pub expected_audit_rows: Vec<ShardFanoutMigrationAuditRowPlan>,
     pub blockers: Vec<ShardFanoutDegradation>,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShardFanoutPreservedSourceReport {
+    pub schema: &'static str,
+    pub source_path: PathBuf,
+    pub preserved_path: PathBuf,
+    pub copied: bool,
+    pub source_hash: String,
+    pub preserved_hash: String,
+    pub source_size_bytes: u64,
+    pub preserved_size_bytes: u64,
+    pub rollback_ready: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ShardFanoutPreserveSourceError {
+    MissingSource {
+        path: PathBuf,
+    },
+    SourceRead {
+        path: PathBuf,
+        message: String,
+    },
+    PreservedRead {
+        path: PathBuf,
+        message: String,
+    },
+    PreserveWrite {
+        path: PathBuf,
+        message: String,
+    },
+    PreservedSourceMismatch {
+        source_path: PathBuf,
+        preserved_path: PathBuf,
+        source_hash: String,
+        preserved_hash: String,
+    },
+}
+
+impl fmt::Display for ShardFanoutPreserveSourceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingSource { path } => write!(
+                f,
+                "source database is required before shard fan-out migration: {}",
+                path.display()
+            ),
+            Self::SourceRead { path, message } => write!(
+                f,
+                "could not read source database for shard fan-out migration: {} ({message})",
+                path.display()
+            ),
+            Self::PreservedRead { path, message } => write!(
+                f,
+                "could not read preserved shard fan-out rollback database: {} ({message})",
+                path.display()
+            ),
+            Self::PreserveWrite { path, message } => write!(
+                f,
+                "could not preserve shard fan-out rollback database: {} ({message})",
+                path.display()
+            ),
+            Self::PreservedSourceMismatch {
+                source_path,
+                preserved_path,
+                source_hash,
+                preserved_hash,
+            } => write!(
+                f,
+                "preserved shard fan-out rollback database does not match source: source={} preserved={} source_hash={} preserved_hash={}",
+                source_path.display(),
+                preserved_path.display(),
+                source_hash,
+                preserved_hash
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ShardFanoutPreserveSourceError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PeerShardAttachPlanInput {
@@ -605,6 +690,9 @@ pub fn plan_shard_fanout_migration(
 ) -> ShardFanoutMigrationPlan {
     let source_database_path = input.source_database_path;
     let preserved_source_database_path = preserved_legacy_database_path(&source_database_path);
+    let source_database_hash = blake3_file_hash(&source_database_path)
+        .ok()
+        .map(|(hash, _)| hash);
     let mut blockers = Vec::new();
     let shard_root_result = input
         .shards_dir_override
@@ -678,7 +766,7 @@ pub fn plan_shard_fanout_migration(
                 shard_path,
                 source_database_path: source_database_path.clone(),
                 planned_row_count: None,
-                source_hash: None,
+                source_hash: source_database_hash.clone(),
                 expected_audit_rows: workspace_expected_audit_rows,
                 blockers: workspace_blockers,
             }
@@ -690,7 +778,7 @@ pub fn plan_shard_fanout_migration(
         dry_run: true,
         source_database_path,
         preserved_source_database_path,
-        source_database_hash: None,
+        source_database_hash,
         shard_root,
         catalog_path,
         catalog_schema_version: SHARD_FANOUT_CATALOG_SCHEMA_VERSION,
@@ -698,6 +786,90 @@ pub fn plan_shard_fanout_migration(
         expected_audit_rows,
         blockers,
     }
+}
+
+pub fn preserve_shard_fanout_source_database(
+    plan: &ShardFanoutMigrationPlan,
+) -> Result<ShardFanoutPreservedSourceReport, ShardFanoutPreserveSourceError> {
+    let source_path = &plan.source_database_path;
+    let preserved_path = &plan.preserved_source_database_path;
+    let source_metadata = fs::metadata(source_path).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => ShardFanoutPreserveSourceError::MissingSource {
+            path: source_path.clone(),
+        },
+        _ => ShardFanoutPreserveSourceError::SourceRead {
+            path: source_path.clone(),
+            message: error.to_string(),
+        },
+    })?;
+    if !source_metadata.is_file() {
+        return Err(ShardFanoutPreserveSourceError::SourceRead {
+            path: source_path.clone(),
+            message: "source path is not a regular file".to_owned(),
+        });
+    }
+
+    let (source_hash, source_size_bytes) = blake3_file_hash(source_path).map_err(|error| {
+        ShardFanoutPreserveSourceError::SourceRead {
+            path: source_path.clone(),
+            message: error.to_string(),
+        }
+    })?;
+
+    let copied = match fs::metadata(preserved_path) {
+        Ok(metadata) => {
+            if !metadata.is_file() {
+                return Err(ShardFanoutPreserveSourceError::PreservedRead {
+                    path: preserved_path.clone(),
+                    message: "preserved path is not a regular file".to_owned(),
+                });
+            }
+            false
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::copy(source_path, preserved_path).map_err(|error| {
+                ShardFanoutPreserveSourceError::PreserveWrite {
+                    path: preserved_path.clone(),
+                    message: error.to_string(),
+                }
+            })?;
+            true
+        }
+        Err(error) => {
+            return Err(ShardFanoutPreserveSourceError::PreservedRead {
+                path: preserved_path.clone(),
+                message: error.to_string(),
+            });
+        }
+    };
+
+    let (preserved_hash, preserved_size_bytes) =
+        blake3_file_hash(preserved_path).map_err(|error| {
+            ShardFanoutPreserveSourceError::PreservedRead {
+                path: preserved_path.clone(),
+                message: error.to_string(),
+            }
+        })?;
+    if source_hash != preserved_hash || source_size_bytes != preserved_size_bytes {
+        return Err(ShardFanoutPreserveSourceError::PreservedSourceMismatch {
+            source_path: source_path.clone(),
+            preserved_path: preserved_path.clone(),
+            source_hash,
+            preserved_hash,
+        });
+    }
+
+    Ok(ShardFanoutPreservedSourceReport {
+        schema: SHARD_FANOUT_PRESERVE_SOURCE_SCHEMA_V1,
+        source_path: source_path.clone(),
+        preserved_path: preserved_path.clone(),
+        copied,
+        source_hash: source_hash.clone(),
+        preserved_hash,
+        source_size_bytes,
+        preserved_size_bytes,
+        rollback_ready: true,
+    })
 }
 
 #[must_use]
@@ -1096,6 +1268,22 @@ fn sqlite_identifier(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
+fn blake3_file_hash(path: &Path) -> io::Result<(String, u64)> {
+    let mut file = File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut bytes = 0_u64;
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        bytes = bytes.saturating_add(read as u64);
+    }
+    Ok((format!("blake3:{}", hasher.finalize().to_hex()), bytes))
+}
+
 impl From<OsString> for ShardFanoutResolverInput {
     fn from(value: OsString) -> Self {
         Self {
@@ -1137,11 +1325,13 @@ mod tests {
         PeerShardAttachPlanInput, SHARD_ATTACH_FAILED_CODE, SHARD_CATALOG_FILE_NAME,
         SHARD_FANOUT_ATTACH_EXECUTION_SCHEMA_V1, SHARD_FANOUT_ATTACH_PLAN_SCHEMA_V1,
         SHARD_FANOUT_CATALOG_MISSING_CODE, SHARD_FANOUT_MIGRATION_PLAN_SCHEMA_V1,
-        SHARD_FANOUT_STATUS_SCHEMA_V1, SHARD_FANOUT_WORKSPACE_ID_UNSAFE_CODE,
-        ShardFanoutMigrationPlanInput, ShardFanoutMigrationWorkspaceInput, ShardFanoutPosture,
+        SHARD_FANOUT_PRESERVE_SOURCE_SCHEMA_V1, SHARD_FANOUT_STATUS_SCHEMA_V1,
+        SHARD_FANOUT_WORKSPACE_ID_UNSAFE_CODE, ShardFanoutMigrationPlanInput,
+        ShardFanoutMigrationWorkspaceInput, ShardFanoutPosture, ShardFanoutPreserveSourceError,
         ShardFanoutResolverInput, default_shards_dir_from_values,
         execute_peer_shard_read_attach_plan, normalize_shard_root, plan_peer_shard_attach,
-        plan_shard_fanout_migration, preserved_legacy_database_path, resolve_shard_fanout_status,
+        plan_shard_fanout_migration, preserve_shard_fanout_source_database,
+        preserved_legacy_database_path, resolve_shard_fanout_status,
         shard_fanout_enabled_from_env_value, shard_file_path,
     };
     use crate::db::{DatabaseConfig, DbConnection};
@@ -1431,6 +1621,115 @@ mod tests {
             ]
         );
         Ok(())
+    }
+
+    #[test]
+    fn migration_plan_hashes_existing_source_database() -> TestResult {
+        let temp = temp_root("ee-shard-migration-source-hash")?;
+        let source_database_path = temp.path().join("workspace/.ee/ee.db");
+        std::fs::create_dir_all(
+            source_database_path
+                .parent()
+                .expect("source database has parent"),
+        )
+        .map_err(|error| error.to_string())?;
+        std::fs::write(&source_database_path, b"legacy-db-v1")
+            .map_err(|error| error.to_string())?;
+
+        let plan = plan_shard_fanout_migration(ShardFanoutMigrationPlanInput {
+            source_database_path,
+            shards_dir_override: Some(temp.path().join("data/shards")),
+            workspaces: Vec::new(),
+        });
+        let expected_hash = format!("blake3:{}", blake3::hash(b"legacy-db-v1").to_hex());
+
+        assert_eq!(
+            plan.source_database_hash.as_deref(),
+            Some(expected_hash.as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn preserve_source_database_copies_once_and_is_idempotent() -> TestResult {
+        let temp = temp_root("ee-shard-preserve-source")?;
+        let source_database_path = temp.path().join("workspace/.ee/ee.db");
+        std::fs::create_dir_all(
+            source_database_path
+                .parent()
+                .expect("source database has parent"),
+        )
+        .map_err(|error| error.to_string())?;
+        std::fs::write(&source_database_path, b"legacy-db-v1")
+            .map_err(|error| error.to_string())?;
+        let plan = plan_shard_fanout_migration(ShardFanoutMigrationPlanInput {
+            source_database_path: source_database_path.clone(),
+            shards_dir_override: Some(temp.path().join("data/shards")),
+            workspaces: Vec::new(),
+        });
+        let expected_hash = plan
+            .source_database_hash
+            .clone()
+            .ok_or_else(|| "plan should hash existing source database".to_owned())?;
+
+        let first =
+            preserve_shard_fanout_source_database(&plan).map_err(|error| error.to_string())?;
+        assert_eq!(first.schema, SHARD_FANOUT_PRESERVE_SOURCE_SCHEMA_V1);
+        assert!(first.copied);
+        assert!(first.rollback_ready);
+        assert_eq!(first.source_path, source_database_path);
+        assert_eq!(first.preserved_path, plan.preserved_source_database_path);
+        assert_eq!(first.source_hash, expected_hash);
+        assert_eq!(first.source_hash, first.preserved_hash);
+        assert_eq!(first.source_size_bytes, first.preserved_size_bytes);
+
+        let second =
+            preserve_shard_fanout_source_database(&plan).map_err(|error| error.to_string())?;
+        assert!(!second.copied);
+        assert_eq!(second.source_hash, first.source_hash);
+        assert_eq!(second.preserved_hash, first.preserved_hash);
+        Ok(())
+    }
+
+    #[test]
+    fn preserve_source_database_refuses_mismatched_existing_rollback_file() -> TestResult {
+        let temp = temp_root("ee-shard-preserve-mismatch")?;
+        let source_database_path = temp.path().join("workspace/.ee/ee.db");
+        std::fs::create_dir_all(
+            source_database_path
+                .parent()
+                .expect("source database has parent"),
+        )
+        .map_err(|error| error.to_string())?;
+        std::fs::write(&source_database_path, b"legacy-db-v1")
+            .map_err(|error| error.to_string())?;
+        let plan = plan_shard_fanout_migration(ShardFanoutMigrationPlanInput {
+            source_database_path,
+            shards_dir_override: Some(temp.path().join("data/shards")),
+            workspaces: Vec::new(),
+        });
+        std::fs::write(
+            &plan.preserved_source_database_path,
+            b"stale-preserved-copy",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let error =
+            preserve_shard_fanout_source_database(&plan).expect_err("mismatch must fail closed");
+        match error {
+            ShardFanoutPreserveSourceError::PreservedSourceMismatch {
+                source_path,
+                preserved_path,
+                source_hash,
+                preserved_hash,
+            } => {
+                assert_eq!(source_path, plan.source_database_path);
+                assert_eq!(preserved_path, plan.preserved_source_database_path);
+                assert_ne!(source_hash, preserved_hash);
+                Ok(())
+            }
+            other => Err(format!("unexpected preserve error: {other}")),
+        }
     }
 
     #[test]
