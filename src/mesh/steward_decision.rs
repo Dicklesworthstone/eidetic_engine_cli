@@ -204,6 +204,44 @@ impl StewardOutcome {
             Self::DailyCapReached => Some(audit_events::RECONCILIATION_DAILY_CAP_REACHED),
         }
     }
+
+    /// Whether this outcome consumes one daily reconciliation slot.
+    /// Only a triggered auto-enroll pass reconciles durable peer-group
+    /// state; skipped/refused/cap-reached ticks remain audit/status
+    /// observations.
+    #[must_use]
+    pub fn increments_reconciliation_counter(self) -> bool {
+        matches!(self, Self::Triggered)
+    }
+}
+
+/// Status-surface vocabulary for
+/// `ee mesh steward status --json.lastReconciliationOutcome`.
+///
+/// This intentionally differs from [`StewardOutcome::as_str`]:
+/// [`StewardOutcome::NoOp`] is an execution outcome, while the status
+/// contract exposes the user-facing reason `no_actionable_drift`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StewardStatusOutcome {
+    NoActionableDrift,
+    Triggered,
+    Refused,
+    DailyCapReached,
+    NotYetRun,
+}
+
+impl StewardStatusOutcome {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoActionableDrift => "no_actionable_drift",
+            Self::Triggered => "triggered",
+            Self::Refused => "refused",
+            Self::DailyCapReached => "daily_cap_reached",
+            Self::NotYetRun => "not_yet_run",
+        }
+    }
 }
 
 /// Canonical reason string the steward emits alongside the audit row.
@@ -224,6 +262,20 @@ pub mod reasons {
 pub struct StewardDecision {
     pub outcome: StewardOutcome,
     pub reason: &'static str,
+}
+
+impl StewardDecision {
+    /// Map a pass decision into the stable status-schema vocabulary.
+    #[must_use]
+    pub fn status_outcome(self) -> StewardStatusOutcome {
+        match self.outcome {
+            StewardOutcome::NotEnabled => StewardStatusOutcome::NotYetRun,
+            StewardOutcome::NoOp => StewardStatusOutcome::NoActionableDrift,
+            StewardOutcome::Triggered => StewardStatusOutcome::Triggered,
+            StewardOutcome::Refused => StewardStatusOutcome::Refused,
+            StewardOutcome::DailyCapReached => StewardStatusOutcome::DailyCapReached,
+        }
+    }
 }
 
 // ============================================================================
@@ -559,6 +611,51 @@ mod tests {
             let serialized = serde_json::to_string(&variant).expect("serialize");
             assert!(serialized.contains(variant.as_str()), "{serialized}");
         }
+        for variant in [
+            StewardStatusOutcome::NoActionableDrift,
+            StewardStatusOutcome::Triggered,
+            StewardStatusOutcome::Refused,
+            StewardStatusOutcome::DailyCapReached,
+            StewardStatusOutcome::NotYetRun,
+        ] {
+            let serialized = serde_json::to_string(&variant).expect("serialize");
+            assert!(serialized.contains(variant.as_str()), "{serialized}");
+        }
+    }
+
+    #[test]
+    fn status_outcome_uses_schema_vocabulary_not_execution_vocabulary() {
+        let noop = decide_steward_outcome(&input(
+            true,
+            DriftSeverity::None,
+            DriftKind::None,
+            0,
+            STEWARD_DEFAULT_MAX_DAILY,
+        ));
+        assert_eq!(noop.outcome.as_str(), "no_op");
+        assert_eq!(noop.status_outcome().as_str(), reasons::NO_ACTIONABLE_DRIFT);
+
+        let disabled = decide_steward_outcome(&input(
+            false,
+            DriftSeverity::Warning,
+            DriftKind::NewPeersAvailable,
+            0,
+            STEWARD_DEFAULT_MAX_DAILY,
+        ));
+        assert_eq!(disabled.status_outcome(), StewardStatusOutcome::NotYetRun);
+    }
+
+    #[test]
+    fn daily_counter_only_increments_after_triggered_reconciliation() {
+        for outcome in [
+            StewardOutcome::NotEnabled,
+            StewardOutcome::NoOp,
+            StewardOutcome::Refused,
+            StewardOutcome::DailyCapReached,
+        ] {
+            assert!(!outcome.increments_reconciliation_counter());
+        }
+        assert!(StewardOutcome::Triggered.increments_reconciliation_counter());
     }
 
     // ---- Jitter ------------------------------------------------------------
