@@ -4341,4 +4341,60 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn find_embed_dedup_link_returns_none_when_no_dedup_link_persisted() -> TestResult {
+        // bd-1iltv.3: explicit honest-degradation contract. A memory that
+        // was NOT deduped at insert time must produce `None` from the why
+        // helper so `WhyReport.dedup_link` stays `None` rather than
+        // fabricating an evidence block.
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or("database path should have parent")?,
+        )
+        .map_err(|error| error.to_string())?;
+        let conn = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        conn.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_dedupwhy000000000000000001";
+        let memory_id = "mem_dedupwhy000000000000000001";
+        conn.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: temp.path().display().to_string(),
+                name: Some("dedup-why-none".to_string()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        conn.insert_memory(
+            memory_id,
+            &crate::db::CreateMemoryInput {
+                workspace_id: workspace_id.to_string(),
+                level: "rule".to_string(),
+                kind: "rule".to_string(),
+                content: "memory without any dedup link".to_string(),
+                workflow_id: None,
+                confidence: 0.5,
+                utility: 0.5,
+                importance: 0.5,
+                provenance_uri: None,
+                trust_class: "agent_inference".to_string(),
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        let result = super::find_embed_dedup_link(&conn, memory_id);
+
+        ensure(
+            result.is_none(),
+            true,
+            "find_embed_dedup_link must return None when no embed-dedup memory_link row exists for the memory",
+        )
+    }
 }
