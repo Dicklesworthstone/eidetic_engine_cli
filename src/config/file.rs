@@ -605,6 +605,7 @@ pub struct GraphConfig {
     pub causal: GraphCausalConfig,
     pub pack_dna: GraphPackDnaConfig,
     pub gomory_hu: GraphGomoryHuConfig,
+    pub memory: GraphMemoryConfig,
     pub witnesses: GraphWitnessesConfig,
     pub feature: GraphFeatureFlagsConfig,
 }
@@ -619,6 +620,7 @@ impl GraphConfig {
             causal: GraphCausalConfig::parse(document)?,
             pack_dna: GraphPackDnaConfig::parse(document)?,
             gomory_hu: GraphGomoryHuConfig::parse(document)?,
+            memory: GraphMemoryConfig::parse(document)?,
             witnesses: GraphWitnessesConfig::parse(document)?,
             feature: GraphFeatureFlagsConfig::parse(document)?,
         })
@@ -737,6 +739,30 @@ impl GraphGomoryHuConfig {
         Ok(Self {
             sample_threshold: optional_u64_path(document, SECTIONS, "sample_threshold")?,
             sample_size: optional_u64_path(document, SECTIONS, "sample_size")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GraphMemoryConfig {
+    pub snapshot_cap_mb: Option<u64>,
+    pub per_algorithm_cap_mb: Option<u64>,
+    pub degraded_below_pct: Option<u64>,
+    pub growth_multiplier_basis_points: Option<u64>,
+}
+
+impl GraphMemoryConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        const SECTIONS: &[&str] = &["graph", "memory"];
+        Ok(Self {
+            snapshot_cap_mb: optional_u64_path(document, SECTIONS, "snapshot_cap_mb")?,
+            per_algorithm_cap_mb: optional_u64_path(document, SECTIONS, "per_algorithm_cap_mb")?,
+            degraded_below_pct: optional_u64_path(document, SECTIONS, "degraded_below_pct")?,
+            growth_multiplier_basis_points: optional_u64_path(
+                document,
+                SECTIONS,
+                "growth_multiplier_basis_points",
+            )?,
         })
     }
 }
@@ -2151,6 +2177,12 @@ max_edges = 30
 sample_threshold = 500
 sample_size = 100
 
+[graph.memory]
+snapshot_cap_mb = 250
+per_algorithm_cap_mb = 100
+degraded_below_pct = 80
+growth_multiplier_basis_points = 15000
+
 [curation]
 duplicate_similarity = 0.92
 harmful_weight = 2.5
@@ -2423,6 +2455,26 @@ prompt_injection_guard = true
             "graph gomory-hu sample size",
         )?;
         ensure_equal(
+            &config.graph.memory.snapshot_cap_mb,
+            &Some(250),
+            "graph memory snapshot cap",
+        )?;
+        ensure_equal(
+            &config.graph.memory.per_algorithm_cap_mb,
+            &Some(100),
+            "graph memory per-algorithm cap",
+        )?;
+        ensure_equal(
+            &config.graph.memory.degraded_below_pct,
+            &Some(80),
+            "graph memory degraded threshold",
+        )?;
+        ensure_equal(
+            &config.graph.memory.growth_multiplier_basis_points,
+            &Some(15_000),
+            "graph memory growth multiplier",
+        )?;
+        ensure_equal(
             &config.curation.harmful_weight,
             &Some(2.5),
             "harmful weight",
@@ -2617,6 +2669,11 @@ prompt_injection_guard = true
             &config.graph.gomory_hu.sample_threshold,
             &None,
             "graph gomory-hu sample threshold",
+        )?;
+        ensure_equal(
+            &config.graph.memory.snapshot_cap_mb,
+            &None,
+            "graph memory snapshot cap",
         )?;
         ensure_equal(
             &config.privacy.redaction_classes,

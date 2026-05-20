@@ -20,6 +20,10 @@ configuration precedence chain.
 | `graph.pack_dna.max_edges` | integer | `30` | `>= 0` | Maximum graph edges included in a Pack DNA explanation block. | Raise when agents need richer local topology; lower when JSON size matters more than topology detail. |
 | `graph.gomory_hu.sample_threshold` | integer | `500` | `>= 0` | Node-count threshold above which Gomory-Hu style proximity work should use deterministic sampling instead of exact computation. | Lower on constrained hosts; raise on large hosts when exact cuts are affordable. |
 | `graph.gomory_hu.sample_size` | integer | `100` | `>= 0` | Deterministic pivot/sample size used for large-graph Gomory-Hu approximations. | Increase for better approximation quality; lower to bound latency in agent hot paths. |
+| `graph.memory.snapshot_cap_mb` | integer | `250` | `>= 1` | F1 graph snapshot admission cap. Snapshot builders estimate `32 * nodes + 96 * edges` and refuse oversized builds before allocation. | Raise only on hosts with enough RAM for persisted graph refresh; lower for constrained agent laptops. |
+| `graph.memory.per_algorithm_cap_mb` | integer | `100` | `>= 1` | F2 per-algorithm working-set cap used before graph algorithms allocate scratch memory. | Lower for foreground commands; raise for intentional maintenance sweeps. |
+| `graph.memory.degraded_below_pct` | integer | `80` | `0..=100` | Advisory threshold that marks admitted snapshots as approaching the hard cap. | Lower when operators need early warning before large workspace growth. |
+| `graph.memory.growth_multiplier_basis_points` | integer | `15000` | `>= 1` | In-build growth tripwire. `15000` means observed allocation may grow to `1.5x` the pre-build estimate before aborting. | Keep conservative unless measurements show the estimator is systematically low. |
 | `graph.witnesses.retention_days` | integer | `30` | `>= 0` | Default TTL for graph algorithm witness rows pruned by `ee maintenance graph-witnesses-prune`. | Keep at the default for normal workspaces; raise when graph auditability matters more than table size. |
 | `graph.witnesses.algorithm_ttl_days.<algorithm>` | integer | unset | `>= 0` | Per-algorithm TTL override for graph witness retention. | Use longer windows for cache or audit witnesses, shorter windows for high-volume ad-hoc algorithms. |
 | `graph.feature.ppr.enabled` | boolean | `false` | `true` or `false` | Enables Personalized PageRank graph re-ranking once its runtime surface is wired. | Keep disabled until the PPR path has fresh graph snapshots and behavior-shift tests in the target workspace. |
@@ -42,6 +46,12 @@ alpha = 0.0
 [graph.gomory_hu]
 sample_threshold = 250
 sample_size = 64
+
+[graph.memory]
+snapshot_cap_mb = 250
+per_algorithm_cap_mb = 100
+degraded_below_pct = 80
+growth_multiplier_basis_points = 15000
 
 [graph.witnesses]
 retention_days = 30

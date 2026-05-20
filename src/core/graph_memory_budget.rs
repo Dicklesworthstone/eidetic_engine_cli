@@ -46,7 +46,11 @@
 //! existing `graph_audit` / `graph_telemetry` modules at the
 //! wiring layer.
 
+use std::path::Path;
+
 use serde::Serialize;
+
+use crate::config::{EnvVar, GraphMemoryConfig, read_env_var, workspace_config};
 
 /// Default snapshot footprint cap per RX7.
 pub const DEFAULT_SNAPSHOT_CAP_MB: u64 = 250;
@@ -99,6 +103,7 @@ pub const APPROACHING_CAP_CODE: &str = "snapshot_approaching_cap";
 /// bytes greater than `growth_multiplier × pre_build_estimate`
 /// triggers the abort path.
 const DEFAULT_GROWTH_MULTIPLIER_BASIS_POINTS: u32 = 15_000;
+const BYTES_PER_MIB: u64 = 1024 * 1024;
 
 /// Effective runtime memory budget for graph snapshots + per-
 /// algorithm working sets. The fields mirror the documented
@@ -130,12 +135,85 @@ impl MemoryBudgetPolicy {
             growth_multiplier_basis_points: DEFAULT_GROWTH_MULTIPLIER_BASIS_POINTS,
         }
     }
+
+    /// Build an effective policy from `[graph.memory]` values and
+    /// registered `EE_GRAPH_MEMORY_*` environment overrides.
+    #[must_use]
+    pub fn from_config(memory: &GraphMemoryConfig, env: MemoryBudgetEnv) -> Self {
+        let defaults = Self::defaults();
+        Self {
+            snapshot_cap_bytes: mb_to_bytes(
+                env.snapshot_cap_mb
+                    .or(memory.snapshot_cap_mb)
+                    .unwrap_or(DEFAULT_SNAPSHOT_CAP_MB),
+            ),
+            per_algorithm_cap_bytes: mb_to_bytes(
+                env.per_algorithm_cap_mb
+                    .or(memory.per_algorithm_cap_mb)
+                    .unwrap_or(DEFAULT_PER_ALGORITHM_CAP_MB),
+            ),
+            degraded_below_pct: clamp_percent_u8(
+                env.degraded_below_pct
+                    .or(memory.degraded_below_pct)
+                    .unwrap_or(u64::from(DEFAULT_DEGRADED_BELOW_PCT)),
+            ),
+            growth_multiplier_basis_points: saturating_u32(
+                env.growth_multiplier_basis_points
+                    .or(memory.growth_multiplier_basis_points)
+                    .unwrap_or(u64::from(DEFAULT_GROWTH_MULTIPLIER_BASIS_POINTS)),
+            )
+            .max(1),
+        }
+        .with_zero_cap_defaults(defaults)
+    }
+
+    fn with_zero_cap_defaults(mut self, defaults: Self) -> Self {
+        if self.snapshot_cap_bytes == 0 {
+            self.snapshot_cap_bytes = defaults.snapshot_cap_bytes;
+        }
+        if self.per_algorithm_cap_bytes == 0 {
+            self.per_algorithm_cap_bytes = defaults.per_algorithm_cap_bytes;
+        }
+        self
+    }
 }
 
 impl Default for MemoryBudgetPolicy {
     fn default() -> Self {
         Self::defaults()
     }
+}
+
+/// Environment override values for graph memory policy. Keeping this
+/// separate makes config precedence testable without mutating process env.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MemoryBudgetEnv {
+    pub snapshot_cap_mb: Option<u64>,
+    pub per_algorithm_cap_mb: Option<u64>,
+    pub degraded_below_pct: Option<u64>,
+    pub growth_multiplier_basis_points: Option<u64>,
+}
+
+impl MemoryBudgetEnv {
+    #[must_use]
+    pub fn current() -> Self {
+        Self {
+            snapshot_cap_mb: read_env_u64(EnvVar::GraphMemorySnapshotCapMb),
+            per_algorithm_cap_mb: read_env_u64(EnvVar::GraphMemoryPerAlgorithmCapMb),
+            degraded_below_pct: read_env_u64(EnvVar::GraphMemoryDegradedBelowPct),
+            growth_multiplier_basis_points: read_env_u64(
+                EnvVar::GraphMemoryGrowthMultiplierBasisPoints,
+            ),
+        }
+    }
+}
+
+#[must_use]
+pub fn workspace_memory_budget_policy(workspace_path: &Path) -> MemoryBudgetPolicy {
+    let memory = workspace_config(workspace_path)
+        .map(|config| config.graph.memory)
+        .unwrap_or_default();
+    MemoryBudgetPolicy::from_config(&memory, MemoryBudgetEnv::current())
 }
 
 /// Refusal payload returned by every `Refuse` variant. The shape
@@ -319,12 +397,51 @@ fn scale_by_basis_points(bytes: u64, basis_points: u32) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+fn mb_to_bytes(megabytes: u64) -> u64 {
+    megabytes.saturating_mul(BYTES_PER_MIB)
+}
+
+fn clamp_percent_u8(value: u64) -> u8 {
+    u8::try_from(value.min(100)).unwrap_or(100)
+}
+
+fn saturating_u32(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn read_env_u64(var: EnvVar) -> Option<u64> {
+    read_env_var(var).and_then(|raw| raw.parse::<u64>().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn mb(megabytes: u64) -> u64 {
         megabytes * 1024 * 1024
+    }
+
+    #[test]
+    fn policy_reads_graph_memory_config_and_env_overrides() {
+        let config = GraphMemoryConfig {
+            snapshot_cap_mb: Some(64),
+            per_algorithm_cap_mb: Some(16),
+            degraded_below_pct: Some(75),
+            growth_multiplier_basis_points: Some(12_500),
+        };
+        let env = MemoryBudgetEnv {
+            snapshot_cap_mb: Some(32),
+            per_algorithm_cap_mb: None,
+            degraded_below_pct: Some(90),
+            growth_multiplier_basis_points: None,
+        };
+
+        let policy = MemoryBudgetPolicy::from_config(&config, env);
+
+        assert_eq!(policy.snapshot_cap_bytes, mb(32));
+        assert_eq!(policy.per_algorithm_cap_bytes, mb(16));
+        assert_eq!(policy.degraded_below_pct, 90);
+        assert_eq!(policy.growth_multiplier_basis_points, 12_500);
     }
 
     #[test]

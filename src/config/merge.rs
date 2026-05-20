@@ -19,9 +19,9 @@ use super::env_registry::EnvVar;
 use super::file::{
     CacheConfig, CassConfig, ConfigFile, CurationConfig, FeedbackConfig, GraphCausalConfig,
     GraphConfig, GraphCurateConfig, GraphFeatureFlagsConfig, GraphGomoryHuConfig,
-    GraphHealthConfig, GraphHitsConfig, GraphPackDnaConfig, GraphPprConfig, GraphWitnessesConfig,
-    HandoffConfig, LearnConfig, LearnDecayConfig, MeshCommandMode, MeshConfig,
-    OutputRedactionConfig, PackConfig, PackL2CacheConfig, PolicyConfig, PrivacyConfig,
+    GraphHealthConfig, GraphHitsConfig, GraphMemoryConfig, GraphPackDnaConfig, GraphPprConfig,
+    GraphWitnessesConfig, HandoffConfig, LearnConfig, LearnDecayConfig, MeshCommandMode,
+    MeshConfig, OutputRedactionConfig, PackConfig, PackL2CacheConfig, PolicyConfig, PrivacyConfig,
     ReadPoolConfig, RedactionConfig, RedactionDefaultsConfig, RuntimeConfig, SearchConfig,
     SearchSpeed, SecretDetectorConfig, StorageConfig, TrustConfig,
 };
@@ -72,6 +72,11 @@ pub const GRAPH_PACK_DNA_MAX_ITEMS_KEY: &str = "graph.pack_dna.max_items";
 pub const GRAPH_PACK_DNA_MAX_EDGES_KEY: &str = "graph.pack_dna.max_edges";
 pub const GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY: &str = "graph.gomory_hu.sample_threshold";
 pub const GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY: &str = "graph.gomory_hu.sample_size";
+pub const GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY: &str = "graph.memory.snapshot_cap_mb";
+pub const GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY: &str = "graph.memory.per_algorithm_cap_mb";
+pub const GRAPH_MEMORY_DEGRADED_BELOW_PCT_KEY: &str = "graph.memory.degraded_below_pct";
+pub const GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY: &str =
+    "graph.memory.growth_multiplier_basis_points";
 pub const GRAPH_WITNESSES_RETENTION_DAYS_KEY: &str = "graph.witnesses.retention_days";
 pub const GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY: &str = "graph.witnesses.algorithm_ttl_days";
 pub const GRAPH_FEATURE_PPR_ENABLED_KEY: &str = "graph.feature.ppr.enabled";
@@ -496,6 +501,34 @@ impl MergedConfig {
                 self.source(GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY),
             ));
         }
+        if let Some(cap) = self.values.graph.memory.snapshot_cap_mb {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY,
+                cap.to_string(),
+                self.source(GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY),
+            ));
+        }
+        if let Some(cap) = self.values.graph.memory.per_algorithm_cap_mb {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY,
+                cap.to_string(),
+                self.source(GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY),
+            ));
+        }
+        if let Some(percent) = self.values.graph.memory.degraded_below_pct {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_MEMORY_DEGRADED_BELOW_PCT_KEY,
+                percent.to_string(),
+                self.source(GRAPH_MEMORY_DEGRADED_BELOW_PCT_KEY),
+            ));
+        }
+        if let Some(basis_points) = self.values.graph.memory.growth_multiplier_basis_points {
+            entries.push(ConfigShowEntry::new(
+                GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY,
+                basis_points.to_string(),
+                self.source(GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY),
+            ));
+        }
         if let Some(days) = self.values.graph.witnesses.retention_days {
             entries.push(ConfigShowEntry::new(
                 GRAPH_WITNESSES_RETENTION_DAYS_KEY,
@@ -910,6 +943,12 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
                 sample_threshold: Some(500),
                 sample_size: Some(100),
             },
+            memory: GraphMemoryConfig {
+                snapshot_cap_mb: Some(250),
+                per_algorithm_cap_mb: Some(100),
+                degraded_below_pct: Some(80),
+                growth_multiplier_basis_points: Some(15_000),
+            },
             witnesses: GraphWitnessesConfig {
                 retention_days: Some(30),
                 algorithm_ttl_days: Some(BTreeMap::new()),
@@ -1045,6 +1084,21 @@ pub fn config_from_env(
             peer_policies: None,
         },
         graph: GraphConfig {
+            memory: GraphMemoryConfig {
+                snapshot_cap_mb: optional_env_u64(env, EnvVar::GraphMemorySnapshotCapMb.name())?,
+                per_algorithm_cap_mb: optional_env_u64(
+                    env,
+                    EnvVar::GraphMemoryPerAlgorithmCapMb.name(),
+                )?,
+                degraded_below_pct: optional_env_u64(
+                    env,
+                    EnvVar::GraphMemoryDegradedBelowPct.name(),
+                )?,
+                growth_multiplier_basis_points: optional_env_u64(
+                    env,
+                    EnvVar::GraphMemoryGrowthMultiplierBasisPoints.name(),
+                )?,
+            },
             witnesses: GraphWitnessesConfig {
                 retention_days: optional_env_u64(env, EnvVar::GraphWitnessesRetentionDays.name())?,
                 algorithm_ttl_days: None,
@@ -1573,6 +1627,48 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                     &layers.defaults.graph.gomory_hu.sample_size,
                 ),
             },
+            memory: GraphMemoryConfig {
+                snapshot_cap_mb: pick_field(
+                    &mut sources,
+                    GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY,
+                    &layers.cli.graph.memory.snapshot_cap_mb,
+                    &layers.environment.graph.memory.snapshot_cap_mb,
+                    &layers.project.graph.memory.snapshot_cap_mb,
+                    &layers.user.graph.memory.snapshot_cap_mb,
+                    &layers.defaults.graph.memory.snapshot_cap_mb,
+                ),
+                per_algorithm_cap_mb: pick_field(
+                    &mut sources,
+                    GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY,
+                    &layers.cli.graph.memory.per_algorithm_cap_mb,
+                    &layers.environment.graph.memory.per_algorithm_cap_mb,
+                    &layers.project.graph.memory.per_algorithm_cap_mb,
+                    &layers.user.graph.memory.per_algorithm_cap_mb,
+                    &layers.defaults.graph.memory.per_algorithm_cap_mb,
+                ),
+                degraded_below_pct: pick_field(
+                    &mut sources,
+                    GRAPH_MEMORY_DEGRADED_BELOW_PCT_KEY,
+                    &layers.cli.graph.memory.degraded_below_pct,
+                    &layers.environment.graph.memory.degraded_below_pct,
+                    &layers.project.graph.memory.degraded_below_pct,
+                    &layers.user.graph.memory.degraded_below_pct,
+                    &layers.defaults.graph.memory.degraded_below_pct,
+                ),
+                growth_multiplier_basis_points: pick_field(
+                    &mut sources,
+                    GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY,
+                    &layers.cli.graph.memory.growth_multiplier_basis_points,
+                    &layers
+                        .environment
+                        .graph
+                        .memory
+                        .growth_multiplier_basis_points,
+                    &layers.project.graph.memory.growth_multiplier_basis_points,
+                    &layers.user.graph.memory.growth_multiplier_basis_points,
+                    &layers.defaults.graph.memory.growth_multiplier_basis_points,
+                ),
+            },
             witnesses: GraphWitnessesConfig {
                 retention_days: pick_field(
                     &mut sources,
@@ -2082,8 +2178,10 @@ mod tests {
         GRAPH_CURATE_ARTICULATION_PROTECTION_MULTIPLIER_KEY, GRAPH_CURATE_ONION_DECAY_MAX_KEY,
         GRAPH_FEATURE_PPR_ENABLED_KEY, GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
         GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY, GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY,
-        GRAPH_HITS_PROFILE_BOOST_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY, GRAPH_PACK_DNA_MAX_ITEMS_KEY,
-        GRAPH_PPR_ALPHA_KEY, LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY,
+        GRAPH_HITS_PROFILE_BOOST_KEY, GRAPH_MEMORY_DEGRADED_BELOW_PCT_KEY,
+        GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY, GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY,
+        GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY,
+        GRAPH_PACK_DNA_MAX_ITEMS_KEY, GRAPH_PPR_ALPHA_KEY, LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY,
         LEARN_DECAY_DEMOTE_THRESHOLD_KEY, LEARN_DECAY_PROCEDURAL_RULE_HALF_LIFE_DAYS_KEY,
         MESH_COMMAND_MODE_KEY, MESH_ENABLED_KEY, MESH_PEER_GROUP_BINDINGS_KEY,
         MESH_PEER_POLICIES_KEY, PACK_ADAPTIVE_BUDGET_KEY, PACK_DEFAULT_MAX_TOKENS_KEY,
@@ -2095,9 +2193,9 @@ mod tests {
     };
     use crate::config::{
         CacheConfig, ConfigFile, CurationConfig, GraphConfig, GraphCurateConfig,
-        GraphFeatureFlagsConfig, GraphGomoryHuConfig, GraphHealthConfig, GraphPprConfig,
-        LearnConfig, LearnDecayConfig, MeshCommandMode, MeshConfig, PackConfig, PackL2CacheConfig,
-        PathExpander, PolicyConfig, ReadPoolConfig, SearchConfig, SearchSpeed,
+        GraphFeatureFlagsConfig, GraphGomoryHuConfig, GraphHealthConfig, GraphMemoryConfig,
+        GraphPprConfig, LearnConfig, LearnDecayConfig, MeshCommandMode, MeshConfig, PackConfig,
+        PackL2CacheConfig, PathExpander, PolicyConfig, ReadPoolConfig, SearchConfig, SearchSpeed,
         SecretDetectorConfig, StorageConfig,
     };
 
@@ -2236,6 +2334,26 @@ mod tests {
             &Some(500),
             "graph gomory-hu sample threshold",
         )?;
+        ensure_equal(
+            &defaults.graph.memory.snapshot_cap_mb,
+            &Some(250),
+            "graph memory snapshot cap",
+        )?;
+        ensure_equal(
+            &defaults.graph.memory.per_algorithm_cap_mb,
+            &Some(100),
+            "graph memory per-algorithm cap",
+        )?;
+        ensure_equal(
+            &defaults.graph.memory.degraded_below_pct,
+            &Some(80),
+            "graph memory degraded threshold",
+        )?;
+        ensure_equal(
+            &defaults.graph.memory.growth_multiplier_basis_points,
+            &Some(15_000),
+            "graph memory growth multiplier",
+        )?;
         ensure_graph_feature_flags_default_disabled(&defaults.graph.feature)?;
         ensure_equal(
             &defaults.curation.specificity_min,
@@ -2298,6 +2416,22 @@ mod tests {
         );
         env.insert("EE_MESH_ENABLED".to_string(), OsString::from("true"));
         env.insert("EE_MESH_MODE".to_string(), OsString::from("cache"));
+        env.insert(
+            "EE_GRAPH_MEMORY_SNAPSHOT_CAP_MB".to_string(),
+            OsString::from("384"),
+        );
+        env.insert(
+            "EE_GRAPH_MEMORY_PER_ALGORITHM_CAP_MB".to_string(),
+            OsString::from("128"),
+        );
+        env.insert(
+            "EE_GRAPH_MEMORY_DEGRADED_BELOW_PCT".to_string(),
+            OsString::from("85"),
+        );
+        env.insert(
+            "EE_GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS".to_string(),
+            OsString::from("12500"),
+        );
         env.insert("EE_PROFILE".to_string(), OsString::from("thorough"));
         env.insert("EE_MAX_TOKENS".to_string(), OsString::from("8192"));
 
@@ -2369,6 +2503,26 @@ mod tests {
             &parsed.mesh.command_mode,
             &Some(MeshCommandMode::Cache),
             "env mesh command mode",
+        )?;
+        ensure_equal(
+            &parsed.graph.memory.snapshot_cap_mb,
+            &Some(384),
+            "env graph memory snapshot cap",
+        )?;
+        ensure_equal(
+            &parsed.graph.memory.per_algorithm_cap_mb,
+            &Some(128),
+            "env graph memory per-algorithm cap",
+        )?;
+        ensure_equal(
+            &parsed.graph.memory.degraded_below_pct,
+            &Some(85),
+            "env graph memory degraded threshold",
+        )?;
+        ensure_equal(
+            &parsed.graph.memory.growth_multiplier_basis_points,
+            &Some(12_500),
+            "env graph memory growth multiplier",
         )
     }
 
@@ -2473,6 +2627,11 @@ mod tests {
                     sample_threshold: Some(750),
                     ..GraphGomoryHuConfig::default()
                 },
+                memory: GraphMemoryConfig {
+                    snapshot_cap_mb: Some(384),
+                    per_algorithm_cap_mb: Some(192),
+                    ..GraphMemoryConfig::default()
+                },
                 feature: GraphFeatureFlagsConfig {
                     ppr_enabled: Some(true),
                     ..GraphFeatureFlagsConfig::default()
@@ -2525,6 +2684,13 @@ mod tests {
                 command_mode: Some(MeshCommandMode::Cache),
                 peer_group_bindings: None,
                 peer_policies: None,
+            },
+            graph: GraphConfig {
+                memory: GraphMemoryConfig {
+                    snapshot_cap_mb: Some(512),
+                    ..GraphMemoryConfig::default()
+                },
+                ..GraphConfig::default()
             },
             ..ConfigFile::default()
         };
@@ -2716,6 +2882,36 @@ mod tests {
             "graph gomory-hu sample threshold source",
         )?;
         ensure_equal(
+            &merged.values.graph.memory.snapshot_cap_mb,
+            &Some(512),
+            "env graph memory snapshot cap",
+        )?;
+        ensure_equal(
+            &merged.source(GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY),
+            &Some(ConfigValueSource::Environment),
+            "graph memory snapshot cap source",
+        )?;
+        ensure_equal(
+            &merged.values.graph.memory.per_algorithm_cap_mb,
+            &Some(192),
+            "project graph memory per-algorithm cap",
+        )?;
+        ensure_equal(
+            &merged.source(GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY),
+            &Some(ConfigValueSource::Project),
+            "graph memory per-algorithm cap source",
+        )?;
+        ensure_equal(
+            &merged.values.graph.memory.degraded_below_pct,
+            &Some(80),
+            "default graph memory advisory threshold",
+        )?;
+        ensure_equal(
+            &merged.source(GRAPH_MEMORY_DEGRADED_BELOW_PCT_KEY),
+            &Some(ConfigValueSource::Default),
+            "graph memory advisory threshold source",
+        )?;
+        ensure_equal(
             &merged.values.graph.feature.ppr_enabled,
             &Some(true),
             "project graph feature ppr enabled",
@@ -2812,6 +3008,10 @@ mod tests {
             GRAPH_PACK_DNA_MAX_EDGES_KEY,
             GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY,
             GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
+            GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY,
+            GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY,
+            GRAPH_MEMORY_DEGRADED_BELOW_PCT_KEY,
+            GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY,
             MESH_ENABLED_KEY,
             MESH_COMMAND_MODE_KEY,
             MESH_PEER_GROUP_BINDINGS_KEY,

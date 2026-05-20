@@ -4,6 +4,10 @@
 use ee::config::{
     ConfigFile, ConfigLayers, GraphConfig, PathExpander, built_in_config, merge_config,
 };
+use ee::core::graph_memory_budget::{
+    MemoryBudgetEnv, MemoryBudgetPolicy, SnapshotAdmissionDecision, check_snapshot_admission,
+    estimate_snapshot_bytes,
+};
 use ee::graph::algorithms::{
     PprPolicy, SamplingChoice, SamplingPolicy, run_pagerank_with_policy, run_with_sampling_policy,
 };
@@ -305,5 +309,55 @@ sample_size = 2
             },
         }),
     );
+    Ok(())
+}
+
+#[test]
+fn graph_memory_budget_config_changes_snapshot_admission() -> TestResult {
+    let default_config = merged_graph_config("")?;
+    let strict_config = merged_graph_config(
+        r#"
+[graph.memory]
+snapshot_cap_mb = 1
+per_algorithm_cap_mb = 1
+degraded_below_pct = 50
+growth_multiplier_basis_points = 12000
+"#,
+    )?;
+    let default_policy =
+        MemoryBudgetPolicy::from_config(&default_config.memory, MemoryBudgetEnv::default());
+    let strict_policy =
+        MemoryBudgetPolicy::from_config(&strict_config.memory, MemoryBudgetEnv::default());
+    let estimate = estimate_snapshot_bytes(1_000, 20_000);
+
+    if matches!(
+        check_snapshot_admission(estimate, &default_policy),
+        SnapshotAdmissionDecision::Refuse(_)
+    ) {
+        return Err("default graph.memory snapshot cap refused the fixture".to_string());
+    }
+    let SnapshotAdmissionDecision::Refuse(refusal) =
+        check_snapshot_admission(estimate, &strict_policy)
+    else {
+        return Err("strict graph.memory snapshot cap did not refuse the fixture".to_string());
+    };
+    if refusal.limit_bytes != 1024 * 1024 {
+        return Err(format!(
+            "strict graph.memory limit should be 1 MiB, got {}",
+            refusal.limit_bytes
+        ));
+    }
+    if strict_policy.per_algorithm_cap_bytes != 1024 * 1024 {
+        return Err(format!(
+            "strict graph.memory per-algorithm cap should be 1 MiB, got {}",
+            strict_policy.per_algorithm_cap_bytes
+        ));
+    }
+    if strict_policy.growth_multiplier_basis_points != 12_000 {
+        return Err(format!(
+            "strict graph.memory growth multiplier should be 12000 bp, got {}",
+            strict_policy.growth_multiplier_basis_points
+        ));
+    }
     Ok(())
 }

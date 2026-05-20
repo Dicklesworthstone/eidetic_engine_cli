@@ -5364,7 +5364,7 @@ fn changed_rust_paths_from_git(workspace_path: &Path) -> Result<BTreeSet<String>
         };
         let path = raw_path
             .split(" -> ")
-            .next_back()
+            .last()
             .unwrap_or(raw_path)
             .trim()
             .trim_matches('"');
@@ -7792,17 +7792,17 @@ mod tests {
             src_dir.join("lib.rs"),
             format!(
                 "\
-pub fn changed_symbol() -> u64 {
+pub fn changed_symbol() -> u64 {{
     1
-}
+}}
 
-pub fn adjacent_symbol() -> u64 {
+pub fn adjacent_symbol() -> u64 {{
     2
-}
+}}
 {far_padding}
-pub fn far_symbol() -> u64 {
+pub fn far_symbol() -> u64 {{
     3
-}
+}}
 "
             ),
         )

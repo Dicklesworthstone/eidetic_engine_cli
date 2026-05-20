@@ -924,6 +924,7 @@ fn validate_raw_regression_input_hash(
     file_name: &str,
     fixture: &DeterminismRegressionFixture,
 ) -> Result<(), String> {
+    reject_raw_regression_input_structured_fields(file_name, fixture)?;
     let raw = fixture
         .input
         .get("raw")
@@ -954,6 +955,36 @@ fn validate_raw_regression_input_hash(
         ));
     }
     Ok(())
+}
+
+fn reject_raw_regression_input_structured_fields(
+    file_name: &str,
+    fixture: &DeterminismRegressionFixture,
+) -> Result<(), String> {
+    const STRUCTURED_FIELDS: &[&str] = &[
+        "workspace_state",
+        "index_state",
+        "config",
+        "query",
+        "seed",
+        "candidate_specs",
+    ];
+
+    let mut unexpected_fields = STRUCTURED_FIELDS
+        .iter()
+        .filter(|field| fixture.input.get(**field).is_some())
+        .copied()
+        .collect::<Vec<_>>();
+    unexpected_fields.sort_unstable();
+
+    if unexpected_fields.is_empty() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "parse {file_name}: raw regression input must not include structured replay fields: {}",
+        unexpected_fields.join(", ")
+    ))
 }
 
 fn stale_regression_fixture_hashes(
@@ -1649,6 +1680,28 @@ fn determinism_regression_fixture_loader_rejects_raw_input_hash_drift() -> Resul
     )])
     .expect_err("raw fixture preview must match raw_hex bytes");
     assert!(preview_error.contains("preview does not match raw_hex"));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_loader_rejects_raw_structured_field_mix() -> Result<(), String> {
+    let mut fixture = regression_fixture_for_mismatch(6, b"raw-hybrid", b"expected", b"observed")
+        .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    let file_name = regression_fixture_file_name(&fixture.input_hash)?;
+    fixture.input["seed"] = serde_json::json!(fixture.seed);
+    fixture.input["candidate_specs"] = serde_json::json!([]);
+    fixture.input["workspace_state"] = serde_json::json!("synthetic_pack_candidates.v1");
+
+    let error = parse_regression_fixture_entries(vec![(
+        file_name,
+        serialize_regression_fixture(&fixture)?,
+    )])
+    .expect_err("raw fallback fixtures must not masquerade as structured replay inputs");
+
+    assert!(error.contains("raw regression input must not include structured replay fields"));
+    assert!(error.contains("candidate_specs"));
+    assert!(error.contains("seed"));
+    assert!(error.contains("workspace_state"));
     Ok(())
 }
 

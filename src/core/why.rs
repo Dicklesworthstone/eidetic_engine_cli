@@ -81,10 +81,12 @@ pub struct GraphRetrievalExplanation {
     pub source: GraphRetrievalSourceExplanation,
     /// Combined graph centrality score used as the retrieval feature.
     pub centrality_score: f64,
-    /// Authority proxy. Uses normalized PageRank until HITS authority is available.
+    /// Authority score used by profile-aware graph ranking.
     pub authority_score: f64,
-    /// Hub proxy. Uses normalized PageRank until HITS hub scores are available.
+    /// Hub score used by profile-aware graph ranking.
     pub hub_score: f64,
+    /// HITS-specific hub and authority evidence when present in the snapshot.
+    pub hits: Option<GraphHitsExplanation>,
     /// Optional graph community identifier when community detection is available.
     pub community_id: Option<String>,
     /// Distance from this memory to the query seed, when query-seed expansion is available.
@@ -164,6 +166,34 @@ pub struct GraphMetricExplanation {
     pub contribution: f64,
     /// Stable formula for this contribution.
     pub formula: String,
+}
+
+/// HITS role evidence for `ee why` graph output.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphHitsExplanation {
+    /// Schema for the HITS score source.
+    pub schema: &'static str,
+    /// Authority score, rank, and percentile.
+    pub authority: GraphHitsScoreExplanation,
+    /// Hub score, rank, and percentile.
+    pub hub: GraphHitsScoreExplanation,
+    /// Stable role label derived from normalized authority/hub balance.
+    pub role_label: &'static str,
+    /// Human-readable role rationale.
+    pub role_rationale: String,
+}
+
+/// One HITS score axis for a memory.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphHitsScoreExplanation {
+    /// Raw score from the graph snapshot.
+    pub raw: f64,
+    /// Score normalized against the maximum finite score on the same axis.
+    pub normalized: f64,
+    /// One-based rank on the same axis.
+    pub rank: Option<usize>,
+    /// Rank percentile where 1.0 is top-ranked and 0.0 is last-ranked.
+    pub percentile: Option<f64>,
 }
 
 /// Why a memory would be selected for a context pack.
@@ -1926,15 +1956,10 @@ fn build_graph_retrieval_explanation(
         ..crate::graph::GraphFeatureEnrichmentOptions::default()
     };
 
-    let report = match conn
+    let snapshot = match conn
         .get_latest_graph_snapshot(workspace_id, crate::db::GraphSnapshotType::MemoryLinks)
     {
-        Ok(snapshot) => crate::graph::enrich_graph_features_from_graph_snapshot(
-            snapshot.as_ref(),
-            workspace_id,
-            crate::db::GraphSnapshotType::MemoryLinks,
-            &options,
-        ),
+        Ok(snapshot) => snapshot,
         Err(error) => {
             return graph_retrieval_unavailable(
                 workspace_id,
@@ -1947,6 +1972,13 @@ fn build_graph_retrieval_explanation(
             );
         }
     };
+
+    let report = crate::graph::enrich_graph_features_from_graph_snapshot(
+        snapshot.as_ref(),
+        workspace_id,
+        crate::db::GraphSnapshotType::MemoryLinks,
+        &options,
+    );
 
     let feature = report
         .features
@@ -1969,6 +2001,17 @@ fn build_graph_retrieval_explanation(
         formula: "betweenness_contribution = betweenness.normalized * 0.4".to_owned(),
     });
     let mut degraded = graph_degradations_from_report(&report);
+    let hits = match snapshot
+        .as_ref()
+        .map(|snapshot| graph_hits_explanation_from_snapshot(snapshot, memory_id))
+    {
+        Some(Ok(hits)) => hits,
+        Some(Err(degradation)) => {
+            degraded.push(degradation);
+            None
+        }
+        None => None,
+    };
     let status = if feature.is_some() {
         "available".to_owned()
     } else if report.status == crate::graph::GraphFeatureEnrichmentStatus::Enriched {
@@ -1999,8 +2042,13 @@ fn build_graph_retrieval_explanation(
         status,
         source: graph_retrieval_source_from_report(&report),
         centrality_score: round_graph_score(feature.map_or(0.0, |feature| feature.combined_score)),
-        authority_score: pagerank.normalized,
-        hub_score: pagerank.normalized,
+        authority_score: hits
+            .as_ref()
+            .map_or(pagerank.normalized, |hits| hits.authority.normalized),
+        hub_score: hits
+            .as_ref()
+            .map_or(pagerank.normalized, |hits| hits.hub.normalized),
+        hits,
         community_id: None,
         distance_to_query_seed: None,
         same_cluster_as_top_result: None,
@@ -2045,6 +2093,7 @@ fn graph_retrieval_unavailable(
         centrality_score: 0.0,
         authority_score: 0.0,
         hub_score: 0.0,
+        hits: None,
         community_id: None,
         distance_to_query_seed: None,
         same_cluster_as_top_result: None,
@@ -2069,6 +2118,139 @@ fn graph_retrieval_unavailable(
             message,
             repair: Some(repair.to_owned()),
         }],
+    }
+}
+
+fn graph_hits_explanation_from_snapshot(
+    snapshot: &crate::db::StoredGraphSnapshot,
+    memory_id: &str,
+) -> Result<Option<GraphHitsExplanation>, WhyDegradation> {
+    let centrality = crate::graph::graph_snapshot_centrality_report(snapshot).map_err(|error| {
+        WhyDegradation {
+            code: "graph_hits_scores_unavailable",
+            severity: "medium",
+            message: format!("Failed to read HITS scores from graph snapshot: {error}"),
+            repair: Some("ee graph centrality-refresh".to_owned()),
+        }
+    })?;
+    let Some(score) = centrality
+        .scores
+        .iter()
+        .find(|score| score.memory_id == memory_id)
+    else {
+        return Ok(None);
+    };
+
+    let hub_max = max_finite_graph_score(centrality.scores.iter().map(|score| score.hub));
+    let authority_max =
+        max_finite_graph_score(centrality.scores.iter().map(|score| score.authority));
+    let hub_ranks = graph_score_rank_map(&centrality.scores, |score| score.hub);
+    let authority_ranks = graph_score_rank_map(&centrality.scores, |score| score.authority);
+    let node_count = centrality.scores.len();
+    let authority = graph_hits_score(
+        score.authority,
+        authority_max,
+        authority_ranks.get(memory_id).copied(),
+        node_count,
+    );
+    let hub = graph_hits_score(
+        score.hub,
+        hub_max,
+        hub_ranks.get(memory_id).copied(),
+        node_count,
+    );
+    let role_label = graph_hits_role_label(authority.normalized, hub.normalized);
+    let role_rationale = format!(
+        "HITS role `{role_label}` from authority {:.4} (rank {}) and hub {:.4} (rank {}).",
+        authority.normalized,
+        authority
+            .rank
+            .map_or_else(|| "none".to_owned(), |rank| rank.to_string()),
+        hub.normalized,
+        hub.rank
+            .map_or_else(|| "none".to_owned(), |rank| rank.to_string())
+    );
+
+    Ok(Some(GraphHitsExplanation {
+        schema: crate::graph::hits::HITS_REPORT_SCHEMA_V1,
+        authority,
+        hub,
+        role_label,
+        role_rationale,
+    }))
+}
+
+fn graph_hits_score(
+    raw: f64,
+    max_score: f64,
+    rank: Option<usize>,
+    node_count: usize,
+) -> GraphHitsScoreExplanation {
+    GraphHitsScoreExplanation {
+        raw: round_graph_score(raw),
+        normalized: normalize_why_graph_score(raw, max_score),
+        rank,
+        percentile: graph_rank_percentile(rank, node_count),
+    }
+}
+
+fn graph_hits_role_label(authority: f64, hub: f64) -> &'static str {
+    const STRONG_THRESHOLD: f64 = 0.5;
+    const BALANCE_EPSILON: f64 = 0.05;
+    if authority < STRONG_THRESHOLD && hub < STRONG_THRESHOLD {
+        "weak"
+    } else if (authority - hub).abs() <= BALANCE_EPSILON {
+        "balanced"
+    } else if authority > hub {
+        "authority"
+    } else {
+        "hub"
+    }
+}
+
+fn graph_rank_percentile(rank: Option<usize>, node_count: usize) -> Option<f64> {
+    rank.map(|rank| {
+        if node_count <= 1 {
+            1.0
+        } else {
+            let bounded_rank = rank.clamp(1, node_count);
+            1.0 - ((bounded_rank - 1) as f64 / (node_count - 1) as f64)
+        }
+    })
+    .map(round_graph_score)
+}
+
+fn graph_score_rank_map(
+    scores: &[crate::graph::MemoryCentralityScore],
+    score_fn: fn(&crate::graph::MemoryCentralityScore) -> f64,
+) -> BTreeMap<String, usize> {
+    let mut ranked = scores
+        .iter()
+        .filter(|score| score_fn(score).is_finite() && score_fn(score) > 0.0)
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        score_fn(right)
+            .total_cmp(&score_fn(left))
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+    ranked
+        .into_iter()
+        .enumerate()
+        .map(|(index, score)| (score.memory_id.clone(), index + 1))
+        .collect()
+}
+
+fn max_finite_graph_score(values: impl Iterator<Item = f64>) -> f64 {
+    values
+        .filter(|value| value.is_finite())
+        .fold(0.0_f64, |max, value| max.max(value))
+}
+
+fn normalize_why_graph_score(value: f64, max_value: f64) -> f64 {
+    if value.is_finite() && max_value.is_finite() && max_value > 0.0 {
+        round_graph_score((value / max_value).clamp(0.0, 1.0))
+    } else {
+        0.0
     }
 }
 
@@ -2782,8 +2964,8 @@ fn fetch_rationale_traces(
 mod tests {
     use super::*;
     use crate::db::{
-        CreateArtifactInput, CreateMemoryInput, CreateProceduralRuleInput, CreateSessionInput,
-        CreateWorkspaceInput,
+        CreateArtifactInput, CreateGraphSnapshotInput, CreateMemoryInput,
+        CreateProceduralRuleInput, CreateSessionInput, CreateWorkspaceInput, GraphSnapshotType,
     };
     use crate::models::{
         RationaleTraceKind, RationaleTracePosture, RationaleTraceVisibility, RedactionStatus,
@@ -2828,6 +3010,124 @@ mod tests {
         let score = compute_selection_score(0.8, 0.6, 0.7);
         let expected = 0.5 * 0.8 + 0.3 * 0.6 + 0.2 * 0.7;
         ensure((score - expected).abs() < 0.001, true, "score computation")
+    }
+
+    #[test]
+    fn explain_memory_attaches_hits_role_scores_from_graph_snapshot() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or("database path should have parent")?,
+        )
+        .map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_whyhits0000000000000000";
+        let memory_id = "mem_whyhits0000000000000001";
+        let connection =
+            crate::db::DbConnection::open_file(&database_path).map_err(|e| e.to_string())?;
+        connection.migrate().map_err(|e| e.to_string())?;
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: temp.path().display().to_string(),
+                    name: Some("why HITS".to_owned()),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        connection
+            .insert_memory(
+                memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "Hub memory orients a dependency map.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: Some("2026-05-20T00:00:00Z".to_owned()),
+                    valid_to: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        connection
+            .insert_graph_snapshot(
+                "gss_whyhits0000000000000001",
+                &CreateGraphSnapshotInput {
+                    workspace_id: workspace_id.to_owned(),
+                    snapshot_version: 7,
+                    schema_version: "ee.graph.snapshot.v1".to_owned(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 3,
+                    edge_count: 2,
+                    metrics_json: serde_json::json!({
+                        "nodes": [
+                            {
+                                "memoryId": memory_id,
+                                "pagerank": 0.2,
+                                "betweenness": 0.1,
+                                "hub": 0.9,
+                                "authority": 0.2
+                            },
+                            {
+                                "memoryId": "mem_whyhitsauthority0000001",
+                                "pagerank": 0.8,
+                                "betweenness": 0.2,
+                                "hub": 0.1,
+                                "authority": 0.8
+                            },
+                            {
+                                "memoryId": "mem_whyhitsmiddle0000000001",
+                                "pagerank": 0.4,
+                                "betweenness": 0.3,
+                                "hub": 0.3,
+                                "authority": 0.4
+                            }
+                        ],
+                        "edges": []
+                    })
+                    .to_string(),
+                    content_hash: "blake3:why-hits".to_owned(),
+                    source_generation: 11,
+                    expires_at: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        drop(connection);
+
+        let report = explain_memory(&WhyOptions {
+            database_path: &database_path,
+            memory_id,
+            confidence_threshold: WhyOptions::DEFAULT_CONFIDENCE_THRESHOLD,
+        });
+
+        let graph = report
+            .graph_retrieval
+            .as_ref()
+            .ok_or_else(|| "why should include graph retrieval features".to_owned())?;
+        let hits = graph
+            .hits
+            .as_ref()
+            .ok_or_else(|| "why should include HITS scores".to_owned())?;
+        ensure(
+            hits.schema,
+            crate::graph::hits::HITS_REPORT_SCHEMA_V1,
+            "schema",
+        )?;
+        ensure(hits.role_label, "hub", "role label")?;
+        ensure(hits.hub.rank, Some(1_usize), "hub rank")?;
+        ensure(hits.hub.percentile, Some(1.0), "hub percentile")?;
+        ensure(hits.authority.rank, Some(3_usize), "authority rank")?;
+        ensure(hits.authority.percentile, Some(0.0), "authority percentile")?;
+        ensure(graph.hub_score, 1.0, "top-level hub score")?;
+        ensure(graph.authority_score, 0.25, "top-level authority score")
     }
 
     #[test]

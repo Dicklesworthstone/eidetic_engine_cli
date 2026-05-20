@@ -14,6 +14,8 @@ use ee::core::procedure::{
 };
 use ee::core::qos::{QOS_ACTIVE_LANE_SUMMARY_SCHEMA_V1, QosLaneSummary};
 use ee::core::singleflight::singleflight_posture_report;
+use ee::core::status::FlightRecorderStatusReport;
+use ee::core::swarm_brief::RchWorkerPressureReport;
 use ee::core::why::{
     MemoryLinkSummary, PackSelectionExplanation, RationaleTraceSummary, RetrievalExplanation,
     SelectionExplanation, StorageExplanation, WhyDegradation, WhyReport,
@@ -189,6 +191,9 @@ fn doctor_fixture() -> DoctorReport {
         overall_healthy: false,
         posture: Posture::DegradedRecoverable,
         singleflight_posture: singleflight_posture_report(),
+        flight_recorder: FlightRecorderStatusReport::disabled(PathBuf::from(
+            "/fixture/workspace/obs/flight_recorder",
+        )),
         qos_posture: QosLaneSummary {
             schema: QOS_ACTIVE_LANE_SUMMARY_SCHEMA_V1.to_owned(),
             workspace_hash: "sha256:fixture-qos-workspace".to_owned(),
@@ -200,6 +205,7 @@ fn doctor_fixture() -> DoctorReport {
             stale_ignored_count: 0,
             degraded: Vec::new(),
         },
+        rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
         checks: vec![
             CheckResult {
                 name: "database",

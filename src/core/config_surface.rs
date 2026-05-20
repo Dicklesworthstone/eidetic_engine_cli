@@ -24,7 +24,9 @@ use crate::config::{
     GRAPH_FEATURE_SKYLINE_ENABLED_KEY, GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY,
     GRAPH_FEATURE_STRUCTURAL_HEALTH_ENABLED_KEY, GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
     GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY, GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY,
-    GRAPH_HITS_PROFILE_BOOST_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY, GRAPH_PACK_DNA_MAX_ITEMS_KEY,
+    GRAPH_HITS_PROFILE_BOOST_KEY, GRAPH_MEMORY_DEGRADED_BELOW_PCT_KEY,
+    GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY, GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY,
+    GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY, GRAPH_PACK_DNA_MAX_ITEMS_KEY,
     GRAPH_PPR_ALPHA_KEY, PathExpander, built_in_config, config_from_env, merge_config,
 };
 
@@ -161,6 +163,10 @@ pub fn graph_config_keys() -> &'static [&'static str] {
         GRAPH_PACK_DNA_MAX_EDGES_KEY,
         GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY,
         GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
+        GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY,
+        GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY,
+        GRAPH_MEMORY_DEGRADED_BELOW_PCT_KEY,
+        GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY,
         GRAPH_FEATURE_PPR_ENABLED_KEY,
         GRAPH_FEATURE_PACK_DNA_ENABLED_KEY,
         GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY,
@@ -632,6 +638,26 @@ fn graph_key_spec(key: &str) -> Option<GraphKeySpec> {
         GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY => Some(GraphKeySpec {
             key: GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
             path: &["graph", "gomory_hu", "sample_size"],
+            kind: GraphValueKind::UnsignedInteger,
+        }),
+        GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY => Some(GraphKeySpec {
+            key: GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY,
+            path: &["graph", "memory", "snapshot_cap_mb"],
+            kind: GraphValueKind::UnsignedInteger,
+        }),
+        GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY => Some(GraphKeySpec {
+            key: GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY,
+            path: &["graph", "memory", "per_algorithm_cap_mb"],
+            kind: GraphValueKind::UnsignedInteger,
+        }),
+        GRAPH_MEMORY_DEGRADED_BELOW_PCT_KEY => Some(GraphKeySpec {
+            key: GRAPH_MEMORY_DEGRADED_BELOW_PCT_KEY,
+            path: &["graph", "memory", "degraded_below_pct"],
+            kind: GraphValueKind::UnsignedInteger,
+        }),
+        GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY => Some(GraphKeySpec {
+            key: GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY,
+            path: &["graph", "memory", "growth_multiplier_basis_points"],
             kind: GraphValueKind::UnsignedInteger,
         }),
         GRAPH_FEATURE_PPR_ENABLED_KEY => Some(GraphKeySpec {

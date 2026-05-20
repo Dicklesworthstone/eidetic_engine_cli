@@ -2328,6 +2328,8 @@ pub struct CentralityRefreshOptions {
     pub min_confidence: Option<f32>,
     /// Maximum links to process.
     pub link_limit: Option<u32>,
+    /// Admission policy for graph snapshot and algorithm memory use.
+    pub memory_budget_policy: MemoryBudgetPolicy,
 }
 
 /// Individual memory centrality scores.
@@ -2780,8 +2782,11 @@ fn refresh_typed_graph_snapshot_with_owner(
     let projection_start = Instant::now();
     let topology = typed_graph_snapshot_topology(conn, workspace_id, graph_type)?;
     let projection_ms = projection_start.elapsed().as_secs_f64() * 1000.0;
-    let budget_preflight =
-        graph_snapshot_budget_preflight(topology.node_count, topology.edge_count);
+    let budget_preflight = graph_snapshot_budget_preflight_with_policy(
+        topology.node_count,
+        topology.edge_count,
+        &options.memory_budget_policy,
+    );
     let status = if budget_preflight.refused() {
         CentralityRefreshStatus::MemoryBudgetRefused
     } else if options.dry_run {
@@ -3250,18 +3255,20 @@ fn refresh_centrality_with_source_links(
         min_confidence: options.min_confidence,
     };
     let links = graph_projection_links(conn, &projection_opts)?;
-    let centrality = refresh_centrality_from_links(&links, options.dry_run)?;
+    let centrality =
+        refresh_centrality_from_links(&links, options.dry_run, &options.memory_budget_policy)?;
     Ok((centrality, links))
 }
 
 fn refresh_centrality_from_links(
     links: &[StoredMemoryLink],
     dry_run: bool,
+    memory_budget_policy: &MemoryBudgetPolicy,
 ) -> GraphResult<CentralityRefreshReport> {
     use std::time::Instant;
 
     let total_start = Instant::now();
-    let budget_preflight = memory_link_snapshot_budget_preflight(links);
+    let budget_preflight = memory_link_snapshot_budget_preflight(links, memory_budget_policy);
 
     if budget_preflight.refused() {
         return Ok(memory_budget_refused_centrality_report(
@@ -3381,9 +3388,10 @@ impl GraphSnapshotBudgetPreflight {
 
 fn memory_link_snapshot_budget_preflight(
     links: &[StoredMemoryLink],
+    policy: &MemoryBudgetPolicy,
 ) -> GraphSnapshotBudgetPreflight {
     let (node_count, edge_count) = memory_link_snapshot_shape(links);
-    graph_snapshot_budget_preflight(node_count, edge_count)
+    graph_snapshot_budget_preflight_with_policy(node_count, edge_count, policy)
 }
 
 fn memory_link_snapshot_shape(links: &[StoredMemoryLink]) -> (usize, usize) {
@@ -3401,12 +3409,23 @@ fn graph_snapshot_budget_preflight(
     node_count: usize,
     edge_count: usize,
 ) -> GraphSnapshotBudgetPreflight {
+    graph_snapshot_budget_preflight_with_policy(
+        node_count,
+        edge_count,
+        &MemoryBudgetPolicy::defaults(),
+    )
+}
+
+fn graph_snapshot_budget_preflight_with_policy(
+    node_count: usize,
+    edge_count: usize,
+    policy: &MemoryBudgetPolicy,
+) -> GraphSnapshotBudgetPreflight {
     let estimate_bytes = estimate_snapshot_bytes(node_count, edge_count);
-    let policy = MemoryBudgetPolicy::defaults();
     GraphSnapshotBudgetPreflight {
         node_count,
         edge_count,
-        decision: check_snapshot_admission(estimate_bytes, &policy),
+        decision: check_snapshot_admission(estimate_bytes, policy),
     }
 }
 
@@ -8066,6 +8085,23 @@ mod tests {
     }
 
     #[test]
+    fn graph_snapshot_budget_preflight_uses_configured_policy() {
+        let policy = crate::core::graph_memory_budget::MemoryBudgetPolicy {
+            snapshot_cap_bytes: 1,
+            ..crate::core::graph_memory_budget::MemoryBudgetPolicy::defaults()
+        };
+        let preflight = super::graph_snapshot_budget_preflight_with_policy(1, 1, &policy);
+
+        assert!(preflight.refused());
+        let crate::core::graph_memory_budget::SnapshotAdmissionDecision::Refuse(refusal) =
+            preflight.decision
+        else {
+            panic!("expected configured memory budget refusal");
+        };
+        assert_eq!(refusal.limit_bytes, 1);
+    }
+
+    #[test]
     fn centrality_refresh_json_includes_memory_budget_degraded_when_refused() {
         let report = centrality_report(
             super::CentralityRefreshStatus::MemoryBudgetRefused,
@@ -8094,7 +8130,11 @@ mod tests {
             stored_memory_link("link_aaaaaaaaaaaaaaaaaaaaaaaaaaaa03", MEMORY_B, MEMORY_C),
         ];
 
-        let report = graph_result(super::refresh_centrality_from_links(&links, false))?;
+        let report = graph_result(super::refresh_centrality_from_links(
+            &links,
+            false,
+            &crate::core::graph_memory_budget::MemoryBudgetPolicy::defaults(),
+        ))?;
 
         assert_eq!(report.status, super::CentralityRefreshStatus::Refreshed);
         if report.hits_ms < 0.0 {
@@ -8151,7 +8191,11 @@ mod tests {
 
     #[test]
     fn refresh_centrality_from_links_dry_run_initializes_hits_fields_to_default() -> TestResult {
-        let report = graph_result(super::refresh_centrality_from_links(&[], true))?;
+        let report = graph_result(super::refresh_centrality_from_links(
+            &[],
+            true,
+            &crate::core::graph_memory_budget::MemoryBudgetPolicy::defaults(),
+        ))?;
         assert_eq!(report.status, super::CentralityRefreshStatus::DryRun);
         assert_eq!(report.hits_ms, 0.0);
         assert!(report.top_hubs.is_empty());

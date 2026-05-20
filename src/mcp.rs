@@ -481,7 +481,7 @@ fn parse_mcp_context_profile(value: &str) -> Result<&'static str, String> {
         .map(ContextProfileName::as_str)
         .ok_or_else(|| {
             format!(
-                "Invalid context profile '{value}'. Expected compact, balanced, thorough, or submodular."
+                "Invalid context profile '{value}'. Expected compact, balanced, grounding, orientation, thorough, or submodular."
             )
         })
 }
