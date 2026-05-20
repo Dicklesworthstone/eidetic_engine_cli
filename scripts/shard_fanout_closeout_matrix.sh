@@ -156,9 +156,12 @@ CHILDREN = [
     {
         "id": "bd-f6jfs.8",
         "criterion": "Concurrency e2e/benchmark throughput evidence",
-        "artifacts": ["scripts/e2e_overhaul/concurrency.sh"],
+        "artifacts": ["tests/shard_fanout_concurrency.rs"],
         "needles": [
-            ("scripts/e2e_overhaul/concurrency.sh", "ee.test_event.v1"),
+            ("tests/shard_fanout_concurrency.rs", "ee.test_event.v1"),
+            ("tests/shard_fanout_concurrency.rs", "SPEEDUP_GATE"),
+            ("tests/shard_fanout_concurrency.rs", "enqueue_to_grant_ms"),
+            ("tests/shard_fanout_concurrency.rs", "grant_to_commit_ms"),
         ],
     },
     {

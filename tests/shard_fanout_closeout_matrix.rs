@@ -52,6 +52,7 @@ fn closeout_matrix_covers_required_acceptance_criteria() -> TestResult {
         "Backup/restore side-path parity evidence",
         "Concurrency e2e/benchmark throughput evidence",
         "Rollback/off-switch/fail-closed evidence",
+        "tests/shard_fanout_concurrency.rs",
         "Failure-mode fixtures",
         "br dep cycles",
         "bv",
