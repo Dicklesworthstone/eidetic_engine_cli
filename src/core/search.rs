@@ -12,7 +12,9 @@ use crate::core::why::{DedupLinkEvidence, find_embed_dedup_link};
 use crate::db::{
     CreateAuditInput, DbConnection, audit_actions, generate_audit_id, generate_audit_id_seeded,
 };
-use crate::models::degradation::CONFORMAL_CALIBRATION_INSUFFICIENT_CODE;
+use crate::models::degradation::{
+    CONFORMAL_CALIBRATION_INSUFFICIENT_CODE, SEARCH_SCORE_CALIBRATION_ROWS_CORRUPT_CODE,
+};
 use crate::models::query::{EqlQuery, EqlSpeedMode, EqlTagsMode};
 use crate::models::{
     MemoryId, MemoryScope, MemoryScopeStats, ProvenanceUri, TrustClass, UnitScore,
@@ -690,6 +692,28 @@ impl SearchDegradation {
             ),
             repair: Some(
                 "Add outcome-backed rows to .ee/search/calibration.jsonl with score and groundTruthRelevance fields, or run the calibrated search refresh workflow when available."
+                    .to_string(),
+            ),
+        }
+    }
+
+    #[must_use]
+    fn search_score_calibration_rows_corrupt(
+        usable_samples: usize,
+        corrupt_rows: usize,
+        corrupt_line_numbers: &[usize],
+    ) -> Self {
+        let line_summary = line_number_summary(corrupt_line_numbers);
+        Self {
+            code: SEARCH_SCORE_CALIBRATION_ROWS_CORRUPT_CODE.to_string(),
+            severity: "warning".to_string(),
+            message: format!(
+                "Search score calibration ignored {corrupt_rows} corrupt row{plural} in .ee/search/calibration.jsonl at {line_summary}; {usable_samples} usable sample{sample_plural} remain. Returning conservative [0, 1] intervals unless enough valid rows are present.",
+                plural = if corrupt_rows == 1 { "" } else { "s" },
+                sample_plural = if usable_samples == 1 { "" } else { "s" },
+            ),
+            repair: Some(
+                "Fix or remove malformed calibration rows; each non-empty row must be JSON with finite score and groundTruthRelevance fields."
                     .to_string(),
             ),
         }
@@ -1522,6 +1546,7 @@ impl SearchHit {
 enum SearchScoreCalibrationStatus {
     Absent,
     Insufficient,
+    Corrupt,
     Calibrated,
 }
 
@@ -1530,6 +1555,7 @@ impl SearchScoreCalibrationStatus {
         match self {
             Self::Absent => "absent",
             Self::Insufficient => "insufficient",
+            Self::Corrupt => "corrupt",
             Self::Calibrated => "calibrated",
         }
     }
@@ -1539,6 +1565,8 @@ impl SearchScoreCalibrationStatus {
 struct SearchScoreCalibration {
     status: SearchScoreCalibrationStatus,
     sample_count: usize,
+    corrupt_row_count: usize,
+    corrupt_line_numbers: Vec<usize>,
     residual_quantile: Option<f32>,
 }
 
@@ -1552,23 +1580,29 @@ impl SearchScoreCalibration {
             return Self {
                 status: SearchScoreCalibrationStatus::Absent,
                 sample_count: 0,
+                corrupt_row_count: 0,
+                corrupt_line_numbers: Vec::new(),
                 residual_quantile: None,
             };
         };
 
         let mut residuals = Vec::new();
-        for line in contents
+        let mut corrupt_line_numbers = Vec::new();
+        for (line_number, line) in contents
             .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
+            .enumerate()
+            .map(|(index, line)| (index + 1, line.trim()))
+            .filter(|(_, line)| !line.is_empty())
         {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                corrupt_line_numbers.push(line_number);
                 continue;
             };
             let Some(score) = calibration_number(
                 &value,
                 &["score", "predictedScore", "predicted_score", "fusionScore"],
             ) else {
+                corrupt_line_numbers.push(line_number);
                 continue;
             };
             let Some(truth) = calibration_number(
@@ -1580,6 +1614,7 @@ impl SearchScoreCalibration {
                     "label",
                 ],
             ) else {
+                corrupt_line_numbers.push(line_number);
                 continue;
             };
             let scale = score_uncertainty_scale(score);
@@ -1587,10 +1622,30 @@ impl SearchScoreCalibration {
                 .push(((score.clamp(0.0, 1.0) - truth.clamp(0.0, 1.0)).abs() / scale).min(20.0));
         }
 
+        if !corrupt_line_numbers.is_empty() {
+            let residual_quantile = if residuals.len() < MIN_SEARCH_SCORE_CALIBRATION_SAMPLES {
+                None
+            } else {
+                Some(split_conformal_quantile(
+                    residuals.clone(),
+                    SEARCH_SCORE_COVERAGE_GUARANTEE,
+                ))
+            };
+            return Self {
+                status: SearchScoreCalibrationStatus::Corrupt,
+                sample_count: residuals.len(),
+                corrupt_row_count: corrupt_line_numbers.len(),
+                corrupt_line_numbers,
+                residual_quantile,
+            };
+        }
+
         if residuals.len() < MIN_SEARCH_SCORE_CALIBRATION_SAMPLES {
             return Self {
                 status: SearchScoreCalibrationStatus::Insufficient,
                 sample_count: residuals.len(),
+                corrupt_row_count: 0,
+                corrupt_line_numbers: Vec::new(),
                 residual_quantile: None,
             };
         }
@@ -1598,6 +1653,8 @@ impl SearchScoreCalibration {
         Self {
             status: SearchScoreCalibrationStatus::Calibrated,
             sample_count: residuals.len(),
+            corrupt_row_count: 0,
+            corrupt_line_numbers: Vec::new(),
             residual_quantile: Some(split_conformal_quantile(
                 residuals,
                 SEARCH_SCORE_COVERAGE_GUARANTEE,
@@ -1629,9 +1686,31 @@ impl SearchScoreCalibration {
             "coverage": round_metric_f32(SEARCH_SCORE_COVERAGE_GUARANTEE),
             "sampleCount": self.sample_count,
             "minimumSamples": MIN_SEARCH_SCORE_CALIBRATION_SAMPLES,
+            "corruptRowCount": self.corrupt_row_count,
+            "corruptLineNumbers": &self.corrupt_line_numbers,
             "residualQuantile": self.residual_quantile.map(round_metric_f32),
         })
     }
+}
+
+fn line_number_summary(line_numbers: &[usize]) -> String {
+    const MAX_LISTED_LINES: usize = 5;
+    let mut listed = line_numbers
+        .iter()
+        .take(MAX_LISTED_LINES)
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if line_numbers.len() > MAX_LISTED_LINES {
+        listed.push_str(&format!(
+            ", ... (+{} more)",
+            line_numbers.len() - MAX_LISTED_LINES
+        ));
+    }
+    format!(
+        "line{} {listed}",
+        if line_numbers.len() == 1 { "" } else { "s" }
+    )
 }
 
 fn calibration_number(value: &serde_json::Value, keys: &[&str]) -> Option<f32> {
@@ -1668,10 +1747,20 @@ fn annotate_hits_with_score_calibration(
     degraded: &mut Vec<SearchDegradation>,
 ) {
     let calibration = SearchScoreCalibration::for_workspace(workspace_path);
-    if calibration.status == SearchScoreCalibrationStatus::Insufficient {
-        degraded.push(SearchDegradation::conformal_calibration_insufficient(
-            calibration.sample_count,
-        ));
+    match calibration.status {
+        SearchScoreCalibrationStatus::Insufficient => {
+            degraded.push(SearchDegradation::conformal_calibration_insufficient(
+                calibration.sample_count,
+            ));
+        }
+        SearchScoreCalibrationStatus::Corrupt => {
+            degraded.push(SearchDegradation::search_score_calibration_rows_corrupt(
+                calibration.sample_count,
+                calibration.corrupt_row_count,
+                &calibration.corrupt_line_numbers,
+            ));
+        }
+        SearchScoreCalibrationStatus::Absent | SearchScoreCalibrationStatus::Calibrated => {}
     }
 
     for hit in hits {
@@ -5095,6 +5184,72 @@ mod tests {
         );
         assert_eq!(calibration.sample_count, 1);
         assert_eq!(calibration.interval_for_score(0.8), [0.0, 1.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn search_score_calibration_marks_corrupt_rows_distinctly() -> TestResult {
+        let workspace = unique_test_dir("score-calibration-corrupt");
+        let calibration_dir = workspace.join(".ee").join("search");
+        std::fs::create_dir_all(&calibration_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            calibration_dir.join("calibration.jsonl"),
+            [
+                "not json",
+                r#"{"score":0.8}"#,
+                r#"{"score":0.6,"groundTruthRelevance":0.5}"#,
+            ]
+            .join("\n"),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let calibration = SearchScoreCalibration::for_workspace(&workspace);
+
+        assert_eq!(calibration.status, SearchScoreCalibrationStatus::Corrupt);
+        assert_eq!(calibration.sample_count, 1);
+        assert_eq!(calibration.corrupt_row_count, 2);
+        assert_eq!(calibration.corrupt_line_numbers, vec![1, 2]);
+        assert_eq!(calibration.interval_for_score(0.8), [0.0, 1.0]);
+        assert_eq!(calibration.data_json()["status"], "corrupt");
+        assert_eq!(calibration.data_json()["corruptRowCount"], 2);
+        assert_eq!(
+            calibration.data_json()["corruptLineNumbers"],
+            serde_json::json!([1, 2])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn search_score_calibration_corrupt_rows_emit_degradation() -> TestResult {
+        let workspace = unique_test_dir("score-calibration-corrupt-degraded");
+        let calibration_dir = workspace.join(".ee").join("search");
+        std::fs::create_dir_all(&calibration_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            calibration_dir.join("calibration.jsonl"),
+            "not json\n{\"oops\":1}\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let mut hits = vec![synthetic_hit("mem_score_calibration_corrupt", 0.8)];
+        let mut degraded = Vec::new();
+        annotate_hits_with_score_calibration(&workspace, &mut hits, &mut degraded);
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, SEARCH_SCORE_CALIBRATION_ROWS_CORRUPT_CODE);
+        assert_eq!(degraded[0].severity, "warning");
+        assert!(
+            degraded[0].message.contains("lines 1, 2"),
+            "message should include corrupt line numbers: {}",
+            degraded[0].message
+        );
+        assert_eq!(
+            hits[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/scoreCalibration/status"))
+                .and_then(serde_json::Value::as_str),
+            Some("corrupt")
+        );
         Ok(())
     }
 

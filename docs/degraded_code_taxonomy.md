@@ -252,6 +252,7 @@ memory bodies in `sources[]`.
 | `search_index_stale` | medium | bd-17c65.2.1 (B1) |
 | `search_index_degraded` | medium | bd-17c65.10.6 (J6) |
 | `conformal_calibration_insufficient` | warning | bd-17c65.14.2 (N2) |
+| `search_score_calibration_rows_corrupt` | warning | bd-3ihl4 |
 | `discovery_cache_invalidated_tailnet_changed` | info | bd-36bbk.1.13 |
 | `discovery_cache_stale_due_to_workspace_mismatch` | info | bd-36bbk.1.13 |
 | `drift_grace_soft_stale_peer_count_high` | warning | bd-36bbk.1.13 |

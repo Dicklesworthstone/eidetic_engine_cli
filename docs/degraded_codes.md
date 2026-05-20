@@ -1751,6 +1751,39 @@ ee search 'format before release' --workspace . --json
 
 ---
 
+## `search_score_calibration_rows_corrupt`
+
+**Severity:** warning
+
+**Surfaces:** search, diag search
+
+**Introduced by:** bd-3ihl4
+
+**Trigger.** A workspace has .ee/search/calibration.jsonl, but one or more non-empty rows are malformed JSON or lack finite score and groundTruthRelevance fields.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+mkdir -p .ee/search
+printf '%s\n' 'not json' '{"oops":1}' > .ee/search/calibration.jsonl
+ee remember 'Run cargo fmt before release.' --workspace . --level procedural --kind rule
+```
+
+**Invocation.**
+
+```bash
+ee search 'format before release' --workspace . --json
+```
+
+**Expected emission.** Message contains: `Search score calibration ignored ... .ee/search/calibration.jsonl`
+
+**Repair hint.** `score and groundTruthRelevance`
+
+**Fixture.** [`tests/fixtures/failure_modes/search_score_calibration_rows_corrupt.json`](../tests/fixtures/failure_modes/search_score_calibration_rows_corrupt.json)
+
+---
+
 ## `consensus_no_clusters`
 
 **Severity:** low

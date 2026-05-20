@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "search_score_calibration_rows_corrupt",
+  "introduced_by": { "bead": "bd-3ihl4", "epic_letter": "N" },
+  "surfaces": ["search", "diag search"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A workspace has .ee/search/calibration.jsonl, but one or more non-empty rows are malformed JSON or lack finite score and groundTruthRelevance fields.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "mkdir -p .ee/search",
+      "printf '%s\\n' 'not json' '{\"oops\":1}' > .ee/search/calibration.jsonl",
+      "ee remember 'Run cargo fmt before release.' --workspace . --level procedural --kind rule"
+    ],
+    "invocation": "ee search 'format before release' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "search_score_calibration_rows_corrupt",
+    "severity": "warning",
+    "message_contains": [
+      "Search score calibration ignored",
+      ".ee/search/calibration.jsonl",
+      "lines 1, 2"
+    ],
+    "repair_contains": "score and groundTruthRelevance"
+  }
+}

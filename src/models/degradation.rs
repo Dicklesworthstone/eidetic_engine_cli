@@ -356,6 +356,9 @@ pub const GRAPH_HITS_CONVERGENCE_FAILURE_CODE: &str = "graph_hits_convergence_fa
 
 /// Response degraded code for conformal calibration with too little evidence.
 pub const CONFORMAL_CALIBRATION_INSUFFICIENT_CODE: &str = "conformal_calibration_insufficient";
+/// Response degraded code for malformed search score calibration rows.
+pub const SEARCH_SCORE_CALIBRATION_ROWS_CORRUPT_CODE: &str =
+    "search_score_calibration_rows_corrupt";
 
 // Pack degradations (D400 - D499)
 pub const TOKEN_BUDGET_EXCEEDED: DegradationCode = DegradationCode {
