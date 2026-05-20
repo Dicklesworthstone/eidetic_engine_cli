@@ -36,25 +36,39 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
     let scan_lines = strip_rust_noise(source);
     let mut hash_map_bindings = Vec::new();
     let mut hash_set_bindings = Vec::new();
+    let mut awaiting_required_body = false;
+    let mut required_body_depth = 0_usize;
 
     for (index, line) in scan_lines.iter().enumerate() {
         let line_no = index + 1;
-        if line.trim_start().starts_with("fn ") {
+        if line_declares_function(line) {
             hash_map_bindings.clear();
             hash_set_bindings.clear();
         }
         hash_map_bindings.extend(hash_collection_bindings(line, "HashMap"));
         hash_set_bindings.extend(hash_collection_bindings(line, "HashSet"));
 
-        if line.contains("#[determinism::required]")
-            && !function_signature_has_deterministic_seed(&scan_lines, index)
-        {
-            findings.push(Finding {
-                line: line_no,
-                code: "missing_seed_param",
-                message: "#[determinism::required] requires a Deterministic<Seed> parameter",
-            });
+        if line.contains("#[determinism::required]") {
+            awaiting_required_body = true;
+            if !function_signature_has_deterministic_seed(&scan_lines, index) {
+                findings.push(Finding {
+                    line: line_no,
+                    code: "missing_seed_param",
+                    message: "#[determinism::required] requires a Deterministic<Seed> parameter",
+                });
+            }
         }
+
+        let begins_required_body = awaiting_required_body && line.contains('{');
+        let in_required_body = required_body_depth > 0 || begins_required_body;
+
+        if !in_required_body {
+            if awaiting_required_body && line.contains(';') {
+                awaiting_required_body = false;
+            }
+            continue;
+        }
+
         if line.contains("thread_rng(") {
             findings.push(Finding {
                 line: line_no,
@@ -174,6 +188,24 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "read process args through the registered CLI boundary",
             });
         }
+        let ambient_current_dir = line.contains("std::env::current_dir(")
+            || contains_path_call(line, "env::current_dir(");
+        if ambient_current_dir {
+            findings.push(Finding {
+                line: line_no,
+                code: "ambient_current_dir",
+                message: "inject current directory/workspace at the boundary instead of calling env::current_dir",
+            });
+        }
+        let ambient_temp_dir =
+            line.contains("std::env::temp_dir(") || contains_path_call(line, "env::temp_dir(");
+        if ambient_temp_dir {
+            findings.push(Finding {
+                line: line_no,
+                code: "ambient_temp_dir",
+                message: "inject temp directory at the boundary instead of calling env::temp_dir",
+            });
+        }
         if hash_collection_iteration_call(line, &hash_map_bindings) {
             findings.push(Finding {
                 line: line_no,
@@ -208,6 +240,15 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 code: "ambient_thread_current",
                 message: "inject the thread identifier at the boundary instead of std::thread::current",
             });
+        }
+
+        if begins_required_body {
+            awaiting_required_body = false;
+            required_body_depth = update_brace_depth(0, line);
+        } else if required_body_depth > 0 {
+            required_body_depth = update_brace_depth(required_body_depth, line);
+        } else if awaiting_required_body && line.contains(';') {
+            awaiting_required_body = false;
         }
     }
 
@@ -440,6 +481,20 @@ fn contains_receiver_method_call(line: &str, receiver: &str, method: &str) -> bo
     false
 }
 
+fn line_declares_function(line: &str) -> bool {
+    let mut search_start = 0;
+    while let Some(relative_index) = line[search_start..].find("fn ") {
+        let index = search_start + relative_index;
+        let previous = line[..index].chars().next_back();
+        if !matches!(previous, Some(ch) if is_identifier_char(ch)) {
+            return true;
+        }
+        search_start = index + "fn ".len();
+    }
+
+    false
+}
+
 fn contains_path_call(line: &str, needle: &str) -> bool {
     let mut search_start = 0;
     while let Some(relative_index) = line[search_start..].find(needle) {
@@ -452,6 +507,18 @@ fn contains_path_call(line: &str, needle: &str) -> bool {
     }
 
     false
+}
+
+fn update_brace_depth(mut depth: usize, line: &str) -> usize {
+    for ch in line.chars() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+
+    depth
 }
 
 fn domain_id_now_call(line: &str) -> bool {
@@ -505,6 +572,21 @@ mod self_tests {
     }
 
     #[test]
+    fn untagged_boundary_ambient_calls_do_not_emit_known_violations() {
+        let fixture = r#"
+            fn boundary_context() {
+                let _ = rand::random::<u64>();
+                let _ = std::time::Instant::now();
+                let _ = std::env::current_dir();
+                let _ = std::env::temp_dir();
+                let _ = std::fs::read_dir(".");
+            }
+        "#;
+        let report = render_report(&scan_fixture(fixture));
+        assert_eq!(report, "schema: ee.determinism_lint_fixture.v1\n");
+    }
+
+    #[test]
     fn comments_and_strings_do_not_emit_known_violations() {
         let fixture = r#"
             fn documentation_mentions() {
@@ -523,6 +605,10 @@ mod self_tests {
                 // std::env::args_os();
                 // env::args();
                 // env::args_os();
+                // std::env::current_dir();
+                // env::current_dir();
+                // std::env::temp_dir();
+                // env::temp_dir();
                 // fs::read_dir(".");
             }
         "#;
@@ -547,12 +633,16 @@ mod self_tests {
              * std::env::args_os();
              * env::args();
              * env::args_os();
+             * std::env::current_dir();
+             * env::current_dir();
+             * std::env::temp_dir();
+             * env::temp_dir();
              * chrono::Utc::now();
              * std::fs::read_dir(".");
              * fs::read_dir(".");
              */
             fn documentation_mentions() {
-                let _ = r#"Uuid::new_v4() Instant::now() SystemTime::now() chrono::Local::now()"#;
+                let _ = r#"Uuid::new_v4() Instant::now() SystemTime::now() chrono::Local::now() std::env::current_dir() env::current_dir() std::env::temp_dir() env::temp_dir()"#;
             }
         "##;
         let report = render_report(&scan_fixture(fixture));
@@ -564,7 +654,8 @@ mod self_tests {
         let fixture = r#"
             use std::{env, fs};
 
-            fn ambient() {
+            #[determinism::required]
+            fn ambient(_: &ee::runtime::determinism::Deterministic<Seed>) {
                 let _ = std::env::var_os("EE_SEED");
                 let _ = std::env::vars();
                 let _ = std::env::vars_os();
@@ -576,6 +667,10 @@ mod self_tests {
                 let _ = env::vars_os();
                 let _ = env::args();
                 let _ = env::args_os();
+                let _ = std::env::current_dir();
+                let _ = env::current_dir();
+                let _ = std::env::temp_dir();
+                let _ = env::temp_dir();
                 let _ = fs::read_dir(".");
             }
         "#;
@@ -584,6 +679,8 @@ mod self_tests {
         assert!(report.contains("ambient_env_var_os"));
         assert_eq!(report.matches(": ambient_env_iteration:").count(), 4);
         assert_eq!(report.matches(": ambient_process_args:").count(), 4);
+        assert_eq!(report.matches(": ambient_current_dir:").count(), 2);
+        assert_eq!(report.matches(": ambient_temp_dir:").count(), 2);
         assert!(report.contains("unsorted_read_dir"));
     }
 
@@ -592,7 +689,12 @@ mod self_tests {
         let fixture = r#"
             use std::collections::{HashMap, HashSet};
 
-            fn ambient(mut map: HashMap<String, String>, mut set: HashSet<String>) {
+            #[determinism::required]
+            fn ambient(
+                _: &ee::runtime::determinism::Deterministic<Seed>,
+                mut map: HashMap<String, String>,
+                mut set: HashSet<String>,
+            ) {
                 for _ in map.keys() {}
                 for _ in map.values() {}
                 for _ in map.drain() {}
@@ -608,9 +710,35 @@ mod self_tests {
     }
 
     #[test]
+    fn hash_collection_bindings_do_not_leak_across_pub_functions() {
+        let fixture = r#"
+            use std::collections::HashMap;
+
+            #[determinism::required]
+            pub fn first(
+                _: &ee::runtime::determinism::Deterministic<Seed>,
+                map: HashMap<String, String>,
+            ) {
+                let _ = map.len();
+            }
+
+            #[determinism::required]
+            pub(crate) fn second(_: &ee::runtime::determinism::Deterministic<Seed>) {
+                for _ in map.iter() {}
+            }
+        "#;
+        let report = render_report(&scan_fixture(fixture));
+        assert!(
+            !report.contains("hashmap_iteration"),
+            "hash bindings from one function must not leak into the next function: {report}"
+        );
+    }
+
+    #[test]
     fn domain_id_now_calls_emit_known_violations() {
         let fixture = r#"
-            fn ambient() {
+            #[determinism::required]
+            fn ambient(_: &ee::runtime::determinism::Deterministic<Seed>) {
                 let _ = ee::models::MemoryId::now();
                 let _ = RuleId::now();
                 let _ = uuid::Uuid::now_v7();
@@ -623,7 +751,8 @@ mod self_tests {
     #[test]
     fn direct_os_entropy_calls_emit_known_violations() {
         let fixture = r#"
-            fn ambient() {
+            #[determinism::required]
+            fn ambient(_: &ee::runtime::determinism::Deterministic<Seed>) {
                 let mut bytes = [0u8; 32];
                 getrandom::fill(&mut bytes).unwrap();
                 let _ = ring::rand::SystemRandom::new();
@@ -640,7 +769,8 @@ mod self_tests {
         let fixture = r#"
             use rand::random;
 
-            fn ambient() {
+            #[determinism::required]
+            fn ambient(_: &ee::runtime::determinism::Deterministic<Seed>) {
                 let _: u64 = random();
                 let _: u64 = random::<u64>();
             }
@@ -659,7 +789,8 @@ mod self_tests {
         let fixture = r#"
             use std::{process, thread};
 
-            fn ambient() {
+            #[determinism::required]
+            fn ambient(_: &ee::runtime::determinism::Deterministic<Seed>) {
                 let _ = std::process::id();
                 let _ = process::id();
                 let _ = std::thread::current();

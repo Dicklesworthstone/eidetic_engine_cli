@@ -22,21 +22,25 @@ line 65: ambient_env_iteration: iterate env only through a deterministic registe
 line 66: ambient_env_iteration: iterate env only through a deterministic registered boundary
 line 67: ambient_process_args: read process args through the registered CLI boundary
 line 68: ambient_process_args: read process args through the registered CLI boundary
-line 74: hashmap_iteration: sort HashMap entries before deterministic output
-line 75: hashmap_iteration: sort HashMap entries before deterministic output
-line 76: hashmap_iteration: sort HashMap entries before deterministic output
-line 77: hashmap_iteration: sort HashMap entries before deterministic output
+line 69: ambient_current_dir: inject current directory/workspace at the boundary instead of calling env::current_dir
+line 70: ambient_current_dir: inject current directory/workspace at the boundary instead of calling env::current_dir
+line 71: ambient_temp_dir: inject temp directory at the boundary instead of calling env::temp_dir
+line 72: ambient_temp_dir: inject temp directory at the boundary instead of calling env::temp_dir
 line 78: hashmap_iteration: sort HashMap entries before deterministic output
-line 84: hashset_iteration: sort HashSet entries before deterministic output
-line 85: hashset_iteration: sort HashSet entries before deterministic output
-line 86: hashset_iteration: sort HashSet entries before deterministic output
-line 91: unsorted_read_dir: sort read_dir entries before deterministic output
-line 92: unsorted_read_dir: sort read_dir entries before deterministic output
-line 97: ambient_chrono_utc_now: inject UTC timestamps at the boundary instead of calling Utc::now
-line 98: ambient_chrono_local_now: inject local timestamps at the boundary instead of calling Local::now
-line 103: ambient_domain_id_now: use seeded ID helpers instead of ambient typed Id::now
-line 104: ambient_domain_id_now: use seeded ID helpers instead of ambient typed Id::now
-line 109: ambient_process_id: inject the host PID at the boundary instead of calling std::process::id
-line 110: ambient_process_id: inject the host PID at the boundary instead of calling std::process::id
-line 111: ambient_thread_current: inject the thread identifier at the boundary instead of std::thread::current
-line 112: ambient_thread_current: inject the thread identifier at the boundary instead of std::thread::current
+line 79: hashmap_iteration: sort HashMap entries before deterministic output
+line 80: hashmap_iteration: sort HashMap entries before deterministic output
+line 81: hashmap_iteration: sort HashMap entries before deterministic output
+line 82: hashmap_iteration: sort HashMap entries before deterministic output
+line 88: hashset_iteration: sort HashSet entries before deterministic output
+line 89: hashset_iteration: sort HashSet entries before deterministic output
+line 90: hashset_iteration: sort HashSet entries before deterministic output
+line 95: unsorted_read_dir: sort read_dir entries before deterministic output
+line 96: unsorted_read_dir: sort read_dir entries before deterministic output
+line 101: ambient_chrono_utc_now: inject UTC timestamps at the boundary instead of calling Utc::now
+line 102: ambient_chrono_local_now: inject local timestamps at the boundary instead of calling Local::now
+line 107: ambient_domain_id_now: use seeded ID helpers instead of ambient typed Id::now
+line 108: ambient_domain_id_now: use seeded ID helpers instead of ambient typed Id::now
+line 113: ambient_process_id: inject the host PID at the boundary instead of calling std::process::id
+line 114: ambient_process_id: inject the host PID at the boundary instead of calling std::process::id
+line 115: ambient_thread_current: inject the thread identifier at the boundary instead of std::thread::current
+line 116: ambient_thread_current: inject the thread identifier at the boundary instead of std::thread::current

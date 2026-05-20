@@ -9277,7 +9277,13 @@ fn closeout_audit_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.closeout_audit.v1.json").to_string()
 }
 
-fn completion_audit_report_schema_definition() -> String {
+// Round-3 self-review fix: the v1 schema generator was duplicated under the
+// same name as the canonical v2 one above (line 8892). Both call sites at
+// 8084 / 8272 reference the v2 form; rename the v1 leftover to disambiguate
+// without deleting the underlying schema file in case another agent still
+// wants to wire it in. Suffix kept so the function stays grep-able.
+#[allow(dead_code)]
+fn completion_audit_report_schema_v1_definition() -> String {
     include_str!("../../docs/schemas/ee.completion_audit.report.v1.json").to_string()
 }
 

@@ -1,0 +1,115 @@
+{
+  "schema": "ee.embed_dedup.no_mock_e2e_golden.v1",
+  "beadId": "bd-1iltv.5",
+  "disabledDefault": {
+    "config": {
+      "enabled": false
+    },
+    "rememberResults": [
+      {
+        "schema": "ee.response.v1",
+        "success": true,
+        "command": "remember",
+        "memoryId": "<MEMORY_ID>",
+        "persisted": true,
+        "indexStatus": "pending",
+        "degradedCodes": [
+          "deprecated_alias"
+        ]
+      },
+      {
+        "schema": "ee.response.v1",
+        "success": true,
+        "command": "remember",
+        "memoryId": "<MEMORY_ID>",
+        "persisted": true,
+        "indexStatus": "pending",
+        "degradedCodes": [
+          "deprecated_alias"
+        ]
+      }
+    ],
+    "contentSimhashCandidates": 0,
+    "memoryLinks": []
+  },
+  "enabledExactDuplicate": {
+    "config": {
+      "enabled": true,
+      "hammingK": 12,
+      "cosineFloor": 0.97
+    },
+    "rememberResults": [
+      {
+        "schema": "ee.response.v1",
+        "success": true,
+        "command": "remember",
+        "memoryId": "<MEMORY_ID>",
+        "persisted": true,
+        "indexStatus": "pending",
+        "degradedCodes": [
+          "deprecated_alias"
+        ]
+      },
+      {
+        "schema": "ee.response.v1",
+        "success": true,
+        "command": "remember",
+        "memoryId": "<MEMORY_ID>",
+        "persisted": true,
+        "indexStatus": "pending",
+        "degradedCodes": [
+          "deprecated_alias"
+        ]
+      }
+    ],
+    "contentSimhashCandidatesAtHammingZero": 2,
+    "dedupLinks": [
+      {
+        "srcMemoryId": "<DUPLICATE_MEMORY_ID>",
+        "dstMemoryId": "<SOURCE_MEMORY_ID>",
+        "relation": "related",
+        "source": "auto",
+        "directed": true,
+        "evidenceCount": 2,
+        "metadata": {
+          "schema": "ee.embed_dedup.link.v1",
+          "relationship": "embedding_reuse",
+          "targetMemoryId": "<SOURCE_MEMORY_ID>",
+          "hammingDistance": 0,
+          "cosineSimilarity": 1.0,
+          "cosineFloor": 0.97,
+          "decision": "reuse",
+          "reason": "simhash_within_threshold_and_cosine_confirmed"
+        }
+      }
+    ]
+  },
+  "strictFalsePositive": {
+    "config": {
+      "enabled": true,
+      "hammingK": 128,
+      "cosineFloor": 1.0
+    },
+    "rememberResult": {
+      "schema": "ee.response.v1",
+      "success": true,
+      "command": "remember",
+      "memoryId": "<MEMORY_ID>",
+      "persisted": true,
+      "indexStatus": "pending",
+      "degradedCodes": [
+        "deprecated_alias"
+      ]
+    },
+    "dedupLinks": []
+  },
+  "performanceEvidence": {
+    "eventSchema": "ee.test_event.v1",
+    "eventCount": 5,
+    "commandsMeasured": 5,
+    "elapsedMs": "<MEASURED>",
+    "hashAlgorithm": "blake3",
+    "persistentEmbeddingReuses": 1,
+    "writeLatencyDeltaMs": "<MEASURED>"
+  }
+}

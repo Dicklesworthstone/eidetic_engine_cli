@@ -1154,6 +1154,14 @@ impl EffectManifest {
                 "perf explain-latency",
                 "Explain latency stages for a normalized performance artifact",
             ),
+            CommandEffect::read_only(
+                "perf live",
+                "Stream read-only performance snapshots for swarm observability",
+            ),
+            CommandEffect::read_only(
+                "perf snapshot",
+                "Emit one read-only performance snapshot for swarm observability",
+            ),
             CommandEffect::read_only("plan recipe list", "List static plan recipes"),
             CommandEffect::read_only("plan recipe show", "Show static plan recipe"),
             CommandEffect::read_only(

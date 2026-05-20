@@ -66,6 +66,10 @@ fn ambient_env(_: &ee::runtime::determinism::Deterministic<Seed>) {
     let _ = env::vars_os();
     let _ = env::args();
     let _ = env::args_os();
+    let _ = std::env::current_dir();
+    let _ = env::current_dir();
+    let _ = std::env::temp_dir();
+    let _ = env::temp_dir();
 }
 
 #[determinism::required]
@@ -113,7 +117,7 @@ fn ambient_process_and_thread(_: &ee::runtime::determinism::Deterministic<Seed>)
 }
 
 fn benign_documentation_mentions() {
-    let _ = "rand::random::<u64>() random::<u64>() getrandom::fill(&mut bytes) SystemRandom::new() Instant::now() SystemTime::now() chrono::Utc::now() MemoryId::now() std::fs::read_dir(.) HashSet";
+    let _ = "rand::random::<u64>() random::<u64>() getrandom::fill(&mut bytes) SystemRandom::new() Instant::now() SystemTime::now() chrono::Utc::now() MemoryId::now() std::env::current_dir() env::current_dir() std::env::temp_dir() env::temp_dir() std::fs::read_dir(.) HashSet";
     // rand::thread_rng();
     // getrandom::fill(&mut bytes);
     // ring::rand::SystemRandom::new();
@@ -131,6 +135,10 @@ fn benign_documentation_mentions() {
     // env::vars_os();
     // env::args();
     // env::args_os();
+    // std::env::current_dir();
+    // env::current_dir();
+    // std::env::temp_dir();
+    // env::temp_dir();
     // fs::read_dir(".");
     // std::process::id();
     // process::id();
@@ -159,6 +167,18 @@ fn benign_block_comment_and_raw_string_mentions() {
      * std::env::args_os();
      * env::args();
      * env::args_os();
+     * std::env::current_dir();
+     * env::current_dir();
+     * std::env::temp_dir();
+     * env::temp_dir();
      */
-    let _ = r#"std::env::var("EE_SEED") std::env::args() env::args_os() random::<u64>() SystemRandom::new() Instant::now() SystemTime::now() chrono::Local::now() RuleId::now()"#;
+    let _ = r#"std::env::var("EE_SEED") std::env::args() env::args_os() std::env::current_dir() env::current_dir() std::env::temp_dir() env::temp_dir() random::<u64>() SystemRandom::new() Instant::now() SystemTime::now() chrono::Local::now() RuleId::now()"#;
+}
+
+fn boundary_context_sources_are_not_tagged() {
+    let _ = std::env::current_dir();
+    let _ = env::temp_dir();
+    let _ = std::time::Instant::now();
+    let _ = std::fs::read_dir(".");
+    let _: u64 = random();
 }

@@ -1,0 +1,55 @@
+{
+  "schema": "ee.perf.artifact_summary.v1",
+  "artifactId": "embed-dedup-insert-e2e",
+  "artifactKind": "e2e_perf_probe",
+  "sourceSchema": "ee.test_event.v1",
+  "sourcePath": "target/*/embed_dedup_e2e/embed_dedup_events.jsonl",
+  "contentHash": "computed-at-test-runtime",
+  "observedHash": "computed-at-test-runtime",
+  "profile": {
+    "profileName": "rch-no-mock-e2e",
+    "confidence": "medium"
+  },
+  "fixtureTier": "smoke",
+  "commandFamily": "remember",
+  "metrics": {
+    "fresh_elapsed_ms": {
+      "kind": "measured",
+      "value": 0.0,
+      "unit": "ms",
+      "source": "ee.test_event.v1 elapsed_ms"
+    },
+    "reuse_elapsed_ms": {
+      "kind": "measured",
+      "value": 0.0,
+      "unit": "ms",
+      "source": "ee.test_event.v1 elapsed_ms"
+    },
+    "write_latency_delta_ms": {
+      "kind": "derived",
+      "value": 0.0,
+      "unit": "ms",
+      "source": "reuse_elapsed_ms - fresh_elapsed_ms"
+    },
+    "persistent_embedding_reuses": {
+      "kind": "counted",
+      "value": 1.0,
+      "unit": "decisions",
+      "source": "durable ee.embed_dedup.link.v1 rows"
+    }
+  },
+  "degraded": [],
+  "redaction": "clean",
+  "provenance": [
+    {
+      "field": "persistent_embedding_reuses",
+      "sourcePath": "memory_links.metadata_json",
+      "sourceLine": null
+    },
+    {
+      "field": "elapsed_ms",
+      "sourcePath": "embed_dedup_events.jsonl",
+      "sourceLine": null
+    }
+  ]
+}
