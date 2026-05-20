@@ -34,6 +34,28 @@ Every mesh verifier must prove two things:
 features exist. Optional long-running checks must be explicit opt-in and must
 not gate local-first non-mesh work.
 
+## SRR6.20 Two-Tier Budgets
+
+`tests/mesh_two_tier_budget.rs` is the RCH-friendly structured proof for
+`bd-3url9`. It exercises the pure `ee.mesh.two_tier_budget.v1` report and
+records these default foreground budgets:
+
+| Budget | Default |
+| --- | --- |
+| Tier 1 local answer p50 | 75 ms |
+| Tier 1 local answer p99 | 250 ms |
+| Async peer probe timeout | 750 ms |
+| Stale-read window under normal sync cadence | 5000 ms |
+| Peer freshness fanout | 32 peers |
+| Lazy body-cache growth per foreground read | 512 KiB |
+| Sync batch size | 512 events |
+| Index-job amplification per round | 16 jobs |
+
+The report must keep `localAnswerBlocking=false`, `networkOnTier1=false`, and
+`bodyTransferAllowedOnTier1=false`. Cache-hit evidence is reported explicitly
+through `cacheHitPathObserved`; missing cache-hit evidence is treated as a
+budget degradation for the SRR6.20 proof row.
+
 ## Fixture Layout
 
 Use these paths for new SRR6 tests:

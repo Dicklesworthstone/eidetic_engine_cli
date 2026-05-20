@@ -19,6 +19,9 @@ pub const MESH_ANTI_ENTROPY_SYNC_SUMMARY_SCHEMA_V1: &str = "ee.mesh.anti_entropy
 /// Public schema emitted by [`build_freshness_probe_summary`].
 pub const MESH_FRESHNESS_PROBE_SUMMARY_SCHEMA_V1: &str = "ee.mesh.freshness_probe.v1";
 
+/// Public schema emitted by [`build_two_tier_budget_summary`].
+pub const MESH_TWO_TIER_BUDGET_SUMMARY_SCHEMA_V1: &str = "ee.mesh.two_tier_budget.v1";
+
 /// Default initial retry delay from `docs/mesh/anti_entropy.md`.
 pub const DEFAULT_INITIAL_BACKOFF_MS: u64 = 1_000;
 
@@ -27,6 +30,30 @@ pub const DEFAULT_MAX_BACKOFF_MS: u64 = 60_000;
 
 /// Default maximum attempts per peer/range from `docs/mesh/anti_entropy.md`.
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
+
+/// Default Tier-1 local-answer p50 latency budget for mesh-aware reads.
+pub const DEFAULT_TIER1_LOCAL_P50_BUDGET_MS: u64 = 75;
+
+/// Default Tier-1 local-answer p99 latency budget for mesh-aware reads.
+pub const DEFAULT_TIER1_LOCAL_P99_BUDGET_MS: u64 = 250;
+
+/// Default async peer freshness timeout budget.
+pub const DEFAULT_PEER_PROBE_TIMEOUT_BUDGET_MS: u64 = 750;
+
+/// Default maximum stale-read window under normal mesh sync cadence.
+pub const DEFAULT_STALE_READ_WINDOW_BUDGET_MS: u64 = 5_000;
+
+/// Default maximum number of events accepted in one sync batch.
+pub const DEFAULT_SYNC_BATCH_BUDGET_EVENTS: u64 = 512;
+
+/// Default lazy body-cache growth budget for one foreground read.
+pub const DEFAULT_BODY_CACHE_BUDGET_BYTES: u64 = 512 * 1024;
+
+/// Default index-job amplification budget for one peer sync round.
+pub const DEFAULT_INDEX_JOB_AMPLIFICATION_BUDGET: u64 = 16;
+
+/// Default peer fanout budget for async freshness probes.
+pub const DEFAULT_PEER_PROBE_FANOUT_BUDGET: u64 = 32;
 
 /// Stable degraded codes used by the sync-summary schema.
 pub mod degraded_codes {
@@ -309,7 +336,7 @@ impl Default for MeshRangePlanner {
     fn default() -> Self {
         Self {
             policy: MeshAntiEntropyRetryPolicy::default(),
-            max_events_per_range: 512,
+            max_events_per_range: DEFAULT_SYNC_BATCH_BUDGET_EVENTS,
         }
     }
 }
@@ -716,6 +743,86 @@ pub struct MeshFreshnessPeerSummary {
     pub body_transfer_allowed: bool,
 }
 
+/// Inputs for a status/doctor-ready SRR6.20 two-tier budget report.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshTwoTierBudgetInput {
+    pub mesh_enabled: bool,
+    pub baseline_tier1_p50_ms: u64,
+    pub observed_tier1_p50_ms: u64,
+    pub baseline_tier1_p99_ms: u64,
+    pub observed_tier1_p99_ms: u64,
+    pub peer_timeout_ms: u64,
+    pub max_peer_probe_elapsed_ms: u64,
+    pub stale_read_window_ms: u64,
+    pub peer_count: usize,
+    pub body_cache_bytes: u64,
+    pub sync_batch_events: u64,
+    pub index_jobs_enqueued: u64,
+    pub cache_hit_path_observed: bool,
+    pub checked_at: Option<String>,
+}
+
+/// Redaction-safe two-tier latency/freshness/resource budget summary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshTwoTierBudgetSummary {
+    pub schema: &'static str,
+    pub status: String,
+    pub checked_at: Option<String>,
+    pub mesh_enabled: bool,
+    pub local_answer_blocking: bool,
+    pub network_on_tier1: bool,
+    pub cache_hit_path_observed: bool,
+    pub tier1_latency: MeshTier1LatencyBudget,
+    pub freshness: MeshFreshnessBudget,
+    pub resources: MeshResourceBudget,
+    pub degraded: Vec<String>,
+}
+
+/// Foreground local-read latency budget, before and after mesh is enabled.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshTier1LatencyBudget {
+    pub baseline_p50_ms: u64,
+    pub observed_p50_ms: u64,
+    pub p50_budget_ms: u64,
+    pub p50_regression_ms: u64,
+    pub baseline_p99_ms: u64,
+    pub observed_p99_ms: u64,
+    pub p99_budget_ms: u64,
+    pub p99_regression_ms: u64,
+    pub within_budget: bool,
+}
+
+/// Async freshness budget status for non-blocking peer probes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshFreshnessBudget {
+    pub peer_timeout_ms: u64,
+    pub peer_timeout_budget_ms: u64,
+    pub max_peer_probe_elapsed_ms: u64,
+    pub stale_read_window_ms: u64,
+    pub stale_read_window_budget_ms: u64,
+    pub peer_count: usize,
+    pub peer_count_budget: u64,
+    pub probe_execution: &'static str,
+    pub within_budget: bool,
+}
+
+/// Resource budget status for background sync and lazy body/cache work.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshResourceBudget {
+    pub body_cache_bytes: u64,
+    pub body_cache_budget_bytes: u64,
+    pub sync_batch_events: u64,
+    pub sync_batch_budget_events: u64,
+    pub index_jobs_enqueued: u64,
+    pub index_job_budget: u64,
+    pub body_transfer_allowed_on_tier1: bool,
+    pub within_budget: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshPeerSyncCounts {
@@ -820,6 +927,105 @@ pub fn build_sync_summary(input: MeshSyncSummaryInput) -> MeshAntiEntropySyncSum
             next_retry_after: input.next_retry_after,
         },
         blocked_ranges,
+        degraded: degraded.into_iter().collect(),
+    }
+}
+
+/// Build the SRR6.20 proof summary consumed by status/doctor and structured
+/// tests. The summary is pure and redaction-safe: it carries budgets and
+/// observed counters only, never peer identities, paths, queries, or bodies.
+#[must_use]
+pub fn build_two_tier_budget_summary(input: MeshTwoTierBudgetInput) -> MeshTwoTierBudgetSummary {
+    let peer_count = u64::try_from(input.peer_count).unwrap_or(u64::MAX);
+    let p50_regression_ms = input
+        .observed_tier1_p50_ms
+        .saturating_sub(input.baseline_tier1_p50_ms);
+    let p99_regression_ms = input
+        .observed_tier1_p99_ms
+        .saturating_sub(input.baseline_tier1_p99_ms);
+
+    let latency_within_budget = !input.mesh_enabled
+        || (input.observed_tier1_p50_ms <= DEFAULT_TIER1_LOCAL_P50_BUDGET_MS
+            && input.observed_tier1_p99_ms <= DEFAULT_TIER1_LOCAL_P99_BUDGET_MS);
+    let freshness_within_budget = !input.mesh_enabled
+        || (input.peer_timeout_ms <= DEFAULT_PEER_PROBE_TIMEOUT_BUDGET_MS
+            && input.max_peer_probe_elapsed_ms <= input.peer_timeout_ms
+            && input.stale_read_window_ms <= DEFAULT_STALE_READ_WINDOW_BUDGET_MS
+            && peer_count <= DEFAULT_PEER_PROBE_FANOUT_BUDGET);
+    let resources_within_budget = !input.mesh_enabled
+        || (input.body_cache_bytes <= DEFAULT_BODY_CACHE_BUDGET_BYTES
+            && input.sync_batch_events <= DEFAULT_SYNC_BATCH_BUDGET_EVENTS
+            && input.index_jobs_enqueued <= DEFAULT_INDEX_JOB_AMPLIFICATION_BUDGET);
+
+    let mut degraded = BTreeSet::new();
+    if input.mesh_enabled {
+        if !latency_within_budget
+            || input.stale_read_window_ms > DEFAULT_STALE_READ_WINDOW_BUDGET_MS
+            || peer_count > DEFAULT_PEER_PROBE_FANOUT_BUDGET
+            || !resources_within_budget
+            || !input.cache_hit_path_observed
+        {
+            degraded.insert(degraded_codes::SUPERVISOR_BUDGET_EXCEEDED.to_owned());
+        }
+        if input.peer_timeout_ms > DEFAULT_PEER_PROBE_TIMEOUT_BUDGET_MS
+            || input.max_peer_probe_elapsed_ms > input.peer_timeout_ms
+        {
+            degraded.insert(degraded_codes::FRESHNESS_PEER_TIMEOUT.to_owned());
+        }
+    }
+
+    let status = if !input.mesh_enabled {
+        "disabled"
+    } else if degraded.is_empty() {
+        "within_budget"
+    } else {
+        "degraded"
+    };
+
+    MeshTwoTierBudgetSummary {
+        schema: MESH_TWO_TIER_BUDGET_SUMMARY_SCHEMA_V1,
+        status: status.to_owned(),
+        checked_at: input.checked_at,
+        mesh_enabled: input.mesh_enabled,
+        local_answer_blocking: false,
+        network_on_tier1: false,
+        cache_hit_path_observed: input.cache_hit_path_observed,
+        tier1_latency: MeshTier1LatencyBudget {
+            baseline_p50_ms: input.baseline_tier1_p50_ms,
+            observed_p50_ms: input.observed_tier1_p50_ms,
+            p50_budget_ms: DEFAULT_TIER1_LOCAL_P50_BUDGET_MS,
+            p50_regression_ms,
+            baseline_p99_ms: input.baseline_tier1_p99_ms,
+            observed_p99_ms: input.observed_tier1_p99_ms,
+            p99_budget_ms: DEFAULT_TIER1_LOCAL_P99_BUDGET_MS,
+            p99_regression_ms,
+            within_budget: latency_within_budget,
+        },
+        freshness: MeshFreshnessBudget {
+            peer_timeout_ms: input.peer_timeout_ms,
+            peer_timeout_budget_ms: DEFAULT_PEER_PROBE_TIMEOUT_BUDGET_MS,
+            max_peer_probe_elapsed_ms: input.max_peer_probe_elapsed_ms,
+            stale_read_window_ms: input.stale_read_window_ms,
+            stale_read_window_budget_ms: DEFAULT_STALE_READ_WINDOW_BUDGET_MS,
+            peer_count: input.peer_count,
+            peer_count_budget: DEFAULT_PEER_PROBE_FANOUT_BUDGET,
+            probe_execution: if input.mesh_enabled {
+                "async_after_local_answer"
+            } else {
+                "mesh_disabled_noop"
+            },
+            within_budget: freshness_within_budget,
+        },
+        resources: MeshResourceBudget {
+            body_cache_bytes: input.body_cache_bytes,
+            body_cache_budget_bytes: DEFAULT_BODY_CACHE_BUDGET_BYTES,
+            sync_batch_events: input.sync_batch_events,
+            sync_batch_budget_events: DEFAULT_SYNC_BATCH_BUDGET_EVENTS,
+            index_jobs_enqueued: input.index_jobs_enqueued,
+            index_job_budget: DEFAULT_INDEX_JOB_AMPLIFICATION_BUDGET,
+            body_transfer_allowed_on_tier1: false,
+            within_budget: resources_within_budget,
+        },
         degraded: degraded.into_iter().collect(),
     }
 }
