@@ -5934,6 +5934,21 @@ pub struct DoctorArgs {
         conflicts_with_all = ["fix_plan", "franken_health", "capabilities"],
     )]
     pub robot_docs: bool,
+
+    /// Replay the undo log for a prior `ee doctor --fix` run, restoring
+    /// every recorded action byte-for-byte. Per AGENTS.md RULE 1 this
+    /// never deletes files: write_file undos that originally CREATED a
+    /// file quarantine it via rename rather than removing it. Idempotent
+    /// — re-running on a fully-undone run is a no-op. The run directory
+    /// is resolved against the configured workspace as
+    /// `<workspace>/.doctor/runs/<RUN_ID>`. Emits an
+    /// `ee.doctor.undo_summary.v1` JSON envelope and exits.
+    #[arg(
+        long = "undo",
+        value_name = "RUN_ID",
+        conflicts_with_all = ["fix_plan", "franken_health", "capabilities", "robot_docs"],
+    )]
+    pub undo: Option<String>,
 }
 
 /// Arguments for `ee init`.
@@ -8819,6 +8834,47 @@ where
             if args.robot_docs {
                 write_stdout(stdout, &(doctor_robot_docs_json() + "\n"));
                 return ProcessExitCode::Success;
+            }
+            if let Some(run_id) = args.undo.as_deref() {
+                let workspace = cli.workspace.clone().unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                });
+                let run_dir = workspace.join(".doctor").join("runs").join(run_id);
+                return match crate::core::doctor_runtime::replay_undo(&run_dir) {
+                    Ok(summary) => {
+                        let status_str = serde_json::to_value(&summary.status)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_owned))
+                            .unwrap_or_else(|| "unknown".to_owned());
+                        let json = serde_json::json!({
+                            "schema": "ee.doctor.undo_summary.v1",
+                            "runId": run_id,
+                            "runDir": run_dir.display().to_string(),
+                            "actionsUndone": summary.actions_undone,
+                            "actionsSkipped": summary.actions_skipped,
+                            "status": status_str,
+                            "firstError": summary.first_error,
+                        });
+                        write_stdout(stdout, &(json.to_string() + "\n"));
+                        ProcessExitCode::Success
+                    }
+                    Err(error) => {
+                        let json = serde_json::json!({
+                            "schema": "ee.doctor.undo_summary.v1",
+                            "runId": run_id,
+                            "runDir": run_dir.display().to_string(),
+                            "status": "fix_failed",
+                            "error": error.to_string(),
+                            "repair": format!(
+                                "Inspect {}/actions.jsonl and {}/undo_log.jsonl for line-level detail.",
+                                run_dir.display(),
+                                run_dir.display()
+                            ),
+                        });
+                        write_stdout(stdout, &(json.to_string() + "\n"));
+                        ProcessExitCode::Configuration
+                    }
+                };
             }
             let report = cli
                 .workspace
