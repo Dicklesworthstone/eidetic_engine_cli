@@ -27,6 +27,7 @@ corresponding v1 surface fails CI, and adding a new v1 string to
 | Response envelope (success path) | `ee.response.v1` | `ee.response.v1` | **Unchanged at the envelope level.** Only additive field changes within v1 — permissive consumers are forward-compatible. |
 | Error envelope | `ee.error.v1` | `ee.error.v2` | **Breaking.** `error.details.recovery[]` added as structured array (F1); `error.nonRecoverable?: bool` added. See [A10](#a10--error-envelope-v1--v2). |
 | Pack object inside response | `ee.pack.v1` | `ee.pack.v2` | **Breaking.** See [A1 phase 2](#a1-phase-2--collapse-selectioncertificate--provenancefooter-into-items). |
+| Model status data object | `ee.model.status.v1` | `ee.model.status.v2` | **Breaking for strict parsers.** `data.reranker` was added and active embedder selection is now explicitly embedding-purpose only. See [N8](#n8--model-status-reranker-posture). |
 | Hook contract | `ee.hook.context_pack.v1` | `ee.hook.context_pack.v1` | **Unchanged.** E2's filter applies; no field shape changes. |
 | Other envelopes (`ee.memory.list.v1`, `ee.rule.list.v1`, `ee.search.v1`, `ee.handoff.capsule.v1`, …) | v1 | v1 | **Unchanged at envelope level.** Some field-level renames; see per-surface sections. |
 
@@ -42,6 +43,50 @@ Each section lists the bead ID, the surface affected, a `Before` /
 `After` JSON example, the agent-rewrite recipe, and whether
 `ee migrate run` is sufficient to handle the data-side of the
 migration.
+
+### N8 — model status reranker posture
+
+**Bead.** bd-17c65.14.8
+
+**Surfaces.** `ee model status --json`.
+
+**Before (v0.1).**
+```json
+{"data":{"schema":"ee.model.status.v1","active":{"selectedRegistryEntry":null},"registeredCount":1,"availableCount":1}}
+```
+
+With a reranker-only registry, strict consumers could see
+`availableCount: 1` and incorrectly infer that semantic embedding was
+available.
+
+**After (v0.2).**
+```json
+{"data":{"schema":"ee.model.status.v2","active":{"selectedRegistryEntry":null},"reranker":{"registeredCount":1,"availableCount":1,"availableModelIds":["ms-marco-minilm-l-6-v2"]},"registeredCount":1,"availableCount":1}}
+```
+
+Active embedder selection now only considers available entries with
+`purpose: "embedding"`. Available reranker entries are reported under
+`data.reranker`, and a reranker-only registry emits
+`model_registry_no_available_entry` because no embedding model is marked
+available.
+
+**Agent rewrite.**
+```python
+status = response["data"]
+active_embedding = status["active"].get("selectedRegistryEntry")
+reranker = status.get("reranker", {"availableCount": 0})
+```
+
+Consumers that only need embedding posture should keep reading
+`data.active`. Consumers that need cross-encoder readiness should read
+`data.reranker` and must not treat top-level `availableCount` as
+embedding availability.
+
+**Migration tool.** None required — pure read-side schema bump.
+
+**Verification.** `tests/model_status_contract.rs` covers the reranker-only
+registry and `tests/smoke.rs` pins `ee.model.status.v2` on the real binary
+model-status smoke path.
 
 ### D1 — canonical `content` field across list/preview surfaces
 

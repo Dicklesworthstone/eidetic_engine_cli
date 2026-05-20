@@ -22,7 +22,9 @@ use std::cmp::Ordering;
 
 use serde::{Serialize, Serializer};
 
-use super::profile::{HostCalibrationFreshness, HostClass, HostClassReport, OperatingProfile};
+use super::profile::{
+    HostCalibrationFreshness, HostClass, HostClassDegradation, HostClassReport, OperatingProfile,
+};
 
 /// Public schema identifier for the recommender's response shape. Surfaces
 /// that embed the recommendation (status, doctor, support bundle, swarm brief)
@@ -37,6 +39,11 @@ pub mod reason_code {
     pub const ELEVATE_TO_RECOMMENDED: &str = "elevate_to_recommended_profile";
     pub const LOWER_TO_RECOMMENDED: &str = "lower_to_recommended_profile";
     pub const CONSERVATIVE_CALIBRATION_STALE: &str = "conservative_calibration_stale";
+    pub const CONSERVATIVE_CALIBRATION_PARTIAL: &str = "conservative_calibration_partial";
+    pub const CONSERVATIVE_CALIBRATION_SYNTHETIC_ONLY: &str =
+        "conservative_calibration_synthetic_only";
+    pub const CONSERVATIVE_CALIBRATION_CONTRADICTORY: &str =
+        "conservative_calibration_contradictory";
     pub const CONSERVATIVE_CALIBRATION_MISSING: &str = "conservative_calibration_missing";
     pub const CONSERVATIVE_CALIBRATION_UNAVAILABLE: &str = "conservative_calibration_unavailable";
     pub const CONSERVATIVE_RCH_ONLY_TOPOLOGY: &str = "conservative_rch_only_topology";
@@ -127,6 +134,7 @@ pub struct BudgetDeltaRecommendation {
     pub effective_profile: OperatingProfile,
     pub global_reason_codes: Vec<&'static str>,
     pub budget_deltas: Vec<BudgetDelta>,
+    pub degraded: Vec<HostClassDegradation>,
 }
 
 impl BudgetDeltaRecommendation {
@@ -174,6 +182,7 @@ pub fn recommend_budget_deltas(
         effective_profile,
         global_reason_codes: global_reasons,
         budget_deltas,
+        degraded: host_class_report.degraded.clone(),
     }
 }
 
@@ -207,6 +216,18 @@ fn derive_recommended_profile(
         HostCalibrationFreshness::Fresh => OperatingProfile::Swarm,
         HostCalibrationFreshness::Stale => {
             reasons.push(reason_code::CONSERVATIVE_CALIBRATION_STALE);
+            OperatingProfile::Portable
+        }
+        HostCalibrationFreshness::Partial => {
+            reasons.push(reason_code::CONSERVATIVE_CALIBRATION_PARTIAL);
+            OperatingProfile::Portable
+        }
+        HostCalibrationFreshness::SyntheticOnly => {
+            reasons.push(reason_code::CONSERVATIVE_CALIBRATION_SYNTHETIC_ONLY);
+            OperatingProfile::Portable
+        }
+        HostCalibrationFreshness::Contradictory => {
+            reasons.push(reason_code::CONSERVATIVE_CALIBRATION_CONTRADICTORY);
             OperatingProfile::Portable
         }
         HostCalibrationFreshness::Missing => {
@@ -299,6 +320,7 @@ mod tests {
             calibration_freshness,
             reason_codes: Vec::new(),
             repair_actions: Vec::new(),
+            degraded: Vec::new(),
         }
     }
 
@@ -444,5 +466,44 @@ mod tests {
         let first = recommend_budget_deltas(&report, OperatingProfile::Workstation);
         let second = recommend_budget_deltas(&report, OperatingProfile::Workstation);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn contradictory_calibration_forces_conservative_profile() {
+        let report = host_class_report(
+            HostClass::Local256Gb,
+            OperatingProfile::Swarm,
+            HostCalibrationFreshness::Contradictory,
+        );
+        let recommendation = recommend_budget_deltas(&report, OperatingProfile::Workstation);
+
+        assert_eq!(
+            recommendation.recommended_profile,
+            OperatingProfile::Portable
+        );
+        assert!(
+            recommendation
+                .global_reason_codes
+                .contains(&reason_code::CONSERVATIVE_CALIBRATION_CONTRADICTORY)
+        );
+    }
+
+    #[test]
+    fn recommender_forwards_host_class_degradations() {
+        let mut report = host_class_report(
+            HostClass::Workstation,
+            OperatingProfile::Workstation,
+            HostCalibrationFreshness::Partial,
+        );
+        report.degraded.push(HostClassDegradation {
+            code: "host_calibration_partial",
+            severity: "warning",
+            message: "partial calibration",
+            repair: Some("rch exec -- scripts/e2e_overhaul/host_calibration.sh"),
+        });
+
+        let recommendation = recommend_budget_deltas(&report, OperatingProfile::Workstation);
+
+        assert_eq!(recommendation.degraded, report.degraded);
     }
 }

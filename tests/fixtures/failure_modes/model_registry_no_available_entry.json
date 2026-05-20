@@ -12,7 +12,7 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "The model registry contains entries, but every entry is disabled or unavailable.",
+    "description": "The model registry contains entries, but no embedding-purpose entry is available.",
     "setup_commands": [
       "ee init --workspace .",
       "ee diag model-registry --workspace . --model-id mdl_j6000000000000000000000001 --provider hash --model-name j6-disabled-hash --purpose embedding --dimension 256 --distance-metric cosine --status disabled --version j6 --last-checked-at 2026-05-13T00:00:00Z --json"
@@ -23,7 +23,7 @@
     "code": "model_registry_no_available_entry",
     "severity": "medium",
     "message_contains": [
-      "none are marked available",
+      "no embedding model is marked available",
       "semantic search is degraded"
     ],
     "repair_contains": "ee doctor",

@@ -12,7 +12,8 @@
     "confidence",
     "calibrationFreshness",
     "reasonCodes",
-    "repairActions"
+    "repairActions",
+    "degraded"
   ],
   "additionalProperties": false,
   "properties": {
@@ -45,7 +46,7 @@
     },
     "calibrationFreshness": {
       "type": "string",
-      "enum": ["fresh", "stale", "missing", "unavailable"]
+      "enum": ["fresh", "stale", "partial", "synthetic_only", "contradictory", "missing", "unavailable"]
     },
     "reasonCodes": {
       "type": "array",
@@ -55,6 +56,10 @@
     "repairActions": {
       "type": "array",
       "items": {"$ref": "#/$defs/repairAction"}
+    },
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradation"}
     }
   },
   "$defs": {
@@ -79,6 +84,9 @@
         "rch_topology_available",
         "calibration_fresh",
         "calibration_stale",
+        "calibration_partial",
+        "calibration_synthetic_only",
+        "calibration_contradictory",
         "calibration_missing",
         "calibration_unavailable",
         "synthetic_fixture_constrained",
@@ -99,7 +107,7 @@
         },
         "kind": {
           "type": "string",
-          "enum": ["calibration", "host_profile_probe"]
+          "enum": ["calibration", "host_profile_probe", "rch_status_probe"]
         },
         "command": {
           "type": ["string", "null"]
@@ -107,6 +115,20 @@
         "message": {
           "type": "string"
         }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message", "repair"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {"type": "string"},
+        "repair": {"type": ["string", "null"]}
       }
     }
   },
@@ -127,7 +149,8 @@
         "calibration_fresh",
         "synthetic_fixture_swarm"
       ],
-      "repairActions": []
+      "repairActions": [],
+      "degraded": []
     }
   ]
 }

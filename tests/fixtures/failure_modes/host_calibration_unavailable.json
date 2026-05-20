@@ -1,0 +1,22 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "host_calibration_unavailable",
+  "introduced_by": {
+    "bead": "bd-1zb7k.12.3.4",
+    "epic_letter": "H"
+  },
+  "surfaces": ["profile config plan", "host calibration recommendation"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Host calibration evidence cannot be inspected, so the recommender caps high-resource profiles.",
+    "setup_commands": [],
+    "invocation": "ee profile config plan --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "host_calibration_unavailable",
+    "severity": "warning",
+    "message_contains": ["Host calibration evidence is unavailable"],
+    "repair_contains": "ee diag host-profile --workspace . --json"
+  }
+}

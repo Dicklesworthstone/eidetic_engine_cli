@@ -24,6 +24,7 @@ pub const PROFILE_CONFIG_PLAN_SCHEMA_V1: &str = "ee.profile.config.plan.v1";
 pub const RUNTIME_PROFILE_SCHEMA_V1: &str = "ee.profile.runtime.v1";
 pub const PROFILE_BUDGET_CONFORMANCE_SCHEMA_V1: &str = "ee.profile.budget_conformance.v1";
 pub const HOST_CLASSIFICATION_SCHEMA_V1: &str = "ee.host_calibration.host_class.v1";
+pub const HOST_CALIBRATION_STALE_AFTER_SECONDS: u64 = 24 * 60 * 60;
 
 const TOOL_NAMES: [&str; 7] = ["cargo", "rustfmt", "clippy", "br", "bv", "rch", "gh"];
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -250,6 +251,9 @@ impl Serialize for HostClass {
 pub enum HostCalibrationFreshness {
     Fresh,
     Stale,
+    Partial,
+    SyntheticOnly,
+    Contradictory,
     #[default]
     Missing,
     Unavailable,
@@ -261,6 +265,9 @@ impl HostCalibrationFreshness {
         match self {
             Self::Fresh => "fresh",
             Self::Stale => "stale",
+            Self::Partial => "partial",
+            Self::SyntheticOnly => "synthetic_only",
+            Self::Contradictory => "contradictory",
             Self::Missing => "missing",
             Self::Unavailable => "unavailable",
         }
@@ -302,6 +309,7 @@ pub struct HostClassReport {
     pub calibration_freshness: HostCalibrationFreshness,
     pub reason_codes: Vec<&'static str>,
     pub repair_actions: Vec<HostClassRepairAction>,
+    pub degraded: Vec<HostClassDegradation>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -311,6 +319,15 @@ pub struct HostClassRepairAction {
     pub kind: &'static str,
     pub command: Option<&'static str>,
     pub message: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostClassDegradation {
+    pub code: &'static str,
+    pub severity: &'static str,
+    pub message: &'static str,
+    pub repair: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1629,6 +1646,7 @@ pub fn classify_host_profile(
 
     let mut host_class = base_host_class(probe, logical_cores, available_memory);
     let mut repair_actions = Vec::new();
+    let mut degraded = Vec::new();
 
     if !probe.complete && host_class_requires_complete_probe(host_class) {
         host_class = HostClass::Portable;
@@ -1640,12 +1658,30 @@ pub fn classify_host_profile(
         });
     }
 
+    if host_class == HostClass::RchOnlyTopology {
+        repair_actions.push(HostClassRepairAction {
+            priority: 15,
+            kind: "rch_status_probe",
+            command: Some("rch queue && rch status --workers --jobs --json"),
+            message: "RCH-only topology blocks high local-resource confidence; inspect remote worker posture instead of treating the local host as weak.",
+        });
+        degraded.push(HostClassDegradation {
+            code: "host_calibration_rch_topology_blocked",
+            severity: "warning",
+            message: "RCH-only topology is treated as a calibration-confidence blocker, not as proof that local hardware is weak.",
+            repair: Some("Run `rch queue` and `rch status --workers --jobs --json`."),
+        });
+    }
+
     if options.calibration_freshness != HostCalibrationFreshness::Fresh {
         host_class = conservative_class_for_unfresh_calibration(host_class);
         repair_actions.push(calibration_repair_action(options.calibration_freshness));
+        degraded.push(calibration_degradation(options.calibration_freshness));
     }
 
     stable_reason_codes(&mut reason_codes);
+    stable_repair_actions(&mut repair_actions);
+    stable_degradations(&mut degraded);
 
     HostClassReport {
         schema: HOST_CLASSIFICATION_SCHEMA_V1,
@@ -1656,6 +1692,7 @@ pub fn classify_host_profile(
         calibration_freshness: options.calibration_freshness,
         reason_codes,
         repair_actions,
+        degraded,
     }
 }
 
@@ -1720,8 +1757,13 @@ fn host_class_confidence(
 ) -> &'static str {
     match calibration_freshness {
         HostCalibrationFreshness::Fresh if probe.complete => "high",
-        HostCalibrationFreshness::Fresh | HostCalibrationFreshness::Stale => "medium",
-        HostCalibrationFreshness::Missing | HostCalibrationFreshness::Unavailable => "low",
+        HostCalibrationFreshness::Fresh
+        | HostCalibrationFreshness::Stale
+        | HostCalibrationFreshness::Partial
+        | HostCalibrationFreshness::SyntheticOnly => "medium",
+        HostCalibrationFreshness::Contradictory
+        | HostCalibrationFreshness::Missing
+        | HostCalibrationFreshness::Unavailable => "low",
     }
 }
 
@@ -1791,6 +1833,9 @@ fn calibration_reason_code(freshness: HostCalibrationFreshness) -> &'static str 
     match freshness {
         HostCalibrationFreshness::Fresh => "calibration_fresh",
         HostCalibrationFreshness::Stale => "calibration_stale",
+        HostCalibrationFreshness::Partial => "calibration_partial",
+        HostCalibrationFreshness::SyntheticOnly => "calibration_synthetic_only",
+        HostCalibrationFreshness::Contradictory => "calibration_contradictory",
         HostCalibrationFreshness::Missing => "calibration_missing",
         HostCalibrationFreshness::Unavailable => "calibration_unavailable",
     }
@@ -1816,20 +1861,85 @@ fn calibration_repair_action(freshness: HostCalibrationFreshness) -> HostClassRe
         HostCalibrationFreshness::Stale => HostClassRepairAction {
             priority: 20,
             kind: "calibration",
-            command: Some("scripts/e2e_overhaul/host_calibration.sh"),
+            command: Some("rch exec -- scripts/e2e_overhaul/host_calibration.sh"),
             message: "Refresh host calibration evidence before enabling higher-resource classes.",
+        },
+        HostCalibrationFreshness::Partial => HostClassRepairAction {
+            priority: 20,
+            kind: "calibration",
+            command: Some("rch exec -- scripts/e2e_overhaul/host_calibration.sh"),
+            message: "Collect the missing calibration samples before enabling higher-resource classes.",
+        },
+        HostCalibrationFreshness::SyntheticOnly => HostClassRepairAction {
+            priority: 20,
+            kind: "calibration",
+            command: Some("rch exec -- scripts/e2e_overhaul/host_calibration.sh"),
+            message: "Replace synthetic-only calibration with live host evidence before enabling higher-resource classes.",
+        },
+        HostCalibrationFreshness::Contradictory => HostClassRepairAction {
+            priority: 10,
+            kind: "calibration",
+            command: Some("ee diag host-profile --workspace . --json"),
+            message: "Review contradictory calibration evidence and keep conservative profile ceilings until it is resolved.",
         },
         HostCalibrationFreshness::Missing => HostClassRepairAction {
             priority: 20,
             kind: "calibration",
-            command: Some("scripts/e2e_overhaul/host_calibration.sh"),
+            command: Some("rch exec -- scripts/e2e_overhaul/host_calibration.sh"),
             message: "Collect host calibration evidence before enabling higher-resource classes.",
         },
         HostCalibrationFreshness::Unavailable => HostClassRepairAction {
             priority: 20,
             kind: "calibration",
-            command: None,
-            message: "Host calibration evidence is unavailable; keep conservative profile ceilings.",
+            command: Some("ee diag host-profile --workspace . --json"),
+            message: "Host calibration evidence is unavailable; inspect host-profile and RCH status before changing profile ceilings.",
+        },
+    }
+}
+
+fn calibration_degradation(freshness: HostCalibrationFreshness) -> HostClassDegradation {
+    match freshness {
+        HostCalibrationFreshness::Fresh => HostClassDegradation {
+            code: "host_calibration_fresh",
+            severity: "info",
+            message: "Host calibration evidence is fresh.",
+            repair: None,
+        },
+        HostCalibrationFreshness::Stale => HostClassDegradation {
+            code: "host_calibration_stale",
+            severity: "warning",
+            message: "Host calibration evidence is stale, so high-resource recommendations are capped conservatively.",
+            repair: Some("Run `rch exec -- scripts/e2e_overhaul/host_calibration.sh`."),
+        },
+        HostCalibrationFreshness::Partial => HostClassDegradation {
+            code: "host_calibration_partial",
+            severity: "warning",
+            message: "Host calibration evidence is partial, so high-resource recommendations are capped conservatively.",
+            repair: Some("Run `rch exec -- scripts/e2e_overhaul/host_calibration.sh`."),
+        },
+        HostCalibrationFreshness::SyntheticOnly => HostClassDegradation {
+            code: "host_calibration_synthetic_only",
+            severity: "warning",
+            message: "Only synthetic calibration evidence is available, so high-resource recommendations are capped conservatively.",
+            repair: Some("Run `rch exec -- scripts/e2e_overhaul/host_calibration.sh`."),
+        },
+        HostCalibrationFreshness::Contradictory => HostClassDegradation {
+            code: "host_calibration_contradictory",
+            severity: "medium",
+            message: "Calibration evidence is contradictory, so high-resource recommendations are capped conservatively.",
+            repair: Some("Run `ee diag host-profile --workspace . --json` and inspect RCH status."),
+        },
+        HostCalibrationFreshness::Missing => HostClassDegradation {
+            code: "host_calibration_missing",
+            severity: "warning",
+            message: "Host calibration evidence is missing, so high-resource recommendations are capped conservatively.",
+            repair: Some("Run `rch exec -- scripts/e2e_overhaul/host_calibration.sh`."),
+        },
+        HostCalibrationFreshness::Unavailable => HostClassDegradation {
+            code: "host_calibration_unavailable",
+            severity: "warning",
+            message: "Host calibration evidence is unavailable, so high-resource recommendations are capped conservatively.",
+            repair: Some("Run `ee diag host-profile --workspace . --json`."),
         },
     }
 }
@@ -1844,6 +1954,27 @@ fn stable_reason_codes(reason_codes: &mut Vec<&'static str>) {
             true
         }
     });
+}
+
+fn stable_repair_actions(actions: &mut Vec<HostClassRepairAction>) {
+    actions.sort_by(|left, right| {
+        (left.priority, left.kind, left.command, left.message).cmp(&(
+            right.priority,
+            right.kind,
+            right.command,
+            right.message,
+        ))
+    });
+    actions.dedup_by(|left, right| {
+        left.kind == right.kind && left.command == right.command && left.message == right.message
+    });
+}
+
+fn stable_degradations(degraded: &mut Vec<HostClassDegradation>) {
+    degraded.sort_by(|left, right| {
+        (left.severity, left.code, left.message).cmp(&(right.severity, right.code, right.message))
+    });
+    degraded.dedup_by(|left, right| left.code == right.code);
 }
 
 /// Build a side-effect-free config mutation report for a profile selection.
@@ -3687,6 +3818,97 @@ mod tests {
             result.confidence,
             "medium",
             "medium confidence without probe data",
+        )
+    }
+
+    #[test]
+    fn host_classification_degrades_stale_calibration_with_repair_action() -> TestResult {
+        let mut probe = probe_with_resources(Some(8), 32);
+        probe.topology.rch.available = false;
+        let report = classify_host_profile(
+            &probe,
+            &HostClassificationOptions {
+                calibration_freshness: HostCalibrationFreshness::Stale,
+                synthetic_fixture_profile: None,
+            },
+        );
+
+        ensure(report.host_class, HostClass::Portable, "conservative class")?;
+        ensure(report.confidence, "medium", "stale confidence")?;
+        ensure_true(
+            report.reason_codes.contains(&"calibration_stale"),
+            "stale reason code",
+        )?;
+        ensure_true(
+            report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "host_calibration_stale"),
+            "stale calibration degradation",
+        )?;
+        ensure_true(
+            report.repair_actions.iter().any(|action| {
+                action.command == Some("rch exec -- scripts/e2e_overhaul/host_calibration.sh")
+            }),
+            "stale calibration repair command",
+        )
+    }
+
+    #[test]
+    fn host_classification_caps_synthetic_only_calibration() -> TestResult {
+        let mut probe = probe_with_resources(Some(32), 256);
+        probe.topology.rch.available = false;
+        let report = classify_host_profile(
+            &probe,
+            &HostClassificationOptions {
+                calibration_freshness: HostCalibrationFreshness::SyntheticOnly,
+                synthetic_fixture_profile: Some(OperatingProfile::Swarm),
+            },
+        );
+
+        ensure(report.host_class, HostClass::Portable, "synthetic-only cap")?;
+        ensure_true(
+            report.reason_codes.contains(&"calibration_synthetic_only"),
+            "synthetic-only reason code",
+        )?;
+        ensure_true(
+            report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "host_calibration_synthetic_only"),
+            "synthetic-only degradation",
+        )
+    }
+
+    #[test]
+    fn rch_only_topology_reports_blocker_not_local_weakness() -> TestResult {
+        let probe = probe_with_resources(Some(16), 64);
+        let report = classify_host_profile(
+            &probe,
+            &HostClassificationOptions {
+                calibration_freshness: HostCalibrationFreshness::Fresh,
+                synthetic_fixture_profile: None,
+            },
+        );
+
+        ensure(
+            report.host_class,
+            HostClass::RchOnlyTopology,
+            "rch-only topology class",
+        )?;
+        ensure_true(
+            report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "host_calibration_rch_topology_blocked"),
+            "rch topology blocker degradation",
+        )?;
+        ensure_true(
+            report
+                .repair_actions
+                .iter()
+                .any(|action| action.kind == "rch_status_probe"),
+            "rch topology repair action",
         )
     }
 

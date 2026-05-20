@@ -139,7 +139,7 @@ fixture in the implementing bead.
 | Disk | `disk_capacity_constrained`, `disk_capacity_sufficient`, `disk_capacity_swarm_ready` |
 | Target dir | `target_dir_shared`, `target_dir_isolated`, `target_dir_external` |
 | RCH topology | `rch_topology_missing`, `rch_topology_available`, `rch_topology_version_skew`, `rch_topology_workspace_metadata_blocked`, `rch_topology_remote_required` |
-| Calibration freshness | `calibration_fresh`, `calibration_stale`, `calibration_missing`, `calibration_unavailable` |
+| Calibration freshness | `calibration_fresh`, `calibration_stale`, `calibration_partial`, `calibration_synthetic_only`, `calibration_contradictory`, `calibration_missing`, `calibration_unavailable` |
 | Synthetic fixtures | `synthetic_fixture_constrained`, `synthetic_fixture_portable`, `synthetic_fixture_workstation`, `synthetic_fixture_swarm` |
 | Overrides | `explicit_profile_override` |
 

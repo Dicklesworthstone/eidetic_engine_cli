@@ -1,0 +1,22 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "host_calibration_rch_topology_blocked",
+  "introduced_by": {
+    "bead": "bd-1zb7k.12.3.4",
+    "epic_letter": "H"
+  },
+  "surfaces": ["profile config plan", "host calibration recommendation"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "The local checkout needs RCH for reliable heavy verification, so the recommender treats topology as a confidence blocker instead of weak local hardware evidence.",
+    "setup_commands": [],
+    "invocation": "ee profile config plan --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "host_calibration_rch_topology_blocked",
+    "severity": "warning",
+    "message_contains": ["RCH-only topology"],
+    "repair_contains": "rch status --workers --jobs --json"
+  }
+}

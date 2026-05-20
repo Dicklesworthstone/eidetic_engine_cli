@@ -726,6 +726,7 @@ impl DerivedAssetReport {
             config_dependencies: parts.config_dependencies,
             feature_dependencies: parts.feature_dependencies,
             input_manifest_hash: parts.input_manifest_hash,
+            previous_dependency_hash: None,
             repair_action: parts.repair.unwrap_or("Inspect derived asset status."),
         });
 

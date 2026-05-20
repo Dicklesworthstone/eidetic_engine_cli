@@ -1334,14 +1334,14 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
         ],
         &workspace,
         None,
-        "fx.model.status.empty.v1",
+        "fx.model.status.empty.v2",
         "ee.response.v1",
         None,
     )?;
     let status_empty_json = parse_logged_response(&status_empty, "model status empty")?;
     ensure_equal(
         &status_empty_json["data"]["schema"],
-        &serde_json::json!("ee.model.status.v1"),
+        &serde_json::json!("ee.model.status.v2"),
         "model status schema",
     )?;
     ensure_equal(
@@ -1417,7 +1417,7 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
         ],
         &workspace,
         None,
-        "fx.model.status.registry.v1",
+        "fx.model.status.registry.v2",
         "ee.response.v1",
         None,
     )?;

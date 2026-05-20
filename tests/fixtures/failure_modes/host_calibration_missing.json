@@ -1,0 +1,22 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "host_calibration_missing",
+  "introduced_by": {
+    "bead": "bd-1zb7k.12.3.4",
+    "epic_letter": "H"
+  },
+  "surfaces": ["profile config plan", "host calibration recommendation"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "No host calibration evidence exists, so the recommender caps high-resource profiles.",
+    "setup_commands": [],
+    "invocation": "ee profile config plan --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "host_calibration_missing",
+    "severity": "warning",
+    "message_contains": ["Host calibration evidence is missing"],
+    "repair_contains": "rch exec -- scripts/e2e_overhaul/host_calibration.sh"
+  }
+}

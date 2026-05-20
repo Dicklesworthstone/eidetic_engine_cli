@@ -23,8 +23,9 @@
 //!    constrained / portable / laptop / workstation / local_256gb /
 //!    rch_only_topology. Additions break consumers that switch over
 //!    the closed set; removals break the recommender.
-//! 3. `calibrationFreshness` enum is exactly fresh/stale/missing/
-//!    unavailable. Confidence is exactly low/medium/high.
+//! 3. `calibrationFreshness` enum is exactly fresh/stale/partial/
+//!    synthetic_only/contradictory/missing/unavailable. Confidence is
+//!    exactly low/medium/high.
 //! 4. The `reasonCode` taxonomy covers each input dimension
 //!    (cpu, memory, disk, target_dir, rch_topology, calibration,
 //!    synthetic_fixture) so the human-facing repair-action rendering
@@ -59,7 +60,15 @@ const REQUIRED_HOST_CLASSES: &[&str] = &[
     "local_256gb",
     "rch_only_topology",
 ];
-const REQUIRED_CALIBRATION_FRESHNESS: &[&str] = &["fresh", "stale", "missing", "unavailable"];
+const REQUIRED_CALIBRATION_FRESHNESS: &[&str] = &[
+    "fresh",
+    "stale",
+    "partial",
+    "synthetic_only",
+    "contradictory",
+    "missing",
+    "unavailable",
+];
 const REQUIRED_CONFIDENCE: &[&str] = &["low", "medium", "high"];
 const REQUIRED_REASON_CODE_PREFIXES: &[&str] = &[
     "cpu_logical_cores_",
@@ -79,6 +88,7 @@ const REQUIRED_HOST_CLASS_TOP_LEVEL: &[&str] = &[
     "calibrationFreshness",
     "reasonCodes",
     "repairActions",
+    "degraded",
 ];
 const REQUIRED_RECOMMENDATION_TOP_LEVEL: &[&str] = &[
     "schema",

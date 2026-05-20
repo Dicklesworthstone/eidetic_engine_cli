@@ -43,7 +43,7 @@ fn db_error_to_domain(error: DbError, context: &str, repair: Option<String>) -> 
 }
 
 /// Schema identifier for `ee model status` JSON output.
-pub const MODEL_STATUS_SCHEMA_V1: &str = "ee.model.status.v1";
+pub const MODEL_STATUS_SCHEMA_V2: &str = "ee.model.status.v2";
 /// Schema identifier for `ee model list` JSON output.
 pub const MODEL_LIST_SCHEMA_V1: &str = "ee.model.list.v1";
 
@@ -153,6 +153,29 @@ impl ModelStatusActive {
     }
 }
 
+/// Local reranker registry posture shaped for public output.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelStatusReranker {
+    pub registered_count: usize,
+    pub available_count: usize,
+    pub available_model_ids: Vec<String>,
+    pub selected_registry_entry: Option<ModelRegistryEntryView>,
+}
+
+impl ModelStatusReranker {
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "registeredCount": self.registered_count,
+            "availableCount": self.available_count,
+            "availableModelIds": self.available_model_ids,
+            "selectedRegistryEntry": self
+                .selected_registry_entry
+                .as_ref()
+                .map(ModelRegistryEntryView::data_json),
+        })
+    }
+}
+
 /// Stable degradation marker for model status / list.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelDegradation {
@@ -172,7 +195,7 @@ const DEG_NO_REGISTRY_ENTRIES: ModelDegradation = ModelDegradation {
 const DEG_NO_AVAILABLE_MODEL: ModelDegradation = ModelDegradation {
     code: "model_registry_no_available_entry",
     severity: "medium",
-    message: "Model registry has entries but none are marked available; semantic search is degraded.",
+    message: "Model registry has entries but no embedding model is marked available; semantic search is degraded.",
     repair: "ee doctor --json",
 };
 
@@ -192,6 +215,7 @@ pub struct ModelStatusReport {
     pub workspace_path: PathBuf,
     pub database_path: PathBuf,
     pub active: ModelStatusActive,
+    pub reranker: ModelStatusReranker,
     pub registered_count: usize,
     pub available_count: usize,
     pub degradations: Vec<ModelDegradation>,
@@ -205,6 +229,7 @@ impl ModelStatusReport {
             "workspacePath": self.workspace_path.to_string_lossy(),
             "databasePath": self.database_path.to_string_lossy(),
             "active": self.active.data_json(),
+            "reranker": self.reranker.data_json(),
             "registeredCount": self.registered_count,
             "availableCount": self.available_count,
             "degradations": model_degradations_data_json("model_status", &self.degradations),
@@ -236,6 +261,16 @@ impl ModelStatusReport {
             "Registered models: {} (available: {})\n",
             self.registered_count, self.available_count,
         ));
+        output.push_str(&format!(
+            "Rerankers: {} (available: {})\n",
+            self.reranker.registered_count, self.reranker.available_count,
+        ));
+        if let Some(selected) = &self.reranker.selected_registry_entry {
+            output.push_str(&format!(
+                "Selected reranker: {} ({}/{}, status {})\n",
+                selected.id, selected.provider, selected.model_name, selected.status,
+            ));
+        }
         if !self.degradations.is_empty() {
             output.push_str("Degraded:\n");
             for degradation in &self.degradations {
@@ -545,9 +580,30 @@ pub fn build_model_status_report(
 
     let selected_registry_entry = entries
         .iter()
-        .find(|entry| entry.status.as_str() == "available")
+        .find(|entry| entry_is_available_embedding(entry))
         .cloned()
         .map(ModelRegistryEntryView::from_stored);
+
+    let reranker_registered_count = entries
+        .iter()
+        .filter(|entry| entry_is_reranker(entry))
+        .count();
+    let reranker_available_entries: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry_is_available_reranker(entry))
+        .collect();
+    let reranker = ModelStatusReranker {
+        registered_count: reranker_registered_count,
+        available_count: reranker_available_entries.len(),
+        available_model_ids: reranker_available_entries
+            .iter()
+            .map(|entry| entry.model_name.clone())
+            .collect(),
+        selected_registry_entry: reranker_available_entries
+            .first()
+            .map(|entry| (*entry).clone())
+            .map(ModelRegistryEntryView::from_stored),
+    };
 
     let fast_embedder = HashEmbedder::default_256();
     let quality_embedder = HashEmbedder::default_384();
@@ -570,7 +626,7 @@ pub fn build_model_status_report(
     let mut degradations = Vec::new();
     if registered_count == 0 {
         degradations.push(DEG_NO_REGISTRY_ENTRIES);
-    } else if available_count == 0 {
+    } else if active.selected_registry_entry.is_none() {
         degradations.push(DEG_NO_AVAILABLE_MODEL);
     }
     if entries.iter().any(entry_exceeds_semantic_dimension_budget) {
@@ -578,10 +634,11 @@ pub fn build_model_status_report(
     }
 
     Ok(ModelStatusReport {
-        schema: MODEL_STATUS_SCHEMA_V1,
+        schema: MODEL_STATUS_SCHEMA_V2,
         workspace_path,
         database_path,
         active,
+        reranker,
         registered_count,
         available_count,
         degradations,
@@ -589,11 +646,22 @@ pub fn build_model_status_report(
 }
 
 fn entry_exceeds_semantic_dimension_budget(entry: &StoredModelRegistryEntry) -> bool {
-    entry.status.as_str() == "available"
-        && entry.purpose.as_str() == "embedding"
+    entry_is_available_embedding(entry)
         && entry
             .dimension
             .is_some_and(|dimension| dimension > SEMANTIC_DIMENSION_BUDGET)
+}
+
+fn entry_is_available_embedding(entry: &StoredModelRegistryEntry) -> bool {
+    entry.purpose.as_str() == "embedding" && entry.status.as_str() == "available"
+}
+
+fn entry_is_reranker(entry: &StoredModelRegistryEntry) -> bool {
+    entry.purpose.as_str() == "reranker"
+}
+
+fn entry_is_available_reranker(entry: &StoredModelRegistryEntry) -> bool {
+    entry_is_reranker(entry) && entry.status.as_str() == "available"
 }
 
 /// Build a `ee model list` report.
@@ -624,6 +692,8 @@ pub fn build_model_list_report(
     let mut degradations = Vec::new();
     if entries.is_empty() {
         degradations.push(DEG_NO_REGISTRY_ENTRIES);
+    } else if !entries.iter().any(entry_is_available_embedding) {
+        degradations.push(DEG_NO_AVAILABLE_MODEL);
     }
 
     Ok(ModelListReport {
@@ -731,6 +801,45 @@ mod tests {
                 },
             )
             .map_err(|error| format!("insert registry entry: {error}"))
+    }
+
+    fn insert_reranker_entry(
+        database_path: &Path,
+        workspace_id: &str,
+        id: &str,
+        name: &str,
+        status: ModelRegistryStatus,
+    ) -> TestResult {
+        let connection = DbConnection::open_file(database_path)
+            .map_err(|error| format!("reopen db: {error}"))?;
+        connection
+            .insert_model_registry_entry(
+                id,
+                &CreateModelRegistryInput {
+                    workspace_id: workspace_id.to_string(),
+                    provider: ModelProvider::FastEmbed,
+                    model_name: name.to_string(),
+                    purpose: ModelPurpose::Reranker,
+                    dimension: None,
+                    distance_metric: None,
+                    status,
+                    version: Some("v1".to_string()),
+                    source_uri: None,
+                    content_hash: None,
+                    metadata_json: None,
+                    last_checked_at: None,
+                },
+            )
+            .map_err(|error| format!("insert registry entry: {error}"))
+    }
+
+    fn empty_reranker_status() -> ModelStatusReranker {
+        ModelStatusReranker {
+            registered_count: 0,
+            available_count: 0,
+            available_model_ids: Vec::new(),
+            selected_registry_entry: None,
+        }
     }
 
     fn model_entry_with_source(source_uri: &str) -> ModelRegistryEntryView {
@@ -861,9 +970,13 @@ mod tests {
         })
         .map_err(|error| format!("status: {error:?}"))?;
 
-        ensure(report.schema == MODEL_STATUS_SCHEMA_V1, "schema constant")?;
+        ensure(report.schema == MODEL_STATUS_SCHEMA_V2, "schema constant")?;
         ensure(report.registered_count == 0, "registered_count")?;
         ensure(report.available_count == 0, "available_count")?;
+        ensure(
+            report.reranker.registered_count == 0 && report.reranker.available_count == 0,
+            "reranker counts empty",
+        )?;
         ensure(
             report.active.source == "frankensearch_hash_fallback",
             "fallback source",
@@ -915,6 +1028,59 @@ mod tests {
             .as_ref()
             .ok_or("missing selected entry")?;
         ensure(selected.status == "available", "selected available")
+    }
+
+    #[test]
+    fn status_reports_available_reranker_without_selecting_it_as_embedder() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+        insert_reranker_entry(
+            &database_path,
+            &workspace_id,
+            "mdl_01HQ3K5Z000000000000000012",
+            "ms-marco-minilm-l-6-v2",
+            ModelRegistryStatus::Available,
+        )?;
+
+        let report = build_model_status_report(&ModelStatusOptions {
+            workspace_path: &workspace_path,
+            database_path: None,
+        })
+        .map_err(|error| format!("status: {error:?}"))?;
+
+        ensure(report.registered_count == 1, "registered_count")?;
+        ensure(report.available_count == 1, "available_count")?;
+        ensure(
+            report.active.source == "frankensearch_hash_fallback",
+            "reranker must not become the active embedder source",
+        )?;
+        ensure(
+            report.active.selected_registry_entry.is_none(),
+            "active embedding selection should ignore reranker entries",
+        )?;
+        ensure(report.degradations.len() == 1, "degradation count")?;
+        ensure(
+            report.degradations[0].code == "model_registry_no_available_entry",
+            "reranker-only registry should degrade semantic embedding status",
+        )?;
+        ensure(report.reranker.registered_count == 1, "reranker registered")?;
+        ensure(report.reranker.available_count == 1, "reranker available")?;
+        ensure(
+            report.reranker.available_model_ids == vec!["ms-marco-minilm-l-6-v2"],
+            "available reranker model ids",
+        )?;
+        let selected = report
+            .reranker
+            .selected_registry_entry
+            .as_ref()
+            .ok_or("selected reranker missing")?;
+        ensure(selected.purpose == "reranker", "selected reranker purpose")?;
+
+        let json = report.data_json();
+        ensure(
+            json["reranker"]["availableModelIds"] == serde_json::json!(["ms-marco-minilm-l-6-v2"]),
+            "reranker JSON available ids",
+        )
     }
 
     #[test]
@@ -980,7 +1146,7 @@ mod tests {
     fn status_json_aggregates_duplicate_model_degradations() -> TestResult {
         let (_temp, workspace_path) = make_workspace()?;
         let report = ModelStatusReport {
-            schema: MODEL_STATUS_SCHEMA_V1,
+            schema: MODEL_STATUS_SCHEMA_V2,
             workspace_path: workspace_path.clone(),
             database_path: workspace_path.join(".ee").join("ee.db"),
             active: ModelStatusActive {
@@ -993,6 +1159,7 @@ mod tests {
                 source: "unit_fixture".to_string(),
                 selected_registry_entry: None,
             },
+            reranker: empty_reranker_status(),
             registered_count: 2,
             available_count: 0,
             degradations: vec![
@@ -1067,7 +1234,7 @@ mod tests {
             "file:///Volumes/USBNVME16TB/private/models/model.json#token=redaction-fixture",
         );
         let report = ModelStatusReport {
-            schema: MODEL_STATUS_SCHEMA_V1,
+            schema: MODEL_STATUS_SCHEMA_V2,
             workspace_path: workspace_path.clone(),
             database_path: workspace_path.join(".ee").join("ee.db"),
             active: ModelStatusActive {
@@ -1080,6 +1247,7 @@ mod tests {
                 source: "registry_observed".to_owned(),
                 selected_registry_entry: Some(entry.clone()),
             },
+            reranker: empty_reranker_status(),
             registered_count: 1,
             available_count: 1,
             degradations: Vec::new(),
@@ -1146,6 +1314,32 @@ mod tests {
     }
 
     #[test]
+    fn list_reports_reranker_only_registry_as_no_available_embedding() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+        insert_reranker_entry(
+            &database_path,
+            &workspace_id,
+            "mdl_01HQ3K5Z000000000000000013",
+            "ms-marco-minilm-l-6-v2",
+            ModelRegistryStatus::Available,
+        )?;
+
+        let report = build_model_list_report(&ModelListOptions {
+            workspace_path: &workspace_path,
+            database_path: None,
+        })
+        .map_err(|error| format!("list: {error:?}"))?;
+
+        ensure(report.entries.len() == 1, "reranker entry listed")?;
+        ensure(report.degradations.len() == 1, "degradation count")?;
+        ensure(
+            report.degradations[0].code == "model_registry_no_available_entry",
+            "reranker-only list should degrade semantic embedding status",
+        )
+    }
+
+    #[test]
     fn json_renderings_are_stable_and_versioned() -> TestResult {
         let (_temp, workspace_path) = make_workspace()?;
         fresh_db_for_workspace(&workspace_path)?;
@@ -1157,7 +1351,7 @@ mod tests {
         .map_err(|error| format!("status: {error:?}"))?;
         let status_json = status.data_json();
         ensure(
-            status_json["schema"] == MODEL_STATUS_SCHEMA_V1,
+            status_json["schema"] == MODEL_STATUS_SCHEMA_V2,
             "status schema",
         )?;
         ensure(

@@ -98,6 +98,9 @@
         "rch_topology_remote_required",
         "calibration_fresh",
         "calibration_stale",
+        "calibration_partial",
+        "calibration_synthetic_only",
+        "calibration_contradictory",
         "calibration_missing",
         "calibration_unavailable",
         "synthetic_fixture_constrained",
@@ -174,7 +177,7 @@
       "properties": {
         "status": {
           "type": "string",
-          "enum": ["fresh", "stale", "missing", "unavailable"]
+          "enum": ["fresh", "stale", "partial", "synthetic_only", "contradictory", "missing", "unavailable"]
         },
         "source": {
           "type": "string",
