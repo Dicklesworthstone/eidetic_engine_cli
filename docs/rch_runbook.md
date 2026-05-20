@@ -216,13 +216,16 @@ br close bd-XXXX --reason "RCH proof: command_hash=<hash>; status=<status>; veri
 scripts/rch_verify.sh --ledger .ee/derived/rch/runs.jsonl -- <cmd>
 ```
 
-Paste or summarize these proof fields in the Beads comment:
+Paste or summarize these proof fields in the Beads comment. Keep fields with
+`none` values when the verifier did not reach that phase; the absence itself is
+part of the source-attribution evidence.
 
 ```text
 RCH proof:
 - command_hash: <command_hash>
 - status: <status>
 - verification_attribution: <verification_attribution>
+- git_head: <git_head>
 - git_tree: <git_tree>
 - dirty_status_hash: <dirty_status_hash>
 - source_manifest_hash: <source_manifest_hash or none>
@@ -231,6 +234,9 @@ RCH proof:
 - degraded_codes: <degraded_codes or none>
 - source_state_degraded_codes: <source_state_degraded_codes or none>
 - worker_state_degraded_codes: <worker_state_degraded_codes or none>
+- known_blocker: <known_blocker.blocker_fingerprint or none>
+- remediation_bead: <known_blocker.remediation_bead or none>
+- retry_after: <known_blocker.retry_after or none>
 - build_admission: <build_admission.status>/<build_admission.admitted>
 - first_error: <first_error_file>:<first_error_line or none>
 ```
