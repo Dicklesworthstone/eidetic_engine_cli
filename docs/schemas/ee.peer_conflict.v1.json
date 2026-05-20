@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.peer_conflict.v1.json",
+  "title": "ee.peer_conflict.v1",
+  "description": "Structured event row emitted by the SRR6.37 peer duplicate / near-duplicate / contradiction surfacer (bd-2w02i). One row per detection: an exact-content-hash duplicate, a near-duplicate candidate link, a contradiction candidate, a context pack that selected a memory under conflict, or a curation candidate whose promotion was blocked by a conflict. Captures conflict shape with provenance so `ee why` and `ee curate apply` can explain WHY they chose one memory over another (or refused to choose) without flattening peer disagreement into a single answer.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "sideEffectFree",
+    "kind",
+    "ts",
+    "workspaceIdHash",
+    "primaryMemoryHash",
+    "peerMemoryHashes",
+    "trustClasses",
+    "detectorVerdict"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.peer_conflict.v1"
+    },
+    "sideEffectFree": {
+      "description": "Conflict events describe a detection observation. They do not mutate the memory graph; a separate explicit `ee curate apply` call can act on them. The detector itself is read-only.",
+      "type": "boolean",
+      "const": true
+    },
+    "kind": {
+      "$ref": "#/$defs/conflictKind"
+    },
+    "ts": {
+      "$ref": "#/$defs/rfc3339"
+    },
+    "workspaceIdHash": {
+      "type": "string",
+      "pattern": "^blake3:[A-Fa-f0-9]{32,128}$"
+    },
+    "primaryMemoryHash": {
+      "description": "The memory whose presence triggered this detection (often a local memory or a recently cached peer memory). Hashed; raw memory ID never appears.",
+      "type": "string",
+      "pattern": "^blake3:[A-Fa-f0-9]{32,128}$"
+    },
+    "peerMemoryHashes": {
+      "description": "Other memories that participate in the conflict. Each is BLAKE3-hashed. For `duplicate_detected` this is the one identical peer memory; for `contradiction_candidate` it is the one peer memory that supplies the opposing claim; for `selected_with_conflict` it is every losing candidate in the pack assembly decision.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^blake3:[A-Fa-f0-9]{32,128}$"
+      }
+    },
+    "trustClasses": {
+      "description": "Trust class of each participating memory in the same order as the corresponding hash (primary first, then peers). Pin these per-row so a later replay can audit the trust-weighted detection without re-querying memory state.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/trustClass"
+      }
+    },
+    "detectorVerdict": {
+      "$ref": "#/$defs/detectorVerdict"
+    },
+    "nearDuplicateScore": {
+      "description": "When kind=near_duplicate_candidate: the SimHash hamming distance + cosine similarity between primary and the named peer. Absent on exact duplicates.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hammingDistance": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        },
+        "cosineSimilarity": {
+          "type": "number",
+          "minimum": -1.0,
+          "maximum": 1.0
+        }
+      }
+    },
+    "contradictionScore": {
+      "description": "When kind=contradiction_candidate: the deterministic score the contradiction detector assigned. The bead's first version uses conservative, deterministic heuristics; no LLM arbitration.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "score": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "signal": {
+          "type": "string",
+          "enum": [
+            "claim_negation_overlap",
+            "rule_predicate_inversion",
+            "trust_class_disagreement_at_same_revision",
+            "explicit_supersession_chain"
+          ]
+        }
+      }
+    },
+    "renderingPolicy": {
+      "description": "How the response surface (context pack / why / curate) should treat this conflict. The bead's acceptance text: `ee` should make these visible with provenance instead of flattening them into one answer.",
+      "type": "string",
+      "enum": ["surface_both_with_provenance", "select_with_explanation", "refuse_with_explanation"]
+    }
+  },
+  "$defs": {
+    "conflictKind": {
+      "description": "Stable taxonomy of the four structured-log codes the bead acceptance names. Adding more is allowed in a minor revision; removing any breaks the consumer surfaces (`ee why`, `ee curate apply`, peer learn) that switch on these literals.",
+      "type": "string",
+      "enum": [
+        "duplicate_detected",
+        "near_duplicate_candidate",
+        "contradiction_candidate",
+        "selected_with_conflict",
+        "promotion_blocked_by_conflict"
+      ]
+    },
+    "detectorVerdict": {
+      "description": "What the detector decided. `exact_duplicate` requires identical content hash; `near_duplicate` requires both SimHash hamming below cap AND cosine above floor (parallels embed-dedup); `contradiction` requires at least one of the contradictionScore.signal values; `co_present_with_conflict` is the conflict-surfacing case where the pack selected one but the row records the losers.",
+      "type": "string",
+      "enum": [
+        "exact_duplicate",
+        "near_duplicate",
+        "contradiction",
+        "co_present_with_conflict",
+        "promotion_blocked"
+      ]
+    },
+    "trustClass": {
+      "description": "Local trust class. Peer-origin material is capped at agent_assertion / agent_validated per ee.curate.peer_evidence.v1's trustCap rule.",
+      "type": "string",
+      "enum": [
+        "human_explicit",
+        "human_revised",
+        "agent_validated",
+        "agent_assertion",
+        "agent_proposed",
+        "external",
+        "cass_evidence",
+        "legacy_import"
+      ]
+    },
+    "rfc3339": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

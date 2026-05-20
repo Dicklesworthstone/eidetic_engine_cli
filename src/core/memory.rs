@@ -4,7 +4,7 @@
 //! - `get_memory_details`: retrieve a single memory with its tags and metadata
 //! - `revise_memory`: create an immutable revision of an existing memory
 
-use std::cmp::Reverse;
+use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -43,7 +43,9 @@ use crate::models::{
 use crate::obs::{AuditEvent, AuditOutcome, now_rfc3339_nanos};
 use crate::runtime::determinism::{Deterministic, Seed};
 use crate::search::HashEmbedder;
-use crate::search::simhash::{EmbedDedupConfig, SimHash128, first_confirmed_simhash_candidate};
+use crate::search::simhash::{
+    EmbedDedupConfig, SimHash128, first_confirmed_simhash_candidate, ranked_simhash_candidates,
+};
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 /// A memory with its associated tags for display.
@@ -6333,6 +6335,420 @@ fn jaccard_similarity(a: &str, b: &str) -> f32 {
     intersection as f32 / union as f32
 }
 
+/// Stable schema for redaction-safe peer conflict observations.
+pub const PEER_CONFLICT_SCHEMA_V1: &str = "ee.peer_conflict.v1";
+
+const PEER_CONFLICT_HASH_PREFIX_LEN: usize = 32;
+
+/// Stable event kind emitted by the conservative SRR6.37 peer-conflict detector.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PeerConflictKind {
+    /// A peer memory has the same content hash as the primary memory.
+    DuplicateDetected,
+    /// A peer memory is close enough by SimHash to require provenance-aware rendering.
+    NearDuplicateCandidate,
+    /// A peer memory appears to contradict the primary memory.
+    ContradictionCandidate,
+}
+
+impl PeerConflictKind {
+    /// Stable wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DuplicateDetected => "duplicate_detected",
+            Self::NearDuplicateCandidate => "near_duplicate_candidate",
+            Self::ContradictionCandidate => "contradiction_candidate",
+        }
+    }
+}
+
+/// Stable detector verdict for a peer conflict observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PeerConflictDetectorVerdict {
+    /// Exact content-hash duplicate.
+    ExactDuplicate,
+    /// SimHash near duplicate.
+    NearDuplicate,
+    /// Deterministic contradiction heuristic matched.
+    Contradiction,
+}
+
+impl PeerConflictDetectorVerdict {
+    /// Stable wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactDuplicate => "exact_duplicate",
+            Self::NearDuplicate => "near_duplicate",
+            Self::Contradiction => "contradiction",
+        }
+    }
+}
+
+/// Conservative contradiction signal used by the first peer-conflict detector.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PeerContradictionSignal {
+    /// One claim negates another while preserving substantial token overlap.
+    ClaimNegationOverlap,
+    /// Rule-like wording inverts the predicate (for example always vs never).
+    RulePredicateInversion,
+    /// Same revision token with different content and different trust class.
+    TrustClassDisagreementAtSameRevision,
+    /// One peer record explicitly supersedes the other.
+    ExplicitSupersessionChain,
+}
+
+impl PeerContradictionSignal {
+    /// Stable wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ClaimNegationOverlap => "claim_negation_overlap",
+            Self::RulePredicateInversion => "rule_predicate_inversion",
+            Self::TrustClassDisagreementAtSameRevision => {
+                "trust_class_disagreement_at_same_revision"
+            }
+            Self::ExplicitSupersessionChain => "explicit_supersession_chain",
+        }
+    }
+}
+
+/// SimHash score attached to a near-duplicate peer conflict row.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerNearDuplicateScore {
+    /// Hamming distance between the primary and peer SimHashes.
+    pub hamming_distance: u32,
+}
+
+/// Deterministic contradiction score attached to a peer conflict row.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerContradictionScore {
+    /// Conservative score in `[0, 1]`.
+    pub score: f32,
+    /// Stable signal name.
+    pub signal: &'static str,
+}
+
+/// Redaction-safe peer conflict event. Raw memory IDs and memory bodies are
+/// intentionally excluded; callers pass hashed memory refs and content hashes.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerConflictEvent {
+    /// Stable schema marker.
+    pub schema: &'static str,
+    /// The detector is read-only and only reports an observation.
+    pub side_effect_free: bool,
+    /// Stable event kind.
+    pub kind: &'static str,
+    /// Caller-supplied RFC3339 timestamp for deterministic replay.
+    pub ts: String,
+    /// Hashed workspace identifier.
+    pub workspace_id_hash: String,
+    /// Hashed primary memory reference.
+    pub primary_memory_hash: String,
+    /// Hashed peer memory references participating in this row.
+    pub peer_memory_hashes: Vec<String>,
+    /// Trust classes in primary-then-peer order.
+    pub trust_classes: Vec<String>,
+    /// Stable detector verdict.
+    pub detector_verdict: &'static str,
+    /// Optional near-duplicate score.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub near_duplicate_score: Option<PeerNearDuplicateScore>,
+    /// Optional contradiction score.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contradiction_score: Option<PeerContradictionScore>,
+    /// Rendering policy for downstream context/why/curate surfaces.
+    pub rendering_policy: &'static str,
+}
+
+/// Caller-provided memory facts for peer conflict detection.
+#[derive(Clone, Debug)]
+pub struct PeerConflictMemory<'a> {
+    /// Redaction-safe memory reference hash.
+    pub memory_hash: &'a str,
+    /// Content hash used for exact duplicate detection.
+    pub content_hash: &'a str,
+    /// Redacted or local-only body used by deterministic heuristics.
+    pub content: &'a str,
+    /// Stable SimHash for near-duplicate ordering.
+    pub simhash: SimHash128,
+    /// Trust class at detection time.
+    pub trust_class: &'a str,
+    /// Optional revision token.
+    pub revision_token: Option<&'a str>,
+    /// Redaction-safe hashes this record explicitly supersedes.
+    pub supersedes_hashes: &'a [&'a str],
+}
+
+impl<'a> PeerConflictMemory<'a> {
+    /// Create peer conflict facts from caller-owned values.
+    #[must_use]
+    pub const fn new(
+        memory_hash: &'a str,
+        content_hash: &'a str,
+        content: &'a str,
+        simhash: SimHash128,
+        trust_class: &'a str,
+    ) -> Self {
+        Self {
+            memory_hash,
+            content_hash,
+            content,
+            simhash,
+            trust_class,
+            revision_token: None,
+            supersedes_hashes: &[],
+        }
+    }
+
+    /// Attach an optional revision token.
+    #[must_use]
+    pub const fn with_revision_token(mut self, revision_token: Option<&'a str>) -> Self {
+        self.revision_token = revision_token;
+        self
+    }
+
+    /// Attach explicit supersession links.
+    #[must_use]
+    pub const fn with_supersedes_hashes(mut self, supersedes_hashes: &'a [&'a str]) -> Self {
+        self.supersedes_hashes = supersedes_hashes;
+        self
+    }
+}
+
+/// Options for deterministic peer-conflict detection.
+#[derive(Clone, Debug)]
+pub struct PeerConflictDetectionOptions<'a> {
+    /// Hashed workspace identifier.
+    pub workspace_id_hash: &'a str,
+    /// RFC3339 timestamp to place on every emitted row.
+    pub observed_at: &'a str,
+    /// Maximum SimHash distance for near-duplicate rows.
+    pub near_duplicate_hamming_distance: u32,
+    /// Maximum near-duplicate rows to emit.
+    pub near_duplicate_limit: usize,
+}
+
+impl<'a> PeerConflictDetectionOptions<'a> {
+    /// Create options with conservative defaults.
+    #[must_use]
+    pub const fn new(workspace_id_hash: &'a str, observed_at: &'a str) -> Self {
+        Self {
+            workspace_id_hash,
+            observed_at,
+            near_duplicate_hamming_distance: 12,
+            near_duplicate_limit: 8,
+        }
+    }
+}
+
+/// Produce a stable BLAKE3 hash suitable for peer-conflict memory/workspace refs.
+#[must_use]
+pub fn peer_conflict_hash(domain: &str, value: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(PEER_CONFLICT_SCHEMA_V1.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(domain.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(value.as_bytes());
+    let hex = hasher.finalize().to_hex().to_string();
+    format!("blake3:{}", &hex[..PEER_CONFLICT_HASH_PREFIX_LEN])
+}
+
+/// Produce a stable content hash for exact peer duplicate detection.
+#[must_use]
+pub fn peer_conflict_content_hash(content: &str) -> String {
+    peer_conflict_hash("content", &normalize_content(content))
+}
+
+/// Detect exact duplicates, near duplicates, and conservative contradictions
+/// between a primary memory and peer-origin memories. Returned rows are sorted
+/// deterministically and contain only hashed memory/workspace references.
+#[must_use]
+pub fn detect_peer_memory_conflicts(
+    primary: &PeerConflictMemory<'_>,
+    peers: &[PeerConflictMemory<'_>],
+    options: &PeerConflictDetectionOptions<'_>,
+) -> Vec<PeerConflictEvent> {
+    let mut events = Vec::new();
+    let mut exact_peer_hashes = BTreeSet::new();
+
+    for peer in peers {
+        if peer.memory_hash == primary.memory_hash {
+            continue;
+        }
+        if peer.content_hash == primary.content_hash {
+            exact_peer_hashes.insert(peer.memory_hash);
+            events.push(peer_conflict_event(
+                PeerConflictKind::DuplicateDetected,
+                PeerConflictDetectorVerdict::ExactDuplicate,
+                primary,
+                peer,
+                options,
+                None,
+                None,
+            ));
+        }
+    }
+
+    let near_duplicate_candidates = ranked_simhash_candidates(
+        primary.simhash,
+        peers
+            .iter()
+            .filter(|peer| {
+                peer.memory_hash != primary.memory_hash
+                    && !exact_peer_hashes.contains(peer.memory_hash)
+            })
+            .map(|peer| (peer.memory_hash, peer.simhash)),
+        options.near_duplicate_hamming_distance,
+        options.near_duplicate_limit,
+    );
+    for candidate in near_duplicate_candidates {
+        let Some(peer) = peers
+            .iter()
+            .find(|peer| peer.memory_hash == candidate.candidate_id)
+        else {
+            continue;
+        };
+        events.push(peer_conflict_event(
+            PeerConflictKind::NearDuplicateCandidate,
+            PeerConflictDetectorVerdict::NearDuplicate,
+            primary,
+            peer,
+            options,
+            Some(PeerNearDuplicateScore {
+                hamming_distance: candidate.hamming_distance,
+            }),
+            None,
+        ));
+    }
+
+    for peer in peers {
+        if peer.memory_hash == primary.memory_hash {
+            continue;
+        }
+        let Some((signal, score)) = contradiction_signal(primary, peer) else {
+            continue;
+        };
+        events.push(peer_conflict_event(
+            PeerConflictKind::ContradictionCandidate,
+            PeerConflictDetectorVerdict::Contradiction,
+            primary,
+            peer,
+            options,
+            None,
+            Some(PeerContradictionScore {
+                score,
+                signal: signal.as_str(),
+            }),
+        ));
+    }
+
+    events.sort_by(compare_peer_conflict_events);
+    events
+}
+
+fn peer_conflict_event(
+    kind: PeerConflictKind,
+    verdict: PeerConflictDetectorVerdict,
+    primary: &PeerConflictMemory<'_>,
+    peer: &PeerConflictMemory<'_>,
+    options: &PeerConflictDetectionOptions<'_>,
+    near_duplicate_score: Option<PeerNearDuplicateScore>,
+    contradiction_score: Option<PeerContradictionScore>,
+) -> PeerConflictEvent {
+    PeerConflictEvent {
+        schema: PEER_CONFLICT_SCHEMA_V1,
+        side_effect_free: true,
+        kind: kind.as_str(),
+        ts: options.observed_at.to_owned(),
+        workspace_id_hash: options.workspace_id_hash.to_owned(),
+        primary_memory_hash: primary.memory_hash.to_owned(),
+        peer_memory_hashes: vec![peer.memory_hash.to_owned()],
+        trust_classes: vec![primary.trust_class.to_owned(), peer.trust_class.to_owned()],
+        detector_verdict: verdict.as_str(),
+        near_duplicate_score,
+        contradiction_score,
+        rendering_policy: "surface_both_with_provenance",
+    }
+}
+
+fn compare_peer_conflict_events(left: &PeerConflictEvent, right: &PeerConflictEvent) -> Ordering {
+    peer_conflict_kind_rank(left.kind)
+        .cmp(&peer_conflict_kind_rank(right.kind))
+        .then_with(|| left.primary_memory_hash.cmp(&right.primary_memory_hash))
+        .then_with(|| left.peer_memory_hashes.cmp(&right.peer_memory_hashes))
+        .then_with(|| left.detector_verdict.cmp(right.detector_verdict))
+}
+
+fn peer_conflict_kind_rank(kind: &str) -> u8 {
+    match kind {
+        "duplicate_detected" => 0,
+        "near_duplicate_candidate" => 1,
+        "contradiction_candidate" => 2,
+        _ => 3,
+    }
+}
+
+fn contradiction_signal(
+    primary: &PeerConflictMemory<'_>,
+    peer: &PeerConflictMemory<'_>,
+) -> Option<(PeerContradictionSignal, f32)> {
+    if primary.supersedes_hashes.contains(&peer.memory_hash)
+        || peer.supersedes_hashes.contains(&primary.memory_hash)
+    {
+        return Some((PeerContradictionSignal::ExplicitSupersessionChain, 0.95));
+    }
+    if primary.revision_token.is_some()
+        && primary.revision_token == peer.revision_token
+        && primary.content_hash != peer.content_hash
+        && primary.trust_class != peer.trust_class
+    {
+        return Some((
+            PeerContradictionSignal::TrustClassDisagreementAtSameRevision,
+            0.8,
+        ));
+    }
+
+    let primary_normalized = normalize_content(primary.content);
+    let peer_normalized = normalize_content(peer.content);
+    let overlap = jaccard_similarity(&primary_normalized, &peer_normalized);
+    if overlap < 0.25 {
+        return None;
+    }
+    let primary_negates = contains_negation_signal(&primary_normalized);
+    let peer_negates = contains_negation_signal(&peer_normalized);
+    let primary_always = contains_any_token(&primary_normalized, &["always", "must", "require"]);
+    let peer_always = contains_any_token(&peer_normalized, &["always", "must", "require"]);
+    let primary_never = contains_any_token(&primary_normalized, &["never", "forbid", "avoid"]);
+    let peer_never = contains_any_token(&peer_normalized, &["never", "forbid", "avoid"]);
+
+    if (primary_always && peer_never) || (peer_always && primary_never) {
+        return Some((PeerContradictionSignal::RulePredicateInversion, 0.75));
+    }
+    if primary_negates != peer_negates && overlap >= 0.4 {
+        return Some((PeerContradictionSignal::ClaimNegationOverlap, 0.6));
+    }
+    None
+}
+
+fn contains_negation_signal(normalized: &str) -> bool {
+    contains_any_token(
+        normalized,
+        &["not", "no", "never", "without", "forbid", "avoid"],
+    ) || normalized.contains("do not")
+}
+
+fn contains_any_token(normalized: &str, needles: &[&str]) -> bool {
+    normalized
+        .split_whitespace()
+        .any(|token| needles.contains(&token))
+}
+
 /// Check for potential duplicate memories.
 ///
 /// Scans existing memories and returns warnings for any that are similar
@@ -6441,6 +6857,7 @@ pub fn check_for_duplicates(options: &DedupeCheckOptions<'_>) -> DedupeCheckRepo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::simhash::simhash_128;
 
     type TestResult = Result<(), String>;
 
@@ -6483,6 +6900,166 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
         Ok(workspace_id)
+    }
+
+    fn peer_conflict_memory<'a>(
+        id: &'a str,
+        content: &'a str,
+        trust_class: &'a str,
+    ) -> PeerConflictMemory<'a> {
+        let memory_hash = Box::leak(peer_conflict_hash("memory", id).into_boxed_str());
+        let content_hash = Box::leak(peer_conflict_content_hash(content).into_boxed_str());
+        PeerConflictMemory::new(
+            memory_hash,
+            content_hash,
+            content,
+            simhash_128(content),
+            trust_class,
+        )
+    }
+
+    fn peer_conflict_options() -> PeerConflictDetectionOptions<'static> {
+        PeerConflictDetectionOptions::new(
+            "blake3:0123456789abcdef0123456789abcdef",
+            "2026-05-20T10:50:00Z",
+        )
+    }
+
+    #[test]
+    fn peer_conflict_detects_exact_content_hash_duplicates_without_raw_refs() -> TestResult {
+        let primary = peer_conflict_memory(
+            "local-memory-1",
+            "Run cargo fmt before release.",
+            "human_explicit",
+        );
+        let peer = peer_conflict_memory(
+            "peer-memory-1",
+            "Run cargo fmt before release.",
+            "agent_assertion",
+        );
+        let events = detect_peer_memory_conflicts(&primary, &[peer], &peer_conflict_options());
+
+        ensure(events.len(), 1, "exact duplicate event count")?;
+        let event = &events[0];
+        ensure(
+            event.kind,
+            PeerConflictKind::DuplicateDetected.as_str(),
+            "exact duplicate kind",
+        )?;
+        ensure(
+            event.detector_verdict,
+            PeerConflictDetectorVerdict::ExactDuplicate.as_str(),
+            "exact duplicate verdict",
+        )?;
+        ensure(
+            event.trust_classes.clone(),
+            vec!["human_explicit".to_owned(), "agent_assertion".to_owned()],
+            "trust classes",
+        )?;
+        let json = serde_json::to_string(event).map_err(|error| error.to_string())?;
+        for forbidden in [
+            "local-memory-1",
+            "peer-memory-1",
+            "Run cargo fmt before release",
+        ] {
+            if json.contains(forbidden) {
+                return Err(format!("peer conflict event leaked raw value: {forbidden}"));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn peer_conflict_near_duplicate_order_is_stable() -> TestResult {
+        let primary = peer_conflict_memory(
+            "local-memory-1",
+            "Run cargo fmt before release.",
+            "human_explicit",
+        );
+        let peer_a = peer_conflict_memory(
+            "peer-memory-a",
+            "Run cargo fmt before every release.",
+            "agent_assertion",
+        );
+        let peer_b = peer_conflict_memory(
+            "peer-memory-b",
+            "Run cargo clippy before release.",
+            "agent_validated",
+        );
+        let mut options = peer_conflict_options();
+        options.near_duplicate_hamming_distance = 128;
+
+        let first =
+            detect_peer_memory_conflicts(&primary, &[peer_b.clone(), peer_a.clone()], &options);
+        let second = detect_peer_memory_conflicts(&primary, &[peer_a, peer_b], &options);
+        let first_near = first
+            .iter()
+            .filter(|event| event.kind == PeerConflictKind::NearDuplicateCandidate.as_str())
+            .cloned()
+            .collect::<Vec<_>>();
+        let second_near = second
+            .iter()
+            .filter(|event| event.kind == PeerConflictKind::NearDuplicateCandidate.as_str())
+            .cloned()
+            .collect::<Vec<_>>();
+
+        ensure(first_near.len(), 2, "near duplicate event count")?;
+        ensure(
+            first_near.clone(),
+            second_near,
+            "near duplicate ordering must not depend on peer input order",
+        )?;
+        let distances = first_near
+            .iter()
+            .map(|event| {
+                event
+                    .near_duplicate_score
+                    .as_ref()
+                    .map(|score| score.hamming_distance)
+                    .ok_or_else(|| "near duplicate score missing".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut sorted_distances = distances.clone();
+        sorted_distances.sort_unstable();
+        ensure(distances, sorted_distances, "near duplicate hamming order")
+    }
+
+    #[test]
+    fn peer_conflict_scores_rule_predicate_inversions() -> TestResult {
+        let primary = peer_conflict_memory(
+            "local-memory-1",
+            "Always run cargo fmt before release.",
+            "agent_validated",
+        );
+        let peer = peer_conflict_memory(
+            "peer-memory-1",
+            "Never run cargo fmt before release.",
+            "agent_assertion",
+        );
+        let events = detect_peer_memory_conflicts(&primary, &[peer], &peer_conflict_options());
+        let contradiction = events
+            .iter()
+            .find(|event| event.kind == PeerConflictKind::ContradictionCandidate.as_str())
+            .ok_or_else(|| "expected contradiction candidate event".to_string())?;
+        let score = contradiction
+            .contradiction_score
+            .as_ref()
+            .ok_or_else(|| "contradiction score missing".to_string())?;
+
+        ensure(
+            contradiction.detector_verdict,
+            PeerConflictDetectorVerdict::Contradiction.as_str(),
+            "contradiction verdict",
+        )?;
+        ensure(
+            score.signal,
+            PeerContradictionSignal::RulePredicateInversion.as_str(),
+            "contradiction signal",
+        )?;
+        if score.score < 0.7 {
+            return Err(format!("contradiction score too low: {}", score.score));
+        }
+        Ok(())
     }
 
     #[test]
