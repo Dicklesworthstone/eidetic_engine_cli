@@ -1,0 +1,38 @@
+{
+  "scenario": "unknown_fields",
+  "description": "Rust serde request handling tolerates future requester fields before the schema gate narrows persisted fixtures.",
+  "request": {
+    "schema": "ee.mesh.hello.v1",
+    "requestId": "req-unknown-fields",
+    "requesterNodeKey": "nodekey:caller",
+    "requesterEeVersion": "0.2.0",
+    "requesterEeProtocolVersion": "1.0",
+    "requesterWorkspaceIds": ["workspace-alpha"],
+    "requesterCapabilities": ["discovery"],
+    "requesterAdvertisedTags": ["tag:ee-mesh"],
+    "futureRequesterHint": "ignored-by-current-handler"
+  },
+  "responderContext": {
+    "meshEnabled": true,
+    "tailscaleAuthenticated": true,
+    "shieldsUp": false,
+    "respondMode": "auto_admit",
+    "responderAdvertisedTags": ["tag:ee-mesh"],
+    "rateLimited": false
+  },
+  "expected": {
+    "kind": "granted",
+    "response": {
+      "schema": "ee.mesh.hello.response.v1",
+      "requestId": "req-unknown-fields",
+      "responderNodeKey": "nodekey:responder",
+      "responderEeVersion": "0.2.0",
+      "responderEeProtocolVersion": "1.0",
+      "responderWorkspaceIds": ["workspace-alpha"],
+      "responderCapabilities": ["discovery"],
+      "responderAdvertisedTags": ["tag:ee-mesh"],
+      "discoveryConsent": true,
+      "responseElapsedMicros": 42
+    }
+  }
+}

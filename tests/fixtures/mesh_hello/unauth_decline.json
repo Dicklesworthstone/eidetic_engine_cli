@@ -1,0 +1,31 @@
+{
+  "scenario": "unauth_decline",
+  "description": "Responder declines when tailscaled is reachable but unauthenticated.",
+  "request": {
+    "schema": "ee.mesh.hello.v1",
+    "requestId": "req-unauth",
+    "requesterNodeKey": "nodekey:caller",
+    "requesterEeVersion": "0.2.0",
+    "requesterEeProtocolVersion": "1.0",
+    "requesterWorkspaceIds": ["workspace-alpha"],
+    "requesterCapabilities": ["discovery"],
+    "requesterAdvertisedTags": ["tag:ee-mesh"]
+  },
+  "responderContext": {
+    "meshEnabled": true,
+    "tailscaleAuthenticated": false,
+    "shieldsUp": false,
+    "respondMode": "auto_admit",
+    "responderAdvertisedTags": ["tag:ee-mesh"],
+    "rateLimited": false
+  },
+  "expected": {
+    "kind": "declined",
+    "error": {
+      "schema": "ee.mesh.hello.error.v1",
+      "requestId": "req-unauth",
+      "discoveryConsent": false,
+      "code": "responder_unauthenticated_tailscale"
+    }
+  }
+}

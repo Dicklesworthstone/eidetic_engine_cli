@@ -518,6 +518,10 @@ run_stage "Fake Tailscale Harness E2E (SRR6.46.10)" "./scripts/e2e_overhaul/lib/
 # no-network status surface covered by the deterministic fake Tailscale CLI.
 run_stage "Tailscale Local Probe E2E (SRR6.46.1)" "./scripts/e2e_overhaul/tailscale_local_probe.sh"
 
+# Gate 6.9: Mesh hello protocol contract (SRR6.46.6). Static/no-Cargo gate
+# covering the bounded hello request/response/error schemas and fixtures.
+run_stage "Mesh Hello Handshake E2E (SRR6.46.6)" "./scripts/e2e_overhaul/mesh_hello_handshake.sh"
+
 # Gate 7: Advanced End-to-End
 run_stage "Advanced E2E Scripts" "./scripts/e2e_advanced.sh"
 
