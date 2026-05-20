@@ -88,6 +88,13 @@
                   "why": {"type": "string"},
                   "provenance": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
                   "trust": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+                  "selection": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "scoreBreakdown": {"$ref": "#/$defs/pprScoreBreakdown"}
+                    }
+                  },
                   "diversityKey": {"type": ["string", "null"]},
                   "selectedIn": {"type": "string"},
                   "lifecycle": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
@@ -138,6 +145,16 @@
         {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
         {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
       ]
+    },
+    "pprScoreBreakdown": {
+      "type": "object",
+      "required": ["textScore", "pprScore", "combinedScore"],
+      "additionalProperties": false,
+      "properties": {
+        "textScore": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "pprScore": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "combinedScore": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+      }
     }
   }
 }
