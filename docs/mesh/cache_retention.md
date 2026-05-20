@@ -49,3 +49,9 @@ Before eager body or embedding replication, callers should run the admission
 warning check. A warning is emitted when the candidate would exceed a global,
 per-peer, or lane quota, or when it would cross the near-limit threshold. The
 warning is advisory; the actual cleanup decision remains the retention plan.
+
+## Verification
+
+Run `scripts/e2e_mesh_cache_retention.sh` to emit the SRR6.26 scheduled
+`ee.test_event.v1` matrix and execute the focused `mesh_cache` Rust test through
+RCH. The script refuses to run Cargo locally if RCH is unavailable.
