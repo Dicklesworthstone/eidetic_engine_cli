@@ -24056,7 +24056,7 @@ where
         limit: args.limit,
         include_tombstoned: args.include_tombstoned,
     };
-    let report = match crate::core::memory_drift::build_memory_drift_report(&options) {
+    let report = match crate::core::memory_drift::build_memory_drift_report_read_only(&options) {
         Ok(report) => report,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };

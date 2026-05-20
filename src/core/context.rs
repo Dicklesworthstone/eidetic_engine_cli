@@ -2164,10 +2164,11 @@ fn push_selected_context_memory_drift_degradations(
                 .unwrap_or("memory_drift_source_unverifiable"),
             context_severity_for_memory_drift_hint(hint),
             format!(
-                "Context pack selected {count} memor{suffix} with stale provenance evidence; highest-risk status={} memoryId={} reason={}.",
+                "Context pack selected {count} memor{suffix} with stale provenance evidence; highest-risk status={} memoryId={} reason={} evidenceCount={}.",
                 hint.drift_status.as_str(),
                 hint.memory_id,
                 hint.top_reason,
+                hint.evidence_count,
                 count = hints.len(),
                 suffix = if hints.len() == 1 { "y" } else { "ies" },
             ),
@@ -10628,6 +10629,7 @@ mod tests {
                 .message
                 .contains("reason=provenance_chain_missing")
         );
+        assert!(degraded[0].message.contains("evidenceCount=1"));
         assert_eq!(
             draft
                 .items

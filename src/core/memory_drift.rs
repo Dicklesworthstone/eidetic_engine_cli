@@ -1643,6 +1643,7 @@ fn blake3_prefix(bytes: &[u8], chars: usize) -> String {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
 
     fn sample_snapshot(anchors: Vec<MemoryDriftAnchor>) -> MemoryDriftSnapshot {
         MemoryDriftSnapshot::new(
@@ -2335,5 +2336,76 @@ mod tests {
         let one_expected: MemoryDriftReport =
             serde_json::from_str(one_fixture).expect("one-memory report golden remains valid JSON");
         assert_eq!(one_report, one_expected);
+    }
+
+    #[test]
+    fn report_builder_is_read_only_over_existing_database() -> Result<(), String> {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_path = Path::new("/tmp/ee-memory-drift-read-only");
+        let workspace_id = stable_workspace_id(workspace_path);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("memory drift read only".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_driftreadonly0000000000001",
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Check memory drift before reusing stale source-grounded memories."
+                        .to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.7,
+                    importance: 0.8,
+                    provenance_uri: Some("file://AGENTS.md#L1".to_owned()),
+                    trust_class: "agent_assertion".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(
+                "UPDATE memories SET provenance_verification_status = 'mismatch', provenance_chain_hash = 'blake3:changed' WHERE id = 'mem_driftreadonly0000000000001'",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let audit_before = connection
+            .list_audit_entries(Some(&workspace_id), None)
+            .map_err(|error| error.to_string())?
+            .len();
+        let options = MemoryDriftReportOptions {
+            database_path: Path::new(":memory:"),
+            workspace_path,
+            mode: MemoryDriftReportMode::AllMemories,
+            memory_id: None,
+            limit: 10,
+            include_tombstoned: false,
+        };
+        let report = build_memory_drift_report_with_connection(&connection, &options)
+            .map_err(|error| error.to_string())?;
+        let audit_after = connection
+            .list_audit_entries(Some(&workspace_id), None)
+            .map_err(|error| error.to_string())?
+            .len();
+
+        assert_eq!(report.summary.changed, 1);
+        assert_eq!(
+            audit_after, audit_before,
+            "memory drift report must not emit audit rows"
+        );
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(())
     }
 }
