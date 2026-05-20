@@ -729,11 +729,25 @@ fn persist_regression_fixture(
     dir: &Path,
     fixture: &DeterminismRegressionFixture,
 ) -> Result<PathBuf, String> {
+    let file_name = regression_fixture_file_name(&fixture.input_hash)?;
+    validate_regression_fixture_metadata(&file_name, fixture)
+        .map_err(|error| format!("refusing to write invalid regression fixture: {error}"))?;
     reject_symlinked_regression_fixture_path_components(dir, "write")?;
     fs::create_dir_all(dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
     reject_symlinked_regression_fixture_dir(dir, "write")?;
-    let path = dir.join(regression_fixture_file_name(&fixture.input_hash)?);
+    let path = dir.join(file_name);
     reject_existing_symlinked_regression_fixture_path(&path, "write")?;
+    fs::write(&path, serialize_regression_fixture(fixture)?)
+        .map_err(|error| format!("write {}: {error}", path.display()))?;
+    Ok(path)
+}
+
+fn write_corrupt_regression_fixture_for_test(
+    dir: &Path,
+    fixture: &DeterminismRegressionFixture,
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+    let path = dir.join(regression_fixture_file_name(&fixture.input_hash)?);
     fs::write(&path, serialize_regression_fixture(fixture)?)
         .map_err(|error| format!("write {}: {error}", path.display()))?;
     Ok(path)
@@ -1408,7 +1422,8 @@ fn determinism_regression_fixture_verifies_loaded_replay_hashes() -> Result<(), 
     );
 
     fixture.expected_hash = hash_bytes(b"wrong expected bytes");
-    persist_regression_fixture(tempdir.path(), &fixture)?;
+    fixture.observed_hash_run1 = fixture.expected_hash.clone();
+    write_corrupt_regression_fixture_for_test(tempdir.path(), &fixture)?;
     let error = verify_loaded_regression_fixture_replays(tempdir.path())
         .expect_err("loaded fixtures should reject replay hash drift");
 
@@ -1732,6 +1747,29 @@ fn determinism_regression_fixture_persists_to_stable_file_name() -> Result<(), S
 
     let loaded = load_regression_fixtures(tempdir.path())?;
     assert_eq!(loaded, vec![fixture]);
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_persist_rejects_invalid_metadata() -> Result<(), String> {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let mut fixture =
+        regression_fixture_for_mismatch(124, b"invalid-persist", b"expected", b"observed")
+            .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    let path = tempdir
+        .path()
+        .join(regression_fixture_file_name(&fixture.input_hash)?);
+    fixture.observed_hash_run2 = fixture.expected_hash.clone();
+
+    let error = persist_regression_fixture(tempdir.path(), &fixture)
+        .expect_err("persist should reject invalid fixture metadata before writing");
+
+    assert!(error.contains("refusing to write invalid regression fixture"));
+    assert!(error.contains("observed_hash_run2"));
+    assert!(
+        !path.exists(),
+        "invalid regression fixture metadata must not be written"
+    );
     Ok(())
 }
 
@@ -2094,8 +2132,9 @@ fn determinism_preflight_event_rejects_replay_hash_drift_before_sampling() -> Re
     )
     .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
     fixture.expected_hash = hash_bytes(b"stale expected bytes");
+    fixture.observed_hash_run1 = fixture.expected_hash.clone();
 
-    persist_regression_fixture(tempdir.path(), &fixture)?;
+    write_corrupt_regression_fixture_for_test(tempdir.path(), &fixture)?;
     let error =
         regression_fixture_preflight_event(tempdir.path(), "2026-05-16T00:00:00Z", 90, 0.25, 60.0)
             .expect_err("preflight should reject replay drift before emitting an event");
