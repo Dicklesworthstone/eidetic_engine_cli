@@ -16,6 +16,7 @@ use super::{DatabaseConfig, DbConnection};
 
 pub const SHARD_FANOUT_STATUS_SCHEMA_V1: &str = "ee.shard_fanout.status.v1";
 pub const SHARD_FANOUT_ATTACH_PLAN_SCHEMA_V1: &str = "ee.shard_fanout.attach_plan.v1";
+pub const SHARD_FANOUT_ATTACH_EXECUTION_SCHEMA_V1: &str = "ee.shard_fanout.attach_execution.v1";
 pub const SHARD_FANOUT_MIGRATION_PLAN_SCHEMA_V1: &str = "ee.shard_fanout.migration_plan.v1";
 pub const SHARD_FANOUT_MIGRATION_AUDIT_SCHEMA_V1: &str = "ee.shard_fanout.migration_audit.v1";
 pub const SHARD_FANOUT_CATALOG_SCHEMA_VERSION: u32 = 1;
@@ -220,6 +221,8 @@ pub struct PeerShardAttachTarget {
     pub shard_id: Option<String>,
     pub attach_alias: String,
     pub shard_path: Option<PathBuf>,
+    pub read_only_uri: Option<String>,
+    pub attach_sql: Option<String>,
     pub shard_exists: bool,
     pub attachable: bool,
     pub degraded: Vec<ShardFanoutDegradation>,
@@ -237,6 +240,27 @@ pub struct PeerShardAttachPlan {
     pub targets: Vec<PeerShardAttachTarget>,
     pub attachable_count: usize,
     pub blocked: bool,
+    pub degraded: Vec<ShardFanoutDegradation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerShardAttachExecutionTarget {
+    pub workspace_id: String,
+    pub attach_alias: String,
+    pub attached: bool,
+    pub degraded: Vec<ShardFanoutDegradation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerShardAttachExecution {
+    pub schema: &'static str,
+    pub attempted_count: usize,
+    pub attached_count: usize,
+    pub blocked: bool,
+    pub query_only_sql: &'static str,
+    pub targets: Vec<PeerShardAttachExecutionTarget>,
     pub degraded: Vec<ShardFanoutDegradation>,
 }
 
@@ -749,12 +773,24 @@ pub fn plan_peer_shard_attach(input: PeerShardAttachPlanInput) -> PeerShardAttac
         }
 
         let attachable = shard_exists && target_degraded.is_empty();
+        let read_only_uri = shard_path
+            .as_ref()
+            .map(|path| sqlite_read_only_file_uri(path.as_path()));
+        let attach_sql = read_only_uri.as_ref().map(|uri| {
+            format!(
+                "ATTACH DATABASE {} AS {}",
+                sqlite_string_literal(uri),
+                sqlite_identifier(&attach_alias)
+            )
+        });
         degraded.extend(target_degraded.iter().cloned());
         targets.push(PeerShardAttachTarget {
             workspace_id,
             shard_id,
             attach_alias,
             shard_path,
+            read_only_uri,
+            attach_sql,
             shard_exists,
             attachable,
             degraded: target_degraded,
@@ -774,6 +810,93 @@ pub fn plan_peer_shard_attach(input: PeerShardAttachPlanInput) -> PeerShardAttac
         targets,
         attachable_count,
         blocked,
+        degraded,
+    }
+}
+
+pub fn execute_peer_shard_read_attach_plan(
+    connection: &DbConnection,
+    plan: &PeerShardAttachPlan,
+) -> PeerShardAttachExecution {
+    let mut targets = Vec::new();
+    let mut degraded = Vec::new();
+    let mut attempted_count = 0usize;
+    let mut attached_count = 0usize;
+
+    if !plan.enabled || plan.blocked {
+        return PeerShardAttachExecution {
+            schema: SHARD_FANOUT_ATTACH_EXECUTION_SCHEMA_V1,
+            attempted_count,
+            attached_count,
+            blocked: plan.blocked,
+            query_only_sql: "PRAGMA query_only = ON",
+            targets,
+            degraded: plan.degraded.clone(),
+        };
+    }
+
+    for target in &plan.targets {
+        if !target.attachable {
+            targets.push(PeerShardAttachExecutionTarget {
+                workspace_id: target.workspace_id.clone(),
+                attach_alias: target.attach_alias.clone(),
+                attached: false,
+                degraded: target.degraded.clone(),
+            });
+            continue;
+        }
+
+        attempted_count = attempted_count.saturating_add(1);
+        let Some(attach_sql) = target.attach_sql.as_deref() else {
+            let failure = shard_attach_failed_degradation();
+            degraded.push(failure.clone());
+            targets.push(PeerShardAttachExecutionTarget {
+                workspace_id: target.workspace_id.clone(),
+                attach_alias: target.attach_alias.clone(),
+                attached: false,
+                degraded: vec![failure],
+            });
+            continue;
+        };
+
+        match connection.execute_read_snapshot_raw(super::DbOperation::Execute, attach_sql) {
+            Ok(()) => {
+                attached_count = attached_count.saturating_add(1);
+                targets.push(PeerShardAttachExecutionTarget {
+                    workspace_id: target.workspace_id.clone(),
+                    attach_alias: target.attach_alias.clone(),
+                    attached: true,
+                    degraded: Vec::new(),
+                });
+            }
+            Err(_) => {
+                let failure = shard_attach_failed_degradation();
+                degraded.push(failure.clone());
+                targets.push(PeerShardAttachExecutionTarget {
+                    workspace_id: target.workspace_id.clone(),
+                    attach_alias: target.attach_alias.clone(),
+                    attached: false,
+                    degraded: vec![failure],
+                });
+            }
+        }
+    }
+
+    if attached_count > 0
+        && connection
+            .execute_read_snapshot_raw(super::DbOperation::Execute, "PRAGMA query_only = ON")
+            .is_err()
+    {
+        degraded.push(cross_shard_skew_detected_degradation());
+    }
+
+    PeerShardAttachExecution {
+        schema: SHARD_FANOUT_ATTACH_EXECUTION_SCHEMA_V1,
+        attempted_count,
+        attached_count,
+        blocked: false,
+        query_only_sql: "PRAGMA query_only = ON",
+        targets,
         degraded,
     }
 }
@@ -942,6 +1065,37 @@ fn shard_attach_failed_degradation() -> ShardFanoutDegradation {
     )
 }
 
+fn cross_shard_skew_detected_degradation() -> ShardFanoutDegradation {
+    ShardFanoutDegradation::new(
+        CROSS_SHARD_SKEW_DETECTED_CODE,
+        "warning",
+        "Cross-shard read planning detected inconsistent peer shard state.",
+        "Re-run the search with a fresh shard catalog snapshot or inspect ee status --json.",
+    )
+}
+
+fn sqlite_read_only_file_uri(path: &Path) -> String {
+    let mut uri = String::from("file:");
+    for byte in path.to_string_lossy().as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                uri.push(char::from(*byte));
+            }
+            byte => uri.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    uri.push_str("?mode=ro");
+    uri
+}
+
+fn sqlite_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn sqlite_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
 impl From<OsString> for ShardFanoutResolverInput {
     fn from(value: OsString) -> Self {
         Self {
@@ -981,14 +1135,16 @@ mod tests {
     use super::{
         DbShardRouter, DbShardRouterError, DbShardRoutingMode, PRE_SHARD_FANOUT_FILE_NAME,
         PeerShardAttachPlanInput, SHARD_ATTACH_FAILED_CODE, SHARD_CATALOG_FILE_NAME,
-        SHARD_FANOUT_ATTACH_PLAN_SCHEMA_V1, SHARD_FANOUT_CATALOG_MISSING_CODE,
-        SHARD_FANOUT_MIGRATION_PLAN_SCHEMA_V1, SHARD_FANOUT_STATUS_SCHEMA_V1,
-        SHARD_FANOUT_WORKSPACE_ID_UNSAFE_CODE, ShardFanoutMigrationPlanInput,
-        ShardFanoutMigrationWorkspaceInput, ShardFanoutPosture, ShardFanoutResolverInput,
-        default_shards_dir_from_values, normalize_shard_root, plan_peer_shard_attach,
+        SHARD_FANOUT_ATTACH_EXECUTION_SCHEMA_V1, SHARD_FANOUT_ATTACH_PLAN_SCHEMA_V1,
+        SHARD_FANOUT_CATALOG_MISSING_CODE, SHARD_FANOUT_MIGRATION_PLAN_SCHEMA_V1,
+        SHARD_FANOUT_STATUS_SCHEMA_V1, SHARD_FANOUT_WORKSPACE_ID_UNSAFE_CODE,
+        ShardFanoutMigrationPlanInput, ShardFanoutMigrationWorkspaceInput, ShardFanoutPosture,
+        ShardFanoutResolverInput, default_shards_dir_from_values,
+        execute_peer_shard_read_attach_plan, normalize_shard_root, plan_peer_shard_attach,
         plan_shard_fanout_migration, preserved_legacy_database_path, resolve_shard_fanout_status,
         shard_fanout_enabled_from_env_value, shard_file_path,
     };
+    use crate::db::{DatabaseConfig, DbConnection};
     use std::path::{Path, PathBuf};
 
     type TestResult = Result<(), String>;
@@ -1392,6 +1548,25 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some(expected_a.as_path()), Some(expected_b.as_path())]
         );
+        assert!(
+            plan.targets[0]
+                .read_only_uri
+                .as_deref()
+                .is_some_and(|uri| uri.starts_with("file:") && uri.ends_with("?mode=ro"))
+        );
+        assert_eq!(
+            plan.targets[0].attach_sql.as_deref(),
+            Some(
+                format!(
+                    "ATTACH DATABASE '{}' AS \"peer_0000\"",
+                    plan.targets[0]
+                        .read_only_uri
+                        .as_deref()
+                        .expect("target has read-only URI")
+                )
+                .as_str()
+            )
+        );
         Ok(())
     }
 
@@ -1512,6 +1687,78 @@ mod tests {
         let first_json = serde_json::to_string(&first).map_err(|error| error.to_string())?;
         let second_json = serde_json::to_string(&second).map_err(|error| error.to_string())?;
         assert_eq!(first_json, second_json);
+        Ok(())
+    }
+
+    #[test]
+    fn peer_attach_plan_encodes_read_only_uri_for_spaces_and_quotes() -> TestResult {
+        let temp = temp_root("ee-shard-peer-uri with spaces")?;
+        let shard_root = temp.path().join("data with spaces/shards");
+        std::fs::create_dir_all(&shard_root).map_err(|error| error.to_string())?;
+        std::fs::write(shard_file_path(&shard_root, "wsp_peer"), b"peer")
+            .map_err(|error| error.to_string())?;
+
+        let plan = plan_peer_shard_attach(PeerShardAttachPlanInput {
+            enabled: true,
+            strict: false,
+            local_workspace_id: "wsp_local".to_owned(),
+            shards_dir_override: Some(shard_root),
+            peer_workspace_ids: vec!["wsp_peer".to_owned()],
+        });
+
+        let target = &plan.targets[0];
+        let uri = target
+            .read_only_uri
+            .as_deref()
+            .ok_or_else(|| "target should carry read-only URI".to_owned())?;
+        assert!(uri.starts_with("file:"));
+        assert!(uri.contains("%20"));
+        assert!(uri.ends_with("?mode=ro"));
+        assert_eq!(
+            target.attach_sql.as_deref(),
+            Some(format!("ATTACH DATABASE '{uri}' AS \"peer_0000\"").as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn peer_attach_execution_keeps_best_effort_read_targets() -> TestResult {
+        let temp = temp_root("ee-shard-peer-exec")?;
+        let shard_root = temp.path().join("data/shards");
+        std::fs::create_dir_all(&shard_root).map_err(|error| error.to_string())?;
+        DbConnection::open(DatabaseConfig::file(shard_file_path(
+            &shard_root,
+            "wsp_present",
+        )))
+        .map_err(|error| error.to_string())?;
+
+        let plan = plan_peer_shard_attach(PeerShardAttachPlanInput {
+            enabled: true,
+            strict: false,
+            local_workspace_id: "wsp_local".to_owned(),
+            shards_dir_override: Some(shard_root),
+            peer_workspace_ids: vec!["wsp_missing".to_owned(), "wsp_present".to_owned()],
+        });
+        let connection =
+            DbConnection::open(DatabaseConfig::memory()).map_err(|error| error.to_string())?;
+        let execution = execute_peer_shard_read_attach_plan(&connection, &plan);
+
+        assert_eq!(execution.schema, SHARD_FANOUT_ATTACH_EXECUTION_SCHEMA_V1);
+        assert_eq!(execution.attempted_count, 1);
+        assert_eq!(execution.targets.len(), 2);
+        assert!(
+            execution
+                .targets
+                .iter()
+                .any(|target| target.workspace_id == "wsp_missing" && !target.attached)
+        );
+        assert!(
+            execution
+                .degraded
+                .iter()
+                .all(|entry| entry.code != SHARD_ATTACH_FAILED_CODE),
+            "planned missing shards are represented on their target, not as execution failures"
+        );
         Ok(())
     }
 

@@ -1097,7 +1097,7 @@ impl DbConnection {
 
         let cross_workspace_pack_items = self.query_for(
             DbOperation::Query,
-            "SELECT pi.pack_id, pi.memory_id, pr.workspace_id, m.workspace_id
+            "SELECT pi.pack_id, pi.memory_id, pr.workspace_id, m.workspace_id, pi.provenance_json
              FROM pack_items pi
              JOIN pack_records pr ON pr.id = pi.pack_id
              JOIN memories m ON m.id = pi.memory_id
@@ -1112,6 +1112,15 @@ impl DbConnection {
                 required_text(&row, 2, DbOperation::Query, "pack.workspace_id")?.to_string();
             let memory_workspace_id =
                 required_text(&row, 3, DbOperation::Query, "memory.workspace_id")?.to_string();
+            let provenance_json =
+                required_text(&row, 4, DbOperation::Query, "provenance_json")?.to_string();
+            if pack_item_cross_shard_reference_is_explicit(
+                &provenance_json,
+                &pack_workspace_id,
+                &memory_workspace_id,
+            ) {
+                continue;
+            }
             issues.push(ReferenceIntegrityIssue {
                 scope: ReferenceIntegrityScope::PackItem,
                 code: ReferenceIntegrityCode::CrossWorkspacePackItem,
@@ -1935,6 +1944,30 @@ impl ReferenceIntegrityReport {
     pub fn is_clean(&self) -> bool {
         self.issue_count == 0
     }
+}
+
+fn pack_item_cross_shard_reference_is_explicit(
+    provenance_json: &str,
+    pack_workspace_id: &str,
+    memory_workspace_id: &str,
+) -> bool {
+    let Ok(provenance) = serde_json::from_str::<serde_json::Value>(provenance_json) else {
+        return false;
+    };
+    provenance
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                let note = entry
+                    .get("note")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                note.contains("cross_shard_read")
+                    && note.contains(&format!("origin_workspace_id={memory_workspace_id}"))
+                    && note.contains(&format!("pack_workspace_id={pack_workspace_id}"))
+            })
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24613,6 +24646,29 @@ mod tests {
 
         connection.close()?;
         Ok(())
+    }
+
+    #[test]
+    fn cross_shard_pack_item_provenance_allows_intentional_workspace_reference() {
+        let provenance_json = serde_json::json!({
+            "schema": "ee.pack_item.provenance.v1",
+            "entries": [{
+                "uri": "ee://memory/mem_00000000000000000000000102",
+                "note": "Memory mem_00000000000000000000000102 selected by cross_shard_read; origin_workspace_id=wsp_peer; pack_workspace_id=wsp_local; evidenceFreshness=current"
+            }]
+        })
+        .to_string();
+
+        assert!(super::pack_item_cross_shard_reference_is_explicit(
+            &provenance_json,
+            "wsp_local",
+            "wsp_peer"
+        ));
+        assert!(!super::pack_item_cross_shard_reference_is_explicit(
+            &provenance_json,
+            "wsp_other",
+            "wsp_peer"
+        ));
     }
 
     #[test]

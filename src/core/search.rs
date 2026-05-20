@@ -3341,6 +3341,21 @@ fn sort_search_hits_by_score_order(hits: &mut [SearchHit]) {
 }
 
 fn sort_search_hit_score_tie_by_doc_id(hits: &mut [SearchHit]) {
+    hits.sort_by(|left, right| search_hit_workspace_id(left).cmp(search_hit_workspace_id(right)));
+    let mut run_start = 0_usize;
+    while run_start < hits.len() {
+        let mut run_end = run_start + 1;
+        while run_end < hits.len()
+            && search_hit_workspace_id(&hits[run_start]) == search_hit_workspace_id(&hits[run_end])
+        {
+            run_end += 1;
+        }
+        sort_search_hit_score_tie_by_doc_id_within_workspace(&mut hits[run_start..run_end]);
+        run_start = run_end;
+    }
+}
+
+fn sort_search_hit_score_tie_by_doc_id_within_workspace(hits: &mut [SearchHit]) {
     if hits.iter().all(|hit| hit.doc_id.starts_with("mem_")) {
         let mut ordered = hits.to_vec();
         sort_by_ulid_payload_or_lexical(&mut ordered, |hit| hit.doc_id.as_str());
@@ -3348,6 +3363,23 @@ fn sort_search_hit_score_tie_by_doc_id(hits: &mut [SearchHit]) {
     } else {
         hits.sort_by(|left, right| left.doc_id.cmp(&right.doc_id));
     }
+}
+
+fn search_hit_workspace_id(hit: &SearchHit) -> &str {
+    hit.metadata
+        .as_ref()
+        .and_then(|metadata| metadata_string(metadata, "workspace_id"))
+        .or_else(|| {
+            hit.metadata
+                .as_ref()
+                .and_then(|metadata| metadata_string(metadata, "workspaceId"))
+        })
+        .or_else(|| {
+            hit.metadata
+                .as_ref()
+                .and_then(|metadata| metadata_string(metadata, "origin_workspace_id"))
+        })
+        .unwrap_or("")
 }
 
 fn option_scores_equivalent(left: Option<f32>, right: Option<f32>) -> bool {
@@ -6810,6 +6842,35 @@ mod tests {
             vec![
                 "doc_01J0000000000000000000000C",
                 "mem_01J0000000000000000000000A",
+            ]
+        );
+    }
+
+    #[test]
+    fn search_hit_sort_orders_cross_shard_ties_by_workspace_then_memory() {
+        let mut shard_b = synthetic_hit("mem_01J0000000000000000000000A", 0.20);
+        shard_b.metadata = Some(serde_json::json!({"workspace_id": "wsp_b"}));
+        let mut shard_a_later = synthetic_hit("mem_01J0000000000000000000000C", 0.20);
+        shard_a_later.metadata = Some(serde_json::json!({"workspace_id": "wsp_a"}));
+        let mut shard_a_earlier = synthetic_hit("mem_01J0000000000000000000000B", 0.20);
+        shard_a_earlier.metadata = Some(serde_json::json!({"workspace_id": "wsp_a"}));
+        let mut no_workspace = synthetic_hit("mem_01J0000000000000000000000D", 0.20);
+        no_workspace.metadata = Some(serde_json::json!({"source": "memory"}));
+        let mut hits = vec![shard_b, shard_a_later, no_workspace, shard_a_earlier];
+
+        sort_search_hits_by_score_order(&mut hits);
+
+        let sorted = hits
+            .iter()
+            .map(|hit| (search_hit_workspace_id(hit).to_owned(), hit.doc_id.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sorted,
+            vec![
+                ("".to_owned(), "mem_01J0000000000000000000000D"),
+                ("wsp_a".to_owned(), "mem_01J0000000000000000000000B"),
+                ("wsp_a".to_owned(), "mem_01J0000000000000000000000C"),
+                ("wsp_b".to_owned(), "mem_01J0000000000000000000000A"),
             ]
         );
     }

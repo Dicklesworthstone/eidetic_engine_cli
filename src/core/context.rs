@@ -2218,8 +2218,40 @@ fn lexical_memory_fallback_hits(
 }
 
 fn sort_scored_memories_by_score_then_memory_id(scored: &mut Vec<(StoredMemory, f32)>) {
-    sort_by_ulid_payload_or_lexical(scored, |(memory, _)| memory.id.as_str());
     scored.sort_by(|(_, left_score), (_, right_score)| right_score.total_cmp(left_score));
+    let mut score_run_start = 0_usize;
+    while score_run_start < scored.len() {
+        let mut score_run_end = score_run_start + 1;
+        while score_run_end < scored.len()
+            && scored[score_run_start]
+                .1
+                .total_cmp(&scored[score_run_end].1)
+                == std::cmp::Ordering::Equal
+        {
+            score_run_end += 1;
+        }
+        sort_scored_memory_score_tie_by_workspace_then_memory_id(
+            &mut scored[score_run_start..score_run_end],
+        );
+        score_run_start = score_run_end;
+    }
+}
+
+fn sort_scored_memory_score_tie_by_workspace_then_memory_id(scored: &mut [(StoredMemory, f32)]) {
+    scored.sort_by(|(left, _), (right, _)| left.workspace_id.cmp(&right.workspace_id));
+    let mut run_start = 0_usize;
+    while run_start < scored.len() {
+        let mut run_end = run_start + 1;
+        while run_end < scored.len()
+            && scored[run_start].0.workspace_id == scored[run_end].0.workspace_id
+        {
+            run_end += 1;
+        }
+        sort_by_ulid_payload_or_lexical(&mut scored[run_start..run_end], |(memory, _)| {
+            memory.id.as_str()
+        });
+        run_start = run_end;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5861,11 +5893,22 @@ fn provenance_for_memory(
     if freshness.status.should_report() {
         push_evidence_freshness_degradation(memory, &freshness, degraded);
     }
-    let note = format!(
-        "Memory {} selected for context pack; evidenceFreshness={}",
-        memory.id,
-        freshness.status.as_str()
-    );
+    let active_workspace_id = stable_context_workspace_id(workspace_path);
+    let note = if memory.workspace_id == active_workspace_id {
+        format!(
+            "Memory {} selected for context pack; evidenceFreshness={}",
+            memory.id,
+            freshness.status.as_str()
+        )
+    } else {
+        format!(
+            "Memory {} selected by cross_shard_read; origin_workspace_id={}; pack_workspace_id={}; evidenceFreshness={}",
+            memory.id,
+            memory.workspace_id,
+            active_workspace_id,
+            freshness.status.as_str()
+        )
+    };
 
     PackProvenance::new(uri, note).ok()
 }
@@ -7321,6 +7364,56 @@ mod tests {
             .map(|(memory, _)| memory.id)
             .collect::<Vec<_>>();
         assert_eq!(ids, vec![top_score_id, lower_id, higher_id]);
+    }
+
+    #[test]
+    fn lexical_fallback_score_ties_include_workspace_tiebreaker() {
+        let local_id = MemoryId::from_uuid(uuid::Uuid::from_u128(7040)).to_string();
+        let peer_id = MemoryId::from_uuid(uuid::Uuid::from_u128(7030)).to_string();
+        let mut local =
+            stored_memory_with_time("2026-05-01T12:00:00Z", "2026-05-01T12:00:00Z", None, None);
+        local.id = local_id.clone();
+        local.workspace_id = "wsp_b".to_owned();
+        let mut peer = local.clone();
+        peer.id = peer_id.clone();
+        peer.workspace_id = "wsp_a".to_owned();
+
+        let mut scored = vec![(local, 0.7), (peer, 0.7)];
+        super::sort_scored_memories_by_score_then_memory_id(&mut scored);
+
+        let ordered = scored
+            .into_iter()
+            .map(|(memory, _)| (memory.workspace_id, memory.id))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered,
+            vec![
+                ("wsp_a".to_owned(), peer_id),
+                ("wsp_b".to_owned(), local_id)
+            ]
+        );
+    }
+
+    #[test]
+    fn provenance_marks_intentional_cross_shard_context_memory() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut memory =
+            stored_memory_with_time("2026-05-01T12:00:00Z", "2026-05-01T12:00:00Z", None, None);
+        memory.workspace_id = "wsp_peer".to_owned();
+        let memory_id = memory
+            .id
+            .parse::<MemoryId>()
+            .map_err(|error| error.to_string())?;
+        let mut degraded = Vec::new();
+
+        let provenance =
+            super::provenance_for_memory(&memory, memory_id, temp.path(), &mut degraded)
+                .ok_or_else(|| "cross-shard provenance should render".to_owned())?;
+
+        assert!(provenance.note.contains("cross_shard_read"));
+        assert!(provenance.note.contains("origin_workspace_id=wsp_peer"));
+        assert!(provenance.note.contains("pack_workspace_id="));
+        Ok(())
     }
 
     #[test]

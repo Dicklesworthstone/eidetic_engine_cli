@@ -69,6 +69,8 @@ in the same commit, keeping the catalog complete by construction.
 | `shard_fanout_shard_missing` | status | warning | bd-f6jfs.2 |
 | `shard_fanout_workspace_id_unsafe` | status | high | bd-f6jfs.2 |
 | `shard_fanout_workspace_unavailable` | status | warning | bd-f6jfs.2 |
+| `shard_attach_failed` | search, context | warning | bd-f6jfs.5 |
+| `cross_shard_skew_detected` | search, context | warning | bd-f6jfs.5 |
 | `snapshot_pin_expired` | context, status | medium | bd-2caru.6 |
 | `snapshot_release_failed` | context, status | medium | bd-2caru.6 |
 | `snapshot_pin_force_released` | status, workspace close | medium | bd-2caru.6 |

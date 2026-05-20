@@ -1,0 +1,34 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "cross_shard_skew_detected",
+  "introduced_by": {
+    "bead": "bd-f6jfs.5",
+    "epic_letter": "SHARD_FANOUT"
+  },
+  "surfaces": [
+    "search",
+    "context"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A cross-shard read observed inconsistent peer shard state while constructing a read-only attach snapshot for search or context.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "mkdir -p /tmp/ee-shard-root/shards",
+      "touch /tmp/ee-shard-root/catalog.db"
+    ],
+    "invocation": "EE_SHARD_FANOUT_ENABLED=1 EE_SHARDS_DIR=/tmp/ee-shard-root/shards ee context 'release' --workspace . --memory-scope swarm --json"
+  },
+  "expected_emission": {
+    "code": "cross_shard_skew_detected",
+    "severity": "warning",
+    "message_contains": [
+      "Cross-shard read",
+      "inconsistent peer shard state"
+    ],
+    "repair_contains": "ee status --json",
+    "repair_string": "Re-run the search with a fresh shard catalog snapshot or inspect ee status --json.",
+    "repair_command_regex": "(?<cmd>ee status --json)"
+  }
+}
