@@ -10,8 +10,13 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MESH_CACHE_RETENTION_SCHEMA_V1: &str = "ee.mesh.cache_retention.v1";
+pub const MESH_WITHDRAWAL_PURGE_SCHEMA_V1: &str = "ee.mesh.withdrawal_purge.v1";
 pub const MESH_CACHE_EVICT_AUDIT_ACTION: &str = "mesh.cache.evict";
 pub const MESH_CACHE_PURGE_AUDIT_ACTION: &str = "mesh.cache.purge";
+pub const WITHDRAWAL_RESIDUAL_METADATA_REASON: &str =
+    "metadata_tombstone_preserves_withdrawal_provenance";
+pub const WITHDRAWAL_UNAVAILABLE_PEER_REPLAY_REASON: &str =
+    "peer_unreachable_withdrawal_replay_required";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum MeshCacheLane {
@@ -167,6 +172,18 @@ impl MeshCacheEntry {
     #[must_use]
     pub fn with_content_hash(mut self, content_hash: impl Into<String>) -> Self {
         self.content_hash = Some(content_hash.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_origin_workspace_id(mut self, origin_workspace_id: impl Into<String>) -> Self {
+        self.origin_workspace_id = origin_workspace_id.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_logical_memory_id(mut self, logical_memory_id: impl Into<String>) -> Self {
+        self.logical_memory_id = logical_memory_id.into();
         self
     }
 
@@ -366,6 +383,109 @@ pub struct MeshCacheRetentionPlan {
     pub protected_local_source_truth_count: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshWithdrawalPeerDelivery {
+    pub peer_id: String,
+    pub reachable: bool,
+}
+
+impl MeshWithdrawalPeerDelivery {
+    #[must_use]
+    pub fn reachable(peer_id: impl Into<String>) -> Self {
+        Self {
+            peer_id: peer_id.into(),
+            reachable: true,
+        }
+    }
+
+    #[must_use]
+    pub fn unreachable(peer_id: impl Into<String>) -> Self {
+        Self {
+            peer_id: peer_id.into(),
+            reachable: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshWithdrawalPurgeInput {
+    pub entries: Vec<MeshCacheEntry>,
+    pub origin_workspace_id: String,
+    pub logical_memory_id: String,
+    pub peer_deliveries: Vec<MeshWithdrawalPeerDelivery>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum MeshWithdrawalLogKind {
+    WithdrawalEvent,
+    PurgeRequested,
+    PurgeApplied,
+    PeerUnreachable,
+    ResidualMetadataReason,
+}
+
+impl MeshWithdrawalLogKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WithdrawalEvent => "withdrawal_event",
+            Self::PurgeRequested => "purge_requested",
+            Self::PurgeApplied => "purge_applied",
+            Self::PeerUnreachable => "peer_unreachable",
+            Self::ResidualMetadataReason => "residual_metadata_reason",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshWithdrawalPurgeLog {
+    pub kind: MeshWithdrawalLogKind,
+    pub peer_id: Option<String>,
+    pub cache_key: Option<String>,
+    pub lane: Option<MeshCacheLane>,
+    pub reason: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshWithdrawalResidualMetadata {
+    pub cache_key: String,
+    pub peer_id: String,
+    pub status: MeshCacheStatus,
+    pub reason: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshWithdrawalReplayTarget {
+    pub peer_id: String,
+    pub reason: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshWithdrawalPurgePlan {
+    pub schema: &'static str,
+    pub origin_workspace_id: String,
+    pub logical_memory_id: String,
+    pub cache_bytes_before: u64,
+    pub cache_bytes_after: u64,
+    pub evictions: Vec<MeshCacheEviction>,
+    pub residual_metadata: Vec<MeshWithdrawalResidualMetadata>,
+    pub replay_targets: Vec<MeshWithdrawalReplayTarget>,
+    pub logs: Vec<MeshWithdrawalPurgeLog>,
+    pub protected_local_source_truth_count: usize,
+}
+
+impl MeshWithdrawalPurgePlan {
+    #[must_use]
+    pub fn purged_count(&self) -> usize {
+        self.evictions.len()
+    }
+
+    #[must_use]
+    pub fn residual_metadata_count(&self) -> usize {
+        self.residual_metadata.len()
+    }
+}
+
 impl MeshCacheRetentionPlan {
     #[must_use]
     pub const fn cache_bytes_before(&self) -> u64 {
@@ -456,6 +576,112 @@ pub fn plan_mesh_cache_retention(input: &MeshCacheRetentionInput) -> MeshCacheRe
             &mut evictions,
             reason,
         );
+    }
+}
+
+#[must_use]
+pub fn plan_mesh_withdrawal_cache_purge(
+    input: &MeshWithdrawalPurgeInput,
+) -> MeshWithdrawalPurgePlan {
+    let mut remaining: BTreeSet<usize> = input
+        .entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| entry.is_billable_cache().then_some(index))
+        .collect();
+    let cache_bytes_before = usage_for(&input.entries, &remaining).total_bytes;
+    let mut evictions = Vec::new();
+    let mut residual_metadata = Vec::new();
+    let mut replay_targets = Vec::new();
+    let mut logs = vec![
+        MeshWithdrawalPurgeLog {
+            kind: MeshWithdrawalLogKind::WithdrawalEvent,
+            peer_id: None,
+            cache_key: None,
+            lane: None,
+            reason: "share_withdrawal_observed",
+        },
+        MeshWithdrawalPurgeLog {
+            kind: MeshWithdrawalLogKind::PurgeRequested,
+            peer_id: None,
+            cache_key: None,
+            lane: None,
+            reason: "best_effort_peer_cache_body_purge",
+        },
+    ];
+    let mut protected_local_source_truth_count = 0;
+
+    let mut candidates: Vec<usize> = input
+        .entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| matches_withdrawal(entry, input).then_some(index))
+        .collect();
+    sort_withdrawal_candidates(&mut candidates, &input.entries);
+
+    for index in candidates {
+        let entry = &input.entries[index];
+        if entry.boundary == MeshCacheBoundary::LocalSourceTruth {
+            protected_local_source_truth_count += 1;
+            continue;
+        }
+        if entry.lane == MeshCacheLane::Metadata {
+            residual_metadata.push(MeshWithdrawalResidualMetadata {
+                cache_key: entry.cache_key.clone(),
+                peer_id: entry.peer_id.clone(),
+                status: entry.status,
+                reason: WITHDRAWAL_RESIDUAL_METADATA_REASON,
+            });
+            logs.push(MeshWithdrawalPurgeLog {
+                kind: MeshWithdrawalLogKind::ResidualMetadataReason,
+                peer_id: Some(entry.peer_id.clone()),
+                cache_key: Some(entry.cache_key.clone()),
+                lane: Some(entry.lane),
+                reason: WITHDRAWAL_RESIDUAL_METADATA_REASON,
+            });
+            continue;
+        }
+        if purge_index(index, &input.entries, &mut remaining, &mut evictions) {
+            logs.push(MeshWithdrawalPurgeLog {
+                kind: MeshWithdrawalLogKind::PurgeApplied,
+                peer_id: Some(entry.peer_id.clone()),
+                cache_key: Some(entry.cache_key.clone()),
+                lane: Some(entry.lane),
+                reason: MeshCacheEvictionReason::ManualPurge.as_str(),
+            });
+        }
+    }
+
+    let mut peer_deliveries = input.peer_deliveries.clone();
+    peer_deliveries.sort_by(|left, right| left.peer_id.cmp(&right.peer_id));
+    for delivery in peer_deliveries {
+        if delivery.reachable {
+            continue;
+        }
+        replay_targets.push(MeshWithdrawalReplayTarget {
+            peer_id: delivery.peer_id.clone(),
+            reason: WITHDRAWAL_UNAVAILABLE_PEER_REPLAY_REASON,
+        });
+        logs.push(MeshWithdrawalPurgeLog {
+            kind: MeshWithdrawalLogKind::PeerUnreachable,
+            peer_id: Some(delivery.peer_id),
+            cache_key: None,
+            lane: None,
+            reason: WITHDRAWAL_UNAVAILABLE_PEER_REPLAY_REASON,
+        });
+    }
+
+    MeshWithdrawalPurgePlan {
+        schema: MESH_WITHDRAWAL_PURGE_SCHEMA_V1,
+        origin_workspace_id: input.origin_workspace_id.clone(),
+        logical_memory_id: input.logical_memory_id.clone(),
+        cache_bytes_before,
+        cache_bytes_after: usage_for(&input.entries, &remaining).total_bytes,
+        evictions,
+        residual_metadata,
+        replay_targets,
+        logs,
+        protected_local_source_truth_count,
     }
 }
 
@@ -564,6 +790,35 @@ fn evict_index(
         cache_bytes_after: after.total_bytes,
         evicted_count: 1,
     });
+}
+
+fn purge_index(
+    index: usize,
+    entries: &[MeshCacheEntry],
+    remaining: &mut BTreeSet<usize>,
+    evictions: &mut Vec<MeshCacheEviction>,
+) -> bool {
+    if !remaining.contains(&index) {
+        return false;
+    }
+    let before = usage_for(entries, remaining);
+    remaining.remove(&index);
+    let after = usage_for(entries, remaining);
+    let entry = &entries[index];
+    evictions.push(MeshCacheEviction {
+        cache_key: entry.cache_key.clone(),
+        peer_id: entry.peer_id.clone(),
+        lane: entry.lane,
+        bytes: entry.bytes,
+        status_before: entry.status,
+        status_after: MeshCacheStatus::Evicted,
+        reason: MeshCacheEvictionReason::ManualPurge,
+        audit_action: MESH_CACHE_PURGE_AUDIT_ACTION,
+        cache_bytes_before: before.total_bytes,
+        cache_bytes_after: after.total_bytes,
+        evicted_count: 1,
+    });
+    true
 }
 
 fn quota_violations(
@@ -706,6 +961,22 @@ fn sort_eviction_candidates(candidates: &mut [usize], entries: &[MeshCacheEntry]
     candidates.sort_by(|left, right| compare_eviction_candidate(&entries[*left], &entries[*right]));
 }
 
+fn matches_withdrawal(entry: &MeshCacheEntry, input: &MeshWithdrawalPurgeInput) -> bool {
+    entry.origin_workspace_id == input.origin_workspace_id
+        && entry.logical_memory_id == input.logical_memory_id
+}
+
+fn sort_withdrawal_candidates(candidates: &mut [usize], entries: &[MeshCacheEntry]) {
+    candidates.sort_by(|left, right| {
+        let left = &entries[*left];
+        let right = &entries[*right];
+        left.peer_id
+            .cmp(&right.peer_id)
+            .then_with(|| left.lane.eviction_rank().cmp(&right.lane.eviction_rank()))
+            .then_with(|| left.cache_key.cmp(&right.cache_key))
+    });
+}
+
 fn compare_eviction_candidate(left: &MeshCacheEntry, right: &MeshCacheEntry) -> Ordering {
     left.retention_score
         .cmp(&right.retention_score)
@@ -812,5 +1083,127 @@ mod tests {
         assert_eq!(plan.evictions[0].cache_key, "expired-high");
         assert_eq!(plan.evictions[0].reason, MeshCacheEvictionReason::Expired);
         assert_eq!(plan.cache_bytes_after(), 100);
+    }
+
+    #[test]
+    fn withdrawal_purges_body_and_embedding_but_keeps_metadata_tombstone() {
+        let input = MeshWithdrawalPurgeInput {
+            entries: vec![
+                withdrawn_entry("meta-a", "peer_alpha", MeshCacheLane::Metadata, 20),
+                withdrawn_entry("body-a", "peer_alpha", MeshCacheLane::Body, 200),
+                withdrawn_entry("embed-a", "peer_alpha", MeshCacheLane::Embedding, 80),
+                MeshCacheEntry::derived("body-other", "peer_alpha", MeshCacheLane::Body, 50)
+                    .with_origin_workspace_id("wsp_remote")
+                    .with_logical_memory_id("mem_other"),
+            ],
+            origin_workspace_id: "wsp_remote".to_owned(),
+            logical_memory_id: "mem_withdrawn".to_owned(),
+            peer_deliveries: vec![
+                MeshWithdrawalPeerDelivery::reachable("peer_alpha"),
+                MeshWithdrawalPeerDelivery::unreachable("peer_beta"),
+            ],
+        };
+
+        let plan = plan_mesh_withdrawal_cache_purge(&input);
+
+        assert_eq!(plan.schema, MESH_WITHDRAWAL_PURGE_SCHEMA_V1);
+        assert_eq!(plan.cache_bytes_before, 350);
+        assert_eq!(plan.cache_bytes_after, 70);
+        assert_eq!(plan.purged_count(), 2);
+        assert_eq!(plan.residual_metadata_count(), 1);
+        assert_eq!(plan.residual_metadata[0].cache_key, "meta-a");
+        assert_eq!(
+            plan.residual_metadata[0].reason,
+            WITHDRAWAL_RESIDUAL_METADATA_REASON
+        );
+        assert!(plan.evictions.iter().all(|eviction| {
+            eviction.reason == MeshCacheEvictionReason::ManualPurge
+                && eviction.audit_action == MESH_CACHE_PURGE_AUDIT_ACTION
+        }));
+        assert_eq!(
+            plan.evictions
+                .iter()
+                .map(|eviction| eviction.cache_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["body-a", "embed-a"]
+        );
+        assert_eq!(
+            plan.logs
+                .iter()
+                .map(|log| log.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "withdrawal_event",
+                "purge_requested",
+                "purge_applied",
+                "purge_applied",
+                "residual_metadata_reason",
+                "peer_unreachable"
+            ]
+        );
+        assert_eq!(plan.replay_targets[0].peer_id, "peer_beta");
+    }
+
+    #[test]
+    fn withdrawal_never_purges_local_source_truth_even_when_ids_match() {
+        let input = MeshWithdrawalPurgeInput {
+            entries: vec![
+                MeshCacheEntry::local_source_truth("local-body", MeshCacheLane::Body, 500)
+                    .with_origin_workspace_id("wsp_remote")
+                    .with_logical_memory_id("mem_withdrawn"),
+                withdrawn_entry("peer-body", "peer_alpha", MeshCacheLane::Body, 100),
+            ],
+            origin_workspace_id: "wsp_remote".to_owned(),
+            logical_memory_id: "mem_withdrawn".to_owned(),
+            peer_deliveries: Vec::new(),
+        };
+
+        let plan = plan_mesh_withdrawal_cache_purge(&input);
+
+        assert_eq!(plan.protected_local_source_truth_count, 1);
+        assert_eq!(plan.cache_bytes_before, 100);
+        assert_eq!(plan.cache_bytes_after, 0);
+        assert_eq!(plan.purged_count(), 1);
+        assert_eq!(plan.evictions[0].cache_key, "peer-body");
+    }
+
+    #[test]
+    fn unavailable_peers_are_sorted_and_marked_for_withdrawal_replay() {
+        let input = MeshWithdrawalPurgeInput {
+            entries: Vec::new(),
+            origin_workspace_id: "wsp_remote".to_owned(),
+            logical_memory_id: "mem_withdrawn".to_owned(),
+            peer_deliveries: vec![
+                MeshWithdrawalPeerDelivery::unreachable("peer_zulu"),
+                MeshWithdrawalPeerDelivery::reachable("peer_alpha"),
+                MeshWithdrawalPeerDelivery::unreachable("peer_beta"),
+            ],
+        };
+
+        let plan = plan_mesh_withdrawal_cache_purge(&input);
+
+        assert_eq!(
+            plan.replay_targets
+                .iter()
+                .map(|target| target.peer_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["peer_beta", "peer_zulu"]
+        );
+        assert!(
+            plan.replay_targets
+                .iter()
+                .all(|target| { target.reason == WITHDRAWAL_UNAVAILABLE_PEER_REPLAY_REASON })
+        );
+    }
+
+    fn withdrawn_entry(
+        cache_key: &str,
+        peer_id: &str,
+        lane: MeshCacheLane,
+        bytes: u64,
+    ) -> MeshCacheEntry {
+        MeshCacheEntry::derived(cache_key, peer_id, lane, bytes)
+            .with_origin_workspace_id("wsp_remote")
+            .with_logical_memory_id("mem_withdrawn")
     }
 }

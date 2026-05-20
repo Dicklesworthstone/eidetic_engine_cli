@@ -14,6 +14,7 @@
 pub mod admission;
 pub mod audit;
 pub mod auto_enrollment_safety;
+pub mod cache;
 pub mod discovery_policy;
 pub mod emergency_disable;
 pub mod foreground_cli;
