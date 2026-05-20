@@ -10,22 +10,34 @@ use std::env;
 use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Arc, Barrier};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use ee::core::audit::{AuditVerifyOptions, verify_audit};
+use ee::core::audit_lane::{
+    AuditEnqueueResult, AuditEvent, AuditLane, AuditLaneConfig, insert_audit_event_batch,
+};
 use ee::db::{AdvisoryLockId, DbConnection};
 use serde_json::Value;
+use serde_json::json;
 
 type TestResult = Result<(), String>;
 
 const BEAD_ID: &str = "bd-3usjw.57";
+const AUDIT_LANE_BEAD_ID: &str = "bd-wp5ac.5";
 const EXIT_SUCCESS: i32 = 0;
 const WRITER_COUNT: usize = 8;
 const WRITES_PER_WRITER: usize = 25;
 const EXPECTED_WRITE_COUNT: usize = WRITER_COUNT * WRITES_PER_WRITER;
+const AUDIT_LANE_PRODUCER_COUNT: usize = 64;
+const AUDIT_LANE_EVENTS_PER_PRODUCER: usize = 2;
+const AUDIT_LANE_EXPECTED_EVENTS: usize =
+    AUDIT_LANE_PRODUCER_COUNT * AUDIT_LANE_EVENTS_PER_PRODUCER;
+const AUDIT_LANE_P99_BUDGET: Duration = Duration::from_millis(2);
 const GOLDEN_TRACE: &str = include_str!("golden/logs/e2e_multi_agent_writers.log");
 
 struct EeOutput {
@@ -287,6 +299,204 @@ fn eight_agents_persist_all_remember_writes_without_leaking_locks() -> TestResul
     Ok(())
 }
 
+#[test]
+fn audit_lane_sixty_four_producers_commit_and_verify_real_db() -> TestResult {
+    const WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
+    let trace = test_tracing::init_test_tracing(
+        AUDIT_LANE_BEAD_ID,
+        "audit_lane_sixty_four_producers_commit_and_verify_real_db",
+    );
+    trace.setup(
+        "audit_lane_real_workload",
+        "created retained workspace for file-backed audit lane workload",
+    );
+
+    let artifact_dir = unique_artifact_dir("audit-lane-real-db")?;
+    let event_log = artifact_dir.join("audit-lane-events.jsonl");
+    write_audit_lane_test_event(
+        &event_log,
+        "setup",
+        "pass",
+        json!({"producerCount": AUDIT_LANE_PRODUCER_COUNT}),
+    )?;
+    let workspace = artifact_dir.join("workspace");
+    let ee_dir = workspace.join(".ee");
+    fs::create_dir_all(&ee_dir).map_err(|error| {
+        format!(
+            "failed to create audit lane workspace {}: {error}",
+            ee_dir.display()
+        )
+    })?;
+    let database_path = ee_dir.join("ee.db");
+
+    let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+    connection.migrate().map_err(|error| error.to_string())?;
+    connection
+        .insert_workspace(
+            WORKSPACE_ID,
+            &ee::db::CreateWorkspaceInput {
+                path: workspace.to_string_lossy().into_owned(),
+                name: Some("audit lane real workload e2e".to_owned()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+    let config = AuditLaneConfig {
+        capacity: AUDIT_LANE_EXPECTED_EVENTS,
+        batch_size: 64,
+        shutdown_event_limit: AUDIT_LANE_EXPECTED_EVENTS,
+    };
+    let (handle, mut lane) = AuditLane::new(config);
+    let start = Arc::new(Barrier::new(AUDIT_LANE_PRODUCER_COUNT));
+    let producers = (0..AUDIT_LANE_PRODUCER_COUNT)
+        .map(|producer_id| {
+            let producer_handle = handle.clone();
+            let producer_start = Arc::clone(&start);
+            thread::spawn(move || -> Result<Vec<Duration>, String> {
+                producer_start.wait();
+                let mut enqueue_latencies = Vec::with_capacity(AUDIT_LANE_EVENTS_PER_PRODUCER);
+                for event_index in 0..AUDIT_LANE_EVENTS_PER_PRODUCER {
+                    let seq =
+                        (producer_id * AUDIT_LANE_EVENTS_PER_PRODUCER + event_index + 1) as u64;
+                    let event = audit_lane_e2e_event(WORKSPACE_ID, producer_id, event_index, seq);
+                    let started_at = Instant::now();
+                    let result = producer_handle.enqueue(event);
+                    enqueue_latencies.push(started_at.elapsed());
+                    match result {
+                        AuditEnqueueResult::Enqueued { audit_seq, .. } if audit_seq == seq => {}
+                        other => {
+                            return Err(format!(
+                                "producer {producer_id} event {event_index} enqueue returned {other:?}"
+                            ));
+                        }
+                    }
+                }
+                Ok(enqueue_latencies)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    trace.exercise(
+        "audit_lane_real_workload",
+        format!("producers={AUDIT_LANE_PRODUCER_COUNT},events={AUDIT_LANE_EXPECTED_EVENTS}"),
+        "spawned concurrent audit-lane producer threads",
+    );
+
+    let mut enqueue_latencies = Vec::with_capacity(AUDIT_LANE_EXPECTED_EVENTS);
+    for (producer_id, producer) in producers.into_iter().enumerate() {
+        enqueue_latencies.extend(
+            producer
+                .join()
+                .map_err(|_| format!("audit lane producer {producer_id} panicked"))??,
+        );
+    }
+    let p99_enqueue_latency = p99_duration(&mut enqueue_latencies)?;
+    ensure(
+        p99_enqueue_latency <= AUDIT_LANE_P99_BUDGET,
+        format!(
+            "audit lane p99 enqueue latency {p99_enqueue_latency:?} exceeded {AUDIT_LANE_P99_BUDGET:?}"
+        ),
+    )?;
+
+    let mut drained = Vec::with_capacity(AUDIT_LANE_EXPECTED_EVENTS);
+    let drain_report = lane.shutdown_drain(|batch| drained.extend_from_slice(batch));
+    ensure_equal(
+        &drain_report.drained_events,
+        &(AUDIT_LANE_EXPECTED_EVENTS as u64),
+        "all audit-lane events should drain on shutdown",
+    )?;
+    ensure_equal(
+        &drain_report.pending_events,
+        &0,
+        "audit lane pending events",
+    )?;
+    ensure(
+        drain_report.degraded_codes.is_empty(),
+        format!(
+            "audit lane shutdown should not degrade: {:?}",
+            drain_report.degraded_codes
+        ),
+    )?;
+    ensure_equal(
+        &drained.len(),
+        &AUDIT_LANE_EXPECTED_EVENTS,
+        "drained event count",
+    )?;
+    ensure_audit_lane_sequence_set(&drained)?;
+
+    insert_audit_event_batch(&connection, &drained).map_err(|error| error.to_string())?;
+    let stored = drained
+        .iter()
+        .map(|event| {
+            connection
+                .get_audit(&event.audit_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("missing audit row {}", event.audit_id))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    ensure(
+        stored
+            .first()
+            .is_some_and(|entry| entry.prev_row_hash.is_none()),
+        "first committed audit row should start the retained-workspace chain",
+    )?;
+    for pair in stored.windows(2) {
+        ensure_equal(
+            &pair[1].prev_row_hash,
+            &pair[0].this_row_hash,
+            "audit lane batch hash chain",
+        )?;
+    }
+    connection.close().map_err(|error| error.to_string())?;
+
+    let verify = verify_audit(&AuditVerifyOptions {
+        workspace: workspace.clone(),
+        database_path: Some(database_path),
+        since: None,
+        until: None,
+    })
+    .map_err(|error| error.to_string())?;
+    ensure(
+        verify.integrity_ok,
+        format!("audit verify should pass after reopen: {:?}", verify.issues),
+    )?;
+    ensure_equal(
+        &verify.rows,
+        &(AUDIT_LANE_EXPECTED_EVENTS as u32),
+        "audit verify row count",
+    )?;
+    ensure(verify.first_break.is_none(), "audit verify first_break")?;
+    ensure(verify.issues.is_empty(), "audit verify issues")?;
+
+    write_audit_lane_test_event(
+        &event_log,
+        "verify",
+        "pass",
+        json!({
+            "producerCount": AUDIT_LANE_PRODUCER_COUNT,
+            "eventCount": AUDIT_LANE_EXPECTED_EVENTS,
+            "p99EnqueueMicros": p99_enqueue_latency.as_micros(),
+            "p99BudgetMicros": AUDIT_LANE_P99_BUDGET.as_micros(),
+            "auditIntegrityOk": verify.integrity_ok,
+        }),
+    )?;
+    assert_audit_lane_event_log_schema(&event_log)?;
+    trace.verify(
+        "audit_lane_real_workload",
+        format!(
+            "stored={AUDIT_LANE_EXPECTED_EVENTS},p99_enqueue_us={},audit_integrity_ok=true",
+            p99_enqueue_latency.as_micros()
+        ),
+        format!("stored={AUDIT_LANE_EXPECTED_EVENTS},audit_integrity_ok=true"),
+        "verified audit-lane event set, p99 enqueue budget, and reopened audit chain",
+    );
+    trace.teardown(
+        "audit_lane_real_workload",
+        format!("retained audit lane event log at {}", event_log.display()),
+    );
+    Ok(())
+}
+
 fn unique_artifact_dir(name: &str) -> Result<PathBuf, String> {
     let target_dir = env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
@@ -306,6 +516,98 @@ fn unique_run_id() -> Result<String, String> {
         .map_err(|error| format!("system clock before UNIX_EPOCH: {error}"))?
         .as_nanos();
     Ok(format!("{}-{nanos}", std::process::id()))
+}
+
+fn audit_lane_e2e_event(
+    workspace_id: &str,
+    producer_id: usize,
+    event_index: usize,
+    seq: u64,
+) -> AuditEvent {
+    let is_outcome = event_index % 2 == 1;
+    let action = if is_outcome {
+        "outcome.record"
+    } else {
+        "memory.create"
+    };
+    let target_type = if is_outcome { "outcome" } else { "memory" };
+    let input = ee::db::CreateAuditInput {
+        workspace_id: Some(workspace_id.to_owned()),
+        actor: Some(format!("audit-lane-e2e-producer-{producer_id:02}")),
+        action: action.to_owned(),
+        target_type: Some(target_type.to_owned()),
+        target_id: Some(format!("audit_lane_e2e_target_{seq:014}")),
+        details: Some(format!(
+            "{{\"producer\":{producer_id},\"event\":{event_index},\"seq\":{seq}}}"
+        )),
+    };
+    AuditEvent::from_audit_input(format!("audit_{seq:032x}"), seq, &input)
+}
+
+fn p99_duration(samples: &mut [Duration]) -> Result<Duration, String> {
+    samples.sort_unstable();
+    let p99_index = ((samples.len() * 99).div_ceil(100)).saturating_sub(1);
+    samples
+        .get(p99_index)
+        .copied()
+        .ok_or_else(|| "missing audit lane latency samples".to_owned())
+}
+
+fn ensure_audit_lane_sequence_set(events: &[AuditEvent]) -> TestResult {
+    let mut seqs = events
+        .iter()
+        .map(|event| event.audit_seq)
+        .collect::<Vec<_>>();
+    seqs.sort_unstable();
+    let expected = (1..=AUDIT_LANE_EXPECTED_EVENTS as u64).collect::<Vec<_>>();
+    ensure_equal(&seqs, &expected, "audit lane sequence set")
+}
+
+fn write_audit_lane_test_event(
+    path: &Path,
+    phase: &str,
+    status: &str,
+    details: Value,
+) -> TestResult {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create event log dir {}: {error}", parent.display()))?;
+    }
+    let event = json!({
+        "schema": "ee.test_event.v1",
+        "surface": "audit_lane_real_workload",
+        "bead_id": AUDIT_LANE_BEAD_ID,
+        "phase": phase,
+        "status": status,
+        "details": details,
+    });
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| format!("open audit lane event log {}: {error}", path.display()))?;
+    writeln!(file, "{event}")
+        .map_err(|error| format!("write audit lane event log {}: {error}", path.display()))
+}
+
+fn assert_audit_lane_event_log_schema(path: &Path) -> TestResult {
+    let body = fs::read_to_string(path)
+        .map_err(|error| format!("read audit lane event log {}: {error}", path.display()))?;
+    let mut row_count = 0_usize;
+    for (line_index, line) in body.lines().enumerate() {
+        let event: Value = serde_json::from_str(line)
+            .map_err(|error| format!("event log line {} is not JSON: {error}", line_index + 1))?;
+        ensure_equal(
+            &event.pointer("/schema").and_then(Value::as_str),
+            &Some("ee.test_event.v1"),
+            "audit lane event schema",
+        )?;
+        row_count = row_count.saturating_add(1);
+    }
+    ensure(
+        row_count >= 2,
+        "audit lane event log should include setup and verify rows",
+    )
 }
 
 fn writer_holder_id(writer_id: usize) -> String {
