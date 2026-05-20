@@ -514,7 +514,9 @@ mod tests {
         ranked_simhash_candidates, simhash_128,
     };
 
-    fn candidate_ids(candidates: &[NearestSimHashCandidate<'_>]) -> Vec<&str> {
+    fn candidate_ids<'candidate>(
+        candidates: &[NearestSimHashCandidate<'candidate>],
+    ) -> Vec<&'candidate str> {
         candidates
             .iter()
             .map(|candidate| candidate.candidate_id)

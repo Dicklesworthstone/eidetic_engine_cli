@@ -502,7 +502,7 @@ fn export_record_redaction_covers_all_record_types() -> TestResult {
 
     let sensitive_value = build_sensitive_api_credential();
 
-    let memory = ExportRecord::Memory(
+    let memory = ExportRecord::Memory(Box::new(
         ExportMemoryRecord::builder()
             .memory_id("mem-test-abc123xyz456")
             .workspace_id("ws-test")
@@ -513,11 +513,11 @@ fn export_record_redaction_covers_all_record_types() -> TestResult {
             .created_at("2026-05-03T00:00:00Z")
             .build()
             .expect("memory has required fields"),
-    );
+    ));
 
     if let ExportRecord::Memory(m) = redact_record(memory, RedactionLevel::Standard) {
         ensure(
-            m.content == REDACTED_PLACEHOLDER,
+            m.as_ref().content == REDACTED_PLACEHOLDER,
             "memory content should be redacted",
         )?;
         ensure(

@@ -6042,6 +6042,17 @@ mod tests {
         )
     }
 
+    fn ensure_equal<T>(actual: &T, expected: &T, context: &str) -> Result<(), String>
+    where
+        T: std::fmt::Debug + PartialEq,
+    {
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("{context}: expected {expected:?}, got {actual:?}"))
+        }
+    }
+
     fn test_runtime_profile() -> RuntimeProfileReport {
         RuntimeProfileReport::for_profile(OperatingProfile::Workstation, "test_fixture")
     }
@@ -9697,6 +9708,7 @@ mod tests {
             memory_id: MemoryId,
             content: &str,
         ) -> Result<PackDraftItem, String> {
+            let rank = u32::try_from(rank).map_err(|_| format!("rank {rank} overflows u32"))?;
             Ok(PackDraftItem {
                 rank,
                 memory_id,

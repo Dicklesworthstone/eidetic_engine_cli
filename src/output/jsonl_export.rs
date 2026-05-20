@@ -361,7 +361,7 @@ pub fn redact_audit_record(
 pub fn redact_record(record: ExportRecord, level: RedactionLevel) -> ExportRecord {
     match record {
         ExportRecord::Header(h) => ExportRecord::Header(redact_header(h, level)),
-        ExportRecord::Memory(m) => ExportRecord::Memory(redact_memory_record(m, level)),
+        ExportRecord::Memory(m) => ExportRecord::Memory(Box::new(redact_memory_record(*m, level))),
         ExportRecord::Artifact(a) => ExportRecord::Artifact(redact_artifact_record(a, level)),
         ExportRecord::Link(l) => ExportRecord::Link(redact_link_record(l, level)),
         ExportRecord::Tag(t) => ExportRecord::Tag(redact_tag_record(t, level)),
@@ -1452,7 +1452,7 @@ mod tests {
     #[test]
     fn redact_record_union() -> TestResult {
         let content = secret_assignment("redaction-fixture");
-        let memory = ExportRecord::Memory(
+        let memory = ExportRecord::Memory(Box::new(
             ExportMemoryRecord::builder()
                 .memory_id("mem-001")
                 .workspace_id("ws-123")
@@ -1462,13 +1462,14 @@ mod tests {
                 .created_at("2026-04-30T12:00:00Z")
                 .build()
                 .expect("memory has required fields"),
-        );
+        ));
 
         let redacted = redact_record(memory, RedactionLevel::Minimal);
 
         if let ExportRecord::Memory(m) = redacted {
+            let record = *m;
             return ensure(
-                m.content,
+                record.content,
                 REDACTED_PLACEHOLDER.to_owned(),
                 "memory content redacted",
             );

@@ -1848,7 +1848,7 @@ impl ExportAgentRecordBuilder {
 #[serde(untagged)]
 pub enum ExportRecord {
     Header(ExportHeader),
-    Memory(ExportMemoryRecord),
+    Memory(Box<ExportMemoryRecord>),
     Artifact(ExportArtifactRecord),
     Link(ExportLinkRecord),
     Tag(ExportTagRecord),
@@ -2419,7 +2419,7 @@ mod tests {
         assert_eq!(header.record_type(), ExportRecordType::Header);
         assert_eq!(header.schema(), EXPORT_HEADER_SCHEMA_V1);
 
-        let memory = ExportRecord::Memory(
+        let memory = ExportRecord::Memory(Box::new(
             ExportMemoryRecord::builder()
                 .memory_id("mem-union")
                 .workspace_id("ws-union")
@@ -2429,7 +2429,7 @@ mod tests {
                 .created_at("2026-04-30T12:00:00Z")
                 .build()
                 .expect("memory has required fields"),
-        );
+        ));
         assert_eq!(memory.record_type(), ExportRecordType::Memory);
         assert_eq!(memory.schema(), EXPORT_MEMORY_SCHEMA_V1);
 
@@ -2656,7 +2656,7 @@ mod tests {
                     .build()
                     .expect("agent has required fields"),
             ),
-            ExportRecord::Memory(
+            ExportRecord::Memory(Box::new(
                 ExportMemoryRecord::builder()
                     .memory_id("mem_01234567890123456789012345")
                     .workspace_id("wsp_01234567890123456789012345")
@@ -2668,7 +2668,7 @@ mod tests {
                     .redacted(false)
                     .build()
                     .expect("memory has required fields"),
-            ),
+            )),
             ExportRecord::Artifact(
                 ExportArtifactRecord::builder()
                     .artifact_id("art_01234567890123456789012345")

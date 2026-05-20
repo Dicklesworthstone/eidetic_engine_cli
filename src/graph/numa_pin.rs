@@ -453,7 +453,7 @@ impl NumaPinResult {
 /// The scaffold returns `None` on every platform; the Linux wiring slice
 /// (tracked under bd-1prrl.3) will replace this with a real `sched_getcpu`
 /// + `numa_node_of_cpu` lookup and the host-calibration probe
-/// (bd-1zb7k.12) once that bead lands.
+///   (bd-1zb7k.12) once that bead lands.
 #[must_use]
 pub fn detect_preferred_node() -> Option<i32> {
     None

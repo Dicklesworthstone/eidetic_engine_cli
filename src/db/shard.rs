@@ -448,7 +448,6 @@ pub fn shard_fanout_enabled_from_env_value(value: Option<&str>) -> bool {
     })
 }
 
-#[must_use]
 pub fn default_shards_dir_from_env() -> Result<PathBuf, ShardPathError> {
     default_shards_dir_from_values(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
 }
