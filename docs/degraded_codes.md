@@ -4193,6 +4193,66 @@ ee diag integrity --database ./integrity-schema-required-skew.db --workspace . -
 
 ---
 
+## `lab_replay_determinism_violation`
+
+**Severity:** high
+
+**Surfaces:** lab replay
+
+**Introduced by:** bd-17c65.14.15.5 (epic N)
+
+**Trigger.** Lab replay reassembles a pack against a frozen episode, but the same-query replayed pack hash differs from the captured pack hash.
+
+**Setup.**
+
+```bash
+ee lab capture --workspace . --task-input 'frozen replay' --json
+```
+
+**Invocation.**
+
+```bash
+ee lab replay EPISODE_ID --workspace . --verify-determinism --json
+```
+
+**Expected emission.** Message contains: `Lab replay ... pack hash`
+
+**Repair hint.** `determinismDiff`
+
+**Fixture.** [`tests/fixtures/failure_modes/lab_replay_determinism_violation.json`](../tests/fixtures/failure_modes/lab_replay_determinism_violation.json)
+
+---
+
+## `lab_replay_nondeterministic`
+
+**Severity:** high
+
+**Surfaces:** lab replay
+
+**Introduced by:** bd-17c65.14.15.5 (epic N)
+
+**Trigger.** Lab replay was asked to verify determinism and repeated replay assemblies did not produce byte-identical normalized packs.
+
+**Setup.**
+
+```bash
+ee lab capture --workspace . --task-input 'frozen replay' --json
+```
+
+**Invocation.**
+
+```bash
+ee lab replay EPISODE_ID --workspace . --verify-determinism --json
+```
+
+**Expected emission.** Message contains: `Lab replay ... non-identical`
+
+**Repair hint.** `verifyDeterminism`
+
+**Fixture.** [`tests/fixtures/failure_modes/lab_replay_nondeterministic.json`](../tests/fixtures/failure_modes/lab_replay_nondeterministic.json)
+
+---
+
 ## `lab_replay_unavailable`
 
 **Severity:** medium

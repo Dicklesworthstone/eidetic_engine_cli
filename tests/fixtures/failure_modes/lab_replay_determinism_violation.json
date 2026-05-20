@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "lab_replay_determinism_violation",
+  "introduced_by": {
+    "bead": "bd-17c65.14.15.5",
+    "epic_letter": "N"
+  },
+  "surfaces": [
+    "lab replay"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "Lab replay reassembles a pack against a frozen episode, but the same-query replayed pack hash differs from the captured pack hash.",
+    "setup_commands": [
+      "ee lab capture --workspace . --task-input 'frozen replay' --json"
+    ],
+    "invocation": "ee lab replay EPISODE_ID --workspace . --verify-determinism --json"
+  },
+  "expected_emission": {
+    "code": "lab_replay_determinism_violation",
+    "severity": "high",
+    "message_contains": [
+      "Lab replay",
+      "pack hash"
+    ],
+    "repair_contains": "determinismDiff"
+  }
+}

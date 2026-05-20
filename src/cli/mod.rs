@@ -3823,6 +3823,14 @@ pub struct LabReplayArgs {
     #[arg(value_name = "EPISODE_ID")]
     pub episode_id: String,
 
+    /// Query override to run against the frozen episode.
+    #[arg(long, value_name = "TEXT")]
+    pub query: Option<String>,
+
+    /// Reassemble the frozen pack three times and verify deterministic output.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub verify_determinism: bool,
+
     /// Report the replay plan without executing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
@@ -14000,7 +14008,7 @@ fn write_lab_replay_report<W>(
 where
     W: Write,
 {
-    match cli.renderer() {
+    let write_exit = match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
             write_stdout(stdout, &(output::render_lab_replay_human(report) + "\n"))
         }
@@ -14013,6 +14021,11 @@ where
         | output::Renderer::Hook => {
             write_stdout(stdout, &(output::render_lab_replay_json(report) + "\n"))
         }
+    };
+    if write_exit == ProcessExitCode::Success && report.determinism_check_failed() {
+        ProcessExitCode::Usage
+    } else {
+        write_exit
     }
 }
 
@@ -14081,7 +14094,9 @@ where
     let options = LabReplayOptions {
         workspace: lab_workspace(cli),
         episode_id: args.episode_id.clone(),
+        query: args.query.clone(),
         verify_hash: true,
+        verify_determinism: args.verify_determinism,
         record_trace: true,
         dry_run: args.dry_run,
     };

@@ -11604,6 +11604,14 @@ pub fn render_lab_replay_json(report: &ReplayReport) -> String {
             "episode_id": report.episode_id,
             "replay_id": report.replay_id,
             "status": report.status.as_str(),
+            "query": report.query,
+            "capturedPackHash": report.captured_pack_hash,
+            "replayedPackHash": report.replayed_pack_hash,
+            "matchesCaptureTimeHash": report.matches_capture_time_hash,
+            "queryMatchesCapture": report.query_matches_capture,
+            "replayedPack": report.replayed_pack,
+            "verifyDeterminism": report.verify_determinism,
+            "determinismDiff": report.determinism_diff,
             "frozenInputs": report.frozen_inputs,
             "replayEvidenceAvailable": report.replay_evidence_available,
             "missingFrozenInputs": report.missing_frozen_inputs,
@@ -11619,18 +11627,21 @@ pub fn render_lab_replay_json(report: &ReplayReport) -> String {
 }
 
 fn lab_replay_degraded(report: &ReplayReport) -> Vec<AggregatedDegradation> {
-    if report
-        .warnings
-        .iter()
-        .any(|warning| warning.contains("lab_replay_unavailable"))
-    {
-        aggregate_degraded_entries([lab_degradation_input(
-            "lab_replay",
-            "lab_replay_unavailable",
-        )])
-    } else {
-        Vec::new()
+    let mut codes = Vec::new();
+    for code in [
+        "lab_replay_unavailable",
+        "lab_replay_determinism_violation",
+        "lab_replay_nondeterministic",
+    ] {
+        if report.warnings.iter().any(|warning| warning.contains(code)) {
+            codes.push(code);
+        }
     }
+    aggregate_degraded_entries(
+        codes
+            .into_iter()
+            .map(|code| lab_degradation_input("lab_replay", code)),
+    )
 }
 
 fn lab_degradation_input(source: &'static str, code: &str) -> DegradationAggregationInput {
@@ -11639,6 +11650,16 @@ fn lab_degradation_input(source: &'static str, code: &str) -> DegradationAggrega
             "medium",
             "Lab replay evidence is unavailable because stored episode inputs are missing.",
             "Capture or provide stored episodes before running lab replay or counterfactual analysis.",
+        ),
+        "lab_replay_determinism_violation" => (
+            "high",
+            "Lab replay produced a pack hash that differs from the captured pack hash.",
+            "Inspect determinismDiff, restore the captured snapshot, or re-capture against current state.",
+        ),
+        "lab_replay_nondeterministic" => (
+            "high",
+            "Lab replay produced non-identical packs across repeated deterministic replay runs.",
+            "Inspect verifyDeterminism and docs/volatile_field_registry.md before trusting replay output.",
         ),
         "dry_run_no_durable_mutation" => (
             "info",
@@ -11670,6 +11691,12 @@ pub fn render_lab_replay_human(report: &ReplayReport) -> String {
         "  Replay evidence available: {}",
         report.replay_evidence_available
     ));
+    if let Some(pack_hash) = &report.replayed_pack_hash {
+        lines.push(format!("  Replayed pack hash: {pack_hash}"));
+    }
+    if let Some(matches) = report.matches_capture_time_hash {
+        lines.push(format!("  Matches capture-time pack: {matches}"));
+    }
     if !report.missing_frozen_inputs.is_empty() {
         lines.push(format!(
             "  Missing frozen inputs: {}",

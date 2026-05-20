@@ -34,6 +34,9 @@ pub const LAB_RECONSTRUCT_SCHEMA_V1: &str = "ee.lab.reconstruct.v1";
 
 const FROZEN_EPISODE_SCHEMA_V1: &str = "ee.lab.frozen_episode.v1";
 const LAB_REPLAY_UNAVAILABLE_CODE: &str = "lab_replay_unavailable";
+pub const LAB_REPLAY_DETERMINISM_VIOLATION_CODE: &str = "lab_replay_determinism_violation";
+pub const LAB_REPLAY_NONDETERMINISTIC_CODE: &str = "lab_replay_nondeterministic";
+pub const LAB_DETERMINISM_DIFF_SCHEMA_V1: &str = "ee.lab.determinism_diff.v1";
 const HYPOTHESIS_RECORD_ID_PREFIX: &str = "hyprec_";
 pub const WAL_RETENTION_KIND_HOLD: &str = "hold";
 pub const WAL_RETENTION_KIND_BEST_EFFORT: &str = "best_effort";
@@ -136,8 +139,12 @@ pub struct ReplayOptions {
     pub workspace: PathBuf,
     /// Episode ID to replay.
     pub episode_id: String,
+    /// Optional query override to run against the frozen episode.
+    pub query: Option<String>,
     /// Verify episode integrity before replay.
     pub verify_hash: bool,
+    /// Run the replay assembly three times and verify deterministic output.
+    pub verify_determinism: bool,
     /// Record detailed trace.
     pub record_trace: bool,
     /// Whether to run in dry-run mode.
@@ -149,7 +156,9 @@ impl Default for ReplayOptions {
         Self {
             workspace: PathBuf::from("."),
             episode_id: String::new(),
+            query: None,
             verify_hash: true,
+            verify_determinism: false,
             record_trace: true,
             dry_run: false,
         }
@@ -163,6 +172,14 @@ pub struct ReplayReport {
     pub episode_id: String,
     pub replay_id: String,
     pub status: ReplayStatus,
+    pub query: Option<String>,
+    pub captured_pack_hash: Option<String>,
+    pub replayed_pack_hash: Option<String>,
+    pub matches_capture_time_hash: Option<bool>,
+    pub query_matches_capture: Option<bool>,
+    pub replayed_pack: Option<ReplayedPack>,
+    pub verify_determinism: Option<ReplayDeterminismReport>,
+    pub determinism_diff: Option<ReplayDeterminismDiff>,
     pub frozen_inputs: bool,
     pub replay_evidence_available: bool,
     pub missing_frozen_inputs: Vec<String>,
@@ -184,6 +201,14 @@ impl ReplayReport {
             episode_id,
             replay_id,
             status: ReplayStatus::Pending,
+            query: None,
+            captured_pack_hash: None,
+            replayed_pack_hash: None,
+            matches_capture_time_hash: None,
+            query_matches_capture: None,
+            replayed_pack: None,
+            verify_determinism: None,
+            determinism_diff: None,
             frozen_inputs: true,
             replay_evidence_available: true,
             missing_frozen_inputs: Vec::new(),
@@ -203,9 +228,68 @@ impl ReplayReport {
     }
 
     #[must_use]
+    pub fn determinism_check_failed(&self) -> bool {
+        self.determinism_diff.is_some()
+            || self
+                .verify_determinism
+                .as_ref()
+                .is_some_and(|report| !report.all_identical)
+    }
+
+    #[must_use]
     pub fn to_json(&self) -> String {
         crate::core::serialize_or_error(self)
     }
+}
+
+/// Frozen pack reconstructed during lab replay.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReplayedPack {
+    pub schema: String,
+    pub episode_id: String,
+    pub query: String,
+    pub pack_hash: String,
+    pub policy_ids: Vec<String>,
+    pub evidence_ids: Vec<String>,
+    pub memories_count: usize,
+    pub actions_count: usize,
+    pub source_episode_hash: String,
+}
+
+/// Result from `ee lab replay --verify-determinism`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReplayDeterminismReport {
+    pub runs: usize,
+    pub pack_hashes: Vec<String>,
+    pub all_identical: bool,
+    pub first_diff_byte_offset: Option<usize>,
+}
+
+/// Deterministic diff emitted when replay fails the captured-pack comparison.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReplayDeterminismDiff {
+    pub schema: String,
+    pub episode_id: String,
+    pub pack_hash_captured: Option<String>,
+    pub pack_hash_replayed: Option<String>,
+    pub differing_fields: Vec<ReplayDifferingField>,
+    pub summary: ReplayDeterminismDiffSummary,
+}
+
+/// One differing field in a replay determinism diff.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReplayDifferingField {
+    pub path: String,
+    pub captured: String,
+    pub replayed: String,
+    pub byte_diff_first: Option<usize>,
+}
+
+/// Summary for a replay determinism diff.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReplayDeterminismDiffSummary {
+    pub fields_diff_count: usize,
+    pub root_cause_hint: String,
 }
 
 /// Status of a replay operation.
@@ -563,12 +647,7 @@ pub fn capture_episode(options: &CaptureOptions) -> Result<CaptureReport, Domain
         "repo:{}",
         hash_content(options.workspace.display().to_string().as_bytes())
     ));
-    report.pack_hash = Some(format!(
-        "blake3:{}",
-        hash_content(
-            format!("pack:{}:{}", report.task_input, report.policy_ids.join(",")).as_bytes()
-        )
-    ));
+    report.pack_hash = Some(lab_pack_hash(&report.task_input, &report.policy_ids));
     report.evidence_ids = capture_evidence_ids(&report);
 
     if options.include_memories {
@@ -674,7 +753,24 @@ pub fn replay_episode(options: &ReplayOptions) -> Result<ReplayReport, DomainErr
     report.dry_run = options.dry_run;
 
     if let Some(artifact) = read_frozen_episode(&options.workspace, &options.episode_id)? {
+        let replay_query = options
+            .query
+            .clone()
+            .unwrap_or_else(|| artifact.task_input.clone());
+        let replayed_pack = reassemble_replayed_pack(&artifact, &replay_query);
+        let replayed_pack_hash = replayed_pack.pack_hash.clone();
+        let captured_pack_hash = artifact.pack_hash.clone();
+        let query_matches_capture = replay_query == artifact.task_input;
+        let matches_capture_time_hash =
+            captured_pack_hash.as_deref() == Some(replayed_pack_hash.as_str());
+
         report.status = ReplayStatus::Replayed;
+        report.query = Some(replay_query.clone());
+        report.captured_pack_hash = captured_pack_hash.clone();
+        report.replayed_pack_hash = Some(replayed_pack_hash.clone());
+        report.matches_capture_time_hash = Some(matches_capture_time_hash);
+        report.query_matches_capture = Some(query_matches_capture);
+        report.replayed_pack = Some(replayed_pack.clone());
         report.frozen_inputs = true;
         report.replay_evidence_available = true;
         report.missing_frozen_inputs = Vec::new();
@@ -695,6 +791,27 @@ pub fn replay_episode(options: &ReplayOptions) -> Result<ReplayReport, DomainErr
         if options.verify_hash && !episode_hash_matches {
             report.status = ReplayStatus::Diverged;
             report.add_warning("frozen episode hash did not match captured inputs");
+        }
+        if query_matches_capture && !matches_capture_time_hash {
+            report.status = ReplayStatus::Diverged;
+            report.determinism_diff = Some(pack_hash_determinism_diff(
+                &artifact.episode_id,
+                captured_pack_hash.as_deref(),
+                Some(&replayed_pack_hash),
+            ));
+            report.add_warning(format!(
+                "{LAB_REPLAY_DETERMINISM_VIOLATION_CODE}: replayed pack hash did not match capture-time pack hash"
+            ));
+        }
+        if options.verify_determinism {
+            let determinism = verify_replay_determinism(&artifact, &replay_query)?;
+            if !determinism.all_identical {
+                report.status = ReplayStatus::Diverged;
+                report.add_warning(format!(
+                    "{LAB_REPLAY_NONDETERMINISTIC_CODE}: repeated replay assemblies did not produce byte-identical packs"
+                ));
+            }
+            report.verify_determinism = Some(determinism);
         }
         return Ok(report);
     }
@@ -722,6 +839,107 @@ pub fn replay_episode(options: &ReplayOptions) -> Result<ReplayReport, DomainErr
     }
 
     Ok(report)
+}
+
+fn lab_pack_hash(query: &str, policy_ids: &[String]) -> String {
+    format!(
+        "blake3:{}",
+        hash_content(format!("pack:{}:{}", query, policy_ids.join(",")).as_bytes())
+    )
+}
+
+fn reassemble_replayed_pack(artifact: &FrozenEpisodeArtifact, query: &str) -> ReplayedPack {
+    ReplayedPack {
+        schema: "ee.lab.replayed_pack.v1".to_string(),
+        episode_id: artifact.episode_id.clone(),
+        query: query.to_string(),
+        pack_hash: lab_pack_hash(query, &artifact.policy_ids),
+        policy_ids: artifact.policy_ids.clone(),
+        evidence_ids: artifact.evidence_ids.clone(),
+        memories_count: artifact.memories_captured,
+        actions_count: artifact.actions_captured,
+        source_episode_hash: artifact.episode_hash.clone(),
+    }
+}
+
+fn verify_replay_determinism(
+    artifact: &FrozenEpisodeArtifact,
+    query: &str,
+) -> Result<ReplayDeterminismReport, DomainError> {
+    let mut pack_hashes = Vec::new();
+    let mut normalized_runs = Vec::new();
+    for _ in 0..3 {
+        let pack = reassemble_replayed_pack(artifact, query);
+        pack_hashes.push(pack.pack_hash.clone());
+        normalized_runs.push(normalized_replayed_pack_json(&pack)?);
+    }
+    let first = normalized_runs.first().cloned().unwrap_or_default();
+    let all_identical = normalized_runs.iter().all(|run| run == &first)
+        && pack_hashes
+            .first()
+            .is_none_or(|first_hash| pack_hashes.iter().all(|hash| hash == first_hash));
+    let first_diff_byte_offset = normalized_runs
+        .iter()
+        .find_map(|run| first_diff_byte_offset(first.as_bytes(), run.as_bytes()));
+    Ok(ReplayDeterminismReport {
+        runs: pack_hashes.len(),
+        pack_hashes,
+        all_identical,
+        first_diff_byte_offset,
+    })
+}
+
+fn normalized_replayed_pack_json(pack: &ReplayedPack) -> Result<String, DomainError> {
+    let mut value = serde_json::to_value(pack).map_err(|error| {
+        lab_storage_error_message(
+            "serialize replayed pack for determinism check",
+            error.to_string(),
+        )
+    })?;
+    crate::obs::volatile_fields::strip_volatile_fields(&mut value);
+    serde_json::to_string(&value).map_err(|error| {
+        lab_storage_error_message(
+            "serialize normalized replayed pack for determinism check",
+            error.to_string(),
+        )
+    })
+}
+
+fn first_diff_byte_offset(left: &[u8], right: &[u8]) -> Option<usize> {
+    let common = left.len().min(right.len());
+    for index in 0..common {
+        if left[index] != right[index] {
+            return Some(index);
+        }
+    }
+    (left.len() != right.len()).then_some(common)
+}
+
+fn pack_hash_determinism_diff(
+    episode_id: &str,
+    captured: Option<&str>,
+    replayed: Option<&str>,
+) -> ReplayDeterminismDiff {
+    let captured_value = captured.unwrap_or("null").to_string();
+    let replayed_value = replayed.unwrap_or("null").to_string();
+    let byte_diff_first =
+        first_diff_byte_offset(captured_value.as_bytes(), replayed_value.as_bytes());
+    ReplayDeterminismDiff {
+        schema: LAB_DETERMINISM_DIFF_SCHEMA_V1.to_string(),
+        episode_id: episode_id.to_string(),
+        pack_hash_captured: captured.map(str::to_string),
+        pack_hash_replayed: replayed.map(str::to_string),
+        differing_fields: vec![ReplayDifferingField {
+            path: "pack.pack_hash".to_string(),
+            captured: captured_value,
+            replayed: replayed_value,
+            byte_diff_first,
+        }],
+        summary: ReplayDeterminismDiffSummary {
+            fields_diff_count: 1,
+            root_cause_hint: "unknown".to_string(),
+        },
+    }
 }
 
 fn maybe_store_frozen_episode(
@@ -1438,7 +1656,9 @@ mod tests {
         let replay = replay_episode(&ReplayOptions {
             workspace: tempdir.path().to_path_buf(),
             episode_id: capture.episode_id,
+            query: None,
             verify_hash: true,
+            verify_determinism: false,
             record_trace: true,
             dry_run: false,
         })
@@ -1456,7 +1676,77 @@ mod tests {
             true,
             "missing frozen inputs",
         )?;
-        ensure(replay.episode_hash_verified, true, "episode hash verified")
+        ensure(replay.episode_hash_verified, true, "episode hash verified")?;
+        ensure(
+            replay.captured_pack_hash.clone(),
+            capture.pack_hash.clone(),
+            "captured pack hash",
+        )?;
+        ensure(
+            replay.replayed_pack_hash.clone(),
+            replay.captured_pack_hash.clone(),
+            "same-query replay pack hash",
+        )?;
+        ensure(
+            replay.matches_capture_time_hash,
+            Some(true),
+            "same-query replay matches capture",
+        )?;
+        ensure(
+            replay
+                .replayed_pack
+                .as_ref()
+                .map(|pack| pack.query.as_str()),
+            Some("fix release regression"),
+            "replayed pack query",
+        )
+    }
+
+    #[test]
+    fn replay_with_new_query_reassembles_against_frozen_episode() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let capture = capture_episode(&CaptureOptions {
+            workspace: tempdir.path().to_path_buf(),
+            task_input: Some("capture original task".to_string()),
+            dry_run: false,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+        let replay = replay_episode(&ReplayOptions {
+            workspace: tempdir.path().to_path_buf(),
+            episode_id: capture.episode_id,
+            query: Some("different replay task".to_string()),
+            verify_hash: true,
+            verify_determinism: true,
+            record_trace: true,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(replay.status, ReplayStatus::Replayed, "replay status")?;
+        ensure(
+            replay.query_matches_capture,
+            Some(false),
+            "query differs from capture",
+        )?;
+        ensure(
+            replay.matches_capture_time_hash,
+            Some(false),
+            "different query has different pack hash",
+        )?;
+        ensure(
+            replay
+                .verify_determinism
+                .as_ref()
+                .map(|report| report.all_identical),
+            Some(true),
+            "verify determinism passes",
+        )?;
+        ensure(
+            replay.verify_determinism.as_ref().map(|report| report.runs),
+            Some(3),
+            "verify determinism run count",
+        )
     }
 
     #[test]
@@ -1484,7 +1774,9 @@ mod tests {
         let replay = replay_episode(&ReplayOptions {
             workspace: tempdir.path().to_path_buf(),
             episode_id: capture.episode_id,
+            query: None,
             verify_hash: true,
+            verify_determinism: false,
             record_trace: true,
             dry_run: false,
         })

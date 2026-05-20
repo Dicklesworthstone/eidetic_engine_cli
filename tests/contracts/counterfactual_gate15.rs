@@ -488,7 +488,9 @@ fn replay_reads_frozen_episode_artifact_created_by_capture() -> TestResult {
     let replay = replay_episode(&ReplayOptions {
         workspace: tempdir.path().to_path_buf(),
         episode_id: capture.episode_id,
+        query: None,
         verify_hash: true,
+        verify_determinism: false,
         record_trace: true,
         dry_run: false,
     })

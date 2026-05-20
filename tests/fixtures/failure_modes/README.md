@@ -228,6 +228,8 @@ in the same commit, keeping the catalog complete by construction.
 | `dry_run_recommended` | causal promote-plan | info | bd-17c65.10.6 (J6) |
 | `graph_snapshot_scores_unavailable` | graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
 | `index_publish_lock_contention` | index rebuild, index publish | medium | bd-17c65.10.6 (J6) |
+| `lab_replay_determinism_violation` | lab replay | high | bd-17c65.14.15.5 (N) |
+| `lab_replay_nondeterministic` | lab replay | high | bd-17c65.14.15.5 (N) |
 | `lab_replay_unavailable` | lab capture, lab replay, lab counterfactual | medium | bd-17c65.10.6 (J6) |
 | `git_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
 | `beads_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
