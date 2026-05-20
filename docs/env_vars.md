@@ -41,6 +41,11 @@ must not expose their current value.
 | `EE_LOG_FORMAT` | diagnostics | enum | none | Select structured log format. | `json` selects structured command-start logs on stderr. |
 | `EE_LOG_JSON` | diagnostics | boolean flag | none | Enable JSON command-start logs on stderr. | Shortcut for JSON command logging. |
 | `EE_MAX_TOKENS` | tuning | integer tokens | none | Override the default context pack token budget. | Applies when a command does not pass an explicit token budget. |
+| `EE_MESH_DISCOVERY_CACHE_TTL_SECONDS` | mesh | integer seconds | `30` | Override the mesh autodiscovery cache TTL in seconds. | Used by SRR6.46 discovery-cache decisions; cache rows are derived state and may be refreshed early on workspace, tailnet, explicit-refresh, or auto-enroll invalidation. |
+| `EE_MESH_DRIFT_SOFT_STALE_AFTER` | mesh | integer count | `1` | Override missed mesh hello probes before soft-stale drift grace. | A soft-stale peer is reported as transient unreachable, not removal-class stale drift. |
+| `EE_MESH_DRIFT_SOFT_STALE_AFTER_SECONDS` | mesh | integer seconds | `300` | Override seconds since last successful mesh probe before soft-stale drift grace. | Defaults to five minutes to tolerate laptop sleep and transient tailnet blips. |
+| `EE_MESH_DRIFT_HARD_STALE_AFTER` | mesh | integer count | `3` | Override missed mesh hello probes before hard-stale drift. | Hard-stale peers may be reported in `stalePeersInConfig` with reason `consecutive_probes_missed`. |
+| `EE_MESH_DRIFT_HARD_STALE_AFTER_SECONDS` | mesh | integer seconds | `3600` | Override seconds since last successful mesh probe before hard-stale drift. | Defaults to one hour so transient reachability failures can self-resolve first. |
 | `EE_MESH_ENABLED` | mesh | boolean flag | `false` | Enable optional mesh-memory surfaces. | Disabled by default; ordinary local-first commands must not open network listeners or require peer configuration when unset. |
 | `EE_MESH_MODE` | mesh | enum | `off` | Select the default mesh command mode. | Accepted values are `off`, `cache`, `revisable`, and `blocking`; explicit `--mesh` command flags take precedence. |
 | `EE_NO_COLOR` | output | boolean flag | none | Disable colored diagnostics. | Mirrors the behavior of `NO_COLOR` for ee-specific control. |

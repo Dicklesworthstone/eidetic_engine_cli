@@ -86,6 +86,16 @@ pub enum EnvVar {
     LogJson,
     /// `EE_MAX_TOKENS`
     MaxTokens,
+    /// `EE_MESH_DISCOVERY_CACHE_TTL_SECONDS`
+    MeshDiscoveryCacheTtlSeconds,
+    /// `EE_MESH_DRIFT_SOFT_STALE_AFTER`
+    MeshDriftSoftStaleAfter,
+    /// `EE_MESH_DRIFT_SOFT_STALE_AFTER_SECONDS`
+    MeshDriftSoftStaleAfterSeconds,
+    /// `EE_MESH_DRIFT_HARD_STALE_AFTER`
+    MeshDriftHardStaleAfter,
+    /// `EE_MESH_DRIFT_HARD_STALE_AFTER_SECONDS`
+    MeshDriftHardStaleAfterSeconds,
     /// `EE_MESH_ENABLED`
     MeshEnabled,
     /// `EE_MESH_MODE`
@@ -199,6 +209,11 @@ impl EnvVar {
             Self::LogFormat,
             Self::LogJson,
             Self::MaxTokens,
+            Self::MeshDiscoveryCacheTtlSeconds,
+            Self::MeshDriftSoftStaleAfter,
+            Self::MeshDriftSoftStaleAfterSeconds,
+            Self::MeshDriftHardStaleAfter,
+            Self::MeshDriftHardStaleAfterSeconds,
             Self::MeshEnabled,
             Self::MeshMode,
             Self::NoColor,
@@ -280,6 +295,11 @@ impl EnvVar {
             Self::LogFormat => "EE_LOG_FORMAT",
             Self::LogJson => "EE_LOG_JSON",
             Self::MaxTokens => "EE_MAX_TOKENS",
+            Self::MeshDiscoveryCacheTtlSeconds => "EE_MESH_DISCOVERY_CACHE_TTL_SECONDS",
+            Self::MeshDriftSoftStaleAfter => "EE_MESH_DRIFT_SOFT_STALE_AFTER",
+            Self::MeshDriftSoftStaleAfterSeconds => "EE_MESH_DRIFT_SOFT_STALE_AFTER_SECONDS",
+            Self::MeshDriftHardStaleAfter => "EE_MESH_DRIFT_HARD_STALE_AFTER",
+            Self::MeshDriftHardStaleAfterSeconds => "EE_MESH_DRIFT_HARD_STALE_AFTER_SECONDS",
             Self::MeshEnabled => "EE_MESH_ENABLED",
             Self::MeshMode => "EE_MESH_MODE",
             Self::NoColor => "EE_NO_COLOR",
@@ -400,6 +420,21 @@ impl EnvVar {
             Self::LogFormat => "Select structured log format.",
             Self::LogJson => "Enable JSON command-start logs on stderr.",
             Self::MaxTokens => "Override the default context pack token budget.",
+            Self::MeshDiscoveryCacheTtlSeconds => {
+                "Override the mesh autodiscovery cache TTL in seconds."
+            }
+            Self::MeshDriftSoftStaleAfter => {
+                "Override missed mesh hello probes before soft-stale drift grace."
+            }
+            Self::MeshDriftSoftStaleAfterSeconds => {
+                "Override seconds since last successful mesh probe before soft-stale drift grace."
+            }
+            Self::MeshDriftHardStaleAfter => {
+                "Override missed mesh hello probes before hard-stale drift."
+            }
+            Self::MeshDriftHardStaleAfterSeconds => {
+                "Override seconds since last successful mesh probe before hard-stale drift."
+            }
             Self::MeshEnabled => "Enable optional mesh-memory surfaces.",
             Self::MeshMode => "Select the default mesh command mode.",
             Self::NoColor => "Disable colored diagnostics.",
@@ -481,6 +516,11 @@ impl EnvVar {
             Self::AuditLaneCapacity => Some("1024"),
             Self::AuditLaneFlushMs => Some("5"),
             Self::TailscaleProbeTimeoutMs => Some("1500"),
+            Self::MeshDiscoveryCacheTtlSeconds => Some("30"),
+            Self::MeshDriftSoftStaleAfter => Some("1"),
+            Self::MeshDriftSoftStaleAfterSeconds => Some("300"),
+            Self::MeshDriftHardStaleAfter => Some("3"),
+            Self::MeshDriftHardStaleAfterSeconds => Some("3600"),
             Self::TailscaleDiscoveryMode => Some("service_tag"),
             Self::TailscaleRespondMode => Some("service_tag"),
             Self::EmbedDedupCosineFloor => Some("0.97"),
@@ -548,6 +588,11 @@ impl EnvVar {
             }
             Self::MeshEnabled
             | Self::MeshMode
+            | Self::MeshDiscoveryCacheTtlSeconds
+            | Self::MeshDriftSoftStaleAfter
+            | Self::MeshDriftSoftStaleAfterSeconds
+            | Self::MeshDriftHardStaleAfter
+            | Self::MeshDriftHardStaleAfterSeconds
             | Self::TailscaleBinaryOverride
             | Self::TailscaleProbeTimeoutMs
             | Self::TailscaleProbeSocketOverride
@@ -785,6 +830,53 @@ mod tests {
         }
         if EnvVar::FlightRecorderDir.category() != "paths" {
             return Err("EE_FLIGHT_RECORDER_DIR must be categorized as a path override".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_discovery_cache_and_drift_grace_env_vars_are_registered() -> TestResult {
+        let expected = [
+            (
+                EnvVar::MeshDiscoveryCacheTtlSeconds,
+                "EE_MESH_DISCOVERY_CACHE_TTL_SECONDS",
+                "30",
+            ),
+            (
+                EnvVar::MeshDriftSoftStaleAfter,
+                "EE_MESH_DRIFT_SOFT_STALE_AFTER",
+                "1",
+            ),
+            (
+                EnvVar::MeshDriftSoftStaleAfterSeconds,
+                "EE_MESH_DRIFT_SOFT_STALE_AFTER_SECONDS",
+                "300",
+            ),
+            (
+                EnvVar::MeshDriftHardStaleAfter,
+                "EE_MESH_DRIFT_HARD_STALE_AFTER",
+                "3",
+            ),
+            (
+                EnvVar::MeshDriftHardStaleAfterSeconds,
+                "EE_MESH_DRIFT_HARD_STALE_AFTER_SECONDS",
+                "3600",
+            ),
+        ];
+
+        for (var, name, default) in expected {
+            if !EnvVar::all().contains(&var) {
+                return Err(format!("{name} missing from registry order"));
+            }
+            if var.name() != name {
+                return Err(format!("unexpected env name for {var:?}: {}", var.name()));
+            }
+            if var.default_value() != Some(default) {
+                return Err(format!("{name} default drifted"));
+            }
+            if var.category() != "mesh" {
+                return Err(format!("{name} must be categorized as mesh"));
+            }
         }
         Ok(())
     }
