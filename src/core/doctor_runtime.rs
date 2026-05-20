@@ -397,7 +397,12 @@ pub enum RunStatus {
 #[derive(Debug)]
 pub struct RunContext {
     run_id: String,
-    target_sha: String,
+    // Round-5 self-review: `target_sha` used to live here too, but the same
+    // value is already persisted in `state.target_sha` (which IS used —
+    // serialized to state.json). The struct-field copy was write-only and
+    // surfaced a `field never read` clippy warning. Drop it; if a caller
+    // ever needs to recover the target_sha at runtime, `ctx.state.target_sha`
+    // is the canonical source.
     workspace: PathBuf,
     run_dir: PathBuf,
     lock_path: PathBuf,
@@ -405,6 +410,41 @@ pub struct RunContext {
     actions_handle: Option<fs::File>,
     blast_radius_roots: Vec<PathBuf>,
     dry_run: bool,
+    // Round-6 self-review (R6-5): true between successful lock acquisition
+    // and lock release. `finish()` flips this to false AFTER manually
+    // removing the lock so the `Drop` impl below can distinguish:
+    //
+    //   - normal teardown via `finish()` → already released, no-op.
+    //   - error/panic teardown via implicit drop → lock leaked, clean it up.
+    //
+    // Critically the flip happens AFTER `remove_file`, not before, so that
+    // a thread interleaving between `remove_file` and the function return
+    // doesn't accidentally cause Drop to double-remove and steal a
+    // newly-acquired lock from a different process.
+    lock_owned: bool,
+}
+
+impl Drop for RunContext {
+    fn drop(&mut self) {
+        // Round-6 self-review (R6-5): RunContext owns the workspace lock
+        // for its lifetime. `finish()` is the canonical release path and
+        // flips `lock_owned` to false. If `finish()` was never called —
+        // because the caller propagated an error via `?`, the doctor
+        // process panicked mid-fix, or a future code path forgot to
+        // finish — the lock file would otherwise linger forever and
+        // every future `ee doctor --fix` against this workspace would
+        // see a phantom holder. Sweep it up.
+        //
+        // We deliberately do NOT inspect the lock contents before
+        // removing: if `lock_owned == true`, we hold the lock by
+        // construction (start() returned Self, finish() hasn't run),
+        // so the file on disk is ours to delete. `let _` swallows
+        // NotFound and EPERM the way fs::remove_file should be
+        // tolerated in a destructor.
+        if self.lock_owned {
+            let _ = fs::remove_file(&self.lock_path);
+        }
+    }
 }
 
 impl RunContext {
@@ -420,6 +460,26 @@ impl RunContext {
         blast_radius_roots: Vec<PathBuf>,
         dry_run: bool,
     ) -> Result<Self, DoctorRuntimeError> {
+        // Round-5 self-review: absolutize the workspace before doing anything
+        // else. The cli layer falls back to `PathBuf::from(".")` when
+        // `current_dir()` errors, and callers can pass `--workspace .` (a
+        // bare relative path) directly. If we stored the relative form in
+        // `state.workspace`, a subsequent `--undo <run-id>` invoked from a
+        // different CWD would resolve `.ee/.doctor.lock` against THAT CWD
+        // instead of the workspace that originally ran `--fix`, silently
+        // breaking lock isolation and creating undo artifacts in the wrong
+        // place. Join with CWD up front; fall back to the caller's input
+        // only if even `current_dir()` is unavailable (in which case there
+        // is nothing better we can do).
+        let workspace_buf = if workspace.is_absolute() {
+            workspace.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(workspace))
+                .unwrap_or_else(|_| workspace.to_path_buf())
+        };
+        let workspace = workspace_buf.as_path();
+
         // Ensure .ee/ exists for the lock file. This is itself inside the
         // documented blast radius for ee.
         let ee_dir = workspace.join(".ee");
@@ -478,26 +538,43 @@ impl RunContext {
             }
         }
 
+        // Round-6 self-review (R6-5 part 1): from this point on we own the
+        // lock file. Every error path below MUST `fs::remove_file(&lock_path)`
+        // before returning, otherwise the lock leaks and every future doctor
+        // invocation against this workspace will fail with
+        // `ConcurrencyLost { holder_run_id: <crashed-run> }`. The post-
+        // construction case (panics, `?` propagation from caller) is handled
+        // by `impl Drop for RunContext` below; this block handles the
+        // construction-time leaks where we haven't built `Self` yet.
         let run_dir = workspace.join(".doctor").join("runs").join(&run_id);
         let backups_dir = run_dir.join("backups");
         let quarantine_dir = run_dir.join("quarantine");
         for d in [&run_dir, &backups_dir, &quarantine_dir] {
-            fs::create_dir_all(d).map_err(|source| DoctorRuntimeError::BackupDirUnwritable {
-                dir: d.clone(),
-                source,
-            })?;
+            if let Err(source) = fs::create_dir_all(d) {
+                let _ = fs::remove_file(&lock_path);
+                return Err(DoctorRuntimeError::BackupDirUnwritable {
+                    dir: d.clone(),
+                    source,
+                });
+            }
         }
 
         // Open actions.jsonl append-only.
         let actions_path = run_dir.join("actions.jsonl");
-        let actions_handle = fs::OpenOptions::new()
+        let actions_handle = match fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&actions_path)
-            .map_err(|source| DoctorRuntimeError::Io {
-                context: format!("open actions.jsonl {}", actions_path.display()),
-                source,
-            })?;
+        {
+            Ok(h) => h,
+            Err(source) => {
+                let _ = fs::remove_file(&lock_path);
+                return Err(DoctorRuntimeError::Io {
+                    context: format!("open actions.jsonl {}", actions_path.display()),
+                    source,
+                });
+            }
+        };
 
         let state = RunState {
             schema: RUN_STATE_SCHEMA_V1.into(),
@@ -510,11 +587,13 @@ impl RunContext {
             action_count: 0,
             dry_run,
         };
-        write_state(&run_dir, &state)?;
+        if let Err(e) = write_state(&run_dir, &state) {
+            let _ = fs::remove_file(&lock_path);
+            return Err(e);
+        }
 
         Ok(Self {
             run_id,
-            target_sha: target_sha.into(),
             workspace: workspace.to_path_buf(),
             run_dir,
             lock_path,
@@ -522,6 +601,7 @@ impl RunContext {
             actions_handle: Some(actions_handle),
             blast_radius_roots,
             dry_run,
+            lock_owned: true,
         })
     }
 
@@ -574,8 +654,13 @@ impl RunContext {
             let _ = std::os::windows::fs::symlink_dir(&self.run_dir, &latest_link);
         }
 
-        // Release the lock.
+        // Release the lock. Round-6 self-review (R6-5): flip `lock_owned`
+        // AFTER the `remove_file` so the subsequent `Drop` skips the
+        // remove. Setting the flag before `remove_file` would re-introduce
+        // a tiny window where a panic between flag-set and remove_file
+        // would leak the lock again.
         let _ = fs::remove_file(&self.lock_path);
+        self.lock_owned = false;
 
         Ok(RunSummary {
             run_id: self.run_id.clone(),
@@ -894,6 +979,25 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
 /// --undo), returns `ConcurrencyLost` with exit semantics that match
 /// `RunContext::start`.
 pub fn replay_undo(run_dir: &Path) -> Result<UndoSummary, DoctorRuntimeError> {
+    // Round-6 self-review: symmetry with `RunContext::start` (R5-3). The CLI
+    // layer builds `run_dir` as `workspace.join(".doctor").join("runs").join(
+    // run_id)`. If `--workspace` was omitted and `current_dir()` failed, the
+    // workspace falls back to `PathBuf::from(".")` and `run_dir` is therefore
+    // relative. A relative `run_dir` resolved against a different CWD at
+    // undo time wouldn't find the state.json that --fix wrote — `read_state`
+    // returns Err, the `.ok()` below swallows it, and replay would proceed
+    // WITHOUT acquiring the workspace lock. Pin to absolute up front so
+    // missing state.json surfaces as a clear "file not found" downstream
+    // rather than a silent lock bypass.
+    let run_dir_buf = if run_dir.is_absolute() {
+        run_dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(run_dir))
+            .unwrap_or_else(|_| run_dir.to_path_buf())
+    };
+    let run_dir = run_dir_buf.as_path();
+
     // Acquire the workspace lock for the duration of this call. The state
     // file at <run_dir>/state.json holds the workspace path; if it's
     // missing or unparseable we can't take a lock and fall through to the
@@ -1477,12 +1581,32 @@ fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     // than falling back to "." (the CWD of an invoking shell, which could
     // be outside the blast radius and break the cross-filesystem rename
     // assumption that persist() relies on).
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("write_file_atomic: path has no parent: {}", path.display()),
-        )
-    })?;
+    //
+    // Round-5 self-review: `Path::new("foo.txt").parent()` returns `Some("")`
+    // (an empty Path, not None). The original guard accepted that and then
+    // happily wrote a tempfile in CWD via `NamedTempFile::new_in("")`. Filter
+    // out the empty-parent case too so bare-filename paths get the same
+    // refusal as truly parentless ones.
+    //
+    // Round-6 self-review: `Path::new("./foo.txt").parent()` returns
+    // `Some(".")` (non-empty) which slipped past the round-5 filter and
+    // produced the same CWD-leak via `NamedTempFile::new_in(".")`. The
+    // chokepoint's invariant after R5-3 is that all writes are to absolute
+    // paths (R5-3 absolutizes the workspace, which propagates everywhere).
+    // Enforce that invariant at the leaf: refuse any parent that isn't
+    // itself absolute. This catches `""`, `"."`, `"./sub"`, `".."` etc.
+    let parent = path
+        .parent()
+        .filter(|p| p.is_absolute())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "write_file_atomic: path lacks an absolute parent: {}",
+                    path.display()
+                ),
+            )
+        })?;
     fs::create_dir_all(parent)?;
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     tmp.write_all(bytes)?;
@@ -1602,7 +1726,21 @@ impl Drop for UndoLockGuard {
 }
 
 fn acquire_undo_lock(workspace: &Path) -> Result<UndoLockGuard, DoctorRuntimeError> {
-    let ee_dir = workspace.join(".ee");
+    // Round-5 self-review: defend against a state.json that has a relative
+    // `workspace` (shouldn't happen with the round-5 fix in `RunContext::
+    // start` that absolutizes the input, but a corrupt or hand-edited
+    // state.json could still smuggle one in). Joining a relative workspace
+    // with the CURRENT CWD when undo runs would point the lock at the wrong
+    // place. Pin it to CWD-at-undo-time only when we can't recover an
+    // absolute form — better than silently failing isolation.
+    let workspace_abs = if workspace.is_absolute() {
+        workspace.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(workspace))
+            .unwrap_or_else(|_| workspace.to_path_buf())
+    };
+    let ee_dir = workspace_abs.join(".ee");
     fs::create_dir_all(&ee_dir).map_err(|source| DoctorRuntimeError::Io {
         context: format!("create_dir_all({}) for undo lock", ee_dir.display()),
         source,
@@ -1802,6 +1940,32 @@ mod tests {
             serde_json::from_slice(&fs::read(run_dir.join("state.json")).unwrap()).unwrap();
         assert!(matches!(state.status, RunStatus::CompletedOk));
         assert!(state.finished_at.is_some());
+    }
+
+    #[test]
+    fn drop_releases_lock_when_finish_was_skipped() {
+        // Round-6 self-review (R6-5): if `RunContext` is dropped without
+        // `finish()` being called — caller propagated an error via `?`, a
+        // panic unwound past the doctor scope, or a future code path
+        // simply forgot to call `finish()` — the workspace lock must
+        // still be released so the next `ee doctor --fix` can run.
+        // Previously the lock leaked forever and the only recovery was
+        // to manually delete `.ee/.doctor.lock`.
+        let ws = fresh_workspace();
+        let lock = ws.path().join(".ee").join(".doctor.lock");
+        {
+            let _ctx = start_run(ws.path());
+            assert!(lock.exists(), "lock should be held while ctx is alive");
+            // _ctx is intentionally not `.finish()`-ed; it drops here.
+        }
+        assert!(
+            !lock.exists(),
+            "lock must be released by Drop when finish() was skipped (R6-5)"
+        );
+        // Verify the next start() can acquire the lock cleanly.
+        let ctx2 = start_run(ws.path());
+        ctx2.finish(RunStatus::CompletedOk).expect("finish");
+        assert!(!lock.exists());
     }
 
     #[test]
@@ -2187,23 +2351,42 @@ mod tests {
 
     #[test]
     fn write_file_atomic_refuses_path_without_parent() {
-        // Round-2 fresh-eyes R2-P1-04: write_file_atomic used to fall back
-        // to `Path::new(".")` (the CWD of an invoking shell) when given a
-        // parentless path. Now it refuses with InvalidInput, so a bare
-        // filename can't accidentally write into wherever ee was launched
-        // from.
-        let bare = Path::new("");
-        let result = write_file_atomic(bare, b"x");
-        assert!(
-            result.is_err(),
-            "write_file_atomic should refuse parentless path"
-        );
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err.kind(), io::ErrorKind::InvalidInput | io::ErrorKind::NotFound),
-            "unexpected error kind: {:?}",
-            err.kind()
-        );
+        // Round-2 R2-P1-04 → round-5 → round-6 self-review.
+        // `write_file_atomic` used to fall back to the CWD of an invoking
+        // shell when given a parentless or relative path. Round-6 tightened
+        // the filter to refuse any parent that isn't absolute, since the
+        // chokepoint's invariant (after R5-3 absolutized the workspace) is
+        // that every write goes to an absolute path. Each parent form below
+        // would have leaked into CWD under the previous, weaker guards.
+        //
+        // - `Path::new("")` has `.parent() == None`.
+        // - `Path::new("foo.txt")` has `.parent() == Some("")` — slipped
+        //   past the original R2-P1-04 None-only guard.
+        // - `Path::new("./foo.txt")` has `.parent() == Some(".")`
+        //   (non-empty, non-absolute) — slipped past the R5-2 is_empty
+        //   filter.
+        // - `Path::new("../foo.txt")` has `.parent() == Some("..")` —
+        //   same class as `./foo.txt`.
+        for parentless in [
+            Path::new(""),
+            Path::new("foo.txt"),
+            Path::new("./foo.txt"),
+            Path::new("../foo.txt"),
+        ] {
+            let result = write_file_atomic(parentless, b"x");
+            assert!(
+                result.is_err(),
+                "write_file_atomic should refuse path lacking an absolute parent: {}",
+                parentless.display()
+            );
+            let err = result.unwrap_err();
+            assert!(
+                matches!(err.kind(), io::ErrorKind::InvalidInput | io::ErrorKind::NotFound),
+                "unexpected error kind for {}: {:?}",
+                parentless.display(),
+                err.kind()
+            );
+        }
     }
 
     #[test]
