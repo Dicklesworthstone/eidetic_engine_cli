@@ -1111,6 +1111,7 @@ dependencies = [
 name = "eidetic-engine"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "asupersync",
  "base64 0.22.1",
  "blake3",
@@ -1118,6 +1119,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "criterion",
+ "crossbeam-queue",
  "fnx-algorithms",
  "fnx-classes",
  "fnx-generators",

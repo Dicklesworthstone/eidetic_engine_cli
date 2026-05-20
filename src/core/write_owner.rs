@@ -43,11 +43,14 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use arc_swap::ArcSwapOption;
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::cx::Cx;
+use crossbeam_queue::ArrayQueue;
 use serde::Serialize;
 
 use crate::models::DomainError;
@@ -90,6 +93,18 @@ pub const DEFAULT_SPOOL_MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
 
 /// Default queue age budget before callers receive backpressure.
 pub const DEFAULT_SPOOL_QUEUE_TIMEOUT_MS: u64 = 30_000;
+
+/// Default wait-free write-hot-path enqueue capacity.
+pub const DEFAULT_WRITE_HOT_PATH_V2_QUEUE_CAPACITY: usize = DEFAULT_SPOOL_MAX_PENDING;
+
+/// Default maximum rows coalesced into one WAL group commit.
+pub const DEFAULT_WRITE_HOT_PATH_V2_GROUP_COMMIT_MAX_ROWS: usize = 256;
+
+/// Default maximum group-commit dwell time in microseconds.
+pub const DEFAULT_WRITE_HOT_PATH_V2_GROUP_COMMIT_MAX_US: u64 = 1_000;
+
+/// Default shard count for reader-visible RCU snapshots.
+pub const DEFAULT_WRITE_HOT_PATH_V2_SNAPSHOT_SHARDS: usize = 16;
 
 /// Error code for write owner busy condition.
 pub const WRITE_OWNER_BUSY_CODE: &str = "write_owner_busy";
@@ -1116,6 +1131,228 @@ pub struct WriteSpoolStatus {
     pub last_failure: Option<WriteSpoolFailure>,
 }
 
+/// Opt-in settings for the SRR3 write-hot-path v2 primitives.
+///
+/// `enabled` defaults to false so existing command behavior remains
+/// byte-identical until config/env routing opts into the new path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriteHotPathConfig {
+    /// Whether durable writes should use the SRR3 hot path.
+    pub enabled: bool,
+    /// Capacity of the wait-free producer queue.
+    pub queue_capacity: usize,
+    /// Maximum rows in one WAL group-commit boundary.
+    pub group_commit_max_rows: usize,
+    /// Maximum group-commit dwell time in microseconds.
+    pub group_commit_max_us: u64,
+    /// Number of independently published reader snapshot shards.
+    pub snapshot_shards: usize,
+}
+
+impl Default for WriteHotPathConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            queue_capacity: DEFAULT_WRITE_HOT_PATH_V2_QUEUE_CAPACITY,
+            group_commit_max_rows: DEFAULT_WRITE_HOT_PATH_V2_GROUP_COMMIT_MAX_ROWS,
+            group_commit_max_us: DEFAULT_WRITE_HOT_PATH_V2_GROUP_COMMIT_MAX_US,
+            snapshot_shards: DEFAULT_WRITE_HOT_PATH_V2_SNAPSHOT_SHARDS,
+        }
+    }
+}
+
+impl WriteHotPathConfig {
+    /// Create an opt-in config with explicit queue, batch, and snapshot limits.
+    #[must_use]
+    pub const fn enabled(
+        queue_capacity: usize,
+        group_commit_max_rows: usize,
+        group_commit_max_us: u64,
+        snapshot_shards: usize,
+    ) -> Self {
+        Self {
+            enabled: true,
+            queue_capacity,
+            group_commit_max_rows,
+            group_commit_max_us,
+            snapshot_shards,
+        }
+    }
+
+    /// Translate the group-commit row budget into the existing spool model.
+    #[must_use]
+    pub fn spool_config(&self) -> WriteSpoolConfig {
+        WriteSpoolConfig::new(
+            self.queue_capacity.max(1),
+            self.group_commit_max_rows.max(1),
+            DEFAULT_SPOOL_MAX_PENDING_BYTES,
+            DEFAULT_SPOOL_QUEUE_TIMEOUT_MS,
+        )
+    }
+}
+
+/// One accepted producer item with a deterministic global sequence.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteHotPathQueueEntry<T> {
+    /// Monotonic sequence assigned before enqueue.
+    pub sequence: u64,
+    /// Producer payload.
+    pub payload: T,
+}
+
+/// Non-blocking producer-side queue for SRR3 durable writes.
+///
+/// Producers either publish into the bounded queue immediately or get
+/// their payload back as explicit backpressure; they never wait for
+/// the single consumer. The consumer sorts drained rows by the stable
+/// sequence so cross-producer ties remain deterministic.
+pub struct WriteHotPathQueue<T> {
+    queue: ArrayQueue<WriteHotPathQueueEntry<T>>,
+    next_sequence: AtomicU64,
+}
+
+impl<T> WriteHotPathQueue<T> {
+    /// Build an empty bounded queue. A zero capacity is coerced to one.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            queue: ArrayQueue::new(capacity.max(1)),
+            next_sequence: AtomicU64::new(1),
+        }
+    }
+
+    /// Build a shareable queue handle for multiple producers.
+    #[must_use]
+    pub fn shared(capacity: usize) -> Arc<Self> {
+        Arc::new(Self::new(capacity))
+    }
+
+    /// Try to enqueue without blocking. Returns the payload if full.
+    pub fn try_enqueue(&self, payload: T) -> Result<u64, T> {
+        let sequence = self.next_sequence.fetch_add(1, Ordering::AcqRel);
+        let entry = WriteHotPathQueueEntry { sequence, payload };
+        self.queue
+            .push(entry)
+            .map(|()| sequence)
+            .map_err(|entry| entry.payload)
+    }
+
+    /// Drain up to `max_rows` accepted rows in deterministic sequence order.
+    #[must_use]
+    pub fn drain_group_commit(&self, max_rows: usize) -> WriteHotPathGroupCommit<T> {
+        let mut rows = Vec::new();
+        let limit = max_rows.max(1);
+        while rows.len() < limit {
+            let Some(entry) = self.queue.pop() else {
+                break;
+            };
+            rows.push(entry);
+        }
+        rows.sort_by_key(|entry| entry.sequence);
+        WriteHotPathGroupCommit { rows }
+    }
+
+    /// Number of accepted rows waiting for the consumer.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Returns true when no accepted rows are waiting.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    /// Configured queue capacity.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.queue.capacity()
+    }
+}
+
+/// Rows selected for one WAL group-commit transaction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteHotPathGroupCommit<T> {
+    /// Rows in deterministic commit order.
+    pub rows: Vec<WriteHotPathQueueEntry<T>>,
+}
+
+impl<T> WriteHotPathGroupCommit<T> {
+    /// Number of rows in this group-commit boundary.
+    #[must_use]
+    pub fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Returns true when the drain found no rows to commit.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+/// Reader-visible snapshot published after a durable group commit.
+#[derive(Debug, Eq, PartialEq)]
+pub struct WriteHotPathSnapshot<T> {
+    /// Monotonic generation for this shard.
+    pub generation: u64,
+    /// Snapshot payload owned by readers through `Arc`.
+    pub value: T,
+}
+
+/// Sharded RCU-style snapshot store for write-hot-path readers.
+///
+/// Publishing swaps an `Arc` into one shard. Readers clone the current
+/// `Arc` and can keep using it while later batches publish newer
+/// generations; old snapshots are reclaimed by normal `Arc` drops.
+pub struct WriteHotPathSnapshotStore<T> {
+    shards: Vec<ArcSwapOption<WriteHotPathSnapshot<T>>>,
+}
+
+impl<T> WriteHotPathSnapshotStore<T> {
+    /// Build an empty snapshot store. A zero shard count is coerced to one.
+    #[must_use]
+    pub fn new(shards: usize) -> Self {
+        let shard_count = shards.max(1);
+        Self {
+            shards: (0..shard_count)
+                .map(|_| ArcSwapOption::<WriteHotPathSnapshot<T>>::from(None))
+                .collect(),
+        }
+    }
+
+    /// Publish a new generation for the shard selected by `shard_key`.
+    pub fn publish(&self, shard_key: impl AsRef<[u8]>, generation: u64, value: T) {
+        let index = self.shard_index(shard_key.as_ref());
+        self.shards[index].store(Some(Arc::new(WriteHotPathSnapshot { generation, value })));
+    }
+
+    /// Load the current snapshot for the shard selected by `shard_key`.
+    #[must_use]
+    pub fn load(&self, shard_key: impl AsRef<[u8]>) -> Option<Arc<WriteHotPathSnapshot<T>>> {
+        let index = self.shard_index(shard_key.as_ref());
+        self.shards[index].load_full()
+    }
+
+    /// Number of snapshot shards.
+    #[must_use]
+    pub fn shard_count(&self) -> usize {
+        self.shards.len()
+    }
+
+    fn shard_index(&self, shard_key: &[u8]) -> usize {
+        let hash = blake3::hash(shard_key);
+        let mut bytes = [0_u8; 8];
+        bytes.copy_from_slice(&hash.as_bytes()[..8]);
+        let raw = u64::from_be_bytes(bytes);
+        let shard_count = u64::try_from(self.shards.len()).unwrap_or(1).max(1);
+        usize::try_from(raw % shard_count).unwrap_or(0)
+    }
+}
+
 /// Deterministic batched write spool for daemon/write-owner mode.
 #[derive(Clone, Debug)]
 pub struct WriteSpool {
@@ -1500,6 +1737,7 @@ mod tests {
     use proptest::prelude::*;
     use proptest::test_runner::{Config as ProptestConfig, TestCaseError};
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
+    use std::sync::Arc;
 
     #[derive(Clone, Debug)]
     struct ScheduledSpoolWrite {
@@ -2492,6 +2730,118 @@ mod tests {
             .ok_or_else(|| "second write request should enqueue".to_string())?;
         assert_eq!(owner.status().queue_depth, 2);
 
+        Ok(())
+    }
+
+    #[test]
+    fn write_hot_path_config_defaults_are_disabled_and_map_group_commit_budget() {
+        let default_config = WriteHotPathConfig::default();
+        assert!(!default_config.enabled);
+        assert_eq!(
+            default_config.queue_capacity,
+            DEFAULT_WRITE_HOT_PATH_V2_QUEUE_CAPACITY
+        );
+        assert_eq!(
+            default_config.group_commit_max_rows,
+            DEFAULT_WRITE_HOT_PATH_V2_GROUP_COMMIT_MAX_ROWS
+        );
+        assert_eq!(
+            default_config.group_commit_max_us,
+            DEFAULT_WRITE_HOT_PATH_V2_GROUP_COMMIT_MAX_US
+        );
+        assert_eq!(
+            default_config.snapshot_shards,
+            DEFAULT_WRITE_HOT_PATH_V2_SNAPSHOT_SHARDS
+        );
+
+        let enabled = WriteHotPathConfig::enabled(4, 7, 250, 3);
+        assert!(enabled.enabled);
+        let spool_config = enabled.spool_config();
+        assert_eq!(spool_config.max_pending, 4);
+        assert_eq!(spool_config.max_batch_size, 7);
+    }
+
+    #[test]
+    fn write_hot_path_queue_try_enqueue_is_nonblocking_and_drains_fifo() -> Result<(), String> {
+        let queue = WriteHotPathQueue::new(2);
+        let first = queue.try_enqueue("first").map_err(|_| "first refused")?;
+        let second = queue.try_enqueue("second").map_err(|_| "second refused")?;
+        let rejected = queue
+            .try_enqueue("third")
+            .expect_err("full hot-path queue must return explicit backpressure");
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        assert_eq!(rejected, "third");
+        assert_eq!(queue.len(), 2);
+
+        let batch = queue.drain_group_commit(16);
+        assert_eq!(batch.row_count(), 2);
+        assert_eq!(
+            batch
+                .rows
+                .iter()
+                .map(|entry| (entry.sequence, entry.payload))
+                .collect::<Vec<_>>(),
+            vec![(1, "first"), (2, "second")]
+        );
+        assert!(queue.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn write_hot_path_queue_accepts_multiple_producers_with_unique_sequences() -> Result<(), String>
+    {
+        let queue = WriteHotPathQueue::shared(8);
+        let first = {
+            let queue = Arc::clone(&queue);
+            std::thread::spawn(move || queue.try_enqueue("producer-a"))
+        };
+        let second = {
+            let queue = Arc::clone(&queue);
+            std::thread::spawn(move || queue.try_enqueue("producer-b"))
+        };
+
+        let first_sequence = first
+            .join()
+            .map_err(|_| "producer-a panicked".to_string())?
+            .map_err(|_| "producer-a was refused".to_string())?;
+        let second_sequence = second
+            .join()
+            .map_err(|_| "producer-b panicked".to_string())?
+            .map_err(|_| "producer-b was refused".to_string())?;
+
+        assert_ne!(first_sequence, second_sequence);
+        let batch = queue.drain_group_commit(8);
+        assert_eq!(batch.row_count(), 2);
+        assert!(
+            batch
+                .rows
+                .windows(2)
+                .all(|window| { window[0].sequence < window[1].sequence })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn write_hot_path_snapshot_store_keeps_old_reader_arcs_after_publish() -> Result<(), String> {
+        let store = WriteHotPathSnapshotStore::new(4);
+        store.publish("workspace-a", 1, vec!["before"]);
+        let first = store
+            .load("workspace-a")
+            .ok_or_else(|| "first snapshot missing".to_string())?;
+
+        store.publish("workspace-a", 2, vec!["after"]);
+        let second = store
+            .load("workspace-a")
+            .ok_or_else(|| "second snapshot missing".to_string())?;
+
+        assert_eq!(first.generation, 1);
+        assert_eq!(first.value, vec!["before"]);
+        assert_eq!(second.generation, 2);
+        assert_eq!(second.value, vec!["after"]);
+        assert_eq!(std::sync::Arc::strong_count(&first), 1);
+        assert_eq!(store.shard_count(), 4);
         Ok(())
     }
 
