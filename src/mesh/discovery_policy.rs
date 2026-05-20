@@ -276,6 +276,33 @@ impl DiscoveryReason {
             Self::SkipSelf => "skip_self",
         }
     }
+
+    /// SRR6.46.2 `eeCapablePeers[].discoveryPolicyDecision` value.
+    /// Returns `None` for skip reasons because skipped peers use the
+    /// separate `skippedPeers[].reason` vocabulary.
+    #[must_use]
+    pub fn autodiscovery_policy_decision(self) -> Option<&'static str> {
+        match self {
+            Self::AutoAdmit => Some("auto_admit"),
+            Self::ServiceTagMatch => Some("service_tag_match"),
+            Self::Allowlisted => Some("allowlisted"),
+            Self::SkipNoTag | Self::SkipNotAllowlisted | Self::SkipDenylisted | Self::SkipSelf => {
+                None
+            }
+        }
+    }
+
+    /// SRR6.46.2 `skippedPeers[].reason` value for caller-side policy
+    /// skips. Returns `None` for probe reasons because eligible peers
+    /// carry `discoveryPolicyDecision` instead.
+    #[must_use]
+    pub fn autodiscovery_skip_reason(self) -> Option<&'static str> {
+        match self {
+            Self::AutoAdmit | Self::ServiceTagMatch | Self::Allowlisted => None,
+            Self::SkipNoTag | Self::SkipNotAllowlisted => Some("no_discovery_consent"),
+            Self::SkipDenylisted | Self::SkipSelf => Some("denied_by_policy"),
+        }
+    }
 }
 
 /// Caller-side inputs for [`decide_discovery`]. Borrowed-only so the
@@ -889,6 +916,31 @@ mod tests {
         });
         assert_eq!(decision, DiscoveryDecision::Skip);
         assert_eq!(reason, DiscoveryReason::SkipNotAllowlisted);
+    }
+
+    #[test]
+    fn caller_probe_reasons_map_to_autodiscovery_policy_decisions() {
+        for (reason, expected) in [
+            (DiscoveryReason::AutoAdmit, "auto_admit"),
+            (DiscoveryReason::ServiceTagMatch, "service_tag_match"),
+            (DiscoveryReason::Allowlisted, "allowlisted"),
+        ] {
+            assert_eq!(reason.autodiscovery_policy_decision(), Some(expected));
+            assert_eq!(reason.autodiscovery_skip_reason(), None);
+        }
+    }
+
+    #[test]
+    fn caller_skip_reasons_map_to_autodiscovery_skip_vocabulary() {
+        for (reason, expected) in [
+            (DiscoveryReason::SkipNoTag, "no_discovery_consent"),
+            (DiscoveryReason::SkipNotAllowlisted, "no_discovery_consent"),
+            (DiscoveryReason::SkipDenylisted, "denied_by_policy"),
+            (DiscoveryReason::SkipSelf, "denied_by_policy"),
+        ] {
+            assert_eq!(reason.autodiscovery_policy_decision(), None);
+            assert_eq!(reason.autodiscovery_skip_reason(), Some(expected));
+        }
     }
 
     // ---- Responder-side decisions ------------------------------------------
