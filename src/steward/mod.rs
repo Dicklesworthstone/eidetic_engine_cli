@@ -597,6 +597,250 @@ impl FromStr for JobType {
     }
 }
 
+/// Default two-sided CUSUM threshold for regime-change detection.
+pub const CUSUM_DEFAULT_THRESHOLD_H: f64 = 5.0;
+
+/// Default two-sided CUSUM slack term.
+pub const CUSUM_DEFAULT_SLACK_K: f64 = 0.5;
+
+/// Default variance for a workspace before a learned baseline is available.
+pub const CUSUM_DEFAULT_BASELINE_VARIANCE: f64 = 1.0;
+
+/// Derived state of a workspace activity regime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegimeState {
+    /// No meaningful drift is currently accumulating.
+    Steady,
+    /// Positive drift is accumulating below the change threshold.
+    Ramping,
+    /// Negative drift is accumulating below the change threshold.
+    Dropping,
+    /// A threshold-crossing change was observed on this update.
+    Shifting,
+}
+
+impl RegimeState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Steady => "steady",
+            Self::Ramping => "ramping",
+            Self::Dropping => "dropping",
+            Self::Shifting => "shifting",
+        }
+    }
+}
+
+impl fmt::Display for RegimeState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Direction of a detected CUSUM regime change.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegimeDirection {
+    /// No threshold-crossing change was detected.
+    None,
+    /// Activity increased relative to the baseline.
+    Increase,
+    /// Activity decreased relative to the baseline.
+    Decrease,
+}
+
+impl RegimeDirection {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Increase => "increase",
+            Self::Decrease => "decrease",
+        }
+    }
+}
+
+impl fmt::Display for RegimeDirection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Per-workspace CUSUM detector state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkspaceRegimeState {
+    /// Accumulator for positive deviations from baseline.
+    pub cusum_positive: f64,
+    /// Accumulator for negative deviations from baseline.
+    pub cusum_negative: f64,
+    /// Timestamp for the most recent observation.
+    pub last_observation_ts: Option<DateTime<Utc>>,
+    /// Value for the most recent observation.
+    pub last_observation_value: Option<f64>,
+    /// CUSUM threshold `h`.
+    pub threshold_h: f64,
+    /// CUSUM slack `k`.
+    pub slack_k: f64,
+    /// Learned baseline mean for the observed signal.
+    pub baseline_mean: f64,
+    /// Learned baseline variance for the observed signal.
+    pub baseline_variance: f64,
+    /// Number of threshold-crossing changes emitted so far.
+    pub regime_changes_count: u64,
+    /// Timestamp for the most recent threshold-crossing change.
+    pub last_regime_change_at: Option<DateTime<Utc>>,
+}
+
+impl Default for WorkspaceRegimeState {
+    fn default() -> Self {
+        Self {
+            cusum_positive: 0.0,
+            cusum_negative: 0.0,
+            last_observation_ts: None,
+            last_observation_value: None,
+            threshold_h: CUSUM_DEFAULT_THRESHOLD_H,
+            slack_k: CUSUM_DEFAULT_SLACK_K,
+            baseline_mean: 0.0,
+            baseline_variance: CUSUM_DEFAULT_BASELINE_VARIANCE,
+            regime_changes_count: 0,
+            last_regime_change_at: None,
+        }
+    }
+}
+
+impl WorkspaceRegimeState {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with_baseline(mut self, mean: f64, variance: f64) -> Self {
+        self.baseline_mean = mean;
+        self.baseline_variance = variance;
+        self
+    }
+
+    #[must_use]
+    pub fn with_thresholds(mut self, threshold_h: f64, slack_k: f64) -> Self {
+        self.threshold_h = threshold_h;
+        self.slack_k = slack_k;
+        self
+    }
+
+    #[must_use]
+    pub fn derived_regime_state(&self) -> RegimeState {
+        derive_regime_state(self.cusum_positive, self.cusum_negative)
+    }
+}
+
+/// Result of applying one observation to a CUSUM detector.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegimeObservationResult {
+    /// State before this observation was applied.
+    pub previous_state: RegimeState,
+    /// State implied by this observation.
+    pub regime_state: RegimeState,
+    /// Threshold-crossing direction, or none.
+    pub direction: RegimeDirection,
+    /// Normalized observation value.
+    pub z_score: f64,
+    /// Positive CUSUM score after applying this observation, before reset.
+    pub cusum_positive: f64,
+    /// Negative CUSUM score after applying this observation, before reset.
+    pub cusum_negative: f64,
+    /// Larger of the two CUSUM scores after applying this observation.
+    pub magnitude: f64,
+    /// Whether this observation crossed the configured threshold.
+    pub regime_change_emitted: bool,
+}
+
+/// Apply one observed activity value to a two-sided CUSUM detector.
+///
+/// The returned scores describe the observation that was just processed. When
+/// a regime change is emitted, the stored accumulators are reset so later
+/// observations begin a fresh detection window.
+pub fn apply_cusum_observation(
+    state: &mut WorkspaceRegimeState,
+    observed_at: DateTime<Utc>,
+    value: f64,
+) -> Result<RegimeObservationResult, String> {
+    validate_cusum_state(state, value)?;
+
+    let previous_state = state.derived_regime_state();
+    let z_score = (value - state.baseline_mean) / state.baseline_variance.sqrt();
+    let cusum_positive = (state.cusum_positive + z_score - state.slack_k).max(0.0);
+    let cusum_negative = (state.cusum_negative - z_score - state.slack_k).max(0.0);
+    let magnitude = cusum_positive.max(cusum_negative);
+    let mut direction = RegimeDirection::None;
+    let mut regime_state = derive_regime_state(cusum_positive, cusum_negative);
+    let regime_change_emitted = magnitude > state.threshold_h;
+
+    if regime_change_emitted {
+        direction = if cusum_positive >= cusum_negative {
+            RegimeDirection::Increase
+        } else {
+            RegimeDirection::Decrease
+        };
+        regime_state = RegimeState::Shifting;
+        state.cusum_positive = 0.0;
+        state.cusum_negative = 0.0;
+        state.regime_changes_count = state.regime_changes_count.saturating_add(1);
+        state.last_regime_change_at = Some(observed_at);
+    } else {
+        state.cusum_positive = cusum_positive;
+        state.cusum_negative = cusum_negative;
+    }
+
+    state.last_observation_ts = Some(observed_at);
+    state.last_observation_value = Some(value);
+
+    Ok(RegimeObservationResult {
+        previous_state,
+        regime_state,
+        direction,
+        z_score,
+        cusum_positive,
+        cusum_negative,
+        magnitude,
+        regime_change_emitted,
+    })
+}
+
+fn validate_cusum_state(state: &WorkspaceRegimeState, value: f64) -> Result<(), String> {
+    if !value.is_finite() {
+        return Err("CUSUM observation must be finite".to_owned());
+    }
+    if !state.baseline_mean.is_finite() {
+        return Err("CUSUM baseline mean must be finite".to_owned());
+    }
+    if !state.baseline_variance.is_finite() || state.baseline_variance <= 0.0 {
+        return Err("CUSUM baseline variance must be finite and positive".to_owned());
+    }
+    if !state.threshold_h.is_finite() || state.threshold_h <= 0.0 {
+        return Err("CUSUM threshold h must be finite and positive".to_owned());
+    }
+    if !state.slack_k.is_finite() || state.slack_k < 0.0 {
+        return Err("CUSUM slack k must be finite and non-negative".to_owned());
+    }
+    if !state.cusum_positive.is_finite() || state.cusum_positive < 0.0 {
+        return Err("CUSUM positive accumulator must be finite and non-negative".to_owned());
+    }
+    if !state.cusum_negative.is_finite() || state.cusum_negative < 0.0 {
+        return Err("CUSUM negative accumulator must be finite and non-negative".to_owned());
+    }
+    Ok(())
+}
+
+fn derive_regime_state(cusum_positive: f64, cusum_negative: f64) -> RegimeState {
+    if cusum_positive <= 0.0 && cusum_negative <= 0.0 {
+        RegimeState::Steady
+    } else if cusum_positive >= cusum_negative {
+        RegimeState::Ramping
+    } else {
+        RegimeState::Dropping
+    }
+}
+
 /// Status of a maintenance job.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum JobStatus {
@@ -3507,6 +3751,7 @@ impl ManualRunner {
             min_weight: None,
             min_confidence: None,
             link_limit,
+            memory_budget_policy: crate::core::graph_memory_budget::MemoryBudgetPolicy::defaults(),
         };
         let preflight = match crate::graph::refresh_graph_snapshot(
             &connection,
@@ -5789,6 +6034,184 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn cusum_observed_at(offset_seconds: i64) -> Result<DateTime<Utc>, String> {
+        Ok(DateTime::parse_from_rfc3339("2026-05-20T00:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc)
+            + ChronoDuration::seconds(offset_seconds))
+    }
+
+    #[test]
+    fn cusum_default_state_has_no_events() -> TestResult {
+        let state = WorkspaceRegimeState::new();
+
+        ensure(
+            state.derived_regime_state(),
+            RegimeState::Steady,
+            "default regime state",
+        )?;
+        ensure(
+            state.regime_changes_count,
+            0,
+            "default regime changes count",
+        )?;
+        ensure(
+            state.last_regime_change_at.is_none(),
+            true,
+            "default last regime change",
+        )
+    }
+
+    #[test]
+    fn cusum_stationary_signal_stays_steady() -> TestResult {
+        let mut state = WorkspaceRegimeState::new();
+
+        for (index, value) in [0.1, -0.1, 0.2, -0.2, 0.0].into_iter().enumerate() {
+            let result = apply_cusum_observation(
+                &mut state,
+                cusum_observed_at(i64::try_from(index).map_err(|error| error.to_string())?)?,
+                value,
+            )?;
+            ensure(
+                result.regime_change_emitted,
+                false,
+                "stationary signal emits no change",
+            )?;
+            ensure(
+                result.regime_state,
+                RegimeState::Steady,
+                "stationary signal remains steady",
+            )?;
+        }
+
+        ensure(
+            state.derived_regime_state(),
+            RegimeState::Steady,
+            "stationary final state",
+        )?;
+        ensure(
+            state.regime_changes_count,
+            0,
+            "stationary final event count",
+        )
+    }
+
+    #[test]
+    fn cusum_step_increase_detects_within_five_observations() -> TestResult {
+        let mut state = WorkspaceRegimeState::new();
+        let mut detected_at = None;
+
+        for offset in 1..=5 {
+            let result = apply_cusum_observation(&mut state, cusum_observed_at(offset)?, 3.0)?;
+            if result.regime_change_emitted {
+                detected_at = Some(offset);
+                ensure(
+                    result.regime_state,
+                    RegimeState::Shifting,
+                    "increase event regime state",
+                )?;
+                ensure(
+                    result.direction,
+                    RegimeDirection::Increase,
+                    "increase event direction",
+                )?;
+                break;
+            }
+        }
+
+        let detected_at = detected_at.ok_or_else(|| "increase should be detected".to_owned())?;
+        ensure(detected_at <= 5, true, "increase detection latency")?;
+        ensure(
+            state.derived_regime_state(),
+            RegimeState::Steady,
+            "increase resets stored accumulators",
+        )?;
+        ensure(state.regime_changes_count, 1, "increase event count")
+    }
+
+    #[test]
+    fn cusum_step_decrease_reports_decrease_direction() -> TestResult {
+        let mut state = WorkspaceRegimeState::new();
+        let mut final_result = None;
+
+        for offset in 1..=5 {
+            let result = apply_cusum_observation(&mut state, cusum_observed_at(offset)?, -3.0)?;
+            if result.regime_change_emitted {
+                final_result = Some(result);
+                break;
+            }
+        }
+
+        let result = final_result.ok_or_else(|| "decrease should be detected".to_owned())?;
+        ensure(
+            result.direction,
+            RegimeDirection::Decrease,
+            "decrease event direction",
+        )?;
+        ensure(
+            result.regime_state,
+            RegimeState::Shifting,
+            "decrease event regime state",
+        )?;
+        ensure(state.regime_changes_count, 1, "decrease event count")
+    }
+
+    #[test]
+    fn cusum_replay_is_deterministic() -> TestResult {
+        let observations = [0.0, 3.0, 3.0, 3.0, -3.0, -3.0, -3.0, 0.0];
+        let mut replays = Vec::new();
+
+        for _ in 0..3 {
+            let mut state = WorkspaceRegimeState::new();
+            let mut replay = Vec::new();
+            for (index, value) in observations.iter().copied().enumerate() {
+                let result = apply_cusum_observation(
+                    &mut state,
+                    cusum_observed_at(i64::try_from(index).map_err(|error| error.to_string())?)?,
+                    value,
+                )?;
+                replay.push((
+                    result.previous_state,
+                    result.regime_state,
+                    result.direction,
+                    result.regime_change_emitted,
+                    result.z_score,
+                    result.cusum_positive,
+                    result.cusum_negative,
+                    state.regime_changes_count,
+                ));
+            }
+            replays.push(replay);
+        }
+
+        ensure(replays[1].clone(), replays[0].clone(), "second replay")?;
+        ensure(replays[2].clone(), replays[0].clone(), "third replay")
+    }
+
+    #[test]
+    fn cusum_threshold_sensitivity_is_configurable() -> TestResult {
+        let mut sensitive = WorkspaceRegimeState::new().with_thresholds(3.0, 0.5);
+        let mut conservative = WorkspaceRegimeState::new().with_thresholds(10.0, 0.5);
+
+        let mut sensitive_detected = false;
+        let mut conservative_detected = false;
+        for offset in 1..=5 {
+            sensitive_detected |=
+                apply_cusum_observation(&mut sensitive, cusum_observed_at(offset)?, 2.0)?
+                    .regime_change_emitted;
+            conservative_detected |=
+                apply_cusum_observation(&mut conservative, cusum_observed_at(offset)?, 2.0)?
+                    .regime_change_emitted;
+        }
+
+        ensure(sensitive_detected, true, "sensitive threshold detects")?;
+        ensure(
+            conservative_detected,
+            false,
+            "conservative threshold does not detect within window",
+        )
     }
 
     #[derive(Clone, Debug)]
