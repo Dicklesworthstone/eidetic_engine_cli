@@ -1,0 +1,31 @@
+{
+  "scenario": "consent_denied",
+  "description": "Service-tag mode declines when the responder is not advertising tag:ee-mesh.",
+  "request": {
+    "schema": "ee.mesh.hello.v1",
+    "requestId": "req-consent-denied",
+    "requesterNodeKey": "nodekey:caller",
+    "requesterEeVersion": "0.2.0",
+    "requesterEeProtocolVersion": "1.0",
+    "requesterWorkspaceIds": ["workspace-alpha"],
+    "requesterCapabilities": ["discovery"],
+    "requesterAdvertisedTags": []
+  },
+  "responderContext": {
+    "meshEnabled": true,
+    "tailscaleAuthenticated": true,
+    "shieldsUp": false,
+    "respondMode": "service_tag",
+    "responderAdvertisedTags": [],
+    "rateLimited": false
+  },
+  "expected": {
+    "kind": "declined",
+    "error": {
+      "schema": "ee.mesh.hello.error.v1",
+      "requestId": "req-consent-denied",
+      "discoveryConsent": false,
+      "code": "discovery_consent_denied"
+    }
+  }
+}

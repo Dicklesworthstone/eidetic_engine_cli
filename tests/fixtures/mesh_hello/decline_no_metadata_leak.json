@@ -1,0 +1,31 @@
+{
+  "scenario": "decline_no_metadata_leak",
+  "description": "Decline responses carry only the echoed request id, consent marker, code, and optional safe detail.",
+  "request": {
+    "schema": "ee.mesh.hello.v1",
+    "requestId": "req-no-leak",
+    "requesterNodeKey": "nodekey:caller",
+    "requesterEeVersion": "0.2.0",
+    "requesterEeProtocolVersion": "1.0",
+    "requesterWorkspaceIds": ["workspace-alpha"],
+    "requesterCapabilities": ["discovery"],
+    "requesterAdvertisedTags": []
+  },
+  "responderContext": {
+    "meshEnabled": true,
+    "tailscaleAuthenticated": true,
+    "shieldsUp": false,
+    "respondMode": "service_tag",
+    "responderAdvertisedTags": [],
+    "rateLimited": false
+  },
+  "expected": {
+    "kind": "declined",
+    "error": {
+      "schema": "ee.mesh.hello.error.v1",
+      "requestId": "req-no-leak",
+      "discoveryConsent": false,
+      "code": "discovery_consent_denied"
+    }
+  }
+}

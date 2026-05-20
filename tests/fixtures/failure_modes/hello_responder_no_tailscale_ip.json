@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "hello_responder_no_tailscale_ip",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.12",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "mesh hello-responder status",
+    "daemon"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Mesh is enabled but the local Tailscale probe does not yield a self Tailscale IP for the responder bind address.",
+    "setup_commands": [
+      "EE_MESH_ENABLED=1 ee daemon --foreground"
+    ],
+    "invocation": "ee mesh hello-responder status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "hello_responder_no_tailscale_ip",
+    "severity": "medium",
+    "message_contains": [
+      "no self Tailscale IP",
+      "hello responder"
+    ],
+    "repair_contains": "Authenticate Tailscale"
+  }
+}

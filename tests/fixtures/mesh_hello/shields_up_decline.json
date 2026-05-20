@@ -1,0 +1,31 @@
+{
+  "scenario": "shields_up_decline",
+  "description": "Responder declines when local Tailscale shields-up is true.",
+  "request": {
+    "schema": "ee.mesh.hello.v1",
+    "requestId": "req-shields-up",
+    "requesterNodeKey": "nodekey:caller",
+    "requesterEeVersion": "0.2.0",
+    "requesterEeProtocolVersion": "1.0",
+    "requesterWorkspaceIds": ["workspace-alpha"],
+    "requesterCapabilities": ["discovery"],
+    "requesterAdvertisedTags": ["tag:ee-mesh"]
+  },
+  "responderContext": {
+    "meshEnabled": true,
+    "tailscaleAuthenticated": true,
+    "shieldsUp": true,
+    "respondMode": "auto_admit",
+    "responderAdvertisedTags": ["tag:ee-mesh"],
+    "rateLimited": false
+  },
+  "expected": {
+    "kind": "declined",
+    "error": {
+      "schema": "ee.mesh.hello.error.v1",
+      "requestId": "req-shields-up",
+      "discoveryConsent": false,
+      "code": "responder_shields_up"
+    }
+  }
+}

@@ -3255,6 +3255,58 @@ RULE NUMBER 2: NO WORKTREES. EVER.
     }
 
     #[test]
+    fn agent_operating_contract_schema_allows_all_reporting_gap_codes() -> TestResult {
+        let schema_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("docs/schemas/ee.agent_operating_contract.v1.json");
+        let schema_text = std::fs::read_to_string(&schema_path)
+            .map_err(|error| format!("read {}: {error}", schema_path.display()))?;
+        let schema: serde_json::Value = serde_json::from_str(&schema_text)
+            .map_err(|error| format!("parse {}: {error}", schema_path.display()))?;
+        let allowed = schema
+            .pointer("/properties/reporting_obligations/items/properties/gap_code/enum")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "schema gap_code enum missing".to_owned())?
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let emitted_gap_codes = [
+            AgentReportingObligationInput {
+                code_changed: true,
+                ..AgentReportingObligationInput::default()
+            },
+            AgentReportingObligationInput {
+                dirty_tree: true,
+                ..AgentReportingObligationInput::default()
+            },
+            AgentReportingObligationInput {
+                destructive_command_refs: vec!["preflight_guard_json:cmd123".to_owned()],
+                ..AgentReportingObligationInput::default()
+            },
+            AgentReportingObligationInput {
+                memory_used: true,
+                ..AgentReportingObligationInput::default()
+            },
+            AgentReportingObligationInput {
+                command_bearing_evidence: true,
+                ..AgentReportingObligationInput::default()
+            },
+        ]
+        .iter()
+        .flat_map(agent_operating_contract_reporting_obligations)
+        .filter_map(|obligation| obligation.gap_code)
+        .collect::<std::collections::BTreeSet<_>>();
+
+        for code in emitted_gap_codes {
+            if !allowed.contains(code.as_str()) {
+                return Err(format!(
+                    "schema gap_code enum must allow emitted gap code `{code}`"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn agent_operating_contract_reporting_obligations_preserve_shell_safe_command_evidence()
     -> TestResult {
         let obligations =

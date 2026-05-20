@@ -203,7 +203,8 @@
             "source_non_regular",
             "source_too_large",
             "source_unreadable",
-            "source_unparsable"
+            "source_unparsable",
+            "symbol_index_stale"
           ]
         },
         "severity": {

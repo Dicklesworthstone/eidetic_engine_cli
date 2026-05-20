@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.auto_enrollment_result.v1.json",
+  "title": "ee.mesh.auto_enrollment_result.v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "command",
+    "outcome",
+    "lanePolicy",
+    "enrollmentOutcomes",
+    "overridesApplied",
+    "syncOnceResult",
+    "explanation",
+    "degraded",
+    "safetySummary"
+  ],
+  "properties": {
+    "schema": { "const": "ee.mesh.auto_enrollment_result.v1" },
+    "command": { "const": "mesh auto-enroll" },
+    "outcome": {
+      "enum": [
+        "materialized",
+        "dry_run",
+        "explained",
+        "already_complete",
+        "no_eligible_peers",
+        "blocked"
+      ]
+    },
+    "peerGroupId": { "type": ["string", "null"], "pattern": "^pg_[0-9a-f]{16}$" },
+    "peerSetHash": { "type": ["string", "null"], "pattern": "^blake3:[0-9a-f]{64}$" },
+    "auditRowId": { "type": ["string", "null"] },
+    "materializedAt": { "type": ["string", "null"] },
+    "lanePolicy": {
+      "type": "object",
+      "required": [
+        "metadata",
+        "body",
+        "embedding",
+        "graphLink",
+        "revisionNotice",
+        "curationSignal"
+      ],
+      "properties": {
+        "metadata": { "const": "allow" },
+        "body": { "const": "deny" },
+        "embedding": { "const": "deny" },
+        "graphLink": { "const": "deny" },
+        "revisionNotice": { "const": "allow" },
+        "curationSignal": { "const": "allow" }
+      },
+      "additionalProperties": false
+    },
+    "enrollmentOutcomes": { "type": "array" },
+    "overridesApplied": { "type": "array" },
+    "syncOnceResult": { "type": "object" },
+    "explanation": { "type": "array" },
+    "degraded": { "type": "array" },
+    "safetySummary": { "type": "object" }
+  },
+  "additionalProperties": false
+}

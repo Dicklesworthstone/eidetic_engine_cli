@@ -161,6 +161,22 @@ pub mod audit_actions {
     // ----------------------------------------------------------------------
     pub const MESH_AUTO_ENROLLMENT_INTENDED: &str = "mesh.auto_enrollment_intended";
     pub const MESH_AUTO_ENROLLMENT_OUTCOME_RECORDED: &str = "mesh.auto_enrollment_outcome_recorded";
+
+    /// Operator changed the workspace's mesh discovery policy through
+    /// `ee mesh discovery-policy set|allow|deny`. Details carry
+    /// `ee.mesh.discovery_policy_changed.v1`.
+    pub const MESH_DISCOVERY_POLICY_CHANGED: &str = "mesh.discovery_policy_changed";
+
+    // ----------------------------------------------------------------------
+    // Mesh hello responder lifecycle actions (SRR6.46.12 / bd-36bbk.1.12).
+    //
+    // Emitted by the supervised foreground daemon job only. Per-request hello
+    // handling remains pure read-only and must not write audit rows.
+    // ----------------------------------------------------------------------
+    pub const MESH_HELLO_RESPONDER_STARTED: &str = "mesh.hello_responder_started";
+    pub const MESH_HELLO_RESPONDER_STOPPED: &str = "mesh.hello_responder_stopped";
+    pub const MESH_HELLO_RESPONDER_CRASHED_RESTARTED: &str =
+        "mesh.hello_responder_crashed_restarted";
 }
 
 const MIGRATION_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS ee_schema_migrations (

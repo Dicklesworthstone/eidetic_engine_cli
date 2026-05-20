@@ -1,0 +1,37 @@
+{
+  "scenario": "consent_granted",
+  "description": "Auto-admit responder grants a bounded hello request and echoes the request id.",
+  "request": {
+    "schema": "ee.mesh.hello.v1",
+    "requestId": "req-consent-granted",
+    "requesterNodeKey": "nodekey:caller",
+    "requesterEeVersion": "0.2.0",
+    "requesterEeProtocolVersion": "1.0",
+    "requesterWorkspaceIds": ["workspace-alpha"],
+    "requesterCapabilities": ["discovery"],
+    "requesterAdvertisedTags": ["tag:ee-mesh"]
+  },
+  "responderContext": {
+    "meshEnabled": true,
+    "tailscaleAuthenticated": true,
+    "shieldsUp": false,
+    "respondMode": "auto_admit",
+    "responderAdvertisedTags": ["tag:ee-mesh"],
+    "rateLimited": false
+  },
+  "expected": {
+    "kind": "granted",
+    "response": {
+      "schema": "ee.mesh.hello.response.v1",
+      "requestId": "req-consent-granted",
+      "responderNodeKey": "nodekey:responder",
+      "responderEeVersion": "0.2.0",
+      "responderEeProtocolVersion": "1.0",
+      "responderWorkspaceIds": ["workspace-alpha"],
+      "responderCapabilities": ["discovery"],
+      "responderAdvertisedTags": ["tag:ee-mesh"],
+      "discoveryConsent": true,
+      "responseElapsedMicros": 42
+    }
+  }
+}

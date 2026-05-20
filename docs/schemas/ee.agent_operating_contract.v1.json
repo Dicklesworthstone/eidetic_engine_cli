@@ -126,6 +126,7 @@
               "dirty_worktree_caveat_required",
               "destructive_command_audit_required",
               "memory_citation_required",
+              "shell_safe_command_evidence_required",
               null
             ]
           }

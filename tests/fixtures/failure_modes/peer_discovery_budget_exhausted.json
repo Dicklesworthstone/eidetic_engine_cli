@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "peer_discovery_budget_exhausted",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.2",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "mesh status"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "The aggregate Tailscale peer autodiscovery budget expires before all policy-eligible peers are probed.",
+    "setup_commands": [
+      "source scripts/e2e_overhaul/lib/fake_tailscale.sh",
+      "ft_init /tmp/ee-tailnet-budget",
+      "for i in $(seq 1 50); do ft_add_peer nodekey:peer$i 100.64.0.$i peer$i --tag=tag:ee-mesh --ee_version=0.2.0 --ee_protocol=1.0 --workspace_ids=workspace-alpha --latency_ms=750; done"
+    ],
+    "invocation": "EE_MESH_ENABLED=1 EE_TAILSCALE_DISCOVERY_BUDGET_MS=500 ee mesh status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "peer_discovery_budget_exhausted",
+    "severity": "warning",
+    "message_contains": [
+      "discovery budget",
+      "exhausted"
+    ],
+    "repair_contains": "EE_TAILSCALE_DISCOVERY_BUDGET_MS"
+  }
+}

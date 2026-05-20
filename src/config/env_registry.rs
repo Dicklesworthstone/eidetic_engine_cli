@@ -98,6 +98,10 @@ pub enum EnvVar {
     MeshDriftHardStaleAfterSeconds,
     /// `EE_MESH_ENABLED`
     MeshEnabled,
+    /// `EE_MESH_HELLO_PORT`
+    MeshHelloPort,
+    /// `EE_MESH_HELLO_RESPONDER_DISABLED`
+    MeshHelloResponderDisabled,
     /// `EE_MESH_MODE`
     MeshMode,
     /// `EE_NO_COLOR`
@@ -146,6 +150,10 @@ pub enum EnvVar {
     TailscaleProbeSocketOverride,
     /// `EE_TAILSCALE_DISCOVERY_MODE`
     TailscaleDiscoveryMode,
+    /// `EE_TAILSCALE_PEER_PROBE_TIMEOUT_MS`
+    TailscalePeerProbeTimeoutMs,
+    /// `EE_TAILSCALE_DISCOVERY_BUDGET_MS`
+    TailscaleDiscoveryBudgetMs,
     /// `EE_TAILSCALE_RESPOND_MODE`
     TailscaleRespondMode,
     /// `EE_WORKSPACE_HYGIENE_ALWAYS_REVIEW_PATTERNS`
@@ -215,6 +223,8 @@ impl EnvVar {
             Self::MeshDriftHardStaleAfter,
             Self::MeshDriftHardStaleAfterSeconds,
             Self::MeshEnabled,
+            Self::MeshHelloPort,
+            Self::MeshHelloResponderDisabled,
             Self::MeshMode,
             Self::NoColor,
             Self::OutputFormat,
@@ -239,6 +249,8 @@ impl EnvVar {
             Self::TailscaleProbeTimeoutMs,
             Self::TailscaleProbeSocketOverride,
             Self::TailscaleDiscoveryMode,
+            Self::TailscalePeerProbeTimeoutMs,
+            Self::TailscaleDiscoveryBudgetMs,
             Self::TailscaleRespondMode,
             Self::WorkspaceHygieneAlwaysReviewPatterns,
             Self::WorkspaceHygieneGeneratedPatterns,
@@ -301,6 +313,8 @@ impl EnvVar {
             Self::MeshDriftHardStaleAfter => "EE_MESH_DRIFT_HARD_STALE_AFTER",
             Self::MeshDriftHardStaleAfterSeconds => "EE_MESH_DRIFT_HARD_STALE_AFTER_SECONDS",
             Self::MeshEnabled => "EE_MESH_ENABLED",
+            Self::MeshHelloPort => "EE_MESH_HELLO_PORT",
+            Self::MeshHelloResponderDisabled => "EE_MESH_HELLO_RESPONDER_DISABLED",
             Self::MeshMode => "EE_MESH_MODE",
             Self::NoColor => "EE_NO_COLOR",
             Self::OutputFormat => "EE_OUTPUT_FORMAT",
@@ -325,6 +339,8 @@ impl EnvVar {
             Self::TailscaleProbeTimeoutMs => "EE_TAILSCALE_PROBE_TIMEOUT_MS",
             Self::TailscaleProbeSocketOverride => "EE_TAILSCALE_PROBE_SOCKET_OVERRIDE",
             Self::TailscaleDiscoveryMode => "EE_TAILSCALE_DISCOVERY_MODE",
+            Self::TailscalePeerProbeTimeoutMs => "EE_TAILSCALE_PEER_PROBE_TIMEOUT_MS",
+            Self::TailscaleDiscoveryBudgetMs => "EE_TAILSCALE_DISCOVERY_BUDGET_MS",
             Self::TailscaleRespondMode => "EE_TAILSCALE_RESPOND_MODE",
             Self::WorkspaceHygieneAlwaysReviewPatterns => {
                 "EE_WORKSPACE_HYGIENE_ALWAYS_REVIEW_PATTERNS"
@@ -436,6 +452,12 @@ impl EnvVar {
                 "Override seconds since last successful mesh probe before hard-stale drift."
             }
             Self::MeshEnabled => "Enable optional mesh-memory surfaces.",
+            Self::MeshHelloPort => {
+                "Override the mesh hello responder bind port on the local Tailscale address."
+            }
+            Self::MeshHelloResponderDisabled => {
+                "Disable the mesh hello responder lifecycle job while leaving other mesh surfaces enabled."
+            }
             Self::MeshMode => "Select the default mesh command mode.",
             Self::NoColor => "Disable colored diagnostics.",
             Self::OutputFormat => "Select the default output renderer.",
@@ -482,6 +504,12 @@ impl EnvVar {
             Self::TailscaleDiscoveryMode => {
                 "Select the caller-side mesh peer discovery policy (service_tag, auto_admit, allowlist)."
             }
+            Self::TailscalePeerProbeTimeoutMs => {
+                "Override the per-peer Tailscale hello probe timeout budget."
+            }
+            Self::TailscaleDiscoveryBudgetMs => {
+                "Override the total Tailscale peer autodiscovery wall-clock budget."
+            }
             Self::TailscaleRespondMode => {
                 "Select the responder-side mesh discovery consent policy (service_tag, auto_admit, allowlist)."
             }
@@ -521,7 +549,11 @@ impl EnvVar {
             Self::MeshDriftSoftStaleAfterSeconds => Some("300"),
             Self::MeshDriftHardStaleAfter => Some("3"),
             Self::MeshDriftHardStaleAfterSeconds => Some("3600"),
+            Self::MeshHelloPort => Some("41888"),
+            Self::MeshHelloResponderDisabled => Some("false"),
             Self::TailscaleDiscoveryMode => Some("service_tag"),
+            Self::TailscalePeerProbeTimeoutMs => Some("750"),
+            Self::TailscaleDiscoveryBudgetMs => Some("5000"),
             Self::TailscaleRespondMode => Some("service_tag"),
             Self::EmbedDedupCosineFloor => Some("0.97"),
             Self::EmbedDedupEnabled => Some("false"),
@@ -593,10 +625,14 @@ impl EnvVar {
             | Self::MeshDriftSoftStaleAfterSeconds
             | Self::MeshDriftHardStaleAfter
             | Self::MeshDriftHardStaleAfterSeconds
+            | Self::MeshHelloPort
+            | Self::MeshHelloResponderDisabled
             | Self::TailscaleBinaryOverride
             | Self::TailscaleProbeTimeoutMs
             | Self::TailscaleProbeSocketOverride
             | Self::TailscaleDiscoveryMode
+            | Self::TailscalePeerProbeTimeoutMs
+            | Self::TailscaleDiscoveryBudgetMs
             | Self::TailscaleRespondMode => "mesh",
             Self::HarmfulBurstWindowSeconds
             | Self::AuditLaneBatchMax

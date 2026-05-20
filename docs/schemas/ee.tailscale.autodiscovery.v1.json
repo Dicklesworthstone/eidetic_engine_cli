@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.tailscale.autodiscovery.v1.json",
+  "title": "ee.tailscale.autodiscovery.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "tailnetId",
+    "tailnetDisplayName",
+    "selfNodeKey",
+    "probedPeerCount",
+    "eligiblePeerCount",
+    "eeCapablePeers",
+    "skippedPeers",
+    "degraded"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ee.tailscale.autodiscovery.v1"
+    },
+    "tailnetId": {
+      "type": ["string", "null"]
+    },
+    "tailnetDisplayName": {
+      "type": ["string", "null"]
+    },
+    "selfNodeKey": {
+      "type": ["string", "null"],
+      "pattern": "^nodekey:[A-Za-z0-9_:-]+$"
+    },
+    "probedPeerCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "eligiblePeerCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "eeCapablePeers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/eeCapablePeer"
+      }
+    },
+    "skippedPeers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/skippedPeer"
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/degradation"
+      }
+    }
+  },
+  "$defs": {
+    "eeCapablePeer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nodeKey",
+        "tailscaleIp",
+        "magicDnsName",
+        "hostname",
+        "eeProtocolVersion",
+        "workspaceMatchSet",
+        "lastProbedAt",
+        "latencyMs",
+        "discoveryPolicyDecision"
+      ],
+      "properties": {
+        "nodeKey": {
+          "type": "string",
+          "pattern": "^nodekey:[A-Za-z0-9_:-]+$"
+        },
+        "tailscaleIp": {
+          "type": "string"
+        },
+        "magicDnsName": {
+          "type": ["string", "null"]
+        },
+        "hostname": {
+          "type": ["string", "null"]
+        },
+        "eeProtocolVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+$"
+        },
+        "workspaceMatchSet": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "lastProbedAt": {
+          "type": "string"
+        },
+        "latencyMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "discoveryPolicyDecision": {
+          "enum": [
+            "auto_admit",
+            "service_tag_match",
+            "allowlisted"
+          ]
+        }
+      }
+    },
+    "skippedPeer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nodeKey",
+        "reason"
+      ],
+      "properties": {
+        "nodeKey": {
+          "type": "string",
+          "pattern": "^nodekey:[A-Za-z0-9_:-]+$"
+        },
+        "reason": {
+          "enum": [
+            "no_discovery_consent",
+            "denied_by_policy",
+            "probe_timeout",
+            "probe_malformed",
+            "workspace_mismatch",
+            "non_ee"
+          ]
+        }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "severity",
+        "message",
+        "repair"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "tailscale_peer_probe_timeout",
+            "no_ee_peers_on_tailnet",
+            "tailscale_peer_list_unavailable",
+            "peer_discovery_workspace_mismatch",
+            "peer_discovery_budget_exhausted"
+          ]
+        },
+        "severity": {
+          "enum": [
+            "info",
+            "warning"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repair": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

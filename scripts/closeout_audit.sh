@@ -179,9 +179,11 @@ DEPS_JSON="$(printf '%s' "$BEAD_JSON" | jq -c '[.dependencies // [] | .[] | sele
 
 # For each dep, look up its status; open deps go into a blocker list.
 OPEN_DEPS_JSON="[]"
+DEFERRED_DEPS_WITHOUT_RATIONALE_JSON="[]"
 if [ "$DEPS_JSON" != "[]" ] && [ "$DEPS_JSON" != "null" ]; then
     OPEN_DEPS_BUFFER="$(mktemp)"
-    trap 'rm -f "$OPEN_DEPS_BUFFER"' EXIT
+    DEFERRED_DEPS_BUFFER="$(mktemp)"
+    trap 'rm -f "$OPEN_DEPS_BUFFER" "$DEFERRED_DEPS_BUFFER"' EXIT
     printf '%s\n' "$DEPS_JSON" | jq -r '.[]' | while IFS= read -r dep_id; do
         [ -z "$dep_id" ] && continue
         dep_line="$(grep -F "\"id\":\"$dep_id\"" "$ISSUES_JSONL" | head -1 || true)"
@@ -190,12 +192,33 @@ if [ "$DEPS_JSON" != "[]" ] && [ "$DEPS_JSON" != "null" ]; then
             continue
         fi
         dep_status="$(printf '%s' "$dep_line" | jq -r '.status // "unknown"')"
-        if [ "$dep_status" != "closed" ] && [ "$dep_status" != "deferred" ]; then
+        if [ "$dep_status" = "deferred" ]; then
+            dep_deferral_rationale="$(printf '%s' "$dep_line" | jq -r '
+                [
+                    .defer_reason?,
+                    .deferred_reason?,
+                    .deferral_reason?,
+                    .notes?,
+                    .close_reason?,
+                    (.comments // [])[]?.text?
+                ]
+                | map(select(type == "string" and test("defer|deferred|deferral|rationale|blocked|follow-up|follow up|owner|proof"; "i")))
+                | first // ""
+            ')"
+            if [ -z "$dep_deferral_rationale" ]; then
+                jq -nc --arg id "$dep_id" --arg s "$dep_status" '{id:$id,status:$s}' >> "$DEFERRED_DEPS_BUFFER"
+            fi
+            continue
+        fi
+        if [ "$dep_status" != "closed" ]; then
             jq -nc --arg id "$dep_id" --arg s "$dep_status" '{id:$id,status:$s}' >> "$OPEN_DEPS_BUFFER"
         fi
     done
     if [ -s "$OPEN_DEPS_BUFFER" ]; then
         OPEN_DEPS_JSON="$(jq -s '.' < "$OPEN_DEPS_BUFFER")"
+    fi
+    if [ -s "$DEFERRED_DEPS_BUFFER" ]; then
+        DEFERRED_DEPS_WITHOUT_RATIONALE_JSON="$(jq -s '.' < "$DEFERRED_DEPS_BUFFER")"
     fi
 fi
 
@@ -288,6 +311,7 @@ SRR6_REQUIRED_PROOFS_JSON="[]"
 SRR6_MISSING_PROOFS_JSON="[]"
 SRR6_MISSING_PROOF_MARKERS_JSON="[]"
 SRR6_UNRESOLVED_DEPS_JSON="[]"
+SRR6_DEFERRED_DEPS_WITHOUT_RATIONALE_JSON="[]"
 if [ "$SRR6_CLOSEOUT_ENABLED" = "true" ]; then
     SRR6_MATRIX_PATH="docs/mesh/verification_matrix.md"
     SRR6_MATRIX_ABS="$WORKSPACE_ROOT/$SRR6_MATRIX_PATH"
@@ -343,14 +367,17 @@ if [ "$SRR6_CLOSEOUT_ENABLED" = "true" ]; then
     fi
 
     SRR6_UNRESOLVED_DEPS_JSON="$OPEN_DEPS_JSON"
+    SRR6_DEFERRED_DEPS_WITHOUT_RATIONALE_JSON="$DEFERRED_DEPS_WITHOUT_RATIONALE_JSON"
     SRR6_MISSING_PROOFS_COUNT="$(printf '%s' "$SRR6_MISSING_PROOFS_JSON" | jq 'length')"
     SRR6_MISSING_PROOF_MARKERS_COUNT="$(printf '%s' "$SRR6_MISSING_PROOF_MARKERS_JSON" | jq 'length')"
     SRR6_UNRESOLVED_DEPS_COUNT="$(printf '%s' "$SRR6_UNRESOLVED_DEPS_JSON" | jq 'length')"
+    SRR6_DEFERRED_DEPS_WITHOUT_RATIONALE_COUNT="$(printf '%s' "$SRR6_DEFERRED_DEPS_WITHOUT_RATIONALE_JSON" | jq 'length')"
     if [ "$SRR6_MATRIX_PRESENT" != "true" ] \
         || [ "$SRR6_MATRIX_ROW_PRESENT" != "true" ] \
         || [ "$SRR6_MISSING_PROOFS_COUNT" -gt 0 ] \
         || [ "$SRR6_MISSING_PROOF_MARKERS_COUNT" -gt 0 ] \
-        || [ "$SRR6_UNRESOLVED_DEPS_COUNT" -gt 0 ]; then
+        || [ "$SRR6_UNRESOLVED_DEPS_COUNT" -gt 0 ] \
+        || [ "$SRR6_DEFERRED_DEPS_WITHOUT_RATIONALE_COUNT" -gt 0 ]; then
         SRR6_CLOSEOUT_STATUS="blocked"
     else
         SRR6_CLOSEOUT_STATUS="ready"
@@ -485,6 +512,11 @@ if [ "$SRR6_CLOSEOUT_ENABLED" = "true" ]; then
         BLOCKERS+=("srr6_unresolved_dependencies: ${SRR6_UNRESOLVED_DEPS_COUNT} SRR6 dep(s) are not closed/deferred")
         NEXT_ACTIONS+=("defer or close every unresolved SRR6 dependency before closing bd-2vu8m")
     fi
+    SRR6_DEFERRED_DEPS_WITHOUT_RATIONALE_COUNT="$(printf '%s' "$SRR6_DEFERRED_DEPS_WITHOUT_RATIONALE_JSON" | jq 'length')"
+    if [ "$SRR6_DEFERRED_DEPS_WITHOUT_RATIONALE_COUNT" -gt 0 ]; then
+        BLOCKERS+=("srr6_deferred_dependencies_missing_rationale: ${SRR6_DEFERRED_DEPS_WITHOUT_RATIONALE_COUNT} deferred SRR6 dep(s) lack explicit rationale")
+        NEXT_ACTIONS+=("add a deferral rationale comment/notes entry for every deferred SRR6 dependency before closing bd-2vu8m")
+    fi
     if [ "$SRR6_MATRIX_PRESENT" != "true" ]; then
         BLOCKERS+=("srr6_matrix_missing: docs/mesh/verification_matrix.md is required")
         NEXT_ACTIONS+=("restore the SRR6 verification matrix before closeout")
@@ -582,6 +614,7 @@ RESULT_JSON="$(jq -nc \
         --argjson missing_proofs "$SRR6_MISSING_PROOFS_JSON" \
         --argjson missing_proof_markers "$SRR6_MISSING_PROOF_MARKERS_JSON" \
         --argjson unresolved_dependencies "$SRR6_UNRESOLVED_DEPS_JSON" \
+        --argjson deferred_dependencies_missing_rationale "$SRR6_DEFERRED_DEPS_WITHOUT_RATIONALE_JSON" \
         '{
             enabled: $enabled,
             status: $status,
@@ -591,7 +624,8 @@ RESULT_JSON="$(jq -nc \
             required_proofs: $required_proofs,
             missing_proofs: $missing_proofs,
             missing_proof_markers: $missing_proof_markers,
-            unresolved_dependencies: $unresolved_dependencies
+            unresolved_dependencies: $unresolved_dependencies,
+            deferred_dependencies_missing_rationale: $deferred_dependencies_missing_rationale
         }')" \
     --argjson blockers "$BLOCKERS_JSON" \
     --argjson caveats "$CAVEATS_JSON" \

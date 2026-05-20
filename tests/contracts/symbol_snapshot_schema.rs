@@ -178,6 +178,7 @@ fn symbol_snapshot_schema_matches_model_enum_vocabulary() -> TestResult {
         SymbolGraphDegradationCode::SourceTooLarge,
         SymbolGraphDegradationCode::SourceUnreadable,
         SymbolGraphDegradationCode::SourceUnparsable,
+        SymbolGraphDegradationCode::SymbolIndexStale,
     ] {
         let value = serialized_enum_value(code)?;
         ensure(
@@ -186,8 +187,8 @@ fn symbol_snapshot_schema_matches_model_enum_vocabulary() -> TestResult {
         )?;
     }
     ensure(
-        degradation_codes.len() == 5,
-        format!("degradation code enum should have 5 values, got {degradation_codes:?}"),
+        degradation_codes.len() == 6,
+        format!("degradation code enum should have 6 values, got {degradation_codes:?}"),
     )
 }
 

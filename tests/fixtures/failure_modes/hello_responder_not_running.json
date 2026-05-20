@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "hello_responder_not_running",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.12",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "mesh hello-responder status",
+    "status",
+    "doctor"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Mesh is enabled but the foreground daemon has not started the hello responder lifecycle job.",
+    "setup_commands": [
+      "EE_MESH_ENABLED=1 EE_MESH_HELLO_RESPONDER_DISABLED=0 ee init --workspace . --json"
+    ],
+    "invocation": "EE_MESH_ENABLED=1 ee mesh hello-responder status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "hello_responder_not_running",
+    "severity": "medium",
+    "message_contains": [
+      "Mesh is enabled",
+      "hello responder",
+      "not running"
+    ],
+    "repair_contains": "ee daemon --foreground"
+  }
+}

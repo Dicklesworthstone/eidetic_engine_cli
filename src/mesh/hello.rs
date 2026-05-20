@@ -498,7 +498,7 @@ fn decline(echo: String, code: HelloErrorCode, detail: Option<String>) -> HelloO
 #[must_use]
 pub fn classify_decline_for_caller_skip_reason(code: HelloErrorCode) -> &'static str {
     match code {
-        HelloErrorCode::UnsupportedProtocolVersion => "incompatible_protocol",
+        HelloErrorCode::UnsupportedProtocolVersion => "probe_malformed",
         HelloErrorCode::DiscoveryConsentDenied => "no_discovery_consent",
         HelloErrorCode::ResponderBusy => "probe_timeout",
         HelloErrorCode::ResponderMeshDisabled => "non_ee",
@@ -886,7 +886,7 @@ mod tests {
         for (code, expected) in [
             (
                 HelloErrorCode::UnsupportedProtocolVersion,
-                "incompatible_protocol",
+                "probe_malformed",
             ),
             (
                 HelloErrorCode::DiscoveryConsentDenied,
