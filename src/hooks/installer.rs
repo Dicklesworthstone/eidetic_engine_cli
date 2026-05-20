@@ -1252,7 +1252,24 @@ fn hook_requires_agent_name(content: &str) -> bool {
     content.contains("AGENT_NAME")
         && (content.contains("environment variable is required")
             || content.contains("os.environ.get(\"AGENT_NAME\"")
-            || content.contains("os.environ.get('AGENT_NAME'"))
+            || content.contains("os.environ.get('AGENT_NAME'")
+            || content.lines().any(shell_line_requires_agent_name))
+}
+
+fn shell_line_requires_agent_name(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return false;
+    }
+
+    trimmed.contains("${AGENT_NAME:?")
+        || trimmed.contains("${AGENT_NAME?")
+        || trimmed.contains("[ -z \"$AGENT_NAME\"")
+        || trimmed.contains("[[ -z \"$AGENT_NAME\"")
+        || trimmed.contains("test -z \"$AGENT_NAME\"")
+        || trimmed.contains("[ -z \"${AGENT_NAME")
+        || trimmed.contains("[[ -z \"${AGENT_NAME")
+        || trimmed.contains("test -z \"${AGENT_NAME")
 }
 
 fn hook_mutates_beads_metadata(content: &str) -> bool {
@@ -2126,6 +2143,55 @@ if not AGENT_NAME:
                 .iter()
                 .any(|finding| finding.code == "preflight_guard_not_in_git_hooks"),
             "missing hook chain should explain that preflight is not reachable"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn git_readiness_detects_shell_agent_name_guards() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_dir = temp.path().join(".git").join("hooks");
+        fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
+        fs::write(
+            hook_dir.join("pre-commit"),
+            "#!/bin/sh\n/usr/local/bin/ee preflight check --cmd \"$*\" --json\n",
+        )
+        .map_err(|e| e.to_string())?;
+        fs::write(
+            hook_dir.join("pre-push"),
+            r#"#!/bin/sh
+: "${AGENT_NAME:?AGENT_NAME environment variable is required}"
+"#,
+        )
+        .map_err(|e| e.to_string())?;
+
+        let missing = check_git_hook_readiness(&GitHookReadinessOptions {
+            repository_root: temp.path().to_path_buf(),
+            agent_name: None,
+        })
+        .map_err(|e| e.message())?;
+        assert_eq!(missing.summary.posture, "blocked");
+        assert!(
+            missing
+                .findings
+                .iter()
+                .any(|finding| finding.code == "agent_name_required"),
+            "shell AGENT_NAME guard must be detected when no identity is supplied"
+        );
+
+        let ready = check_git_hook_readiness(&GitHookReadinessOptions {
+            repository_root: temp.path().to_path_buf(),
+            agent_name: Some("JadeSquirrel".to_owned()),
+        })
+        .map_err(|e| e.message())?;
+        assert!(ready.summary.agent_name_ready);
+        assert!(
+            ready
+                .findings
+                .iter()
+                .all(|finding| finding.code != "agent_name_required"),
+            "supplying the agent identity should satisfy shell AGENT_NAME hooks"
         );
 
         Ok(())
