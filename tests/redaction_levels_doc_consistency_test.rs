@@ -450,6 +450,42 @@ fn doc_does_not_claim_unregistered_redaction_env_override() -> TestResult {
 }
 
 #[test]
+fn current_export_redaction_claim_matches_cli_and_backup_wiring() -> TestResult {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let doc = read_doc()?;
+    let cli = std::fs::read_to_string(manifest_dir.join("src/cli/mod.rs"))
+        .map_err(|e| format!("read src/cli/mod.rs: {e}"))?;
+    let backup = std::fs::read_to_string(manifest_dir.join("src/core/backup.rs"))
+        .map_err(|e| format!("read src/core/backup.rs: {e}"))?;
+
+    ensure(
+        doc.lines().any(|line| {
+            line.contains("`ee export`")
+                && line.contains("`standard`")
+                && line.contains("current `--redaction <level>`")
+        }),
+        "docs/redaction_levels.md must mark ee export as a current standard-redaction surface",
+    )?;
+    ensure(
+        cli.contains("pub struct ExportArgs"),
+        "src/cli/mod.rs must define ExportArgs",
+    )?;
+    ensure(
+        cli.contains("RedactionDefaultSurface::Export") && cli.contains("RedactionLevel::Standard"),
+        "ee export must resolve the documented standard built-in default through workspace config",
+    )?;
+    ensure(
+        cli.contains("redaction_level: redaction.level"),
+        "handle_export must pass the effective redaction level into BackupCreateOptions",
+    )?;
+    ensure(
+        backup.contains("pub redaction_level: RedactionLevel")
+            && backup.contains("redaction_level: options.redaction_level"),
+        "BackupCreateOptions must carry and apply the requested export redaction level",
+    )
+}
+
+#[test]
 fn current_context_redaction_claim_matches_cli_and_pack_wiring() -> TestResult {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let doc = read_doc()?;
