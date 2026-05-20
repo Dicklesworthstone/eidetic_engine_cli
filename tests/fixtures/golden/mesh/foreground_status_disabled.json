@@ -31,6 +31,78 @@
     "bodyLanesDefaultAllowed": false,
     "embeddingLanesAllowed": false
   },
+  "autoEnrollment": {
+    "schema": "ee.mesh.auto_status.v1",
+    "enabled": false,
+    "readOnly": true,
+    "tailscale": {
+      "schema": "ee.tailscale.local.v1",
+      "status": "not_probed",
+      "authenticated": null,
+      "shieldsUp": null,
+      "binaryAuthentic": null,
+      "tailnetDisplayName": null,
+      "peerCount": 0
+    },
+    "helloResponder": {
+      "schema": "ee.mesh.hello_responder.status.v1",
+      "status": "not_probed",
+      "running": null,
+      "listenAddr": null
+    },
+    "discovery": {
+      "schema": "ee.tailscale.autodiscovery.v1",
+      "status": "not_refreshed",
+      "eeCapablePeerCount": 0,
+      "skippedReason": "mesh_status_is_read_only"
+    },
+    "discoveryCache": {
+      "schema": "ee.mesh.discovery_cache.status.v1",
+      "status": "not_loaded",
+      "ttlSeconds": 30,
+      "hit": null,
+      "refreshedAt": null
+    },
+    "materialized": null,
+    "peerStateBreakdown": {
+      "active": 0,
+      "softStale": 0,
+      "hardStale": 0,
+      "denylisted": 0
+    },
+    "drift": {
+      "newPeersAvailable": [],
+      "newPeerCount": 0,
+      "stalePeersInConfig": [],
+      "transientUnreachable": [],
+      "tailnetChanged": false,
+      "nodeKeyChanged": false,
+      "manualConflictPresent": false,
+      "driftSeverity": "none",
+      "actionGraph": {
+        "schema": "ee.repair_action_graph.v1",
+        "actions": [],
+        "topologicallyOrderedExecution": [],
+        "parallelizableGroups": [],
+        "estimatedTotalDurationSeconds": 0
+      },
+      "nextActionHint": "Mesh is disabled; set EE_MESH_ENABLED=1 or configure [mesh].enabled when this workspace should join a mesh."
+    },
+    "stewardPosture": {
+      "schema": "ee.mesh.steward_posture.v1",
+      "status": "not_inspected",
+      "enabled": false,
+      "lastReconciliationAt": null
+    },
+    "degraded": [
+      {
+        "code": "mesh_disabled",
+        "severity": "info",
+        "message": "Optional mesh memory is disabled; foreground commands remain local-only.",
+        "repair": "Set EE_MESH_ENABLED=1 or configure [mesh].enabled only when you want mesh surfaces."
+      }
+    ]
+  },
   "repairCommands": [
     "ee init --workspace \"/tmp/ee-mesh\" --json",
     "ee mesh export --workspace \"/tmp/ee-mesh\" --out mesh-export.json --json",

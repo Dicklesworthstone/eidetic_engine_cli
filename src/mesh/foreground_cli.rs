@@ -14,6 +14,13 @@ use serde::{Deserialize, Serialize};
 use crate::db::{
     MeshStorageStatus, StoredMeshImportLedgerEvent, StoredMeshPeer, StoredMeshPeerCursor,
 };
+use crate::mesh::identity_change_guard::{
+    AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE, AUTO_ENROLLMENT_TAILNET_CHANGED_CODE,
+};
+use crate::mesh::repair_action_graph::{
+    ActionKind, ExecutionContext, ExpectedOutcome, Priority, REPAIR_ACTION_GRAPH_SCHEMA_V1,
+    RepairAction, RepairActionGraph, build_repair_action_graph,
+};
 use crate::mesh::sync::{SelectiveSyncConfig, SelectiveSyncStatusSummary};
 use crate::policy::{
     MeshExportPolicyAttestation, MeshExportSecretScanReport, MeshExportSecretScanSubject,
@@ -26,6 +33,7 @@ pub const MESH_CLI_EXPORT_SCHEMA_V1: &str = "ee.mesh.cli.export.v1";
 pub const MESH_CLI_IMPORT_SCHEMA_V1: &str = "ee.mesh.cli.import.v1";
 pub const MESH_CLI_SYNC_SCHEMA_V1: &str = "ee.mesh.cli.sync.v1";
 pub const MESH_EXPORT_ARTIFACT_SCHEMA_V1: &str = "ee.mesh.foreground_export.v1";
+pub const MESH_AUTO_STATUS_SCHEMA_V1: &str = "ee.mesh.auto_status.v1";
 
 pub const MESH_WORKSPACE_UNINITIALIZED_CODE: &str = "mesh_workspace_uninitialized";
 pub const MESH_DISABLED_POSTURE_CODE: &str = "mesh_disabled";
@@ -272,8 +280,123 @@ pub struct MeshCliStatusReport {
     pub posture: String,
     pub storage: MeshStorageCounts,
     pub selective_sync: SelectiveSyncStatusSummary,
+    pub auto_enrollment: MeshAutoEnrollmentStatus,
     pub repair_commands: Vec<String>,
     pub degraded: Vec<MeshCliDegradation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshAutoEnrollmentStatus {
+    pub schema: &'static str,
+    pub enabled: bool,
+    pub read_only: bool,
+    pub tailscale: MeshAutoTailscaleStatus,
+    pub hello_responder: MeshAutoHelloResponderStatus,
+    pub discovery: MeshAutoDiscoveryStatus,
+    pub discovery_cache: MeshAutoDiscoveryCacheStatus,
+    pub materialized: Option<MeshAutoMaterializedStatus>,
+    pub peer_state_breakdown: MeshAutoPeerStateBreakdown,
+    pub drift: MeshAutoDriftStatus,
+    pub steward_posture: MeshAutoStewardPosture,
+    pub degraded: Vec<MeshCliDegradation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshAutoTailscaleStatus {
+    pub schema: &'static str,
+    pub status: String,
+    pub authenticated: Option<bool>,
+    pub shields_up: Option<bool>,
+    pub binary_authentic: Option<bool>,
+    pub tailnet_display_name: Option<String>,
+    pub peer_count: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshAutoHelloResponderStatus {
+    pub schema: &'static str,
+    pub status: String,
+    pub running: Option<bool>,
+    pub listen_addr: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshAutoDiscoveryStatus {
+    pub schema: &'static str,
+    pub status: String,
+    pub ee_capable_peer_count: u32,
+    pub skipped_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshAutoDiscoveryCacheStatus {
+    pub schema: &'static str,
+    pub status: String,
+    pub ttl_seconds: u32,
+    pub hit: Option<bool>,
+    pub refreshed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshAutoMaterializedStatus {
+    pub peer_group_id: String,
+    pub peer_set_hash: String,
+    pub peer_count: u32,
+    pub lane_policy: MeshAutoLanePolicy,
+    pub bound_tailnet_id: Option<String>,
+    pub materialized_on_node_key: Option<String>,
+    pub last_materialized_at: Option<String>,
+    pub enrollment_source: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshAutoLanePolicy {
+    pub metadata: &'static str,
+    pub body: &'static str,
+    pub embedding: &'static str,
+    pub graph_link: &'static str,
+    pub revision_notice: &'static str,
+    pub curation_signal: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshAutoPeerStateBreakdown {
+    pub active: u32,
+    pub soft_stale: u32,
+    pub hard_stale: u32,
+    pub denylisted: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshAutoDriftStatus {
+    pub new_peers_available: Vec<String>,
+    pub new_peer_count: u32,
+    pub stale_peers_in_config: Vec<String>,
+    pub transient_unreachable: Vec<String>,
+    pub tailnet_changed: bool,
+    pub node_key_changed: bool,
+    pub manual_conflict_present: bool,
+    pub drift_severity: &'static str,
+    pub action_graph: RepairActionGraph,
+    pub next_action_hint: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshAutoStewardPosture {
+    pub schema: &'static str,
+    pub status: String,
+    pub enabled: bool,
+    pub last_reconciliation_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -702,6 +825,17 @@ pub struct MeshCheckedExportArtifact {
     pub secret_scan: MeshExportSecretScanReport,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct MeshAutoStatusSignals {
+    tailscale_authenticated: Option<bool>,
+    tailscale_authenticated_for_24h: bool,
+    hello_responder_running: Option<bool>,
+    discovered_peer_count: u32,
+    tailnet_changed: bool,
+    node_key_changed: bool,
+    manual_conflict_present: bool,
+}
+
 impl MeshForegroundSnapshot {
     #[must_use]
     pub fn status_report(&self) -> MeshCliStatusReport {
@@ -727,6 +861,10 @@ impl MeshForegroundSnapshot {
             posture: posture.to_owned(),
             storage: self.storage.clone(),
             selective_sync: SelectiveSyncConfig::safe_starter_config().summary(),
+            auto_enrollment: auto_enrollment_status_for_snapshot(
+                self,
+                MeshAutoStatusSignals::default(),
+            ),
             repair_commands: vec![
                 format!("ee init --workspace \"{}\" --json", self.workspace_path),
                 format!(
@@ -796,6 +934,442 @@ impl MeshForegroundSnapshot {
             artifact,
             secret_scan,
         })
+    }
+}
+
+fn auto_enrollment_status_for_snapshot(
+    snapshot: &MeshForegroundSnapshot,
+    signals: MeshAutoStatusSignals,
+) -> MeshAutoEnrollmentStatus {
+    let active_peer_count = active_peer_count(snapshot) as u32;
+    let stale_peers_in_config = stale_mesh_peer_ids(snapshot);
+    let new_peer_count = signals
+        .discovered_peer_count
+        .saturating_sub(snapshot.storage.peer_count);
+    let drift_severity = auto_drift_severity(snapshot, &signals, new_peer_count);
+    let action_graph = auto_status_action_graph(snapshot, &signals);
+    let next_action_hint = auto_status_next_action_hint(snapshot, &signals, new_peer_count);
+    let mut degraded = snapshot.degraded.clone();
+    degraded.extend(auto_status_degradations(&signals));
+
+    MeshAutoEnrollmentStatus {
+        schema: MESH_AUTO_STATUS_SCHEMA_V1,
+        enabled: snapshot.mesh_enabled,
+        read_only: true,
+        tailscale: MeshAutoTailscaleStatus {
+            schema: "ee.tailscale.local.v1",
+            status: match signals.tailscale_authenticated {
+                Some(true) => "authenticated",
+                Some(false) => "not_authenticated",
+                None => "not_probed",
+            }
+            .to_owned(),
+            authenticated: signals.tailscale_authenticated,
+            shields_up: None,
+            binary_authentic: None,
+            tailnet_display_name: None,
+            peer_count: signals.discovered_peer_count,
+        },
+        hello_responder: MeshAutoHelloResponderStatus {
+            schema: "ee.mesh.hello_responder.status.v1",
+            status: match signals.hello_responder_running {
+                Some(true) => "running",
+                Some(false) => "not_running",
+                None => "not_probed",
+            }
+            .to_owned(),
+            running: signals.hello_responder_running,
+            listen_addr: None,
+        },
+        discovery: MeshAutoDiscoveryStatus {
+            schema: "ee.tailscale.autodiscovery.v1",
+            status: "not_refreshed".to_owned(),
+            ee_capable_peer_count: signals.discovered_peer_count,
+            skipped_reason: Some("mesh_status_is_read_only".to_owned()),
+        },
+        discovery_cache: MeshAutoDiscoveryCacheStatus {
+            schema: "ee.mesh.discovery_cache.status.v1",
+            status: "not_loaded".to_owned(),
+            ttl_seconds: 30,
+            hit: None,
+            refreshed_at: None,
+        },
+        materialized: auto_materialized_status(snapshot),
+        peer_state_breakdown: MeshAutoPeerStateBreakdown {
+            active: active_peer_count,
+            soft_stale: 0,
+            hard_stale: stale_peers_in_config.len() as u32,
+            denylisted: 0,
+        },
+        drift: MeshAutoDriftStatus {
+            new_peers_available: Vec::new(),
+            new_peer_count,
+            stale_peers_in_config,
+            transient_unreachable: Vec::new(),
+            tailnet_changed: signals.tailnet_changed,
+            node_key_changed: signals.node_key_changed,
+            manual_conflict_present: signals.manual_conflict_present,
+            drift_severity,
+            action_graph,
+            next_action_hint,
+        },
+        steward_posture: MeshAutoStewardPosture {
+            schema: "ee.mesh.steward_posture.v1",
+            status: "not_inspected".to_owned(),
+            enabled: false,
+            last_reconciliation_at: None,
+        },
+        degraded,
+    }
+}
+
+fn auto_materialized_status(
+    snapshot: &MeshForegroundSnapshot,
+) -> Option<MeshAutoMaterializedStatus> {
+    if snapshot.storage.peer_count == 0 && snapshot.peers.is_empty() {
+        return None;
+    }
+
+    let peer_set_hash = mesh_auto_peer_set_hash(&snapshot.peers);
+    let digest = peer_set_hash
+        .strip_prefix("blake3:")
+        .unwrap_or(peer_set_hash.as_str());
+    let peer_group_suffix: String = digest.chars().take(16).collect();
+    Some(MeshAutoMaterializedStatus {
+        peer_group_id: format!("pg_{peer_group_suffix}"),
+        peer_set_hash,
+        peer_count: snapshot.storage.peer_count,
+        lane_policy: MeshAutoLanePolicy {
+            metadata: "allow",
+            body: "deny",
+            embedding: "deny",
+            graph_link: "deny",
+            revision_notice: "allow",
+            curation_signal: "allow",
+        },
+        bound_tailnet_id: None,
+        materialized_on_node_key: None,
+        last_materialized_at: latest_peer_seen_at(snapshot),
+        enrollment_source: "manual".to_owned(),
+    })
+}
+
+fn mesh_auto_peer_set_hash(peers: &[MeshPeerRow]) -> String {
+    let mut rows: Vec<String> = peers
+        .iter()
+        .map(|peer| {
+            format!(
+                "{}\t{}\t{}",
+                peer.peer_id, peer.origin_node_id, peer.enabled
+            )
+        })
+        .collect();
+    rows.sort();
+
+    let mut hasher = blake3::Hasher::new();
+    for row in rows {
+        hasher.update(row.as_bytes());
+        hasher.update(b"\n");
+    }
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn latest_peer_seen_at(snapshot: &MeshForegroundSnapshot) -> Option<String> {
+    snapshot
+        .peers
+        .iter()
+        .map(|peer| peer.last_seen_at.as_str())
+        .max()
+        .map(str::to_owned)
+}
+
+fn stale_mesh_peer_ids(snapshot: &MeshForegroundSnapshot) -> Vec<String> {
+    let mut ids: Vec<String> = snapshot
+        .peers
+        .iter()
+        .filter(|peer| !peer.enabled)
+        .map(|peer| peer.peer_id.clone())
+        .collect();
+    ids.sort();
+    ids
+}
+
+fn auto_drift_severity(
+    snapshot: &MeshForegroundSnapshot,
+    signals: &MeshAutoStatusSignals,
+    new_peer_count: u32,
+) -> &'static str {
+    if signals.tailnet_changed
+        || signals.node_key_changed
+        || signals.manual_conflict_present
+        || signals.hello_responder_running == Some(false)
+    {
+        return "medium";
+    }
+
+    let stale_count = stale_mesh_peer_ids(snapshot).len() as u32;
+    if new_peer_count > 2 || stale_count > 2 {
+        return "warning";
+    }
+    if new_peer_count > 0 || stale_count > 0 {
+        return "info";
+    }
+    if snapshot.initialized && snapshot.mesh_enabled && snapshot.storage.peer_count == 0 {
+        return "info";
+    }
+    "none"
+}
+
+fn auto_status_action_graph(
+    snapshot: &MeshForegroundSnapshot,
+    signals: &MeshAutoStatusSignals,
+) -> RepairActionGraph {
+    let mut actions = Vec::new();
+
+    if !snapshot.initialized || !snapshot.mesh_enabled {
+        return build_auto_repair_action_graph(actions);
+    }
+
+    if signals.tailscale_authenticated == Some(false) {
+        actions.push(tailscale_up_action());
+    }
+
+    if signals.tailnet_changed || signals.node_key_changed || signals.manual_conflict_present {
+        actions.push(mesh_disable_action(
+            &snapshot.workspace_path,
+            signals.node_key_changed,
+        ));
+        actions.push(mesh_auto_enroll_action(
+            &snapshot.workspace_path,
+            vec!["ee_mesh_disable".to_owned()],
+        ));
+        return build_auto_repair_action_graph(actions);
+    }
+
+    if snapshot.storage.peer_count == 0 || signals.hello_responder_running == Some(false) {
+        let daemon_prerequisites = if signals.tailscale_authenticated == Some(false) {
+            vec!["tailscale_up".to_owned()]
+        } else {
+            Vec::new()
+        };
+        actions.push(ee_daemon_start_action(
+            &snapshot.workspace_path,
+            daemon_prerequisites,
+        ));
+        actions.push(mesh_auto_enroll_action(
+            &snapshot.workspace_path,
+            vec!["ee_daemon_start".to_owned()],
+        ));
+    }
+
+    build_auto_repair_action_graph(actions)
+}
+
+fn auto_status_next_action_hint(
+    snapshot: &MeshForegroundSnapshot,
+    signals: &MeshAutoStatusSignals,
+    new_peer_count: u32,
+) -> String {
+    if !snapshot.initialized {
+        return format!(
+            "Run `ee init --workspace \"{}\" --json` before mesh auto-enrollment can inspect local state.",
+            snapshot.workspace_path
+        );
+    }
+    if !snapshot.mesh_enabled {
+        return "Mesh is disabled; set EE_MESH_ENABLED=1 or configure [mesh].enabled when this workspace should join a mesh."
+            .to_owned();
+    }
+    if signals.tailscale_authenticated == Some(false) {
+        return "Run `tailscale up` to authenticate, then re-run `ee mesh status`.".to_owned();
+    }
+    if signals.node_key_changed {
+        return format!(
+            "Auto-enrollment is blocked because nodeKeyChanged=true. Run `ee mesh disable --workspace \"{}\" --reason \"restored from different machine\"`, then re-run auto-enroll.",
+            snapshot.workspace_path
+        );
+    }
+    if signals.tailnet_changed {
+        return format!(
+            "Auto-enrollment is blocked because tailnetChanged=true. Run `ee mesh disable --workspace \"{}\"`, then re-run auto-enroll.",
+            snapshot.workspace_path
+        );
+    }
+    if signals.manual_conflict_present {
+        return "Manual mesh configuration conflicts with auto-enrollment; resolve the manual peer-group before auto-enroll rewrites it."
+            .to_owned();
+    }
+    if signals.hello_responder_running == Some(false) {
+        return "Auto-enrolled but peers cannot reach this workspace. Run `ee daemon --foreground` to enable inbound discovery."
+            .to_owned();
+    }
+    if snapshot.storage.peer_count == 0
+        && signals.discovered_peer_count == 0
+        && signals.tailscale_authenticated == Some(true)
+        && signals.tailscale_authenticated_for_24h
+    {
+        return "You are the first ee instance on this tailnet. Other machines will appear automatically when they run ee with mesh enabled. Status: waiting for first peer."
+            .to_owned();
+    }
+    if snapshot.storage.peer_count == 0 && signals.discovered_peer_count == 0 {
+        return "Tailnet status was not refreshed by this read-only command. Run `ee mesh status --refresh --json` to recheck discovery, or run ee on a second machine in this tailnet."
+            .to_owned();
+    }
+    if snapshot.storage.peer_count == 0 && signals.discovered_peer_count > 0 {
+        return format!(
+            "{} peers discovered. Run `ee mesh auto-enroll --workspace \"{}\"` to enroll them.",
+            signals.discovered_peer_count, snapshot.workspace_path
+        );
+    }
+    if new_peer_count > 0 {
+        return format!(
+            "{new_peer_count} new peers are available. Run `ee mesh auto-enroll --workspace \"{}\"` to reconcile the peer set.",
+            snapshot.workspace_path
+        );
+    }
+    "Auto-enrollment materialized state matches the local mesh cache; no drift was detected by this read-only status view."
+        .to_owned()
+}
+
+fn auto_status_degradations(signals: &MeshAutoStatusSignals) -> Vec<MeshCliDegradation> {
+    let mut degraded = Vec::new();
+    if signals.tailnet_changed {
+        degraded.push(MeshCliDegradation {
+            code: AUTO_ENROLLMENT_TAILNET_CHANGED_CODE,
+            severity: "medium",
+            message: "Auto-enrollment materialized state belongs to a different tailnet."
+                .to_owned(),
+            repair: "Run `ee mesh disable --workspace <path>` and then `ee mesh auto-enroll --workspace <path>`."
+                .to_owned(),
+        });
+    }
+    if signals.node_key_changed {
+        degraded.push(MeshCliDegradation {
+            code: AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE,
+            severity: "medium",
+            message:
+                "Auto-enrollment materialized state was created on a different Tailscale node key."
+                    .to_owned(),
+            repair: "Run `ee mesh disable --workspace <path> --reason \"restored from different machine\"` and then `ee mesh auto-enroll --workspace <path>`."
+                .to_owned(),
+        });
+    }
+    if signals.manual_conflict_present {
+        degraded.push(MeshCliDegradation {
+            code: "auto_enrollment_manual_conflict",
+            severity: "medium",
+            message: "Manual peer configuration conflicts with the auto-enrollment peer group."
+                .to_owned(),
+            repair: "Resolve the manual peer group before re-running `ee mesh auto-enroll`."
+                .to_owned(),
+        });
+    }
+    degraded
+}
+
+fn build_auto_repair_action_graph(actions: Vec<RepairAction>) -> RepairActionGraph {
+    build_repair_action_graph(actions).unwrap_or_else(|error| {
+        tracing::warn!(
+            error = %error,
+            "mesh auto-enrollment status built an invalid repair action graph"
+        );
+        RepairActionGraph {
+            schema: REPAIR_ACTION_GRAPH_SCHEMA_V1.to_owned(),
+            actions: Vec::new(),
+            topologically_ordered_execution: Vec::new(),
+            parallelizable_groups: Vec::new(),
+            estimated_total_duration_seconds: 0,
+        }
+    })
+}
+
+fn tailscale_up_action() -> RepairAction {
+    RepairAction {
+        id: "tailscale_up".to_owned(),
+        kind: ActionKind::ShellCommand,
+        command: "tailscale up".to_owned(),
+        human_readable: "Authenticate this host with Tailscale.".to_owned(),
+        prerequisites: Vec::new(),
+        expected_outcome: ExpectedOutcome {
+            resolves_checks: vec!["tailscale_authenticated".to_owned()],
+            preconditions_for_next_actions: Vec::new(),
+        },
+        priority: Priority::Critical,
+        estimated_duration_seconds: 60,
+        reversible: false,
+        reversal_command: None,
+        requires_user_confirmation: true,
+        execution_context: ExecutionContext::UserShell,
+    }
+}
+
+fn ee_daemon_start_action(workspace_path: &str, prerequisites: Vec<String>) -> RepairAction {
+    RepairAction {
+        id: "ee_daemon_start".to_owned(),
+        kind: ActionKind::EeSubcommand,
+        command: format!("ee daemon --foreground --workspace \"{workspace_path}\""),
+        human_readable: "Start the foreground ee daemon so peers can discover this workspace."
+            .to_owned(),
+        prerequisites,
+        expected_outcome: ExpectedOutcome {
+            resolves_checks: vec!["hello_responder_running".to_owned()],
+            preconditions_for_next_actions: Vec::new(),
+        },
+        priority: Priority::High,
+        estimated_duration_seconds: 10,
+        reversible: true,
+        reversal_command: Some("Ctrl-C the foreground daemon".to_owned()),
+        requires_user_confirmation: false,
+        execution_context: ExecutionContext::EeSubcommand,
+    }
+}
+
+fn mesh_auto_enroll_action(workspace_path: &str, prerequisites: Vec<String>) -> RepairAction {
+    RepairAction {
+        id: "ee_mesh_auto_enroll".to_owned(),
+        kind: ActionKind::EeSubcommand,
+        command: format!("ee mesh auto-enroll --workspace \"{workspace_path}\""),
+        human_readable: "Materialize the discovered ee-capable peers into the mesh peer set."
+            .to_owned(),
+        prerequisites,
+        expected_outcome: ExpectedOutcome {
+            resolves_checks: vec!["mesh_auto_enrollment_materialized".to_owned()],
+            preconditions_for_next_actions: Vec::new(),
+        },
+        priority: Priority::Medium,
+        estimated_duration_seconds: 5,
+        reversible: true,
+        reversal_command: Some(format!(
+            "ee mesh disable --workspace \"{workspace_path}\" --reason \"revert auto-enrollment\""
+        )),
+        requires_user_confirmation: false,
+        execution_context: ExecutionContext::EeSubcommand,
+    }
+}
+
+fn mesh_disable_action(workspace_path: &str, node_key_changed: bool) -> RepairAction {
+    let reason = if node_key_changed {
+        "restored from different machine"
+    } else {
+        "tailnet changed"
+    };
+    RepairAction {
+        id: "ee_mesh_disable".to_owned(),
+        kind: ActionKind::EeSubcommand,
+        command: format!("ee mesh disable --workspace \"{workspace_path}\" --reason \"{reason}\""),
+        human_readable: "Disable the stale materialized peer group before auto-enrolling again."
+            .to_owned(),
+        prerequisites: Vec::new(),
+        expected_outcome: ExpectedOutcome {
+            resolves_checks: vec!["mesh_auto_enrollment_stale_binding_cleared".to_owned()],
+            preconditions_for_next_actions: Vec::new(),
+        },
+        priority: Priority::High,
+        estimated_duration_seconds: 5,
+        reversible: false,
+        reversal_command: None,
+        requires_user_confirmation: true,
+        execution_context: ExecutionContext::EeSubcommand,
     }
 }
 
@@ -1118,10 +1692,12 @@ pub fn foreground_degradations(
 #[cfg(test)]
 mod tests {
     use super::{
-        MESH_EXPORT_ARTIFACT_SCHEMA_V1, MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE,
+        MESH_AUTO_STATUS_SCHEMA_V1, MESH_EXPORT_ARTIFACT_SCHEMA_V1,
+        MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE,
         MESH_SYNC_SUPERVISOR_BUDGET_EXHAUSTED_CODE, MESH_WORKSPACE_UNINITIALIZED_CODE,
-        MeshCliDegradation, MeshForegroundSnapshot, MeshPeerRow, MeshStorageCounts,
-        MeshSyncSupervisorOptions, run_mesh_sync_supervisor_supervised,
+        MeshAutoStatusSignals, MeshCliDegradation, MeshForegroundSnapshot, MeshPeerRow,
+        MeshStorageCounts, MeshSyncSupervisorOptions, REPAIR_ACTION_GRAPH_SCHEMA_V1,
+        auto_enrollment_status_for_snapshot, run_mesh_sync_supervisor_supervised,
     };
     use asupersync::runtime::JoinError;
     use asupersync::{Budget, CancelReason, Cx, LabConfig, LabRuntime, Outcome};
@@ -1147,6 +1723,126 @@ mod tests {
         let report = snapshot.status_report();
         assert_eq!(report.posture, "disabled_local_only");
         assert_eq!(report.degraded[0].code, "mesh_disabled");
+        assert_eq!(report.auto_enrollment.schema, MESH_AUTO_STATUS_SCHEMA_V1);
+        assert!(!report.auto_enrollment.enabled);
+        assert!(report.auto_enrollment.read_only);
+        assert_eq!(
+            report.auto_enrollment.drift.action_graph.schema,
+            REPAIR_ACTION_GRAPH_SCHEMA_V1
+        );
+    }
+
+    #[test]
+    fn auto_status_view_action_graph_field_validates_against_ee_repair_action_graph_v1_schema() {
+        let snapshot = sample_snapshot(Vec::new());
+        let auto_status = snapshot.status_report().auto_enrollment;
+
+        assert_eq!(auto_status.schema, MESH_AUTO_STATUS_SCHEMA_V1);
+        assert_eq!(
+            auto_status.drift.action_graph.schema,
+            REPAIR_ACTION_GRAPH_SCHEMA_V1
+        );
+        assert_eq!(
+            auto_status
+                .drift
+                .action_graph
+                .topologically_ordered_execution,
+            vec![
+                "ee_daemon_start".to_owned(),
+                "ee_mesh_auto_enroll".to_owned()
+            ]
+        );
+        assert_eq!(auto_status.drift.drift_severity, "info");
+    }
+
+    #[test]
+    fn auto_status_view_action_graph_topological_order_matches_dependency_chain() {
+        let snapshot = sample_snapshot(Vec::new());
+        let auto_status = auto_enrollment_status_for_snapshot(
+            &snapshot,
+            MeshAutoStatusSignals {
+                tailscale_authenticated: Some(false),
+                ..MeshAutoStatusSignals::default()
+            },
+        );
+
+        assert_eq!(
+            auto_status
+                .drift
+                .action_graph
+                .topologically_ordered_execution,
+            vec![
+                "tailscale_up".to_owned(),
+                "ee_daemon_start".to_owned(),
+                "ee_mesh_auto_enroll".to_owned()
+            ]
+        );
+        assert_eq!(
+            auto_status.drift.action_graph.parallelizable_groups,
+            vec![
+                vec!["tailscale_up".to_owned()],
+                vec!["ee_daemon_start".to_owned()],
+                vec!["ee_mesh_auto_enroll".to_owned()]
+            ]
+        );
+    }
+
+    #[test]
+    fn auto_status_view_node_key_changed_classified_as_medium_severity() {
+        let snapshot = sample_snapshot(vec![sample_peer("peer-a", true)]);
+        let auto_status = auto_enrollment_status_for_snapshot(
+            &snapshot,
+            MeshAutoStatusSignals {
+                node_key_changed: true,
+                ..MeshAutoStatusSignals::default()
+            },
+        );
+
+        assert!(auto_status.drift.node_key_changed);
+        assert_eq!(auto_status.drift.drift_severity, "medium");
+        assert_eq!(
+            auto_status
+                .drift
+                .action_graph
+                .topologically_ordered_execution,
+            vec![
+                "ee_mesh_disable".to_owned(),
+                "ee_mesh_auto_enroll".to_owned()
+            ]
+        );
+        assert!(
+            auto_status
+                .degraded
+                .iter()
+                .any(|item| item.code == "auto_enrollment_node_key_changed")
+        );
+    }
+
+    #[test]
+    fn auto_status_view_first_time_on_tailnet_hint_emitted_when_self_only_and_stable_24h() {
+        let snapshot = sample_snapshot(Vec::new());
+        let auto_status = auto_enrollment_status_for_snapshot(
+            &snapshot,
+            MeshAutoStatusSignals {
+                tailscale_authenticated: Some(true),
+                tailscale_authenticated_for_24h: true,
+                ..MeshAutoStatusSignals::default()
+            },
+        );
+
+        assert_eq!(auto_status.drift.drift_severity, "info");
+        assert!(
+            auto_status
+                .drift
+                .next_action_hint
+                .contains("first ee instance")
+        );
+        assert!(
+            auto_status
+                .drift
+                .next_action_hint
+                .contains("waiting for first peer")
+        );
     }
 
     #[test]
@@ -1370,4 +2066,5 @@ mod tests {
             policy_summary_json: None,
         }
     }
+
 }
