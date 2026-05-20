@@ -116,6 +116,10 @@ const REQUIRED_SRR6_CLOSEOUT: &[&str] = &[
     "deferred_dependencies_missing_rationale",
 ];
 
+const REQUIRED_DEPENDENCY_STATUS: &[&str] = &["id", "status"];
+const REQUIRED_DEPENDENCY_CYCLE: &[&str] = &["path", "cycle"];
+const REQUIRED_MISSING_PROOF_MARKER: &[&str] = &["path", "marker"];
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -156,6 +160,36 @@ fn require_closed_set(schema: &Value, pointer: &str, expected: &[&str], label: &
     ensure(
         actual == want,
         format!("{label} drifted from closed set; expected {want:?}, got {actual:?}"),
+    )
+}
+
+fn require_schema_ref(
+    schema: &Value,
+    pointer: &str,
+    expected_ref: &str,
+    label: &str,
+) -> TestResult {
+    let actual = schema
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .unwrap_or("<missing>");
+    ensure(
+        actual == expected_ref,
+        format!("{label} must use {expected_ref}; got {actual}"),
+    )
+}
+
+fn require_required_fields(
+    schema: &Value,
+    pointer: &str,
+    expected: &[&str],
+    label: &str,
+) -> TestResult {
+    let required = collect_strings(schema.pointer(pointer).unwrap_or(&Value::Null), label)?;
+    let want: BTreeSet<String> = expected.iter().map(|s| (*s).to_owned()).collect();
+    ensure(
+        required == want,
+        format!("{label} required fields drifted; expected {want:?}, got {required:?}"),
     )
 }
 
@@ -289,6 +323,60 @@ fn closeout_audit_srr6_closeout_status_enum_is_three_states() -> TestResult {
         SRR6_CLOSEOUT_STATUSES,
         "srr6_closeout.status enum",
     )
+}
+
+#[test]
+fn closeout_audit_structured_arrays_match_script_payloads() -> TestResult {
+    let schema = load_schema()?;
+
+    for (pointer, expected_ref, label) in [
+        (
+            "/$defs/evidence/properties/open_dependencies/items/$ref",
+            "#/$defs/dependencyStatus",
+            "evidence.open_dependencies items",
+        ),
+        (
+            "/$defs/evidence/properties/dependency_cycles/items/$ref",
+            "#/$defs/dependencyCycle",
+            "evidence.dependency_cycles items",
+        ),
+        (
+            "/$defs/srr6Closeout/properties/missing_proof_markers/items/$ref",
+            "#/$defs/missingProofMarker",
+            "srr6_closeout.missing_proof_markers items",
+        ),
+        (
+            "/$defs/srr6Closeout/properties/unresolved_dependencies/items/$ref",
+            "#/$defs/dependencyStatus",
+            "srr6_closeout.unresolved_dependencies items",
+        ),
+        (
+            "/$defs/srr6Closeout/properties/deferred_dependencies_missing_rationale/items/$ref",
+            "#/$defs/dependencyStatus",
+            "srr6_closeout.deferred_dependencies_missing_rationale items",
+        ),
+    ] {
+        require_schema_ref(&schema, pointer, expected_ref, label)?;
+    }
+
+    for (def_name, required_fields) in [
+        ("dependencyStatus", REQUIRED_DEPENDENCY_STATUS),
+        ("dependencyCycle", REQUIRED_DEPENDENCY_CYCLE),
+        ("missingProofMarker", REQUIRED_MISSING_PROOF_MARKER),
+    ] {
+        ensure(
+            schema["$defs"][def_name]["additionalProperties"] == Value::Bool(false),
+            format!("{def_name} must be closed over additional properties"),
+        )?;
+        require_required_fields(
+            &schema,
+            &format!("/$defs/{def_name}/required"),
+            required_fields,
+            def_name,
+        )?;
+    }
+
+    Ok(())
 }
 
 #[test]

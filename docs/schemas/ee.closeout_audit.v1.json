@@ -86,13 +86,13 @@
         },
         "open_dependencies": {
           "type": "array",
-          "items": { "type": "string", "minLength": 1 },
-          "description": "Bead ids of dependencies that are still open. Non-empty entries normally produce a blocker."
+          "items": { "$ref": "#/$defs/dependencyStatus" },
+          "description": "Dependencies that are still not closed. Non-empty entries normally produce a blocker."
         },
         "dependency_cycles": {
           "type": "array",
-          "items": { "type": "array", "items": { "type": "string" } },
-          "description": "Cycles surfaced by `br dep cycles`. Each inner array is one cycle; the bead's `dependency_cycle_count` mirrors `length`."
+          "items": { "$ref": "#/$defs/dependencyCycle" },
+          "description": "Cycles surfaced by `br dep cycles`. Each entry carries the path and rendered cycle string; `dependency_cycle_count` mirrors `length`."
         },
         "dependency_cycle_count": {
           "type": "integer",
@@ -200,19 +200,49 @@
         },
         "missing_proof_markers": {
           "type": "array",
-          "items": { "type": "string", "minLength": 1 },
+          "items": { "$ref": "#/$defs/missingProofMarker" },
           "description": "Stable text markers an operator can grep for to locate the missing-proof origin in the matrix file."
         },
         "unresolved_dependencies": {
           "type": "array",
-          "items": { "type": "string", "minLength": 1 },
+          "items": { "$ref": "#/$defs/dependencyStatus" },
           "description": "SRR6 dependency bead ids still open. Any entry blocks SRR6 closeout until either closed or explicitly deferred with rationale."
         },
         "deferred_dependencies_missing_rationale": {
           "type": "array",
-          "items": { "type": "string", "minLength": 1 },
+          "items": { "$ref": "#/$defs/dependencyStatus" },
           "description": "Deferred dependencies that lack a rationale comment in the matrix. Each entry is a blocker — explicit deferral with rationale is required by bd-2vu8m acceptance."
         }
+      }
+    },
+    "dependencyStatus": {
+      "type": "object",
+      "required": ["id", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "minLength": 1 }
+      }
+    },
+    "dependencyCycle": {
+      "type": "object",
+      "required": ["path", "cycle"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "cycle": { "type": "string", "minLength": 1 }
+      }
+    },
+    "missingProofMarker": {
+      "type": "object",
+      "required": ["path", "marker"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "marker": { "type": "string", "minLength": 1 }
       }
     }
   }
