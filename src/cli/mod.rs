@@ -39048,6 +39048,7 @@ fn render_swarm_brief_json(
                     "dryRunWouldOffload": capability.dry_run_would_offload,
                     "workerProbeSummary": &capability.worker_probe_summary,
                     "queueHealth": &capability.queue_health,
+                    "workerPressure": &capability.worker_pressure,
                     "remoteOnlyRequired": capability.remote_only_required,
                     "remoteOnlySafe": capability.remote_only_safe,
                     "degradedCodes": capability.degraded.iter().map(|degradation| {

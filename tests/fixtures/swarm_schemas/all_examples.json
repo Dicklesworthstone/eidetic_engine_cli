@@ -363,6 +363,29 @@
       "sourceStatusCounts": {"ready": 1},
       "sourceStatuses": [],
       "resourcePressurePosture": "low",
+      "rchWorkerPressure": {
+        "schema": "ee.rch.worker_pressure.v1",
+        "status": "pressure_clear",
+        "workerCount": 1,
+        "usableWorkerCount": 1,
+        "blockedWorkerCount": 0,
+        "staleWorkerCount": 0,
+        "unknownWorkerCount": 0,
+        "topWorkers": [
+          {
+            "workerId": "vmi-example",
+            "pressureState": "clear",
+            "confidence": "high",
+            "reasonCode": "pressure_clear",
+            "freeGb": 44,
+            "freeRatioBps": 4200,
+            "telemetryFreshness": "current",
+            "admissionImpact": "usable"
+          }
+        ],
+        "rawPathsIncluded": false,
+        "rawCommandsIncluded": false
+      },
       "singleFlight": {
         "schema": "ee.singleflight.posture.v1",
         "status": "idle",

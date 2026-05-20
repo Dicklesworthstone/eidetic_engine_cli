@@ -1055,11 +1055,24 @@ fn env_path_starts_with(key: &str, expected_root: &str) -> bool {
 mod tests {
     use super::*;
     use crate::core::swarm_brief::{
-        RchCodexHookCapability, RchLocalCapabilityReport, RchQueueHealth, RchWorkerProbeSummary,
-        SwarmBriefBead, SwarmBriefBvPick, SwarmBriefBvSummary, SwarmBriefDegradation,
-        SwarmBriefDirtyFile, SwarmBriefFileReservation, SwarmBriefInboxSummary,
-        SwarmBriefSourceKind,
+        RchCodexHookCapability, RchLocalCapabilityReport, RchQueueHealth, RchWorkerPressureReport,
+        RchWorkerProbeSummary, SwarmBriefBead, SwarmBriefBvPick, SwarmBriefBvSummary,
+        SwarmBriefDegradation, SwarmBriefDirtyFile, SwarmBriefFileReservation,
+        SwarmBriefInboxSummary, SwarmBriefSourceKind,
     };
+
+    fn unknown_worker_pressure() -> RchWorkerPressureReport {
+        RchWorkerPressureReport {
+            schema: "ee.rch.worker_pressure.v1",
+            status: "pressure_unknown".to_owned(),
+            worker_count: 0,
+            usable_worker_count: 0,
+            blocked_worker_count: 0,
+            stale_worker_count: 0,
+            unknown_worker_count: 0,
+            workers: Vec::new(),
+        }
+    }
 
     #[test]
     fn next_action_snapshot_deduplicates_and_orders_candidates() {
@@ -1147,6 +1160,7 @@ mod tests {
                 queue_head_slots_needed: Some(4),
                 status: "saturated".to_owned(),
             }),
+            worker_pressure: unknown_worker_pressure(),
             remote_only_required: true,
             remote_only_safe: false,
             degraded: Vec::new(),
@@ -1198,6 +1212,7 @@ mod tests {
                 queue_head_slots_needed: Some(4),
                 status: "capacity_blocked".to_owned(),
             }),
+            worker_pressure: unknown_worker_pressure(),
             remote_only_required: true,
             remote_only_safe: false,
             degraded: Vec::new(),

@@ -38,6 +38,7 @@ const RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE: &str = "rch_remote_required_f
 const RCH_POSTURE_REMOTE_READY: &str = "remote_ready";
 const RCH_POSTURE_NO_REMOTE_WORKERS: &str = "no_remote_workers";
 const RCH_POSTURE_WORKER_UNREACHABLE: &str = "worker_unreachable";
+const RCH_WORKER_PRESSURE_SCHEMA_V1: &str = "ee.rch.worker_pressure.v1";
 const AGENT_STATUS_UNAVAILABLE_CODE: &str = "agent_status_unavailable";
 const MAX_SWARM_BRIEF_SUMMARY_RECOMMENDATIONS: usize = 5;
 const MEMORY_DRIFT_SWARM_BRIEF_LIMIT: u32 = 16;
@@ -605,6 +606,32 @@ pub struct RchQueueHealth {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RchWorkerPressureReport {
+    pub schema: &'static str,
+    pub status: String,
+    pub worker_count: u64,
+    pub usable_worker_count: u64,
+    pub blocked_worker_count: u64,
+    pub stale_worker_count: u64,
+    pub unknown_worker_count: u64,
+    pub workers: Vec<RchWorkerPressureObservation>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RchWorkerPressureObservation {
+    pub worker_id: String,
+    pub pressure_state: String,
+    pub confidence: String,
+    pub reason_code: String,
+    pub free_gb: Option<u64>,
+    pub free_ratio_bps: Option<u64>,
+    pub telemetry_freshness: String,
+    pub admission_impact: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RchLocalCapabilityReport {
     pub schema: &'static str,
     pub cli_version: Option<String>,
@@ -616,6 +643,7 @@ pub struct RchLocalCapabilityReport {
     pub worker_probe_summary: RchWorkerProbeSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_health: Option<RchQueueHealth>,
+    pub worker_pressure: RchWorkerPressureReport,
     pub remote_only_required: bool,
     pub remote_only_safe: bool,
     pub degraded: Vec<SwarmBriefDegradation>,
@@ -2248,6 +2276,7 @@ pub fn summarize_swarm_brief_report(report: &SwarmBriefReport) -> Value {
         "sourceStatusCounts": source_status_counts,
         "sourceStatuses": swarm_brief_source_status_summaries(report),
         "resourcePressurePosture": swarm_brief_resource_pressure_posture(report),
+        "rchWorkerPressure": swarm_brief_rch_worker_pressure_summary(report),
         "singleFlight": singleflight_posture_report(),
         "degradedCodes": degraded_codes,
         "fileSurfaceRiskSummary": swarm_brief_file_surface_risk_summary(report),
@@ -2514,6 +2543,47 @@ fn swarm_brief_resource_pressure_posture(report: &SwarmBriefReport) -> &'static 
         return "unknown";
     }
     "low"
+}
+
+fn swarm_brief_rch_worker_pressure_summary(report: &SwarmBriefReport) -> Value {
+    let Some(capability) = &report.rch_local_capability else {
+        return json!({
+            "schema": RCH_WORKER_PRESSURE_SCHEMA_V1,
+            "status": "not_collected",
+            "workerCount": 0,
+            "usableWorkerCount": 0,
+            "blockedWorkerCount": 0,
+            "staleWorkerCount": 0,
+            "unknownWorkerCount": 0,
+            "topWorkers": [],
+            "rawPathsIncluded": false,
+            "rawCommandsIncluded": false,
+        });
+    };
+    let pressure = &capability.worker_pressure;
+    json!({
+        "schema": pressure.schema,
+        "status": &pressure.status,
+        "workerCount": pressure.worker_count,
+        "usableWorkerCount": pressure.usable_worker_count,
+        "blockedWorkerCount": pressure.blocked_worker_count,
+        "staleWorkerCount": pressure.stale_worker_count,
+        "unknownWorkerCount": pressure.unknown_worker_count,
+        "topWorkers": pressure.workers.iter().take(5).map(|worker| {
+            json!({
+                "workerId": &worker.worker_id,
+                "pressureState": &worker.pressure_state,
+                "confidence": &worker.confidence,
+                "reasonCode": &worker.reason_code,
+                "freeGb": worker.free_gb,
+                "freeRatioBps": worker.free_ratio_bps,
+                "telemetryFreshness": &worker.telemetry_freshness,
+                "admissionImpact": &worker.admission_impact,
+            })
+        }).collect::<Vec<_>>(),
+        "rawPathsIncluded": false,
+        "rawCommandsIncluded": false,
+    })
 }
 
 fn swarm_brief_file_surface_risk_summary(report: &SwarmBriefReport) -> Value {
@@ -4319,6 +4389,20 @@ pub fn parse_rch_status_json(input: &str) -> Result<Vec<SwarmBriefResourcePressu
             message: format!("rch active builds: {active_builds}"),
         });
     }
+    let pressure = rch_worker_pressure_report(&value, None);
+    if pressure.worker_count > 0 {
+        let level = match pressure.status.as_str() {
+            "healthy_but_pressure_blocked" | "pressure_policy_denied" => "high",
+            "telemetry_stale" | "pressure_degraded" => "medium",
+            "pressure_unknown" => "unknown",
+            _ => "low",
+        };
+        hints.push(SwarmBriefResourcePressureHint {
+            source: SwarmBriefSourceKind::Rch,
+            level: level.to_string(),
+            message: format!("rch worker pressure posture: {}", pressure.status),
+        });
+    }
     if hints.is_empty() {
         hints.push(SwarmBriefResourcePressureHint {
             source: SwarmBriefSourceKind::Rch,
@@ -4446,6 +4530,7 @@ pub fn parse_rch_local_capability_snapshot(
     let queue_health = queue
         .and_then(rch_queue_health)
         .or_else(|| rch_queue_health(status));
+    let worker_pressure = rch_worker_pressure_report(status, worker_probe);
     let dry_run_would_offload = diagnose.and_then(rch_diagnose_would_offload);
     let remote_only_required = value
         .get("remoteOnlyRequired")
@@ -4461,10 +4546,17 @@ pub fn parse_rch_local_capability_snapshot(
     let queue_capacity_blocked = queue_health
         .as_ref()
         .is_some_and(|health| health.status == "capacity_blocked");
+    let worker_pressure_blocked = matches!(
+        worker_pressure.status.as_str(),
+        "healthy_but_pressure_blocked" | "pressure_policy_denied"
+    ) || (worker_pressure.worker_count > 0
+        && worker_pressure.usable_worker_count == 0
+        && worker_pressure.blocked_worker_count > 0);
     let remote_only_safe = route_available
         && workers_probe_ready
         && !queue_start_stalled
         && !queue_capacity_blocked
+        && !worker_pressure_blocked
         && dry_run_would_offload.unwrap_or(true)
         && status_socket_consistent.unwrap_or(true);
     let mut degraded = Vec::new();
@@ -4533,6 +4625,18 @@ pub fn parse_rch_local_capability_snapshot(
         ));
         recovery.push("wait_for_rch_capacity_or_fail_fast_before_remote_cargo".to_string());
     }
+    if worker_pressure_blocked {
+        degraded.push(SwarmBriefDegradation::warning(
+            SwarmBriefSourceKind::Rch,
+            RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE,
+            format!(
+                "RCH worker pressure posture is {}; remote-only verification must fail closed before launching a doomed Cargo job.",
+                worker_pressure.status
+            ),
+            Some("Reuse an active RCH known-blocker proof or wait for operator-approved worker disk-pressure remediation; ee must not delete or mutate worker files.".to_string()),
+        ));
+        recovery.push("reuse_rch_known_blocker_or_wait_for_worker_pressure_recovery".to_string());
+    }
     if recovery.is_empty() {
         recovery.push("remote_only_cargo_allowed_from_this_shell".to_string());
     }
@@ -4550,6 +4654,7 @@ pub fn parse_rch_local_capability_snapshot(
         dry_run_would_offload,
         worker_probe_summary,
         queue_health,
+        worker_pressure,
         remote_only_required,
         remote_only_safe,
         degraded,
@@ -4736,6 +4841,381 @@ fn rch_queue_health(status: &Value) -> Option<RchQueueHealth> {
     })
 }
 
+fn rch_worker_pressure_report(status: &Value, probe: Option<&Value>) -> RchWorkerPressureReport {
+    let mut workers = rch_worker_pressure_observations(status);
+    if workers.is_empty()
+        && let Some(probe) = probe
+    {
+        workers = rch_worker_pressure_observations(probe);
+    }
+    workers.sort();
+    workers.dedup_by(|left, right| left.worker_id == right.worker_id);
+
+    let worker_count = workers.len() as u64;
+    let usable_worker_count = workers
+        .iter()
+        .filter(|worker| worker.admission_impact == "usable")
+        .count() as u64;
+    let blocked_worker_count = workers
+        .iter()
+        .filter(|worker| worker.admission_impact == "blocked")
+        .count() as u64;
+    let stale_worker_count = workers
+        .iter()
+        .filter(|worker| worker.telemetry_freshness == "stale")
+        .count() as u64;
+    let unknown_worker_count = workers
+        .iter()
+        .filter(|worker| worker.pressure_state == "unknown")
+        .count() as u64;
+    let any_healthy_blocked = workers.iter().any(|worker| {
+        worker.admission_impact == "blocked" && worker.reason_code.contains("disk_pressure")
+    });
+    let any_policy_denied = workers
+        .iter()
+        .any(|worker| worker.reason_code.contains("policy_denied"));
+    let status_label = if worker_count == 0 {
+        "pressure_unknown"
+    } else if any_policy_denied {
+        "pressure_policy_denied"
+    } else if unknown_worker_count == worker_count {
+        "pressure_unknown"
+    } else if any_healthy_blocked && usable_worker_count == 0 {
+        "healthy_but_pressure_blocked"
+    } else if stale_worker_count == worker_count {
+        "telemetry_stale"
+    } else if blocked_worker_count > 0 || stale_worker_count > 0 {
+        "pressure_degraded"
+    } else {
+        "pressure_clear"
+    };
+
+    RchWorkerPressureReport {
+        schema: RCH_WORKER_PRESSURE_SCHEMA_V1,
+        status: status_label.to_string(),
+        worker_count,
+        usable_worker_count,
+        blocked_worker_count,
+        stale_worker_count,
+        unknown_worker_count,
+        workers,
+    }
+}
+
+fn rch_worker_pressure_observations(value: &Value) -> Vec<RchWorkerPressureObservation> {
+    rch_workers(value)
+        .map(|workers| {
+            workers
+                .iter()
+                .enumerate()
+                .map(|(index, worker)| rch_worker_pressure_observation(index, worker))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn rch_worker_pressure_observation(index: usize, worker: &Value) -> RchWorkerPressureObservation {
+    let worker_id = string_field(
+        worker,
+        &["id", "worker_id", "workerId", "name", "alias", "host"],
+    )
+    .map(|id| redact_brief_text(&id))
+    .unwrap_or_else(|| format!("worker_{index}"));
+    let explicit_pressure = string_field(
+        worker,
+        &[
+            "disk_pressure",
+            "diskPressure",
+            "pressure",
+            "pressure_state",
+            "pressureState",
+            "resource_pressure",
+            "resourcePressure",
+        ],
+    );
+    let explicit_admission = string_field(
+        worker,
+        &[
+            "admission",
+            "admissionImpact",
+            "admission_impact",
+            "admission_state",
+            "admissionState",
+            "buildAdmission",
+            "build_admission",
+        ],
+    );
+    let explicit_reason = string_field(
+        worker,
+        &[
+            "reason_code",
+            "reasonCode",
+            "reason",
+            "message",
+            "admissionReason",
+            "admission_reason",
+        ],
+    );
+    let free_gb = numeric_field(
+        worker,
+        &[
+            "free_gb",
+            "freeGb",
+            "disk_free_gb",
+            "diskFreeGb",
+            "available_gb",
+            "availableGb",
+        ],
+    )
+    .or_else(|| {
+        numeric_field(
+            worker,
+            &[
+                "free_bytes",
+                "freeBytes",
+                "disk_free_bytes",
+                "diskFreeBytes",
+                "available_bytes",
+                "availableBytes",
+            ],
+        )
+        .map(|bytes| bytes / 1_000_000_000)
+    });
+    let free_ratio_bps = ratio_bps_field(
+        worker,
+        &[
+            "free_ratio",
+            "freeRatio",
+            "disk_free_ratio",
+            "diskFreeRatio",
+            "available_ratio",
+            "availableRatio",
+        ],
+        false,
+    )
+    .or_else(|| {
+        ratio_bps_field(
+            worker,
+            &[
+                "free_percent",
+                "freePercent",
+                "available_percent",
+                "availablePercent",
+            ],
+            true,
+        )
+    });
+    let telemetry_freshness = rch_worker_telemetry_freshness(worker);
+    let pressure_state = normalize_rch_pressure_state(
+        explicit_pressure.as_deref(),
+        free_gb,
+        free_ratio_bps,
+        telemetry_freshness.as_str(),
+    );
+    let admission_impact =
+        normalize_rch_admission_impact(explicit_admission.as_deref(), pressure_state.as_str());
+    let reason_code = if explicit_admission
+        .as_deref()
+        .is_some_and(is_rch_policy_denied_text)
+    {
+        "pressure_policy_denied".to_string()
+    } else {
+        normalize_rch_pressure_reason(
+            explicit_reason.as_deref(),
+            pressure_state.as_str(),
+            admission_impact.as_str(),
+        )
+    };
+    let confidence = rch_worker_pressure_confidence(
+        explicit_pressure.as_deref(),
+        explicit_admission.as_deref(),
+        free_gb,
+        free_ratio_bps,
+        pressure_state.as_str(),
+    );
+
+    RchWorkerPressureObservation {
+        worker_id,
+        pressure_state,
+        confidence,
+        reason_code,
+        free_gb,
+        free_ratio_bps,
+        telemetry_freshness,
+        admission_impact,
+    }
+}
+
+fn normalize_rch_pressure_state(
+    explicit: Option<&str>,
+    free_gb: Option<u64>,
+    free_ratio_bps: Option<u64>,
+    freshness: &str,
+) -> String {
+    if freshness == "stale" {
+        return "stale".to_string();
+    }
+    if let Some(value) = explicit {
+        let lower = value.to_ascii_lowercase();
+        if lower.contains("critical")
+            || lower.contains("full")
+            || lower.contains("blocked")
+            || lower.contains("enospc")
+        {
+            return "critical".to_string();
+        }
+        if lower.contains("warn") || lower.contains("pressure") || lower.contains("low") {
+            return "warning".to_string();
+        }
+        if lower.contains("clear")
+            || lower.contains("ok")
+            || lower.contains("healthy")
+            || lower.contains("normal")
+            || lower.contains("nominal")
+        {
+            return "clear".to_string();
+        }
+        if lower.contains("stale") {
+            return "stale".to_string();
+        }
+    }
+    if free_ratio_bps.is_some_and(|ratio| ratio < 500) || free_gb.is_some_and(|gb| gb < 2) {
+        return "critical".to_string();
+    }
+    if free_ratio_bps.is_some_and(|ratio| ratio < 1_000) || free_gb.is_some_and(|gb| gb < 10) {
+        return "warning".to_string();
+    }
+    if free_ratio_bps.is_some() || free_gb.is_some() {
+        return "clear".to_string();
+    }
+    "unknown".to_string()
+}
+
+fn normalize_rch_admission_impact(explicit: Option<&str>, pressure_state: &str) -> String {
+    if let Some(value) = explicit {
+        let lower = value.to_ascii_lowercase();
+        if lower.contains("deny")
+            || lower.contains("blocked")
+            || lower.contains("refuse")
+            || lower.contains("not_admitted")
+        {
+            return "blocked".to_string();
+        }
+        if lower.contains("degraded")
+            || lower.contains("warn")
+            || lower.contains("limited")
+            || lower.contains("throttle")
+        {
+            return "degraded".to_string();
+        }
+        if lower.contains("allow") || lower.contains("admit") || lower.contains("usable") {
+            return "usable".to_string();
+        }
+    }
+    match pressure_state {
+        "critical" => "blocked",
+        "warning" | "stale" => "degraded",
+        "clear" => "usable",
+        _ => "unknown",
+    }
+    .to_string()
+}
+
+fn normalize_rch_pressure_reason(
+    explicit: Option<&str>,
+    pressure_state: &str,
+    admission_impact: &str,
+) -> String {
+    if let Some(value) = explicit {
+        if is_rch_policy_denied_text(value) {
+            return "pressure_policy_denied".to_string();
+        }
+        let lower = value.to_ascii_lowercase();
+        if lower.contains("disk") && lower.contains("pressure") {
+            return format!("disk_pressure_{pressure_state}");
+        }
+        if lower.contains("enospc") || lower.contains("no space left") {
+            return "disk_pressure_critical".to_string();
+        }
+    }
+    if admission_impact == "blocked" && pressure_state == "critical" {
+        "disk_pressure_critical"
+    } else if pressure_state == "warning" {
+        "disk_pressure_warning"
+    } else if pressure_state == "stale" {
+        "telemetry_stale"
+    } else if pressure_state == "clear" {
+        "pressure_clear"
+    } else {
+        "no_pressure_telemetry"
+    }
+    .to_string()
+}
+
+fn is_rch_policy_denied_text(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("policy") && (lower.contains("deny") || lower.contains("denied"))
+}
+
+fn rch_worker_pressure_confidence(
+    explicit_pressure: Option<&str>,
+    explicit_admission: Option<&str>,
+    free_gb: Option<u64>,
+    free_ratio_bps: Option<u64>,
+    pressure_state: &str,
+) -> String {
+    if explicit_pressure.is_some() || explicit_admission.is_some() {
+        return "high".to_string();
+    }
+    if free_gb.is_some() || free_ratio_bps.is_some() {
+        return "medium".to_string();
+    }
+    if pressure_state == "unknown" {
+        "low"
+    } else {
+        "medium"
+    }
+    .to_string()
+}
+
+fn rch_worker_telemetry_freshness(worker: &Value) -> String {
+    if let Some(freshness) = string_field(
+        worker,
+        &[
+            "telemetry_freshness",
+            "telemetryFreshness",
+            "freshness",
+            "telemetry_state",
+            "telemetryState",
+        ],
+    ) {
+        let lower = freshness.to_ascii_lowercase();
+        if lower.contains("stale") || lower.contains("expired") {
+            return "stale".to_string();
+        }
+        if lower.contains("current") || lower.contains("fresh") {
+            return "current".to_string();
+        }
+    }
+    if string_field(
+        worker,
+        &[
+            "observed_at",
+            "observedAt",
+            "last_seen",
+            "lastSeen",
+            "updated_at",
+            "updatedAt",
+        ],
+    )
+    .is_some()
+    {
+        "current".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
 fn rch_build_count(status: &Value, snake_key: &str, camel_key: &str) -> Option<u64> {
     rch_build_array(status, snake_key, camel_key)
         .map(|items| items.len() as u64)
@@ -4905,13 +5385,27 @@ fn rch_workers(value: &Value) -> Option<&Vec<Value>> {
         .get("workers")
         .and_then(Value::as_array)
         .or_else(|| value.get("data")?.get("workers").and_then(Value::as_array))
+        .or_else(|| {
+            value
+                .pointer("/data/daemon/workers")
+                .and_then(Value::as_array)
+        })
+        .or_else(|| {
+            value
+                .pointer("/data/daemon/daemon/workers")
+                .and_then(Value::as_array)
+        })
+        .or_else(|| value.pointer("/data/results").and_then(Value::as_array))
 }
 
 fn rch_worker_is_ready(worker: &Value) -> bool {
     string_field(worker, &["status", "state", "health"])
         .map(|status| {
             let status = status.to_ascii_lowercase();
-            status.contains("ready") || status.contains("healthy") || status.contains("online")
+            status.contains("ready")
+                || status.contains("healthy")
+                || status.contains("online")
+                || status == "ok"
         })
         .unwrap_or(false)
 }
@@ -5058,6 +5552,24 @@ fn numeric_field(value: &Value, keys: &[&str]) -> Option<u64> {
 fn numeric_field_any(value: &Value, keys: &[&str]) -> Option<u64> {
     numeric_field(value, keys)
         .or_else(|| value.get("data").and_then(|data| numeric_field(data, keys)))
+}
+
+fn ratio_bps_field(value: &Value, keys: &[&str], percent_units: bool) -> Option<u64> {
+    keys.iter().find_map(|key| {
+        let raw = value.get(*key)?;
+        let numeric = raw
+            .as_f64()
+            .or_else(|| raw.as_str().and_then(|text| text.parse::<f64>().ok()))?;
+        if !numeric.is_finite() || numeric.is_sign_negative() {
+            return None;
+        }
+        let basis_points = if percent_units || numeric > 1.0 {
+            numeric * 100.0
+        } else {
+            numeric * 10_000.0
+        };
+        Some(basis_points.round() as u64)
+    })
 }
 
 fn redact_brief_text(input: &str) -> String {
@@ -7084,6 +7596,182 @@ mod tests {
         assert_eq!(
             report.recovery,
             vec!["remote_only_cargo_allowed_from_this_shell".to_string()]
+        );
+    }
+
+    #[test]
+    fn rch_worker_pressure_blocks_all_healthy_critical_workers() {
+        let report = require_ok(
+            parse_rch_local_capability_snapshot(
+                r#"{
+                    "schema":"ee.rch.local_capability.fixture.v1",
+                    "remoteOnlyRequired":true,
+                    "captures":{
+                        "helpJson":{"commands":[{"name":"status"},{"name":"exec"}]},
+                        "hookStatus":{"data":{"agents":[{"agent":"CodexCli","status":"Not installed"}]}},
+                        "status":{
+                            "data":{
+                                "daemon":{
+                                    "daemon":{"version":"1.0.17","socket_path":"/tmp/rch.sock","workers_healthy":2},
+                                    "workers":[
+                                        {
+                                            "id":"vmi-a",
+                                            "status":"healthy",
+                                            "diskPressure":"critical",
+                                            "admissionImpact":"blocked",
+                                            "reasonCode":"disk_pressure_critical",
+                                            "freeGb":1,
+                                            "freeRatio":0.03,
+                                            "telemetryFreshness":"current"
+                                        },
+                                        {
+                                            "id":"vmi-b",
+                                            "status":"healthy",
+                                            "diskPressure":"critical",
+                                            "admissionImpact":"blocked",
+                                            "reasonCode":"disk_pressure_critical",
+                                            "freeGb":0,
+                                            "freeRatio":0.01,
+                                            "telemetryFreshness":"current"
+                                        }
+                                    ]
+                                }
+                            }
+                        },
+                        "config":{"data":{"general":{"socket_path":"/tmp/rch.sock"}}},
+                        "workerProbe":{"data":{"summary":{"healthy":2,"failed":0}}},
+                        "diagnose":{"data":{"dry_run":{"would_offload":true}}}
+                    }
+                }"#,
+            ),
+            "all workers pressure-blocked fixture",
+        );
+
+        assert_eq!(report.worker_pressure.schema, RCH_WORKER_PRESSURE_SCHEMA_V1);
+        assert_eq!(
+            report.worker_pressure.status,
+            "healthy_but_pressure_blocked"
+        );
+        assert_eq!(report.worker_pressure.worker_count, 2);
+        assert_eq!(report.worker_pressure.usable_worker_count, 0);
+        assert_eq!(report.worker_pressure.blocked_worker_count, 2);
+        assert_eq!(report.worker_pressure.workers[0].free_ratio_bps, Some(300));
+        assert!(!report.remote_only_safe);
+        assert!(report.degraded.iter().any(|degradation| {
+            degradation.code == RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE
+                && degradation.message.contains("worker pressure posture")
+        }));
+        assert!(
+            report.recovery.contains(
+                &"reuse_rch_known_blocker_or_wait_for_worker_pressure_recovery".to_string()
+            )
+        );
+
+        let hints = require_ok(
+            parse_rch_status_json(
+                r#"{"data":{"daemon":{"workers":[{"id":"vmi-a","status":"healthy","diskPressure":"critical","admissionImpact":"blocked","reasonCode":"disk_pressure_critical"}]}}}"#,
+            ),
+            "pressure status hints",
+        );
+        assert!(hints.iter().any(|hint| {
+            hint.level == "high"
+                && hint.message == "rch worker pressure posture: healthy_but_pressure_blocked"
+        }));
+    }
+
+    #[test]
+    fn rch_worker_pressure_keeps_one_usable_worker_available() {
+        let report = require_ok(
+            parse_rch_local_capability_snapshot(
+                r#"{
+                    "schema":"ee.rch.local_capability.fixture.v1",
+                    "remoteOnlyRequired":true,
+                    "captures":{
+                        "helpJson":{"commands":[{"name":"status"},{"name":"exec"}]},
+                        "hookStatus":{"data":{"agents":[{"agent":"CodexCli","status":"Not installed"}]}},
+                        "status":{
+                            "data":{
+                                "daemon":{
+                                    "daemon":{"version":"1.0.17","socket_path":"/tmp/rch.sock","workers_healthy":2},
+                                    "workers":[
+                                        {"id":"vmi-a","status":"healthy","diskPressure":"critical","admissionImpact":"blocked","freeGb":1},
+                                        {"id":"vmi-b","status":"healthy","diskPressure":"clear","admissionImpact":"usable","freeGb":44,"freeRatio":0.42}
+                                    ]
+                                }
+                            }
+                        },
+                        "config":{"data":{"general":{"socket_path":"/tmp/rch.sock"}}},
+                        "workerProbe":{"data":{"summary":{"healthy":2,"failed":0}}},
+                        "diagnose":{"data":{"dry_run":{"would_offload":true}}}
+                    }
+                }"#,
+            ),
+            "one usable worker fixture",
+        );
+
+        assert_eq!(report.worker_pressure.status, "pressure_degraded");
+        assert_eq!(report.worker_pressure.usable_worker_count, 1);
+        assert_eq!(report.worker_pressure.blocked_worker_count, 1);
+        assert!(report.remote_only_safe);
+        assert!(report.degraded.is_empty());
+    }
+
+    #[test]
+    fn rch_worker_pressure_distinguishes_stale_and_missing_telemetry() {
+        let stale = rch_worker_pressure_report(
+            &serde_json::json!({
+                "data":{
+                    "daemon":{
+                        "workers":[
+                            {"id":"vmi-a","status":"healthy","telemetryFreshness":"stale","freeGb":30},
+                            {"id":"vmi-b","status":"healthy","telemetryFreshness":"stale","freeRatio":0.30}
+                        ]
+                    }
+                }
+            }),
+            None,
+        );
+        assert_eq!(stale.status, "telemetry_stale");
+        assert_eq!(stale.stale_worker_count, 2);
+        assert_eq!(stale.blocked_worker_count, 0);
+
+        let missing = rch_worker_pressure_report(
+            &serde_json::json!({
+                "data":{
+                    "daemon":{
+                        "workers":[
+                            {"id":"vmi-a","status":"healthy"},
+                            {"id":"vmi-b","status":"healthy"}
+                        ]
+                    }
+                }
+            }),
+            None,
+        );
+        assert_eq!(missing.status, "pressure_unknown");
+        assert_eq!(missing.worker_count, 2);
+        assert_eq!(missing.unknown_worker_count, 2);
+        assert!(missing.workers.iter().all(|worker| {
+            worker.reason_code == "no_pressure_telemetry" && worker.admission_impact == "unknown"
+        }));
+
+        let policy_denied = rch_worker_pressure_report(
+            &serde_json::json!({
+                "data":{
+                    "daemon":{
+                        "workers":[
+                            {"id":"vmi-a","status":"healthy","admissionImpact":"policy_denied"}
+                        ]
+                    }
+                }
+            }),
+            None,
+        );
+        assert_eq!(policy_denied.status, "pressure_policy_denied");
+        assert_eq!(policy_denied.blocked_worker_count, 1);
+        assert_eq!(
+            policy_denied.workers[0].reason_code,
+            "pressure_policy_denied"
         );
     }
 

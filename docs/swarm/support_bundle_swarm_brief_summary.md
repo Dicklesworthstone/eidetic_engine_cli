@@ -14,6 +14,12 @@ raw queries or memory content.
 Memory drift posture appears under `memoryDrift` with recent-pack counts,
 affected memory IDs, source-kind counts, and degraded codes only. It does not
 include source snippets, command output bodies, or full file listings.
+RCH worker pressure appears under `rchWorkerPressure`; when no RCH capability
+snapshot is present, its status is `not_collected`. Otherwise it uses the
+redaction-safe `ee.rch.worker_pressure.v1` shape to distinguish
+`healthy_but_pressure_blocked`, `telemetry_stale`, `pressure_policy_denied`,
+`pressure_unknown`, and usable/degraded worker posture without embedding raw
+worker filesystem listings or executing any operator remediation.
 
 Versioning: field renames or incompatible redaction semantics require a new
 schema version and a migration note. Additive counts may remain in

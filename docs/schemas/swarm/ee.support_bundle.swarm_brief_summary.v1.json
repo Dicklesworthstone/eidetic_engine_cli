@@ -45,6 +45,7 @@
       "items": {"type": "object"}
     },
     "resourcePressurePosture": {"type": "string"},
+    "rchWorkerPressure": {"$ref": "#/definitions/rchWorkerPressure"},
     "singleFlight": {"$ref": "#/definitions/singleFlightPosture"},
     "degradedCodes": {
       "type": "array",
@@ -196,6 +197,61 @@
         "fullListingsIncluded": {"const": false}
       }
     },
+    "rchWorkerPressure": {
+      "type": "object",
+      "required": [
+        "schema",
+        "status",
+        "workerCount",
+        "usableWorkerCount",
+        "blockedWorkerCount",
+        "staleWorkerCount",
+        "unknownWorkerCount",
+        "topWorkers",
+        "rawPathsIncluded",
+        "rawCommandsIncluded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "ee.rch.worker_pressure.v1"},
+        "status": {"type": "string"},
+        "workerCount": {"type": "integer", "minimum": 0},
+        "usableWorkerCount": {"type": "integer", "minimum": 0},
+        "blockedWorkerCount": {"type": "integer", "minimum": 0},
+        "staleWorkerCount": {"type": "integer", "minimum": 0},
+        "unknownWorkerCount": {"type": "integer", "minimum": 0},
+        "topWorkers": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/rchWorkerPressureWorker"}
+        },
+        "rawPathsIncluded": {"const": false},
+        "rawCommandsIncluded": {"const": false}
+      }
+    },
+    "rchWorkerPressureWorker": {
+      "type": "object",
+      "required": [
+        "workerId",
+        "pressureState",
+        "confidence",
+        "reasonCode",
+        "freeGb",
+        "freeRatioBps",
+        "telemetryFreshness",
+        "admissionImpact"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "workerId": {"type": "string"},
+        "pressureState": {"type": "string"},
+        "confidence": {"type": "string"},
+        "reasonCode": {"type": "string"},
+        "freeGb": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0}]},
+        "freeRatioBps": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0}]},
+        "telemetryFreshness": {"type": "string"},
+        "admissionImpact": {"type": "string"}
+      }
+    },
     "topRisk": {
       "type": "object",
       "required": [
@@ -281,6 +337,29 @@
       "sourceStatusCounts": {"ready": 1},
       "sourceStatuses": [],
       "resourcePressurePosture": "low",
+      "rchWorkerPressure": {
+        "schema": "ee.rch.worker_pressure.v1",
+        "status": "pressure_clear",
+        "workerCount": 1,
+        "usableWorkerCount": 1,
+        "blockedWorkerCount": 0,
+        "staleWorkerCount": 0,
+        "unknownWorkerCount": 0,
+        "topWorkers": [
+          {
+            "workerId": "vmi-example",
+            "pressureState": "clear",
+            "confidence": "high",
+            "reasonCode": "pressure_clear",
+            "freeGb": 44,
+            "freeRatioBps": 4200,
+            "telemetryFreshness": "current",
+            "admissionImpact": "usable"
+          }
+        ],
+        "rawPathsIncluded": false,
+        "rawCommandsIncluded": false
+      },
       "singleFlight": {
         "schema": "ee.singleflight.posture.v1",
         "status": "idle",
