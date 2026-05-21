@@ -107,17 +107,13 @@ impl ProofCommandRunner for SystemProofCommandRunner {
         }
 
         let started = Instant::now();
-        let output = match artifact.kind {
-            ProofArtifactKind::Lean4 => Command::new("lake")
-                .arg("build")
-                .current_dir(artifact.path.parent().unwrap_or_else(|| Path::new(".")))
-                .output(),
-            ProofArtifactKind::TlaPlus => Command::new("tlc")
-                .arg("-workers")
-                .arg("8")
-                .arg(&artifact.path)
-                .output(),
-        };
+        let command = command_for_artifact(artifact);
+        let mut process = Command::new(&command[0]);
+        process.args(&command[1..]);
+        if artifact.kind == ProofArtifactKind::Lean4 {
+            process.current_dir(artifact.path.parent().unwrap_or_else(|| Path::new(".")));
+        }
+        let output = process.output();
         match output {
             Ok(output) => ProofCommandOutcome {
                 tool_available: true,
@@ -340,13 +336,21 @@ fn classify_status(kind: ProofArtifactKind, outcome: &ProofCommandOutcome) -> Pr
 fn command_for_artifact(artifact: &ProofArtifact) -> Vec<String> {
     match artifact.kind {
         ProofArtifactKind::Lean4 => vec!["lake".to_owned(), "build".to_owned()],
-        ProofArtifactKind::TlaPlus => vec![
-            "tlc".to_owned(),
-            "-workers".to_owned(),
-            "8".to_owned(),
-            artifact.path.to_string_lossy().into_owned(),
-        ],
+        ProofArtifactKind::TlaPlus => {
+            let mut command = vec!["tlc".to_owned(), "-workers".to_owned(), "8".to_owned()];
+            if let Some(config_path) = tla_config_for_artifact(artifact) {
+                command.push("-config".to_owned());
+                command.push(config_path.to_string_lossy().into_owned());
+            }
+            command.push(artifact.path.to_string_lossy().into_owned());
+            command
+        }
     }
+}
+
+fn tla_config_for_artifact(artifact: &ProofArtifact) -> Option<PathBuf> {
+    let config_path = artifact.path.parent()?.join("MC.cfg");
+    config_path.is_file().then_some(config_path)
 }
 
 #[allow(dead_code)]
@@ -552,5 +556,32 @@ mod tests {
         } else {
             Err(format!("unexpected non-regular artifact error: {error}"))
         }
+    }
+
+    #[test]
+    fn tla_command_uses_sibling_model_config_when_present() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let tla_dir = temp.path().join("tla");
+        fs::create_dir_all(&tla_dir).map_err(|error| error.to_string())?;
+        let spec_path = tla_dir.join("spec.tla");
+        let config_path = tla_dir.join("MC.cfg");
+        fs::write(&spec_path, "---- MODULE spec ----\n====\n")
+            .map_err(|error| error.to_string())?;
+        fs::write(&config_path, "INIT Init\n").map_err(|error| error.to_string())?;
+        let artifact = ProofArtifact {
+            path: spec_path.clone(),
+            kind: ProofArtifactKind::TlaPlus,
+            invariants: Vec::new(),
+        };
+
+        let command = command_for_artifact(&artifact);
+
+        assert_eq!(command[0], "tlc");
+        let config_path = config_path.to_string_lossy();
+        assert!(command.windows(2).any(|window| {
+            window[0].as_str() == "-config" && window[1].as_str() == config_path.as_ref()
+        }));
+        assert_eq!(command.last().map(String::as_str), spec_path.to_str());
+        Ok(())
     }
 }
