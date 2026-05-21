@@ -177,6 +177,7 @@ pub struct SwarmNextActionVerificationSummary {
     pub queued_remote_build_count: Option<u64>,
     pub slots_available: Option<u64>,
     pub queue_head_slots_needed: Option<u64>,
+    pub active_build_max_age_seconds: Option<u64>,
     pub queue_status: Option<String>,
 }
 
@@ -194,7 +195,10 @@ impl Serialize for SwarmNextActionVerificationSummary {
         state.serialize_field("queuedRemoteBuildCount", &self.queued_remote_build_count)?;
         state.serialize_field("slotsAvailable", &self.slots_available)?;
         state.serialize_field("queueHeadSlotsNeeded", &self.queue_head_slots_needed)?;
-        state.serialize_field("activeBuildMaxAgeSeconds", &Option::<u64>::None)?;
+        state.serialize_field(
+            "activeBuildMaxAgeSeconds",
+            &self.active_build_max_age_seconds,
+        )?;
         state.serialize_field("headOfLineBlocked", &self.head_of_line_blocked())?;
         state.serialize_field("queueRecommendation", &self.queue_recommendation())?;
         state.serialize_field("queueStatus", &self.queue_status)?;
@@ -246,6 +250,9 @@ impl SwarmNextActionVerificationSummary {
         }
         if let Some(slots) = self.queue_head_slots_needed {
             evidence.insert(format!("queue_head_slots_needed:{slots}"));
+        }
+        if let Some(seconds) = self.active_build_max_age_seconds {
+            evidence.insert(format!("active_build_max_age_seconds:{seconds}"));
         }
         if let Some(status) = &self.queue_status {
             evidence.insert(format!("queue_status:{status}"));
@@ -1065,6 +1072,9 @@ fn verification_summary(brief: &SwarmBriefReport) -> SwarmNextActionVerification
         queue_head_slots_needed: rch
             .and_then(|report| report.queue_health.as_ref())
             .and_then(|queue| queue.queue_head_slots_needed),
+        active_build_max_age_seconds: rch
+            .and_then(|report| report.queue_health.as_ref())
+            .and_then(|queue| queue.active_build_max_age_seconds),
         queue_status: rch
             .and_then(|report| report.queue_health.as_ref())
             .map(|queue| queue.status.clone()),
@@ -1198,6 +1208,7 @@ mod tests {
                 active_count: 4,
                 slots_available: Some(0),
                 queue_head_slots_needed: Some(4),
+                active_build_max_age_seconds: Some(3_600),
                 status: "saturated".to_owned(),
             }),
             worker_pressure: unknown_worker_pressure(),
@@ -1218,6 +1229,10 @@ mod tests {
         assert_eq!(snapshot.verification.queued_remote_build_count, Some(2));
         assert_eq!(snapshot.verification.slots_available, Some(0));
         assert_eq!(snapshot.verification.queue_head_slots_needed, Some(4));
+        assert_eq!(
+            snapshot.verification.active_build_max_age_seconds,
+            Some(3_600)
+        );
         assert_eq!(snapshot.verification.head_of_line_blocked(), Some(false));
         assert_eq!(
             snapshot.verification.queue_status.as_deref(),
@@ -1250,6 +1265,7 @@ mod tests {
                 active_count: 1,
                 slots_available: Some(2),
                 queue_head_slots_needed: Some(4),
+                active_build_max_age_seconds: Some(79_200),
                 status: "capacity_blocked".to_owned(),
             }),
             worker_pressure: unknown_worker_pressure(),
@@ -1272,10 +1288,11 @@ mod tests {
             json["queueRecommendation"],
             "prefer_static_work_until_queue_head_fits"
         );
-        assert_eq!(json["activeBuildMaxAgeSeconds"], Value::Null);
+        assert_eq!(json["activeBuildMaxAgeSeconds"], 79_200);
         assert_eq!(
             json["queueEvidence"],
             serde_json::json!([
+                "active_build_max_age_seconds:79200",
                 "active_remote_build_count:1",
                 "head_of_line_blocked:true",
                 "queue_head_slots_needed:4",
@@ -1311,6 +1328,7 @@ mod tests {
                 active_count: 0,
                 slots_available: Some(4),
                 queue_head_slots_needed: Some(4),
+                active_build_max_age_seconds: None,
                 status: "start_stalled".to_owned(),
             }),
             worker_pressure: unknown_worker_pressure(),
@@ -1711,6 +1729,7 @@ mod tests {
                 queued_remote_build_count: Some(0),
                 slots_available: Some(1),
                 queue_head_slots_needed: None,
+                active_build_max_age_seconds: None,
                 queue_status: Some("ready".to_owned()),
             },
             environment: SwarmNextActionEnvironmentSummary {

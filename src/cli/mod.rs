@@ -43773,6 +43773,7 @@ mod tests {
                 queued_remote_build_count: None,
                 slots_available: None,
                 queue_head_slots_needed: None,
+                active_build_max_age_seconds: None,
                 queue_status: None,
             },
             environment: crate::core::swarm_next_action::SwarmNextActionEnvironmentSummary {

@@ -620,6 +620,7 @@ pub struct RchQueueHealth {
     pub active_count: u64,
     pub slots_available: Option<u64>,
     pub queue_head_slots_needed: Option<u64>,
+    pub active_build_max_age_seconds: Option<u64>,
     pub status: String,
 }
 
@@ -4981,6 +4982,7 @@ fn rch_queue_health(status: &Value) -> Option<RchQueueHealth> {
         });
     let slots_available = rch_slots_available(status);
     let first_slots_needed = rch_first_queued_slots_needed(status);
+    let active_build_max_age_seconds = rch_active_build_max_age_seconds(status);
     let startable_now = queued_count > 0
         && active_count == 0
         && slots_available
@@ -5005,6 +5007,7 @@ fn rch_queue_health(status: &Value) -> Option<RchQueueHealth> {
         active_count,
         slots_available,
         queue_head_slots_needed: first_slots_needed,
+        active_build_max_age_seconds,
         status: status_label.to_string(),
     })
 }
@@ -5434,6 +5437,39 @@ fn rch_first_queued_slots_needed(status: &Value) -> Option<u64> {
             .first()
             .and_then(|item| numeric_field_any(item, &["slots_needed", "slotsNeeded", "slots"]))
     })
+}
+
+fn rch_active_build_max_age_seconds(status: &Value) -> Option<u64> {
+    let active_build_age_keys = [
+        "active_build_max_age_seconds",
+        "activeBuildMaxAgeSeconds",
+        "max_active_build_age_seconds",
+        "maxActiveBuildAgeSeconds",
+    ];
+    numeric_field_any(status, &active_build_age_keys).or_else(|| {
+        rch_build_array(status, "active_builds", "activeBuilds")
+            .and_then(|items| items.iter().filter_map(rch_active_build_age_seconds).max())
+    })
+}
+
+fn rch_active_build_age_seconds(build: &Value) -> Option<u64> {
+    numeric_field_any(
+        build,
+        &[
+            "detector_build_age_secs",
+            "detectorBuildAgeSecs",
+            "detector_build_age_seconds",
+            "detectorBuildAgeSeconds",
+            "age_secs",
+            "ageSecs",
+            "age_seconds",
+            "ageSeconds",
+            "duration_secs",
+            "durationSecs",
+            "duration_seconds",
+            "durationSeconds",
+        ],
+    )
 }
 
 fn rch_diagnose_would_offload(value: &Value) -> Option<bool> {
@@ -8132,7 +8168,8 @@ mod tests {
                                 "active_builds":[
                                     {
                                         "id":31,
-                                        "command":"env TMPDIR=/tmp cargo build --bin ee"
+                                        "command":"env TMPDIR=/tmp cargo build --bin ee",
+                                        "detector_build_age_secs":79200
                                     }
                                 ],
                                 "queued_builds":[
@@ -8161,6 +8198,7 @@ mod tests {
         assert_eq!(queue.active_count, 1);
         assert_eq!(queue.slots_available, Some(2));
         assert_eq!(queue.queue_head_slots_needed, Some(4));
+        assert_eq!(queue.active_build_max_age_seconds, Some(79_200));
         assert_eq!(queue.status, "capacity_blocked");
         assert!(!report.remote_only_safe);
         assert!(report.degraded.iter().any(|degradation| {
