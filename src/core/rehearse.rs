@@ -5,10 +5,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Instant;
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,8 @@ const UNAVAILABLE_VALUE: &str = "unavailable";
 const MANIFEST_FILE: &str = "manifest.json";
 const SOURCE_SNAPSHOT_FILE: &str = "source_snapshot.json";
 const SANDBOX_SNAPSHOT_FILE: &str = "sandbox_snapshot.json";
+const REHEARSAL_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+const REHEARSAL_STDERR_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
 // ============================================================================
 // Command Spec Types
@@ -1287,16 +1290,14 @@ fn execute_rehearsal_command(
         });
     };
     let trusted_runner = validate_rehearsal_runner(binary)?;
-    let output = Command::new(trusted_runner)
-        .arg("--workspace")
-        .arg(sandbox_path)
-        .arg(&command.command)
-        .args(&command.args)
-        .env("EE_REHEARSE_SANDBOX", "1")
-        .stdout(std::process::Stdio::null())
-        .output()
-        .map_err(|error| storage_error("execute rehearsal command", error))?;
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let output = run_rehearsal_command_with_timeout(&trusted_runner, sandbox_path, command)
+        .map_err(|error| {
+            storage_error(
+                "execute rehearsal command",
+                io::Error::new(error.kind, error.message),
+            )
+        })?;
+    let stderr = output.stderr.trim().to_string();
     Ok(CommandResult {
         command_id: command.id.clone(),
         command: command.command.clone(),
@@ -1315,6 +1316,115 @@ fn execute_rehearsal_command(
             Some(stderr.chars().take(512).collect())
         },
     })
+}
+
+#[derive(Debug)]
+struct RehearsalCommandOutput {
+    status: ExitStatus,
+    stderr: String,
+}
+
+#[derive(Debug)]
+struct RehearsalCommandError {
+    kind: io::ErrorKind,
+    message: String,
+}
+
+fn run_rehearsal_command_with_timeout(
+    trusted_runner: &Path,
+    sandbox_path: &Path,
+    command: &CommandSpec,
+) -> Result<RehearsalCommandOutput, RehearsalCommandError> {
+    run_rehearsal_command_with_limits(
+        trusted_runner,
+        sandbox_path,
+        command,
+        REHEARSAL_COMMAND_TIMEOUT,
+        REHEARSAL_STDERR_LIMIT_BYTES,
+    )
+}
+
+fn run_rehearsal_command_with_limits(
+    trusted_runner: &Path,
+    sandbox_path: &Path,
+    command: &CommandSpec,
+    timeout: Duration,
+    stderr_limit_bytes: usize,
+) -> Result<RehearsalCommandOutput, RehearsalCommandError> {
+    let timeout = timeout.max(Duration::from_millis(1));
+    let mut child = Command::new(trusted_runner)
+        .arg("--workspace")
+        .arg(sandbox_path)
+        .arg(&command.command)
+        .args(&command.args)
+        .env("EE_REHEARSE_SANDBOX", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| RehearsalCommandError {
+            kind: error.kind(),
+            message: error.to_string(),
+        })?;
+
+    let stderr = child.stderr.take().ok_or_else(|| RehearsalCommandError {
+        kind: io::ErrorKind::Other,
+        message: "failed to capture stderr pipe".to_string(),
+    })?;
+    let stderr_thread = thread::spawn(move || read_pipe_limited(stderr, stderr_limit_bytes));
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                let elapsed = started.elapsed();
+                if elapsed >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stderr_thread.join();
+                    return Err(RehearsalCommandError {
+                        kind: io::ErrorKind::TimedOut,
+                        message: format!("command timed out after {} ms", timeout.as_millis()),
+                    });
+                }
+                thread::sleep(Duration::from_millis(10).min(timeout.saturating_sub(elapsed)));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stderr_thread.join();
+                return Err(RehearsalCommandError {
+                    kind: error.kind(),
+                    message: error.to_string(),
+                });
+            }
+        }
+    };
+
+    let stderr = output_bytes_to_string(stderr_thread.join().unwrap_or_default());
+    Ok(RehearsalCommandOutput { status, stderr })
+}
+
+fn read_pipe_limited<R: Read>(mut reader: R, limit: usize) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(_) => break,
+        };
+        let remaining = limit.saturating_sub(output.len());
+        if remaining > 0 {
+            output.extend_from_slice(&buffer[..read.min(remaining)]);
+        }
+    }
+    output
+}
+
+fn output_bytes_to_string(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
 }
 
 fn resolve_manifest_path(artifact_id: &str, workspace: &Path) -> Result<PathBuf, DomainError> {
@@ -1587,6 +1697,74 @@ mod tests {
         assert_eq!(report.non_rehearsable.len(), 1);
         assert_eq!(report.non_rehearsable[0].reason_code, "external_io");
         assert!(!report.can_proceed);
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rehearsal_command_timeout_is_bounded() -> TestResult {
+        let workspace = kept_temp_dir("ee-rehearse-timeout-workspace")?;
+        let runner = kept_temp_dir("ee-rehearse-timeout-runner")?.join("runner.sh");
+        fs::write(&runner, "#!/bin/sh\nsleep 2\n").map_err(|error| error.to_string())?;
+        let mut permissions = fs::metadata(&runner)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
+        fs::set_permissions(&runner, permissions).map_err(|error| error.to_string())?;
+        let command = CommandSpec {
+            id: "cmd_timeout".to_string(),
+            command: "status".to_string(),
+            args: Vec::new(),
+            expected_effect: "read_only".to_string(),
+            stop_on_failure: true,
+            idempotency_key: None,
+        };
+
+        let error = run_rehearsal_command_with_limits(
+            &runner,
+            &workspace,
+            &command,
+            Duration::from_millis(20),
+            1024,
+        )
+        .expect_err("sleeping rehearsal command should time out");
+
+        assert!(error.message.contains("timed out"));
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rehearsal_command_stderr_is_capped() -> TestResult {
+        let workspace = kept_temp_dir("ee-rehearse-stderr-workspace")?;
+        let runner = kept_temp_dir("ee-rehearse-stderr-runner")?.join("runner.sh");
+        fs::write(&runner, "#!/bin/sh\nprintf abcdef >&2\nexit 1\n")
+            .map_err(|error| error.to_string())?;
+        let mut permissions = fs::metadata(&runner)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
+        fs::set_permissions(&runner, permissions).map_err(|error| error.to_string())?;
+        let command = CommandSpec {
+            id: "cmd_stderr".to_string(),
+            command: "status".to_string(),
+            args: Vec::new(),
+            expected_effect: "read_only".to_string(),
+            stop_on_failure: true,
+            idempotency_key: None,
+        };
+
+        let output = run_rehearsal_command_with_limits(
+            &runner,
+            &workspace,
+            &command,
+            Duration::from_secs(1),
+            3,
+        )
+        .map_err(|error| error.message)?;
+
+        assert!(!output.status.success());
+        assert_eq!(output.stderr, "abc");
         Ok(())
     }
 

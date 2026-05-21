@@ -20,8 +20,10 @@
 //! - Golden test outputs regenerated on demand, versioned
 
 use std::fmt;
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -48,6 +50,8 @@ pub const VERIFY_RECORD_REPORT_SCHEMA_V1: &str = "ee.verify.record_report.v1";
 pub const VERIFY_CLOSURE_GUIDANCE_REPORT_SCHEMA_V1: &str = "ee.verify.closure_guidance_report.v1";
 pub const VERIFICATION_LEDGER_ENTRY_SCHEMA_V1: &str = "ee.verification.ledger_entry.v1";
 const LEGACY_VERIFICATION_RECORD_ACTION: &str = "verification.record";
+const VERIFY_STEP_TIMEOUT: Duration = Duration::from_secs(60);
+const VERIFY_STEP_OUTPUT_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
 /// Schema for artifact policy.
 pub const ARTIFACT_POLICY_SCHEMA_V1: &str = "ee.artifact_policy.v1";
@@ -1045,33 +1049,138 @@ fn run_step(step: VerifyStep, workspace_path: &str) -> StepResult {
         VerifyStep::ForbiddenDeps => ("cargo", vec!["test", "forbidden_deps"]),
     };
 
-    let result = Command::new(program)
-        .args(&args)
-        .current_dir(workspace_path)
-        .output();
+    let result = run_bounded_verify_step_command(
+        program,
+        &args,
+        Path::new(workspace_path),
+        VERIFY_STEP_TIMEOUT,
+        VERIFY_STEP_OUTPUT_LIMIT_BYTES,
+    );
 
     let duration = start.elapsed();
 
     match result {
         Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let exit_code = output.status.code();
-
             if output.status.success() {
-                StepResult::passed(step, duration, stdout, stderr)
+                StepResult::passed(step, duration, output.stdout, output.stderr)
             } else {
-                StepResult::failed(step, duration, stdout, stderr, exit_code)
+                StepResult::failed(
+                    step,
+                    duration,
+                    output.stdout,
+                    output.stderr,
+                    output.status.code(),
+                )
             }
         }
         Err(e) => StepResult::failed(
             step,
             duration,
             String::new(),
-            format!("Failed to execute command: {e}"),
+            format!("Failed to execute command: {}", e.message),
             None,
         ),
     }
+}
+
+#[derive(Debug)]
+struct BoundedVerifyStepOutput {
+    status: ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Debug)]
+struct BoundedVerifyStepError {
+    message: String,
+}
+
+fn run_bounded_verify_step_command(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    timeout: Duration,
+    output_limit_bytes: usize,
+) -> Result<BoundedVerifyStepOutput, BoundedVerifyStepError> {
+    let timeout = timeout.max(Duration::from_millis(1));
+    let mut child = Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| BoundedVerifyStepError {
+            message: error.to_string(),
+        })?;
+
+    let stdout = child.stdout.take().ok_or_else(|| BoundedVerifyStepError {
+        message: "failed to capture stdout pipe".to_string(),
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| BoundedVerifyStepError {
+        message: "failed to capture stderr pipe".to_string(),
+    })?;
+    let stdout_thread = thread::spawn(move || read_pipe_limited(stdout, output_limit_bytes));
+    let stderr_thread = thread::spawn(move || read_pipe_limited(stderr, output_limit_bytes));
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                let elapsed = started.elapsed();
+                if elapsed >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_thread.join();
+                    let _ = stderr_thread.join();
+                    return Err(BoundedVerifyStepError {
+                        message: format!("command timed out after {} ms", timeout.as_millis()),
+                    });
+                }
+                thread::sleep(Duration::from_millis(10).min(timeout.saturating_sub(elapsed)));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return Err(BoundedVerifyStepError {
+                    message: error.to_string(),
+                });
+            }
+        }
+    };
+
+    let stdout = output_bytes_to_string(stdout_thread.join().unwrap_or_default());
+    let stderr = output_bytes_to_string(stderr_thread.join().unwrap_or_default());
+
+    Ok(BoundedVerifyStepOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn read_pipe_limited<R: Read>(mut reader: R, limit: usize) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(_) => break,
+        };
+        let remaining = limit.saturating_sub(output.len());
+        if remaining > 0 {
+            output.extend_from_slice(&buffer[..read.min(remaining)]);
+        }
+    }
+    output
+}
+
+fn output_bytes_to_string(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
 }
 
 /// Check if a path should be gitignored based on artifact policy.
@@ -1131,6 +1240,41 @@ mod tests {
             ensure(step.is_required(), format!("{} should be required", step))?;
         }
         Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn verify_step_command_timeout_is_bounded() -> TestResult {
+        let error = run_bounded_verify_step_command(
+            "sh",
+            &["-c", "sleep 2"],
+            Path::new("."),
+            Duration::from_millis(20),
+            1024,
+        )
+        .expect_err("sleeping command should time out");
+
+        ensure(
+            error.message.contains("timed out"),
+            "timeout error should mention timeout",
+        )
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn verify_step_command_output_is_capped() -> TestResult {
+        let output = run_bounded_verify_step_command(
+            "sh",
+            &["-c", "printf abcdef; printf ghijkl >&2"],
+            Path::new("."),
+            Duration::from_secs(1),
+            3,
+        )
+        .map_err(|error| error.message)?;
+
+        ensure(output.status.success(), "command succeeds")?;
+        ensure_equal(&output.stdout, &"abc".to_string(), "stdout capped")?;
+        ensure_equal(&output.stderr, &"ghi".to_string(), "stderr capped")
     }
 
     #[test]
