@@ -885,6 +885,10 @@ fn validate_regression_fixture_metadata(
     }
     if fixture.input.get("raw").is_some() {
         validate_raw_regression_input_hash(file_name, fixture)?;
+    } else if fixture.input.get("raw_hex").is_some() {
+        return Err(format!(
+            "parse {file_name}: raw_hex regression input requires raw preview"
+        ));
     } else {
         validate_structured_regression_input_hash(file_name, fixture)?;
     }
@@ -1702,6 +1706,27 @@ fn determinism_regression_fixture_loader_rejects_raw_structured_field_mix() -> R
     assert!(error.contains("candidate_specs"));
     assert!(error.contains("seed"));
     assert!(error.contains("workspace_state"));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_loader_rejects_raw_hex_without_preview() -> Result<(), String> {
+    let mut fixture = regression_fixture_for_mismatch(6, b"raw-hex-only", b"expected", b"observed")
+        .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    fixture.input = serde_json::json!({
+        "raw_hex": hex_encode(b"raw-hex-only"),
+    });
+    let input_bytes = serde_json::to_vec(&fixture.input).map_err(|error| error.to_string())?;
+    fixture.input_hash = hash_bytes(&input_bytes);
+    let file_name = regression_fixture_file_name(&fixture.input_hash)?;
+
+    let error = parse_regression_fixture_entries(vec![(
+        file_name,
+        serialize_regression_fixture(&fixture)?,
+    )])
+    .expect_err("raw_hex fallback fixtures require the raw preview field");
+
+    assert!(error.contains("raw_hex regression input requires raw preview"));
     Ok(())
 }
 
