@@ -470,6 +470,72 @@ fn lock_database_write_file(database_path: &Path) -> Result<File> {
     Ok(lock_file)
 }
 
+fn validate_file_database_open_path(database_path: &Path, operation: DbOperation) -> Result<()> {
+    ensure_file_database_path_has_no_symlink_components(database_path, operation)?;
+    ensure_file_database_path_is_regular_or_missing(database_path, operation)
+}
+
+fn ensure_file_database_path_has_no_symlink_components(
+    database_path: &Path,
+    operation: DbOperation,
+) -> Result<()> {
+    if let Some(symlink_path) =
+        first_existing_symlink_component(database_path).map_err(|error| DbError::InvalidPath {
+            operation,
+            path: database_path.to_path_buf(),
+            message: format!(
+                "failed to inspect database path component '{}': {}",
+                error.path.display(),
+                error.source
+            ),
+        })?
+    {
+        return Err(DbError::InvalidPath {
+            operation,
+            path: database_path.to_path_buf(),
+            message: format!(
+                "refusing to open database path '{}': path traverses symbolic link '{}'",
+                database_path.display(),
+                symlink_path.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn ensure_file_database_path_is_regular_or_missing(
+    database_path: &Path,
+    operation: DbOperation,
+) -> Result<()> {
+    match std::fs::symlink_metadata(database_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(DbError::InvalidPath {
+            operation,
+            path: database_path.to_path_buf(),
+            message: format!(
+                "refusing to open database path '{}': path is not a regular file",
+                database_path.display()
+            ),
+        }),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(DbError::InvalidPath {
+            operation,
+            path: database_path.to_path_buf(),
+            message: format!(
+                "failed to inspect database path '{}': {error}",
+                database_path.display()
+            ),
+        }),
+    }
+}
+
 fn open_database_write_lock_file(lock_path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
@@ -622,6 +688,14 @@ impl DbConnection {
     }
 
     fn open_once(config: DatabaseConfig) -> Result<Self> {
+        if let DatabaseLocation::File(path) = &config.location {
+            let operation = match config.mode {
+                DatabaseOpenMode::ReadWrite => DbOperation::OpenReadWrite,
+                DatabaseOpenMode::SchemaOnly => DbOperation::OpenSchemaOnly,
+            };
+            validate_file_database_open_path(path, operation)?;
+        }
+
         let _open_write_owner = if matches!(
             (&config.location, config.mode),
             (DatabaseLocation::File(_), DatabaseOpenMode::ReadWrite)
@@ -27316,6 +27390,106 @@ mod tests {
                 .file_type()
                 .is_symlink(),
             "rejected lock symlink should remain for inspection",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_open_rejects_symlinked_database_parent_before_lock() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let real_parent = tempdir.path().join("real-parent");
+        let symlink_parent = tempdir.path().join("symlink-parent");
+        std::fs::create_dir(&real_parent).map_err(|error| TestFailure::new(error.to_string()))?;
+        std::os::unix::fs::symlink(&real_parent, &symlink_parent)
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+
+        let database_path = symlink_parent.join("ee.db");
+        let target_lock_path = real_parent.join("ee.write.lock");
+        let error = match DbConnection::open_file(&database_path) {
+            Ok(connection) => {
+                connection.close()?;
+                return Err(TestFailure::new(
+                    "database open should reject symlinked database parent before locking",
+                ));
+            }
+            Err(error) => error,
+        };
+
+        let message = error.to_string();
+        ensure(
+            message.contains("database path") && message.contains("symbolic link"),
+            format!("error should mention database symlink rejection, got: {message}"),
+        )?;
+        ensure(
+            !target_lock_path.exists(),
+            "write lock file should not be created through symlinked database parent",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_open_rejects_symlinked_database_file_before_lock() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let database_path = tempdir.path().join("ee.db");
+        let outside_database = tempdir.path().join("outside.db");
+        let lock_path = database_path.with_extension("write.lock");
+        std::fs::write(&outside_database, "outside sentinel")
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        std::os::unix::fs::symlink(&outside_database, &database_path)
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+
+        let error = match DbConnection::open_file(&database_path) {
+            Ok(connection) => {
+                connection.close()?;
+                return Err(TestFailure::new(
+                    "database open should reject symlinked database file before locking",
+                ));
+            }
+            Err(error) => error,
+        };
+
+        let message = error.to_string();
+        ensure(
+            message.contains("database path") && message.contains("symbolic link"),
+            format!("error should mention database symlink rejection, got: {message}"),
+        )?;
+        ensure(
+            !lock_path.exists(),
+            "write lock file should not be created for a rejected database symlink",
+        )?;
+        ensure(
+            std::fs::read_to_string(&outside_database)
+                .map_err(|error| TestFailure::new(error.to_string()))?
+                == "outside sentinel",
+            "outside database target should not be mutated",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn schema_only_open_rejects_symlinked_database_file() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let database_path = tempdir.path().join("schema.db");
+        let outside_database = tempdir.path().join("outside-schema.db");
+        std::fs::write(&outside_database, "outside sentinel")
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        std::os::unix::fs::symlink(&outside_database, &database_path)
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+
+        let error = match DbConnection::open_schema_only(&database_path) {
+            Ok(connection) => {
+                connection.close()?;
+                return Err(TestFailure::new(
+                    "schema-only open should reject symlinked database file",
+                ));
+            }
+            Err(error) => error,
+        };
+
+        let message = error.to_string();
+        ensure(
+            message.contains("schema-only open") && message.contains("symbolic link"),
+            format!("error should mention schema-only symlink rejection, got: {message}"),
         )
     }
 
