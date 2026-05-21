@@ -13997,6 +13997,38 @@ impl DbConnection {
         rows.iter().map(stored_memory_link_from_row).collect()
     }
 
+    /// List links incident to any memory in a deterministic graph-projection order.
+    pub fn list_memory_links_for_memories(
+        &self,
+        memory_ids: &[&str],
+        relation: Option<MemoryLinkRelation>,
+    ) -> Result<Vec<StoredMemoryLink>> {
+        if memory_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders: Vec<String> = (1..=memory_ids.len()).map(|i| format!("?{i}")).collect();
+        let joined_placeholders = placeholders.join(", ");
+        let mut sql = format!(
+            "SELECT id, src_memory_id, dst_memory_id, relation, weight, confidence, directed, evidence_count, last_reinforced_at, source, created_at, created_by, metadata_json FROM memory_links WHERE (src_memory_id IN ({joined_placeholders}) OR dst_memory_id IN ({joined_placeholders}))",
+        );
+        let mut params: Vec<Value> = memory_ids
+            .iter()
+            .map(|memory_id| Value::Text((*memory_id).to_string()))
+            .collect();
+
+        if let Some(relation) = relation {
+            let relation_param = params.len() + 1;
+            sql.push_str(&format!(" AND relation = ?{relation_param}"));
+            params.push(Value::Text(relation.as_str().to_string()));
+        }
+
+        sql.push_str(" ORDER BY relation ASC, src_memory_id ASC, dst_memory_id ASC, id ASC");
+
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        rows.iter().map(stored_memory_link_from_row).collect()
+    }
+
     /// Remove derived AUTO links incident to a memory.
     ///
     /// AUTO links are rebuilt from memory contents, tags, and workflow activity.
@@ -24476,6 +24508,70 @@ mod tests {
             &"link_00000000000000000000000002",
             "supports id",
         )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_memory_links_for_memories_batches_frontier_adjacency() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_link_memories(&connection)?;
+        insert_link_memory(
+            &connection,
+            "mem_00000000000000000000000013",
+            "Graph frontier memory",
+        )?;
+
+        let support = memory_link_input(super::MemoryLinkRelation::Supports);
+        connection.insert_memory_link("link_00000000000000000000000002", &support)?;
+        let mut contradicts = memory_link_input(super::MemoryLinkRelation::Contradicts);
+        contradicts.src_memory_id = "mem_00000000000000000000000012".to_string();
+        contradicts.dst_memory_id = "mem_00000000000000000000000013".to_string();
+        connection.insert_memory_link("link_00000000000000000000000003", &contradicts)?;
+        let mut related = memory_link_input(super::MemoryLinkRelation::Related);
+        related.src_memory_id = "mem_00000000000000000000000013".to_string();
+        related.dst_memory_id = "mem_00000000000000000000000011".to_string();
+        connection.insert_memory_link("link_00000000000000000000000004", &related)?;
+
+        let batched = connection.list_memory_links_for_memories(
+            &[
+                "mem_00000000000000000000000011",
+                "mem_00000000000000000000000013",
+            ],
+            None,
+        )?;
+        ensure_equal(&batched.len(), &3, "batched incident links")?;
+        ensure_equal(
+            &batched
+                .iter()
+                .map(|link| link.id.as_str())
+                .collect::<Vec<_>>(),
+            &vec![
+                "link_00000000000000000000000003",
+                "link_00000000000000000000000004",
+                "link_00000000000000000000000002",
+            ],
+            "deterministic graph-projection order",
+        )?;
+
+        let supports = connection.list_memory_links_for_memories(
+            &[
+                "mem_00000000000000000000000011",
+                "mem_00000000000000000000000013",
+            ],
+            Some(super::MemoryLinkRelation::Supports),
+        )?;
+        ensure_equal(&supports.len(), &1, "relation-filtered batched link")?;
+        ensure_equal(
+            &supports[0].id.as_str(),
+            &"link_00000000000000000000000002",
+            "supports id",
+        )?;
+
+        let empty = connection.list_memory_links_for_memories(&[], None)?;
+        ensure(empty.is_empty(), "empty frontier has no links")?;
 
         connection.close()?;
         Ok(())

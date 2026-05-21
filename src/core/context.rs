@@ -6077,23 +6077,46 @@ fn graph_hint_nodes(
             break;
         }
         let mut pending_neighbors = BTreeMap::new();
+        let frontier_refs: Vec<&str> = frontier.iter().map(String::as_str).collect();
+        let frontier_links = match connection.list_memory_links_for_memories(&frontier_refs, None) {
+            Ok(links) => links,
+            Err(error) => {
+                push_degradation(
+                    degraded,
+                    "context_graph_neighborhood_unavailable",
+                    ContextResponseSeverity::Low,
+                    format!(
+                        "Graph frontier neighborhood at depth {depth} could not be read: {error}"
+                    ),
+                    Some("ee graph neighborhood <memory-id> --json".to_string()),
+                );
+                break;
+            }
+        };
+        let mut links_by_frontier = BTreeMap::<String, Vec<&crate::db::StoredMemoryLink>>::new();
+        for link in &frontier_links {
+            if frontier.contains(&link.src_memory_id) {
+                links_by_frontier
+                    .entry(link.src_memory_id.clone())
+                    .or_default()
+                    .push(link);
+            }
+            if link.dst_memory_id != link.src_memory_id && frontier.contains(&link.dst_memory_id) {
+                links_by_frontier
+                    .entry(link.dst_memory_id.clone())
+                    .or_default()
+                    .push(link);
+            }
+        }
         for memory_id in &frontier {
-            let mut options = crate::graph::GraphNeighborhoodOptions::new(memory_id.clone());
-            options.direction = direction;
-            let report = match crate::graph::graph_neighborhood(connection, &options) {
-                Ok(report) => report,
-                Err(error) => {
-                    push_degradation(
-                        degraded,
-                        "context_graph_neighborhood_unavailable",
-                        ContextResponseSeverity::Low,
-                        format!("Graph neighborhood for {memory_id} could not be read: {error}"),
-                        Some("ee graph neighborhood <memory-id> --json".to_string()),
-                    );
-                    continue;
-                }
+            let Some(links) = links_by_frontier.get(memory_id) else {
+                continue;
             };
-            for edge in report.edges {
+            for edge in crate::graph::graph_neighborhood_edges_from_links(
+                memory_id,
+                direction,
+                links.iter().copied(),
+            ) {
                 if !link_types.is_empty() && !link_types.contains(&edge.relation) {
                     continue;
                 }

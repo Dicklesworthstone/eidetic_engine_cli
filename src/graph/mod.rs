@@ -5488,12 +5488,8 @@ pub fn graph_neighborhood(
         .list_memory_links_for_memory(&options.memory_id, options.relation)
         .map_err(|error| GraphError::storage("query memory-link neighborhood", error))?;
 
-    let mut edges: Vec<GraphNeighborhoodEdge> = links
-        .into_iter()
-        .filter(|link| memory_link_mesh_metadata_visible(link.metadata_json.as_deref()))
-        .filter_map(|link| neighborhood_edge_for_link(&options.memory_id, options.direction, &link))
-        .collect();
-    edges.sort_by(compare_neighborhood_edges);
+    let mut edges =
+        graph_neighborhood_edges_from_links(&options.memory_id, options.direction, links.iter());
 
     let original_edge_count = edges.len();
     if let Some(limit) = options.limit {
@@ -5525,6 +5521,24 @@ pub fn graph_neighborhood(
         nodes,
         edges,
     })
+}
+
+/// Convert preloaded source-of-truth memory links into neighborhood edges.
+///
+/// This preserves the public `graph neighborhood` direction, redaction, and
+/// deterministic sorting semantics for callers that batch-load adjacency.
+pub fn graph_neighborhood_edges_from_links<'a>(
+    memory_id: &str,
+    direction: GraphNeighborhoodDirection,
+    links: impl IntoIterator<Item = &'a crate::db::StoredMemoryLink>,
+) -> Vec<GraphNeighborhoodEdge> {
+    let mut edges: Vec<GraphNeighborhoodEdge> = links
+        .into_iter()
+        .filter(|link| memory_link_mesh_metadata_visible(link.metadata_json.as_deref()))
+        .filter_map(|link| neighborhood_edge_for_link(memory_id, direction, link))
+        .collect();
+    edges.sort_by(compare_neighborhood_edges);
+    edges
 }
 
 fn neighborhood_edge_for_link(
