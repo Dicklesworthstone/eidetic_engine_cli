@@ -30,11 +30,11 @@ use crate::config::{ConfigFile, GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY};
 use crate::curate::cluster_coherence::{ClusterCoherenceConfig, EmbeddingPoint, agglomerate};
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
-    ApplyMemoryLevelTransitionInput, CreateAuditInput, CreateCurationCandidateInput,
-    CreateMemoryInput, CreateMemoryLinkInput, CreateSearchIndexJobInput, CreateWorkspaceInput,
-    DbConnection, DbOperation, MemoryContentSimHash, MemoryLinkRelation, MemoryLinkSource,
-    SearchIndexJobType, StoredMemory, StoredMemoryLink, audit_actions, generate_audit_id,
-    generate_audit_id_seeded,
+    AdvisoryLockId, ApplyMemoryLevelTransitionInput, CreateAuditInput,
+    CreateCurationCandidateInput, CreateMemoryInput, CreateMemoryLinkInput,
+    CreateSearchIndexJobInput, CreateWorkspaceInput, DbConnection, DbOperation,
+    MemoryContentSimHash, MemoryLinkRelation, MemoryLinkSource, SearchIndexJobType, StoredMemory,
+    StoredMemoryLink, audit_actions, generate_audit_id, generate_audit_id_seeded,
 };
 use crate::models::{
     DomainError, MAX_TAG_BYTES, MemoryContent, MemoryId, MemoryKind, MemoryLevel,
@@ -608,6 +608,8 @@ fn remember_memory_inner(
     )?;
 
     let memory_id = prepared.memory_id.to_string();
+    let _workspace_write_lock =
+        acquire_remember_workspace_lock(&connection, &prepared.workspace_id, &memory_id)?;
     let audit_id = id_source.next_audit_id();
     let policy_bypass_audit_id = prepared
         .policy_bypass
@@ -983,6 +985,114 @@ fn remember_index_status(report: &IndexProcessingJobReport) -> String {
 }
 
 const REMEMBER_CONTENTION_MAX_ATTEMPTS: usize = 64;
+const REMEMBER_WORKSPACE_LOCK_TTL_SECS: u64 = 300;
+
+struct RememberWorkspaceWriteLock<'a> {
+    connection: &'a DbConnection,
+    lock_id: AdvisoryLockId,
+    holder_id: String,
+}
+
+impl Drop for RememberWorkspaceWriteLock<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = self
+            .connection
+            .release_advisory_lock(&self.lock_id, &self.holder_id)
+        {
+            tracing::warn!(
+                target: "ee::memory",
+                resource_type = self.lock_id.resource_type(),
+                workspace_id = self.lock_id.resource_id(),
+                holder_id = self.holder_id.as_str(),
+                error = %error,
+                "remember workspace advisory lock release failed"
+            );
+        }
+    }
+}
+
+fn acquire_remember_workspace_lock<'a>(
+    connection: &'a DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+) -> Result<RememberWorkspaceWriteLock<'a>, DomainError> {
+    acquire_remember_workspace_lock_with_retry(
+        connection,
+        workspace_id,
+        memory_id,
+        REMEMBER_CONTENTION_MAX_ATTEMPTS,
+        remember_write_retry_delay,
+    )
+}
+
+fn acquire_remember_workspace_lock_with_retry<'a>(
+    connection: &'a DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+    attempts: usize,
+    retry_delay: impl Fn(usize) -> Duration,
+) -> Result<RememberWorkspaceWriteLock<'a>, DomainError> {
+    let lock_id = AdvisoryLockId::workspace(workspace_id);
+    let holder_id = format!("remember:{}:{memory_id}", std::process::id());
+    let attempts = attempts.max(1);
+    let mut last_holder = None;
+
+    for attempt in 0..attempts {
+        match connection.acquire_advisory_lock(
+            &lock_id,
+            &holder_id,
+            Some(REMEMBER_WORKSPACE_LOCK_TTL_SECS),
+            Some("remember workspace write"),
+        ) {
+            Ok(crate::db::AcquireLockResult::Acquired(_))
+            | Ok(crate::db::AcquireLockResult::Expired { .. }) => {
+                return Ok(RememberWorkspaceWriteLock {
+                    connection,
+                    lock_id,
+                    holder_id,
+                });
+            }
+            Ok(crate::db::AcquireLockResult::AlreadyHeld {
+                holder_id,
+                acquired_at,
+            }) => {
+                last_holder = Some((holder_id, acquired_at));
+                if attempt + 1 < attempts {
+                    remember_retry_sleep(retry_delay(attempt), "acquire advisory lock")?;
+                }
+            }
+            Err(error) if remember_write_contention_is_retryable(&error) => {
+                if attempt + 1 < attempts {
+                    remember_retry_sleep(retry_delay(attempt), "acquire advisory lock")?;
+                } else {
+                    return Err(DomainError::Storage {
+                        message: format!(
+                            "advisory lock timeout while acquiring workspace write lock: {error}"
+                        ),
+                        repair: Some("ee diag advisory-lock --workspace . --json".to_owned()),
+                    });
+                }
+            }
+            Err(error) => {
+                return Err(DomainError::Storage {
+                    message: format!("Failed to acquire workspace advisory lock: {error}"),
+                    repair: Some("ee diag advisory-lock --workspace . --json".to_owned()),
+                });
+            }
+        }
+    }
+
+    let holder = last_holder.map_or_else(
+        || "<unknown holder> at <unknown time>".to_owned(),
+        |(holder_id, acquired_at)| format!("{holder_id} since {acquired_at}"),
+    );
+    Err(DomainError::Storage {
+        message: format!(
+            "advisory lock timeout while waiting for workspace write lock held by {holder}"
+        ),
+        repair: Some("ee diag advisory-lock --workspace . --json".to_owned()),
+    })
+}
 
 fn open_remember_database_with_retry(database_path: &Path) -> Result<DbConnection, DomainError> {
     for attempt in 0..REMEMBER_CONTENTION_MAX_ATTEMPTS {
@@ -10331,6 +10441,85 @@ mod tests {
                 Err(other) => panic!("wrong error variant for `{content}`: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn remember_workspace_lock_timeout_emits_advisory_lock_code() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection
+            .ensure_advisory_locks_table()
+            .map_err(|error| error.to_string())?;
+        let lock_id = AdvisoryLockId::workspace("wsp_remember_timeout");
+        let acquired = connection
+            .acquire_advisory_lock(&lock_id, "held-by-agent", Some(300), Some("unit test"))
+            .map_err(|error| error.to_string())?;
+        ensure(acquired.is_acquired(), true, "fixture lock acquired")?;
+
+        let error = match acquire_remember_workspace_lock_with_retry(
+            &connection,
+            "wsp_remember_timeout",
+            "mem_01234567890123456789012345",
+            1,
+            |_| Duration::ZERO,
+        ) {
+            Ok(_) => return Err("remember should not acquire a held workspace lock".to_owned()),
+            Err(error) => error,
+        };
+
+        let json = crate::output::error_response_json(&error);
+        ensure(
+            json.contains(crate::models::degradation::ADVISORY_LOCK_TIMEOUT_CODE),
+            true,
+            "error envelope carries advisory lock timeout code",
+        )?;
+        ensure(
+            json.contains("ee diag advisory-lock --workspace . --json"),
+            true,
+            "error envelope carries recovery command",
+        )?;
+
+        connection
+            .release_advisory_lock(&lock_id, "held-by-agent")
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn remember_workspace_lock_releases_when_guard_drops() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection
+            .ensure_advisory_locks_table()
+            .map_err(|error| error.to_string())?;
+        let lock_id = AdvisoryLockId::workspace("wsp_remember_release");
+
+        {
+            let _owner = acquire_remember_workspace_lock_with_retry(
+                &connection,
+                "wsp_remember_release",
+                "mem_01234567890123456789012346",
+                1,
+                |_| Duration::ZERO,
+            )
+            .map_err(|error| error.to_string())?;
+            ensure(
+                connection
+                    .is_lock_held(&lock_id)
+                    .map_err(|error| error.to_string())?
+                    .is_some(),
+                true,
+                "lock held while guard is alive",
+            )?;
+        }
+
+        ensure(
+            connection
+                .is_lock_held(&lock_id)
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            true,
+            "lock released when guard drops",
+        )?;
+        connection.close().map_err(|error| error.to_string())
     }
 
     /// Structurally-fine content from the 2026-05-10 reference corpus

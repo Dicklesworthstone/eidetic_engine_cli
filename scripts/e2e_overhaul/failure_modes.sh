@@ -724,6 +724,18 @@ run_fixture_scenario() {
                 --relevance-floor 0.0 \
                 --json 2>/dev/null || true)
             ;;
+        advisory_lock_timeout)
+            ee_workspace diag advisory-lock \
+                --resource-type workspace \
+                --holder held-by-agent \
+                --ttl-seconds 300 \
+                --json >/dev/null 2>&1 || true
+            SCENARIO_OUTPUT=$(ee_workspace remember \
+                "contention fixture" \
+                --level procedural \
+                --kind fact \
+                --json 2>/dev/null || true)
+            ;;
         auto_propose_skipped_too_few_neighbors)
             SCENARIO_OUTPUT=$(ee_workspace remember \
                 "One isolated fact." \

@@ -11809,6 +11809,17 @@ fn domain_error_degraded(error: &DomainError, message: &str) -> Vec<ErrorDegrada
             repair: error.repair().map(str::to_owned),
         }];
     }
+    if matches!(error, DomainError::Storage { .. })
+        && lower_message.contains("advisory lock")
+        && lower_message.contains("timeout")
+    {
+        return vec![ErrorDegradation {
+            code: crate::models::degradation::ADVISORY_LOCK_TIMEOUT_CODE,
+            severity: "medium",
+            message: format!("advisory lock timeout: {message}"),
+            repair: error.repair().map(str::to_owned),
+        }];
+    }
     Vec::new()
 }
 
@@ -18233,6 +18244,32 @@ mod tests {
             &json,
             "\"repair\":\"ee doctor --fix-plan --json\"",
             "repair",
+        )
+    }
+
+    #[test]
+    fn error_schema_storage_advisory_lock_timeout_adds_degraded_code() -> TestResult {
+        let error = DomainError::Storage {
+            message: "advisory lock timeout while waiting for workspace write lock held by agent"
+                .to_string(),
+            repair: Some("ee diag advisory-lock --workspace . --json".to_string()),
+        };
+        let json = error_response_json(&error);
+        ensure_contains(&json, "\"code\":\"storage\"", "storage code")?;
+        ensure_contains(
+            &json,
+            "\"code\":\"advisory_lock_timeout\"",
+            "advisory lock degraded code",
+        )?;
+        ensure_contains(
+            &json,
+            "\"severity\":\"medium\"",
+            "advisory lock degraded severity",
+        )?;
+        ensure_contains(
+            &json,
+            "ee diag advisory-lock --workspace . --json",
+            "repair command",
         )
     }
 
