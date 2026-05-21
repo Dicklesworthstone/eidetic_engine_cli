@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn strip_volatile_fields_recurses_and_reports() -> TestResult {
         let mut value = serde_json::json!({
-            "schema": "ee.response.v1",
+            "schema": "ee.response.v2",
             "generatedAt": "2026-05-13T00:00:00Z",
             "data": {
                 "computed_at": "2026-05-13T00:00:01Z",

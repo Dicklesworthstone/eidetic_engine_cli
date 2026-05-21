@@ -170,36 +170,46 @@ impl LeakPattern {
 
         match &self.kind {
             PatternKind::Contains(needle) => {
-                if output.contains(needle) {
+                for (pos, _) in output.match_indices(needle) {
                     detections.push(LeakDetection {
                         class: self.class,
                         pattern_name: self.name,
                         matched_text: needle.to_string(),
-                        context: extract_context(output, needle),
+                        context: extract_context(output, needle, pos),
                     });
                 }
             }
             PatternKind::Prefix(prefix) => {
+                let mut seen = std::collections::HashSet::new();
                 for word in output.split_whitespace() {
                     if let Some(token) = prefixed_token(word, prefix) {
-                        detections.push(LeakDetection {
-                            class: self.class,
-                            pattern_name: self.name,
-                            matched_text: token.to_string(),
-                            context: extract_context(output, token),
-                        });
+                        if seen.insert(token) {
+                            for (pos, _) in output.match_indices(token) {
+                                detections.push(LeakDetection {
+                                    class: self.class,
+                                    pattern_name: self.name,
+                                    matched_text: token.to_string(),
+                                    context: extract_context(output, token, pos),
+                                });
+                            }
+                        }
                     }
                 }
             }
             PatternKind::Suffix(suffix) => {
+                let mut seen = std::collections::HashSet::new();
                 for word in output.split_whitespace() {
                     if word.ends_with(suffix) && word.len() > suffix.len() {
-                        detections.push(LeakDetection {
-                            class: self.class,
-                            pattern_name: self.name,
-                            matched_text: word.to_string(),
-                            context: extract_context(output, word),
-                        });
+                        if seen.insert(word) {
+                            for (pos, _) in output.match_indices(word) {
+                                detections.push(LeakDetection {
+                                    class: self.class,
+                                    pattern_name: self.name,
+                                    matched_text: word.to_string(),
+                                    context: extract_context(output, word, pos),
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -209,7 +219,7 @@ impl LeakPattern {
                         class: self.class,
                         pattern_name: self.name,
                         matched_text: mat.as_str().to_string(),
-                        context: extract_context(output, mat.as_str()),
+                        context: extract_context(output, mat.as_str(), mat.start()),
                     });
                 }
             }
@@ -310,22 +320,18 @@ impl RedactionLeakEvaluation {
 /// before slicing so this function never panics when `output` contains
 /// multi-byte characters (e.g. non-ASCII text or emoji in user-supplied
 /// command output).
-fn extract_context(output: &str, matched: &str) -> String {
+fn extract_context(output: &str, matched: &str, pos: usize) -> String {
     const CONTEXT_BYTES: usize = 30;
 
-    if let Some(pos) = output.find(matched) {
-        let raw_start = pos.saturating_sub(CONTEXT_BYTES);
-        let raw_end = (pos + matched.len() + CONTEXT_BYTES).min(output.len());
-        let start = floor_char_boundary(output, raw_start);
-        let end = ceil_char_boundary(output, raw_end);
-        let context = &output[start..end];
-        if start > 0 || end < output.len() {
-            format!("...{}...", context.replace('\n', " "))
-        } else {
-            context.replace('\n', " ")
-        }
+    let raw_start = pos.saturating_sub(CONTEXT_BYTES);
+    let raw_end = (pos + matched.len() + CONTEXT_BYTES).min(output.len());
+    let start = floor_char_boundary(output, raw_start);
+    let end = ceil_char_boundary(output, raw_end);
+    let context = &output[start..end];
+    if start > 0 || end < output.len() {
+        format!("...{}...", context.replace('\n', " "))
     } else {
-        matched.to_string()
+        context.replace('\n', " ")
     }
 }
 
@@ -633,7 +639,7 @@ mod tests {
     fn detector_clean_output_passes() -> TestResult {
         let detector = RedactionLeakDetector::new();
         let output =
-            r#"{"schema": "ee.response.v1", "success": true, "data": {"command": "status"}}"#;
+            r#"{"schema": "ee.response.v2", "success": true, "data": {"command": "status"}}"#;
 
         ensure(detector.is_clean(output), true, "clean output should pass")
     }
@@ -715,7 +721,7 @@ mod tests {
     #[test]
     fn context_extraction_adds_ellipsis() -> TestResult {
         let long_output = "a".repeat(100) + "SECRET" + &"b".repeat(100);
-        let context = extract_context(&long_output, "SECRET");
+        let context = extract_context(&long_output, "SECRET", 0);
 
         ensure(context.starts_with("..."), true, "starts with ellipsis")?;
         ensure(context.ends_with("..."), true, "ends with ellipsis")?;

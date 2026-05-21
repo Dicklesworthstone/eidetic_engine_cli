@@ -1210,7 +1210,7 @@ fn expand_source_id_range(
         )));
     }
 
-    let count = end_number - start_number + 1;
+    let count = end_number.saturating_sub(start_number).saturating_add(1);
     if count > 10_000 {
         return Err(fixture_validation_error(format!(
             "source tier `{tier_name}` id_range is too large for fixture validation"
@@ -1531,8 +1531,7 @@ pub fn compute_data_hash(report: &EvalRunReport) -> String {
     format!("blake3:{}", hasher.finalize().to_hex())
 }
 
-/// Schema version for pack-quality comparison report.
-pub const PACK_QUALITY_REPORT_SCHEMA_V1: &str = "ee.eval.pack_quality_report.v1";
+pub use crate::models::PACK_QUALITY_REPORT_SCHEMA_V1;
 
 /// Deterministic verdict for a pack-quality comparison.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]

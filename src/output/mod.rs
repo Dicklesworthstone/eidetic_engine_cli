@@ -47,7 +47,7 @@ use crate::eval::{EvaluationReport, EvaluationStatus, FixtureListEntry, Scenario
 use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
 use crate::models::{
     DomainError, ERROR_SCHEMA_V2, InstallCheckReport, InstallPlanReport, ProducerMetadata,
-    RESPONSE_SCHEMA_V0, RESPONSE_SCHEMA_V1, RecoveryAction, RecoveryKind,
+    RESPONSE_SCHEMA_V0, RESPONSE_SCHEMA_V2, RecoveryAction, RecoveryKind,
 };
 use crate::pack::{
     ConflictEntry, ConsensusEntry, ConsensusProducer, ContextResponse, ContextResponseDegradation,
@@ -1105,7 +1105,7 @@ impl OutputContext {
     }
 }
 
-/// Severity level for degradation notices in the ee.response.v1 envelope.
+/// Severity level for degradation notices in the ee.response.v2 envelope.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DegradationSeverity {
     Low,
@@ -1124,7 +1124,7 @@ impl DegradationSeverity {
     }
 }
 
-/// A single degradation notice in the ee.response.v1 envelope.
+/// A single degradation notice in the ee.response.v2 envelope.
 ///
 /// Degradation notices tell consumers that the response is valid but
 /// incomplete or limited in some way. The repair field suggests how to
@@ -1314,7 +1314,7 @@ impl Default for JsonBuilder {
     }
 }
 
-/// Convert a current `ee.response.v1` envelope into the retained v0 shape.
+/// Convert a current `ee.response.v2` envelope into the retained v0 shape.
 #[must_use]
 pub fn render_response_json_for_schema_version(
     json: &str,
@@ -1333,7 +1333,7 @@ fn render_response_json_v0(json: &str) -> String {
     let Some(object) = value.as_object() else {
         return json.to_owned();
     };
-    if object.get("schema").and_then(serde_json::Value::as_str) != Some(RESPONSE_SCHEMA_V1) {
+    if object.get("schema").and_then(serde_json::Value::as_str) != Some(RESPONSE_SCHEMA_V2) {
         return json.to_owned();
     }
 
@@ -1374,7 +1374,7 @@ pub fn apply_field_selector_to_json(
     let Some(object) = value.as_object_mut() else {
         return Ok(json.to_owned());
     };
-    if object.get("schema").and_then(serde_json::Value::as_str) != Some(RESPONSE_SCHEMA_V1) {
+    if object.get("schema").and_then(serde_json::Value::as_str) != Some(RESPONSE_SCHEMA_V2) {
         return Ok(json.to_owned());
     }
     let Some(data) = object
@@ -1846,7 +1846,7 @@ impl ResponseEnvelope {
     #[must_use]
     pub fn success() -> Self {
         let mut builder = JsonBuilder::with_capacity(256);
-        builder.field_str("schema", RESPONSE_SCHEMA_V1);
+        builder.field_str("schema", RESPONSE_SCHEMA_V2);
         builder.field_bool("success", true);
         Self { builder }
     }
@@ -1854,7 +1854,7 @@ impl ResponseEnvelope {
     #[must_use]
     pub fn failure() -> Self {
         let mut builder = JsonBuilder::with_capacity(256);
-        builder.field_str("schema", RESPONSE_SCHEMA_V1);
+        builder.field_str("schema", RESPONSE_SCHEMA_V2);
         builder.field_bool("success", false);
         Self { builder }
     }
@@ -2072,7 +2072,7 @@ impl From<ContextPackOutputOptions> for ContextJsonRenderOptions {
     }
 }
 
-/// Render a context response as JSON (ee.response.v1 envelope).
+/// Render a context response as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_context_response_json(response: &ContextResponse) -> String {
     render_context_response_json_with_options(response, ContextJsonRenderOptions::default())
@@ -3210,11 +3210,11 @@ where
     output
 }
 
-/// Render a status report as JSON (ee.response.v1 envelope).
+/// Render a status report as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_status_json(report: &StatusReport) -> String {
     let mut b = JsonBuilder::with_capacity(512);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "status");
@@ -3269,11 +3269,11 @@ pub fn render_status_json(report: &StatusReport) -> String {
     b.finish()
 }
 
-/// Render the status skyline report as JSON (ee.response.v1 envelope).
+/// Render the status skyline report as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_status_skyline_json(report: &StatusSkylineReport) -> String {
     let mut b = JsonBuilder::with_capacity(512);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| render_status_skyline_data_json(d, report));
     b.finish()
@@ -4199,7 +4199,7 @@ pub fn render_status_json_with_meta(
     timing: Option<&crate::models::DiagnosticTiming>,
 ) -> String {
     let mut b = JsonBuilder::with_capacity(1024);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "status");
@@ -4441,12 +4441,12 @@ pub fn render_status_toon_filtered(report: &StatusReport, profile: FieldProfile)
     render_toon_from_json(&render_status_json_filtered(report, profile))
 }
 
-/// Render a doctor report as JSON (ee.response.v1 envelope).
+/// Render a doctor report as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_doctor_json(report: &DoctorReport) -> String {
     let mut b = JsonBuilder::with_capacity(512);
     let mesh_auto_enrollment = render_doctor_mesh_auto_enrollment_json();
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     // bd-2xdom Gap 4: envelope `success` means "command ran", not "system is healthy".
     // System state is in `data.posture` (canonical, 5-state enum) and `data.healthy`
     // (deprecated boolean kept for v0.1→v0.2 transition).
@@ -4707,11 +4707,11 @@ pub fn render_why_mermaid(report: &WhyReport) -> String {
     output
 }
 
-/// Render a fix plan as JSON (ee.response.v1 envelope).
+/// Render a fix plan as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_fix_plan_json(plan: &FixPlan) -> String {
     let mut b = JsonBuilder::with_capacity(512);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "doctor");
@@ -4825,11 +4825,11 @@ pub fn render_fix_plan_toon(plan: &FixPlan) -> String {
     render_toon_from_json(&render_fix_plan_json(plan))
 }
 
-/// Render dependency diagnostics as JSON (ee.response.v1 envelope).
+/// Render dependency diagnostics as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_dependency_diagnostics_json(report: &DependencyDiagnosticsReport) -> String {
     let mut b = JsonBuilder::with_capacity(4096);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", report.summary.forbidden_default_hit_count == 0);
     b.field_object("data", |d| {
         d.field_str("command", "diag dependencies");
@@ -4903,11 +4903,11 @@ pub fn render_dependency_diagnostics_toon(report: &DependencyDiagnosticsReport) 
     render_toon_from_json(&render_dependency_diagnostics_json(report))
 }
 
-/// Render integrity diagnostics as JSON (ee.response.v1 envelope).
+/// Render integrity diagnostics as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_integrity_diagnostics_json(report: &IntegrityDiagnosticsReport) -> String {
     let mut b = JsonBuilder::with_capacity(2048);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", report.success());
     b.field_object("data", |d| {
         d.field_str("command", "diag integrity");
@@ -5039,11 +5039,11 @@ pub fn render_integrity_diagnostics_toon(report: &IntegrityDiagnosticsReport) ->
     render_toon_from_json(&render_integrity_diagnostics_json(report))
 }
 
-/// Render franken-stack doctor health as JSON (ee.response.v1 envelope).
+/// Render franken-stack doctor health as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_franken_health_json(report: &FrankenHealthReport) -> String {
     let mut b = JsonBuilder::with_capacity(4096);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", report.healthy);
     b.field_object("data", |d| {
         d.field_str("command", "doctor");
@@ -5417,11 +5417,11 @@ fn render_blocked_feature(obj: &mut JsonBuilder, feature: &DependencyBlockedFeat
     obj.field_str("action", feature.action);
 }
 
-/// Render a quarantine report as JSON (ee.response.v1 envelope).
+/// Render a quarantine report as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_quarantine_json(report: &QuarantineReport) -> String {
     let mut b = JsonBuilder::with_capacity(1024);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "diag quarantine");
@@ -5565,13 +5565,13 @@ pub fn render_quarantine_toon(report: &QuarantineReport) -> String {
     render_toon_from_json(&render_quarantine_json(report))
 }
 
-/// Render a single quarantine entry as JSON (ee.response.v1 envelope).
+/// Render a single quarantine entry as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_quarantine_entry_json(entry: &crate::db::StoredTrustQuarantine) -> String {
     let source_uri = redact_quarantine_source_uri(&entry.source_uri);
     let reason = redact_quarantine_source_uri(&entry.reason);
     let mut b = JsonBuilder::with_capacity(512);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "diag quarantine show");
@@ -5625,7 +5625,7 @@ fn redact_quarantine_source_uri(value: &str) -> String {
 // EE-243: Graph Diagnostic Output
 // ============================================================================
 
-/// Render a graph diagnostic report as JSON (ee.response.v1 envelope).
+/// Render a graph diagnostic report as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_graph_diag_json(readiness: &crate::graph::GraphModuleReadiness) -> String {
     use crate::models::CapabilityStatus;
@@ -5656,7 +5656,7 @@ pub fn render_graph_diag_json(readiness: &crate::graph::GraphModuleReadiness) ->
     };
 
     serde_json::json!({
-        "schema": RESPONSE_SCHEMA_V1,
+        "schema": RESPONSE_SCHEMA_V2,
         "success": readiness.status() == CapabilityStatus::Ready,
         "data": {
             "command": "diag graph",
@@ -5719,11 +5719,11 @@ pub fn render_graph_diag_toon(readiness: &crate::graph::GraphModuleReadiness) ->
     render_toon_from_json(&render_graph_diag_json(readiness))
 }
 
-/// Render a streams diagnostic report as JSON (ee.response.v1 envelope).
+/// Render a streams diagnostic report as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_streams_json(report: &crate::core::streams::StreamsReport) -> String {
     let mut b = JsonBuilder::with_capacity(512);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", report.is_healthy());
     b.field_object("data", |d| {
         d.field_str("command", "diag streams");
@@ -5768,11 +5768,11 @@ pub fn render_streams_toon(report: &crate::core::streams::StreamsReport) -> Stri
     render_toon_from_json(&render_streams_json(report))
 }
 
-/// Render a check report as JSON (ee.response.v1 envelope).
+/// Render a check report as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_check_json(report: &CheckReport) -> String {
     let mut b = JsonBuilder::with_capacity(512);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", report.posture.is_usable());
     b.field_object("data", |d| {
         d.field_str("command", "check");
@@ -5840,11 +5840,11 @@ pub fn render_check_toon(report: &CheckReport) -> String {
     render_toon_from_json(&render_check_json(report))
 }
 
-/// Render a health report as JSON (ee.response.v1 envelope).
+/// Render a health report as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_health_json(report: &HealthReport) -> String {
     let mut b = JsonBuilder::with_capacity(512);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", report.verdict.is_healthy());
     b.field_object("data", |d| {
         d.field_str("command", "health");
@@ -5924,7 +5924,7 @@ pub fn render_structural_health_json(report: &StructuralHealthReport) -> String 
         })
         .collect();
     serde_json::to_string(&report)
-        .unwrap_or_else(|_| r#"{"schema":"ee.error.v1","error":"serialization_failed"}"#.to_owned())
+        .unwrap_or_else(|_| r#"{"schema":"ee.error.v2","error":{"code":"serialization_failed","message":"Failed to serialize response","severity":"high","details":{"recovery":[]},"nonRecoverable":false}}"#.to_owned())
 }
 
 /// Render the opt-in structural health surface as human-readable text.
@@ -6039,7 +6039,7 @@ pub fn render_structural_health_toon(report: &StructuralHealthReport) -> String 
 
 fn render_schema_value_json(value: &serde_json::Value) -> String {
     serde_json::to_string(value)
-        .unwrap_or_else(|_| r#"{"schema":"ee.error.v1","error":"serialization_failed"}"#.to_owned())
+        .unwrap_or_else(|_| r#"{"schema":"ee.error.v2","error":{"code":"serialization_failed","message":"Failed to serialize response","severity":"high","details":{"recovery":[]},"nonRecoverable":false}}"#.to_owned())
 }
 
 fn json_object_field<'a>(
@@ -6375,7 +6375,7 @@ pub fn render_memory_impact_analysis_markdown(impact: &serde_json::Value) -> Str
 #[must_use]
 pub fn render_proximity_json(report: &crate::graph::gomory_hu::ProximityReport) -> String {
     serde_json::to_string(report).unwrap_or_else(|_| {
-        r#"{"schema":"ee.error.v1","error":"serialization_failed"}"#.to_string()
+        r#"{"schema":"ee.error.v2","error":{"code":"serialization_failed","message":"Failed to serialize response","severity":"high","details":{"recovery":[]},"nonRecoverable":false}}"#.to_string()
     })
 }
 
@@ -6426,11 +6426,11 @@ pub fn render_proximity_markdown(report: &crate::graph::gomory_hu::ProximityRepo
     output
 }
 
-/// Render a memory show report as JSON (ee.response.v1 envelope).
+/// Render a memory show report as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_memory_show_json(report: &MemoryShowReport) -> String {
     let mut b = JsonBuilder::with_capacity(1024);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", report.found && report.error.is_none());
     b.field_object("data", |d| {
         d.field_str("command", "memory show");
@@ -6552,11 +6552,11 @@ pub fn render_memory_show_toon(report: &MemoryShowReport) -> String {
     render_toon_from_json(&render_memory_show_json(report))
 }
 
-/// Render a memory list report as JSON (ee.response.v1 envelope).
+/// Render a memory list report as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_memory_list_json(report: &MemoryListReport) -> String {
     let mut b = JsonBuilder::with_capacity(2048);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", report.error.is_none());
     b.field_object("data", |d| {
         d.field_str("command", "memory list");
@@ -6796,11 +6796,11 @@ pub fn render_memory_list_toon(report: &MemoryListReport) -> String {
     render_toon_from_json(&render_memory_list_json(report))
 }
 
-/// Render a memory history report as JSON (ee.response.v1 envelope).
+/// Render a memory history report as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_memory_history_json(report: &MemoryHistoryReport) -> String {
     let mut b = JsonBuilder::with_capacity(2048);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", report.error.is_none());
     b.field_object("data", |d| {
         d.field_str("command", "memory history");
@@ -6895,7 +6895,7 @@ pub fn render_memory_history_toon(report: &MemoryHistoryReport) -> String {
     render_toon_from_json(&render_memory_history_json(report))
 }
 
-/// Render a procedural rule add report as JSON (`ee.response.v1` envelope).
+/// Render a procedural rule add report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_rule_add_json(report: &RuleAddReport) -> String {
     ResponseEnvelope::success()
@@ -6915,7 +6915,7 @@ pub fn render_rule_add_toon(report: &RuleAddReport) -> String {
     render_toon_from_json(&render_rule_add_json(report))
 }
 
-/// Render a procedural rule list report as JSON (`ee.response.v1` envelope).
+/// Render a procedural rule list report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_rule_list_json(report: &RuleListReport) -> String {
     ResponseEnvelope::success()
@@ -6935,7 +6935,7 @@ pub fn render_rule_list_toon(report: &RuleListReport) -> String {
     render_toon_from_json(&render_rule_list_json(report))
 }
 
-/// Render a procedural rule show report as JSON (`ee.response.v1` envelope).
+/// Render a procedural rule show report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_rule_show_json(report: &RuleShowReport) -> String {
     ResponseEnvelope::success()
@@ -6955,7 +6955,7 @@ pub fn render_rule_show_toon(report: &RuleShowReport) -> String {
     render_toon_from_json(&render_rule_show_json(report))
 }
 
-/// Render a procedural rule mark report as JSON (`ee.response.v1` envelope).
+/// Render a procedural rule mark report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_rule_mark_json(report: &RuleMarkReport) -> String {
     ResponseEnvelope::success()
@@ -6975,7 +6975,7 @@ pub fn render_rule_mark_toon(report: &RuleMarkReport) -> String {
     render_toon_from_json(&render_rule_mark_json(report))
 }
 
-/// Render a procedural rule protection report as JSON (`ee.response.v1` envelope).
+/// Render a procedural rule protection report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_rule_protect_json(report: &RuleProtectReport) -> String {
     ResponseEnvelope::success()
@@ -6995,7 +6995,7 @@ pub fn render_rule_protect_toon(report: &RuleProtectReport) -> String {
     render_toon_from_json(&render_rule_protect_json(report))
 }
 
-/// Render a procedural rule update report as JSON (`ee.response.v1` envelope).
+/// Render a procedural rule update report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_rule_update_json(report: &RuleUpdateReport) -> String {
     ResponseEnvelope::success()
@@ -7015,7 +7015,7 @@ pub fn render_rule_update_toon(report: &RuleUpdateReport) -> String {
     render_toon_from_json(&render_rule_update_json(report))
 }
 
-/// Render a playbook extraction report as JSON (`ee.response.v1` envelope).
+/// Render a playbook extraction report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_playbook_extract_json(report: &PlaybookExtractReport) -> String {
     ResponseEnvelope::success()
@@ -7035,7 +7035,7 @@ pub fn render_playbook_extract_toon(report: &PlaybookExtractReport) -> String {
     render_toon_from_json(&render_playbook_extract_json(report))
 }
 
-/// Render a feedback quarantine list report as JSON (`ee.response.v1` envelope).
+/// Render a feedback quarantine list report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_outcome_quarantine_list_json(report: &OutcomeQuarantineListReport) -> String {
     ResponseEnvelope::success()
@@ -7055,7 +7055,7 @@ pub fn render_outcome_quarantine_list_toon(report: &OutcomeQuarantineListReport)
     render_toon_from_json(&render_outcome_quarantine_list_json(report))
 }
 
-/// Render a feedback quarantine review report as JSON (`ee.response.v1` envelope).
+/// Render a feedback quarantine review report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_outcome_quarantine_review_json(report: &OutcomeQuarantineReviewReport) -> String {
     ResponseEnvelope::success()
@@ -7075,7 +7075,7 @@ pub fn render_outcome_quarantine_review_toon(report: &OutcomeQuarantineReviewRep
     render_toon_from_json(&render_outcome_quarantine_review_json(report))
 }
 
-/// Render a curation candidate list report as JSON (`ee.response.v1` envelope).
+/// Render a curation candidate list report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_curate_candidates_json(report: &CurateCandidatesReport) -> String {
     ResponseEnvelope::success()
@@ -7095,7 +7095,7 @@ pub fn render_curate_candidates_toon(report: &CurateCandidatesReport) -> String 
     render_toon_from_json(&render_curate_candidates_json(report))
 }
 
-/// Render a curation validation report as JSON (`ee.response.v1` envelope).
+/// Render a curation validation report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_curate_validate_json(report: &CurateValidateReport) -> String {
     ResponseEnvelope::success()
@@ -7115,7 +7115,7 @@ pub fn render_curate_validate_toon(report: &CurateValidateReport) -> String {
     render_toon_from_json(&render_curate_validate_json(report))
 }
 
-/// Render a curation apply report as JSON (`ee.response.v1` envelope).
+/// Render a curation apply report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_curate_apply_json(report: &CurateApplyReport) -> String {
     ResponseEnvelope::success()
@@ -7135,7 +7135,7 @@ pub fn render_curate_apply_toon(report: &CurateApplyReport) -> String {
     render_toon_from_json(&render_curate_apply_json(report))
 }
 
-/// Render a curation review lifecycle report as JSON (`ee.response.v1` envelope).
+/// Render a curation review lifecycle report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_curate_review_json(report: &CurateReviewReport) -> String {
     ResponseEnvelope::success()
@@ -7155,7 +7155,7 @@ pub fn render_curate_review_toon(report: &CurateReviewReport) -> String {
     render_toon_from_json(&render_curate_review_json(report))
 }
 
-/// Render a curation TTL disposition report as JSON (`ee.response.v1` envelope).
+/// Render a curation TTL disposition report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_curate_disposition_json(report: &CurateDispositionReport) -> String {
     ResponseEnvelope::success()
@@ -7175,11 +7175,11 @@ pub fn render_curate_disposition_toon(report: &CurateDispositionReport) -> Strin
     render_toon_from_json(&render_curate_disposition_json(report))
 }
 
-/// Render binary version and build provenance as JSON (`ee.response.v1` envelope).
+/// Render binary version and build provenance as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_version_json(report: &VersionReport) -> String {
     let mut b = JsonBuilder::with_capacity(2048);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "version");
@@ -7231,7 +7231,7 @@ pub fn render_version_toon(report: &VersionReport) -> String {
     render_toon_from_json(&render_version_json(report))
 }
 
-/// Render `ee install check` as JSON (`ee.response.v1` envelope).
+/// Render `ee install check` as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_install_check_json(report: &InstallCheckReport) -> String {
     render_serialized_report_response(report, "InstallCheckReport")
@@ -7261,7 +7261,7 @@ pub fn render_install_check_toon(report: &InstallCheckReport) -> String {
     render_toon_from_json(&render_install_check_json(report))
 }
 
-/// Render install/update dry-run plans as JSON (`ee.response.v1` envelope).
+/// Render install/update dry-run plans as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_install_plan_json(report: &InstallPlanReport) -> String {
     render_serialized_report_response(report, "InstallPlanReport")
@@ -7376,11 +7376,11 @@ fn source_state(report: &VersionReport) -> &'static str {
     }
 }
 
-/// Render a capabilities report as JSON (ee.response.v1 envelope).
+/// Render a capabilities report as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_capabilities_json(report: &CapabilitiesReport) -> String {
     let mut b = JsonBuilder::with_capacity(1024);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "capabilities");
@@ -7640,7 +7640,7 @@ pub fn render_capabilities_toon(report: &CapabilitiesReport) -> String {
     render_toon_from_json(&render_capabilities_json(report))
 }
 
-/// Render evaluation run result as JSON (ee.response.v1 envelope).
+/// Render evaluation run result as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_eval_run_json(report: &EvaluationReport, scenario_id: Option<&str>) -> String {
     render_eval_report_json(report, scenario_id)
@@ -7673,11 +7673,11 @@ fn render_eval_science_metrics_json(
     };
 }
 
-/// Render evaluation report as JSON (ee.response.v1 envelope).
+/// Render evaluation report as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_eval_report_json(report: &EvaluationReport, scenario_id: Option<&str>) -> String {
     let mut b = JsonBuilder::with_capacity(1024);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", report.status.is_success());
     b.field_object("data", |d| {
         d.field_str("command", "eval run");
@@ -7815,11 +7815,11 @@ pub fn render_eval_report_toon(report: &EvaluationReport, scenario_id: Option<&s
     render_toon_from_json(&render_eval_report_json(report, scenario_id))
 }
 
-/// Render evaluation fixture list as JSON (ee.response.v1 envelope).
+/// Render evaluation fixture list as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_eval_list_json(entries: &[FixtureListEntry], fixture_dir: Option<&str>) -> String {
     let mut b = JsonBuilder::with_capacity(512);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "eval list");
@@ -7895,7 +7895,7 @@ pub struct SchemaEntry {
 pub const fn public_schemas() -> &'static [SchemaEntry] {
     &[
         SchemaEntry {
-            id: "ee.response.v1",
+            id: "ee.response.v2",
             version: "1",
             description: "Success response envelope for all ee commands",
             category: "envelope",
@@ -8694,12 +8694,12 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
     ]
 }
 
-/// Render the schema list as JSON (ee.response.v1 envelope).
+/// Render the schema list as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_schema_list_json() -> String {
     let schemas = public_schemas();
     let mut b = JsonBuilder::with_capacity(512);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "schema list");
@@ -8764,7 +8764,7 @@ fn render_single_schema_export(schema_id: &str) -> String {
 
 fn render_all_schemas_export() -> String {
     let mut b = JsonBuilder::with_capacity(3072);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "schema export");
@@ -8786,7 +8786,7 @@ fn schema_definition_array_json() -> String {
 }
 
 fn response_schema_definition() -> String {
-    include_str!("../../docs/schemas/ee.response.v1.json").to_string()
+    include_str!("../../docs/schemas/ee.response.v2.json").to_string()
 }
 
 fn error_schema_definition() -> String {
@@ -9574,7 +9574,7 @@ pub fn render_schema_export_toon(schema_id: Option<&str>) -> String {
 #[must_use]
 pub fn render_mcp_manifest_json() -> String {
     let mut b = JsonBuilder::with_capacity(8192);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "mcp manifest");
@@ -9629,10 +9629,9 @@ pub fn render_mcp_manifest_json() -> String {
         let subcommand_tools: Vec<SubcommandToolEntry> = COMMAND_MANIFEST
             .iter()
             .flat_map(|cmd| {
-                cmd.subcommands.iter().map(move |sub| SubcommandToolEntry {
-                    parent: cmd,
-                    sub,
-                })
+                cmd.subcommands
+                    .iter()
+                    .map(move |sub| SubcommandToolEntry { parent: cmd, sub })
             })
             .collect();
         d.field_array_of_objects(
@@ -9653,7 +9652,7 @@ fn render_mcp_tool_manifest_entry(obj: &mut JsonBuilder, cmd: &CommandEntry) {
     obj.field_str("description", cmd.description);
     obj.field_bool("available", cmd.available);
     obj.field_str("source", "public_command_manifest");
-    obj.field_str("responseEnvelope", RESPONSE_SCHEMA_V1);
+    obj.field_str("responseEnvelope", RESPONSE_SCHEMA_V2);
     obj.field_str("errorEnvelope", ERROR_SCHEMA_V2);
     obj.field_array_of_objects("subcommands", cmd.subcommands, |sub, sc| {
         sub.field_str("name", sc.name);
@@ -9719,7 +9718,7 @@ fn render_mcp_subcommand_tool_entry(obj: &mut JsonBuilder, entry: &SubcommandToo
     obj.field_str("description", entry.sub.description);
     obj.field_bool("available", entry.parent.available);
     obj.field_str("source", "public_command_manifest");
-    obj.field_str("responseEnvelope", RESPONSE_SCHEMA_V1);
+    obj.field_str("responseEnvelope", RESPONSE_SCHEMA_V2);
     obj.field_str("errorEnvelope", ERROR_SCHEMA_V2);
     obj.field_str("parentTool", &parent_tool);
     obj.field_str("parentCommand", entry.parent.name);
@@ -9822,14 +9821,14 @@ pub fn help_text() -> &'static str {
 pub fn schema_json() -> String {
     format!(
         "{{\"schema\":\"{}\",\"success\":true,\"data\":{{\"command\":\"schema\",\"schemas\":{{\"response\":\"{}\",\"error\":\"{}\"}}}}}}",
-        RESPONSE_SCHEMA_V1, RESPONSE_SCHEMA_V1, ERROR_SCHEMA_V2
+        RESPONSE_SCHEMA_V2, RESPONSE_SCHEMA_V2, ERROR_SCHEMA_V2
     )
 }
 
 #[must_use]
 pub fn help_json() -> String {
     let mut b = JsonBuilder::with_capacity(4096);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "help");
@@ -10858,7 +10857,7 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
 #[must_use]
 pub fn render_introspect_json() -> String {
     let mut b = JsonBuilder::with_capacity(8192);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "introspect");
@@ -11033,7 +11032,7 @@ fn strings_to_json_array(strings: &[String]) -> String {
 #[must_use]
 pub fn render_agent_detect_json(report: &InstalledAgentDetectionReport) -> String {
     let mut b = JsonBuilder::with_capacity(2048);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "agent detect");
@@ -11085,7 +11084,7 @@ pub fn render_agent_detect_toon(report: &InstalledAgentDetectionReport) -> Strin
 #[must_use]
 pub fn render_agent_status_json(report: &AgentInventoryReport) -> String {
     let mut b = JsonBuilder::with_capacity(2048);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool(
         "success",
         report.status != crate::core::agent_detect::AgentInventoryStatus::Unavailable,
@@ -11146,7 +11145,7 @@ use crate::core::agent_docs::{
 #[must_use]
 pub fn render_agent_docs_json(report: &AgentDocsReport) -> String {
     let mut b = JsonBuilder::with_capacity(8192);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| {
         d.field_str("command", "agent-docs");
@@ -11707,7 +11706,7 @@ pub fn escape_json_string(s: &str) -> String {
 #[must_use]
 pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile) -> String {
     let mut b = JsonBuilder::with_capacity(512);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_str("fields", profile.as_str());
     b.field_object("data", |d| {
@@ -11785,7 +11784,7 @@ pub fn render_capabilities_json_filtered(
     profile: FieldProfile,
 ) -> String {
     let mut b = JsonBuilder::with_capacity(1024);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_str("fields", profile.as_str());
     b.field_object("data", |d| {
@@ -11868,7 +11867,7 @@ pub fn render_doctor_json_filtered(report: &DoctorReport, profile: FieldProfile)
     } else {
         None
     };
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     // bd-2xdom Gap 4: envelope `success` means "command ran", not "system is healthy".
     // System state is in `data.posture` (canonical) and `data.healthy` (deprecated alias).
     b.field_bool("success", true);
@@ -11915,7 +11914,7 @@ pub fn render_doctor_json_filtered(report: &DoctorReport, profile: FieldProfile)
 #[must_use]
 pub fn render_health_json_filtered(report: &HealthReport, profile: FieldProfile) -> String {
     let mut b = JsonBuilder::with_capacity(512);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", report.verdict.is_healthy());
     b.field_str("fields", profile.as_str());
     b.field_object("data", |d| {
@@ -11955,7 +11954,7 @@ pub fn render_health_json_filtered(report: &HealthReport, profile: FieldProfile)
 #[must_use]
 pub fn render_check_json_filtered(report: &CheckReport, profile: FieldProfile) -> String {
     let mut b = JsonBuilder::with_capacity(512);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", report.posture.is_usable());
     b.field_str("fields", profile.as_str());
     b.field_object("data", |d| {
@@ -11991,7 +11990,7 @@ pub fn render_check_json_filtered(report: &CheckReport, profile: FieldProfile) -
 #[must_use]
 pub fn render_quarantine_json_filtered(report: &QuarantineReport, profile: FieldProfile) -> String {
     let mut b = JsonBuilder::with_capacity(1024);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_str("fields", profile.as_str());
     b.field_object("data", |d| {
@@ -13172,7 +13171,7 @@ use crate::core::lab::{CaptureReport, CounterfactualReport, ReplayReport};
 #[must_use]
 pub fn render_lab_capture_json(report: &CaptureReport) -> String {
     let json = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "episode_id": report.episode_id,
@@ -13239,7 +13238,7 @@ pub fn render_lab_capture_toon(report: &CaptureReport) -> String {
 pub fn render_lab_replay_json(report: &ReplayReport) -> String {
     let degraded = lab_replay_degraded(report);
     let json = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "degraded": &degraded,
         "data": {
@@ -13403,7 +13402,7 @@ pub fn render_lab_counterfactual_json(report: &CounterfactualReport) -> String {
         data["packDiff"] = serde_json::json!(pack_diff);
     }
     let json = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "degraded": degraded,
         "data": data
@@ -13478,7 +13477,7 @@ use crate::core::preflight::{CloseReport, RunReport, ShowReport};
 pub fn render_preflight_run_json(report: &RunReport) -> String {
     let degraded = aggregate_preflight_degradations("preflight_run", &report.degraded);
     let json = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "run_id": report.run_id,
@@ -13547,7 +13546,7 @@ pub fn render_preflight_run_toon(report: &RunReport) -> String {
 pub fn render_preflight_show_json(report: &ShowReport) -> String {
     let degraded = aggregate_preflight_degradations("preflight_show", &report.degraded);
     let json = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "run": report.run,
@@ -13614,7 +13613,7 @@ pub fn render_preflight_show_toon(report: &ShowReport) -> String {
 #[must_use]
 pub fn render_preflight_close_json(report: &CloseReport) -> String {
     let json = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "run_id": report.run_id,
@@ -13825,7 +13824,7 @@ pub fn render_procedure_list_toon(report: &ProcedureListReport) -> String {
 #[must_use]
 pub fn render_procedure_export_json(report: &ProcedureExportReport) -> String {
     serde_json::json!({
-        "schema": RESPONSE_SCHEMA_V1,
+        "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "schema": report.schema,
@@ -13884,7 +13883,7 @@ pub fn render_procedure_export_toon(report: &ProcedureExportReport) -> String {
 #[must_use]
 pub fn render_procedure_promote_json(report: &ProcedurePromoteReport) -> String {
     serde_json::json!({
-        "schema": RESPONSE_SCHEMA_V1,
+        "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "schema": report.schema,
@@ -14029,7 +14028,7 @@ pub fn render_procedure_promote_toon(report: &ProcedurePromoteReport) -> String 
 #[must_use]
 pub fn render_procedure_retire_json(report: &ProcedureRetireReport) -> String {
     serde_json::json!({
-        "schema": RESPONSE_SCHEMA_V1,
+        "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "schema": report.schema,
@@ -14079,7 +14078,7 @@ pub fn render_procedure_retire_toon(report: &ProcedureRetireReport) -> String {
 #[must_use]
 pub fn render_procedure_verify_json(report: &ProcedureVerifyReport) -> String {
     serde_json::json!({
-        "schema": RESPONSE_SCHEMA_V1,
+        "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "schema": report.schema,
@@ -14126,7 +14125,7 @@ pub fn render_procedure_verify_toon(report: &ProcedureVerifyReport) -> String {
 #[must_use]
 pub fn render_procedure_drift_json(report: &ProcedureDriftReport) -> String {
     serde_json::json!({
-        "schema": RESPONSE_SCHEMA_V1,
+        "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "schema": report.schema,
@@ -14825,7 +14824,7 @@ pub fn render_completion_audit_json(
     report: &crate::core::completion_audit::CompletionAuditReport,
 ) -> String {
     serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report,
         "degraded": []
@@ -15230,11 +15229,11 @@ pub fn render_handoff_resume_toon(report: &HandoffResumeReport) -> String {
 // EE-363: Claim Diagnostics Output
 // ============================================================================
 
-/// Render a claims diagnostic report as JSON (ee.response.v1 envelope).
+/// Render a claims diagnostic report as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_diag_claims_json(report: &crate::core::claims::DiagClaimsReport) -> String {
     let mut b = JsonBuilder::with_capacity(1024);
-    b.field_str("schema", RESPONSE_SCHEMA_V1);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", report.health_status == "healthy");
     b.field_object("data", |d| {
         d.field_str("command", "diag claims");
@@ -15426,7 +15425,7 @@ mod tests {
     use crate::graph::health::HEALTH_STRUCTURAL_SCHEMA_V1;
     use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
     use crate::models::{
-        DomainError, ERROR_SCHEMA_V2, MemoryId, ProvenanceUri, RESPONSE_SCHEMA_V1, TrustClass,
+        DomainError, ERROR_SCHEMA_V2, MemoryId, ProvenanceUri, RESPONSE_SCHEMA_V2, TrustClass,
         UnitScore,
     };
     use crate::pack::{
@@ -16013,7 +16012,7 @@ mod tests {
         let json = super::render_procedure_retire_json(&report);
         let parsed: serde_json::Value =
             serde_json::from_str(&json).map_err(|error| error.to_string())?;
-        assert_eq!(parsed["schema"], RESPONSE_SCHEMA_V1);
+        assert_eq!(parsed["schema"], RESPONSE_SCHEMA_V2);
         assert_eq!(parsed["success"], true);
         assert_eq!(parsed["data"]["command"], "procedure retire");
         assert_eq!(
@@ -16205,7 +16204,7 @@ mod tests {
                 BuildFeature::new("serve", false),
             ],
             schemas: vec![
-                SupportedSchema::new("response", RESPONSE_SCHEMA_V1),
+                SupportedSchema::new("response", RESPONSE_SCHEMA_V2),
                 SupportedSchema::new("error", ERROR_SCHEMA_V2),
                 SupportedSchema::new("version_provenance", VERSION_PROVENANCE_SCHEMA_V1),
             ],
@@ -16226,7 +16225,7 @@ mod tests {
         );
         let json = render_version_json(&report);
 
-        ensure_starts_with(&json, "{\"schema\":\"ee.response.v1\"", "response schema")?;
+        ensure_starts_with(&json, "{\"schema\":\"ee.response.v2\"", "response schema")?;
         ensure_contains(&json, "\"command\":\"version\"", "command")?;
         ensure_contains(
             &json,
@@ -16353,7 +16352,7 @@ mod tests {
     #[test]
     fn status_json_has_stable_schema_and_degradation_codes() -> TestResult {
         let json = status_response_json();
-        ensure_starts_with(&json, "{\"schema\":\"ee.response.v1\"", "status schema")?;
+        ensure_starts_with(&json, "{\"schema\":\"ee.response.v2\"", "status schema")?;
         ensure_contains(&json, "\"success\":true", "status success flag")?;
         ensure_contains(&json, "\"runtime\":\"ready\"", "status runtime capability")?;
         ensure_contains(&json, "\"engine\":\"asupersync\"", "status runtime engine")?;
@@ -17053,7 +17052,7 @@ mod tests {
                 d.field_str("command", "test");
             })
             .finish();
-        ensure_starts_with(&json, "{\"schema\":\"ee.response.v1\"", "schema")?;
+        ensure_starts_with(&json, "{\"schema\":\"ee.response.v2\"", "schema")?;
         ensure_contains(&json, "\"success\":true", "success flag")?;
         ensure_contains(&json, "\"data\":{\"command\":\"test\"}", "data object")
     }
@@ -17253,7 +17252,7 @@ mod tests {
         let response = context_response_fixture()?;
         let json = render_context_response_json(&response);
 
-        ensure_starts_with(&json, "{\"schema\":\"ee.response.v1\"", "schema")?;
+        ensure_starts_with(&json, "{\"schema\":\"ee.response.v2\"", "schema")?;
         ensure_contains(&json, "\"command\":\"context\"", "command")?;
         ensure_contains(
             &json,
@@ -18589,7 +18588,7 @@ mod tests {
     fn toon_status_has_required_fields() -> TestResult {
         let report = StatusReport::gather();
         let toon = render_status_toon(&report);
-        ensure_contains(&toon, "schema: ee.response.v1", "toon schema")?;
+        ensure_contains(&toon, "schema: ee.response.v2", "toon schema")?;
         ensure_contains(&toon, "success: true", "toon success")?;
         ensure_contains(&toon, "command: status", "toon command")?;
         ensure_contains(&toon, "capabilities:", "toon capabilities section")?;
@@ -19092,7 +19091,7 @@ mod tests {
 
         // Verify required TOON structure is present (not exact content, since
         // gather() now inspects actual workspace state which varies).
-        ensure_contains(&actual, "schema: ee.response.v1", "schema")?;
+        ensure_contains(&actual, "schema: ee.response.v2", "schema")?;
         ensure_contains(&actual, "success: true", "success flag")?;
         ensure_contains(&actual, "data:", "data section")?;
         ensure_contains(&actual, "command: status", "command field")?;
@@ -19135,7 +19134,7 @@ mod tests {
         for (i, fixture) in fixtures.iter().enumerate() {
             let value: serde_json::Value = serde_json::from_str(fixture)
                 .map_err(|e| format!("status fixture {} is not valid JSON: {e}", i))?;
-            if value.get("schema") != Some(&serde_json::Value::String("ee.response.v1".to_string()))
+            if value.get("schema") != Some(&serde_json::Value::String("ee.response.v2".to_string()))
             {
                 return Err(format!("status fixture {} missing schema", i));
             }
@@ -19148,7 +19147,7 @@ mod tests {
         let fixture = include_str!("../../tests/fixtures/golden/version/version.golden");
         let value: serde_json::Value = serde_json::from_str(fixture)
             .map_err(|e| format!("version fixture is not valid JSON: {e}"))?;
-        if value.get("schema") != Some(&serde_json::Value::String("ee.response.v1".to_string())) {
+        if value.get("schema") != Some(&serde_json::Value::String("ee.response.v2".to_string())) {
             return Err("version fixture missing schema".to_string());
         }
         Ok(())
@@ -19244,7 +19243,7 @@ mod tests {
         let report = StatusReport::gather();
         let json = render_status_json_filtered(&report, FieldProfile::Minimal);
 
-        ensure_contains(&json, "\"schema\":\"ee.response.v1\"", "schema")?;
+        ensure_contains(&json, "\"schema\":\"ee.response.v2\"", "schema")?;
         ensure_contains(&json, "\"success\":true", "success")?;
         ensure_contains(&json, "\"fields\":\"minimal\"", "fields indicator")?;
         ensure_contains(&json, "\"command\":\"status\"", "command")?;
@@ -19380,7 +19379,7 @@ mod tests {
         let report = EvaluationReport::new();
         let json = render_eval_report_json(&report, None);
 
-        ensure_contains(&json, "\"schema\":\"ee.response.v1\"", "schema")?;
+        ensure_contains(&json, "\"schema\":\"ee.response.v2\"", "schema")?;
         ensure_contains(&json, "\"success\":true", "success")?;
         ensure_contains(&json, "\"command\":\"eval run\"", "command")?;
         ensure_contains(&json, "\"status\":\"no_scenarios\"", "status")?;
@@ -19628,7 +19627,7 @@ mod tests {
 
         let toon = render_eval_report_toon(&report, None);
 
-        ensure_contains(&toon, "ee.response.v1", "schema")?;
+        ensure_contains(&toon, "ee.response.v2", "schema")?;
         ensure_contains(&toon, "all_passed", "status")?;
         ensure_contains(&toon, "test", "scenario id")
     }
@@ -20043,7 +20042,7 @@ mod tests {
     fn size_diagnostic_from_json_computes_all_fields() -> TestResult {
         use super::OutputSizeDiagnostic;
 
-        let json = r#"{"schema":"ee.response.v1","success":true,"data":{"command":"status"}}"#;
+        let json = r#"{"schema":"ee.response.v2","success":true,"data":{"command":"status"}}"#;
         let diagnostic = OutputSizeDiagnostic::from_json(json);
 
         ensure(diagnostic.json_bytes > 0, "json_bytes should be positive")?;
@@ -20069,7 +20068,7 @@ mod tests {
     fn size_diagnostic_json_output_has_required_schema() -> TestResult {
         use super::{OUTPUT_SIZE_DIAGNOSTIC_SCHEMA_V1, OutputSizeDiagnostic};
 
-        let json = r#"{"schema":"ee.response.v1","success":true,"data":{"command":"test"}}"#;
+        let json = r#"{"schema":"ee.response.v2","success":true,"data":{"command":"test"}}"#;
         let diagnostic = OutputSizeDiagnostic::from_json(json);
         let output = diagnostic.to_json();
 
@@ -20086,7 +20085,7 @@ mod tests {
     fn size_diagnostic_human_output_has_structure() -> TestResult {
         use super::OutputSizeDiagnostic;
 
-        let json = r#"{"schema":"ee.response.v1","success":true,"data":{"command":"test"}}"#;
+        let json = r#"{"schema":"ee.response.v2","success":true,"data":{"command":"test"}}"#;
         let diagnostic = OutputSizeDiagnostic::from_json(json);
         let output = diagnostic.to_human();
 

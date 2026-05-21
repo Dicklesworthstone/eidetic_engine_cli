@@ -12,7 +12,7 @@ use crate::pack::{ContextResponse, ContextResponseDegradation, ContextResponseSe
 
 use super::{ContextJsonRenderOptions, render_context_response_json_with_options};
 
-pub const PACK_STREAM_SCHEMA_V1: &str = "ee.pack.stream.v1";
+pub use crate::models::PACK_STREAM_SCHEMA_V1;
 pub const CONTEXT_STREAM_PARTIAL_EMISSION_CODE: &str = "context_stream_partial_emission";
 const CONTEXT_STREAM_PARTIAL_EMISSION_MESSAGE: &str =
     "Context stream ended before a terminal frame arrived.";
@@ -99,6 +99,7 @@ impl From<ContextResponseSeverity> for StreamSeverity {
         match severity {
             ContextResponseSeverity::Info => Self::Info,
             ContextResponseSeverity::Low => Self::Low,
+            ContextResponseSeverity::Warning => Self::Warning,
             ContextResponseSeverity::Medium => Self::Medium,
             ContextResponseSeverity::High => Self::High,
         }

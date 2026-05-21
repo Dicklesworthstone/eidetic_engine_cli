@@ -1495,9 +1495,9 @@ mod tests {
         let scenario = EvaluationScenario::builder("test_scenario")
             .journey("Test journey")
             .fixture_family("test_family")
-            .command(CommandStep::new(1, "ee status --json").with_schema("ee.response.v1"))
+            .command(CommandStep::new(1, "ee status --json").with_schema("ee.response.v2"))
             .expected_output(
-                ExpectedOutput::new(1, "ee.response.v1")
+                ExpectedOutput::new(1, "ee.response.v2")
                     .require_field("data.command")
                     .absent_field("secret"),
             )

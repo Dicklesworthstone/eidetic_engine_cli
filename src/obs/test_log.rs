@@ -31,9 +31,7 @@ use std::time::Instant;
 
 use crate::config::{EnvVar, read_env_var, read_env_var_os};
 
-/// Schema version. Bump on shape changes; `docs/schemas/test_event_v1.json`
-/// must move in lock-step.
-pub const TEST_EVENT_SCHEMA_V1: &str = "ee.test_event.v1";
+pub use crate::models::TEST_EVENT_SCHEMA_V1;
 
 /// Env var naming the JSON-line log file. Unset → harness no-ops.
 pub const ENV_TEST_LOG_PATH: &str = EnvVar::TestLogPath.name();

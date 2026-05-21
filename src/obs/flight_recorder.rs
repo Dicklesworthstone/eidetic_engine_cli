@@ -466,7 +466,7 @@ pub fn append_workload_trace(
         message: error.to_string(),
     })?;
     line.push('\n');
-    let existing_bytes = match fs::metadata(&trace_path) {
+    let existing_bytes = match fs::symlink_metadata(&trace_path) {
         Ok(metadata) => metadata.len(),
         Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
         Err(error) => {
