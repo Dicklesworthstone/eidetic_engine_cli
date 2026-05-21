@@ -524,11 +524,15 @@ mod tests {
     use std::collections::HashMap;
     use std::path::Path;
 
+    #[cfg(target_os = "linux")]
+    use super::NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE;
+    #[cfg(not(target_os = "linux"))]
+    use super::NUMA_PIN_UNSUPPORTED_PLATFORM_CODE;
     use super::{
         GRAPH_SNAPSHOT_NUMA_HINT_SCHEMA_V1, GraphSnapshotNumaHintInput, NUMA_PIN_DISABLE_ENV,
-        NUMA_PIN_DISABLED_CODE, NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE, NUMA_PIN_NODE_ENV,
-        NUMA_PIN_POPULATE_ENV, NUMA_PIN_PREFERRED_NODE_AUTO, NumaPinConfig, NumaPinFallbackPath,
-        NumaPinMappingKind, NumaPinPlan, NumaPinPlatform, NumaPinPreference, NumaPinResult,
+        NUMA_PIN_DISABLED_CODE, NUMA_PIN_NODE_ENV, NUMA_PIN_POPULATE_ENV,
+        NUMA_PIN_PREFERRED_NODE_AUTO, NumaPinConfig, NumaPinFallbackPath, NumaPinMappingKind,
+        NumaPinPlan, NumaPinPlatform, NumaPinPreference, NumaPinResult,
         STATUS_GRAPH_NUMA_PIN_SCHEMA_V1, detect_preferred_node, graph_snapshot_numa_hint,
         parse_env_bool, parse_env_preferred_node, pin_snapshot_blob, plan_snapshot_pin,
         platform_support,
