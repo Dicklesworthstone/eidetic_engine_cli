@@ -244,6 +244,10 @@ name = "agent_profile"
 harness = false
 
 [[bench]]
+name = "consolidator"
+harness = false
+
+[[bench]]
 name = "curate_candidates"
 harness = false
 
