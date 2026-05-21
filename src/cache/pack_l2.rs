@@ -99,13 +99,39 @@ impl PackL2Cache {
     ) -> Result<PackL2CacheLookup, PackL2CacheError> {
         let fallback_path = self.entry_path(key);
         let candidates = self.entry_candidates(key)?;
-        let Some(path) = candidates.into_iter().next() else {
+        if candidates.is_empty() {
             return Ok(PackL2CacheLookup::Miss(PackL2CacheMiss {
                 key: key.to_owned(),
                 path: fallback_path,
                 reason: PackL2CacheMissReason::NotFound,
             }));
-        };
+        }
+
+        let mut last_miss = None;
+        for path in candidates {
+            match self.get_candidate_at(key, path, now_epoch_seconds)? {
+                PackL2CacheLookup::Hit(hit) => return Ok(PackL2CacheLookup::Hit(hit)),
+                PackL2CacheLookup::Miss(miss) => {
+                    last_miss = Some(miss);
+                }
+            }
+        }
+
+        Ok(PackL2CacheLookup::Miss(last_miss.unwrap_or(
+            PackL2CacheMiss {
+                key: key.to_owned(),
+                path: fallback_path,
+                reason: PackL2CacheMissReason::NotFound,
+            },
+        )))
+    }
+
+    fn get_candidate_at(
+        &self,
+        key: &str,
+        path: PathBuf,
+        now_epoch_seconds: u64,
+    ) -> Result<PackL2CacheLookup, PackL2CacheError> {
         ensure_no_symlink_components(&path, "inspect_entry")?;
         let bytes = match read_cache_entry_file(&path) {
             Ok(bytes) => bytes,
@@ -1156,6 +1182,40 @@ mod tests {
         assert!(
             !path.exists(),
             "corrupt cache entry should be invalidated after a typed miss"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn error_or_invalid_corrupt_candidate_does_not_mask_valid_fallback() -> TestResult {
+        let key = "blake3:multi-candidate";
+        let pack = json!({"hash": "valid-fallback", "items": [{"id": "mem_valid"}]});
+        let valid_bytes = raw_entry_bytes(key, pack.clone(), 100)?;
+        let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
+        ensure_cache_dir(cache.root()).map_err(|error| error.to_string())?;
+
+        let corrupt_bytes = b"{not-json";
+        let corrupt_path = cache.entry_path_for_body_hash(key, &body_hash_prefix(corrupt_bytes));
+        fs::write(&corrupt_path, corrupt_bytes).map_err(|error| error.to_string())?;
+        let valid_path = cache.entry_path(key);
+        fs::write(&valid_path, valid_bytes).map_err(|error| error.to_string())?;
+
+        let lookup = cache.get_at(key, 120).map_err(|error| error.to_string())?;
+
+        match lookup {
+            PackL2CacheLookup::Hit(hit) => {
+                assert_eq!(hit.path, valid_path);
+                assert_eq!(hit.pack_json, pack);
+            }
+            PackL2CacheLookup::Miss(miss) => {
+                return Err(format!(
+                    "valid fallback should hit after bad candidate: {miss:?}"
+                ));
+            }
+        }
+        assert!(
+            !corrupt_path.exists(),
+            "bad body-hash candidate should be invalidated before trying the valid fallback"
         );
         Ok(())
     }
