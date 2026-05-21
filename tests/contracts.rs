@@ -303,3 +303,6 @@ mod peer_conflict_schema;
 
 #[path = "contracts/perf_live_schema.rs"]
 mod perf_live_schema;
+
+#[path = "contracts/tracing_paragraph_required.rs"]
+mod tracing_paragraph_required;

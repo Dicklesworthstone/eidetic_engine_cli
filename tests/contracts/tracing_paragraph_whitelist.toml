@@ -1,0 +1,9 @@
+# Existing Part II beads that match the broad file-surface scan but do
+# not own an implements-surface tracing closeout yet. Remove entries as
+# each bead receives a TRACING paragraph or closes.
+
+[tracing_paragraph]
+whitelisted_issue_ids = [
+  "bd-3usjw.54",
+  "bd-3usjw.75",
+]
