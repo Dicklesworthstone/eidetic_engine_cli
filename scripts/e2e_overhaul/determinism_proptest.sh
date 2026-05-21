@@ -22,6 +22,28 @@ cases_failed=0
 START_SECONDS="$(python3 -c 'import time; print(time.time())')"
 BUDGET_SECONDS="${EE_DETERMINISM_PROPTEST_BUDGET_SECONDS:-60}"
 
+validate_nonnegative_seconds() {
+    local label="$1"
+    local value="$2"
+    python3 - "$label" "$value" <<'PY'
+import math
+import sys
+
+label = sys.argv[1]
+raw = sys.argv[2]
+try:
+    value = float(raw)
+except ValueError:
+    print(f"{label} must be a finite non-negative number, got {raw!r}", file=sys.stderr)
+    sys.exit(1)
+if not math.isfinite(value) or value < 0:
+    print(f"{label} must be a finite non-negative number, got {raw!r}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+validate_nonnegative_seconds "EE_DETERMINISM_PROPTEST_BUDGET_SECONDS" "$BUDGET_SECONDS"
+
 run_cargo_gate() {
     local label="$1"
     local sample_count="$2"
