@@ -223,6 +223,130 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
+      - name: Install provenance hash tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v b3sum >/dev/null 2>&1; then
+            cargo install b3sum --locked
+          fi
+
+      - name: Generate SLSA provenance
+        shell: bash
+        env:
+          EE_RELEASE_ARTIFACT: ee-${{ matrix.target }}.tar.xz
+          EE_RELEASE_TARGET: ${{ matrix.target }}
+          EE_RELEASE_RUNNER_OS: ${{ runner.os }}
+          EE_RELEASE_RUNNER_IMAGE: ${{ matrix.os }}
+          EE_RELEASE_CROSS: ${{ matrix.cross }}
+          EE_RELEASE_VERSION: ${{ needs.check-version.outputs.version }}
+          EE_RELEASE_TAG: ${{ needs.tag.outputs.tag }}
+          EE_RELEASE_REPOSITORY: ${{ github.repository }}
+          EE_RELEASE_SHA: ${{ github.sha }}
+          EE_RELEASE_RUN_ID: ${{ github.run_id }}
+          EE_RELEASE_RUN_ATTEMPT: ${{ github.run_attempt }}
+          EE_RELEASE_WORKFLOW_REF: ${{ github.workflow_ref }}
+          EE_RELEASE_SERVER_URL: ${{ github.server_url }}
+        run: |
+          set -euo pipefail
+          cd dist
+          LOCK_BLAKE3="$(b3sum ../Cargo.lock | awk '{print $1}')"
+          export LOCK_BLAKE3
+          python3 - <<'PY'
+          import datetime
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+
+          artifact = os.environ["EE_RELEASE_ARTIFACT"]
+          artifact_path = pathlib.Path(artifact)
+          sha_path = pathlib.Path(f"{artifact}.sha256")
+          if not artifact_path.is_file():
+              sys.exit(f"missing release artifact: {artifact}")
+          if not sha_path.is_file():
+              sys.exit(f"missing checksum file: {sha_path}")
+
+          actual_sha256 = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+          recorded_sha256 = sha_path.read_text(encoding="utf-8").split()[0].lower()
+          if actual_sha256 != recorded_sha256:
+              sys.exit(f"checksum mismatch for {artifact}: {actual_sha256} != {recorded_sha256}")
+
+          repo = os.environ["EE_RELEASE_REPOSITORY"]
+          server_url = os.environ["EE_RELEASE_SERVER_URL"]
+          run_url = f"{server_url}/{repo}/actions/runs/{os.environ['EE_RELEASE_RUN_ID']}"
+          target = os.environ["EE_RELEASE_TARGET"]
+          cross = os.environ["EE_RELEASE_CROSS"] == "true"
+          cargo_command = (
+              f"cross build --release --target {target}"
+              if cross
+              else f"cargo build --release --target {target}"
+          )
+          created_at = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+          provenance = {
+              "_type": "https://in-toto.io/Statement/v1",
+              "predicateType": "https://slsa.dev/provenance/v1",
+              "subject": [
+                  {
+                      "name": artifact,
+                      "digest": {
+                          "sha256": actual_sha256,
+                      },
+                  }
+              ],
+              "predicate": {
+                  "buildDefinition": {
+                      "buildType": f"https://github.com/{repo}/.github/workflows/release.yml@v1",
+                      "externalParameters": {
+                          "target": target,
+                          "cargoCommand": cargo_command,
+                          "features": "default",
+                          "releaseVersion": os.environ["EE_RELEASE_VERSION"],
+                          "releaseTag": os.environ["EE_RELEASE_TAG"],
+                      },
+                      "internalParameters": {
+                          "runnerOs": os.environ["EE_RELEASE_RUNNER_OS"],
+                          "runnerImage": os.environ["EE_RELEASE_RUNNER_IMAGE"],
+                          "cross": cross,
+                      },
+                      "resolvedDependencies": [
+                          {
+                              "uri": f"git+{server_url}/{repo}",
+                              "digest": {
+                                  "gitCommit": os.environ["EE_RELEASE_SHA"],
+                              },
+                          },
+                          {
+                              "uri": "file://Cargo.lock",
+                              "digest": {
+                                  "blake3": os.environ["LOCK_BLAKE3"],
+                              },
+                          },
+                      ],
+                  },
+                  "runDetails": {
+                      "builder": {
+                          "id": run_url,
+                      },
+                      "metadata": {
+                          "invocationId": f"{os.environ['EE_RELEASE_RUN_ID']}-{os.environ['EE_RELEASE_RUN_ATTEMPT']}",
+                          "startedOn": created_at,
+                          "sourceRepository": repo,
+                          "sourceCommit": os.environ["EE_RELEASE_SHA"],
+                          "workflowRef": os.environ["EE_RELEASE_WORKFLOW_REF"],
+                      },
+                  },
+              },
+          }
+
+          provenance_path = pathlib.Path(f"ee-{target}.provenance.json")
+          provenance_path.write_text(
+              json.dumps(provenance, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
       - name: Sign with Sigstore
         shell: bash
         run: |
@@ -231,6 +355,9 @@ jobs:
           cosign sign-blob --yes \
             --bundle ee-${{ matrix.target }}.tar.xz.sigstore.json \
             ee-${{ matrix.target }}.tar.xz
+          cosign sign-blob --yes \
+            --bundle ee-${{ matrix.target }}.provenance.json.sigstore.json \
+            ee-${{ matrix.target }}.provenance.json
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -240,6 +367,8 @@ jobs:
             dist/ee-${{ matrix.target }}.tar.xz
             dist/ee-${{ matrix.target }}.tar.xz.sha256
             dist/ee-${{ matrix.target }}.tar.xz.sigstore.json
+            dist/ee-${{ matrix.target }}.provenance.json
+            dist/ee-${{ matrix.target }}.provenance.json.sigstore.json
           retention-days: 1
 
   release:
@@ -278,7 +407,7 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: Verify Sigstore bundles
+      - name: Verify Sigstore bundles and provenance
         run: |
           set -euo pipefail
           CERT_IDENTITY_REGEXP='^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/(tags/v[0-9].*|heads/main)$'
@@ -294,6 +423,46 @@ jobs:
               --certificate-identity-regexp "$CERT_IDENTITY_REGEXP" \
               --certificate-oidc-issuer "$CERT_OIDC_ISSUER" \
               "$artifact"
+
+            provenance="${artifact%.tar.xz}.provenance.json"
+            provenance_bundle="${provenance}.sigstore.json"
+            if [ ! -f "$provenance" ]; then
+              echo "::error title=Missing provenance::Expected $provenance for $artifact"
+              exit 1
+            fi
+            if [ ! -f "$provenance_bundle" ]; then
+              echo "::error title=Missing provenance Sigstore bundle::Expected $provenance_bundle for $provenance"
+              exit 1
+            fi
+            cosign verify-blob \
+              --bundle "$provenance_bundle" \
+              --certificate-identity-regexp "$CERT_IDENTITY_REGEXP" \
+              --certificate-oidc-issuer "$CERT_OIDC_ISSUER" \
+              "$provenance"
+            python3 - "$artifact" "$provenance" "${GITHUB_SHA}" <<'PY'
+            import hashlib
+            import json
+            import pathlib
+            import sys
+
+            artifact = pathlib.Path(sys.argv[1])
+            provenance = pathlib.Path(sys.argv[2])
+            expected_commit = sys.argv[3]
+            actual_sha256 = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            data = json.loads(provenance.read_text(encoding="utf-8"))
+            subject = data.get("subject", [{}])[0]
+            if data.get("predicateType") != "https://slsa.dev/provenance/v1":
+                sys.exit(f"{provenance}: unexpected predicateType")
+            if subject.get("name") != artifact.name:
+                sys.exit(f"{provenance}: subject name does not match {artifact.name}")
+            if subject.get("digest", {}).get("sha256") != actual_sha256:
+                sys.exit(f"{provenance}: subject digest does not match artifact")
+            dependencies = data.get("predicate", {}).get("buildDefinition", {}).get("resolvedDependencies", [])
+            if not any(dep.get("digest", {}).get("gitCommit") == expected_commit for dep in dependencies):
+                sys.exit(f"{provenance}: missing source commit dependency")
+            if not any(dep.get("uri") == "file://Cargo.lock" and dep.get("digest", {}).get("blake3") for dep in dependencies):
+                sys.exit(f"{provenance}: missing Cargo.lock blake3 dependency")
+            PY
           done
 
       - name: Generate release notes
@@ -341,6 +510,14 @@ jobs:
             printf '%s\n' '  --certificate-identity-regexp "^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/(tags/v[0-9].*|heads/main)$" \'
             printf '%s\n' '  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \'
             printf '%s\n' '  ee-<target>.tar.xz'
+            printf '%s\n\n' '```'
+            printf '%s\n' 'Each tarball also ships SLSA provenance. Verify it with:'
+            printf '%s\n' '```bash'
+            printf '%s\n' 'cosign verify-blob \'
+            printf '%s\n' '  --bundle ee-<target>.provenance.json.sigstore.json \'
+            printf '%s\n' '  --certificate-identity-regexp "^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/(tags/v[0-9].*|heads/main)$" \'
+            printf '%s\n' '  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \'
+            printf '%s\n' '  ee-<target>.provenance.json'
             printf '%s\n\n' '```'
             printf '%s\n\n' '## Changes'
           } > release_notes.md

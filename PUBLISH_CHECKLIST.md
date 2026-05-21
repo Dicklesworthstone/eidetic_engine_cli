@@ -45,6 +45,13 @@ Before publishing, ensure:
    - [x] `categories` set
    - [x] `exclude` set (no test fixtures, profiling data)
 
+5. **Signed release provenance ready**
+   - [ ] `.github/workflows/release.yml` emits `ee-<target>.provenance.json`
+   - [ ] Provenance uses SLSA v1 predicate data with source commit, runner, cargo command, target, artifact SHA256, and Cargo.lock BLAKE3
+   - [ ] Provenance JSON is signed with Sigstore and uploaded as `ee-<target>.provenance.json.sigstore.json`
+   - [ ] Release publication verifies binary bundles and provenance bundles before `gh release upload`
+   - [ ] `install.sh --require-provenance` verifies provenance JSON, artifact digest, and provenance Sigstore bundle
+
 ## Manual Steps
 
 1. **Remove publish block**
@@ -77,6 +84,7 @@ The following are enforced by CI:
 - `./scripts/check-forbidden-deps.sh` - No tokio, rusqlite, petgraph, etc.
 - `./scripts/closure-lint.sh` - No abstention-as-implementation closures
 - `./scripts/vision-coverage.sh` - Blocks release if gap > 0
+- `scripts/e2e_release_provenance.sh --static` - SLSA provenance workflow and installer contract
 - `cargo fmt --check`
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo test --workspace --all-targets`

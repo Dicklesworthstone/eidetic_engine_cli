@@ -211,12 +211,13 @@ release_workflow_assets() {
         # Asset categories (existence, not exhaustive listing).
         printf '  "asset_categories": ['
         local first=1
-        for category in 'tar.xz' 'tar.xz.sha256' 'sigstore' 'install.sh' 'install.ps1'; do
+        for category in 'tar.xz' 'tar.xz.sha256' 'sigstore' 'provenance' 'install.sh' 'install.ps1'; do
             local pattern
             case "$category" in
                 'tar.xz') pattern='ee-.*\.tar\.xz' ;;
                 'tar.xz.sha256') pattern='\.tar\.xz\.sha256' ;;
                 'sigstore') pattern='sigstore' ;;
+                'provenance') pattern='\.provenance\.json' ;;
                 'install.sh') pattern='install\.sh' ;;
                 'install.ps1') pattern='install\.ps1' ;;
             esac
@@ -254,12 +255,36 @@ release_workflow_assets() {
             echo '  "cosign_identity_bound": false'
         fi
         echo ','
+        if grep -qF 'predicateType' "$yml" 2>/dev/null \
+            && grep -qF 'https://slsa.dev/provenance/v1' "$yml" 2>/dev/null \
+            && grep -qF 'Cargo.lock' "$yml" 2>/dev/null \
+            && grep -qF 'b3sum ../Cargo.lock' "$yml" 2>/dev/null; then
+            echo '  "slsa_provenance_present": true'
+        else
+            echo '  "slsa_provenance_present": false'
+        fi
+        echo ','
+        if grep -qE -- '--bundle[[:space:]]+ee-.*\.provenance\.json\.sigstore\.json' "$yml" 2>/dev/null; then
+            echo '  "provenance_bundle_present": true'
+        else
+            echo '  "provenance_bundle_present": false'
+        fi
+        echo ','
         if grep -qF 'Verify Sigstore bundles' "$yml" 2>/dev/null \
             && grep -qF 'Missing Sigstore bundle' "$yml" 2>/dev/null \
             && grep -qF 'for artifact in release/ee-*.tar.xz' "$yml" 2>/dev/null; then
             echo '  "release_verifies_sigstore_before_publish": true'
         else
             echo '  "release_verifies_sigstore_before_publish": false'
+        fi
+        echo ','
+        if grep -qF 'Verify Sigstore bundles and provenance' "$yml" 2>/dev/null \
+            && grep -qF 'Missing provenance' "$yml" 2>/dev/null \
+            && grep -qF 'provenance="${artifact%.tar.xz}.provenance.json"' "$yml" 2>/dev/null \
+            && grep -qF 'Cargo.lock blake3 dependency' "$yml" 2>/dev/null; then
+            echo '  "release_verifies_provenance_before_publish": true'
+        else
+            echo '  "release_verifies_provenance_before_publish": false'
         fi
         echo ','
         local smoke_containers_json
@@ -423,7 +448,7 @@ readme_installation_status() {
         return
     fi
 
-    local has_status release_planned homebrew_planned cargo_planned source_available release_assets release_version_pinned
+    local has_status release_planned homebrew_planned cargo_planned source_available release_assets release_version_pinned provenance_column provenance_installer
     has_status=false
     release_planned=false
     homebrew_planned=false
@@ -431,20 +456,22 @@ readme_installation_status() {
     source_available=false
     release_assets=false
     release_version_pinned=false
+    provenance_column=false
+    provenance_installer=false
 
     if grep -qE '^### Installation status$' "$readme" 2>/dev/null; then
         has_status=true
     fi
-    if grep -qF '| GitHub release installer | planned; no release assets published yet | `bd-3usjw.9` |' "$readme" 2>/dev/null; then
+    if grep -qF '| GitHub release installer | planned; no release assets published yet | SLSA provenance planned; installer supports `--require-provenance` | `bd-3usjw.9` / `bd-3usjw.9.1` |' "$readme" 2>/dev/null; then
         release_planned=true
     fi
-    if grep -qF '| Homebrew tap | planned; tap formula not published yet | `bd-3usjw.13` |' "$readme" 2>/dev/null; then
+    if grep -qF '| Homebrew tap | planned; tap formula not published yet | release-asset provenance applies after tap publish | `bd-3usjw.13` |' "$readme" 2>/dev/null; then
         homebrew_planned=true
     fi
-    if grep -qF '| crates.io | planned; package name selected as `eidetic-engine`; binary remains `ee` | `bd-3usjw.10` |' "$readme" 2>/dev/null; then
+    if grep -qF '| crates.io | planned; package name selected as `eidetic-engine`; binary remains `ee`; `publish = false` today | n/a | `bd-3usjw.10` |' "$readme" 2>/dev/null; then
         cargo_planned=true
     fi
-    if grep -qF '| Source build | available now | this README |' "$readme" 2>/dev/null; then
+    if grep -qF '| Source build | available now | local build only | this README |' "$readme" 2>/dev/null; then
         source_available=true
     fi
     if grep -qF 'releases/download/v0.1.0/install.sh' "$readme" 2>/dev/null \
@@ -455,6 +482,13 @@ readme_installation_status() {
         && grep -qF -- '-Version "0.1.0"' "$readme" 2>/dev/null; then
         release_version_pinned=true
     fi
+    if grep -qF '| Path | Status | Provenance | Tracking |' "$readme" 2>/dev/null; then
+        provenance_column=true
+    fi
+    if grep -qF 'SLSA provenance JSON and its Sigstore bundle' "$readme" 2>/dev/null \
+        && grep -qF -- '--require-provenance' "$readme" 2>/dev/null; then
+        provenance_installer=true
+    fi
 
     jq -n \
         --argjson has_status "$has_status" \
@@ -464,6 +498,8 @@ readme_installation_status() {
         --argjson source_available "$source_available" \
         --argjson release_assets "$release_assets" \
         --argjson release_version_pinned "$release_version_pinned" \
+        --argjson provenance_column "$provenance_column" \
+        --argjson provenance_installer "$provenance_installer" \
         '{
             probe_status: "ok",
             installation_status_section: $has_status,
@@ -473,6 +509,8 @@ readme_installation_status() {
             source_build_marked_available: $source_available,
             release_installer_uses_release_assets: $release_assets,
             release_installer_pins_version: $release_version_pinned,
+            provenance_column_present: $provenance_column,
+            provenance_installer_documented: $provenance_installer,
             planned_markers_present: (
                 $has_status
                 and $release_planned
@@ -481,6 +519,8 @@ readme_installation_status() {
                 and $source_available
                 and $release_assets
                 and $release_version_pinned
+                and $provenance_column
+                and $provenance_installer
             )
         }'
 }
@@ -492,7 +532,7 @@ installer_asset_contract() {
     local homebrew_template="$REPO_ROOT/scripts/homebrew/ee.rb.template"
     local homebrew_update="$REPO_ROOT/scripts/homebrew/update-formula.sh"
 
-    local installer_examples_use_release_assets unix_musl unix_version_normalized unix_sigstore_hard_fail unix_sigstore_bundle_required unix_sha256_tool_required unix_sigstore_identity_bound windows_x64 windows_i686_rejected windows_arm64_rejected windows_version_normalized windows_sigstore_hard_fail windows_sigstore_bundle_required windows_sigstore_identity_bound homebrew_formula_tests_doctor homebrew_formula_fetches_sha_strictly homebrew_formula_normalizes_version_tag
+    local installer_examples_use_release_assets unix_musl unix_version_normalized unix_sigstore_hard_fail unix_sigstore_bundle_required unix_sha256_tool_required unix_sigstore_identity_bound unix_requires_provenance windows_x64 windows_i686_rejected windows_arm64_rejected windows_version_normalized windows_sigstore_hard_fail windows_sigstore_bundle_required windows_sigstore_identity_bound homebrew_formula_tests_doctor homebrew_formula_fetches_sha_strictly homebrew_formula_normalizes_version_tag
     installer_examples_use_release_assets=false
     unix_musl=false
     unix_version_normalized=false
@@ -500,6 +540,7 @@ installer_asset_contract() {
     unix_sigstore_bundle_required=false
     unix_sha256_tool_required=false
     unix_sigstore_identity_bound=false
+    unix_requires_provenance=false
     windows_x64=false
     windows_i686_rejected=false
     windows_arm64_rejected=false
@@ -545,6 +586,14 @@ installer_asset_contract() {
         && grep -qF -- '--certificate-oidc-issuer "$CERT_OIDC_ISSUER"' "$unix_installer" 2>/dev/null \
         && grep -qF 'https://token.actions.githubusercontent.com' "$unix_installer" 2>/dev/null; then
         unix_sigstore_identity_bound=true
+    fi
+    if [ -f "$unix_installer" ] \
+        && grep -qF -- '--require-provenance' "$unix_installer" 2>/dev/null \
+        && grep -qF 'EE_REQUIRE_PROVENANCE=1' "$unix_installer" 2>/dev/null \
+        && grep -qF 'verify_provenance_bundle "$TMP/$TAR" "$URL"' "$unix_installer" 2>/dev/null \
+        && grep -qF '.provenance.json' "$unix_installer" 2>/dev/null \
+        && grep -qF 'Cargo.lock blake3 dependency' "$unix_installer" 2>/dev/null; then
+        unix_requires_provenance=true
     fi
     if [ -f "$windows_installer" ] && grep -qF '"AMD64" { return "x86_64" }' "$windows_installer" 2>/dev/null; then
         windows_x64=true
@@ -607,6 +656,7 @@ installer_asset_contract() {
         --argjson unix_sigstore_bundle_required "$unix_sigstore_bundle_required" \
         --argjson unix_sha256_tool_required "$unix_sha256_tool_required" \
         --argjson unix_sigstore_identity_bound "$unix_sigstore_identity_bound" \
+        --argjson unix_requires_provenance "$unix_requires_provenance" \
         --argjson windows_x64 "$windows_x64" \
         --argjson windows_i686_rejected "$windows_i686_rejected" \
         --argjson windows_arm64_rejected "$windows_arm64_rejected" \
@@ -626,6 +676,7 @@ installer_asset_contract() {
             unix_installer_requires_sigstore_bundle_with_cosign: $unix_sigstore_bundle_required,
             unix_installer_requires_sha256_tool: $unix_sha256_tool_required,
             unix_installer_binds_sigstore_identity: $unix_sigstore_identity_bound,
+            unix_installer_supports_required_provenance: $unix_requires_provenance,
             windows_installer_supports_x64_asset: $windows_x64,
             windows_installer_rejects_unbuilt_i686: $windows_i686_rejected,
             windows_installer_rejects_unbuilt_arm64: $windows_arm64_rejected,
@@ -644,6 +695,7 @@ installer_asset_contract() {
                 and $unix_sigstore_bundle_required
                 and $unix_sha256_tool_required
                 and $unix_sigstore_identity_bound
+                and $unix_requires_provenance
                 and $windows_x64
                 and $windows_i686_rejected
                 and $windows_arm64_rejected

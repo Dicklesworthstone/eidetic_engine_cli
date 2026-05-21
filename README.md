@@ -321,13 +321,13 @@ Hard constraints. CI fails if any of them break.
 install paths below are planned channels, not live distribution channels yet.
 Current release posture:
 
-| Path | Status | Tracking |
-|---|---|---|
-| Git tag | `v0.1.0` exists | [`CHANGELOG.md`](CHANGELOG.md) |
-| GitHub release installer | planned; no release assets published yet | `bd-3usjw.9` |
-| Homebrew tap | planned; tap formula not published yet | `bd-3usjw.13` |
-| crates.io | planned; package name selected as `eidetic-engine`; binary remains `ee`; `publish = false` today | `bd-3usjw.10` |
-| Source build | available now | this README |
+| Path | Status | Provenance | Tracking |
+|---|---|---|---|
+| Git tag | `v0.1.0` exists | n/a | [`CHANGELOG.md`](CHANGELOG.md) |
+| GitHub release installer | planned; no release assets published yet | SLSA provenance planned; installer supports `--require-provenance` | `bd-3usjw.9` / `bd-3usjw.9.1` |
+| Homebrew tap | planned; tap formula not published yet | release-asset provenance applies after tap publish | `bd-3usjw.13` |
+| crates.io | planned; package name selected as `eidetic-engine`; binary remains `ee`; `publish = false` today | n/a | `bd-3usjw.10` |
+| Source build | available now | local build only | this README |
 
 ### Release installer (planned)
 
@@ -339,7 +339,9 @@ curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/down
 ```
 
 This will verify the binary against the published Sigstore bundle, drop it in
-`~/.local/bin/ee`, and run `ee doctor` to confirm.
+`~/.local/bin/ee`, and run `ee doctor` to confirm. Pass
+`--require-provenance` when invoking `install.sh` to also require the
+SLSA provenance JSON and its Sigstore bundle.
 
 PowerShell (Windows):
 

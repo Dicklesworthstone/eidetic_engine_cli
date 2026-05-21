@@ -21,12 +21,16 @@
 #   --no-gum           Disable gum formatting even if available
 #   --no-configure     Skip agent integration instructions (still installs binary)
 #   --no-verify        Skip checksum + Sigstore verification (NOT recommended)
+#   --require-provenance
+#                       Require SLSA provenance JSON + Sigstore verification
 #   --force            Force reinstall even when same version is already present
 #
 # Environment variables (legacy names honored for back-compat):
 #   EE_VERSION         specific version to install (== --version)
 #   EE_INSTALL_DIR     installation directory (== --dest)
 #   EE_SKIP_VERIFY     set to 1 to skip verification (== --no-verify)
+#   EE_REQUIRE_PROVENANCE
+#                      set to 1 to require provenance verification
 #   HTTPS_PROXY / HTTP_PROXY   honored for every network call
 #
 set -euo pipefail
@@ -62,6 +66,7 @@ SYSTEM=0
 NO_GUM=0
 NO_CONFIGURE=0
 NO_CHECKSUM="${EE_SKIP_VERIFY:-0}"
+REQUIRE_PROVENANCE="${EE_REQUIRE_PROVENANCE:-0}"
 FORCE_INSTALL=0
 OFFLINE="${EE_OFFLINE:-0}"
 
@@ -197,7 +202,7 @@ usage() {
 Usage: install.sh [--version vX.Y.Z] [--dest DIR] [--system] [--easy-mode] [--verify] \\
                   [--artifact-url URL] [--checksum HEX] [--checksum-url URL] \\
                   [--from-source] [--quiet] [--offline] [--no-gum] [--no-configure] \\
-                  [--no-verify] [--force]
+                  [--no-verify] [--require-provenance] [--force]
 
 Options:
   --version vX.Y.Z   Install specific version (default: latest GitHub release)
@@ -214,12 +219,16 @@ Options:
   --no-gum           Disable gum formatting even if available
   --no-configure     Skip agent integration instructions (still installs binary)
   --no-verify        Skip SHA256 + Sigstore verification (NOT recommended)
+  --require-provenance
+                      Require SLSA provenance JSON + Sigstore verification
   --force            Reinstall even when the same version is already present
 
 Environment variables:
   EE_VERSION         == --version
   EE_INSTALL_DIR     == --dest
   EE_SKIP_VERIFY=1   == --no-verify
+  EE_REQUIRE_PROVENANCE=1
+                     == --require-provenance
   HTTPS_PROXY        Proxy URL honored on every curl call
 EOFU
 }
@@ -250,6 +259,7 @@ while [ $# -gt 0 ]; do
     --no-gum) NO_GUM=1; shift;;
     --no-configure) NO_CONFIGURE=1; shift;;
     --no-verify) NO_CHECKSUM=1; shift;;
+    --require-provenance) REQUIRE_PROVENANCE=1; shift;;
     --force) FORCE_INSTALL=1; shift;;
     -h|--help) usage; exit 0;;
     *) err "Unknown option: $1"; usage; exit 2;;
@@ -265,6 +275,16 @@ if [ -n "$VERSION" ]; then
 fi
 
 setup_proxy
+
+case "$REQUIRE_PROVENANCE" in
+  0|1) ;;
+  *) err "EE_REQUIRE_PROVENANCE must be 0 or 1"; exit 2;;
+esac
+
+if [ "$REQUIRE_PROVENANCE" = "1" ] && [ "$NO_CHECKSUM" = "1" ]; then
+  err "--require-provenance cannot be combined with --no-verify / EE_SKIP_VERIFY=1"
+  exit 2
+fi
 
 # ───────────────────────────────────────────────────────────────────────────
 # Agent detection
@@ -687,18 +707,23 @@ maybe_install_completions() {
 # Checksum + Sigstore
 # ───────────────────────────────────────────────────────────────────────────
 
-verify_checksum() {
-  local file="$1" expected="$2" actual=""
-  [ -f "$file" ] || { err "File not found: $file"; return 1; }
-
+file_sha256() {
+  local file="$1"
   if command -v sha256sum &>/dev/null; then
-    actual=$(sha256sum "$file" | cut -d' ' -f1)
+    sha256sum "$file" | cut -d' ' -f1
   elif command -v shasum &>/dev/null; then
-    actual=$(shasum -a 256 "$file" | cut -d' ' -f1)
+    shasum -a 256 "$file" | cut -d' ' -f1
   else
     err "No SHA256 tool found. Install sha256sum or shasum, or set EE_SKIP_VERIFY=1 to bypass verification."
     return 1
   fi
+}
+
+verify_checksum() {
+  local file="$1" expected="$2" actual=""
+  [ -f "$file" ] || { err "File not found: $file"; return 1; }
+
+  actual=$(file_sha256 "$file") || return 1
 
   if [ "$actual" != "$expected" ]; then
     err "Checksum verification FAILED!"
@@ -742,6 +767,92 @@ verify_sigstore_bundle() {
     return 1
   fi
   ok "Sigstore signature verified"
+}
+
+verify_provenance_bundle() {
+  local file="$1" artifact_url="$2"
+  [ "$REQUIRE_PROVENANCE" = "1" ] || return 0
+
+  if ! command -v cosign &>/dev/null; then
+    err "cosign not found. Cannot verify provenance signature."
+    err "Install cosign (https://github.com/sigstore/cosign) or re-run without --require-provenance."
+    return 1
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    err "python3 not found. Cannot validate SLSA provenance JSON."
+    err "Install python3 or re-run without --require-provenance."
+    return 1
+  fi
+
+  local provenance_url="${artifact_url%.tar.xz}.provenance.json"
+  if [ "$provenance_url" = "$artifact_url" ]; then
+    provenance_url="${artifact_url}.provenance.json"
+  fi
+  local bundle_url="${provenance_url}.sigstore.json"
+
+  local provenance_file bundle_file artifact_sha artifact_name
+  provenance_file="$TMP/$(basename "$provenance_url")"
+  bundle_file="$TMP/$(basename "$bundle_url")"
+  artifact_name="$(basename "$file")"
+
+  info "Fetching SLSA provenance"
+  info "Provenance: $provenance_url" >&2
+  if ! ee_curl "$provenance_url" -o "$provenance_file" 2>/dev/null; then
+    err "Provenance JSON not available at $provenance_url."
+    err "Cannot satisfy --require-provenance."
+    return 1
+  fi
+  if ! ee_curl "$bundle_url" -o "$bundle_file" 2>/dev/null; then
+    err "Provenance Sigstore bundle not available at $bundle_url."
+    err "Cannot satisfy --require-provenance."
+    return 1
+  fi
+
+  if ! cosign verify-blob \
+        --bundle "$bundle_file" \
+        --certificate-identity-regexp "$CERT_IDENTITY_REGEXP" \
+        --certificate-oidc-issuer "$CERT_OIDC_ISSUER" \
+        "$provenance_file" >/dev/null 2>&1; then
+    err "Provenance Sigstore verification failed for $provenance_file"
+    return 1
+  fi
+
+  artifact_sha=$(file_sha256 "$file") || return 1
+  if ! python3 - "$provenance_file" "$artifact_name" "$artifact_sha" <<'PY'
+import json
+import sys
+
+path, artifact_name, artifact_sha = sys.argv[1:4]
+with open(path, "r", encoding="utf-8") as handle:
+    data = json.load(handle)
+
+if data.get("predicateType") != "https://slsa.dev/provenance/v1":
+    raise SystemExit("provenance predicateType is not SLSA v1")
+
+subjects = data.get("subject")
+if not isinstance(subjects, list) or not subjects:
+    raise SystemExit("provenance subject is missing")
+subject = subjects[0]
+if subject.get("name") != artifact_name:
+    raise SystemExit(f"provenance subject {subject.get('name')!r} does not match {artifact_name!r}")
+if subject.get("digest", {}).get("sha256") != artifact_sha:
+    raise SystemExit("provenance subject sha256 does not match downloaded artifact")
+
+dependencies = (
+    data.get("predicate", {})
+    .get("buildDefinition", {})
+    .get("resolvedDependencies", [])
+)
+if not any(dep.get("uri") == "file://Cargo.lock" and dep.get("digest", {}).get("blake3") for dep in dependencies):
+    raise SystemExit("provenance is missing Cargo.lock blake3 dependency")
+if not any(dep.get("digest", {}).get("gitCommit") for dep in dependencies):
+    raise SystemExit("provenance is missing source git commit dependency")
+PY
+  then
+    err "Provenance JSON validation failed"
+    return 1
+  fi
+  ok "SLSA provenance verified"
 }
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -801,6 +912,10 @@ print_detected_agents
 detect_platform
 resolve_version
 set_artifact_url
+if [ "$REQUIRE_PROVENANCE" = "1" ] && [ "$FROM_SOURCE" -eq 1 ]; then
+  err "--require-provenance only applies to signed release artifacts, not --from-source builds"
+  exit 2
+fi
 
 # Ensure the destination dir exists before write-perm check.
 mkdir -p "$DEST" 2>/dev/null || true
@@ -877,6 +992,10 @@ TMP=$(mktemp -d)
 if [ "$FROM_SOURCE" -eq 0 ]; then
   info "Downloading $URL"
   if ! ee_curl "$URL" -o "$TMP/$TAR"; then
+    if [ "$REQUIRE_PROVENANCE" = "1" ]; then
+      err "Artifact download failed and --require-provenance forbids source fallback"
+      exit 1
+    fi
     warn "Artifact download failed; falling back to build-from-source"
     FROM_SOURCE=1
   fi
@@ -946,6 +1065,10 @@ else
     fi
     if ! verify_sigstore_bundle "$TMP/$TAR" "$URL"; then
       err "Installation aborted: Sigstore verification failed"
+      exit 1
+    fi
+    if ! verify_provenance_bundle "$TMP/$TAR" "$URL"; then
+      err "Installation aborted: provenance verification failed"
       exit 1
     fi
   fi
