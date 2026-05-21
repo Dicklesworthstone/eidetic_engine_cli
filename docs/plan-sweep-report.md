@@ -8,12 +8,54 @@
 
 | Status | Count | Percentage |
 |--------|-------|------------|
-| Implemented (verified) | 18 | 56% |
-| Partially verified | 1 | 3% |
-| Implemented (unverified) | 6 | 19% |
-| Stubbed | 5 | 16% |
-| Missing | 2 | 6% |
+| Implemented (verified) | 23 | 72% |
+| Implemented (unverified) | 5 | 16% |
+| Stubbed | 4 | 12% |
+| Missing | 0 | 0% |
 | **Total sections** | 32 | 100% |
+
+---
+
+## Machine-Checked Section Matrix
+
+This matrix is the authoritative bd-3usjw.14 sweep surface. Narrative notes
+below preserve the original audit context, but this table is what
+`tests/plan_doc_completeness.rs` validates.
+
+| section_id | section_title | classification | evidence_path | follow_up_bead_id |
+|------------|---------------|----------------|---------------|-------------------|
+| §0 | Reading guide | Implemented-verified | AGENTS.md | - |
+| §1 | Executive summary | Implemented-verified | src/cli/mod.rs | - |
+| §2 | Background - what changed since the original Eidetic Engine | Implemented-verified | AGENTS.md | - |
+| §3 | Core design principles | Implemented-verified | AGENTS.md | - |
+| §4 | North Star acceptance scenarios | Implemented-verified | tests/north_star_context_e2e.rs; tests/e2e_north_star_distillation.rs | - |
+| §5 | Non-goals for v1 | Implemented-verified | AGENTS.md | - |
+| §6 | Technology stack and dependencies | Implemented-verified | Cargo.toml; scripts/check-forbidden-deps.sh | - |
+| §7 | Dependency integration contracts | Implemented-unverified | docs/degraded_code_taxonomy.md | bd-3usjw.11 |
+| §8 | Runtime architecture with asupersync | Implemented-verified | src/core/effect.rs; docs/adr/0003-native-asupersync-runtime.md | - |
+| §9 | Crate / module layout | Implemented-verified | src/lib.rs | - |
+| §10 | Storage architecture | Implemented-verified | src/db/mod.rs; tests/contracts/schema_drift.rs | - |
+| §11 | Data model | Implemented-unverified | src/models/; tests/contracts/schema_drift.rs | bd-3dty0 |
+| §12 | Memory lifecycle | Implemented-verified | src/core/memory.rs; src/core/outcome.rs | - |
+| §13 | Hybrid retrieval pipeline | Implemented-verified | src/core/search.rs; src/search/ | - |
+| §14 | Knowledge graph layer | Implemented-unverified | src/graph/; tests/plan_drift_gate.rs | bd-zx2v |
+| §15 | Session ingestion via cass | Implemented-verified | src/cass/; tests/cass_import.rs | - |
+| §16 | Curation, consolidation, and review | Stubbed | src/core/curate.rs; src/steward/ | bd-zj46 |
+| §17 | Procedural memory and playbooks | Stubbed | src/core/procedure.rs; src/cli/mod.rs | bd-2btck |
+| §18 | Trauma guard and confidence decay | Implemented-verified | src/core/preflight_guard.rs; src/core/bayes.rs | - |
+| §19 | Deterministic context packing | Implemented-verified | src/core/context.rs; src/pack/ | - |
+| §20 | CLI surface | Implemented-verified | src/cli/mod.rs; tests/contracts/cli_help_completeness.rs | - |
+| §21 | Diagnostics, repair, and ee why | Implemented-verified | src/core/doctor.rs; src/core/why.rs | - |
+| §22 | Privacy, redaction, and safety | Implemented-unverified | src/policy/; tests/redaction_levels_unit.rs | bd-17c65.11.6 |
+| §23 | Agent hook integration | Stubbed | src/hooks/; tests/preflight_hook_bash.rs; tests/preflight_hook_zsh.rs | bd-3usjw.6 |
+| §24 | Optional MCP server mode | Stubbed | src/mcp.rs; tests/mcp_parity.rs | bd-27p9c |
+| §25 | Configuration | Implemented-verified | src/config/; tests/env_vars_doc_coverage.rs | - |
+| §26 | On-disk layout | Implemented-verified | src/config/workspace.rs; docs/migration-guide.md | - |
+| §27 | Testing strategy and evaluation harness | Implemented-unverified | scripts/verify.sh; docs/testing-strategy.md | bd-17c65.10 |
+| §28 | Performance budget | Implemented-verified | benches/budgets.toml; tests/readme_perf_coverage_test.rs | - |
+| §29 | Walking skeleton acceptance gate and rollout milestones | Implemented-verified | tests/e2e_core_workflow.rs; tests/advanced_e2e.rs | - |
+| §30 | Granular backlog | Implemented-verified | .beads/issues.jsonl | - |
+| §31 | Risks and open questions | Implemented-verified | .beads/issues.jsonl; docs/plan-sweep-report.md | - |
 
 ---
 
