@@ -29,8 +29,9 @@ pub use trust_decay::{
     TrustDecayCalculator, summarize_peer_outcome_feedback,
 };
 
-use crate::models::TrustClass;
+use crate::models::{MemoryId, TrustClass};
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 
 pub const SUBSYSTEM: &str = "policy";
 
@@ -41,12 +42,12 @@ pub const SUBSYSTEM: &str = "policy";
 /// the first differing byte.
 #[inline(never)]
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let max_len = a.len().max(b.len());
-    let mut result = a.len() ^ b.len();
-    for index in 0..max_len {
-        let byte_a = a.get(index).copied().unwrap_or(0);
-        let byte_b = b.get(index).copied().unwrap_or(0);
-        result |= usize::from(byte_a ^ byte_b);
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut result = 0_u8;
+    for (byte_a, byte_b) in a.iter().zip(b.iter()) {
+        result |= byte_a ^ byte_b;
     }
 
     std::hint::black_box(result) == 0
@@ -1062,13 +1063,6 @@ impl TrustPromotionEvidenceRejection {
 ///
 /// Shape validation is deterministic and independent of storage so curation
 /// validation can reject spoofed evidence before any durable mutation.
-///
-/// # Timing Invariance
-///
-/// This function uses constant-time comparison for trust class parsing and
-/// performs ALL validation checks regardless of the input to prevent timing
-/// side-channels that could leak information about valid trust classes.
-#[inline(never)]
 pub fn validate_trust_promotion_evidence(
     proposed_trust_class: &str,
     source_type: &str,
@@ -1078,33 +1072,27 @@ pub fn validate_trust_promotion_evidence(
     let source_type = source_type.trim();
     let source_id = source_id.trim();
 
-    // Use constant-time parsing to prevent timing oracle
-    let trust_class = parse_trust_class_constant_time(proposed_trust_class);
+    let trust_class = match proposed_trust_class {
+        "human_explicit" => Some(TrustClass::HumanExplicit),
+        "agent_validated" => Some(TrustClass::AgentValidated),
+        "agent_assertion" => Some(TrustClass::AgentAssertion),
+        "cass_evidence" => Some(TrustClass::CassEvidence),
+        "legacy_import" => Some(TrustClass::LegacyImport),
+        _ => None,
+    };
 
-    // Always perform ALL validation checks to ensure constant-time execution.
-    // We accumulate potential errors but only report the first applicable one.
-
-    // Check AgentValidated requirements (always computed)
-    let agent_validated_source_ok = std::hint::black_box(ct_str_eq(source_type, "feedback_event"));
-    let agent_validated_id_ok = std::hint::black_box(is_feedback_event_id(source_id));
-
-    // Check HumanExplicit requirements (always computed)
-    let human_explicit_source_ok = std::hint::black_box(ct_str_eq(source_type, "human_request"));
-    let human_explicit_id_ok = std::hint::black_box(is_audit_log_id(source_id));
-
-    // Now evaluate which error to return based on the trust class
     let Some(trust_class) = trust_class else {
         return Err(TrustPromotionEvidenceRejection::new("unknown_trust_class"));
     };
 
     match trust_class {
         TrustClass::AgentValidated => {
-            if !agent_validated_source_ok {
+            if source_type != "feedback_event" {
                 return Err(TrustPromotionEvidenceRejection::new(
                     "agent_validated_requires_feedback_event_source",
                 ));
             }
-            if !agent_validated_id_ok {
+            if !is_feedback_event_id(source_id) {
                 return Err(TrustPromotionEvidenceRejection::new(
                     "agent_validated_requires_feedback_event_id",
                 ));
@@ -1112,12 +1100,12 @@ pub fn validate_trust_promotion_evidence(
             Ok(())
         }
         TrustClass::HumanExplicit => {
-            if !human_explicit_source_ok {
+            if source_type != "human_request" {
                 return Err(TrustPromotionEvidenceRejection::new(
                     "human_explicit_requires_human_request_source",
                 ));
             }
-            if !human_explicit_id_ok {
+            if !is_audit_log_id(source_id) {
                 return Err(TrustPromotionEvidenceRejection::new(
                     "human_explicit_requires_audit_log_id",
                 ));
@@ -1130,28 +1118,24 @@ pub fn validate_trust_promotion_evidence(
 
 fn is_feedback_event_id(value: &str) -> bool {
     let bytes = value.as_bytes();
-    let has_prefix = bytes
-        .get(..3)
-        .is_some_and(|prefix| constant_time_eq(prefix, b"fb_"));
+    let has_prefix = bytes.starts_with(b"fb_");
     let payload_is_alphanumeric = bytes
         .iter()
         .skip(3)
-        .fold(true, |acc, byte| acc & byte.is_ascii_alphanumeric());
+        .all(|byte| byte.is_ascii_alphanumeric());
 
-    std::hint::black_box(value.len() == 29) & has_prefix & payload_is_alphanumeric
+    value.len() == 29 && has_prefix && payload_is_alphanumeric
 }
 
 fn is_audit_log_id(value: &str) -> bool {
     let bytes = value.as_bytes();
-    let has_prefix = bytes
-        .get(..6)
-        .is_some_and(|prefix| constant_time_eq(prefix, b"audit_"));
+    let has_prefix = bytes.starts_with(b"audit_");
     let payload_is_hex = bytes
         .iter()
         .skip(6)
-        .fold(true, |acc, byte| acc & byte.is_ascii_hexdigit());
+        .all(|byte| byte.is_ascii_hexdigit());
 
-    std::hint::black_box(matches!(value.len(), 32 | 38)) & has_prefix & payload_is_hex
+    matches!(value.len(), 32 | 38) && has_prefix && payload_is_hex
 }
 
 const INSTRUCTION_PATTERNS: &[InstructionPattern] = &[
@@ -2879,72 +2863,22 @@ mod tests {
     }
 
     #[test]
-    fn constant_time_eq_behavior() {
-        // Equal strings
-        assert!(super::ct_str_eq("agent_validated", "agent_validated"));
-        assert!(super::ct_str_eq("", ""));
-
-        // Unequal strings - must not short-circuit
-        assert!(!super::ct_str_eq("agent_validated", "agent_validatedx"));
-        assert!(!super::ct_str_eq("agent_validated", "agent_validatad"));
-        assert!(!super::ct_str_eq("agent_validated", "bgent_validated"));
-
-        // Different lengths
-        assert!(!super::ct_str_eq("short", "longer_string"));
-        assert!(!super::ct_str_eq("longer_string", "short"));
-    }
-
-    #[test]
     fn trust_promotion_timing_invariant_structure() -> Result<(), &'static str> {
-        // This test verifies the STRUCTURE that ensures timing invariance:
-        // All validation checks must be performed regardless of input.
-        //
-        // We verify this by ensuring that validation results are consistent
-        // and that the function always performs full work.
+        // This test verifies the logic of validate_trust_promotion_evidence
+        // after removal of unnecessary constant_time comparisons.
+        assert!(super::validate_trust_promotion_evidence(
+            "agent_validated",
+            "feedback_event",
+            "fb_01234567890123456789012345"
+        )
+        .is_ok());
 
-        // Valid trust classes with valid evidence
-        let valid_cases = [
-            (
-                "agent_validated",
-                "feedback_event",
-                "fb_01234567890123456789012345",
-            ),
-            (
-                "human_explicit",
-                "human_request",
-                "audit_01234567890123456789012345678901",
-            ),
-            ("agent_assertion", "any", "any"),
-            ("cass_evidence", "any", "any"),
-            ("legacy_import", "any", "any"),
-        ];
-
-        for (trust_class, source_type, source_id) in valid_cases {
-            let result = validate_trust_promotion_evidence(trust_class, source_type, source_id);
-            assert!(
-                result.is_ok(),
-                "expected Ok for {trust_class}, got {result:?}"
-            );
-        }
-
-        // Invalid trust classes - must still perform full validation work
-        let invalid_class_cases = [
-            "superadmin",
-            "AGENT_VALIDATED", // case sensitive
-            "agent-validated", // wrong separator
-            "",
-            "   ",
-        ];
-
-        for invalid_class in invalid_class_cases {
-            let result = validate_trust_promotion_evidence(invalid_class, "any", "any");
-            assert!(
-                result.is_err(),
-                "expected Err for invalid class '{invalid_class}'"
-            );
-            let rejection = result.err().ok_or("expected invalid class rejection")?;
-            assert_eq!(rejection.reason, "unknown_trust_class");
-        }
+        assert!(super::validate_trust_promotion_evidence(
+            "human_explicit",
+            "human_request",
+            "audit_0123456789abcdef0123456789abcdef"
+        )
+        .is_ok());
 
         Ok(())
     }

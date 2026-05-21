@@ -248,14 +248,15 @@ pub fn fix_policy_safety_inconsistent(workspace_root: &Path) -> FixerDispatch {
 /// slice.
 #[must_use]
 pub fn fix_snapshot_backup_owed(workspace_root: &Path, label: impl Into<String>) -> FixerDispatch {
+    let label = label.into();
     FixerDispatch {
         finding_code: "snapshot_backup_owed",
         severity: "warning",
         path: workspace_root.join(".ee"),
         op: Op::SnapshotBackup {
-            label: label.into(),
+            label: label.clone(),
             steps: vec![
-                "ee backup create --label doctor-pre-mutation".to_string(),
+                format!("ee backup create --label {label}"),
                 "Verify the backup manifest hash matches the pre-mutation source.".to_string(),
             ],
         },

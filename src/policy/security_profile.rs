@@ -134,7 +134,8 @@ impl FromStr for SecurityProfile {
     type Err = ParseSecurityProfileError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
+        let normalized = s.trim().to_ascii_lowercase();
+        match normalized.as_str() {
             "default" => Ok(Self::Default),
             "strict" => Ok(Self::Strict),
             "permissive" => Ok(Self::Permissive),
@@ -287,18 +288,24 @@ pub fn check_workspace_permissions(
     profile: SecurityProfile,
 ) -> FilePermissionReport {
     let mut checks = Vec::new();
+    let max_file_mode = if profile.enforce_file_permissions() {
+        profile.max_db_permissions()
+    } else {
+        0o777
+    };
+    let max_config_mode = if profile.enforce_file_permissions() {
+        profile.max_config_permissions()
+    } else {
+        0o777
+    };
 
     let db_path = workspace.join(".ee").join("ee.db");
-    checks.push(check_file_permissions(
-        &db_path,
-        profile.max_db_permissions(),
-        "database",
-    ));
+    checks.push(check_file_permissions(&db_path, max_file_mode, "database"));
 
     let config_path = workspace.join(".ee").join("config.toml");
     checks.push(check_file_permissions(
         &config_path,
-        profile.max_config_permissions(),
+        max_config_mode,
         "config",
     ));
 
@@ -306,7 +313,7 @@ pub fn check_workspace_permissions(
     if optional_directory_should_be_checked(&index_dir) {
         checks.push(check_directory_permissions(
             &index_dir,
-            profile.max_db_permissions(),
+            max_file_mode,
             "index directory",
         ));
     }
@@ -621,6 +628,7 @@ mod tests {
             ("DEFAULT", SecurityProfile::Default),
             ("Strict", SecurityProfile::Strict),
             ("PERMISSIVE", SecurityProfile::Permissive),
+            (" strict ", SecurityProfile::Strict),
         ] {
             let parsed = SecurityProfile::from_str(input).map_err(|e| e.to_string())?;
             ensure(parsed, expected, input)?;
@@ -854,6 +862,39 @@ mod tests {
                 .as_deref()
                 .is_some_and(|issue| issue.contains("not a directory"))
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permissive_workspace_permission_report_relaxes_mode_bits() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        let ee_dir = workspace.join(".ee");
+        let db_path = ee_dir.join("ee.db");
+        let config_path = ee_dir.join("config.toml");
+        let index_dir = ee_dir.join("index");
+        std::fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        std::fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        std::fs::create_dir(&index_dir).map_err(|error| error.to_string())?;
+        std::fs::write(&db_path, b"db").map_err(|error| error.to_string())?;
+        std::fs::write(&config_path, b"config").map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o777))
+            .map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o666))
+            .map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&index_dir, std::fs::Permissions::from_mode(0o777))
+            .map_err(|error| error.to_string())?;
+
+        let default_report = check_workspace_permissions(&workspace, SecurityProfile::Default);
+        let permissive_report =
+            check_workspace_permissions(&workspace, SecurityProfile::Permissive);
+
+        assert!(!default_report.passed);
+        assert!(permissive_report.passed);
+        assert_eq!(permissive_report.issue_count, 0);
         Ok(())
     }
 }

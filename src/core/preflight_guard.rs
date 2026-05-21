@@ -1933,16 +1933,16 @@ fn derive_bypass_key(secret: &[u8]) -> [u8; 32] {
 }
 
 fn constant_time_eq_str(a: &str, b: &str) -> bool {
-    let a = a.as_bytes();
-    let b = b.as_bytes();
-    if a.len() != b.len() {
-        return false;
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    let max_len = a_bytes.len().max(b_bytes.len());
+    let mut diff = a_bytes.len() ^ b_bytes.len();
+    for index in 0..max_len {
+        let x = a_bytes.get(index).copied().unwrap_or(0);
+        let y = b_bytes.get(index).copied().unwrap_or(0);
+        diff |= usize::from(x ^ y);
     }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    std::hint::black_box(diff) == 0
 }
 
 #[cfg(test)]

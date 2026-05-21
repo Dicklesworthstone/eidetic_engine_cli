@@ -643,16 +643,18 @@ impl RunContext {
         }
 
         // Update the `latest` symlink (best-effort; symlinks on Windows
-        // sometimes require privilege).
+        // sometimes require privilege). Use a relative target so the symlink
+        // survives workspace moves.
         let latest_link = self.workspace.join(".doctor").join("latest");
         let _ = fs::remove_file(&latest_link); // ignore error if missing
+        let symlink_target = Path::new("runs").join(&self.run_id);
         #[cfg(unix)]
         {
-            let _ = std::os::unix::fs::symlink(&self.run_dir, &latest_link);
+            let _ = std::os::unix::fs::symlink(&symlink_target, &latest_link);
         }
         #[cfg(windows)]
         {
-            let _ = std::os::windows::fs::symlink_dir(&self.run_dir, &latest_link);
+            let _ = std::os::windows::fs::symlink_dir(&symlink_target, &latest_link);
         }
 
         // Release the lock. Round-6 self-review (R6-5): flip `lock_owned`
@@ -1119,7 +1121,11 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
                     // for the "bytes were modified" scenario, not "file
                     // disappeared".
                     if action.path.exists() {
-                        let live_hash = hash_file(&action.path)?;
+                        let live_hash = if action.path.is_file() {
+                            hash_file(&action.path)?
+                        } else {
+                            "<directory>".to_string()
+                        };
                         if Some(live_hash.as_str()) != action.after_hash.as_deref() {
                             return Err(DoctorRuntimeError::UndoStateDrifted {
                                 path: action.path.clone(),
@@ -1160,7 +1166,11 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
                     // the same basename in different dirs don't collide on
                     // undo.
                     if action.path.exists() {
-                        let live_hash = hash_file(&action.path)?;
+                        let live_hash = if action.path.is_file() {
+                            hash_file(&action.path)?
+                        } else {
+                            "<directory>".to_string()
+                        };
                         if action.after_hash.as_deref() != Some(live_hash.as_str()) {
                             return Err(DoctorRuntimeError::UndoStateDrifted {
                                 path: action.path.clone(),
@@ -1264,7 +1274,11 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
             // `UndoStateDrifted` is the right signal — the user can inspect
             // both the new occupant and the quarantine and decide.
             if action.path.exists() {
-                let live_hash = hash_file(&action.path)?;
+                let live_hash = if action.path.is_file() {
+                    hash_file(&action.path)?
+                } else {
+                    "<directory>".to_string()
+                };
                 return Err(DoctorRuntimeError::UndoStateDrifted {
                     path: action.path.clone(),
                     expected_hash: "<not present (quarantined)>".into(),
@@ -1275,13 +1289,13 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
                 .quarantine_dest_rel
                 .as_ref()
                 .map(|rel| run_dir.join("quarantine").join(rel));
-            if let Some(source) = quarantine_dest
-                && source.exists()
-            {
-                if let Some(parent) = action.path.parent() {
-                    fs::create_dir_all(parent)?;
+            if let Some(source) = quarantine_dest {
+                if source.exists() {
+                    if let Some(parent) = action.path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::rename(&source, &action.path)?;
                 }
-                fs::rename(&source, &action.path)?;
             }
         }
         "manual"

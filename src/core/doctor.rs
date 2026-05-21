@@ -1109,7 +1109,7 @@ fn close_action_dependencies(required: &mut BTreeSet<String>) {
                 "ee_daemon_start" => vec!["tailscale_up", "tailscale_disable_shields_up"],
                 "ee_mesh_discovery_refresh" => vec!["tailscale_up", "ee_daemon_start"],
                 "ee_mesh_auto_enroll" => {
-                    vec!["ee_mesh_discovery_refresh", "ee_daemon_start"]
+                    vec!["ee_mesh_discovery_refresh", "ee_daemon_start", "ee_mesh_disable"]
                 }
                 "ee_mcp_parity_check" => vec!["ee_mesh_auto_enroll"],
                 _ => Vec::new(),
