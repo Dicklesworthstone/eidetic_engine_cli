@@ -22,7 +22,9 @@ Evidence scale:
 - There was no root `CHANGELOG.md` before this pass.
 - The detailed audit ledger lives in [`CHANGELOG_RESEARCH.md`](./CHANGELOG_RESEARCH.md).
 
-## [Unreleased] - 2026-05-16 to 2026-05-20
+## [Unreleased]
+
+## [0.2.0] - 2026-05-21
 
 Post-`v0.1.0` work is a large hardening and expansion wave. The main themes are
 graph-derived retrieval, optional mesh/Tailscale coordination, doctor first-aid,
@@ -469,5 +471,6 @@ Closed workstreams behind this changelog:
   workspace hygiene, QoS, flight recorder, mesh/Tailscale optionality, duplicate
   work detection, host profiles, and crowded-checkout ergonomics.
 
-[Unreleased]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.1.0...main
+[Unreleased]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.2.0...main
+[0.2.0]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Dicklesworthstone/eidetic_engine_cli/tree/v0.1.0
