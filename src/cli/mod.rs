@@ -3410,7 +3410,7 @@ pub struct GraphExportArgs {
     /// Graph snapshot type to export.
     #[arg(
         long = "graph-type",
-        alias = "type",
+        visible_alias = "type",
         default_value = "memory_links",
         value_name = "TYPE"
     )]

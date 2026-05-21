@@ -543,6 +543,7 @@ fn graph_command_flags_are_help_discoverable() -> TestResult {
             "--workspace-id",
             "--snapshot-id",
             "--graph-type",
+            "--type",
         ],
         "ee graph export --help",
     )?;
