@@ -55,7 +55,7 @@ impl AgentDocsTopic {
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        match s {
+        match s.trim().to_ascii_lowercase().as_str() {
             "guide" => Some(Self::Guide),
             "commands" => Some(Self::Commands),
             "contracts" => Some(Self::Contracts),
@@ -941,7 +941,7 @@ pub const PLAN_RECIPE_FAILURES: &[FailureBranchEntry] = &[
 pub const CONTRACT_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     FailureBranchEntry {
         condition: "expected schema is absent",
-        jq: r#".data.contracts[]? | select(.schema == "ee.response.v1")"#,
+        jq: r#".data.contracts[]? | select(.schema == "ee.response.v2")"#,
         next_action: "Pin automation to the published schema list and stop if the expected schema is missing.",
     },
     FailureBranchEntry {
@@ -1035,7 +1035,7 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         category: "context",
         command: "ee context \"<task>\" --workspace . --max-tokens 4000 --json",
         jq: r#".data.pack.items[]? | {memoryId, section, why}"#,
-        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: CONTEXT_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
@@ -1045,7 +1045,7 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         category: "diagnostics",
         command: "ee status --workspace . --json",
         jq: r#"{database: .data.database, index: .data.index, degraded: (.data.degraded // [])}"#,
-        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: STATUS_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
@@ -1055,7 +1055,7 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         category: "diagnostics",
         command: "ee doctor --json",
         jq: r#".data.checks[]? | select(.status != "ok") | {name, code, repair}"#,
-        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: DOCTOR_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
@@ -1065,7 +1065,7 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         category: "planning",
         command: "ee plan goal \"<goal>\" --json",
         jq: r#"{recipeId: .data.recipeId, steps: [.data.steps[]?.command], degraded: (.data.degradedBranches // [])}"#,
-        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: PLAN_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
@@ -1075,7 +1075,7 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         category: "contracts",
         command: "ee agent-docs contracts --json",
         jq: r#".data.contracts[] | {name, schema, stability}"#,
-        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: CONTRACT_RECIPE_FAILURES,
     },
     // EE-DIST-005: Install/Update/Recovery Recipes
@@ -1086,7 +1086,7 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         category: "distribution",
         command: "ee install check --json",
         jq: r#"{binaryPath: .data.binaryPath, version: .data.version, checksum: .data.checksumValid, pathConflicts: (.data.duplicates // [])}"#,
-        success_check: r#".schema == "ee.response.v1" and .success == true and .data.checksumValid == true"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and .data.checksumValid == true"#,
         failure_branches: INSTALL_CHECK_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
@@ -1096,7 +1096,7 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         category: "distribution",
         command: "ee update --dry-run --json",
         jq: r#"{currentVersion: .data.current, targetVersion: .data.target, changes: .data.changelog, postUpdateActions: (.data.postUpdate // [])}"#,
-        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: UPDATE_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
@@ -1106,7 +1106,7 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         category: "distribution",
         command: "ee config set version-pin <version> --json",
         jq: r#"{pinnedVersion: .data.version, pinnedAt: .data.pinnedAt, expiresAt: .data.expiresAt}"#,
-        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: PIN_VERSION_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
@@ -1116,7 +1116,7 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         category: "distribution",
         command: "ee install --force --verify-checksum --json",
         jq: r#"{reinstalled: .data.installed, newChecksum: .data.checksum, previousChecksum: .data.previousChecksum}"#,
-        success_check: r#".schema == "ee.response.v1" and .success == true and .data.checksumValid == true"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and .data.checksumValid == true"#,
         failure_branches: INSTALL_CHECK_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
@@ -1126,7 +1126,7 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         category: "distribution",
         command: "ee install diagnose --json",
         jq: r#"{primaryPath: .data.primary, duplicates: [.data.duplicates[]? | {path, version, recommendation}], repairCommands: .data.repairCommands}"#,
-        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: INSTALL_CHECK_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
@@ -1136,7 +1136,7 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         category: "distribution",
         command: "ee update --offline --check --json",
         jq: r#"{offlineReady: .data.cachedUpdateAvailable, cachedVersion: .data.cachedVersion, cacheAge: .data.cacheAgeHours, degraded: (.data.degraded // [])}"#,
-        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: UPDATE_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
@@ -1146,7 +1146,7 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         category: "distribution",
         command: "ee support-bundle --scope update --json",
         jq: r#"{bundlePath: .data.path, sizeBytes: .data.sizeBytes, includes: .data.artifacts, binaryProvenance: .data.provenance}"#,
-        success_check: r#".schema == "ee.response.v1" and .success == true"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: SUPPORT_BUNDLE_RECIPE_FAILURES,
     },
 ];
@@ -1205,6 +1205,20 @@ mod tests {
             )?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn topic_parse_normalizes_cli_values() -> TestResult {
+        ensure_equal(
+            &AgentDocsTopic::parse(" Exit-Codes "),
+            &Some(AgentDocsTopic::ExitCodes),
+            "hyphenated topic",
+        )?;
+        ensure_equal(
+            &AgentDocsTopic::parse("RECIPES"),
+            &Some(AgentDocsTopic::Recipes),
+            "uppercase topic",
+        )
     }
 
     #[test]

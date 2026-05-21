@@ -123,7 +123,7 @@ impl SymbolGraphExtractor {
 
         for path in sorted_paths {
             let display_path = workspace_relative_path(workspace_root, &path);
-            let metadata = match fs::metadata(&path) {
+            let metadata = match fs::symlink_metadata(&path) {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     degraded.push(degradation(

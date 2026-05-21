@@ -333,7 +333,7 @@ fn collect_entries_inner(
     entries: &mut Vec<ArtifactRelocationEntry>,
 ) -> Result<(), DomainError> {
     reject_symlink(current)?;
-    let metadata = fs::metadata(current).map_err(|error| DomainError::Storage {
+    let metadata = fs::symlink_metadata(current).map_err(|error| DomainError::Storage {
         message: format!("failed to inspect {}: {error}", current.display()),
         repair: Some("Check file permissions.".to_owned()),
     })?;

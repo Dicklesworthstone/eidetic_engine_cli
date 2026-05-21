@@ -81,7 +81,7 @@ impl FromStr for TaskFrameStatus {
     type Err = DomainError;
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
-        match raw {
+        match raw.trim().to_ascii_lowercase().as_str() {
             "draft" => Ok(Self::Draft),
             "open" => Ok(Self::Open),
             "active" => Ok(Self::Active),
@@ -1053,6 +1053,19 @@ mod tests {
             created_at: Some("2026-05-04T00:00:00Z".to_owned()),
             dry_run: false,
         }
+    }
+
+    #[test]
+    fn task_frame_status_parse_normalizes_cli_values() -> TestResult {
+        assert_eq!(
+            TaskFrameStatus::from_str(" Active ").map_err(|error| error.message())?,
+            TaskFrameStatus::Active
+        );
+        assert_eq!(
+            TaskFrameStatus::from_str("COMPLETED").map_err(|error| error.message())?,
+            TaskFrameStatus::Completed
+        );
+        Ok(())
     }
 
     #[test]

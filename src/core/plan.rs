@@ -895,7 +895,7 @@ impl std::str::FromStr for PlanProfile {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match s.trim().to_ascii_lowercase().as_str() {
             "compact" => Ok(Self::Compact),
             "full" => Ok(Self::Full),
             "safe" => Ok(Self::Safe),
@@ -1627,5 +1627,10 @@ mod tests {
         assert_eq!(PlanProfile::from_str("full"), Some(PlanProfile::Full));
         assert_eq!(PlanProfile::from_str("safe"), Some(PlanProfile::Safe));
         assert_eq!(PlanProfile::from_str("invalid"), None);
+        assert_eq!(
+            PlanProfile::from_str(" Compact "),
+            Some(PlanProfile::Compact)
+        );
+        assert_eq!(PlanProfile::from_str("SAFE"), Some(PlanProfile::Safe));
     }
 }

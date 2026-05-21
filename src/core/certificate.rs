@@ -1434,14 +1434,14 @@ fn attestation_digest(domain: &str, signer: &str, payload_hash: &str) -> String 
 fn constant_time_str_eq(left: &str, right: &str) -> bool {
     let left = left.as_bytes();
     let right = right.as_bytes();
-    let max_len = left.len().max(right.len());
-    let mut diff = left.len() ^ right.len();
-    for index in 0..max_len {
-        let left_byte = left.get(index).copied().unwrap_or(0);
-        let right_byte = right.get(index).copied().unwrap_or(0);
-        diff |= usize::from(left_byte ^ right_byte);
+    if left.len() != right.len() {
+        return false;
     }
-    diff == 0
+    let mut diff = 0_u8;
+    for (left_byte, right_byte) in left.iter().zip(right.iter()) {
+        diff |= left_byte ^ right_byte;
+    }
+    std::hint::black_box(diff) == 0
 }
 
 fn hex_lower(bytes: &[u8]) -> String {

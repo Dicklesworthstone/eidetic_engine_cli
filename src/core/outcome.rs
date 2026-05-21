@@ -331,6 +331,7 @@ pub struct OutcomeRecordOptions<'a> {
     pub dry_run: bool,
     pub harmful_per_source_per_hour: u32,
     pub harmful_burst_window_seconds: u32,
+    pub prompt_injection_guard: bool,
 }
 
 /// Options for listing quarantined feedback events.
@@ -846,9 +847,10 @@ fn record_outcome_inner(
 
     let target = resolve_target_workspace(
         &connection,
-        &target_type,
-        &target_id,
+        &options.target_type,
+        &options.target_id,
         options.workspace_id.as_deref(),
+        options.prompt_injection_guard,
     )?;
 
     let feedback_input = CreateFeedbackEventInput {
@@ -1563,6 +1565,7 @@ fn resolve_target_workspace(
     target_type: &str,
     target_id: &str,
     workspace_id: Option<&str>,
+    prompt_injection_guard: bool,
 ) -> Result<TargetResolution, DomainError> {
     if target_type == "memory" {
         let memory = connection
@@ -1576,12 +1579,14 @@ fn resolve_target_workspace(
                 id: target_id.to_string(),
                 repair: Some("ee memory list".to_string()),
             })?;
-        let instruction_report = crate::policy::detect_instruction_like_content(&memory.content);
-        if instruction_report.is_instruction_like {
-            return Err(outcome_instruction_policy_denied_error(
-                target_id,
-                &instruction_report,
-            ));
+        if prompt_injection_guard {
+            let instruction_report = crate::policy::detect_instruction_like_content(&memory.content);
+            if instruction_report.is_instruction_like {
+                return Err(outcome_instruction_policy_denied_error(
+                    target_id,
+                    &instruction_report,
+                ));
+            }
         }
         return Ok(TargetResolution {
             workspace_id: memory.workspace_id,
@@ -2802,6 +2807,7 @@ mod tests {
             dry_run: true,
             harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
         })
         .map_err(|error| error.message())?;
 
@@ -2840,6 +2846,7 @@ mod tests {
             dry_run: false,
             harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
         })
         .map_err(|error| error.message())?;
 
@@ -2907,6 +2914,7 @@ mod tests {
                     dry_run: false,
                     harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
                     harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+                    prompt_injection_guard: true,
                 },
                 &mut determinism,
             )
@@ -2969,6 +2977,7 @@ mod tests {
                 dry_run: false,
                 harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
                 harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+                prompt_injection_guard: true,
             })
             .map_err(|error| error.message())?;
             ensure_equal(
@@ -3035,6 +3044,7 @@ mod tests {
             dry_run: false,
             harmful_per_source_per_hour: 1,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
         })
         .map_err(|error| error.message())?;
         ensure_equal(
@@ -3061,6 +3071,7 @@ mod tests {
             dry_run: false,
             harmful_per_source_per_hour: 1,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
         })
         .map_err(|error| error.message())?;
         ensure_equal(
@@ -3141,6 +3152,7 @@ mod tests {
             dry_run: false,
             harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
         })
         .err()
         .ok_or_else(|| "prompt-injection guarded memory should be policy denied".to_string())?;
@@ -3209,6 +3221,7 @@ mod tests {
             dry_run: false,
             harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
         };
 
         let first = record_outcome(&options).map_err(|error| error.message())?;
@@ -3249,6 +3262,7 @@ mod tests {
                 dry_run: false,
                 harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
                 harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+                prompt_injection_guard: true,
             })
             .map_err(|error| error.message())?;
             ensure_equal(
@@ -3276,6 +3290,7 @@ mod tests {
             dry_run: false,
             harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
         })
         .map_err(|error| error.message())?;
 
@@ -3341,6 +3356,7 @@ mod tests {
             dry_run: false,
             harmful_per_source_per_hour: 1,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
         })
         .map_err(|error| error.message())?;
         ensure_equal(
@@ -3367,6 +3383,7 @@ mod tests {
             dry_run: false,
             harmful_per_source_per_hour: 1,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
         })
         .map_err(|error| error.message())?;
         ensure_equal(
@@ -3451,6 +3468,7 @@ mod tests {
             dry_run: false,
             harmful_per_source_per_hour: 1,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
         })
         .map_err(|error| error.message())?;
         ensure_equal(
@@ -3478,6 +3496,7 @@ mod tests {
             dry_run: false,
             harmful_per_source_per_hour: 1,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
         })
         .map_err(|error| error.message())?;
         ensure_equal(
@@ -3579,6 +3598,7 @@ mod tests {
             dry_run: false,
             harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
             harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
         });
 
         match result {

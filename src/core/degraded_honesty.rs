@@ -631,7 +631,7 @@ mod tests {
             "preflight show",
             true,
             false,
-            r#"{"schema":"ee.response.v1","success":true,"data":{"status":"stubbed"}}"#,
+            r#"{"schema":"ee.response.v2","success":true,"data":{"status":"stubbed"}}"#,
         );
 
         assert!(!report.passed);
@@ -644,7 +644,7 @@ mod tests {
             "eval run",
             true,
             true,
-            r#"{"schema":"ee.response.v1","success":true,"data":{"fixtureId":"fixture_release"}}"#,
+            r#"{"schema":"ee.response.v2","success":true,"data":{"fixtureId":"fixture_release"}}"#,
         );
 
         assert!(report.passed);
@@ -692,19 +692,19 @@ mod tests {
         let outputs = [
             (
                 "context",
-                r#"{"schema":"ee.response.v1","success":true,"data":{"items":[{"selected":true,"selectionReason":"best match"}]}}"#,
+                r#"{"schema":"ee.response.v2","success":true,"data":{"items":[{"selected":true,"selectionReason":"best match"}]}}"#,
             ),
             (
                 "preflight show",
-                r#"{"schema":"ee.response.v1","success":true,"data":{"riskLevel":"high","riskScore":0.91}}"#,
+                r#"{"schema":"ee.response.v2","success":true,"data":{"riskLevel":"high","riskScore":0.91}}"#,
             ),
             (
                 "rule show",
-                r#"{"schema":"ee.response.v1","success":true,"data":{"maturity":"validated"}}"#,
+                r#"{"schema":"ee.response.v2","success":true,"data":{"maturity":"validated"}}"#,
             ),
             (
                 "graph neighborhood",
-                r#"{"schema":"ee.response.v1","success":true,"data":{"pageRank":0.42,"betweenness":0.11,"graphExplanation":"central evidence node"}}"#,
+                r#"{"schema":"ee.response.v2","success":true,"data":{"pageRank":0.42,"betweenness":0.11,"graphExplanation":"central evidence node"}}"#,
             ),
         ];
 
@@ -723,13 +723,13 @@ mod tests {
             "context",
             true,
             false,
-            r#"{"schema":"ee.response.v1","success":true,"data":{"items":[{"selected":true,"selectionReason":"best match","provenance":["mem://abc"],"scoreComponents":{"lexical":0.4}}],"packHash":"blake3:pack"}}"#,
+            r#"{"schema":"ee.response.v2","success":true,"data":{"items":[{"selected":true,"selectionReason":"best match","provenance":["mem://abc"],"scoreComponents":{"lexical":0.4}}],"packHash":"blake3:pack"}}"#,
         );
         let graph_report = validate_no_unsupported_evidence_claims(
             "graph neighborhood",
             true,
             false,
-            r#"{"schema":"ee.response.v1","success":true,"data":{"pageRank":0.42,"betweenness":0.11,"graphSnapshotId":"graph_001","sourceIds":["mem_001"]}}"#,
+            r#"{"schema":"ee.response.v2","success":true,"data":{"pageRank":0.42,"betweenness":0.11,"graphSnapshotId":"graph_001","sourceIds":["mem_001"]}}"#,
         );
 
         assert!(pack_report.passed);
@@ -748,7 +748,7 @@ mod tests {
             "procedure verify",
             true,
             true,
-            r#"{"schema":"ee.response.v1","success":true,"data":{"overallResult":"passed","sourcesChecked":[{"sourceId":"fixture_001"}]}}"#,
+            r#"{"schema":"ee.response.v2","success":true,"data":{"overallResult":"passed","sourcesChecked":[{"sourceId":"fixture_001"}]}}"#,
         );
 
         assert!(failure.passed);

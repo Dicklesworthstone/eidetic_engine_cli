@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-pub const PROOF_CHECK_SCHEMA_V1: &str = "ee.proof_check.v1";
+pub use crate::models::PROOF_CHECK_SCHEMA_V1;
 pub const PROOF_TOOL_MISSING_CODE: &str = "proof_tool_missing";
 pub const PROOF_VIOLATION_DETECTED_CODE: &str = "proof_violation_detected";
 

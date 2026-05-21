@@ -1157,6 +1157,24 @@ fn verify_command_exit_evidence(
     workspace_path: &Path,
     evidence: &ParsedClaimEvidence,
 ) -> Result<(), String> {
+    use crate::core::preflight_guard::{
+        PreflightGuardOptions, PreflightGuardRegistry, run_preflight_guard,
+    };
+    let registry = PreflightGuardRegistry::with_builtins();
+    let opts = PreflightGuardOptions {
+        command: evidence.target.clone(),
+        workspace: workspace_path.to_path_buf(),
+        bypass_tokens: Vec::new(),
+        bypass_secret: None,
+    };
+    let report = run_preflight_guard(&registry, &opts);
+    if report.exit_code == 7 {
+        return Err(format!(
+            "command_exit_denied: preflight trauma-guard halted execution of {}",
+            evidence.target
+        ));
+    }
+
     let parts = parse_command_target(&evidence.target)?;
     let expected_exit = evidence.expected_exit.unwrap_or(0);
     let output = Command::new(&parts[0])

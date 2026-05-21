@@ -117,7 +117,7 @@ impl CapsuleProfile {
 
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
-        match s {
+        match s.trim().to_ascii_lowercase().as_str() {
             "compact" => Some(Self::Compact),
             "resume" => Some(Self::Resume),
             "handoff" => Some(Self::Handoff),
@@ -4150,6 +4150,16 @@ memories_revised = 3
             &CapsuleProfile::parse("handoff"),
             &Some(CapsuleProfile::Handoff),
             "handoff",
+        )?;
+        ensure_equal(
+            &CapsuleProfile::parse(" Resume "),
+            &Some(CapsuleProfile::Resume),
+            "trimmed mixed case resume",
+        )?;
+        ensure_equal(
+            &CapsuleProfile::parse("HANDOFF"),
+            &Some(CapsuleProfile::Handoff),
+            "uppercase handoff",
         )?;
         ensure_equal(&CapsuleProfile::parse("invalid"), &None, "invalid")
     }

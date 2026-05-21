@@ -63,7 +63,7 @@ impl PerfLatencySurface {
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        match value {
+        match value.trim().to_ascii_lowercase().as_str() {
             "search" => Some(Self::Search),
             "context" => Some(Self::Context),
             _ => None,
@@ -2770,6 +2770,19 @@ mod tests {
             let parsed = ArtifactKind::parse(s).expect("should parse");
             assert_eq!(kind, parsed);
         }
+    }
+
+    #[test]
+    fn perf_latency_surface_parse_normalizes_cli_values() {
+        assert_eq!(
+            PerfLatencySurface::parse(" Search "),
+            Some(PerfLatencySurface::Search)
+        );
+        assert_eq!(
+            PerfLatencySurface::parse("CONTEXT"),
+            Some(PerfLatencySurface::Context)
+        );
+        assert_eq!(PerfLatencySurface::parse("graph"), None);
     }
 
     #[cfg(unix)]

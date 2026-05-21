@@ -703,7 +703,7 @@ fn prepare_file_artifact(
     }
 
     let resolved_metadata =
-        fs::metadata(&canonical_path).map_err(|error| DomainError::Storage {
+        fs::symlink_metadata(&canonical_path).map_err(|error| DomainError::Storage {
             message: format!(
                 "Failed to read artifact metadata {}: {error}",
                 canonical_path.display()

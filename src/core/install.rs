@@ -2325,7 +2325,9 @@ mod tests {
         let outside_binary = tempdir.path().join("outside-ee");
         fs::write(&outside_binary, b"outside binary").map_err(|error| error.to_string())?;
         let install_path = tempdir.path().join("bin").join("ee");
-        fs::create_dir_all(install_path.parent().unwrap()).map_err(|error| error.to_string())?;
+        if let Some(parent) = install_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
         std::os::unix::fs::symlink(&outside_binary, &install_path)
             .map_err(|error| error.to_string())?;
         let artifact = InstallArtifactSelection {

@@ -42,10 +42,7 @@ fn db_error_to_domain(error: DbError, context: &str, repair: Option<String>) -> 
     }
 }
 
-/// Schema identifier for `ee model status` JSON output.
-pub const MODEL_STATUS_SCHEMA_V2: &str = "ee.model.status.v2";
-/// Schema identifier for `ee model list` JSON output.
-pub const MODEL_LIST_SCHEMA_V1: &str = "ee.model.list.v1";
+pub use crate::models::{MODEL_STATUS_SCHEMA_V2, MODEL_LIST_SCHEMA_V1};
 
 const DEFAULT_DB_FILE: &str = "ee.db";
 

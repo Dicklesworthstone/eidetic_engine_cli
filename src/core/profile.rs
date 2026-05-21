@@ -170,13 +170,14 @@ impl FromStr for OperatingProfile {
     type Err = ParseOperatingProfileError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        let normalized = input.trim().to_ascii_lowercase();
+        match normalized.as_str() {
             "constrained" => Ok(Self::Constrained),
             "portable" => Ok(Self::Portable),
             "workstation" => Ok(Self::Workstation),
             "swarm" => Ok(Self::Swarm),
-            other => Err(ParseOperatingProfileError {
-                value: other.to_string(),
+            _ => Err(ParseOperatingProfileError {
+                value: input.to_string(),
             }),
         }
     }
@@ -3068,6 +3069,24 @@ mod tests {
             requested_profile: Some(profile),
             dry_run,
         }
+    }
+
+    #[test]
+    fn operating_profile_parse_normalizes_cli_values() -> TestResult {
+        ensure(
+            " Workstation "
+                .parse::<OperatingProfile>()
+                .map_err(|error| error.to_string())?,
+            OperatingProfile::Workstation,
+            "normalized workstation profile",
+        )?;
+        ensure(
+            "SWARM"
+                .parse::<OperatingProfile>()
+                .map_err(|error| error.to_string())?,
+            OperatingProfile::Swarm,
+            "normalized swarm profile",
+        )
     }
 
     #[test]
