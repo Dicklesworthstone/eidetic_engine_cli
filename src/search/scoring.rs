@@ -120,7 +120,7 @@ impl BeadAffinityCandidateSignals {
 
     #[must_use]
     pub fn with_link_refs(mut self, refs: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.link_refs = normalize_label_set(refs);
+        self.link_refs = refs.into_iter().map(Into::into).collect();
         self
     }
 }
@@ -241,7 +241,7 @@ impl std::str::FromStr for SpeedMode {
     type Err = ParseSpeedModeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match s.trim().to_ascii_lowercase().as_str() {
             "instant" => Ok(Self::Instant),
             "default" => Ok(Self::Default),
             "quality" => Ok(Self::Quality),
@@ -404,16 +404,14 @@ pub fn bead_affinity_score(
     let content_hash_overlap = candidate
         .content_hash
         .as_deref()
-        .is_some_and(|hash| context.tokens.iter().any(|token| hash.contains(token)));
-    let link_overlap = context
-        .tokens
+        .is_some_and(|hash| {
+            let digest = hash.strip_prefix("blake3:").unwrap_or(hash);
+            context.tokens.iter().any(|token| token.len() >= 8 && digest.contains(token))
+        });
+    let link_overlap = candidate
+        .link_refs
         .iter()
-        .filter(|token| {
-            candidate
-                .link_refs
-                .iter()
-                .any(|link| link.contains(token.as_str()))
-        })
+        .filter(|link| link.contains(&context.bead_id))
         .count();
 
     let raw = tag_overlap as f32 * 0.025
@@ -491,7 +489,6 @@ fn finite_positive(value: f32) -> Option<f32> {
 
 fn bead_affinity_tokens(text: &str) -> BTreeSet<String> {
     text.split(|ch: char| !ch.is_ascii_alphanumeric())
-        .map(str::trim)
         .filter(|token| token.len() >= 2)
         .map(str::to_ascii_lowercase)
         .collect()
@@ -504,7 +501,6 @@ fn normalize_label_set(values: impl IntoIterator<Item = impl Into<String>>) -> B
         .flat_map(|value| {
             value
                 .split(|ch: char| !ch.is_ascii_alphanumeric())
-                .map(str::trim)
                 .filter(|token| token.len() >= 2)
                 .map(str::to_ascii_lowercase)
                 .collect::<Vec<_>>()
@@ -771,6 +767,12 @@ mod tests {
         );
         assert_eq!(
             "quality"
+                .parse::<SpeedMode>()
+                .map_err(|error| error.to_string())?,
+            SpeedMode::Quality
+        );
+        assert_eq!(
+            " Quality "
                 .parse::<SpeedMode>()
                 .map_err(|error| error.to_string())?,
             SpeedMode::Quality

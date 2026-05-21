@@ -332,8 +332,8 @@ thread_local! {
 
 struct FileWriteOwnerGuard {
     key: WriteOwnerKey,
-    _process_guard: Option<MutexGuard<'static, ()>>,
     _lock_file: Option<File>,
+    _process_guard: Option<MutexGuard<'static, ()>>,
     active: bool,
 }
 
@@ -962,7 +962,7 @@ impl DbConnection {
             return Ok(WalStatus::default());
         };
 
-        let bytes = match std::fs::metadata(wal_path_for_database(database_path)) {
+        let bytes = match std::fs::symlink_metadata(wal_path_for_database(database_path)) {
             Ok(metadata) => metadata.len(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
             Err(error) => {

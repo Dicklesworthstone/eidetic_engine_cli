@@ -93,7 +93,7 @@ pub struct CanonicalSearchDocument {
     kind: Option<String>,
     created_at: Option<String>,
     tags: Vec<String>,
-    metadata: HashMap<String, String>,
+    metadata: BTreeMap<String, String>,
 }
 
 impl CanonicalSearchDocument {
@@ -110,7 +110,7 @@ impl CanonicalSearchDocument {
             kind: None,
             created_at: None,
             tags: Vec::new(),
-            metadata: HashMap::new(),
+            metadata: BTreeMap::new(),
         }
     }
 

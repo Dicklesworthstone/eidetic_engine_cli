@@ -1644,6 +1644,16 @@ fn resource_read_result(
     stderr: String,
 ) -> Value {
     let redacted_stderr = redact_mcp_public_diagnostics(&stderr);
+    
+    if exit != ProcessExitCode::Success {
+        let message = if redacted_stderr.is_empty() {
+            format!("Resource read failed with exit code {}", exit as u8)
+        } else {
+            redacted_stderr
+        };
+        return json_rpc_error(Some(id), -32603, &message);
+    }
+
     let text = if stdout.is_empty() {
         redacted_stderr.as_str()
     } else {
@@ -1656,10 +1666,7 @@ fn resource_read_result(
                 "uri": uri,
                 "mimeType": "application/json",
                 "text": text
-            }],
-            "isError": exit != ProcessExitCode::Success,
-            "exitCode": exit as u8,
-            "stderr": redacted_stderr
+            }]
         }),
     )
 }
@@ -1743,7 +1750,7 @@ pub fn handle_json_rpc_message(request: &Value) -> Option<Value> {
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
 
     trace_mcp_top_level("input", 0, &[]);
-    if is_json_rpc_notification(request) && method == "notifications/cancelled" {
+    if is_json_rpc_notification(request) && !method.is_empty() {
         trace_mcp_top_level("response", 0, &[]);
         return None;
     }
@@ -2345,7 +2352,7 @@ mod tests {
             serde_json::from_str(text).map_err(|error| format!("invalid JSON: {error}"))?;
         assert_eq!(
             parsed.get("schema").and_then(Value::as_str),
-            Some("ee.response.v1")
+            Some("ee.response.v2")
         );
         assert_eq!(
             parsed
@@ -2525,7 +2532,7 @@ mod tests {
             serde_json::from_str(text).map_err(|error| format!("invalid JSON: {error}"))?;
         assert_eq!(
             parsed.get("schema").and_then(Value::as_str),
-            Some("ee.response.v1")
+            Some("ee.response.v2")
         );
         assert_eq!(
             parsed

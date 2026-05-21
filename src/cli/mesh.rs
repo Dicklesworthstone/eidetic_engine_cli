@@ -698,7 +698,7 @@ where
 
     let preview_value = serde_json::to_value(&preview).unwrap_or_else(|_| serde_json::json!({}));
     let response = serde_json::json!({
-        "schema": "ee.response.v1",
+        "schema": "ee.response.v2",
         "success": true,
         "data": {
             "command": "mesh preview-grant",
@@ -2865,7 +2865,14 @@ where
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, human_output),
         output::Renderer::Toon => {
-            let data = serde_json::to_value(report).expect("mesh CLI report must serialize");
+            let data = match serde_json::to_value(report) {
+                Ok(data) => data,
+                Err(error) => {
+                    return ee_response_v2_mesh_error(format!(
+                        "Failed to serialize mesh CLI report: {error}"
+                    ));
+                }
+            };
             write_stdout(
                 stdout,
                 &(output::render_toon_from_json(&data.to_string()) + "\n"),

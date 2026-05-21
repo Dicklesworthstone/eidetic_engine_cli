@@ -143,11 +143,7 @@ pub(crate) fn configured_workspace_redaction_default(
 }
 
 fn workspace_config_contents(workspace_path: &Path) -> Option<String> {
-    let config_path = workspace_path.join(".ee").join("config.toml");
-    if !config_path.exists() {
-        return None;
-    }
-    std::fs::read_to_string(config_path).ok()
+    read_workspace_config_contents(workspace_path).unwrap_or(None)
 }
 
 pub fn workspace_config(workspace_path: &Path) -> Option<ConfigFile> {

@@ -314,7 +314,7 @@ impl PackL2Cache {
             if !file_type.is_file() {
                 continue;
             }
-            let Ok(metadata) = fs::metadata(&path) else {
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
                 report.skipped = report.skipped.saturating_add(1);
                 continue;
             };

@@ -810,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn from_environment_pin_ram_default_keeps_hugepages_request_active() {
+    fn from_environment_pin_ram_default_rejects_hugepages_request_as_no_op() {
         // When pin-ram is not explicitly set the default `enabled=false`
         // wins, so an explicit hugepages opt-in is rejected as a no-op.
         let unparseable: RefCell<Vec<(&'static str, String)>> = RefCell::new(Vec::new());

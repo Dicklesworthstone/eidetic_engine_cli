@@ -217,13 +217,14 @@ impl FromStr for SearchSpeed {
     type Err = ConfigParseError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        let normalized = input.trim().to_ascii_lowercase();
+        match normalized.as_str() {
             "fast" => Ok(Self::Fast),
             "balanced" => Ok(Self::Balanced),
             "thorough" => Ok(Self::Thorough),
-            other => Err(ConfigParseError::InvalidValue {
+            _ => Err(ConfigParseError::InvalidValue {
                 key: "search.default_speed".to_string(),
-                value: other.to_string(),
+                value: input.to_string(),
                 message: "expected one of `fast`, `balanced`, or `thorough`".to_string(),
             }),
         }
@@ -374,14 +375,15 @@ impl FromStr for MeshCommandMode {
     type Err = ConfigParseError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        let normalized = input.trim().to_ascii_lowercase();
+        match normalized.as_str() {
             "off" => Ok(Self::Off),
             "cache" => Ok(Self::Cache),
             "revisable" => Ok(Self::Revisable),
             "blocking" => Ok(Self::Blocking),
-            other => Err(ConfigParseError::InvalidValue {
+            _ => Err(ConfigParseError::InvalidValue {
                 key: "mesh.command_mode".to_string(),
-                value: other.to_string(),
+                value: input.to_string(),
                 message: "expected one of `off`, `cache`, `revisable`, or `blocking`".to_string(),
             }),
         }
@@ -2711,6 +2713,17 @@ prompt_injection_guard = true
     }
 
     #[test]
+    fn search_speed_normalizes_config_values() -> TestResult {
+        let config = ConfigFile::parse("[search]\ndefault_speed = \" Thorough \"\n")
+            .map_err(|error| format!("search speed should parse: {error}"))?;
+        ensure_equal(
+            &config.search.default_speed,
+            &Some(SearchSpeed::Thorough),
+            "normalized search speed",
+        )
+    }
+
+    #[test]
     fn rejects_unknown_redaction_default_level() -> TestResult {
         let error = expect_config_error("[redaction.defaults]\ncontext_json = \"full\"\n")?;
 
@@ -2804,6 +2817,7 @@ metadata = "allow"
             ("cache", MeshCommandMode::Cache),
             ("revisable", MeshCommandMode::Revisable),
             ("blocking", MeshCommandMode::Blocking),
+            (" Blocking ", MeshCommandMode::Blocking),
         ] {
             let config = ConfigFile::parse(&format!("[mesh]\ncommand_mode = \"{raw}\"\n"))
                 .map_err(|error| format!("mesh mode {raw} should parse: {error}"))?;
@@ -2812,7 +2826,11 @@ metadata = "allow"
                 &Some(expected),
                 "mesh command mode",
             )?;
-            ensure_equal(&expected.as_str(), &raw, "mesh command mode string")?;
+            ensure_equal(
+                &expected.as_str(),
+                &raw.trim().to_ascii_lowercase().as_str(),
+                "mesh command mode string",
+            )?;
         }
         Ok(())
     }

@@ -1363,10 +1363,18 @@ impl PackScoreBreakdown {
     #[must_use]
     pub fn ppr(text_score: f32, ppr_score: f32, combined_score: f32) -> Self {
         Self {
-            text_score: text_score.clamp(0.0, 1.0),
-            ppr_score: ppr_score.clamp(0.0, 1.0),
-            combined_score: combined_score.clamp(0.0, 1.0),
+            text_score: finite_unit_float(text_score),
+            ppr_score: finite_unit_float(ppr_score),
+            combined_score: finite_unit_float(combined_score),
         }
+    }
+}
+
+fn finite_unit_float(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
     }
 }
 
@@ -2501,6 +2509,7 @@ pub const PACK_ASSEMBLY_SLO_SCHEMA_V1: &str = "ee.pack.slo.v1";
 pub const PACK_ASSEMBLY_SLOW_CODE: &str = "pack_assembly_slow";
 pub const PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE: &str = "pack_assembly_budget_exceeded";
 pub const PACK_CONCURRENT_LIMIT_REACHED_CODE: &str = "pack_concurrent_limit_reached";
+pub const PACK_BUDGET_TOO_SMALL_CODE: &str = "pack_budget_too_small";
 pub const CONSENSUS_SCHEMA_V1: &str = "ee.consensus.v1";
 pub const CONFLICT_SCHEMA_V1: &str = "ee.conflict.v1";
 
@@ -2563,12 +2572,13 @@ impl std::str::FromStr for PackResourceProfile {
     type Err = ParsePackResourceProfileError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        let normalized = input.trim().to_ascii_lowercase().replace('-', "_");
+        match normalized.as_str() {
             "lean" => Ok(Self::Lean),
             "standard" => Ok(Self::Standard),
-            "swarm_heavy" | "swarm-heavy" => Ok(Self::SwarmHeavy),
-            other => Err(ParsePackResourceProfileError {
-                value: other.to_string(),
+            "swarm_heavy" => Ok(Self::SwarmHeavy),
+            _ => Err(ParsePackResourceProfileError {
+                value: input.to_string(),
             }),
         }
     }
@@ -2583,7 +2593,7 @@ impl fmt::Display for ParsePackResourceProfileError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "invalid resource profile `{}`; expected lean, standard, or swarm_heavy",
+            "invalid resource profile `{}`; expected lean, standard, or swarm_heavy/swarm-heavy",
             self.value
         )
     }
@@ -3958,6 +3968,7 @@ pub const fn category_for_code(code: &str) -> DegradedCategory {
 pub enum ContextResponseSeverity {
     Info,
     Low,
+    Warning,
     Medium,
     High,
 }
@@ -3968,6 +3979,7 @@ impl ContextResponseSeverity {
         match self {
             Self::Info => "info",
             Self::Low => "low",
+            Self::Warning => "warning",
             Self::Medium => "medium",
             Self::High => "high",
         }
@@ -7827,6 +7839,15 @@ mod tests {
     }
 
     #[test]
+    fn pack_score_breakdown_sanitizes_non_finite_scores() -> TestResult {
+        let breakdown = PackScoreBreakdown::ppr(f32::NAN, f32::INFINITY, -0.5);
+
+        ensure_equal(&breakdown.text_score, &0.0, "nan text score")?;
+        ensure_equal(&breakdown.ppr_score, &0.0, "infinite ppr score")?;
+        ensure_equal(&breakdown.combined_score, &0.0, "negative combined score")
+    }
+
+    #[test]
     fn pack_provenance_rendering_labels_sources() -> TestResult {
         let source = provenance("file://src/lib.rs#L42")?;
         let rendered = source.rendered();
@@ -9370,7 +9391,7 @@ mod tests {
         let response = ContextResponse::new(request, draft, vec![degraded])
             .map_err(|error| format!("response rejected: {error:?}"))?;
 
-        ensure_equal(&response.schema, &"ee.response.v1", "response schema")?;
+        ensure_equal(&response.schema, &"ee.response.v2", "response schema")?;
         ensure(response.success, "context response success flag")?;
         ensure_equal(
             &response.data.command,
@@ -9500,6 +9521,24 @@ mod tests {
             elapsed_ms,
             memory_bytes_peak: 4096,
         }
+    }
+
+    #[test]
+    fn pack_resource_profile_parse_normalizes_cli_values() -> TestResult {
+        ensure_equal(
+            &" lean "
+                .parse::<PackResourceProfile>()
+                .map_err(|error| error.to_string())?,
+            &PackResourceProfile::Lean,
+            "lean profile",
+        )?;
+        ensure_equal(
+            &"SWARM-HEAVY"
+                .parse::<PackResourceProfile>()
+                .map_err(|error| error.to_string())?,
+            &PackResourceProfile::SwarmHeavy,
+            "swarm-heavy profile",
+        )
     }
 
     #[test]

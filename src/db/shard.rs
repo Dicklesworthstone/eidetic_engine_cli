@@ -818,7 +818,7 @@ pub fn preserve_shard_fanout_source_database(
         }
     })?;
 
-    let copied = match fs::metadata(preserved_path) {
+    let copied = match fs::symlink_metadata(preserved_path) {
         Ok(metadata) => {
             if !metadata.is_file() {
                 return Err(ShardFanoutPreserveSourceError::PreservedRead {
