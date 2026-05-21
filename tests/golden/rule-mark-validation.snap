@@ -1,0 +1,97 @@
+{
+  "showAfterFirstValidation": {
+    "data": {
+      "command": "rule show",
+      "found": true,
+      "rule": {
+        "confidence": 0.91,
+        "lastValidatedAt": "<TIMESTAMP>",
+        "maturity": "candidate",
+        "negativeFeedbackCount": 0,
+        "positiveFeedbackCount": 0,
+        "utility": 0.54,
+        "validationContradictions": 0,
+        "validationPasses": 1
+      },
+      "schema": "ee.rule.show.v1"
+    },
+    "schema": "ee.response.v2",
+    "success": true
+  },
+  "showAfterHelpfulOutcome": {
+    "data": {
+      "command": "rule show",
+      "found": true,
+      "rule": {
+        "confidence": 1.0,
+        "lastValidatedAt": "<TIMESTAMP>",
+        "maturity": "candidate",
+        "negativeFeedbackCount": 0,
+        "positiveFeedbackCount": 1,
+        "utility": 0.66,
+        "validationContradictions": 0,
+        "validationPasses": 2
+      },
+      "schema": "ee.rule.show.v1"
+    },
+    "schema": "ee.response.v2",
+    "success": true
+  },
+  "showAfterSecondValidation": {
+    "data": {
+      "command": "rule show",
+      "found": true,
+      "rule": {
+        "confidence": 0.97,
+        "lastValidatedAt": "<TIMESTAMP>",
+        "maturity": "candidate",
+        "negativeFeedbackCount": 0,
+        "positiveFeedbackCount": 0,
+        "utility": 0.58,
+        "validationContradictions": 0,
+        "validationPasses": 2
+      },
+      "schema": "ee.rule.show.v1"
+    },
+    "schema": "ee.response.v2",
+    "success": true
+  },
+  "showAfterValidationOverride": {
+    "data": {
+      "command": "rule show",
+      "found": true,
+      "rule": {
+        "confidence": 1.0,
+        "lastValidatedAt": "<TIMESTAMP>",
+        "maturity": "candidate",
+        "negativeFeedbackCount": 0,
+        "positiveFeedbackCount": 1,
+        "utility": 0.7,
+        "validationContradictions": 0,
+        "validationPasses": 7
+      },
+      "schema": "ee.rule.show.v1"
+    },
+    "schema": "ee.response.v2",
+    "success": true
+  },
+  "showInitial": {
+    "data": {
+      "command": "rule show",
+      "found": true,
+      "rule": {
+        "confidence": 0.85,
+        "lastValidatedAt": null,
+        "maturity": "candidate",
+        "negativeFeedbackCount": 0,
+        "positiveFeedbackCount": 0,
+        "utility": 0.5,
+        "validationContradictions": 0,
+        "validationPasses": 0
+      },
+      "schema": "ee.rule.show.v1"
+    },
+    "schema": "ee.response.v2",
+    "success": true
+  }
+}

@@ -205,6 +205,40 @@ fn normalize_rule_response(mut value: JsonValue) -> JsonValue {
     value
 }
 
+fn scrubbed_optional_timestamp(value: &JsonValue) -> JsonValue {
+    if value.is_string() {
+        JsonValue::String("<TIMESTAMP>".to_owned())
+    } else {
+        JsonValue::Null
+    }
+}
+
+fn rule_counter_projection(value: &JsonValue) -> JsonValue {
+    json!({
+        "schema": value["schema"],
+        "success": value["success"],
+        "data": {
+            "schema": value["data"]["schema"],
+            "command": value["data"]["command"],
+            "found": value["data"]["found"],
+            "rule": {
+                "maturity": value["data"]["rule"]["maturity"],
+                "confidence": value["data"]["rule"]["confidence"],
+                "utility": value["data"]["rule"]["utility"],
+                "positiveFeedbackCount": value["data"]["rule"]["positiveFeedbackCount"],
+                "negativeFeedbackCount": value["data"]["rule"]["negativeFeedbackCount"],
+                "validationPasses": value["data"]["rule"]["validationPasses"],
+                "validationContradictions": value["data"]["rule"]["validationContradictions"],
+                "lastValidatedAt": scrubbed_optional_timestamp(&value["data"]["rule"]["lastValidatedAt"]),
+            },
+        },
+    })
+}
+
+fn rule_counter_at(value: &JsonValue, key: &str) -> Option<i64> {
+    value["data"]["rule"][key].as_i64()
+}
+
 fn canonicalize_json(value: JsonValue) -> JsonValue {
     match value {
         JsonValue::Array(values) => {
@@ -485,4 +519,157 @@ fn rule_mark_and_update_are_audited_and_idempotent() -> TestResult {
     )?;
 
     ensure(events_path.is_file(), "E2E JSONL log exists")
+}
+
+#[test]
+fn rule_mark_validation_counter_golden_pins_non_interference() -> TestResult {
+    let run_dir = unique_run_dir()?;
+    let workspace = run_dir.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let events_path = run_dir.join("validation-events.jsonl");
+
+    let mut init_args = workspace_args(&workspace);
+    init_args.push("init".to_owned());
+    run_step(&workspace, &events_path, "init", init_args)?;
+
+    let mut remember_args = workspace_args(&workspace);
+    remember_args.extend([
+        "remember".to_owned(),
+        "--level".to_owned(),
+        "semantic".to_owned(),
+        "--kind".to_owned(),
+        "fact".to_owned(),
+        "Source memory for validation counter golden.".to_owned(),
+    ]);
+    let remember_output = run_step(&workspace, &events_path, "remember_source", remember_args)?;
+    let remember_json = parse_stdout_json(&remember_output, "remember source")?;
+    let source_memory_id = remember_json["data"]["memory_id"]
+        .as_str()
+        .ok_or_else(|| "remember response missing memory_id".to_owned())?
+        .to_owned();
+
+    let mut rule_add_args = workspace_args(&workspace);
+    rule_add_args.extend([
+        "rule".to_owned(),
+        "add".to_owned(),
+        "--maturity".to_owned(),
+        "candidate".to_owned(),
+        "--scope".to_owned(),
+        "workspace".to_owned(),
+        "--source-memory".to_owned(),
+        source_memory_id,
+        "Validate rule counters independently from outcome feedback.".to_owned(),
+    ]);
+    let rule_add_output = run_step(&workspace, &events_path, "rule_add", rule_add_args)?;
+    let rule_add_json = parse_stdout_json(&rule_add_output, "rule add")?;
+    let rule_id = rule_add_json["data"]["ruleId"]
+        .as_str()
+        .ok_or_else(|| "rule add response missing ruleId".to_owned())?
+        .to_owned();
+
+    let show_rule = |step: &str| -> Result<JsonValue, String> {
+        let mut args = workspace_args(&workspace);
+        args.extend(["rule".to_owned(), "show".to_owned(), rule_id.clone()]);
+        let output = run_step(&workspace, &events_path, step, args)?;
+        parse_stdout_json(&output, step)
+    };
+
+    let mark_rule = |step: &str, trigger: &str, extra_args: &[&str]| -> Result<JsonValue, String> {
+        let mut args = workspace_args(&workspace);
+        args.extend([
+            "rule".to_owned(),
+            "mark".to_owned(),
+            rule_id.clone(),
+            "--trigger".to_owned(),
+            trigger.to_owned(),
+            "--actor".to_owned(),
+            "rule-validation-counter-golden".to_owned(),
+        ]);
+        args.extend(extra_args.iter().map(|arg| (*arg).to_owned()));
+        let output = run_step(&workspace, &events_path, step, args)?;
+        parse_stdout_json(&output, step)
+    };
+
+    let show_initial = show_rule("show_initial")?;
+    let first_validation = mark_rule("validation_passed_1", "validation_passed", &[])?;
+    ensure(
+        first_validation["data"]["rule"]["validationPasses"] == 1,
+        "first validation_passed increments validation passes from 0 to 1",
+    )?;
+    let show_after_first = show_rule("show_after_first_validation")?;
+
+    let second_validation = mark_rule("validation_passed_2", "validation_passed", &[])?;
+    ensure(
+        second_validation["data"]["rule"]["validationPasses"] == 2,
+        "second validation_passed increments validation passes from 1 to 2",
+    )?;
+    let show_after_second = show_rule("show_after_second_validation")?;
+
+    let helpful = mark_rule("outcome_helpful", "outcome_helpful", &[])?;
+    ensure(
+        helpful["data"]["rule"]["validationPasses"] == 2,
+        "outcome_helpful leaves validation passes unchanged",
+    )?;
+    ensure(
+        helpful["data"]["rule"]["positiveFeedbackCount"] == 1,
+        "outcome_helpful increments positive feedback",
+    )?;
+    let show_after_helpful = show_rule("show_after_helpful_outcome")?;
+
+    let override_validation = mark_rule(
+        "validation_passed_override",
+        "validation_passed",
+        &["--validation-passes", "5"],
+    )?;
+    ensure(
+        override_validation["data"]["rule"]["validationPasses"] == 7,
+        "validation_passed --validation-passes 5 adds five validation passes",
+    )?;
+    let show_after_override = show_rule("show_after_validation_override")?;
+
+    ensure(
+        rule_counter_at(&show_initial, "validationPasses") == Some(0),
+        "initial show starts with zero validation passes",
+    )?;
+    ensure(
+        rule_counter_at(&show_after_first, "validationPasses") == Some(1),
+        "first show records one validation pass",
+    )?;
+    ensure(
+        rule_counter_at(&show_after_second, "validationPasses") == Some(2),
+        "second show records two validation passes",
+    )?;
+    ensure(
+        rule_counter_at(&show_after_helpful, "validationPasses") == Some(2),
+        "helpful outcome show keeps validation passes at two",
+    )?;
+    ensure(
+        rule_counter_at(&show_after_helpful, "positiveFeedbackCount") == Some(1),
+        "helpful outcome show increments positive feedback",
+    )?;
+    ensure(
+        rule_counter_at(&show_after_override, "validationPasses") == Some(7),
+        "override show records seven validation passes",
+    )?;
+    ensure(
+        rule_counter_at(&show_after_override, "positiveFeedbackCount") == Some(1),
+        "override show preserves positive feedback count",
+    )?;
+
+    assert_golden(
+        json!({
+            "showInitial": rule_counter_projection(&show_initial),
+            "showAfterFirstValidation": rule_counter_projection(&show_after_first),
+            "showAfterSecondValidation": rule_counter_projection(&show_after_second),
+            "showAfterHelpfulOutcome": rule_counter_projection(&show_after_helpful),
+            "showAfterValidationOverride": rule_counter_projection(&show_after_override),
+        }),
+        include_str!("golden/rule-mark-validation.snap"),
+        "rule mark validation counter",
+    )?;
+
+    ensure(
+        events_path.is_file(),
+        "validation counter E2E JSONL log exists",
+    )
 }
