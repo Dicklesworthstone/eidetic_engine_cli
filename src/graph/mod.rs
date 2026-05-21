@@ -58,6 +58,7 @@ pub mod pack_dna;
 pub mod ppr;
 pub mod ppr_prefetch_cache;
 pub mod result_cache_keys;
+pub mod scale_policy;
 pub mod skyline;
 
 pub const SUBSYSTEM: &str = "graph";
