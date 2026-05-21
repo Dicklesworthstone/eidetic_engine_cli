@@ -1633,6 +1633,21 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
             updated_at: &marked_at,
         },
     );
+    if validation_passes_delta > 0 || validation_contradictions_delta > 0 {
+        tracing::info!(
+            target: "ee::rule::validation_bump",
+            rule_id = %rule_id,
+            trigger = %trigger,
+            dry_run = options.dry_run,
+            validation_passes_before = previous_detail.validation_passes,
+            validation_passes_delta,
+            validation_passes_after = dry_rule.validation_passes,
+            validation_contradictions_before = previous_detail.validation_contradictions,
+            validation_contradictions_delta,
+            validation_contradictions_after = dry_rule.validation_contradictions,
+            "rule validation counters bumped"
+        );
+    }
     if options.dry_run {
         return Ok(rule_mark_report(RuleMarkReportInput {
             prepared: &prepared,
