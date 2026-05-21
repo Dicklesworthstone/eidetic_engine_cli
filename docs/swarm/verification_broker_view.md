@@ -65,3 +65,110 @@ Stale reason codes explain why a prior run cannot be reused directly:
 `--runs-jsonl <path>` (J1 test-event JSONL with artifact-manifest events). When
 neither source is supplied, it returns an `unavailable` broker view instead of
 launching a verifier.
+
+## Operator Workflow
+
+Run broker lookup before spending a fresh RCH slot on common closeout checks:
+
+1. Query the broker with the intended command hash, source fingerprint, command
+   class, and substrate.
+2. If the result is `reusable`, cite the matched run ID, worker, artifact
+   manifest hash, source fingerprint, and command hash in the Beads closeout.
+3. If the result is `known_blocker`, inspect the redacted
+   `firstFailureSummaryRef`, coordinate with the owner or remediation bead, and
+   do not rerun RCH unless source state, command scope, worker topology, or the
+   blocker TTL changed.
+4. If the result is `in_progress`, wait for the owning verifier or coordinate
+   before launching another equivalent command.
+5. If the result is `stale`, rerun only against the current source state and
+   record the new artifact manifest.
+6. If the result is `unavailable` or `incompatible`, import retained J1 logs
+   first when available; otherwise run the narrowest RCH command that can prove
+   the bead.
+
+Suggested commands must prefer reuse or coordination before RCH. The broker does
+not override Beads, BV, Agent Mail, Git reservations, or RCH admission policy.
+
+## Command Examples
+
+All examples below are lookup shapes. They do not run Cargo, launch RCH, mutate
+the ledger, or claim a bead.
+
+```bash
+ee verify broker lookup \
+  --runs-jsonl artifacts/j1.jsonl \
+  --bead-id bd-example \
+  --command-class cargo_check_all_targets \
+  --command-hash blake3:all-targets-command \
+  --source-hash blake3:current-tree \
+  --execution-substrate rch \
+  --env-fingerprint-class class:external_cargo_target \
+  --json
+```
+
+```bash
+ee verify broker lookup \
+  --runs-jsonl artifacts/j1.jsonl \
+  --bead-id bd-example \
+  --command-class cargo_test_focused \
+  --command-hash blake3:focused-unit-command \
+  --normalized-argv-hash blake3:focused-unit-argv \
+  --source-hash blake3:current-tree \
+  --execution-substrate rch \
+  --target-profile debug \
+  --json
+```
+
+```bash
+ee verify broker lookup \
+  --runs-jsonl artifacts/j1.jsonl \
+  --bead-id bd-example \
+  --command-class e2e_harness \
+  --command-hash blake3:e2e-harness-command \
+  --source-hash blake3:current-tree \
+  --execution-substrate rch \
+  --json
+```
+
+```bash
+ee verify broker lookup \
+  --runs-jsonl artifacts/j1.jsonl \
+  --bead-id bd-example \
+  --command-class cargo_clippy_all_targets \
+  --command-hash blake3:clippy-command \
+  --source-hash blake3:current-tree \
+  --execution-substrate rch \
+  --json
+```
+
+For a stale dirty-tree case, keep the old command hash but pass the current
+source fingerprint. A returned `stale` view means the old artifact is useful
+context, not proof for the current checkout.
+
+```bash
+ee verify broker lookup \
+  --runs-jsonl artifacts/j1.jsonl \
+  --bead-id bd-example \
+  --command-class cargo_test_focused \
+  --command-hash blake3:focused-unit-command \
+  --source-hash blake3:dirty-current-tree \
+  --execution-substrate rch \
+  --json
+```
+
+## Failure-Mode Catalog Mapping
+
+The broker uses in-band statuses for most lookup outcomes. Do not invent new
+`degraded[]` codes for statuses that are already represented by
+`ee.verification.broker_view.v1`.
+
+| Operator case | Current representation | Fixture-backed catalog entry |
+| --- | --- | --- |
+| Broker evidence unavailable | `status: "unavailable"`, `compatibilityReasonCodes: ["no_matching_record"]`, `suggestedAction: "import_or_run_verification"` | `verification_evidence_not_found` covers linked-memory `why` evidence gaps; broker lookup itself is in-band. |
+| Artifact manifest stale or missing | `status: "stale"` for source drift; verification posture may report `artifact_manifest_missing` as an evidence-health reason. | Broker stale is covered by `tests/fixtures/golden/verification/broker_views.json.golden`; no top-level degraded fixture is emitted until this reason is promoted to `degraded[]`. |
+| RCH posture unavailable | Swarm brief/RCH posture reports `rch_unavailable`, `rch_remote_required_fallback_prevented`, or `rch_worker_topology_blocked`. | Existing failure-mode fixtures under `tests/fixtures/failure_modes/` cover all three codes. |
+| First-failure redacted | `firstFailureSummaryRef.rawOutputIncluded` is `false`; hashes such as `stderrExcerptHash` and `artifactManifestHash` replace raw logs. | Broker redaction is covered by the broker-view golden and `verification_evidence_schema_unit`; internal compile-attribution fallback is documented by the retired `unattributed_compile_blocker` fixture. |
+
+If a future implementation promotes any broker status or evidence-health reason
+to a top-level response `degraded[]` entry, it must land a
+`tests/fixtures/failure_modes/<code>.json` fixture in the same commit.

@@ -37,6 +37,11 @@ fn broker_view_schema_path() -> PathBuf {
         .join("ee.verification.broker_view.v1.json")
 }
 
+fn read_repo_file(relative: &str) -> Result<String, String> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative);
+    fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))
+}
+
 fn sample_for(status: VerificationStatus) -> Result<VerificationEvidenceRecord, String> {
     sample_verification_evidence_records()
         .into_iter()
@@ -187,6 +192,82 @@ fn verification_broker_view_golden_covers_all_operator_states() -> TestResult {
             .as_ref()
             .is_none_or(|summary| !summary.raw_output_included)
     }));
+    Ok(())
+}
+
+#[test]
+fn verification_broker_operator_docs_cover_closeout_workflow_and_catalog_mapping() -> TestResult {
+    let doc = read_repo_file("docs/swarm/verification_broker_view.md")?;
+    let catalog = read_repo_file("tests/fixtures/failure_modes/README.md")?;
+
+    for marker in [
+        "## Operator Workflow",
+        "## Command Examples",
+        "cargo_check_all_targets",
+        "cargo_test_focused",
+        "e2e_harness",
+        "cargo_clippy_all_targets",
+        "dirty-current-tree",
+        "cite the matched run ID",
+        "do not rerun RCH unless source state",
+        "does not run Cargo",
+        "does not override Beads, BV, Agent Mail, Git reservations, or RCH admission policy",
+    ] {
+        assert!(
+            doc.contains(marker),
+            "verification broker docs missing operator marker `{marker}`"
+        );
+    }
+
+    for marker in [
+        "Broker evidence unavailable",
+        "Artifact manifest stale or missing",
+        "RCH posture unavailable",
+        "First-failure redacted",
+        "status: \"unavailable\"",
+        "verification_evidence_not_found",
+        "artifact_manifest_missing",
+        "rch_unavailable",
+        "rch_remote_required_fallback_prevented",
+        "rch_worker_topology_blocked",
+        "firstFailureSummaryRef.rawOutputIncluded",
+        "unattributed_compile_blocker",
+    ] {
+        assert!(
+            doc.contains(marker),
+            "verification broker docs missing catalog marker `{marker}`"
+        );
+    }
+
+    for marker in [
+        "## Verification broker mapping",
+        "broker evidence unavailable",
+        "artifact manifest stale or missing",
+        "RCH posture unavailable",
+        "first-failure redacted",
+        "Do not add a broker-specific failure-mode fixture unless",
+    ] {
+        assert!(
+            catalog.contains(marker),
+            "failure-mode catalog missing broker mapping marker `{marker}`"
+        );
+    }
+
+    for path in [
+        "tests/fixtures/failure_modes/verification_evidence_not_found.json",
+        "tests/fixtures/failure_modes/rch_unavailable.json",
+        "tests/fixtures/failure_modes/rch_remote_required_fallback_prevented.json",
+        "tests/fixtures/failure_modes/rch_worker_topology_blocked.json",
+        "tests/fixtures/failure_modes/unattributed_compile_blocker.json",
+        "tests/fixtures/golden/verification/broker_views.json.golden",
+    ] {
+        let full_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path);
+        assert!(
+            full_path.exists(),
+            "verification broker docs reference missing fixture `{path}`"
+        );
+    }
+
     Ok(())
 }
 

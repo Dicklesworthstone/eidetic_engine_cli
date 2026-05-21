@@ -300,6 +300,28 @@ in the same commit, keeping the catalog complete by construction.
    to confirm structural validity + cross-reference against `src/`.
 4. Add a row to the table above.
 
+## Verification broker mapping
+
+`ee verify broker lookup` emits the shipped
+`ee.verification.broker_view.v1` payload. Its core operator outcomes are
+in-band statuses, not top-level `degraded[]` entries:
+
+- broker evidence unavailable -> `status: "unavailable"` with
+  `no_matching_record`; the related catalog fixture is
+  `verification_evidence_not_found` for linked-memory `why` evidence gaps.
+- artifact manifest stale or missing -> broker `status: "stale"` for source
+  drift, or verification posture `artifact_manifest_missing` as an
+  evidence-health reason. The shipped broker golden covers this until the reason
+  becomes a top-level degraded code.
+- RCH posture unavailable -> existing fixtures `rch_unavailable`,
+  `rch_remote_required_fallback_prevented`, and `rch_worker_topology_blocked`.
+- first-failure redacted -> `firstFailureSummaryRef.rawOutputIncluded: false`
+  with hashed log/artifact references; the retired `unattributed_compile_blocker`
+  fixture documents the adjacent internal compile-attribution fallback.
+
+Do not add a broker-specific failure-mode fixture unless the implementation
+emits a real response-envelope `degraded[]` code with the same literal in `src/`.
+
 ## What this catalog is NOT
 
 * It is not a replacement for end-to-end exercise of each degraded
