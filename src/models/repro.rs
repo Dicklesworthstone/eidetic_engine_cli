@@ -19,6 +19,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
+fn normalized_repro_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 /// Schema version for repro pack envelope.
 pub const REPRO_PACK_SCHEMA_V1: &str = "ee.repro_pack.v1";
 
@@ -370,7 +374,7 @@ impl FromStr for DependencyCategory {
     type Err = ParseDependencyCategoryError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_repro_token(s).as_str() {
             "crate" => Ok(Self::Crate),
             "system" => Ok(Self::System),
             "tool" => Ok(Self::Tool),
@@ -602,7 +606,7 @@ impl FromStr for ProvenanceEventType {
     type Err = ParseProvenanceEventTypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_repro_token(s).as_str() {
             "capture" => Ok(Self::Capture),
             "build" => Ok(Self::Build),
             "test" => Ok(Self::Test),
@@ -818,6 +822,20 @@ mod tests {
     }
 
     #[test]
+    fn dependency_category_accepts_operator_spelling_variants() -> TestResult {
+        ensure(
+            DependencyCategory::from_str(" System "),
+            Ok(DependencyCategory::System),
+            "trimmed dependency category",
+        )?;
+        ensure(
+            DependencyCategory::from_str("TOOL"),
+            Ok(DependencyCategory::Tool),
+            "uppercase dependency category",
+        )
+    }
+
+    #[test]
     fn repro_provenance_builder() -> TestResult {
         let mut prov = ReproProvenance::new("2026-04-30T12:00:00Z")
             .with_trace_id("trace_00000000000000000000000001")
@@ -876,6 +894,20 @@ mod tests {
     fn provenance_event_type_rejects_invalid() {
         let result = ProvenanceEventType::from_str("invalid");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn provenance_event_type_accepts_operator_spelling_variants() -> TestResult {
+        ensure(
+            ProvenanceEventType::from_str(" Capture "),
+            Ok(ProvenanceEventType::Capture),
+            "trimmed event type",
+        )?;
+        ensure(
+            ProvenanceEventType::from_str("PUBLISH"),
+            Ok(ProvenanceEventType::Publish),
+            "uppercase event type",
+        )
     }
 
     #[test]

@@ -19,6 +19,10 @@
 use std::fmt;
 use std::str::FromStr;
 
+fn normalized_episode_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 /// Schema version for task episode.
 pub const TASK_EPISODE_SCHEMA_V1: &str = "ee.task_episode.v1";
 
@@ -260,7 +264,7 @@ impl FromStr for ActionType {
     type Err = ParseActionTypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_episode_token(s).as_str() {
             "tool_call" => Ok(Self::ToolCall),
             "edit" => Ok(Self::Edit),
             "command" => Ok(Self::Command),
@@ -339,7 +343,7 @@ impl FromStr for EpisodeOutcome {
     type Err = ParseEpisodeOutcomeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_episode_token(s).as_str() {
             "success" => Ok(Self::Success),
             "failure" => Ok(Self::Failure),
             "cancelled" => Ok(Self::Cancelled),
@@ -499,7 +503,7 @@ impl FromStr for InterventionType {
     type Err = ParseInterventionTypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_episode_token(s).as_str() {
             "add_memory" => Ok(Self::AddMemory),
             "remove_memory" => Ok(Self::RemoveMemory),
             "replace_content" => Ok(Self::ReplaceContent),
@@ -641,7 +645,7 @@ impl FromStr for CounterfactualMethod {
     type Err = ParseCounterfactualMethodError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_episode_token(s).as_str() {
             "deterministic_replay" => Ok(Self::DeterministicReplay),
             "heuristic_estimate" => Ok(Self::HeuristicEstimate),
             "llm_reasoning" => Ok(Self::LlmReasoning),
@@ -826,7 +830,7 @@ impl FromStr for RegretCategory {
     type Err = ParseRegretCategoryError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_episode_token(s).as_str() {
             "missing_knowledge" => Ok(Self::MissingKnowledge),
             "stale_information" => Ok(Self::StaleInformation),
             "retrieval_failure" => Ok(Self::RetrievalFailure),
@@ -981,7 +985,7 @@ impl FromStr for CounterfactualClaimType {
     type Err = ParseCounterfactualClaimTypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_episode_token(s).as_str() {
             "would_have_surfaced" => Ok(Self::WouldHaveSurfaced),
             "regret_delta" => Ok(Self::RegretDelta),
             "missed_retrieval" => Ok(Self::MissedRetrieval),
@@ -1603,6 +1607,40 @@ mod tests {
             ensure(parsed, Ok(ct), ct.as_str())?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn episode_enums_accept_operator_spelling_variants() -> TestResult {
+        ensure(
+            ActionType::from_str(" Tool-Call "),
+            Ok(ActionType::ToolCall),
+            "action type alias",
+        )?;
+        ensure(
+            EpisodeOutcome::from_str("FAILURE"),
+            Ok(EpisodeOutcome::Failure),
+            "outcome alias",
+        )?;
+        ensure(
+            InterventionType::from_str("replace-content"),
+            Ok(InterventionType::ReplaceContent),
+            "intervention alias",
+        )?;
+        ensure(
+            CounterfactualMethod::from_str(" Human-Judgment "),
+            Ok(CounterfactualMethod::HumanJudgment),
+            "method alias",
+        )?;
+        ensure(
+            RegretCategory::from_str("retrieval-failure"),
+            Ok(RegretCategory::RetrievalFailure),
+            "regret category alias",
+        )?;
+        ensure(
+            CounterfactualClaimType::from_str("INSUFFICIENT_RANK"),
+            Ok(CounterfactualClaimType::InsufficientRank),
+            "claim type alias",
+        )
     }
 
     #[test]

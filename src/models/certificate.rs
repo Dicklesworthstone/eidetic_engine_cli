@@ -14,6 +14,10 @@
 use std::fmt;
 use std::str::FromStr;
 
+fn normalized_certificate_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 /// Schema version for certificate JSON output.
 pub const CERTIFICATE_SCHEMA_V1: &str = "ee.certificate.v1";
 
@@ -90,7 +94,7 @@ impl FromStr for CertificateKind {
     type Err = ParseCertificateKindError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_certificate_token(input).as_str() {
             "pack" => Ok(Self::Pack),
             "curation" => Ok(Self::Curation),
             "tail_risk" => Ok(Self::TailRisk),
@@ -186,7 +190,7 @@ impl FromStr for CertificateStatus {
     type Err = ParseCertificateStatusError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_certificate_token(input).as_str() {
             "valid" => Ok(Self::Valid),
             "pending" => Ok(Self::Pending),
             "invalid" => Ok(Self::Invalid),
@@ -436,7 +440,7 @@ impl FromStr for ShareableAggregateKind {
     type Err = ParseShareableAggregateKindError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_certificate_token(input).as_str() {
             "count" => Ok(Self::Count),
             "sum" => Ok(Self::Sum),
             "mean" => Ok(Self::Mean),
@@ -737,7 +741,7 @@ impl FromStr for LifecycleEvent {
     type Err = ParseLifecycleEventError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_certificate_token(input).as_str() {
             "import" => Ok(Self::Import),
             "index_publish" => Ok(Self::IndexPublish),
             "hook_execution" => Ok(Self::HookExecution),
@@ -1314,6 +1318,30 @@ mod tests {
         ensure(
             matches!(err, Err(ParseCertificateStatusError { .. })),
             "should reject unknown status",
+        )
+    }
+
+    #[test]
+    fn certificate_enums_accept_operator_spelling_variants() -> TestResult {
+        ensure_equal(
+            &CertificateKind::from_str(" Tail-Risk ").map_err(|e| e.to_string())?,
+            &CertificateKind::TailRisk,
+            "certificate kind alias",
+        )?;
+        ensure_equal(
+            &CertificateStatus::from_str("VALID").map_err(|e| e.to_string())?,
+            &CertificateStatus::Valid,
+            "certificate status alias",
+        )?;
+        ensure_equal(
+            &ShareableAggregateKind::from_str("std-dev").map_err(|e| e.to_string())?,
+            &ShareableAggregateKind::StdDev,
+            "aggregate kind alias",
+        )?;
+        ensure_equal(
+            &LifecycleEvent::from_str(" Hook-Execution ").map_err(|e| e.to_string())?,
+            &LifecycleEvent::HookExecution,
+            "lifecycle event alias",
         )
     }
 
