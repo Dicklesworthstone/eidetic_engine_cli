@@ -10382,7 +10382,7 @@ where
         },
         Some(Command::Note(ref args)) => handle_note(&cli, args, stdout, stderr),
         Some(Command::Remember(ref args)) => match handle_remember(&cli, args) {
-            Ok(result) => write_remember_report(&cli, &result, stdout, true),
+            Ok(result) => write_remember_report(&cli, &result, stdout),
             Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
         },
         Some(Command::Curate(CurateCommand::Candidates(ref args))) => {
@@ -35368,7 +35368,6 @@ fn write_remember_report<W>(
     cli: &Cli,
     result: &RememberMemoryReport,
     stdout: &mut W,
-    include_deprecated_alias: bool,
 ) -> ProcessExitCode
 where
     W: Write,
@@ -35381,35 +35380,8 @@ where
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            let json = if include_deprecated_alias {
-                remember_json_with_deprecated_alias(result.json_output())
-            } else {
-                result.json_output()
-            };
-            write_stdout(stdout, &(json + "\n"))
-        }
+        | output::Renderer::Hook => write_stdout(stdout, &(result.json_output() + "\n")),
     }
-}
-
-fn remember_json_with_deprecated_alias(json: String) -> String {
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&json) else {
-        return json;
-    };
-    let Some(degraded) = value
-        .get_mut("data")
-        .and_then(|data| data.get_mut("degraded"))
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return json;
-    };
-    degraded.push(serde_json::json!({
-        "code": "deprecated_alias",
-        "severity": "info",
-        "message": "`ee remember` is a compatibility alias for the promoted triad command.",
-        "repair": "Use `ee note \"<text>\"` when inference is acceptable; keep `ee remember` for explicit level/kind capture."
-    }));
-    value.to_string()
 }
 
 /// Rule-based level/kind inference used by the `ee note` wrapper.
@@ -35505,7 +35477,7 @@ where
 {
     let remember_args = note_to_remember_args(args);
     match handle_remember(cli, &remember_args) {
-        Ok(result) => write_remember_report(cli, &result, stdout, false),
+        Ok(result) => write_remember_report(cli, &result, stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -52074,26 +52046,71 @@ mod tests {
     }
 
     #[test]
-    fn remember_json_with_deprecated_alias_appends_degradation() -> TestResult {
-        let enriched = super::remember_json_with_deprecated_alias(
-            r#"{"schema":"ee.response.v2","success":true,"data":{"degraded":[]}}"#.to_string(),
-        );
-        let value: serde_json::Value = serde_json::from_str(&enriched)
-            .map_err(|error| format!("remember alias json parses: {error}"))?;
-
-        let code = value
-            .pointer("/data/degraded/0/code")
-            .and_then(serde_json::Value::as_str);
-        let severity = value
-            .pointer("/data/degraded/0/severity")
-            .and_then(serde_json::Value::as_str);
-        let repair = value
-            .pointer("/data/degraded/0/repair")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        ensure_equal(&code, &Some("deprecated_alias"), "remember alias code")?;
-        ensure_equal(&severity, &Some("low"), "remember alias severity")?;
-        ensure_contains(repair, "ee note", "remember alias repair")
+    fn remember_json_output_omits_deprecated_alias_noise() -> TestResult {
+        let cli = Cli::try_parse_from([
+            "ee",
+            "--json",
+            "remember",
+            "Run cargo fmt before release.",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+        ])
+        .map_err(|error| format!("failed to parse remember command: {:?}", error.kind()))?;
+        let report = crate::core::memory::RememberMemoryReport {
+            version: env!("CARGO_PKG_VERSION"),
+            memory_id: MemoryId::from_uuid(uuid::Uuid::from_u128(1)),
+            workspace_id: "wsp_remember_alias_test".to_owned(),
+            workspace_path: PathBuf::from("/tmp/ee-remember-alias-test"),
+            database_path: PathBuf::from("/tmp/ee-remember-alias-test/.ee/ee.db"),
+            content: "Run cargo fmt before release.".to_owned(),
+            workflow_id: None,
+            level: crate::models::MemoryLevel::Procedural,
+            kind: crate::models::MemoryKind::Rule,
+            confidence: 0.9,
+            tags: Vec::new(),
+            source: None,
+            producer: crate::models::ProducerMetadata::manual_remember(None, None),
+            valid_from: None,
+            valid_to: None,
+            validity_status: "unknown".to_owned(),
+            validity_window_kind: "unbounded".to_owned(),
+            dry_run: false,
+            persisted: true,
+            revision_number: 1,
+            revision_group_id: None,
+            audit_id: Some("audit_remember_alias_test".to_owned()),
+            index_job_id: Some("sidx_remember_alias_test".to_owned()),
+            index_status: "indexed".to_owned(),
+            effect_ids: Vec::new(),
+            suggested_links: Vec::new(),
+            suggested_link_status: "no_candidates".to_owned(),
+            suggested_link_degradations: Vec::new(),
+            redaction_status: "checked".to_owned(),
+            policy_bypass: None,
+            auto_links: Vec::new(),
+            auto_link_status: "disabled".to_owned(),
+            auto_link_degradations: Vec::new(),
+            curation_candidate: None,
+            curation_candidate_status: "disabled".to_owned(),
+            curation_candidate_degradations: Vec::new(),
+        };
+        let mut stdout = Vec::new();
+        let exit = super::write_remember_report(&cli, &report, &mut stdout);
+        ensure_equal(&exit, &ProcessExitCode::Success, "remember write exit")?;
+        let value: serde_json::Value = serde_json::from_slice(&stdout)
+            .map_err(|error| format!("remember output parses as JSON: {error}"))?;
+        let degraded = value
+            .pointer("/data/degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("remember output missing degraded array: {value}"))?;
+        ensure(
+            degraded.iter().all(|entry| {
+                entry.get("code").and_then(serde_json::Value::as_str) != Some("deprecated_alias")
+            }),
+            format!("remember output still emits deprecated_alias: {value}"),
+        )
     }
 
     #[test]

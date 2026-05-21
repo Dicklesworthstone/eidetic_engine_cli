@@ -6,17 +6,16 @@
     "epic_letter": "J"
   },
   "surfaces": [
-    "remember",
     "context"
   ],
   "severity": "info",
   "repair_present": true,
   "trigger": {
-    "description": "A promoted triad command keeps the older verbose command available as a compatibility alias and reports the replacement.",
+    "description": "A promoted triad pack command keeps the older context command available as a compatibility alias and reports the replacement.",
     "setup_commands": [
       "ee init --workspace ."
     ],
-    "invocation": "ee remember 'Deprecated alias fixture.' --workspace . --level semantic --kind fact --json"
+    "invocation": "ee context 'Deprecated alias fixture.' --workspace . --json"
   },
   "expected_emission": {
     "code": "deprecated_alias",
@@ -25,6 +24,6 @@
       "compatibility alias",
       "promoted triad command"
     ],
-    "repair_contains": "ee note"
+    "repair_contains": "ee pack"
   }
 }

@@ -2761,11 +2761,11 @@ scripts/e2e_overhaul/failure_modes.sh with EE_FAILURE_MODE_FILTER=degraded_conte
 
 **Severity:** info
 
-**Surfaces:** remember, context
+**Surfaces:** context
 
 **Introduced by:** bd-17c65.10.6 (epic J)
 
-**Trigger.** A promoted triad command keeps the older verbose command available as a compatibility alias and reports the replacement.
+**Trigger.** A promoted triad pack command keeps the older context command available as a compatibility alias and reports the replacement.
 
 **Setup.**
 
@@ -2776,12 +2776,12 @@ ee init --workspace .
 **Invocation.**
 
 ```bash
-ee remember 'Deprecated alias fixture.' --workspace . --level semantic --kind fact --json
+ee context 'Deprecated alias fixture.' --workspace . --json
 ```
 
 **Expected emission.** Message contains: `compatibility alias ... promoted triad command`
 
-**Repair hint.** `ee note`
+**Repair hint.** `ee pack`
 
 **Fixture.** [`tests/fixtures/failure_modes/deprecated_alias.json`](../tests/fixtures/failure_modes/deprecated_alias.json)
 

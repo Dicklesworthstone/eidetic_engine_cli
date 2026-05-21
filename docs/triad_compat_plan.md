@@ -84,7 +84,7 @@ Deprecation window: keep aliases for at least two minor milestones after triad p
 | `ee recorder` | kept | Recorder operations remain explicit. |
 | `ee rationale` | kept | Rationale trace operations remain explicit. |
 | `ee rehearse` | kept | Rehearsal workflows remain explicit. |
-| `ee remember "<text>"` | aliased | Continue current explicit-capture contract. Emit `degraded.deprecated_alias` with replacement `ee note "<text>"`; do not apply inference when invoking `remember`. |
+| `ee remember "<text>"` | kept | Continue current explicit-capture contract without alias degradation; `ee note` remains the inference wrapper. |
 | `ee review` | kept | Session review remains explicit. |
 | `ee rule` | kept | Direct rule management remains explicit. |
 | `ee schema` | kept | Schema listing/export remains explicit. |
@@ -135,7 +135,7 @@ The alias must not change the command's existing semantic contract. For example,
 ## Promotion Checklist
 
 1. Implemented in `bd-17c65.15`: remove the hidden gating behavior from `--experimental-triad`; keep the flag as a no-op compatibility flag for one milestone.
-2. Implemented in `bd-17c65.15`: add `deprecated_alias` emission to `ee context` and `ee remember` JSON responses.
+2. Implemented in `bd-17c65.15`, revised by `bd-2xdom.2`: add `deprecated_alias` emission to `ee context`; keep `ee remember` quiet because canonical docs still present it as explicit capture.
 3. Keep `ee search` and all detail/debug surfaces because they serve workflows outside the common agent path.
 4. Implemented in `bd-17c65.15`: update `ee --help` so `note`, `pack`, and `why` are the first agent-facing commands.
 5. Re-run `scripts/e2e_overhaul/agent_triad.sh`; promotion remains blocked if `pack_hash_parity` or any promote condition fails.
