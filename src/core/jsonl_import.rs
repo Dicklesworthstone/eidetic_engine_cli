@@ -1167,7 +1167,17 @@ fn stable_redacted_memory_id(memory: &ExportMemoryRecord) -> MemoryId {
 }
 
 fn score_or_default(value: Option<f64>, default: f32) -> Result<f32, String> {
-    let score = value.map_or(default, |score| score as f32);
+    let score = match value {
+        Some(score) => {
+            if !score.is_finite() || !(0.0..=1.0).contains(&score) {
+                return Err(format!(
+                    "score is invalid: value {score} is not finite or outside 0.0..=1.0"
+                ));
+            }
+            score as f32
+        }
+        None => default,
+    };
     UnitScore::parse(score)
         .map(UnitScore::into_inner)
         .map_err(|error| format!("score is invalid: {error}"))
@@ -1775,6 +1785,24 @@ mod tests {
                 .any(|issue| issue.code == "invalid_memory_confidence"),
             true,
             "invalid confidence issue",
+        )
+    }
+
+    #[test]
+    fn prepare_memories_rejects_scores_that_round_into_range_after_narrowing() -> TestResult {
+        let input =
+            sample_jsonl().replace(r#""confidence":0.9"#, r#""confidence":1.0000000000000002"#);
+        let parsed = parse_jsonl_source(&input);
+        let prepared = prepare_memories(&parsed, "wsp_01234567890123456789012345");
+
+        ensure(prepared.has_errors(), true, "prepared has errors")?;
+        ensure(
+            prepared
+                .issues
+                .iter()
+                .any(|issue| issue.code == "invalid_memory_confidence"),
+            true,
+            "rounded invalid confidence issue",
         )
     }
 
