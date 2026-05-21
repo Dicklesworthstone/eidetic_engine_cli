@@ -43388,6 +43388,8 @@ impl NormalizedInvocation {
                         }
                     },
                     mesh::MeshCommand::Status(_) => "mesh status".to_string(),
+                    mesh::MeshCommand::Disable(_) => "mesh disable".to_string(),
+                    mesh::MeshCommand::Reenable(_) => "mesh reenable".to_string(),
                     mesh::MeshCommand::Export(_) => "mesh export".to_string(),
                     mesh::MeshCommand::Import(_) => "mesh import".to_string(),
                     mesh::MeshCommand::Sync(_) => "mesh sync".to_string(),
