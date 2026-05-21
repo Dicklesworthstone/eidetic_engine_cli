@@ -3630,6 +3630,148 @@ mod tests {
     }
 
     #[test]
+    fn harmful_burst_quarantine_row_preserves_observed_payload() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-quarantine-payload")?;
+        let first = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: None,
+            signal: "harmful".to_string(),
+            weight: Some(1.0),
+            source_type: "automated_check".to_string(),
+            source_id: Some("payload-source".to_string()),
+            reason: Some("First event establishes the burst bucket.".to_string()),
+            evidence_json: None,
+            session_id: None,
+            event_id: Some("fb_00000000000000000000000881".to_string()),
+            actor: Some("test".to_string()),
+            agent_name: None,
+            dry_run: false,
+            harmful_per_source_per_hour: 1,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            &first.status,
+            &OutcomeRecordStatus::Recorded,
+            "first event records",
+        )?;
+
+        let proposed_event_id = "fb_00000000000000000000000882".to_string();
+        let quarantined = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: None,
+            signal: "harmful".to_string(),
+            weight: Some(4.25),
+            source_type: "automated_check".to_string(),
+            source_id: Some("payload-source".to_string()),
+            reason: Some("Observed payload must remain reviewable.".to_string()),
+            evidence_json: Some(r#"{"kind":"harmful-burst","case":"payload"}"#.to_string()),
+            session_id: Some(OUTCOME_TEST_SESSION_ID.to_string()),
+            event_id: Some(proposed_event_id.clone()),
+            actor: Some("test".to_string()),
+            agent_name: None,
+            dry_run: false,
+            harmful_per_source_per_hour: 1,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            &quarantined.status,
+            &OutcomeRecordStatus::Quarantined,
+            "second event quarantines",
+        )?;
+
+        let quarantine_id = quarantined
+            .quarantine
+            .as_ref()
+            .and_then(|quarantine| quarantine.id.clone())
+            .ok_or_else(|| "quarantine id missing from report".to_string())?;
+        let degraded = quarantined
+            .degraded
+            .first()
+            .ok_or_else(|| "harmful burst degradation missing".to_string())?;
+        ensure_equal(
+            &degraded.code,
+            &HARMFUL_BURST_QUARANTINE_CODE.to_string(),
+            "degraded code",
+        )?;
+        let details = degraded
+            .details
+            .as_ref()
+            .ok_or_else(|| "degraded details missing".to_string())?;
+        ensure_equal(
+            &details["quarantinedCandidateIds"],
+            &serde_json::json!([quarantine_id.clone()]),
+            "degraded details link to the quarantine row",
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let rows = connection
+            .list_feedback_quarantine(OUTCOME_TEST_WORKSPACE_ID, Some("pending"))
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&rows.len(), &1_usize, "one pending quarantine row")?;
+        let row = rows
+            .first()
+            .ok_or_else(|| "pending quarantine row missing after length check".to_string())?;
+        ensure_equal(&row.id, &quarantine_id, "quarantine row id")?;
+        ensure_equal(
+            &row.source_id,
+            &"payload-source".to_string(),
+            "source id is preserved",
+        )?;
+        ensure_equal(
+            &row.target_id,
+            &OUTCOME_TEST_MEMORY_ID.to_string(),
+            "target id is preserved",
+        )?;
+        ensure_equal(&row.signal, &"harmful".to_string(), "signal is preserved")?;
+        ensure((row.weight - 4.25).abs() < 0.001, "weight is preserved")?;
+        ensure_equal(
+            &row.source_type,
+            &"automated_check".to_string(),
+            "source type is preserved",
+        )?;
+        ensure_equal(
+            &row.proposed_event_id,
+            &Some(proposed_event_id),
+            "proposed event id is preserved",
+        )?;
+        ensure(
+            row.reason.contains("observed 2 harmful events")
+                && row.reason.contains("limit 1")
+                && row.reason.contains("payload-source"),
+            "quarantine reason carries observed rate, cap, and source",
+        )?;
+        ensure_equal(
+            &row.event_reason,
+            &Some("Observed payload must remain reviewable.".to_string()),
+            "original event reason is preserved",
+        )?;
+        ensure_equal(
+            &row.evidence_json,
+            &Some(r#"{"kind":"harmful-burst","case":"payload"}"#.to_string()),
+            "evidence json is preserved",
+        )?;
+        ensure_equal(
+            &row.session_id,
+            &Some(OUTCOME_TEST_SESSION_ID.to_string()),
+            "session id is preserved",
+        )?;
+        ensure_equal(
+            &row.raw_event_hash.starts_with("blake3:"),
+            &true,
+            "raw event hash is stored",
+        )?;
+        ensure_equal(&row.status, &"pending".to_string(), "row status")
+    }
+
+    #[test]
     fn harmful_burst_quarantine_is_source_scoped_and_preserves_target_trust() -> TestResult {
         let (_dir, database) = seed_outcome_database("ee-outcome-source-scoped-quarantine")?;
         let first_source_a = record_outcome(&OutcomeRecordOptions {
