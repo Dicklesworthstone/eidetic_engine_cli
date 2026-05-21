@@ -116,7 +116,7 @@ impl BudgetDelta {
     /// considered and no change is needed.
     #[must_use]
     pub fn would_change(&self) -> bool {
-        self.recommended_profile != self.configured_profile
+        self.effective_profile != self.configured_profile
     }
 }
 
@@ -252,7 +252,7 @@ fn build_budget_delta(
     let configured_value = surface_value(surface, configured_profile);
     let recommended_value = surface_value(surface, recommended_profile);
     let effective_value = surface_value(surface, effective_profile);
-    let reason_code = match recommended_profile.cmp(&configured_profile) {
+    let reason_code = match effective_profile.cmp(&configured_profile) {
         Ordering::Equal => reason_code::NO_CHANGE,
         Ordering::Greater => reason_code::ELEVATE_TO_RECOMMENDED,
         Ordering::Less => reason_code::LOWER_TO_RECOMMENDED,
@@ -428,6 +428,29 @@ mod tests {
         for delta in &recommendation.budget_deltas {
             assert_eq!(delta.effective_profile, OperatingProfile::Workstation);
             assert_ne!(delta.recommended_value, delta.effective_value);
+        }
+    }
+
+    #[test]
+    fn no_change_when_profile_ceiling_matches_configured_profile() {
+        let report = host_class_report(
+            HostClass::Local256Gb,
+            OperatingProfile::Workstation,
+            HostCalibrationFreshness::Fresh,
+        );
+        let recommendation = recommend_budget_deltas(&report, OperatingProfile::Workstation);
+
+        assert_eq!(recommendation.recommended_profile, OperatingProfile::Swarm);
+        assert_eq!(
+            recommendation.effective_profile,
+            OperatingProfile::Workstation
+        );
+        assert!(!recommendation.any_changes_recommended());
+        for delta in &recommendation.budget_deltas {
+            assert_eq!(delta.configured_profile, OperatingProfile::Workstation);
+            assert_eq!(delta.effective_profile, OperatingProfile::Workstation);
+            assert_eq!(delta.reason_code, reason_code::NO_CHANGE);
+            assert!(!delta.would_change());
         }
     }
 
