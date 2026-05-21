@@ -476,6 +476,104 @@ fn graph_ppr_deliberate_regression_is_rejected_by_compare_only_gate() -> TestRes
 }
 
 #[test]
+fn graph_full_stack_benchmark_covers_cross_feature_perf_gate() -> TestResult {
+    let cargo_toml = fs::read_to_string("Cargo.toml")
+        .map_err(|error| format!("failed to read Cargo.toml: {error}"))?;
+    let bench_script = fs::read_to_string("scripts/bench.sh")
+        .map_err(|error| format!("failed to read scripts/bench.sh: {error}"))?;
+    let bench_source = fs::read_to_string("benches/graph_full_stack.rs")
+        .map_err(|error| format!("failed to read benches/graph_full_stack.rs: {error}"))?;
+    let budgets = budgets_manifest()?;
+    let graph_baseline = fs::read_to_string(GRAPH_BASELINE_PATH)
+        .map_err(|error| format!("failed to read `{GRAPH_BASELINE_PATH}`: {error}"))?;
+    let graph_baseline: Value = serde_json::from_str(&graph_baseline)
+        .map_err(|error| format!("invalid graph baseline JSON: {error}"))?;
+
+    if !cargo_toml.contains("name = \"graph_full_stack\"") {
+        return Err("Cargo.toml missing graph_full_stack bench target".to_owned());
+    }
+    if !bench_script.contains("graph_full_stack") {
+        return Err("scripts/bench.sh missing graph_full_stack profile entry".to_owned());
+    }
+
+    for expected in [
+        "const WORKLOAD_QUERY_COUNT: usize = 100",
+        "const CACHE_ON_P50_BUDGET_MS: f64 = 100.0",
+        "const CACHE_ON_P99_BUDGET_MS: f64 = 500.0",
+        "const CACHE_OFF_P50_BUDGET_MS: f64 = 350.0",
+        "const CACHE_OFF_P99_BUDGET_MS: f64 = 1_000.0",
+        "const DELIBERATE_REGRESSION_MS: f64 = 100.0",
+        "const ALL_GRAPH_FEATURES",
+        "fn assert_workload_budget",
+        "fn deliberate_regression_is_rejected",
+        "compare_only_mode_enabled",
+    ] {
+        if !bench_source.contains(expected) {
+            return Err(format!("benches/graph_full_stack.rs missing `{expected}`"));
+        }
+    }
+
+    for feature in [
+        "ppr",
+        "pack_dna",
+        "causal_explain",
+        "structural_health",
+        "structural_decay",
+        "proximity",
+        "revision_dominance",
+        "skyline",
+        "load_bearing",
+        "hits_profiles",
+    ] {
+        if !bench_source.contains(feature) {
+            return Err(format!(
+                "benches/graph_full_stack.rs missing graph feature `{feature}`"
+            ));
+        }
+    }
+
+    let operations = budgets
+        .get("operations")
+        .ok_or_else(|| "missing TOML field `operations`".to_owned())?
+        .as_table()
+        .ok_or_else(|| "`operations` must be a TOML table".to_owned())?;
+    for operation in [
+        "ee_graph_full_stack_cache_on",
+        "ee_graph_full_stack_cache_off",
+    ] {
+        if !operations.contains_key(operation) {
+            return Err(format!("benches/budgets.toml missing `{operation}`"));
+        }
+    }
+
+    let baseline = graph_baseline
+        .pointer("/operations/graph_full_stack")
+        .ok_or_else(|| "graph baseline missing operations.graph_full_stack".to_owned())?;
+    if baseline.get("memory_count").and_then(Value::as_u64) != Some(1_000) {
+        return Err("graph_full_stack baseline must pin memory_count=1000".to_owned());
+    }
+    if baseline.get("query_count").and_then(Value::as_u64) != Some(100) {
+        return Err("graph_full_stack baseline must pin query_count=100".to_owned());
+    }
+    if baseline.get("features_enabled").and_then(Value::as_u64) != Some(10) {
+        return Err("graph_full_stack baseline must pin all 10 graph features".to_owned());
+    }
+    for pointer in [
+        "/operations/graph_full_stack/cache_on/p50_ms",
+        "/operations/graph_full_stack/cache_on/p99_ms",
+        "/operations/graph_full_stack/cache_off/p50_ms",
+        "/operations/graph_full_stack/cache_off/p99_ms",
+        "/operations/graph_full_stack/deliberate_regression_ms",
+    ] {
+        if graph_baseline.pointer(pointer).is_none() {
+            return Err(format!("graph_full_stack baseline missing `{pointer}`"));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn benchmark_budget_profiles_are_explicit_and_advisory() -> TestResult {
     let manifest = budgets_manifest()?;
     let profiles = manifest

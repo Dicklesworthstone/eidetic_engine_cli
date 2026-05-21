@@ -47,6 +47,14 @@
         "100_memories": { "p50_ms": 25.0, "p99_ms": 100.0 },
         "1000_memories": { "p50_ms": 100.0, "p99_ms": 400.0 }
       }
+    },
+    "graph_full_stack": {
+      "memory_count": 1000,
+      "query_count": 100,
+      "features_enabled": 10,
+      "cache_on": { "p50_ms": 100.0, "p99_ms": 500.0 },
+      "cache_off": { "p50_ms": 350.0, "p99_ms": 1000.0 },
+      "deliberate_regression_ms": 100.0
     }
   }
 }
