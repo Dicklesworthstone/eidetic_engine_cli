@@ -90,6 +90,8 @@ use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 static PACK_HASH_LOG_RUN_INDEX: AtomicU64 = AtomicU64::new(0);
 static PACK_SLOT_PROCESS_GATES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
+static CONTEXT_PROXIMITY_TREE_CACHE: OnceLock<Mutex<Option<CachedContextProximityTree>>> =
+    OnceLock::new();
 const PACK_SLOT_RETRY_AFTER_MS: u64 = 250;
 #[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
 pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V1: &str = "ee.pack.l2_cache_key.v1";
@@ -97,6 +99,12 @@ const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V1: &str = "ee.pack.l2_context_response.v1
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
 const CONTEXT_CHANGED_SYMBOL_BOOST: f32 = 0.05;
 const CONTEXT_CHANGED_SYMBOL_ADJACENCY_LINE_WINDOW: u32 = 20;
+
+#[derive(Clone, Debug)]
+struct CachedContextProximityTree {
+    generation: u64,
+    tree: crate::graph::gomory_hu::GomoryHuTree,
+}
 
 #[derive(Debug)]
 struct PackSlotGuard {
@@ -5073,9 +5081,9 @@ fn apply_proximity_to_seed_scores(
         return ProximityToSeedMetrics::default();
     }
 
-    let graph = match context_proximity_graph(connection) {
-        Ok(graph) => graph,
-        Err(error) => {
+    let tree = match context_proximity_tree(connection) {
+        Ok(tree) => tree,
+        Err(ContextProximityTreeError::Graph(error)) => {
             push_degradation(
                 degraded,
                 "context_graph_snapshot_unavailable",
@@ -5087,11 +5095,7 @@ fn apply_proximity_to_seed_scores(
             );
             return ProximityToSeedMetrics::default();
         }
-    };
-
-    let tree = match crate::graph::gomory_hu::build_gomory_hu_tree(&graph) {
-        Ok(tree) => tree,
-        Err(error) => {
+        Err(ContextProximityTreeError::GomoryHu(error)) => {
             push_degradation(
                 degraded,
                 "context_graph_snapshot_unavailable",
@@ -5593,6 +5597,64 @@ fn push_proximity_feature_disabled_degradation(degraded: &mut Vec<ContextRespons
             "ee config set {GRAPH_FEATURE_PROXIMITY_ENABLED_KEY} true"
         )),
     );
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ContextProximityTreeError {
+    Graph(String),
+    GomoryHu(String),
+}
+
+fn context_proximity_tree(
+    connection: &DbConnection,
+) -> Result<crate::graph::gomory_hu::GomoryHuTree, ContextProximityTreeError> {
+    let generation = context_proximity_graph_generation(connection).ok();
+    if let Some(generation) = generation {
+        if let Some(tree) = cached_context_proximity_tree(generation) {
+            return Ok(tree);
+        }
+    }
+
+    let graph = context_proximity_graph(connection).map_err(ContextProximityTreeError::Graph)?;
+    let tree = crate::graph::gomory_hu::build_gomory_hu_tree(&graph)
+        .map_err(|error| ContextProximityTreeError::GomoryHu(error.to_string()))?;
+
+    if let Some(generation) = generation {
+        store_context_proximity_tree(generation, tree.clone());
+    }
+
+    Ok(tree)
+}
+
+fn cached_context_proximity_tree(generation: u64) -> Option<crate::graph::gomory_hu::GomoryHuTree> {
+    let guard = context_proximity_tree_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard
+        .as_ref()
+        .filter(|cached| cached.generation == generation)
+        .map(|cached| cached.tree.clone())
+}
+
+fn store_context_proximity_tree(generation: u64, tree: crate::graph::gomory_hu::GomoryHuTree) {
+    let mut guard = context_proximity_tree_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *guard = Some(CachedContextProximityTree { generation, tree });
+}
+
+fn context_proximity_tree_cache() -> &'static Mutex<Option<CachedContextProximityTree>> {
+    CONTEXT_PROXIMITY_TREE_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn context_proximity_graph_generation(connection: &DbConnection) -> Result<u64, String> {
+    context_pack_l2_query_generation(
+        connection,
+        "SELECT \
+            COUNT(*), \
+            COALESCE(MAX(created_at), '') \
+         FROM memory_links",
+    )
 }
 
 fn context_proximity_graph(connection: &DbConnection) -> Result<fnx_classes::Graph, String> {
