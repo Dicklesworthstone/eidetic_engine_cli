@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "pack_budget_too_small",
+  "introduced_by": {
+    "bead": "bd-3qs2i.2.1",
+    "epic_letter": "F2"
+  },
+  "surfaces": [
+    "context",
+    "pack"
+  ],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "A context request finds matching candidates, but the requested token budget is too small to fit even one candidate into the assembled pack.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Release ritual with enough supporting detail to exceed a one-token context pack budget.' --workspace . --level semantic --kind fact --json"
+    ],
+    "invocation": "ee context 'release ritual' --workspace . --max-tokens 1 --json"
+  },
+  "expected_emission": {
+    "code": "pack_budget_too_small",
+    "severity": "warning",
+    "message_contains": [
+      "Pack budget could not fit any candidate",
+      "Items=0",
+      "pool="
+    ]
+  }
+}

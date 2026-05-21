@@ -121,6 +121,7 @@ in the same commit, keeping the catalog complete by construction.
 | `conflict_trust_mismatch` | context | high | bd-1zb7k.9 (S8) |
 | `coordination_source_stale` | context, pack | low | bd-1zb7k.4 (S3) |
 | `coordination_source_unavailable` | context, pack | medium | bd-1zb7k.4 (S3) |
+| `pack_budget_too_small` | context, pack | warning | bd-3qs2i.2.1 (F2) |
 | `qos_registry_unavailable` | qos registry, status, doctor, swarm brief | medium | bd-1zb7k.20.2 |
 | `cache_hotset_stale` | cache hotset | medium | bd-1zb7k.10.2 (O2) |
 | `derived_asset_hash_mismatch` | support bundle | high | bd-1nxz4.2 |
