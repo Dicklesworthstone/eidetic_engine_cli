@@ -2197,7 +2197,7 @@ mod tests {
                         thread::sleep(Duration::from_millis(25));
                         Ok(42_u64)
                     },
-                    |result| {
+                    |result, _elapsed_ms| {
                         *stored
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(*result);

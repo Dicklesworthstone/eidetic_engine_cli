@@ -65,6 +65,7 @@ pub struct AuditTimelineOptions {
     pub database_path: Option<PathBuf>,
     pub since: Option<String>,
     pub surface: Option<String>,
+    pub action: Option<String>,
     pub limit: u32,
     pub cursor: Option<String>,
 }
@@ -108,6 +109,7 @@ pub struct ShardedAuditTimelineOptions {
     pub shards: Vec<AuditShardEntries>,
     pub since: Option<String>,
     pub surface: Option<String>,
+    pub action: Option<String>,
     pub limit: u32,
     pub cursor: Option<String>,
 }
@@ -258,7 +260,13 @@ pub fn list_timeline(options: &AuditTimelineOptions) -> Result<AuditTimelineRepo
     let entries = load_entries(&options.workspace, options.database_path.as_deref())?;
     let since = parse_optional_instant(options.since.as_deref(), "since")?;
     let offset = parse_cursor(options.cursor.as_deref())?;
-    let filtered = filter_entries(entries, since, None, options.surface.as_deref())?;
+    let filtered = filter_entries(
+        entries,
+        since,
+        None,
+        options.surface.as_deref(),
+        options.action.as_deref(),
+    )?;
     let total_count = u32::try_from(filtered.len()).unwrap_or(u32::MAX);
     let limit = usize::try_from(options.limit.max(1)).unwrap_or(usize::MAX);
     let page: Vec<_> = filtered.into_iter().skip(offset).take(limit).collect();
@@ -285,7 +293,13 @@ pub fn list_sharded_timeline(
     let offset = parse_cursor(options.cursor.as_deref())?;
     let mut entries = sharded_entries(options.shards.as_slice());
     sort_sharded_entries_chronological(&mut entries);
-    let filtered = filter_sharded_entries(entries, since, None, options.surface.as_deref())?;
+    let filtered = filter_sharded_entries(
+        entries,
+        since,
+        None,
+        options.surface.as_deref(),
+        options.action.as_deref(),
+    )?;
     let total_count = u32::try_from(filtered.len()).unwrap_or(u32::MAX);
     let limit = usize::try_from(options.limit.max(1)).unwrap_or(usize::MAX);
     let page: Vec<_> = filtered.into_iter().skip(offset).take(limit).collect();
@@ -352,7 +366,7 @@ pub fn show_diff(options: &AuditDiffOptions) -> Result<AuditDiffReport, DomainEr
     }
 
     let entries = load_entries(&options.workspace, options.database_path.as_deref())?;
-    let filtered = filter_entries(entries, Some(from), Some(to), None)?;
+    let filtered = filter_entries(entries, Some(from), Some(to), None, None)?;
     let row_count = u32::try_from(filtered.len()).unwrap_or(u32::MAX);
 
     Ok(AuditDiffReport {
@@ -483,7 +497,7 @@ fn verify_entries_with_shard(
 ) -> Result<AuditVerifyReport, DomainError> {
     let mut ordered = entries.to_vec();
     sort_entries_chronological(&mut ordered);
-    let filtered = filter_entries(ordered, since, until, None)?;
+    let filtered = filter_entries(ordered, since, until, None, None)?;
     let mut expected_prev_hash = if since.is_some() {
         filtered
             .first()
@@ -594,8 +608,10 @@ fn filter_entries(
     since: Option<DateTime<Utc>>,
     until: Option<DateTime<Utc>>,
     surface: Option<&str>,
+    action: Option<&str>,
 ) -> Result<Vec<StoredAuditEntry>, DomainError> {
     let surface = surface.map(str::trim).filter(|value| !value.is_empty());
+    let action = action.map(str::trim).filter(|value| !value.is_empty());
     let mut filtered = Vec::new();
 
     for entry in entries {
@@ -609,10 +625,23 @@ fn filter_entries(
         if surface.is_some_and(|wanted| entry.surface != wanted) {
             continue;
         }
+        if action.is_some_and(|wanted| !audit_action_filter_matches(&entry.action, wanted)) {
+            continue;
+        }
         filtered.push(entry);
     }
 
     Ok(filtered)
+}
+
+fn audit_action_filter_matches(action: &str, wanted: &str) -> bool {
+    if wanted == "*" {
+        return true;
+    }
+    if let Some(prefix) = wanted.strip_suffix('*') {
+        return action.starts_with(prefix);
+    }
+    action == wanted
 }
 
 #[derive(Clone, Debug)]
@@ -643,8 +672,10 @@ fn filter_sharded_entries(
     since: Option<DateTime<Utc>>,
     until: Option<DateTime<Utc>>,
     surface: Option<&str>,
+    action: Option<&str>,
 ) -> Result<Vec<ShardedStoredAuditEntry>, DomainError> {
     let surface = surface.map(str::trim).filter(|value| !value.is_empty());
+    let action = action.map(str::trim).filter(|value| !value.is_empty());
     let mut filtered = Vec::new();
 
     for entry in entries {
@@ -656,6 +687,9 @@ fn filter_sharded_entries(
             continue;
         }
         if surface.is_some_and(|wanted| entry.entry.surface != wanted) {
+            continue;
+        }
+        if action.is_some_and(|wanted| !audit_action_filter_matches(&entry.entry.action, wanted)) {
             continue;
         }
         filtered.push(entry);
@@ -1225,6 +1259,40 @@ mod tests {
         assert_eq!(report.entries.len(), 1);
         assert_eq!(report.entries[0].surface, "memory");
         assert_eq!(report.entries[0].actor.as_deref(), Some("agent-a"));
+        assert_eq!(report.pagination.total_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn timeline_filters_by_action_namespace_glob() -> TestResult {
+        let workspace = seeded_workspace("action-glob")?;
+        let database = workspace.join(".ee").join("ee.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        seed_entry(
+            &connection,
+            "audit_00000000000000000000000003",
+            "agent-g",
+            "graph.algorithm.result_cached",
+            "graph_algorithm_witness",
+            "witness_000000000000000000000001",
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = list_timeline(&AuditTimelineOptions {
+            workspace,
+            action: Some("graph.*".to_owned()),
+            limit: 20,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(
+            report.entries[0].mutation_kind,
+            "graph.algorithm.result_cached"
+        );
+        assert_eq!(report.entries[0].surface, "graph_algorithm_witness");
+        assert_eq!(report.entries[0].actor.as_deref(), Some("agent-g"));
         assert_eq!(report.pagination.total_count, 1);
         Ok(())
     }

@@ -4302,6 +4302,10 @@ pub struct AuditTimelineArgs {
     #[arg(long, value_name = "NAME")]
     pub surface: Option<String>,
 
+    /// Only include rows whose audit action matches this exact name or namespace glob.
+    #[arg(long, value_name = "ACTION")]
+    pub action: Option<String>,
+
     /// Maximum entries to show.
     #[arg(long, short = 'n', default_value_t = 20)]
     pub limit: u32,
@@ -16325,6 +16329,7 @@ where
         database_path: args.database.clone(),
         since: args.since.clone(),
         surface: args.surface.clone(),
+        action: args.action.clone(),
         limit: args.limit,
         cursor: args.cursor.clone(),
     };
