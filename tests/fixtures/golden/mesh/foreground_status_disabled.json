@@ -52,9 +52,21 @@
     },
     "discovery": {
       "schema": "ee.tailscale.autodiscovery.v1",
-      "status": "not_refreshed",
-      "eeCapablePeerCount": 0,
-      "skippedReason": "mesh_status_is_read_only"
+      "tailnetId": null,
+      "tailnetDisplayName": null,
+      "selfNodeKey": null,
+      "probedPeerCount": 0,
+      "eligiblePeerCount": 0,
+      "eeCapablePeers": [],
+      "skippedPeers": [],
+      "degraded": [
+        {
+          "code": "tailscale_peer_list_unavailable",
+          "severity": "warning",
+          "message": "Tailscale peer list was unavailable because the local probe did not run.",
+          "repair": "Enable mesh probing with EE_MESH_ENABLED=1 and re-run `ee mesh status --json`."
+        }
+      ]
     },
     "discoveryCache": {
       "schema": "ee.mesh.discovery_cache.status.v1",

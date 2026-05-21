@@ -22,6 +22,10 @@ use crate::mesh::repair_action_graph::{
     RepairAction, RepairActionGraph, build_repair_action_graph,
 };
 use crate::mesh::sync::{SelectiveSyncConfig, SelectiveSyncStatusSummary};
+use crate::mesh::tailscale_autodiscovery::{
+    TAILSCALE_AUTODISCOVERY_SCHEMA_V1, TAILSCALE_PEER_LIST_UNAVAILABLE_CODE,
+    TailscaleAutodiscoveryDegradation, TailscaleAutodiscoveryReport,
+};
 use crate::policy::{
     MeshExportPolicyAttestation, MeshExportSecretScanReport, MeshExportSecretScanSubject,
     scan_mesh_export_subjects,
@@ -293,7 +297,7 @@ pub struct MeshAutoEnrollmentStatus {
     pub read_only: bool,
     pub tailscale: MeshAutoTailscaleStatus,
     pub hello_responder: MeshAutoHelloResponderStatus,
-    pub discovery: MeshAutoDiscoveryStatus,
+    pub discovery: TailscaleAutodiscoveryReport,
     pub discovery_cache: MeshAutoDiscoveryCacheStatus,
     pub materialized: Option<MeshAutoMaterializedStatus>,
     pub peer_state_breakdown: MeshAutoPeerStateBreakdown,
@@ -321,15 +325,6 @@ pub struct MeshAutoHelloResponderStatus {
     pub status: String,
     pub running: Option<bool>,
     pub listen_addr: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MeshAutoDiscoveryStatus {
-    pub schema: &'static str,
-    pub status: String,
-    pub ee_capable_peer_count: u32,
-    pub skipped_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -981,12 +976,7 @@ fn auto_enrollment_status_for_snapshot(
             running: signals.hello_responder_running,
             listen_addr: None,
         },
-        discovery: MeshAutoDiscoveryStatus {
-            schema: "ee.tailscale.autodiscovery.v1",
-            status: "not_refreshed".to_owned(),
-            ee_capable_peer_count: signals.discovered_peer_count,
-            skipped_reason: Some("mesh_status_is_read_only".to_owned()),
-        },
+        discovery: auto_status_discovery_report(&signals),
         discovery_cache: MeshAutoDiscoveryCacheStatus {
             schema: "ee.mesh.discovery_cache.status.v1",
             status: "not_loaded".to_owned(),
@@ -1020,6 +1010,29 @@ fn auto_enrollment_status_for_snapshot(
             last_reconciliation_at: None,
         },
         degraded,
+    }
+}
+
+fn auto_status_discovery_report(signals: &MeshAutoStatusSignals) -> TailscaleAutodiscoveryReport {
+    TailscaleAutodiscoveryReport {
+        schema: TAILSCALE_AUTODISCOVERY_SCHEMA_V1,
+        tailnet_id: None,
+        tailnet_display_name: None,
+        self_node_key: None,
+        probed_peer_count: 0,
+        eligible_peer_count: 0,
+        ee_capable_peers: Vec::new(),
+        skipped_peers: Vec::new(),
+        degraded: vec![TailscaleAutodiscoveryDegradation::new(
+            TAILSCALE_PEER_LIST_UNAVAILABLE_CODE,
+            "warning",
+            if signals.tailscale_authenticated.is_none() {
+                "Tailscale peer list was unavailable because the local probe did not run."
+            } else {
+                "Tailscale peer autodiscovery was skipped from the read-only status path."
+            },
+            "Enable mesh probing with EE_MESH_ENABLED=1 and re-run `ee mesh status --json`.",
+        )],
     }
 }
 
@@ -1693,11 +1706,11 @@ pub fn foreground_degradations(
 mod tests {
     use super::{
         MESH_AUTO_STATUS_SCHEMA_V1, MESH_EXPORT_ARTIFACT_SCHEMA_V1,
-        MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE,
-        MESH_SYNC_SUPERVISOR_BUDGET_EXHAUSTED_CODE, MESH_WORKSPACE_UNINITIALIZED_CODE,
-        MeshAutoStatusSignals, MeshCliDegradation, MeshForegroundSnapshot, MeshPeerRow,
-        MeshStorageCounts, MeshSyncSupervisorOptions, REPAIR_ACTION_GRAPH_SCHEMA_V1,
-        auto_enrollment_status_for_snapshot, run_mesh_sync_supervisor_supervised,
+        MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE, MESH_SYNC_SUPERVISOR_BUDGET_EXHAUSTED_CODE,
+        MESH_WORKSPACE_UNINITIALIZED_CODE, MeshAutoStatusSignals, MeshCliDegradation,
+        MeshForegroundSnapshot, MeshPeerRow, MeshStorageCounts, MeshSyncSupervisorOptions,
+        REPAIR_ACTION_GRAPH_SCHEMA_V1, auto_enrollment_status_for_snapshot,
+        run_mesh_sync_supervisor_supervised,
     };
     use asupersync::runtime::JoinError;
     use asupersync::{Budget, CancelReason, Cx, LabConfig, LabRuntime, Outcome};
@@ -2066,5 +2079,4 @@ mod tests {
             policy_summary_json: None,
         }
     }
-
 }

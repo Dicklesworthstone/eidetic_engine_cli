@@ -120,6 +120,27 @@
         }
       }
     },
+    "materialized": {
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/materialized" }
+      ]
+    },
+    "peerStateBreakdown": {
+      "$ref": "#/$defs/peerStateBreakdown"
+    },
+    "drift": {
+      "$ref": "#/$defs/drift"
+    },
+    "stewardPosture": {
+      "$ref": "#/$defs/stewardPosture"
+    },
+    "degraded": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/degradation" }
+    }
+  },
+  "$defs": {
     "tailscaleAutodiscovery": {
       "type": "object",
       "required": [
@@ -222,27 +243,6 @@
         }
       }
     },
-    "materialized": {
-      "anyOf": [
-        { "type": "null" },
-        { "$ref": "#/$defs/materialized" }
-      ]
-    },
-    "peerStateBreakdown": {
-      "$ref": "#/$defs/peerStateBreakdown"
-    },
-    "drift": {
-      "$ref": "#/$defs/drift"
-    },
-    "stewardPosture": {
-      "$ref": "#/$defs/stewardPosture"
-    },
-    "degraded": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/degradation" }
-    }
-  },
-  "$defs": {
     "materialized": {
       "type": "object",
       "required": [

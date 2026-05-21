@@ -85,6 +85,18 @@ const DRIFT_SEVERITIES: &[&str] = &["none", "info", "warning", "medium"];
 
 const PEER_STATE_BREAKDOWN_FIELDS: &[&str] = &["active", "softStale", "hardStale", "denylisted"];
 
+const TAILSCALE_AUTODISCOVERY_FIELDS: &[&str] = &[
+    "schema",
+    "tailnetId",
+    "tailnetDisplayName",
+    "selfNodeKey",
+    "probedPeerCount",
+    "eligiblePeerCount",
+    "eeCapablePeers",
+    "skippedPeers",
+    "degraded",
+];
+
 const DRIFT_REQUIRED_FIELDS: &[&str] = &[
     "newPeersAvailable",
     "newPeerCount",
@@ -123,6 +135,13 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
 
 fn load_schema() -> Result<Value, String> {
     let path = repo_root().join(SCHEMA_PATH);
+    let text =
+        fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    serde_json::from_str(&text).map_err(|error| format!("parse {}: {error}", path.display()))
+}
+
+fn load_json(path: &str) -> Result<Value, String> {
+    let path = repo_root().join(path);
     let text =
         fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
     serde_json::from_str(&text).map_err(|error| format!("parse {}: {error}", path.display()))
@@ -228,6 +247,68 @@ fn auto_status_hello_responder_status_enum_matches_srr6_46_12() -> TestResult {
         "/properties/helloResponder/properties/status/enum",
         HELLO_RESPONDER_STATUSES,
         "helloResponder.status enum",
+    )
+}
+
+#[test]
+fn auto_status_discovery_ref_targets_tailscale_autodiscovery_def() -> TestResult {
+    let schema = load_schema()?;
+    ensure(
+        schema["properties"]["discovery"]["$ref"] == "#/$defs/tailscaleAutodiscovery",
+        "properties.discovery must point at the tailscaleAutodiscovery definition",
+    )?;
+    ensure(
+        schema
+            .pointer("/$defs/tailscaleAutodiscovery")
+            .and_then(Value::as_object)
+            .is_some(),
+        "$defs.tailscaleAutodiscovery must exist",
+    )?;
+    ensure(
+        schema["properties"].get("tailscaleAutodiscovery").is_none(),
+        "tailscaleAutodiscovery is a reusable definition, not a top-level property",
+    )
+}
+
+#[test]
+fn auto_status_discovery_required_fields_match_tailscale_report() -> TestResult {
+    let schema = load_schema()?;
+    let required = collect_strings(
+        schema
+            .pointer("/$defs/tailscaleAutodiscovery/required")
+            .unwrap_or(&Value::Null),
+        "tailscaleAutodiscovery.required",
+    )?;
+    for field in TAILSCALE_AUTODISCOVERY_FIELDS {
+        ensure(
+            required.contains(*field),
+            format!("tailscaleAutodiscovery.required missing {field}; got {required:?}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn auto_status_constructed_golden_discovery_matches_schema_contract() -> TestResult {
+    let golden = load_json("tests/fixtures/golden/mesh/foreground_status_disabled.json")?;
+    let discovery = golden
+        .pointer("/autoEnrollment/discovery")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "foreground_status_disabled golden missing discovery object".to_owned())?;
+    let actual: BTreeSet<String> = discovery.keys().cloned().collect();
+    let expected: BTreeSet<String> = TAILSCALE_AUTODISCOVERY_FIELDS
+        .iter()
+        .map(|field| (*field).to_owned())
+        .collect();
+    ensure(
+        actual == expected,
+        format!(
+            "foreground_status_disabled discovery shape drifted; expected {expected:?}, got {actual:?}"
+        ),
+    )?;
+    ensure(
+        discovery.get("schema").and_then(Value::as_str) == Some("ee.tailscale.autodiscovery.v1"),
+        "foreground_status_disabled discovery must use ee.tailscale.autodiscovery.v1",
     )
 }
 
