@@ -31,11 +31,13 @@ use chrono::{Duration, Utc};
 use serde::Serialize;
 
 use crate::core::bayes::{BetaPosterior, DEFAULT_HARMFUL_WEIGHT};
+use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
     ApplyProcedureFeedbackInput, AuditedFeedbackEventInput, CreateAuditInput,
-    CreateFeedbackEventInput, CreateFeedbackQuarantineInput, DbConnection, FeedbackCounts,
-    StoredFeedbackEvent, StoredFeedbackQuarantine, UpsertAgentContextProfileInput, audit_actions,
-    feedback_scoring, generate_audit_id, generate_audit_id_seeded,
+    CreateCurationCandidateInput, CreateFeedbackEventInput, CreateFeedbackQuarantineInput,
+    DbConnection, FeedbackCounts, StoredFeedbackEvent, StoredFeedbackQuarantine,
+    UpsertAgentContextProfileInput, audit_actions, feedback_scoring, generate_audit_id,
+    generate_audit_id_seeded,
 };
 use crate::models::degradation::HARMFUL_BURST_QUARANTINE_CODE;
 use crate::models::{AgentContextProfileCounts, DomainError, ProcessExitCode, RecoveryKind};
@@ -263,6 +265,8 @@ const ALLOWED_SOURCE_TYPES: &[&str] = &[
     "decay_trigger",
 ];
 const HARMFUL_SIGNALS: &[&str] = &["negative", "contradiction", "harmful", "inaccurate"];
+const ANTI_PATTERN_PROPOSAL_THRESHOLD: usize = 3;
+const ANTI_PATTERN_PROPOSED_CODE: &str = "anti_pattern_proposed";
 
 /// Default harmful-feedback burst ceiling per source.
 pub const DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR: u32 = 5;
@@ -1204,6 +1208,22 @@ fn record_outcome_inner(
         // posterior update was best-effort.
     }
 
+    let mut degraded = Vec::new();
+    if target_type == "memory" && is_harmful_signal(&signal) {
+        match maybe_propose_anti_pattern_candidate(
+            &connection,
+            &target.workspace_id,
+            &target_id,
+            &event_id,
+            options.actor.as_deref(),
+            id_source,
+        ) {
+            Ok(Some(proposed)) => degraded.push(proposed),
+            Ok(None) => {}
+            Err(error) => degraded.push(anti_pattern_proposal_failed_degradation(&error)),
+        }
+    }
+
     let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
 
     trace_sprt_quarantine("response", 0, &[]);
@@ -1226,8 +1246,232 @@ fn record_outcome_inner(
         session_id,
         quarantine: None,
         feedback,
-        degraded: Vec::new(),
+        degraded,
     })
+}
+
+fn maybe_propose_anti_pattern_candidate(
+    connection: &DbConnection,
+    workspace_id: &str,
+    target_id: &str,
+    event_id: &str,
+    actor: Option<&str>,
+    id_source: &mut OutcomeIdSource<'_>,
+) -> Result<Option<OutcomeDegradation>, DomainError> {
+    let feedback_events = connection
+        .list_feedback_events_for_target("memory", target_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to inspect memory feedback for anti-pattern proposal: {error}"
+            ),
+            repair: Some("ee curate candidates --type anti_pattern_proposal --json".to_owned()),
+        })?;
+    let harmful_events = feedback_events
+        .iter()
+        .filter(|event| is_harmful_signal(&event.signal))
+        .collect::<Vec<_>>();
+    if harmful_events.len() < ANTI_PATTERN_PROPOSAL_THRESHOLD {
+        return Ok(None);
+    }
+
+    let memory = connection
+        .get_memory(target_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load memory for anti-pattern proposal: {error}"),
+            repair: Some("ee memory show <id> --json".to_owned()),
+        })?
+        .ok_or_else(|| DomainError::NotFound {
+            resource: "memory".to_owned(),
+            id: target_id.to_owned(),
+            repair: Some("ee memory list --json".to_owned()),
+        })?;
+
+    let candidate_id = anti_pattern_candidate_id(workspace_id, target_id);
+    if connection
+        .get_curation_candidate(workspace_id, &candidate_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to check existing anti-pattern candidate: {error}"),
+            repair: Some("ee curate candidates --type anti_pattern_proposal --json".to_owned()),
+        })?
+        .is_some()
+    {
+        return Ok(None);
+    }
+
+    let helpful_count = feedback_events
+        .iter()
+        .filter(|event| event.signal == "helpful" || event.signal == "positive")
+        .count();
+    let harmful_count = harmful_events.len();
+    let severity = anti_pattern_severity(harmful_count, helpful_count);
+    let event_ids = harmful_events
+        .iter()
+        .map(|event| event.id.clone())
+        .collect::<Vec<_>>();
+    let source_id = event_ids.join(",");
+    let proposed_content = anti_pattern_candidate_content(&memory.content, harmful_count);
+    let reason = format!(
+        "{harmful_count} harmful outcome events reached the anti-pattern proposal threshold for memory {target_id}."
+    );
+    let details = anti_pattern_candidate_audit_details(
+        &candidate_id,
+        target_id,
+        event_id,
+        &event_ids,
+        harmful_count,
+        helpful_count,
+        severity,
+    );
+    let audit_id = id_source.next_audit_id();
+
+    connection
+        .with_transaction(|| {
+            connection.insert_curation_candidate(
+                &candidate_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.to_owned(),
+                    candidate_type: CandidateType::AntiPatternProposal.as_str().to_owned(),
+                    target_memory_id: target_id.to_owned(),
+                    proposed_content: Some(proposed_content.clone()),
+                    proposed_confidence: Some(severity),
+                    proposed_trust_class: None,
+                    source_type: CandidateSource::FeedbackEvent.as_str().to_owned(),
+                    source_id: Some(source_id.clone()),
+                    reason: reason.clone(),
+                    confidence: severity,
+                    status: Some(CandidateStatus::Pending.as_str().to_owned()),
+                    created_at: None,
+                    ttl_expires_at: None,
+                },
+            )?;
+            connection.insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(workspace_id.to_owned()),
+                    actor: actor.map(str::to_owned),
+                    action: audit_actions::CURATION_CANDIDATE_CREATE.to_owned(),
+                    target_type: Some("curation_candidate".to_owned()),
+                    target_id: Some(candidate_id.clone()),
+                    details: Some(details.clone()),
+                },
+            )
+        })
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to persist anti-pattern candidate: {error}"),
+            repair: Some("ee curate candidates --type anti_pattern_proposal --json".to_owned()),
+        })?;
+
+    tracing::info!(
+        target: "ee::outcome::anti_pattern",
+        candidate_id = %candidate_id,
+        memory_id = %target_id,
+        harmful_count,
+        helpful_count,
+        threshold = ANTI_PATTERN_PROPOSAL_THRESHOLD,
+        proposed = true,
+        "anti-pattern candidate proposed"
+    );
+
+    Ok(Some(anti_pattern_proposed_degradation(
+        &candidate_id,
+        target_id,
+        harmful_count,
+        helpful_count,
+        severity,
+    )))
+}
+
+fn anti_pattern_candidate_id(workspace_id: &str, target_id: &str) -> String {
+    let hash = blake3::hash(format!("{workspace_id}\0anti-pattern\0{target_id}").as_bytes());
+    let suffix = hash.to_hex().to_string();
+    format!("curate_{}", &suffix[..26])
+}
+
+fn anti_pattern_candidate_content(memory_content: &str, harmful_count: usize) -> String {
+    let summary = memory_content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("Avoid: '{summary}' -- {harmful_count} harmful outcomes recorded.")
+}
+
+fn anti_pattern_severity(harmful_count: usize, helpful_count: usize) -> f32 {
+    let ratio = harmful_count as f32 / helpful_count.max(1) as f32;
+    1.0 / (1.0 + (-ratio).exp())
+}
+
+fn anti_pattern_candidate_audit_details(
+    candidate_id: &str,
+    target_id: &str,
+    triggering_event_id: &str,
+    harmful_event_ids: &[String],
+    harmful_count: usize,
+    helpful_count: usize,
+    severity: f32,
+) -> String {
+    serde_json::json!({
+        "schema": "ee.audit.anti_pattern_candidate_proposed.v1",
+        "candidateId": candidate_id,
+        "targetMemoryId": target_id,
+        "triggeringFeedbackEventId": triggering_event_id,
+        "harmfulFeedbackEventIds": harmful_event_ids,
+        "harmfulCount": harmful_count,
+        "helpfulCount": helpful_count,
+        "threshold": ANTI_PATTERN_PROPOSAL_THRESHOLD,
+        "severity": score_json_value(severity),
+    })
+    .to_string()
+}
+
+fn anti_pattern_proposed_degradation(
+    candidate_id: &str,
+    target_id: &str,
+    harmful_count: usize,
+    helpful_count: usize,
+    severity: f32,
+) -> OutcomeDegradation {
+    OutcomeDegradation {
+        code: ANTI_PATTERN_PROPOSED_CODE.to_owned(),
+        severity: "info".to_owned(),
+        message: format!(
+            "Anti-pattern candidate {candidate_id} proposed after {harmful_count} harmful outcomes for memory {target_id}."
+        ),
+        details: Some(serde_json::json!({
+            "candidateId": candidate_id,
+            "targetMemoryId": target_id,
+            "harmfulCount": harmful_count,
+            "helpfulCount": helpful_count,
+            "threshold": ANTI_PATTERN_PROPOSAL_THRESHOLD,
+            "advisorySeverity": score_json_value(severity),
+            "recovery": [
+                {
+                    "priority": 1,
+                    "kind": RecoveryKind::Command.as_str(),
+                    "command": "ee curate candidates --type anti_pattern_proposal --json"
+                }
+            ]
+        })),
+    }
+}
+
+fn anti_pattern_proposal_failed_degradation(error: &DomainError) -> OutcomeDegradation {
+    OutcomeDegradation {
+        code: "anti_pattern_proposal_failed".to_owned(),
+        severity: "warning".to_owned(),
+        message: "Outcome feedback was recorded, but anti-pattern candidate proposal failed."
+            .to_owned(),
+        details: Some(serde_json::json!({
+            "errorCode": error.code(),
+            "errorMessage": error.message(),
+            "recovery": [
+                {
+                    "priority": 1,
+                    "kind": RecoveryKind::Command.as_str(),
+                    "command": "ee curate candidates --json"
+                }
+            ]
+        })),
+    }
 }
 
 /// bd-3qs2i.3.1: build the `harmful_burst_quarantine` degraded entry that
@@ -2347,7 +2591,8 @@ mod tests {
     };
 
     use super::{
-        CliCancelReason, CliOutcomeClass, CliOutcomeSummary, DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+        ANTI_PATTERN_PROPOSAL_THRESHOLD, ANTI_PATTERN_PROPOSED_CODE, CliCancelReason,
+        CliOutcomeClass, CliOutcomeSummary, DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
         DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR, EXIT_CANCELLED, EXIT_PANICKED,
         HARMFUL_BURST_QUARANTINE_CODE, OUTCOME_QUARANTINE_LIST_SCHEMA_V1, OutcomeFeedbackSummary,
         OutcomeQuarantineListReport, OutcomeQuarantineRecord, OutcomeQuarantineSummary,
@@ -3264,6 +3509,95 @@ mod tests {
             &profile.is_none(),
             &true,
             "audit actor alone must not create an agent profile",
+        )
+    }
+
+    #[test]
+    fn harmful_outcomes_auto_propose_anti_pattern_candidate() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-anti-pattern")?;
+        let event_ids = [
+            "fb_61234567890123456789012345",
+            "fb_71234567890123456789012345",
+            "fb_81234567890123456789012345",
+        ];
+
+        for (index, event_id) in event_ids.iter().enumerate() {
+            let report = record_outcome(&OutcomeRecordOptions {
+                database_path: &database,
+                target_type: "memory".to_string(),
+                target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+                workspace_id: None,
+                signal: "harmful".to_string(),
+                weight: None,
+                source_type: "outcome_observed".to_string(),
+                source_id: Some(format!("anti-pattern-source-{index}")),
+                reason: Some(format!("Harmful outcome {index} should count.")),
+                evidence_json: Some(format!(r#"{{"case":"anti-pattern","index":{index}}}"#)),
+                session_id: Some(OUTCOME_TEST_SESSION_ID.to_string()),
+                event_id: Some((*event_id).to_string()),
+                actor: Some("test".to_string()),
+                agent_name: None,
+                dry_run: false,
+                harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+                harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+                prompt_injection_guard: true,
+            })
+            .map_err(|error| error.message())?;
+
+            ensure_equal(
+                &report.status,
+                &OutcomeRecordStatus::Recorded,
+                "harmful outcome records",
+            )?;
+            let proposed = report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == ANTI_PATTERN_PROPOSED_CODE);
+            ensure_equal(
+                &proposed,
+                &(index + 1 == ANTI_PATTERN_PROPOSAL_THRESHOLD),
+                "anti-pattern proposal fires exactly at threshold",
+            )?;
+        }
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let candidates = connection
+            .list_curation_candidates(
+                OUTCOME_TEST_WORKSPACE_ID,
+                Some(crate::curate::CandidateType::AntiPatternProposal.as_str()),
+                Some("pending"),
+                Some(OUTCOME_TEST_MEMORY_ID),
+            )
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &candidates.len(),
+            &1_usize,
+            "one anti-pattern candidate is proposed",
+        )?;
+        let candidate = candidates
+            .first()
+            .ok_or_else(|| "candidate missing after length check".to_string())?;
+        ensure_equal(
+            &candidate.source_type,
+            &crate::curate::CandidateSource::FeedbackEvent
+                .as_str()
+                .to_string(),
+            "candidate source type",
+        )?;
+        ensure(
+            candidate
+                .proposed_content
+                .as_deref()
+                .is_some_and(|content| {
+                    content.starts_with("Avoid:") && content.contains("3 harmful outcomes recorded")
+                }),
+            "candidate content names the anti-pattern and evidence count",
+        )?;
+        ensure(
+            candidate
+                .proposed_confidence
+                .is_some_and(|confidence| confidence > 0.9),
+            "candidate severity is high after three harmful events",
         )
     }
 

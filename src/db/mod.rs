@@ -5062,6 +5062,95 @@ ALTER TABLE procedural_rules ADD COLUMN validation_contradictions INTEGER NOT NU
     "blake3:v059_rule_validation_counters_2026_05_20",
 );
 
+/// V060: Allow anti-pattern curation proposals from harmful outcomes.
+pub const V060_ANTI_PATTERN_CURATION_CANDIDATES: Migration = Migration::new(
+    60,
+    "anti_pattern_curation_candidates",
+    r#"
+ALTER TABLE curation_candidates RENAME TO curation_candidates_v059;
+
+CREATE TABLE curation_candidates (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'curate_*' AND length(id) = 33),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    candidate_type TEXT NOT NULL CHECK (candidate_type IN (
+        'consolidate', 'promote', 'deprecate', 'supersede', 'tombstone',
+        'merge', 'split', 'retract', 'rule', 'anti_pattern_proposal', 'procedure'
+    )),
+    target_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    proposed_content TEXT CHECK (proposed_content IS NULL OR length(trim(proposed_content)) > 0),
+    proposed_confidence REAL CHECK (proposed_confidence IS NULL OR (proposed_confidence >= 0.0 AND proposed_confidence <= 1.0)),
+    proposed_trust_class TEXT CHECK (proposed_trust_class IS NULL OR proposed_trust_class IN (
+        'human_explicit', 'agent_validated', 'agent_assertion', 'cass_evidence', 'legacy_import'
+    )),
+    source_type TEXT NOT NULL CHECK (source_type IN (
+        'agent_inference', 'rule_engine', 'human_request', 'feedback_event',
+        'contradiction_detected', 'decay_trigger', 'counterfactual_replay'
+    )),
+    source_id TEXT CHECK (source_id IS NULL OR length(trim(source_id)) > 0),
+    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'expired', 'applied')),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    reviewed_at TEXT CHECK (reviewed_at IS NULL OR length(trim(reviewed_at)) > 0),
+    reviewed_by TEXT CHECK (reviewed_by IS NULL OR length(trim(reviewed_by)) > 0),
+    applied_at TEXT CHECK (applied_at IS NULL OR length(trim(applied_at)) > 0),
+    ttl_expires_at TEXT CHECK (ttl_expires_at IS NULL OR length(trim(ttl_expires_at)) > 0),
+    review_state TEXT NOT NULL DEFAULT 'new' CHECK (review_state IN (
+        'new', 'needs_evidence', 'needs_scope', 'duplicate', 'snoozed',
+        'accepted', 'rejected', 'merged', 'superseded', 'expired', 'applied'
+    )),
+    snoozed_until TEXT CHECK (snoozed_until IS NULL OR length(trim(snoozed_until)) > 0),
+    merged_into_candidate_id TEXT CHECK (merged_into_candidate_id IS NULL OR (
+        merged_into_candidate_id GLOB 'curate_*' AND length(merged_into_candidate_id) = 33
+    )),
+    state_entered_at TEXT CHECK (state_entered_at IS NULL OR length(trim(state_entered_at)) > 0),
+    last_action_at TEXT CHECK (last_action_at IS NULL OR length(trim(last_action_at)) > 0),
+    ttl_policy_id TEXT CHECK (ttl_policy_id IS NULL OR length(trim(ttl_policy_id)) > 0)
+);
+
+INSERT INTO curation_candidates (
+    id, workspace_id, candidate_type, target_memory_id, proposed_content,
+    proposed_confidence, proposed_trust_class, source_type, source_id, reason,
+    confidence, status, created_at, reviewed_at, reviewed_by, applied_at,
+    ttl_expires_at, review_state, snoozed_until, merged_into_candidate_id,
+    state_entered_at, last_action_at, ttl_policy_id
+)
+SELECT
+    id, workspace_id, candidate_type, target_memory_id, proposed_content,
+    proposed_confidence, proposed_trust_class, source_type, source_id, reason,
+    confidence, status, created_at, reviewed_at, reviewed_by, applied_at,
+    ttl_expires_at, review_state, snoozed_until, merged_into_candidate_id,
+    state_entered_at, last_action_at, ttl_policy_id
+FROM curation_candidates_v059;
+
+CREATE INDEX idx_curation_candidates_v060_workspace ON curation_candidates(workspace_id);
+CREATE INDEX idx_curation_candidates_v060_target ON curation_candidates(target_memory_id);
+CREATE INDEX idx_curation_candidates_v060_status ON curation_candidates(status);
+CREATE INDEX idx_curation_candidates_v060_type ON curation_candidates(candidate_type);
+CREATE INDEX idx_curation_candidates_v060_created ON curation_candidates(created_at);
+CREATE INDEX idx_curation_candidates_v060_ttl
+    ON curation_candidates(ttl_expires_at)
+    WHERE ttl_expires_at IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v060_review_state ON curation_candidates(review_state);
+CREATE INDEX idx_curation_candidates_v060_snoozed_until
+    ON curation_candidates(snoozed_until)
+    WHERE snoozed_until IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v060_merged_into
+    ON curation_candidates(merged_into_candidate_id)
+    WHERE merged_into_candidate_id IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v060_state_entered
+    ON curation_candidates(state_entered_at)
+    WHERE state_entered_at IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v060_last_action
+    ON curation_candidates(last_action_at)
+    WHERE last_action_at IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v060_ttl_policy
+    ON curation_candidates(ttl_policy_id)
+    WHERE ttl_policy_id IS NOT NULL;
+"#,
+    "blake3:v060_anti_pattern_curation_candidates_2026_05_21",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -5123,6 +5212,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V057_MESH_IMPORT_LEDGER_SHARE_WITHDRAW,
     V058_PREFLIGHT_BYPASS_TOKEN_SCOPE,
     V059_RULE_VALIDATION_COUNTERS,
+    V060_ANTI_PATTERN_CURATION_CANDIDATES,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
