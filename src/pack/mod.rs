@@ -2641,6 +2641,59 @@ pub struct PackSloBudgetClass {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackAdmissionOutcome {
+    Admitted,
+    Backoff,
+}
+
+impl PackAdmissionOutcome {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admitted => "admitted",
+            Self::Backoff => "backoff",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PackAdmissionPosture {
+    pub outcome: PackAdmissionOutcome,
+    pub queue_depth: usize,
+    pub concurrent_pack_max: usize,
+    pub retry_after_ms: Option<u64>,
+    pub waited_ms: u64,
+}
+
+impl PackAdmissionPosture {
+    #[must_use]
+    pub const fn admitted(queue_depth: usize, concurrent_pack_max: usize) -> Self {
+        Self {
+            outcome: PackAdmissionOutcome::Admitted,
+            queue_depth,
+            concurrent_pack_max,
+            retry_after_ms: None,
+            waited_ms: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn backoff(
+        queue_depth: usize,
+        concurrent_pack_max: usize,
+        retry_after_ms: u64,
+    ) -> Self {
+        Self {
+            outcome: PackAdmissionOutcome::Backoff,
+            queue_depth,
+            concurrent_pack_max,
+            retry_after_ms: Some(retry_after_ms),
+            waited_ms: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PackAssemblySloActuals {
     pub candidate_count: usize,
     pub scanned_count: usize,
@@ -2702,6 +2755,7 @@ pub struct PackAssemblySlo {
     pub schema: &'static str,
     pub profile: PackResourceProfile,
     pub budget_class: PackSloBudgetClass,
+    pub admission: Option<PackAdmissionPosture>,
     pub actuals: PackAssemblySloActuals,
     pub status: PackAssemblySloStatus,
     pub degradations: Vec<PackAssemblySloDegradation>,
@@ -2738,6 +2792,10 @@ impl PackAssemblySlo {
             schema: PACK_ASSEMBLY_SLO_SCHEMA_V1,
             profile,
             budget_class,
+            admission: Some(PackAdmissionPosture::admitted(
+                0,
+                budget_class.concurrent_pack_max,
+            )),
             actuals,
             status,
             degradations,
@@ -2749,18 +2807,25 @@ impl PackAssemblySlo {
         profile: PackResourceProfile,
         actuals: PackAssemblySloActuals,
         retry_after_ms: u64,
+        queue_depth: usize,
     ) -> Self {
         let budget_class = profile.budget_class();
         Self {
             schema: PACK_ASSEMBLY_SLO_SCHEMA_V1,
             profile,
             budget_class,
+            admission: Some(PackAdmissionPosture::backoff(
+                queue_depth,
+                budget_class.concurrent_pack_max,
+                retry_after_ms,
+            )),
             actuals,
             status: PackAssemblySloStatus::Warning,
             degradations: vec![pack_concurrent_limit_reached_degradation(
                 profile,
                 &budget_class,
                 retry_after_ms,
+                queue_depth,
             )],
         }
     }
@@ -4092,13 +4157,15 @@ fn pack_concurrent_limit_reached_degradation(
     profile: PackResourceProfile,
     budget: &PackSloBudgetClass,
     retry_after_ms: u64,
+    queue_depth: usize,
 ) -> PackAssemblySloDegradation {
     PackAssemblySloDegradation {
         code: PACK_CONCURRENT_LIMIT_REACHED_CODE,
         severity: ContextResponseSeverity::Low,
         message: format!(
-            "Concurrent pack limit reached for the {} resource profile: {} pack slot{} already in use.",
+            "Concurrent pack limit reached for the {} resource profile: queue depth {} meets the configured cap of {} pack slot{}.",
             profile.as_str(),
+            queue_depth,
             budget.concurrent_pack_max,
             plural_s(budget.concurrent_pack_max)
         ),

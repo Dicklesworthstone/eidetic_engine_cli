@@ -24,7 +24,8 @@
     "severity": "low",
     "message_contains": [
       "Concurrent",
-      "pack"
+      "pack",
+      "queue depth"
     ],
     "repair_contains": "retry"
   }

@@ -78,9 +78,9 @@ use crate::models::{
 use crate::pack::{
     ConflictKind, ConflictRecommendedAction, ConsensusConflictReport, ContextPackProfile,
     ContextRequest, ContextRequestInput, ContextResponse, ContextResponseDegradation,
-    ContextResponseSeverity, PackAssemblySlo, PackAssemblySloActuals, PackCandidate,
-    PackCandidateInput, PackCoordinationSnapshot, PackDraft, PackItemLifecycle, PackProvenance,
-    PackResourceProfile, PackScoreBreakdown, PackSection, PackTrustSignal,
+    ContextResponseSeverity, PackAdmissionPosture, PackAssemblySlo, PackAssemblySloActuals,
+    PackCandidate, PackCandidateInput, PackCoordinationSnapshot, PackDraft, PackItemLifecycle,
+    PackProvenance, PackResourceProfile, PackScoreBreakdown, PackSection, PackTrustSignal,
     assemble_draft_with_profile_and_options_seeded,
     budget_classifier::{AdaptiveBudgetDecision, AdaptiveBudgetInput, classify_adaptive_budget},
     estimate_tokens_default, pack_item_provenance_json,
@@ -120,9 +120,20 @@ impl Drop for PackSlotGuard {
 
 #[derive(Debug)]
 enum PackSlotAcquisition {
-    Acquired(PackSlotGuard),
-    LimitReached { retry_after_ms: u64 },
-    Unavailable { path: PathBuf, message: String },
+    Acquired {
+        guard: PackSlotGuard,
+        queue_depth: usize,
+        concurrent_pack_max: usize,
+    },
+    LimitReached {
+        retry_after_ms: u64,
+        queue_depth: usize,
+        concurrent_pack_max: usize,
+    },
+    Unavailable {
+        path: PathBuf,
+        message: String,
+    },
 }
 
 fn pack_slot_process_gates() -> &'static Mutex<BTreeSet<PathBuf>> {
@@ -168,6 +179,7 @@ fn try_acquire_pack_slot(
         };
     }
 
+    let mut queue_depth = 0_usize;
     for slot_index in 0..budget.concurrent_pack_max {
         let slot_path = slots_dir.join(format!("{}-{slot_index:02}.lock", profile.as_str()));
         if let Err(message) = ensure_pack_slot_path_is_not_symlink(&slot_path, "pack slot lock") {
@@ -185,6 +197,7 @@ fn try_acquire_pack_slot(
             };
         }
         if !try_acquire_pack_slot_process_gate(&slot_path) {
+            queue_depth = queue_depth.saturating_add(1);
             continue;
         }
         if let Err(message) = ensure_pack_slot_path_is_not_symlink(&slot_path, "pack slot lock") {
@@ -219,6 +232,7 @@ fn try_acquire_pack_slot(
         if let Err(error) = flock(&file, FlockOperation::NonBlockingLockExclusive) {
             release_pack_slot_process_gate(&slot_path);
             if error == Errno::WOULDBLOCK || error == Errno::AGAIN {
+                queue_depth = queue_depth.saturating_add(1);
                 continue;
             }
             return PackSlotAcquisition::Unavailable {
@@ -227,14 +241,20 @@ fn try_acquire_pack_slot(
             };
         }
 
-        return PackSlotAcquisition::Acquired(PackSlotGuard {
-            path: slot_path,
-            _file: file,
-        });
+        return PackSlotAcquisition::Acquired {
+            guard: PackSlotGuard {
+                path: slot_path,
+                _file: file,
+            },
+            queue_depth,
+            concurrent_pack_max: budget.concurrent_pack_max,
+        };
     }
 
     PackSlotAcquisition::LimitReached {
         retry_after_ms: PACK_SLOT_RETRY_AFTER_MS,
+        queue_depth,
+        concurrent_pack_max: budget.concurrent_pack_max,
     }
 }
 
@@ -1600,23 +1620,47 @@ fn run_context_pack_with_performance_inner(
         &options.workspace_path,
         options.output_options.resource_profile,
     );
-    let (pack_slot_guard, concurrent_limit_retry_after_ms) = match pack_slot_acquisition {
-        PackSlotAcquisition::Acquired(guard) => (Some(guard), None),
-        PackSlotAcquisition::LimitReached { retry_after_ms } => (None, Some(retry_after_ms)),
-        PackSlotAcquisition::Unavailable { path, message } => {
-            push_degradation(
-                &mut degraded,
-                "pack_slot_lock_unavailable",
-                ContextResponseSeverity::Low,
-                format!(
-                    "Pack slot governance could not acquire a lock at {}: {message}",
-                    path.display()
-                ),
-                Some("Check .ee/pack-slots permissions, then retry.".to_string()),
-            );
-            (None, None)
-        }
-    };
+    let (pack_slot_guard, admission_posture, concurrent_limit_retry_after_ms) =
+        match pack_slot_acquisition {
+            PackSlotAcquisition::Acquired {
+                guard,
+                queue_depth,
+                concurrent_pack_max,
+            } => (
+                Some(guard),
+                Some(PackAdmissionPosture::admitted(
+                    queue_depth,
+                    concurrent_pack_max,
+                )),
+                None,
+            ),
+            PackSlotAcquisition::LimitReached {
+                retry_after_ms,
+                queue_depth,
+                concurrent_pack_max,
+            } => (
+                None,
+                Some(PackAdmissionPosture::backoff(
+                    queue_depth,
+                    concurrent_pack_max,
+                    retry_after_ms,
+                )),
+                Some(retry_after_ms),
+            ),
+            PackSlotAcquisition::Unavailable { path, message } => {
+                push_degradation(
+                    &mut degraded,
+                    "pack_slot_lock_unavailable",
+                    ContextResponseSeverity::Low,
+                    format!(
+                        "Pack slot governance could not acquire a lock at {}: {message}",
+                        path.display()
+                    ),
+                    Some("Check .ee/pack-slots permissions, then retry.".to_string()),
+                );
+                (None, None, None)
+            }
+        };
 
     let pack_start = Instant::now();
     let pack_candidates = if concurrent_limit_retry_after_ms.is_some() {
@@ -1714,14 +1758,25 @@ fn run_context_pack_with_performance_inner(
             options.output_options.resource_profile,
             actuals,
             retry_after_ms,
+            admission_posture
+                .map(|posture| posture.queue_depth)
+                .unwrap_or_else(|| {
+                    options
+                        .output_options
+                        .resource_profile
+                        .budget_class()
+                        .concurrent_pack_max
+                }),
         )
     } else {
-        pack_assembly_slo_for_run(
+        let mut slo = pack_assembly_slo_for_run(
             options.output_options.resource_profile,
             &draft,
             &search_report,
             &trace,
-        )
+        );
+        slo.admission = admission_posture;
+        slo
     };
     let _pack_slot_guard = pack_slot_guard;
 
@@ -2098,6 +2153,15 @@ fn pack_assembly_slo_json(slo: &PackAssemblySlo) -> serde_json::Value {
             "elapsedMsFailure": slo.budget_class.elapsed_ms_failure,
             "concurrentPackMax": slo.budget_class.concurrent_pack_max,
         },
+        "admission": slo.admission.map(|admission| {
+            serde_json::json!({
+                "outcome": admission.outcome.as_str(),
+                "queueDepth": admission.queue_depth,
+                "concurrentPackMax": admission.concurrent_pack_max,
+                "retryAfterMs": admission.retry_after_ms,
+                "waitedMs": admission.waited_ms,
+            })
+        }),
         "actuals": {
             "candidateCount": slo.actuals.candidate_count,
             "scannedCount": slo.actuals.scanned_count,
@@ -7537,7 +7601,15 @@ mod tests {
         let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
 
         let first = match try_acquire_pack_slot(workspace.path(), PackResourceProfile::Lean) {
-            PackSlotAcquisition::Acquired(guard) => guard,
+            PackSlotAcquisition::Acquired {
+                guard,
+                queue_depth,
+                concurrent_pack_max,
+            } => {
+                assert_eq!(queue_depth, 0);
+                assert_eq!(concurrent_pack_max, 1);
+                guard
+            }
             other => {
                 return Err(format!(
                     "first lean pack slot should be acquired: {other:?}"
@@ -7546,8 +7618,14 @@ mod tests {
         };
 
         match try_acquire_pack_slot(workspace.path(), PackResourceProfile::Lean) {
-            PackSlotAcquisition::LimitReached { retry_after_ms } => {
+            PackSlotAcquisition::LimitReached {
+                retry_after_ms,
+                queue_depth,
+                concurrent_pack_max,
+            } => {
                 assert_eq!(retry_after_ms, super::PACK_SLOT_RETRY_AFTER_MS);
+                assert_eq!(queue_depth, 1);
+                assert_eq!(concurrent_pack_max, 1);
             }
             other => {
                 return Err(format!(
@@ -7559,7 +7637,15 @@ mod tests {
         drop(first);
 
         match try_acquire_pack_slot(workspace.path(), PackResourceProfile::Lean) {
-            PackSlotAcquisition::Acquired(_guard) => Ok(()),
+            PackSlotAcquisition::Acquired {
+                guard: _guard,
+                queue_depth,
+                concurrent_pack_max,
+            } => {
+                assert_eq!(queue_depth, 0);
+                assert_eq!(concurrent_pack_max, 1);
+                Ok(())
+            }
             other => Err(format!(
                 "lean pack slot should be available after guard drop: {other:?}"
             )),

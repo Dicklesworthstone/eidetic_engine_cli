@@ -6951,7 +6951,7 @@ run more simultaneous ee context calls than the selected profile's concurrentPac
 ee context "swarm task" --resource-profile lean --json
 ```
 
-**Expected emission.** Message contains: `Concurrent ... pack`
+**Expected emission.** Message contains: `Concurrent ... pack ... queue depth`
 
 **Repair hint.** `retry`
 

@@ -111,13 +111,26 @@ fn pack_concurrent_limit_code_is_stable_for_j6_fixture() {
 
 #[test]
 fn pack_slo_warns_when_concurrent_limit_is_reached() {
-    let slo =
-        PackAssemblySlo::concurrent_limit_reached(PackResourceProfile::Lean, actuals(0, 0, 1), 250);
+    let slo = PackAssemblySlo::concurrent_limit_reached(
+        PackResourceProfile::Lean,
+        actuals(0, 0, 1),
+        250,
+        1,
+    );
     assert_eq!(slo.status, PackAssemblySloStatus::Warning);
+    let admission = slo
+        .admission
+        .expect("concurrent limit records admission posture");
+    assert_eq!(admission.outcome.as_str(), "backoff");
+    assert_eq!(admission.queue_depth, 1);
+    assert_eq!(admission.concurrent_pack_max, 1);
+    assert_eq!(admission.retry_after_ms, Some(250));
+    assert_eq!(admission.waited_ms, 0);
     assert_eq!(slo.degradations.len(), 1);
     assert_eq!(slo.degradations[0].code, PACK_CONCURRENT_LIMIT_REACHED_CODE);
     assert_eq!(slo.degradations[0].severity.as_str(), "low");
     assert!(slo.degradations[0].message.contains("Concurrent pack"));
+    assert!(slo.degradations[0].message.contains("queue depth 1"));
     assert!(
         slo.degradations[0]
             .repair
@@ -246,8 +259,78 @@ fn context_json_renders_pack_slo_surface() -> TestResult {
         Some(&Value::from(16))
     );
     assert_eq!(
+        json.pointer("/data/pack/slo/admission/outcome"),
+        Some(&Value::String("admitted".to_owned()))
+    );
+    assert_eq!(
+        json.pointer("/data/pack/slo/admission/concurrentPackMax"),
+        Some(&Value::from(16))
+    );
+    assert_eq!(
+        json.pointer("/data/pack/slo/admission/waitedMs"),
+        Some(&Value::from(0))
+    );
+    assert_eq!(
         json.pointer("/data/pack/slo/actuals/scannedCount"),
         Some(&Value::from(1))
+    );
+    Ok(())
+}
+
+#[test]
+fn context_json_renders_pack_backoff_admission_and_recovery_shape() -> TestResult {
+    let query = "resource-aware pack backoff";
+    let request = ContextRequest::from_query(query).map_err(|error| error.to_string())?;
+    let budget = TokenBudget::new(400).map_err(|error| error.to_string())?;
+    let mut draft = assemble_draft_with_profile_and_options(
+        ContextPackProfile::Balanced,
+        query,
+        budget,
+        Vec::new(),
+        PackAssemblyOptions::default(),
+    )
+    .map_err(|error| error.to_string())?;
+    draft.hash = Some("blake3:s4-pack-backoff-fixture".to_owned());
+    let actuals = PackAssemblySloActuals::from_pack_run(&draft, 0, 0, 1);
+    let slo = PackAssemblySlo::concurrent_limit_reached(PackResourceProfile::Lean, actuals, 250, 1);
+    let degraded = slo.context_degradations();
+    let mut response =
+        ContextResponse::new(request, draft, degraded).map_err(|error| error.to_string())?;
+    response.data.slo = Some(slo);
+
+    let json: Value = serde_json::from_str(&render_context_response_json(&response))
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        json.pointer("/data/pack/slo/admission/outcome"),
+        Some(&Value::String("backoff".to_owned()))
+    );
+    assert_eq!(
+        json.pointer("/data/pack/slo/admission/queueDepth"),
+        Some(&Value::from(1))
+    );
+    assert_eq!(
+        json.pointer("/data/pack/slo/admission/retryAfterMs"),
+        Some(&Value::from(250))
+    );
+    assert_eq!(
+        json.pointer("/data/degraded/0/code"),
+        Some(&Value::String(
+            PACK_CONCURRENT_LIMIT_REACHED_CODE.to_owned()
+        ))
+    );
+    assert_eq!(
+        json.pointer("/data/degraded/0/details/recovery/0/kind"),
+        Some(&Value::String("narrow".to_owned()))
+    );
+    assert_eq!(
+        json.pointer("/data/degraded/0/details/recovery/1/flagName"),
+        Some(&Value::String("--resource-profile".to_owned()))
+    );
+    assert_eq!(
+        json.pointer("/data/degraded/0/details/recovery/2/example"),
+        Some(&Value::String(
+            "ee cache prewarm --from-hotset latest --profile lean --json".to_owned()
+        ))
     );
     Ok(())
 }

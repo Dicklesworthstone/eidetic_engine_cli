@@ -52,10 +52,10 @@ use crate::models::{
 };
 use crate::pack::{
     ConflictEntry, ConsensusEntry, ConsensusProducer, ContextResponse, ContextResponseDegradation,
-    ContextResponseSeverity, PACK_BUDGET_TOO_SMALL_CODE, PackAdvisoryBanner, PackAdvisoryNote,
-    PackAssemblySlo, PackItemProvenance, PackOmission, PackOmissionMetrics, PackQualityMetrics,
-    PackSectionMetric, PackSelectedItem, PackSelectionAudit, PackSelectionStep,
-    RenderedPackProvenance,
+    ContextResponseSeverity, PACK_BUDGET_TOO_SMALL_CODE, PACK_CONCURRENT_LIMIT_REACHED_CODE,
+    PackAdmissionPosture, PackAdvisoryBanner, PackAdvisoryNote, PackAssemblySlo,
+    PackItemProvenance, PackOmission, PackOmissionMetrics, PackQualityMetrics, PackSectionMetric,
+    PackSelectedItem, PackSelectionAudit, PackSelectionStep, RenderedPackProvenance,
 };
 use crate::steward::{
     MAINTENANCE_JOB_LIST_SCHEMA_V1, MAINTENANCE_JOB_ROW_SCHEMA_V1, MAINTENANCE_JOB_SHOW_SCHEMA_V1,
@@ -2780,6 +2780,9 @@ fn degraded_recovery_actions_for_code(code: &str) -> Vec<RecoveryAction> {
     if code == PACK_BUDGET_TOO_SMALL_CODE {
         return pack_budget_too_small_recovery_actions();
     }
+    if code == PACK_CONCURRENT_LIMIT_REACHED_CODE {
+        return pack_concurrent_limit_reached_recovery_actions();
+    }
     degraded_recovery_actions(code)
 }
 
@@ -2801,6 +2804,47 @@ fn pack_budget_too_small_recovery_actions() -> Vec<RecoveryAction> {
             3,
             "Candidate pool may be too narrow; broaden query text or relax EQL tag filters.",
         ),
+    ]
+}
+
+fn pack_concurrent_limit_reached_recovery_actions() -> Vec<RecoveryAction> {
+    vec![
+        RecoveryAction {
+            priority: 1,
+            kind: RecoveryKind::Narrow,
+            rationale:
+                "Honor admission.retryAfterMs before retrying the same deterministic context call."
+                    .to_owned(),
+            env_name: None,
+            value_hint: None,
+            config_path: None,
+            config_key: None,
+            flag_name: None,
+            command: None,
+            results_in: None,
+            example: None,
+        },
+        RecoveryAction::flag(
+            2,
+            "--resource-profile",
+            "swarm_heavy",
+            "Use the higher-cap profile only when the host has capacity for more concurrent pack assembly.",
+        ),
+        RecoveryAction {
+            priority: 3,
+            kind: RecoveryKind::Seed,
+            rationale:
+                "Prewarm cache entries before the next burst so foreground context calls do less pack work."
+                    .to_owned(),
+            env_name: None,
+            value_hint: None,
+            config_path: None,
+            config_key: None,
+            flag_name: None,
+            command: None,
+            results_in: None,
+            example: Some("ee cache prewarm --from-hotset latest --profile lean --json".to_owned()),
+        },
     ]
 }
 
@@ -3131,6 +3175,14 @@ fn build_pack_assembly_slo(obj: &mut JsonBuilder, slo: &PackAssemblySlo) {
             &slo.budget_class.concurrent_pack_max.to_string(),
         );
     });
+    match &slo.admission {
+        Some(admission) => {
+            obj.field_object("admission", |admission_obj| {
+                build_pack_admission_posture(admission_obj, admission);
+            });
+        }
+        None => obj.field_raw("admission", "null"),
+    };
     obj.field_object("actuals", |actuals| {
         actuals.field_raw("candidateCount", &slo.actuals.candidate_count.to_string());
         actuals.field_raw("scannedCount", &slo.actuals.scanned_count.to_string());
@@ -3162,6 +3214,20 @@ fn build_pack_assembly_slo(obj: &mut JsonBuilder, slo: &PackAssemblySlo) {
             None => entry_obj.field_raw("repair", "null"),
         };
     });
+}
+
+fn build_pack_admission_posture(obj: &mut JsonBuilder, posture: &PackAdmissionPosture) {
+    obj.field_str("outcome", posture.outcome.as_str());
+    obj.field_raw("queueDepth", &posture.queue_depth.to_string());
+    obj.field_raw(
+        "concurrentPackMax",
+        &posture.concurrent_pack_max.to_string(),
+    );
+    match posture.retry_after_ms {
+        Some(retry_after_ms) => obj.field_raw("retryAfterMs", &retry_after_ms.to_string()),
+        None => obj.field_raw("retryAfterMs", "null"),
+    };
+    obj.field_raw("waitedMs", &posture.waited_ms.to_string());
 }
 
 fn build_pack_algorithm_metadata(obj: &mut JsonBuilder, audit: &PackSelectionAudit) {
