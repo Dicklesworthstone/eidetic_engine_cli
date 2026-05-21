@@ -7334,6 +7334,9 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
+    use proptest::prelude::*;
+    use proptest::test_runner::Config as ProptestConfig;
+
     use super::{
         AccessLevel, CandidateResolutionMetrics, CapabilitySet, CommandContext,
         ContextPerformanceTrace, PackSlotAcquisition, PerformanceTiming, ReadSnapshotTrace,
@@ -7448,6 +7451,57 @@ mod tests {
             &1,
             "no_relevant_results suppresses budget degradation",
         )
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn pack_budget_too_small_and_no_relevant_results_never_both_emit(
+            candidate_pool in 0_usize..64,
+            item_count in 0_usize..64,
+            used_tokens in any::<u16>(),
+            max_tokens in 0_u16..8192,
+            no_relevant_results_present in proptest::bool::ANY,
+        ) {
+            let mut degraded = Vec::new();
+
+            if no_relevant_results_present {
+                degraded.push(
+                    ContextResponseDegradation::new(
+                        "no_relevant_results",
+                        ContextResponseSeverity::Medium,
+                        "No relevant results.",
+                        None,
+                    )
+                    .expect("fixture degradation is valid"),
+                );
+            }
+
+            push_pack_budget_too_small_degradation(
+                &mut degraded,
+                candidate_pool,
+                item_count,
+                u32::from(used_tokens),
+                u32::from(max_tokens),
+            );
+
+            let has_pack_budget_too_small = degraded
+                .iter()
+                .any(|entry| entry.code == crate::pack::PACK_BUDGET_TOO_SMALL_CODE);
+            let has_no_relevant_results = degraded
+                .iter()
+                .any(|entry| entry.code == "no_relevant_results");
+
+            prop_assert!(
+                !(has_pack_budget_too_small && has_no_relevant_results),
+                "pack_budget_too_small and no_relevant_results must be mutually exclusive"
+            );
+            prop_assert_eq!(
+                has_pack_budget_too_small,
+                candidate_pool > 0 && item_count == 0 && !no_relevant_results_present
+            );
+        }
     }
 
     #[test]
