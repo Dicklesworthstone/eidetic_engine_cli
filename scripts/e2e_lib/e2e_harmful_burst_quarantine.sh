@@ -13,8 +13,19 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-WORKSPACE="${WORKSPACE:-$(mktemp -d -t ee-e2e-f3-XXXX)}"
+if [ -z "${WORKSPACE:-}" ]; then
+    if [ -n "${EE_AGENT_TMPDIR:-}" ]; then
+        workspace_root="$EE_AGENT_TMPDIR"
+    elif [ -d /Volumes/USBNVME16TB/temp_agent_space/tmp ]; then
+        workspace_root="/Volumes/USBNVME16TB/temp_agent_space/tmp"
+    else
+        workspace_root="$REPO_ROOT/tests/logs/agent_ergonomics_workspaces"
+    fi
+    mkdir -p "$workspace_root"
+    WORKSPACE="$(mktemp -d "$workspace_root/ee-e2e-f3-XXXX")"
+fi
 export WORKSPACE
 
 # shellcheck source=scripts/e2e_lib/agent_ergonomics_lib.sh
@@ -68,6 +79,9 @@ send_harmful() {
 log_step "Initialize fresh workspace"
 init_out=$(ee_workspace init --json)
 assert_jq "$init_out" '.success' "true" "init returns success=true"
+assert_jq "$init_out" \
+    '(.data.status == "created" or .data.status == "already_exists" or .data.status == "revalidated")' \
+    "true" "init produced a usable workspace"
 
 # ---------------------------------------------------------------------------
 log_step "Verify workspace is fresh (no prior outcomes)"
