@@ -13,9 +13,13 @@ use chrono::Utc;
 use fnx_runtime::CompatibilityMode;
 use serde_json::{Value as JsonValue, json};
 
-use crate::config::WORKSPACE_MARKER;
+use crate::config::{EnvVar, WORKSPACE_MARKER, read_env_var, read_env_var_os};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::jsonl_import::{IMPORT_ACTION, JsonlImportOptions, import_jsonl_records};
+use crate::db::shard::{
+    ShardFanoutPosture, ShardFanoutResolverInput, ShardFanoutStatusReport,
+    resolve_shard_fanout_status, shard_fanout_enabled_from_env_value,
+};
 use crate::db::{
     CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
     DatabaseConfig, DbConnection, GraphSnapshotType, StoredAuditEntry, StoredGraphAlgorithmResult,
@@ -1467,6 +1471,7 @@ pub fn restore_backup_to_side_path(
         &side_path,
         &inspect,
     )?;
+    restore_shard_fanout_assets(&side_path, &restored_derived)?;
 
     let import_report = import_jsonl_records(&JsonlImportOptions {
         workspace_path: side_path.clone(),
@@ -1550,6 +1555,76 @@ fn restore_manifest_degradations(manifest_bytes: &[u8]) -> Vec<BackupDegradation
         ),
         "restore imports records through the current migrations before replaying graph-cache assets; run ee db status --workspace <side-path> --json after restore to inspect the migrated database",
     )]
+}
+
+fn restore_shard_fanout_assets(
+    side_path: &Path,
+    restored_derived: &[BackupRestoredDerivedAssetReport],
+) -> Result<(), DomainError> {
+    let Some(manifest_asset) = restored_derived
+        .iter()
+        .find(|asset| asset.kind == "shard_fanout_manifest")
+    else {
+        return Ok(());
+    };
+    let manifest = read_restored_derived_json(manifest_asset)?;
+    let catalog = required_object(&manifest, "catalog")?;
+    let catalog_backup_path = required_json_str(catalog, "backupPath")?;
+    let catalog_asset = restored_derived_asset(restored_derived, catalog_backup_path)?;
+    let catalog_bytes =
+        fs::read(&catalog_asset.restore_path).map_err(|error| DomainError::Import {
+            message: format!(
+                "restored shard fan-out catalog artifact '{}' could not be read: {error}",
+                catalog_asset.restore_path
+            ),
+            repair: Some("verify the backup and retry restore with a fresh side path".to_owned()),
+        })?;
+    let side_ee_dir = side_path.join(WORKSPACE_MARKER);
+    write_new_relative_file(&side_ee_dir, "catalog.db", &catalog_bytes)?;
+
+    let shards = manifest
+        .get("shards")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| DomainError::Import {
+            message: "backup shard fan-out manifest is missing array field 'shards'".to_owned(),
+            repair: Some("recreate the backup with shard fan-out derived assets".to_owned()),
+        })?;
+    for shard in shards {
+        let shard_id = required_json_str(shard, "shardId")?;
+        let shard_backup_path = required_json_str(shard, "backupPath")?;
+        let shard_asset = restored_derived_asset(restored_derived, shard_backup_path)?;
+        let shard_bytes =
+            fs::read(&shard_asset.restore_path).map_err(|error| DomainError::Import {
+                message: format!(
+                    "restored shard fan-out shard artifact '{}' could not be read: {error}",
+                    shard_asset.restore_path
+                ),
+                repair: Some(
+                    "verify the backup and retry restore with a fresh side path".to_owned(),
+                ),
+            })?;
+        write_new_relative_file(
+            &side_ee_dir,
+            &format!("shards/{}.db", safe_file_stem(shard_id)),
+            &shard_bytes,
+        )?;
+    }
+    Ok(())
+}
+
+fn restored_derived_asset<'a>(
+    restored_derived: &'a [BackupRestoredDerivedAssetReport],
+    backup_path: &str,
+) -> Result<&'a BackupRestoredDerivedAssetReport, DomainError> {
+    restored_derived
+        .iter()
+        .find(|asset| asset.path == backup_path)
+        .ok_or_else(|| DomainError::Import {
+            message: format!(
+                "backup shard fan-out manifest references missing derived asset '{backup_path}'"
+            ),
+            repair: Some("recreate the backup with complete shard fan-out assets".to_owned()),
+        })
 }
 
 fn backup_artifact_path(
@@ -2908,6 +2983,13 @@ fn collect_derived_payloads(
 ) -> Vec<BackupDerivedPayload> {
     let mut payloads = Vec::new();
     collect_index_manifest_payloads(workspace_path, captured_at, degraded, &mut payloads);
+    collect_shard_fanout_payloads(
+        workspace_path,
+        workspace_id,
+        captured_at,
+        degraded,
+        &mut payloads,
+    );
     collect_graph_snapshot_payloads(
         connection,
         workspace_id,
@@ -3072,6 +3154,209 @@ fn read_index_manifest_candidate(
                     candidate.display()
                 ),
                 "inspect .ee/index permissions and retry backup create --include-derived",
+            ));
+            None
+        }
+    }
+}
+
+fn collect_shard_fanout_payloads(
+    workspace_path: &Path,
+    workspace_id: &str,
+    captured_at: &str,
+    degraded: &mut Vec<BackupDegradation>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) {
+    let enabled =
+        shard_fanout_enabled_from_env_value(read_env_var(EnvVar::ShardFanoutEnabled).as_deref());
+    if !enabled {
+        return;
+    }
+    let status = resolve_shard_fanout_status(ShardFanoutResolverInput {
+        enabled,
+        workspace_id: Some(workspace_id.to_owned()),
+        workspace_root: Some(workspace_path.to_path_buf()),
+        shards_dir_override: read_env_var_os(EnvVar::ShardsDir).map(PathBuf::from),
+    });
+    collect_shard_fanout_payloads_from_status(&status, captured_at, degraded, payloads);
+}
+
+fn collect_shard_fanout_payloads_from_status(
+    status: &ShardFanoutStatusReport,
+    captured_at: &str,
+    degraded: &mut Vec<BackupDegradation>,
+    payloads: &mut Vec<BackupDerivedPayload>,
+) {
+    for entry in &status.degraded {
+        degraded.push(BackupDegradation::with_severity(
+            entry.code,
+            entry.severity,
+            entry.message,
+            entry.repair,
+        ));
+    }
+    if status.posture != ShardFanoutPosture::Enabled {
+        return;
+    }
+
+    let Some(shard_id) = status.shard_id.as_deref() else {
+        degraded.push(BackupDegradation::warning(
+            "shard_fanout_workspace_unavailable",
+            "shard fan-out is enabled but no workspace shard id was available for backup",
+            "run ee status --workspace . --json and retry backup create --include-derived",
+        ));
+        return;
+    };
+    let Some(shard_path) = status.shard_path.as_deref() else {
+        degraded.push(BackupDegradation::warning(
+            "shard_fanout_shard_missing",
+            "shard fan-out is enabled but no workspace shard path was available for backup",
+            "run ee migrate shard-fanout --workspace . --dry-run --json",
+        ));
+        return;
+    };
+
+    let Some(catalog_bytes) = read_shard_fanout_asset(&status.catalog_path, "catalog", degraded)
+    else {
+        return;
+    };
+    let Some(shard_bytes) = read_shard_fanout_asset(shard_path, "workspace shard", degraded) else {
+        return;
+    };
+
+    let catalog_backup_path = "derived/shards/catalog.db";
+    let shard_backup_path = format!("derived/shards/{}.db", safe_file_stem(shard_id));
+    let catalog_hash = hash_bytes(&catalog_bytes);
+    let shard_hash = hash_bytes(&shard_bytes);
+    let manifest = json!({
+        "schema": "ee.backup.derived.shard_fanout.v1",
+        "capturedAt": captured_at,
+        "workspaceId": status.workspace_id.as_deref(),
+        "shardId": shard_id,
+        "catalog": {
+            "backupPath": catalog_backup_path,
+            "sourcePath": status.catalog_path.to_string_lossy(),
+            "schemaVersion": status.catalog_contract.schema_version,
+            "hash": catalog_hash,
+            "byteSize": catalog_bytes.len() as u64,
+        },
+        "shards": [{
+            "workspaceId": status.workspace_id.as_deref(),
+            "shardId": shard_id,
+            "backupPath": shard_backup_path,
+            "sourcePath": shard_path.to_string_lossy(),
+            "hash": shard_hash,
+            "byteSize": shard_bytes.len() as u64,
+            "schemaVersion": status.catalog_contract.schema_version,
+            "shardGeneration": status.shard_generation,
+        }],
+        "redaction": {
+            "status": "not_applicable",
+            "reason": "catalog and shard database files are storage artifacts; user memory content remains governed by records.jsonl redaction",
+        },
+        "restore": {
+            "sidePathCatalog": ".ee/catalog.db",
+            "sidePathShardRoot": ".ee/shards",
+            "overwritePolicy": "write_new_file",
+        },
+    });
+    match json_payload_bytes(&manifest) {
+        Ok(manifest_bytes) => {
+            payloads.push(derived_payload(
+                catalog_backup_path,
+                "shard_fanout_catalog",
+                captured_at,
+                None,
+                catalog_bytes,
+            ));
+            payloads.push(derived_payload(
+                shard_backup_path,
+                "shard_fanout_workspace_shard",
+                captured_at,
+                None,
+                shard_bytes,
+            ));
+            payloads.push(derived_payload(
+                "derived/shards/manifest.json",
+                "shard_fanout_manifest",
+                captured_at,
+                None,
+                manifest_bytes,
+            ));
+        }
+        Err(error) => degraded.push(BackupDegradation::warning(
+            "shard_fanout_manifest_unreadable",
+            format!("shard fan-out backup manifest could not be serialized: {error}"),
+            "run ee db check --workspace . before retrying backup create --include-derived",
+        )),
+    }
+}
+
+fn read_shard_fanout_asset(
+    path: &Path,
+    label: &'static str,
+    degraded: &mut Vec<BackupDegradation>,
+) -> Option<Vec<u8>> {
+    match first_existing_symlink_component(path) {
+        Ok(Some(symlink_path)) => {
+            degraded.push(BackupDegradation::warning(
+                "shard_fanout_asset_symlink",
+                format!(
+                    "shard fan-out {label} '{}' was skipped because it traverses symlinked path component '{}'",
+                    path.display(),
+                    symlink_path.display()
+                ),
+                "replace symlinked shard fan-out files with regular files before retrying backup create --include-derived",
+            ));
+            return None;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            degraded.push(BackupDegradation::warning(
+                "shard_fanout_asset_unreadable",
+                error.message(),
+                "inspect shard fan-out filesystem permissions and retry backup create --include-derived",
+            ));
+            return None;
+        }
+    }
+
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            degraded.push(BackupDegradation::warning(
+                "shard_fanout_asset_unreadable",
+                format!(
+                    "shard fan-out {label} '{}' is not a regular file",
+                    path.display()
+                ),
+                "run ee migrate shard-fanout --workspace . --dry-run --json",
+            ));
+            return None;
+        }
+        Err(error) => {
+            degraded.push(BackupDegradation::warning(
+                "shard_fanout_asset_unreadable",
+                format!(
+                    "shard fan-out {label} '{}' could not be inspected: {error}",
+                    path.display()
+                ),
+                "inspect shard fan-out filesystem permissions and retry backup create --include-derived",
+            ));
+            return None;
+        }
+    }
+
+    match fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) => {
+            degraded.push(BackupDegradation::warning(
+                "shard_fanout_asset_unreadable",
+                format!(
+                    "shard fan-out {label} '{}' could not be read: {error}",
+                    path.display()
+                ),
+                "inspect shard fan-out filesystem permissions and retry backup create --include-derived",
             ));
             None
         }
@@ -5265,6 +5550,149 @@ mod tests {
                 }),
             "inspect JSON exposes derived assets with byteSize",
         )
+    }
+
+    #[test]
+    fn backup_derived_assets_include_authoritative_shard_fanout_layout() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        fs::create_dir_all(workspace.join(WORKSPACE_MARKER)).map_err(|error| error.to_string())?;
+        let shard_root = tempdir.path().join("data/shards");
+        fs::create_dir_all(&shard_root).map_err(|error| error.to_string())?;
+        let catalog_path = tempdir.path().join("data/catalog.db");
+        fs::write(&catalog_path, b"catalog-db").map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_backup_shard";
+        let shard_path = shard_root.join("wsp_backup_shard.db");
+        fs::write(&shard_path, b"workspace-shard-db").map_err(|error| error.to_string())?;
+
+        let status = resolve_shard_fanout_status(ShardFanoutResolverInput {
+            enabled: true,
+            workspace_id: Some(workspace_id.to_owned()),
+            workspace_root: Some(workspace),
+            shards_dir_override: Some(shard_root),
+        });
+        ensure_equal(
+            status.posture,
+            ShardFanoutPosture::Enabled,
+            "shard fan-out fixture posture",
+        )?;
+        let mut degraded = Vec::new();
+        let mut payloads = Vec::new();
+        collect_shard_fanout_payloads_from_status(
+            &status,
+            "2026-05-21T00:00:00Z",
+            &mut degraded,
+            &mut payloads,
+        );
+
+        ensure(degraded.is_empty(), "authoritative shard assets are clean")?;
+        ensure(
+            payloads
+                .iter()
+                .any(|payload| payload.report.kind == "shard_fanout_catalog"),
+            "catalog derived asset is included",
+        )?;
+        ensure(
+            payloads
+                .iter()
+                .any(|payload| payload.report.kind == "shard_fanout_workspace_shard"),
+            "workspace shard derived asset is included",
+        )?;
+        let manifest_payload = payloads
+            .iter()
+            .find(|payload| payload.report.kind == "shard_fanout_manifest")
+            .ok_or_else(|| "shard fan-out manifest derived asset missing".to_owned())?;
+        let manifest = serde_json::from_slice::<JsonValue>(&manifest_payload.bytes)
+            .map_err(|error| format!("shard fan-out manifest must parse as JSON: {error}"))?;
+
+        ensure_equal(
+            manifest.get("schema").and_then(JsonValue::as_str),
+            Some("ee.backup.derived.shard_fanout.v1"),
+            "shard manifest schema",
+        )?;
+        ensure_equal(
+            manifest.get("workspaceId").and_then(JsonValue::as_str),
+            Some(workspace_id),
+            "manifest workspace id",
+        )?;
+        ensure_equal(
+            manifest
+                .pointer("/catalog/backupPath")
+                .and_then(JsonValue::as_str),
+            Some("derived/shards/catalog.db"),
+            "manifest catalog backup path",
+        )?;
+        ensure_equal(
+            manifest
+                .pointer("/redaction/status")
+                .and_then(JsonValue::as_str),
+            Some("not_applicable"),
+            "manifest redaction posture",
+        )
+    }
+
+    #[test]
+    fn restore_shard_fanout_assets_reconstructs_side_path_layout() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let restore_artifacts = tempdir.path().join("restore-artifacts");
+        fs::create_dir_all(restore_artifacts.join("derived/shards"))
+            .map_err(|error| error.to_string())?;
+        let catalog_restore_path = restore_artifacts.join("derived/shards/catalog.db");
+        let shard_restore_path = restore_artifacts.join("derived/shards/wsp_restore.db");
+        fs::write(&catalog_restore_path, b"catalog-copy").map_err(|error| error.to_string())?;
+        fs::write(&shard_restore_path, b"shard-copy").map_err(|error| error.to_string())?;
+        let manifest_restore_path = restore_artifacts.join("derived/shards/manifest.json");
+        fs::write(
+            &manifest_restore_path,
+            json_payload_bytes(&json!({
+                "schema": "ee.backup.derived.shard_fanout.v1",
+                "catalog": {
+                    "backupPath": "derived/shards/catalog.db",
+                },
+                "shards": [{
+                    "shardId": "wsp_restore",
+                    "backupPath": "derived/shards/wsp_restore.db",
+                }],
+            }))
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let restored_derived = vec![
+            BackupRestoredDerivedAssetReport {
+                path: "derived/shards/catalog.db".to_owned(),
+                kind: "shard_fanout_catalog".to_owned(),
+                restore_path: catalog_restore_path.to_string_lossy().into_owned(),
+                lab_episode_path: None,
+            },
+            BackupRestoredDerivedAssetReport {
+                path: "derived/shards/wsp_restore.db".to_owned(),
+                kind: "shard_fanout_workspace_shard".to_owned(),
+                restore_path: shard_restore_path.to_string_lossy().into_owned(),
+                lab_episode_path: None,
+            },
+            BackupRestoredDerivedAssetReport {
+                path: "derived/shards/manifest.json".to_owned(),
+                kind: "shard_fanout_manifest".to_owned(),
+                restore_path: manifest_restore_path.to_string_lossy().into_owned(),
+                lab_episode_path: None,
+            },
+        ];
+        let side_path = tempdir.path().join("restore-side-path");
+
+        restore_shard_fanout_assets(&side_path, &restored_derived)
+            .map_err(|error| error.message())?;
+
+        let catalog = fs::read(side_path.join(WORKSPACE_MARKER).join("catalog.db"))
+            .map_err(|error| error.to_string())?;
+        let shard = fs::read(
+            side_path
+                .join(WORKSPACE_MARKER)
+                .join("shards")
+                .join("wsp_restore.db"),
+        )
+        .map_err(|error| error.to_string())?;
+        ensure_equal(catalog, b"catalog-copy".to_vec(), "restored catalog bytes")?;
+        ensure_equal(shard, b"shard-copy".to_vec(), "restored shard bytes")
     }
 
     #[test]
