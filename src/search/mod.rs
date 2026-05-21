@@ -212,7 +212,7 @@ impl CanonicalSearchDocument {
         if let Some(title) = self.title {
             doc = doc.with_title(title);
         }
-        doc.metadata = metadata;
+        doc.metadata = metadata.into_iter().collect();
         doc
     }
 }
