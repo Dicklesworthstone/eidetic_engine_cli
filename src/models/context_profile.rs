@@ -22,7 +22,37 @@ pub const AGENT_PROFILE_BIAS_CAP: f64 = 0.05;
 pub const AGENT_PROFILE_COLD_START_OUTCOMES: u32 = 10;
 
 fn normalized_context_profile_token(value: &str) -> String {
-    value.trim().to_ascii_lowercase().replace('-', "_")
+    let trimmed = value.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
 }
 
 /// Outcome counts learned for one agent/memory pair.
@@ -827,9 +857,29 @@ mod tests {
             "objective parser accepts hyphenated spelling",
         )?;
         ensure(
+            ContextProfileObjective::parse("facilityLocation"),
+            Some(ContextProfileObjective::FacilityLocation),
+            "objective parser accepts camelCase spelling",
+        )?;
+        ensure(
+            ContextProfileObjective::parse("MmrRedundancy"),
+            Some(ContextProfileObjective::MmrRedundancy),
+            "objective parser accepts PascalCase spelling",
+        )?;
+        ensure(
             ContextProfileSection::parse("procedural-rules"),
             Some(ContextProfileSection::ProceduralRules),
             "section parser accepts hyphenated spelling",
+        )?;
+        ensure(
+            ContextProfileSection::parse("proceduralRules"),
+            Some(ContextProfileSection::ProceduralRules),
+            "section parser accepts camelCase spelling",
+        )?;
+        ensure(
+            ContextProfileSection::parse("ProceduralRules"),
+            Some(ContextProfileSection::ProceduralRules),
+            "section parser accepts PascalCase spelling",
         )
     }
 
