@@ -998,6 +998,29 @@ fn assert_curate_review_audit_details(
     )
 }
 
+fn assert_curate_review_audit_reason(
+    database_path: &Path,
+    audit_id: &str,
+    expected_reason: Option<&str>,
+) -> TestResult {
+    let connection = DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+    let audit = connection
+        .get_audit(audit_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("missing audit entry {audit_id}"))?;
+    let details_raw = audit
+        .details
+        .as_ref()
+        .ok_or_else(|| format!("audit details missing for {audit_id}"))?;
+    let details: serde_json::Value = serde_json::from_str(details_raw)
+        .map_err(|error| format!("audit details must be valid JSON: {error}"))?;
+    ensure_equal(
+        &details["reason"],
+        &serde_json::json!(expected_reason),
+        "audit details reason",
+    )
+}
+
 #[cfg(unix)]
 fn ensure_pack_query_file_machine_error(
     workspace_prefix: &str,
@@ -3473,6 +3496,242 @@ fn curate_review_lifecycle_commands_json_update_review_state() -> TestResult {
         &Some(merge_target_id.to_string()),
         "persisted merge target",
     )
+}
+
+#[cfg(unix)]
+#[test]
+fn curate_review_with_reason_pins_audit_row_shape() -> TestResult {
+    let workspace = unique_artifact_dir("curate-review-with-reason")?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let init = run_ee(&["--workspace", workspace_arg.as_str(), "--json", "init"])?;
+    ensure(
+        init.status.success(),
+        format!(
+            "init should succeed before curate-review-with-reason; stderr: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ),
+    )?;
+    let remember = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "remember",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "Run cargo fmt --check before release.",
+    ])?;
+    ensure(
+        remember.status.success(),
+        format!(
+            "remember should create the test database; stderr: {}",
+            String::from_utf8_lossy(&remember.stderr)
+        ),
+    )?;
+    let remember_json: serde_json::Value = serde_json::from_slice(&remember.stdout)
+        .map_err(|error| format!("remember stdout must be JSON: {error}"))?;
+    let workspace_id = remember_json["data"]["workspace_id"]
+        .as_str()
+        .ok_or_else(|| "remember workspace_id must be a string".to_string())?
+        .to_owned();
+    let memory_id = remember_json["data"]["memory_id"]
+        .as_str()
+        .ok_or_else(|| "remember memory_id must be a string".to_string())?
+        .to_owned();
+    let database_path = workspace.join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+    let accept_id = "curate_00000000000000000000000010";
+    let reject_id = "curate_00000000000000000000000011";
+    let bare_id = "curate_00000000000000000000000012";
+    for (candidate_id, reason_text) in [
+        (accept_id, "Accept with reason."),
+        (reject_id, "Reject with reason."),
+        (bare_id, "Reject without --reason."),
+    ] {
+        connection
+            .insert_curation_candidate(
+                candidate_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.clone(),
+                    candidate_type: "promote".to_string(),
+                    target_memory_id: memory_id.clone(),
+                    proposed_content: None,
+                    proposed_confidence: Some(0.82),
+                    proposed_trust_class: Some("agent_validated".to_string()),
+                    source_type: "feedback_event".to_string(),
+                    source_id: Some(format!("smoke-{candidate_id}")),
+                    reason: reason_text.to_string(),
+                    confidence: 0.76,
+                    status: Some("pending".to_string()),
+                    created_at: Some("2026-05-01T00:00:02Z".to_string()),
+                    ttl_expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    // Accept with --reason "validated by humans".
+    let accept = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "curate",
+        "accept",
+        accept_id,
+        "--reason",
+        "validated by humans",
+        "--actor",
+        "agent-1",
+    ])?;
+    ensure(
+        accept.status.success(),
+        format!(
+            "curate accept --reason should succeed; stderr: {}",
+            String::from_utf8_lossy(&accept.stderr)
+        ),
+    )?;
+    let accept_json: serde_json::Value = serde_json::from_slice(&accept.stdout)
+        .map_err(|error| format!("curate accept --reason stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &accept_json["success"],
+        &serde_json::json!(true),
+        "curate accept --reason success",
+    )?;
+    let accept_audit_id = accept_json["data"]["mutation"]["auditId"]
+        .as_str()
+        .ok_or_else(|| "curate accept --reason auditId must be present".to_string())?;
+    assert_curate_review_audit_details(
+        &database_path,
+        accept_audit_id,
+        "curation_candidate.accept",
+        accept_id,
+        "accept",
+        "pending",
+        "approved",
+        "new",
+        "accepted",
+        None,
+        None,
+        "accept",
+    )?;
+    assert_curate_review_audit_reason(
+        &database_path,
+        accept_audit_id,
+        Some("validated by humans"),
+    )?;
+
+    // Reject with --reason "duplicate".
+    let reject = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "curate",
+        "reject",
+        reject_id,
+        "--reason",
+        "duplicate",
+        "--actor",
+        "agent-2",
+    ])?;
+    ensure(
+        reject.status.success(),
+        format!(
+            "curate reject --reason should succeed; stderr: {}",
+            String::from_utf8_lossy(&reject.stderr)
+        ),
+    )?;
+    let reject_json: serde_json::Value = serde_json::from_slice(&reject.stdout)
+        .map_err(|error| format!("curate reject --reason stdout must be JSON: {error}"))?;
+    ensure_equal(
+        &reject_json["success"],
+        &serde_json::json!(true),
+        "curate reject --reason success",
+    )?;
+    let reject_audit_id = reject_json["data"]["mutation"]["auditId"]
+        .as_str()
+        .ok_or_else(|| "curate reject --reason auditId must be present".to_string())?;
+    assert_curate_review_audit_details(
+        &database_path,
+        reject_audit_id,
+        "curation_candidate.reject",
+        reject_id,
+        "reject",
+        "pending",
+        "rejected",
+        "new",
+        "rejected",
+        None,
+        None,
+        "reject",
+    )?;
+    assert_curate_review_audit_reason(&database_path, reject_audit_id, Some("duplicate"))?;
+
+    // Companion absent-reason check: reject without --reason must persist
+    // reason: null in the audit row.
+    let bare = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "curate",
+        "reject",
+        bare_id,
+        "--actor",
+        "agent-3",
+    ])?;
+    ensure(
+        bare.status.success(),
+        format!(
+            "curate reject without --reason should succeed; stderr: {}",
+            String::from_utf8_lossy(&bare.stderr)
+        ),
+    )?;
+    let bare_json: serde_json::Value = serde_json::from_slice(&bare.stdout)
+        .map_err(|error| format!("curate reject (no reason) stdout must be JSON: {error}"))?;
+    let bare_audit_id = bare_json["data"]["mutation"]["auditId"]
+        .as_str()
+        .ok_or_else(|| "curate reject (no reason) auditId must be present".to_string())?;
+    assert_curate_review_audit_reason(&database_path, bare_audit_id, None)?;
+
+    // Pin the planned-details JSON shape to a deterministic golden snap.
+    let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+    let reject_audit = connection
+        .get_audit(reject_audit_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("missing audit entry {reject_audit_id}"))?;
+    let reject_details_raw = reject_audit
+        .details
+        .as_ref()
+        .ok_or_else(|| format!("audit details missing for {reject_audit_id}"))?;
+    let reject_details: serde_json::Value = serde_json::from_str(reject_details_raw)
+        .map_err(|error| format!("audit details must be valid JSON: {error}"))?;
+    let projection = serde_json::json!({
+        "schema": "ee.curate.transition.audit_row.v1",
+        "command": "curate reject --reason",
+        "audit": {
+            "action": reject_audit.action,
+            "targetType": reject_audit.target_type,
+            "targetId": "CANDIDATE",
+            "actor": reject_audit.actor,
+        },
+        "details": {
+            "candidateId": "CANDIDATE",
+            "action": reject_details["action"],
+            "fromStatus": reject_details["fromStatus"],
+            "toStatus": reject_details["toStatus"],
+            "fromReviewState": reject_details["fromReviewState"],
+            "toReviewState": reject_details["toReviewState"],
+            "snoozedUntil": reject_details["snoozedUntil"],
+            "mergedIntoCandidateId": reject_details["mergedIntoCandidateId"],
+            "decision": reject_details["decision"],
+            "reason": reject_details["reason"],
+        }
+    });
+    let mut rendered =
+        serde_json::to_string_pretty(&projection).map_err(|error| error.to_string())?;
+    rendered.push('\n');
+    assert_snapshot_file("tests/snapshots/curate_review_with_reason.snap", &rendered)
 }
 
 #[test]

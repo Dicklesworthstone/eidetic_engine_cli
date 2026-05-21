@@ -1,0 +1,22 @@
+{
+  "schema": "ee.curate.transition.audit_row.v1",
+  "command": "curate reject --reason",
+  "audit": {
+    "action": "curation_candidate.reject",
+    "targetType": "curation_candidate",
+    "targetId": "CANDIDATE",
+    "actor": "agent-2"
+  },
+  "details": {
+    "candidateId": "CANDIDATE",
+    "action": "reject",
+    "fromStatus": "pending",
+    "toStatus": "rejected",
+    "fromReviewState": "new",
+    "toReviewState": "rejected",
+    "snoozedUntil": null,
+    "mergedIntoCandidateId": null,
+    "decision": "reject",
+    "reason": "duplicate"
+  }
+}

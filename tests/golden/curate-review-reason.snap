@@ -1,0 +1,24 @@
+---
+source: src/cli/mod.rs
+assertion: curate accept/reject --reason persists details.reason on the curation transition audit row
+schema:
+  response: ee.response.v1
+  audit_row: ee.curate.transition.audit_row.v1
+contracts:
+  - "ee curate accept <id> --reason <TEXT> --actor <ACTOR> --json exits 0 and writes an audit row whose details.reason equals <TEXT>"
+  - "ee curate reject <id> --reason <TEXT> --actor <ACTOR> --json exits 0 and writes an audit row whose details.reason equals <TEXT>"
+  - "ee curate accept/reject without --reason persists details.reason as null on the audit row (absent-reason companion)"
+  - "audit.action is curation_candidate.accept or curation_candidate.reject; audit.targetType is curation_candidate; audit.actor matches the --actor argument"
+  - "details fields fromStatus / toStatus / fromReviewState / toReviewState / decision / snoozedUntil / mergedIntoCandidateId match the planned-details serialization shape (camelCase, ee.curate.transition.audit_row.v1)"
+  - "details.reason is NEVER logged at tracing INFO; src/core/curate.rs:5617 only emits reason_present + reason_len"
+evidence:
+  - CurateReviewArgs.reason (src/cli/mod.rs:6722)
+  - CurateReviewOptions.reason (src/core/curate.rs)
+  - validate_curate_review_reason + MAX_CURATE_REVIEW_REASON_BYTES (src/core/curate.rs:6897)
+  - curate_reason_too_large (src/core/curate.rs)
+  - CurateReviewPlannedDetails.reason (src/core/curate.rs:1031)
+  - persist_candidate_review_inner emits details via curate_review_planned_details (src/core/curate.rs:5557)
+  - ee::curate::transition tracing emits reason_present + reason_len, never the reason text (src/core/curate.rs:5617)
+companion_tests:
+  - tests/smoke.rs::curate_review_with_reason_pins_audit_row_shape
+  - tests/snapshots/curate_review_with_reason.snap
