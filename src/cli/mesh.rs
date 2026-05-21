@@ -38,6 +38,11 @@ use crate::mesh::discovery_policy::{
     decide_discovery, decide_respond, evaluate_policy_degradations, load_node_key_list,
     load_workspace_lists, validate_node_key,
 };
+use crate::mesh::emergency_disable::{
+    MeshEmergencyDisableInput, MeshEmergencyDisableReport, MeshEmergencyReenableInput,
+    MeshEmergencyReenableReport, apply_emergency_disable, apply_emergency_reenable,
+    plan_emergency_disable, plan_emergency_reenable,
+};
 use crate::mesh::foreground_cli::{
     MESH_CLI_EXPORT_SCHEMA_V1, MESH_CLI_IMPORT_SCHEMA_V1, MESH_CLI_SYNC_SCHEMA_V1,
     MESH_EXPORT_ARTIFACT_SCHEMA_V1, MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE, MeshCliDegradation,
@@ -78,6 +83,10 @@ pub enum MeshCommand {
     Peer(MeshPeerArgs),
     /// Report local mesh posture, cache counts, and repair commands.
     Status(MeshStatusArgs),
+    /// Immediately contain mesh activity without deleting local truth.
+    Disable(MeshDisableArgs),
+    /// Re-enable mesh after explicit containment review.
+    Reenable(MeshReenableArgs),
     /// Materialize zero-touch Tailscale mesh peers from fresh autodiscovery.
     AutoEnroll(MeshAutoEnrollArgs),
     /// Inspect or update Tailscale peer discovery policy.
@@ -210,6 +219,50 @@ pub struct MeshPreviewGrantArgs {
     /// Seed for the random sample strategy. Pinned for deterministic replay.
     #[arg(long, default_value_t = 0)]
     pub seed: u64,
+}
+
+/// Arguments for `ee mesh disable`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshDisableArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Preview containment without writing workspace config.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Record all-workspaces containment intent without mutating every workspace config.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub all_workspaces: bool,
+
+    /// Narrow containment to one mesh peer.
+    #[arg(long, value_name = "PEER_ID")]
+    pub peer: Option<String>,
+
+    /// Optional temporary containment duration for operator/audit context.
+    #[arg(long = "temporary-for", value_name = "DURATION")]
+    pub temporary_for: Option<String>,
+
+    /// Operator-visible incident reason.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+}
+
+/// Arguments for `ee mesh reenable`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshReenableArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Preview re-enable actions without writing workspace config.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Required confirmation that containment review is complete.
+    #[arg(long = "confirm-reenable", action = ArgAction::SetTrue)]
+    pub confirm_reenable: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -617,6 +670,8 @@ where
         MeshCommand::Peers(args) => handle_mesh_peers(cli, args, stdout, stderr),
         MeshCommand::Peer(args) => handle_mesh_peer(cli, args, stdout, stderr),
         MeshCommand::Status(args) => handle_mesh_status(cli, args, stdout, stderr),
+        MeshCommand::Disable(args) => handle_mesh_disable(cli, args, stdout, stderr),
+        MeshCommand::Reenable(args) => handle_mesh_reenable(cli, args, stdout, stderr),
         MeshCommand::AutoEnroll(args) => handle_mesh_auto_enroll(cli, args, stdout, stderr),
         MeshCommand::DiscoveryPolicy(args) => {
             handle_mesh_discovery_policy(cli, args, stdout, stderr)
@@ -802,6 +857,129 @@ where
         return write_mesh_status_json_with_autodiscovery(stdout, &report, &autodiscovery);
     }
     write_mesh_report(cli, &report, &render_mesh_status_human(&report), stdout)
+}
+
+fn handle_mesh_disable<W, E>(
+    cli: &Cli,
+    args: &MeshDisableArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let snapshot = match build_snapshot(cli, args.database.as_deref()) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let input = MeshEmergencyDisableInput {
+        workspace_path: cli.resolve_workspace(),
+        all_workspaces: args.all_workspaces,
+        dry_run: args.dry_run,
+        reason: args.reason.clone(),
+        peer_id: args.peer.clone(),
+        temporary_for: args.temporary_for.clone(),
+        mesh_enabled_before: snapshot.mesh_enabled,
+        command_mode_before: snapshot_mesh_command_mode(&snapshot),
+    };
+    let report = if args.dry_run {
+        plan_emergency_disable(&input)
+    } else {
+        match apply_emergency_disable(&input) {
+            Ok(report) => report,
+            Err(error) => {
+                return write_domain_error(
+                    &mesh_emergency_domain_error(error),
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                );
+            }
+        }
+    };
+    write_mesh_report(cli, &report, &render_mesh_disable_human(&report), stdout)
+}
+
+fn handle_mesh_reenable<W, E>(
+    cli: &Cli,
+    args: &MeshReenableArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let snapshot = match build_snapshot(cli, args.database.as_deref()) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let input = MeshEmergencyReenableInput {
+        workspace_path: cli.resolve_workspace(),
+        dry_run: args.dry_run,
+        explicit: args.confirm_reenable,
+        mesh_enabled_before: snapshot.mesh_enabled,
+        command_mode_before: snapshot_mesh_command_mode(&snapshot),
+    };
+    let report = if args.dry_run {
+        match plan_emergency_reenable(&input) {
+            Ok(report) => report,
+            Err(error) => {
+                return write_domain_error(
+                    &mesh_emergency_domain_error(error),
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                );
+            }
+        }
+    } else {
+        match apply_emergency_reenable(&input) {
+            Ok(report) => report,
+            Err(error) => {
+                return write_domain_error(
+                    &mesh_emergency_domain_error(error),
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                );
+            }
+        }
+    };
+    write_mesh_report(cli, &report, &render_mesh_reenable_human(&report), stdout)
+}
+
+fn snapshot_mesh_command_mode(snapshot: &MeshForegroundSnapshot) -> MeshCommandMode {
+    snapshot.mode.parse().unwrap_or(MeshCommandMode::Off)
+}
+
+fn mesh_emergency_domain_error(
+    error: crate::mesh::emergency_disable::MeshEmergencyError,
+) -> DomainError {
+    let message = error.to_string();
+    match error {
+        crate::mesh::emergency_disable::MeshEmergencyError::ReenableRequiresExplicitCommand => {
+            DomainError::Usage {
+                message,
+                repair: Some(
+                    "Re-run with `ee mesh reenable --confirm-reenable --json` after containment review."
+                        .to_owned(),
+                ),
+            }
+        }
+        crate::mesh::emergency_disable::MeshEmergencyError::ReadConfig { .. }
+        | crate::mesh::emergency_disable::MeshEmergencyError::ParseConfig { .. }
+        | crate::mesh::emergency_disable::MeshEmergencyError::WriteConfig { .. } => {
+            DomainError::Configuration {
+                message,
+                repair: Some(
+                    "Inspect the workspace .ee/config.toml permissions and retry the mesh containment command."
+                        .to_owned(),
+                ),
+            }
+        }
+    }
 }
 
 fn build_tailscale_autodiscovery_report(
@@ -3196,6 +3374,51 @@ fn render_mesh_status_human(report: &MeshCliStatusReport) -> String {
     }
     append_degradations(&mut output, &report.degraded);
     output
+}
+
+fn render_mesh_disable_human(report: &MeshEmergencyDisableReport) -> String {
+    let mut output = format!(
+        "Mesh disable: {scope}\n  Workspace: {workspace}\n  Mesh: {before} -> {after}\n  Mode: {mode_before} -> {mode_after}\n  Applied: {applied}\n  Listener stopped: {listener}\n  Background sync stopped: {sync}\n  Queued exports cancelled: {queued}\n  Local cache readable: {cache}\n  Source-of-truth memories preserved: {truth}\n",
+        scope = report.scope,
+        workspace = report.workspace_path,
+        before = report.mesh_enabled_before,
+        after = report.mesh_enabled_after,
+        mode_before = report.command_mode_before,
+        mode_after = report.command_mode_after,
+        applied = report.applied,
+        listener = report.listener_stopped,
+        sync = report.background_sync_stopped,
+        queued = report.queued_exports_cancelled,
+        cache = report.local_cache_readable,
+        truth = report.source_of_truth_memories_preserved,
+    );
+    if let Some(reason) = &report.reason {
+        output.push_str(&format!("  Reason: {reason}\n"));
+    }
+    if !report.peer_capabilities_suspended.is_empty() {
+        output.push_str("  Peer suspensions:\n");
+        for peer in &report.peer_capabilities_suspended {
+            output.push_str(&format!(
+                "    - {} capabilities={}\n",
+                peer.peer_id,
+                peer.capabilities_suspended.join(",")
+            ));
+        }
+    }
+    output
+}
+
+fn render_mesh_reenable_human(report: &MeshEmergencyReenableReport) -> String {
+    format!(
+        "Mesh reenable\n  Workspace: {workspace}\n  Mesh: {before} -> {after}\n  Mode: {mode_before} -> {mode_after}\n  Applied: {applied}\n  Explicit confirmation: {explicit}\n",
+        workspace = report.workspace_path,
+        before = report.mesh_enabled_before,
+        after = report.mesh_enabled_after,
+        mode_before = report.command_mode_before,
+        mode_after = report.command_mode_after,
+        applied = report.applied,
+        explicit = report.explicit,
+    )
 }
 
 fn render_mesh_auto_enroll_human(report: &AutoEnrollmentResult) -> String {
