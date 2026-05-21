@@ -637,6 +637,27 @@ fn swarm_next_action_sample() -> Value {
                 ],
                 "fallbackDecision": null
             }],
+            "staleWorkProposals": [{
+                "beadId": "bd-stale",
+                "title": "Stale in-progress slice",
+                "assignee": "QuietHill",
+                "decision": "reopenSuggested",
+                "confidence": "medium",
+                "evidence": [
+                    "assignee_present:QuietHill",
+                    "no_mail_thread_mentions_bead",
+                    "no_matching_active_reservation",
+                    "no_recent_commit_mentions_bead",
+                    "priority:2",
+                    "source_bucket:in_progress",
+                    "status:in_progress"
+                ],
+                "caveats": [],
+                "suggestedCommands": [
+                    "br show bd-stale --json",
+                    "br update bd-stale --status open --json"
+                ]
+            }],
             "coordination": {
                 "activeReservationCount": 1,
                 "reservationHolders": ["GoldenCompass"],

@@ -34,6 +34,10 @@
           "type": "array",
           "items": {"$ref": "#/$defs/recommendationCard"}
         },
+        "staleWorkProposals": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/staleWorkProposal"}
+        },
         "topCandidates": {
           "type": "array",
           "items": {"$ref": "#/$defs/candidate"}
@@ -51,8 +55,8 @@
   },
   "field_presets": {
     "minimal": ["schema", "workspace", "redactionStatus", "candidateCount", "dirtyPathCount", "degradedCount"],
-    "summary": ["schema", "workspace", "redactionStatus", "inputs", "coordination", "checkout", "compileHealth", "verification", "environment", "topCandidates", "degraded"],
-    "standard": ["schema", "workspace", "redactionStatus", "inputs", "candidates", "recommendationCards", "coordination", "checkout", "compileHealth", "verification", "environment", "degraded"],
+    "summary": ["schema", "workspace", "redactionStatus", "inputs", "coordination", "checkout", "compileHealth", "verification", "environment", "topCandidates", "staleWorkProposals", "degraded"],
+    "standard": ["schema", "workspace", "redactionStatus", "inputs", "candidates", "recommendationCards", "staleWorkProposals", "coordination", "checkout", "compileHealth", "verification", "environment", "degraded"],
     "full": ["*"]
   },
   "examples": [
@@ -133,6 +137,29 @@
               "remote_only_rch_not_safe"
             ],
             "fallbackDecision": "message_owner_before_editing"
+          }
+        ],
+        "staleWorkProposals": [
+          {
+            "beadId": "bd-stale",
+            "title": "Stale in-progress slice",
+            "assignee": "QuietHill",
+            "decision": "reopenSuggested",
+            "confidence": "medium",
+            "evidence": [
+              "assignee_present:QuietHill",
+              "no_mail_thread_mentions_bead",
+              "no_matching_active_reservation",
+              "no_recent_commit_mentions_bead",
+              "priority:2",
+              "source_bucket:in_progress",
+              "status:in_progress"
+            ],
+            "caveats": [],
+            "suggestedCommands": [
+              "br show bd-stale --json",
+              "br update bd-stale --status open --json"
+            ]
           }
         ],
         "coordination": {
@@ -261,6 +288,24 @@
         "proofObligations": {"type": "array", "items": {"type": "string"}},
         "evidenceCaveats": {"type": "array", "items": {"type": "string"}},
         "fallbackDecision": {"type": ["string", "null"]}
+      }
+    },
+    "staleWorkProposal": {
+      "type": "object",
+      "required": ["beadId", "title", "assignee", "decision", "confidence", "evidence", "caveats", "suggestedCommands"],
+      "additionalProperties": false,
+      "properties": {
+        "beadId": {"type": "string"},
+        "title": {"type": "string"},
+        "assignee": {"type": ["string", "null"]},
+        "decision": {
+          "type": "string",
+          "enum": ["leaveAloneActive", "contactSuggested", "reopenSuggested"]
+        },
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "evidence": {"type": "array", "items": {"type": "string"}},
+        "caveats": {"type": "array", "items": {"type": "string"}},
+        "suggestedCommands": {"type": "array", "items": {"type": "string"}}
       }
     },
     "scoreInput": {

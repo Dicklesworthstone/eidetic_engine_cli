@@ -44415,6 +44415,7 @@ mod tests {
                 bv_top_pick_count: 0,
             },
             candidates: Vec::new(),
+            stale_work_proposals: Vec::new(),
             coordination: crate::core::swarm_next_action::SwarmNextActionCoordinationSummary {
                 active_reservation_count: 0,
                 reservation_holders: Vec::new(),

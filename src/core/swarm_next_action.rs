@@ -13,8 +13,9 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::core::swarm_brief::{
-    SwarmBriefCollectOptions, SwarmBriefCommandRunner, SwarmBriefDegradation,
-    SwarmBriefFileReservation, SwarmBriefReport, SwarmBriefSourceKind, collect_swarm_brief,
+    SwarmBriefBead, SwarmBriefCollectOptions, SwarmBriefCommandRunner, SwarmBriefCommit,
+    SwarmBriefDegradation, SwarmBriefFileReservation, SwarmBriefReport, SwarmBriefSourceKind,
+    SwarmBriefThreadSummary, collect_swarm_brief,
 };
 
 pub const SWARM_NEXT_ACTION_SCHEMA_V1: &str = "ee.swarm_next_action.v1";
@@ -29,6 +30,7 @@ pub struct SwarmNextActionSnapshot {
     pub redaction_status: &'static str,
     pub inputs: SwarmNextActionInputSummary,
     pub candidates: Vec<SwarmNextActionCandidate>,
+    pub stale_work_proposals: Vec<SwarmNextActionStaleWorkProposal>,
     pub coordination: SwarmNextActionCoordinationSummary,
     pub checkout: SwarmNextActionCheckoutSummary,
     pub compile_health: SwarmNextActionCompileHealthSummary,
@@ -42,13 +44,14 @@ impl Serialize for SwarmNextActionSnapshot {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("SwarmNextActionSnapshot", 12)?;
+        let mut state = serializer.serialize_struct("SwarmNextActionSnapshot", 13)?;
         state.serialize_field("schema", &self.schema)?;
         state.serialize_field("workspace", &self.workspace)?;
         state.serialize_field("redactionStatus", &self.redaction_status)?;
         state.serialize_field("inputs", &self.inputs)?;
         state.serialize_field("candidates", &self.candidates)?;
         state.serialize_field("recommendationCards", &self.recommendation_cards())?;
+        state.serialize_field("staleWorkProposals", &self.stale_work_proposals)?;
         state.serialize_field("coordination", &self.coordination)?;
         state.serialize_field("checkout", &self.checkout)?;
         state.serialize_field("compileHealth", &self.compile_health)?;
@@ -82,6 +85,19 @@ pub struct SwarmNextActionCandidate {
     pub blocked_by: Vec<String>,
     pub blocked_by_compile_health: bool,
     pub action_hint: String,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmNextActionStaleWorkProposal {
+    pub bead_id: String,
+    pub title: String,
+    pub assignee: Option<String>,
+    pub decision: &'static str,
+    pub confidence: &'static str,
+    pub evidence: Vec<String>,
+    pub caveats: Vec<String>,
+    pub suggested_commands: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -642,6 +658,7 @@ impl SwarmNextActionSnapshot {
                     .map_or(0, |summary| summary.top_picks.len()),
             },
             candidates,
+            stale_work_proposals: stale_work_proposals_from_brief(brief),
             coordination: coordination_summary(brief),
             checkout: SwarmNextActionCheckoutSummary {
                 dirty_path_count: dirty_paths.len(),
@@ -844,6 +861,193 @@ fn candidate_source_rank(source: &str) -> u8 {
         "bv_top_pick" => 0,
         "beads_ready" => 1,
         _ => 2,
+    }
+}
+
+fn stale_work_proposals_from_brief(
+    brief: &SwarmBriefReport,
+) -> Vec<SwarmNextActionStaleWorkProposal> {
+    let agent_mail_degraded = source_has_degradation(brief, SwarmBriefSourceKind::AgentMail);
+    let beads_degraded = source_has_degradation(brief, SwarmBriefSourceKind::Beads);
+    let mut proposals = brief
+        .beads
+        .in_progress
+        .iter()
+        .map(|bead| stale_work_proposal_for_bead(brief, bead, agent_mail_degraded, beads_degraded))
+        .collect::<Vec<_>>();
+    proposals.sort();
+    proposals.dedup();
+    proposals
+}
+
+fn source_has_degradation(brief: &SwarmBriefReport, source: SwarmBriefSourceKind) -> bool {
+    brief
+        .degraded
+        .iter()
+        .any(|degradation| degradation.source == source)
+}
+
+fn stale_work_proposal_for_bead(
+    brief: &SwarmBriefReport,
+    bead: &SwarmBriefBead,
+    agent_mail_degraded: bool,
+    beads_degraded: bool,
+) -> SwarmNextActionStaleWorkProposal {
+    let matching_reservation = matching_reservation_for_in_progress_bead(brief, bead);
+    let matching_commit = matching_recent_commit_for_bead(brief, bead);
+    let matching_thread = matching_thread_for_bead(brief, bead);
+    let blocked_by = bv_blockers_for_bead(brief, bead);
+
+    let mut evidence = BTreeSet::new();
+    evidence.insert(format!("status:{}", bead.status));
+    evidence.insert(format!("source_bucket:{}", bead.source_bucket));
+    if let Some(priority) = bead.priority {
+        evidence.insert(format!("priority:{priority}"));
+    }
+    match &bead.assignee {
+        Some(assignee) => {
+            evidence.insert(format!("assignee_present:{assignee}"));
+        }
+        None => {
+            evidence.insert("assignee_missing".to_owned());
+        }
+    }
+
+    if let Some(reservation) = matching_reservation {
+        evidence.insert(format!(
+            "active_reservation_holder:{}:{}",
+            reservation.holder, reservation.path_pattern
+        ));
+    } else {
+        evidence.insert("no_matching_active_reservation".to_owned());
+    }
+
+    if let Some(commit) = matching_commit {
+        evidence.insert(format!("recent_commit_mentions_bead:{}", commit.hash));
+    } else {
+        evidence.insert("no_recent_commit_mentions_bead".to_owned());
+    }
+
+    if let Some(thread) = matching_thread {
+        evidence.insert(format!("mail_thread_mentions_bead:{}", thread.thread_id));
+    } else {
+        evidence.insert("no_mail_thread_mentions_bead".to_owned());
+    }
+
+    if !blocked_by.is_empty() {
+        evidence.insert(format!("blocked_by:{}", blocked_by.join(",")));
+    }
+
+    let mut caveats = BTreeSet::new();
+    if agent_mail_degraded {
+        caveats.insert("agent_mail_unavailable_not_stale_evidence".to_owned());
+    }
+    if beads_degraded {
+        caveats.insert("beads_tracker_degraded_timestamps_may_be_stale".to_owned());
+    }
+    if bead.assignee.is_none() {
+        caveats.insert("missing_assignee_reduces_contactability".to_owned());
+    }
+    if !blocked_by.is_empty() {
+        caveats.insert("blocked_dependencies_require_parent_check_before_reopen".to_owned());
+    }
+
+    let has_active_signal =
+        matching_reservation.is_some() || matching_commit.is_some() || matching_thread.is_some();
+    let stale_signal_count = [
+        matching_reservation.is_none(),
+        matching_commit.is_none(),
+        matching_thread.is_none(),
+        bead.assignee.is_none(),
+    ]
+    .into_iter()
+    .filter(|signal| *signal)
+    .count();
+
+    let (decision, confidence) = if has_active_signal {
+        ("leaveAloneActive", "high")
+    } else if agent_mail_degraded || beads_degraded || !blocked_by.is_empty() {
+        ("contactSuggested", "low")
+    } else if stale_signal_count >= 3 {
+        ("reopenSuggested", "medium")
+    } else {
+        ("contactSuggested", "medium")
+    };
+
+    SwarmNextActionStaleWorkProposal {
+        bead_id: bead.id.clone(),
+        title: bead.title.clone(),
+        assignee: bead.assignee.clone(),
+        decision,
+        confidence,
+        evidence: evidence.into_iter().collect(),
+        caveats: caveats.into_iter().collect(),
+        suggested_commands: stale_work_suggested_commands(bead, decision),
+    }
+}
+
+fn matching_reservation_for_in_progress_bead<'a>(
+    brief: &'a SwarmBriefReport,
+    bead: &SwarmBriefBead,
+) -> Option<&'a SwarmBriefFileReservation> {
+    let assignee = bead.assignee.as_deref()?;
+    brief
+        .file_reservations
+        .iter()
+        .find(|reservation| reservation.exclusive && reservation.holder == assignee)
+}
+
+fn matching_recent_commit_for_bead<'a>(
+    brief: &'a SwarmBriefReport,
+    bead: &SwarmBriefBead,
+) -> Option<&'a SwarmBriefCommit> {
+    brief
+        .recent_commits
+        .iter()
+        .find(|commit| text_mentions_bead(&commit.subject, &bead.id))
+}
+
+fn matching_thread_for_bead<'a>(
+    brief: &'a SwarmBriefReport,
+    bead: &SwarmBriefBead,
+) -> Option<&'a SwarmBriefThreadSummary> {
+    brief.threads.iter().find(|thread| {
+        text_mentions_bead(&thread.thread_id, &bead.id)
+            || thread
+                .subject
+                .as_deref()
+                .is_some_and(|subject| text_mentions_bead(subject, &bead.id))
+    })
+}
+
+fn bv_blockers_for_bead(brief: &SwarmBriefReport, bead: &SwarmBriefBead) -> Vec<String> {
+    let mut blockers = brief
+        .bv
+        .as_ref()
+        .and_then(|summary| summary.top_picks.iter().find(|pick| pick.id == bead.id))
+        .map_or_else(Vec::new, |pick| pick.blocked_by.clone());
+    blockers.sort();
+    blockers.dedup();
+    blockers
+}
+
+fn text_mentions_bead(text: &str, bead_id: &str) -> bool {
+    text.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '.'))
+        .any(|token| token == bead_id)
+}
+
+fn stale_work_suggested_commands(bead: &SwarmBriefBead, decision: &'static str) -> Vec<String> {
+    match decision {
+        "reopenSuggested" => vec![
+            format!("br show {} --json", bead.id),
+            format!("br update {} --status open --json", bead.id),
+        ],
+        "contactSuggested" => vec![
+            format!("br show {} --json", bead.id),
+            format!("br update {} --status in_progress --json", bead.id),
+        ],
+        "leaveAloneActive" => vec![format!("br show {} --json", bead.id)],
+        _ => Vec::new(),
     }
 }
 
@@ -1522,8 +1726,8 @@ mod tests {
     use crate::core::swarm_brief::{
         RchCodexHookCapability, RchLocalCapabilityReport, RchQueueHealth, RchWorkerPressureReport,
         RchWorkerProbeSummary, SwarmBriefBead, SwarmBriefBvPick, SwarmBriefBvSummary,
-        SwarmBriefDegradation, SwarmBriefDirtyFile, SwarmBriefFileReservation,
-        SwarmBriefInboxSummary, SwarmBriefSourceKind,
+        SwarmBriefCommit, SwarmBriefDegradation, SwarmBriefDirtyFile, SwarmBriefFileReservation,
+        SwarmBriefInboxSummary, SwarmBriefSourceKind, SwarmBriefThreadSummary,
     };
 
     fn unknown_worker_pressure() -> RchWorkerPressureReport {
@@ -2148,6 +2352,171 @@ mod tests {
     }
 
     #[test]
+    fn stale_work_proposals_leave_active_assignee_alone_when_reservation_matches() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut bead = bead("bd-active", "Active in-progress work", 2);
+        bead.status = "in_progress".to_owned();
+        bead.source_bucket = "in_progress".to_owned();
+        bead.assignee = Some("BlueLake".to_owned());
+        brief.beads.in_progress = vec![bead];
+        brief.file_reservations = vec![SwarmBriefFileReservation {
+            path_pattern: "src/db/*.rs".to_owned(),
+            holder: "BlueLake".to_owned(),
+            exclusive: true,
+            expires_at: Some("2026-05-21T16:00:00Z".to_owned()),
+        }];
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+
+        assert_eq!(snapshot.stale_work_proposals.len(), 1);
+        let proposal = &snapshot.stale_work_proposals[0];
+        assert_eq!(proposal.decision, "leaveAloneActive");
+        assert_eq!(proposal.confidence, "high");
+        assert!(
+            proposal
+                .evidence
+                .iter()
+                .any(|entry| entry.starts_with("active_reservation_holder:BlueLake:"))
+        );
+        assert_eq!(
+            proposal.suggested_commands,
+            vec!["br show bd-active --json"]
+        );
+    }
+
+    #[test]
+    fn stale_work_proposals_reopen_stale_assignee_with_multiple_missing_signals() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut bead = bead("bd-stale", "Stale in-progress work", 2);
+        bead.status = "in_progress".to_owned();
+        bead.source_bucket = "in_progress".to_owned();
+        bead.assignee = Some("QuietHill".to_owned());
+        brief.beads.in_progress = vec![bead];
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+
+        let proposal = &snapshot.stale_work_proposals[0];
+        assert_eq!(proposal.decision, "reopenSuggested");
+        assert_eq!(proposal.confidence, "medium");
+        assert!(
+            proposal
+                .evidence
+                .contains(&"no_matching_active_reservation".to_owned())
+        );
+        assert!(
+            proposal
+                .evidence
+                .contains(&"no_recent_commit_mentions_bead".to_owned())
+        );
+        assert!(
+            proposal
+                .suggested_commands
+                .contains(&"br update bd-stale --status open --json".to_owned())
+        );
+    }
+
+    #[test]
+    fn stale_work_proposals_treat_missing_agent_mail_as_caveat_not_stale_evidence() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut bead = bead("bd-mail", "Mail degraded in-progress work", 2);
+        bead.status = "in_progress".to_owned();
+        bead.source_bucket = "in_progress".to_owned();
+        bead.assignee = Some("QuietHill".to_owned());
+        brief.beads.in_progress = vec![bead];
+        brief.degraded = vec![degradation(
+            SwarmBriefSourceKind::AgentMail,
+            "agent_mail_unavailable",
+            "Agent Mail state was unavailable.",
+            None,
+        )];
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+
+        let proposal = &snapshot.stale_work_proposals[0];
+        assert_eq!(proposal.decision, "contactSuggested");
+        assert_eq!(proposal.confidence, "low");
+        assert!(
+            proposal
+                .caveats
+                .contains(&"agent_mail_unavailable_not_stale_evidence".to_owned())
+        );
+    }
+
+    #[test]
+    fn stale_work_proposals_keep_recent_commit_and_thread_active() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut bead = bead("bd-recent", "Recent in-progress work", 2);
+        bead.status = "in_progress".to_owned();
+        bead.source_bucket = "in_progress".to_owned();
+        bead.assignee = Some("CoralStone".to_owned());
+        brief.beads.in_progress = vec![bead];
+        brief.recent_commits = vec![SwarmBriefCommit {
+            hash: "abc123".to_owned(),
+            authored_at_epoch_seconds: Some(1_768_000_000),
+            subject: "fix: continue bd-recent".to_owned(),
+        }];
+        brief.threads = vec![SwarmBriefThreadSummary {
+            thread_id: "bd-recent".to_owned(),
+            subject: Some("[bd-recent] progress".to_owned()),
+            message_count: Some(3),
+            last_activity_at: Some("2026-05-21T14:00:00Z".to_owned()),
+        }];
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+
+        let proposal = &snapshot.stale_work_proposals[0];
+        assert_eq!(proposal.decision, "leaveAloneActive");
+        assert!(
+            proposal
+                .evidence
+                .contains(&"recent_commit_mentions_bead:abc123".to_owned())
+        );
+        assert!(
+            proposal
+                .evidence
+                .contains(&"mail_thread_mentions_bead:bd-recent".to_owned())
+        );
+    }
+
+    #[test]
+    fn stale_work_proposals_contact_for_blocked_parent_before_reopen() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut bead = bead("bd-blocked", "Blocked in-progress work", 2);
+        bead.status = "in_progress".to_owned();
+        bead.source_bucket = "in_progress".to_owned();
+        bead.assignee = Some("QuietHill".to_owned());
+        brief.beads.in_progress = vec![bead];
+        brief.bv = Some(SwarmBriefBvSummary {
+            actionable_count: Some(0),
+            blocked_count: Some(1),
+            in_progress_count: Some(1),
+            track_count: None,
+            top_picks: vec![SwarmBriefBvPick {
+                id: "bd-blocked".to_owned(),
+                title: "Blocked in-progress work".to_owned(),
+                score_milli: Some(650),
+                action_hint: Some("Work on bd-parent first".to_owned()),
+                blocked_by: vec!["bd-parent".to_owned()],
+            }],
+        });
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+
+        let proposal = &snapshot.stale_work_proposals[0];
+        assert_eq!(proposal.decision, "contactSuggested");
+        assert!(
+            proposal
+                .caveats
+                .contains(&"blocked_dependencies_require_parent_check_before_reopen".to_owned())
+        );
+        assert!(
+            proposal
+                .evidence
+                .contains(&"blocked_by:bd-parent".to_owned())
+        );
+    }
+
+    #[test]
     fn verifier_evidence_json_parser_extracts_failure_first_error_only() {
         let evidence = verifier_evidence_from_json(&serde_json::json!({
             "runs": [
@@ -2394,6 +2763,7 @@ mod tests {
                 bv_top_pick_count: 0,
             },
             candidates,
+            stale_work_proposals: Vec::new(),
             coordination: SwarmNextActionCoordinationSummary {
                 active_reservation_count: 0,
                 reservation_holders: Vec::new(),

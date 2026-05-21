@@ -92,6 +92,7 @@
         "fallbackDecision": null
       }
     ],
+    "staleWorkProposals": [],
     "coordination": {
       "activeReservationCount": 0,
       "reservationHolders": [],

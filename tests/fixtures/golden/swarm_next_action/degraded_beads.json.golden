@@ -42,6 +42,7 @@
         "fallbackDecision": "repair_evidence_providers"
       }
     ],
+    "staleWorkProposals": [],
     "coordination": {
       "activeReservationCount": 0,
       "reservationHolders": [],

@@ -8,7 +8,7 @@
     "inputs": {
       "sourceCount": 6,
       "readyBeadCount": 2,
-      "inProgressBeadCount": 1,
+      "inProgressBeadCount": 3,
       "blockedBeadCount": 1,
       "bvTopPickCount": 1
     },
@@ -98,6 +98,73 @@
           "dirty_checkout_paths:3"
         ],
         "fallbackDecision": "message_owner_before_editing"
+      }
+    ],
+    "staleWorkProposals": [
+      {
+        "beadId": "bd-active",
+        "title": "Active in-progress slice",
+        "assignee": "BlueLake",
+        "decision": "leaveAloneActive",
+        "confidence": "high",
+        "evidence": [
+          "active_reservation_holder:BlueLake:src/core/*.rs",
+          "assignee_present:BlueLake",
+          "no_mail_thread_mentions_bead",
+          "no_recent_commit_mentions_bead",
+          "priority:2",
+          "source_bucket:in_progress",
+          "status:in_progress"
+        ],
+        "caveats": [],
+        "suggestedCommands": [
+          "br show bd-active --json"
+        ]
+      },
+      {
+        "beadId": "bd-blocked",
+        "title": "Blocked in-progress slice",
+        "assignee": "QuietHill",
+        "decision": "contactSuggested",
+        "confidence": "low",
+        "evidence": [
+          "assignee_present:QuietHill",
+          "blocked_by:bd-parent",
+          "no_mail_thread_mentions_bead",
+          "no_matching_active_reservation",
+          "no_recent_commit_mentions_bead",
+          "priority:2",
+          "source_bucket:in_progress",
+          "status:in_progress"
+        ],
+        "caveats": [
+          "blocked_dependencies_require_parent_check_before_reopen"
+        ],
+        "suggestedCommands": [
+          "br show bd-blocked --json",
+          "br update bd-blocked --status in_progress --json"
+        ]
+      },
+      {
+        "beadId": "bd-stale",
+        "title": "Stale in-progress slice",
+        "assignee": "QuietHill",
+        "decision": "reopenSuggested",
+        "confidence": "medium",
+        "evidence": [
+          "assignee_present:QuietHill",
+          "no_mail_thread_mentions_bead",
+          "no_matching_active_reservation",
+          "no_recent_commit_mentions_bead",
+          "priority:2",
+          "source_bucket:in_progress",
+          "status:in_progress"
+        ],
+        "caveats": [],
+        "suggestedCommands": [
+          "br show bd-stale --json",
+          "br update bd-stale --status open --json"
+        ]
       }
     ],
     "coordination": {

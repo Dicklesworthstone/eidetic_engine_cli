@@ -97,6 +97,7 @@
         "fallbackDecision": null
       }
     ],
+    "staleWorkProposals": [],
     "coordination": {
       "activeReservationCount": 1,
       "reservationHolders": ["GoldenCompass"],
