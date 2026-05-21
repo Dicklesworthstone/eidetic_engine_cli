@@ -46,3 +46,4 @@ including rejected alternatives and verification hooks.
 - [ADR 0038: Optional Zero-Touch Tailscale Mesh Auto-Enrollment](0038-auto-enrollment-zero-touch.md)
 - [ADR 0039: Write-Hot-Path V2 Implementation Gate](0039-write-hot-path-v2-implementation-gate.md)
 - [ADR 0040: Per-Workspace Shard Fan-Out](0040-per-workspace-shard-fanout.md)
+- [ADR 0042: Symbol Graph Derived Index](0042-symbol-graph-derived-index.md)
