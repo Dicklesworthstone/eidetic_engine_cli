@@ -20,7 +20,37 @@ use std::fmt;
 use std::str::FromStr;
 
 fn normalized_episode_token(input: &str) -> String {
-    input.trim().to_ascii_lowercase().replace('-', "_")
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
 }
 
 /// Schema version for task episode.
@@ -1617,6 +1647,11 @@ mod tests {
             "action type alias",
         )?;
         ensure(
+            ActionType::from_str("toolCall"),
+            Ok(ActionType::ToolCall),
+            "camel action type alias",
+        )?;
+        ensure(
             EpisodeOutcome::from_str("FAILURE"),
             Ok(EpisodeOutcome::Failure),
             "outcome alias",
@@ -1627,9 +1662,19 @@ mod tests {
             "intervention alias",
         )?;
         ensure(
+            InterventionType::from_str("removeMemory"),
+            Ok(InterventionType::RemoveMemory),
+            "camel intervention alias",
+        )?;
+        ensure(
             CounterfactualMethod::from_str(" Human-Judgment "),
             Ok(CounterfactualMethod::HumanJudgment),
             "method alias",
+        )?;
+        ensure(
+            CounterfactualMethod::from_str("humanJudgment"),
+            Ok(CounterfactualMethod::HumanJudgment),
+            "camel method alias",
         )?;
         ensure(
             RegretCategory::from_str("retrieval-failure"),
@@ -1637,9 +1682,19 @@ mod tests {
             "regret category alias",
         )?;
         ensure(
+            RegretCategory::from_str("staleInformation"),
+            Ok(RegretCategory::StaleInformation),
+            "camel regret category alias",
+        )?;
+        ensure(
             CounterfactualClaimType::from_str("INSUFFICIENT_RANK"),
             Ok(CounterfactualClaimType::InsufficientRank),
             "claim type alias",
+        )?;
+        ensure(
+            CounterfactualClaimType::from_str("wouldHaveSurfaced"),
+            Ok(CounterfactualClaimType::WouldHaveSurfaced),
+            "camel claim type alias",
         )
     }
 
