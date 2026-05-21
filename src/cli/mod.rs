@@ -4497,6 +4497,9 @@ pub enum VerifyCommand {
     /// Query reusable verification evidence without launching a build.
     #[command(subcommand)]
     Broker(VerifyBrokerCommand),
+    /// Render redaction-safe closeout proof from retained verification evidence.
+    #[command(subcommand)]
+    Closeout(VerifyCloseoutCommand),
     /// Evaluate whether recorded evidence satisfies bead closure gates.
     #[command(name = "closure-guidance")]
     ClosureGuidance(VerifyClosureGuidanceArgs),
@@ -4507,6 +4510,13 @@ pub enum VerifyCommand {
 pub enum VerifyBrokerCommand {
     /// Look up reusable, stale, in-progress, or known-blocker verification evidence.
     Lookup(VerifyBrokerLookupArgs),
+}
+
+/// Subcommands for `ee verify closeout`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum VerifyCloseoutCommand {
+    /// Render a redaction-safe closeout capsule for one retained run.
+    Capsule(VerifyCloseoutCapsuleArgs),
 }
 
 /// Arguments for `ee verify broker lookup`.
@@ -4550,6 +4560,43 @@ pub struct VerifyBrokerLookupArgs {
         conflicts_with = "records_json"
     )]
     pub runs_jsonl: Option<PathBuf>,
+}
+
+/// Arguments for `ee verify closeout capsule`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct VerifyCloseoutCapsuleArgs {
+    /// JSON array of retained `ee.verification.run.v1` records.
+    #[arg(
+        long = "records-json",
+        value_name = "PATH",
+        conflicts_with = "runs_jsonl"
+    )]
+    pub records_json: Option<PathBuf>,
+    /// Retained J1 test-event JSONL containing artifact-manifest events.
+    #[arg(
+        long = "runs-jsonl",
+        value_name = "PATH",
+        conflicts_with = "records_json"
+    )]
+    pub runs_jsonl: Option<PathBuf>,
+    /// Specific retained run ID to render. Defaults to the newest retained run.
+    #[arg(long = "run-id", value_name = "RUN_ID")]
+    pub run_id: Option<String>,
+    /// Surface that will receive the capsule.
+    #[arg(long = "requested-surface", default_value = "beads_comment")]
+    pub requested_surface: String,
+    /// Bead ID associated with this closeout.
+    #[arg(long = "bead-id", value_name = "BEAD")]
+    pub bead_id: Option<String>,
+    /// Source tree fingerprint that must match when source matching is enabled.
+    #[arg(long = "source-hash", value_name = "HASH")]
+    pub source_hash: Option<String>,
+    /// Timestamp through which this evidence can be reused.
+    #[arg(long = "reusable-until", value_name = "RFC3339")]
+    pub reusable_until: Option<String>,
+    /// Allow rendering even when the run source hash differs from --source-hash.
+    #[arg(long = "allow-source-mismatch", action = ArgAction::SetTrue)]
+    pub allow_source_mismatch: bool,
 }
 
 /// Arguments for `ee verification ingest`.
@@ -10567,6 +10614,9 @@ where
         Some(Command::Verify(VerifyCommand::Broker(VerifyBrokerCommand::Lookup(ref args)))) => {
             handle_verify_broker_lookup(&cli, args, stdout, stderr)
         }
+        Some(Command::Verify(VerifyCommand::Closeout(VerifyCloseoutCommand::Capsule(
+            ref args,
+        )))) => handle_verify_closeout_capsule(&cli, args, stdout, stderr),
         Some(Command::Verify(VerifyCommand::ClosureGuidance(ref args))) => {
             handle_verify_closure_guidance(&cli, args, stdout, stderr)
         }
@@ -10582,6 +10632,9 @@ where
         Some(Command::Verification(VerifyCommand::Broker(VerifyBrokerCommand::Lookup(
             ref args,
         )))) => handle_verify_broker_lookup(&cli, args, stdout, stderr),
+        Some(Command::Verification(VerifyCommand::Closeout(VerifyCloseoutCommand::Capsule(
+            ref args,
+        )))) => handle_verify_closeout_capsule(&cli, args, stdout, stderr),
         Some(Command::Verification(VerifyCommand::ClosureGuidance(ref args))) => {
             handle_verify_closure_guidance(&cli, args, stdout, stderr)
         }
@@ -33154,6 +33207,164 @@ fn render_verify_broker_lookup_human(data: &serde_json::Value) -> String {
     )
 }
 
+fn handle_verify_closeout_capsule<W, E>(
+    cli: &Cli,
+    args: &VerifyCloseoutCapsuleArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !matches!(
+        args.requested_surface.as_str(),
+        "beads_comment" | "agent_mail" | "support_bundle"
+    ) {
+        let domain_error = DomainError::Usage {
+            message: format!(
+                "unsupported closeout requested surface '{}'",
+                args.requested_surface
+            ),
+            repair: Some(
+                "use --requested-surface beads_comment, agent_mail, or support_bundle".to_owned(),
+            ),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let records = match read_verification_closeout_records(args) {
+        Ok(records) => records,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error,
+                repair: Some(
+                    "pass --records-json <path> with ee.verification.run.v1 records or --runs-jsonl <path>"
+                        .to_owned(),
+                ),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let record = match select_verification_closeout_record(args, &records) {
+        Ok(record) => record,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error,
+                repair: Some(
+                    "import retained J1 verification logs or pass --run-id for an existing retained run"
+                        .to_owned(),
+                ),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let capsule = crate::models::verification_closeout_capsule(
+        crate::models::VerificationCloseoutCapsuleRequest {
+            requested_surface: args.requested_surface.as_str(),
+            bead_id: args.bead_id.as_deref(),
+            source_hash: args.source_hash.as_deref(),
+            reusable_until: args.reusable_until.as_deref(),
+            source_must_match: !args.allow_source_mismatch,
+        },
+        record,
+    );
+    let data = serde_json::json!({
+        "command": "verify closeout capsule",
+        "schema": crate::models::VERIFICATION_CLOSEOUT_CAPSULE_SCHEMA_V1,
+        "closeoutCapsule": capsule,
+        "evidenceCount": records.len(),
+        "source": verification_closeout_source_label(args),
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_verify_closeout_capsule_human(&data))
+        }
+        output::Renderer::Toon => {
+            let json = verification_response_json(data).to_string();
+            write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = verification_response_json(data);
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn read_verification_closeout_records(
+    args: &VerifyCloseoutCapsuleArgs,
+) -> Result<Vec<crate::models::VerificationRunRecord>, String> {
+    if let Some(path) = &args.records_json {
+        let input = fs::read_to_string(path).map_err(|error| {
+            format!(
+                "Failed to read verification closeout records '{}': {error}",
+                path.display()
+            )
+        })?;
+        return serde_json::from_str::<Vec<crate::models::VerificationRunRecord>>(&input)
+            .map_err(|error| format!("Invalid verification closeout records JSON: {error}"));
+    }
+    if let Some(path) = &args.runs_jsonl {
+        let input = fs::read_to_string(path).map_err(|error| {
+            format!(
+                "Failed to read verification closeout run JSONL '{}': {error}",
+                path.display()
+            )
+        })?;
+        return crate::models::verification_run_records_from_j1_jsonl(&input)
+            .map_err(|error| format!("Invalid verification closeout run JSONL: {error}"));
+    }
+    Ok(Vec::new())
+}
+
+fn select_verification_closeout_record<'a>(
+    args: &VerifyCloseoutCapsuleArgs,
+    records: &'a [crate::models::VerificationRunRecord],
+) -> Result<&'a crate::models::VerificationRunRecord, String> {
+    if let Some(run_id) = args.run_id.as_deref() {
+        return records
+            .iter()
+            .find(|record| record.run_id == run_id)
+            .ok_or_else(|| format!("verification run '{run_id}' was not found"));
+    }
+
+    records
+        .iter()
+        .max_by(|left, right| {
+            left.finished_at
+                .cmp(&right.finished_at)
+                .then_with(|| left.run_id.cmp(&right.run_id))
+        })
+        .ok_or_else(|| "no verification run evidence is available".to_owned())
+}
+
+fn verification_closeout_source_label(args: &VerifyCloseoutCapsuleArgs) -> &'static str {
+    if args.records_json.is_some() {
+        "records_json"
+    } else if args.runs_jsonl.is_some() {
+        "runs_jsonl"
+    } else {
+        "none"
+    }
+}
+
+fn render_verify_closeout_capsule_human(data: &serde_json::Value) -> String {
+    let capsule = &data["closeoutCapsule"];
+    let result = capsule["result"].as_str().unwrap_or("unknown");
+    let run_id = capsule["supportBundleMetadata"]["runId"]
+        .as_str()
+        .unwrap_or("unknown");
+    let substrate = capsule["executionSubstrate"].as_str().unwrap_or("unknown");
+    let worker = capsule["workerHost"].as_str().unwrap_or("none");
+    format!(
+        "verification closeout capsule\n  Result: {result}\n  Run: {run_id}\n  Substrate: {substrate}\n  Worker: {worker}\n"
+    )
+}
+
 fn handle_verify_closure_guidance<W, E>(
     cli: &Cli,
     args: &VerifyClosureGuidanceArgs,
@@ -42717,8 +42928,14 @@ const SWARM_SUBCOMMANDS: &[&str] = &["brief"];
 const TASK_FRAME_SUBCOMMANDS: &[&str] = &["create", "show", "update", "close", "subgoal"];
 const TASK_FRAME_SUBGOAL_SUBCOMMANDS: &[&str] = &["add"];
 const TRIPWIRE_SUBCOMMANDS: &[&str] = &["list", "check"];
-const VERIFICATION_SUBCOMMANDS: &[&str] =
-    &["ingest", "record", "proofs", "broker", "closure-guidance"];
+const VERIFICATION_SUBCOMMANDS: &[&str] = &[
+    "ingest",
+    "record",
+    "proofs",
+    "broker",
+    "closeout",
+    "closure-guidance",
+];
 const WORKSPACE_SUBCOMMANDS: &[&str] = &["resolve", "list", "alias", "hygiene"];
 
 /// Read-only normalized representation of a CLI invocation.
@@ -43225,6 +43442,9 @@ impl NormalizedInvocation {
                     VerifyCommand::Broker(VerifyBrokerCommand::Lookup(_)) => {
                         "verify broker lookup".to_string()
                     }
+                    VerifyCommand::Closeout(VerifyCloseoutCommand::Capsule(_)) => {
+                        "verify closeout capsule".to_string()
+                    }
                     VerifyCommand::ClosureGuidance(_) => "verify closure-guidance".to_string(),
                 },
                 Command::Verification(verify) => match verify {
@@ -43233,6 +43453,9 @@ impl NormalizedInvocation {
                     VerifyCommand::Proofs(_) => "verification proofs".to_string(),
                     VerifyCommand::Broker(VerifyBrokerCommand::Lookup(_)) => {
                         "verification broker lookup".to_string()
+                    }
+                    VerifyCommand::Closeout(VerifyCloseoutCommand::Capsule(_)) => {
+                        "verification closeout capsule".to_string()
                     }
                     VerifyCommand::ClosureGuidance(_) => {
                         "verification closure-guidance".to_string()
@@ -49079,6 +49302,89 @@ mod tests {
             &value["data"]["broker"]["suggestedAction"],
             &serde_json::json!("import_or_run_verification"),
             "verify broker unavailable action",
+        )
+    }
+
+    #[test]
+    fn verify_closeout_capsule_json_renders_retained_run_without_raw_output() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let records_path = tempdir.path().join("verification-runs.json");
+        let records = crate::models::sample_verification_run_records();
+        let records_json = serde_json::to_string(&records)
+            .map_err(|error| format!("serialize closeout records: {error}"))?;
+        fs::write(&records_path, records_json)
+            .map_err(|error| format!("write closeout records fixture: {error}"))?;
+        let records_path = records_path.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "verify",
+            "closeout",
+            "capsule",
+            "--records-json",
+            &records_path,
+            "--run-id",
+            "vrun_rch_00000000000000000001",
+            "--bead-id",
+            "bd-example",
+            "--source-hash",
+            "blake3:source",
+            "--reusable-until",
+            "2026-05-15T07:00:42Z",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "verify closeout capsule JSON exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "verify closeout capsule JSON stderr clean",
+        )?;
+        ensure_ends_with(&stdout, '\n', "verify closeout capsule trailing newline")?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("verify closeout capsule stdout must parse: {error}"))?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.response.v2"),
+            "verify closeout capsule response schema",
+        )?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!("ee.verification.closeout_capsule.v1"),
+            "verify closeout capsule data schema",
+        )?;
+        ensure_equal(
+            &value["data"]["closeoutCapsule"]["result"],
+            &serde_json::json!("passed"),
+            "verify closeout capsule result",
+        )?;
+        ensure_equal(
+            &value["data"]["closeoutCapsule"]["executionSubstrate"],
+            &serde_json::json!("rch"),
+            "verify closeout capsule substrate",
+        )?;
+        ensure_equal(
+            &value["data"]["closeoutCapsule"]["workerHost"],
+            &serde_json::json!("css"),
+            "verify closeout capsule worker",
+        )?;
+        ensure_equal(
+            &value["data"]["closeoutCapsule"]["supportBundleMetadata"]["rawOutputIncluded"],
+            &serde_json::json!(false),
+            "verify closeout capsule raw output flag",
+        )?;
+        ensure_equal(
+            &value["data"]["closeoutCapsule"]["supportBundleMetadata"]["localPathsRedacted"],
+            &serde_json::json!(true),
+            "verify closeout capsule path redaction flag",
+        )?;
+        ensure(
+            !stdout.contains("/Volumes/USBNVME16TB")
+                && !stdout.contains("/tmp/")
+                && !stdout.contains("stderr bytes"),
+            "verify closeout capsule redacts paths and raw output",
         )
     }
 
