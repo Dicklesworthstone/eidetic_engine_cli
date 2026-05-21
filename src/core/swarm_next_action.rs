@@ -1059,8 +1059,12 @@ fn recommendation_cards_from_snapshot(
     }
 
     let mut candidate_counts = BTreeMap::<&str, usize>::new();
+    let mut candidate_title_counts = BTreeMap::<String, usize>::new();
     for candidate in &snapshot.candidates {
         *candidate_counts.entry(candidate.id.as_str()).or_default() += 1;
+        *candidate_title_counts
+            .entry(candidate_title_overlap_key(&candidate.title))
+            .or_default() += 1;
     }
 
     let caveats = recommendation_evidence_caveats(snapshot);
@@ -1069,25 +1073,31 @@ fn recommendation_cards_from_snapshot(
         .blockers
         .iter()
         .any(|blocker| blocker.owner_agent.is_some());
+    let reusable_verifier_evidence = reusable_verifier_evidence_for_snapshot(snapshot);
     let mut ranked_cards = snapshot
         .candidates
         .iter()
         .map(|candidate| {
-            let duplicate = candidate_counts
-                .get(candidate.id.as_str())
-                .copied()
-                .unwrap_or(1)
-                > 1;
+            let duplicate_reason = duplicate_reason_for_candidate(
+                candidate,
+                &candidate_counts,
+                &candidate_title_counts,
+            );
+            let duplicate = duplicate_reason.is_some();
             let blocked_by_owner = candidate.assignee.is_some()
                 || (candidate.blocked_by_compile_health && has_compile_owner_blocker);
+            let has_reusable_verifier_evidence =
+                candidate.blocked_by_compile_health && !reusable_verifier_evidence.is_empty();
             let rank_milli =
                 recommendation_rank_milli(candidate, duplicate, blocked_by_owner, &caveats);
             let card = recommendation_card_for_candidate(
                 candidate,
-                duplicate,
+                duplicate_reason,
                 blocked_by_owner,
+                has_reusable_verifier_evidence,
                 rank_milli,
                 &caveats,
+                &reusable_verifier_evidence,
             );
             (rank_milli, card)
         })
@@ -1102,6 +1112,39 @@ fn recommendation_cards_from_snapshot(
         .collect::<Vec<_>>();
     cards.dedup();
     cards
+}
+
+fn candidate_title_overlap_key(title: &str) -> String {
+    title
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '.'))
+        .filter(|token| !token.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn duplicate_reason_for_candidate(
+    candidate: &SwarmNextActionCandidate,
+    candidate_counts: &BTreeMap<&str, usize>,
+    candidate_title_counts: &BTreeMap<String, usize>,
+) -> Option<&'static str> {
+    if candidate_counts
+        .get(candidate.id.as_str())
+        .copied()
+        .unwrap_or(1)
+        > 1
+    {
+        return Some("candidate_id_already_present");
+    }
+    if candidate_title_counts
+        .get(&candidate_title_overlap_key(&candidate.title))
+        .copied()
+        .unwrap_or(1)
+        > 1
+    {
+        return Some("candidate_title_already_present");
+    }
+    None
 }
 
 fn recommendation_card_sort_key(
@@ -1157,15 +1200,19 @@ fn no_action_recommendation_cards(
 
 fn recommendation_card_for_candidate(
     candidate: &SwarmNextActionCandidate,
-    duplicate: bool,
+    duplicate_reason: Option<&'static str>,
     blocked_by_owner: bool,
+    has_reusable_verifier_evidence: bool,
     rank_milli: i64,
     evidence_caveats: &[String],
+    reusable_verifier_evidence: &[String],
 ) -> SwarmNextActionRecommendationCard {
-    let decision = if duplicate {
+    let decision = if duplicate_reason.is_some() {
         "duplicate_rejected"
     } else if blocked_by_owner {
         "blocked_by_owner"
+    } else if has_reusable_verifier_evidence {
+        "reuse_recent_evidence"
     } else if candidate.status == "unknown" {
         "new_bead_recommended"
     } else {
@@ -1174,6 +1221,7 @@ fn recommendation_card_for_candidate(
     let fallback_decision = match decision {
         "duplicate_rejected" => Some("refine_existing_bead"),
         "blocked_by_owner" => Some("message_owner_before_editing"),
+        "reuse_recent_evidence" => Some("prefer_static_or_non_cargo_work"),
         _ => None,
     };
 
@@ -1189,11 +1237,12 @@ fn recommendation_card_for_candidate(
         do_not_take_because: do_not_take_reasons_for_candidate(
             candidate,
             decision,
-            duplicate,
+            duplicate_reason.is_some(),
             blocked_by_owner,
             evidence_caveats,
+            reusable_verifier_evidence,
         ),
-        overlap: overlap_decision_for_candidate(candidate, decision, duplicate),
+        overlap: overlap_decision_for_candidate(candidate, decision, duplicate_reason),
         proof_obligations: recommendation_proof_obligations(candidate, decision),
         evidence_caveats: evidence_caveats.to_vec(),
         fallback_decision,
@@ -1203,7 +1252,7 @@ fn recommendation_card_for_candidate(
 fn overlap_decision_for_candidate(
     candidate: &SwarmNextActionCandidate,
     decision: &'static str,
-    duplicate: bool,
+    duplicate_reason: Option<&'static str>,
 ) -> SwarmNextActionOverlapDecision {
     let mut matched_existing_beads = Vec::new();
     if candidate.status != "unknown" {
@@ -1224,11 +1273,7 @@ fn overlap_decision_for_candidate(
         decision,
         queries,
         matched_existing_beads,
-        rejected_duplicate_reason: if duplicate {
-            Some("candidate_id_already_present")
-        } else {
-            None
-        },
+        rejected_duplicate_reason: duplicate_reason,
         selected_relation: match decision {
             "new_bead_recommended" => "new_child",
             "duplicate_rejected" | "refine_existing_bead" => "existing_bead",
@@ -1317,7 +1362,10 @@ fn suggested_reservations_for_candidate(
     candidate: &SwarmNextActionCandidate,
     decision: &'static str,
 ) -> Vec<SwarmNextActionSuggestedReservation> {
-    if matches!(decision, "duplicate_rejected" | "blocked_by_owner") {
+    if matches!(
+        decision,
+        "duplicate_rejected" | "blocked_by_owner" | "reuse_recent_evidence"
+    ) {
         return Vec::new();
     }
 
@@ -1370,6 +1418,7 @@ fn do_not_take_reasons_for_candidate(
     duplicate: bool,
     blocked_by_owner: bool,
     evidence_caveats: &[String],
+    reusable_verifier_evidence: &[String],
 ) -> Vec<String> {
     let mut reasons = BTreeSet::new();
     if duplicate {
@@ -1389,6 +1438,10 @@ fn do_not_take_reasons_for_candidate(
     }
     if matches!(decision, "duplicate_rejected" | "blocked_by_owner") {
         reasons.extend(evidence_caveats.iter().cloned());
+    }
+    if decision == "reuse_recent_evidence" {
+        reasons.insert("recent_verifier_evidence_available".to_owned());
+        reasons.extend(reusable_verifier_evidence.iter().cloned());
     }
     reasons.into_iter().collect()
 }
@@ -1411,7 +1464,61 @@ fn recommendation_proof_obligations(
     if decision == "new_bead_recommended" {
         obligations.insert("search_existing_beads_before_creation".to_owned());
     }
+    if decision == "reuse_recent_evidence" {
+        obligations.insert("record_reused_verification_hash_in_closeout".to_owned());
+        obligations.insert("avoid_duplicate_rch_until_source_changes".to_owned());
+    }
     obligations.into_iter().collect()
+}
+
+fn reusable_verifier_evidence_for_snapshot(snapshot: &SwarmNextActionSnapshot) -> Vec<String> {
+    let mut evidence = BTreeSet::new();
+    for blocker in &snapshot.compile_health.blockers {
+        let Some(first_error) = &blocker.recent_first_error else {
+            continue;
+        };
+        evidence.insert(format!("recent_verifier_path:{}", blocker.path));
+        evidence.insert(format!("recent_verifier_reason:{}", blocker.reason));
+        if let Some(status) = &first_error.status {
+            evidence.insert(format!("recent_verifier_status:{status}"));
+        }
+        if let Some(hash) = &first_error.command_hash {
+            evidence.insert(format!("recent_verifier_command_hash:{hash}"));
+        }
+        for kind in &blocker.affected_command_kinds {
+            evidence.insert(format!("recent_verifier_command_kind:{kind}"));
+        }
+        if let Some(command) = &first_error.command
+            && let Some(target) = cargo_test_target_from_command(command)
+        {
+            evidence.insert(format!("recent_verifier_command_target:{target}"));
+        }
+    }
+    evidence.into_iter().collect()
+}
+
+fn cargo_test_target_from_command(command: &str) -> Option<String> {
+    let words = command.split_whitespace().collect::<Vec<_>>();
+    let cargo_index = words.iter().position(|word| *word == "cargo")?;
+    if words.get(cargo_index + 1).copied() != Some("test") {
+        return None;
+    }
+
+    let mut index = cargo_index + 2;
+    while index < words.len() {
+        match words[index] {
+            "--" => break,
+            "--lib" => return Some("--lib".to_owned()),
+            "--package" | "--test" | "-p" => {
+                let flag = words[index];
+                let value = words.get(index + 1)?;
+                return Some(format!("{flag}:{value}"));
+            }
+            token if !token.starts_with('-') => return Some(token.to_owned()),
+            _ => index += 1,
+        }
+    }
+    Some("--workspace".to_owned())
 }
 
 fn recommendation_evidence_caveats(snapshot: &SwarmNextActionSnapshot) -> Vec<String> {
@@ -2677,6 +2784,97 @@ mod tests {
             cards[0]
                 .do_not_take_because
                 .contains(&"candidate_already_appears_in_multiple_sources".to_owned())
+        );
+    }
+
+    #[test]
+    fn recommendation_cards_reuse_recent_verifier_failure_evidence() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.beads.ready = vec![bead("bd-rch", "Needs focused remote proof", 1)];
+        brief.dirty_files = vec![SwarmBriefDirtyFile {
+            path: "src/db/mod.rs".to_owned(),
+            status: "M".to_owned(),
+        }];
+        let evidence = vec![SwarmNextActionRecentFirstError {
+            file: "src/db/mod.rs".to_owned(),
+            line: Some(431),
+            command_kind: Some("cargo_test".to_owned()),
+            command: Some("cargo test --lib focused_remote_proof -- --nocapture".to_owned()),
+            command_hash: Some("abc123".to_owned()),
+            status: Some("remote_failure".to_owned()),
+            degraded_codes: vec!["rch_verify_remote_command_failed".to_owned()],
+        }];
+
+        let snapshot =
+            SwarmNextActionSnapshot::from_swarm_brief_with_verifier_evidence(&brief, &evidence);
+        let cards = snapshot.recommendation_cards();
+
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].decision, "reuse_recent_evidence");
+        assert_eq!(
+            cards[0].fallback_decision,
+            Some("prefer_static_or_non_cargo_work")
+        );
+        assert!(cards[0].suggested_reservations.is_empty());
+        assert!(
+            cards[0]
+                .do_not_take_because
+                .contains(&"recent_verifier_evidence_available".to_owned())
+        );
+        assert!(
+            cards[0]
+                .do_not_take_because
+                .contains(&"recent_verifier_command_hash:abc123".to_owned())
+        );
+        assert!(
+            cards[0]
+                .do_not_take_because
+                .contains(&"recent_verifier_command_kind:cargo_test".to_owned())
+        );
+        assert!(
+            cards[0]
+                .do_not_take_because
+                .contains(&"recent_verifier_command_target:--lib".to_owned())
+        );
+        assert!(
+            cards[0]
+                .proof_obligations
+                .contains(&"record_reused_verification_hash_in_closeout".to_owned())
+        );
+    }
+
+    #[test]
+    fn recommendation_cards_reject_overlapping_candidate_titles() {
+        let snapshot = snapshot_with_candidates(vec![
+            candidate(
+                "bd-one",
+                "Duplicate verification reuse hook",
+                "beads_ready",
+                Some(2),
+            ),
+            candidate(
+                "bd-two",
+                "duplicate verification-reuse hook",
+                "bv_top_pick",
+                Some(2),
+            ),
+        ]);
+
+        let cards = snapshot.recommendation_cards();
+
+        assert_eq!(cards.len(), 2);
+        assert!(
+            cards
+                .iter()
+                .all(|card| card.decision == "duplicate_rejected")
+        );
+        assert!(cards.iter().all(|card| {
+            card.overlap.rejected_duplicate_reason == Some("candidate_title_already_present")
+        }));
+        assert!(
+            cards
+                .iter()
+                .all(|card| card.suggested_reservations.is_empty())
         );
     }
 
