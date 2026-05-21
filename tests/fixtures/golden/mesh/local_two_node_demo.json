@@ -1,0 +1,145 @@
+{
+  "schema": "ee.mesh.local_two_node_demo.v1",
+  "bead": "bd-ghey6",
+  "scenario": "mesh_local_two_node_demo",
+  "transport": {
+    "kind": "local_file",
+    "externalNetworkRequired": false,
+    "tailscaleAccountRequired": false,
+    "mapsTo": [
+      "tailnet peer discovery",
+      "metadata-only sync",
+      "policy-gated lazy body fetch",
+      "asynchronous freshness probe"
+    ]
+  },
+  "nodes": [
+    {
+      "nodeId": "node01",
+      "role": "origin",
+      "workspaceId": "wsp_local_node01"
+    },
+    {
+      "nodeId": "node02",
+      "role": "consumer",
+      "workspaceId": "wsp_local_node02"
+    }
+  ],
+  "steps": [
+    {
+      "phase": "remember",
+      "nodeId": "node01",
+      "artifact": {
+        "schema": "ee.mesh.fixture.memory_metadata.v1",
+        "nodeId": "node01",
+        "workspaceId": "wsp_local_node01",
+        "globalMemoryId": "meshmem_local_rule_001",
+        "level": "procedural",
+        "kind": "rule",
+        "bodyDigest": "fixture:local-two-node-rule-v1",
+        "bodyBytes": 58,
+        "revisionToken": "rev_node01_000001",
+        "exportedLanes": [
+          "metadata"
+        ],
+        "bodyExportedEagerly": false
+      }
+    },
+    {
+      "phase": "sync_metadata",
+      "nodeId": "node02",
+      "artifact": {
+        "schema": "ee.mesh.fixture.cached_metadata.v1",
+        "nodeId": "node02",
+        "sourceNodeId": "node01",
+        "cacheState": "metadata_only",
+        "cachedMemoryIds": [
+          "meshmem_local_rule_001"
+        ],
+        "bodyCachedBeforeLazyFetch": false,
+        "transport": "local_file"
+      }
+    },
+    {
+      "phase": "tier1_search",
+      "nodeId": "node02",
+      "artifact": {
+        "schema": "ee.mesh.fixture.tier1_search.v1",
+        "nodeId": "node02",
+        "query": "remote proof before bead close",
+        "networkOnTier1": false,
+        "source": "local_peer_metadata_cache",
+        "results": [
+          {
+            "globalMemoryId": "meshmem_local_rule_001",
+            "originNodeId": "node01",
+            "revisionToken": "rev_node01_000001",
+            "bodyAvailable": false,
+            "provenance": "cached peer metadata"
+          }
+        ]
+      }
+    },
+    {
+      "phase": "lazy_body_fetch",
+      "nodeId": "node02",
+      "artifact": {
+        "schema": "ee.mesh.fixture.lazy_body_fetch.v1",
+        "requestNodeId": "node02",
+        "sourceNodeId": "node01",
+        "policyProfileId": "starter.trusted_bodies",
+        "allowed": true,
+        "status": "digest_verified",
+        "bodyPersistAllowed": true,
+        "expectedDigest": "fixture:local-two-node-rule-v1",
+        "actualDigest": "fixture:local-two-node-rule-v1"
+      }
+    },
+    {
+      "phase": "revision_available",
+      "nodeId": "node02",
+      "artifact": {
+        "schema": "ee.mesh.fixture.revision_available.v1",
+        "nodeId": "node02",
+        "globalMemoryId": "meshmem_local_rule_001",
+        "localRevisionToken": "rev_node01_000001",
+        "peerRevisionToken": "rev_node01_000002",
+        "peerHasFresherRevision": true,
+        "foregroundResultMutated": false,
+        "revisionNotice": "peer_revision_available"
+      }
+    },
+    {
+      "phase": "peer_unavailable",
+      "nodeId": "node02",
+      "artifact": {
+        "schema": "ee.mesh.fixture.peer_unavailable.v1",
+        "nodeId": "node02",
+        "sourceNodeId": "node01",
+        "status": "peer_unavailable",
+        "foregroundResultReturned": true,
+        "bodyFetchAllowed": false,
+        "fallback": "metadata_only_cache",
+        "retryClass": "async_probe_retry"
+      }
+    }
+  ],
+  "invariants": {
+    "tier1DoesNotContactNetwork": true,
+    "eagerSyncIsMetadataOnly": true,
+    "lazyBodyRequiresPolicyGrant": true,
+    "fresherPeerRevisionIsNoticeOnly": true,
+    "peerUnavailableKeepsForegroundUsable": true
+  },
+  "structuredLog": {
+    "schema": "ee.test_event.v1",
+    "requiredPhases": [
+      "setup",
+      "action",
+      "assert",
+      "cleanup"
+    ],
+    "emitsRawMemoryBodies": false,
+    "emitsPeerSecrets": false
+  }
+}
