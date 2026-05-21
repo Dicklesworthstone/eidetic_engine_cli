@@ -1195,6 +1195,87 @@ pub fn read_perf_artifact_summary(path: &Path) -> Result<models::ArtifactSummary
     })
 }
 
+fn read_latency_artifact_summary(
+    surface: PerfLatencySurface,
+    path: &Path,
+) -> Result<models::ArtifactSummary, DomainError> {
+    validate_perf_artifact_path(path)?;
+    let body = fs::read_to_string(path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Could not read perf artifact summary {}: {error}",
+            path.display()
+        ),
+        repair: Some("Verify the file is readable and retry.".to_owned()),
+    })?;
+    match serde_json::from_str::<models::ArtifactSummary>(&body) {
+        Ok(artifact) => Ok(artifact),
+        Err(summary_error) => explain_performance_artifact_summary(surface, path, &body)
+            .ok_or_else(|| DomainError::Usage {
+                message: format!("Malformed perf artifact summary JSON: {summary_error}"),
+                repair: Some(
+                    "Re-run with an ee.perf.artifact_summary.v1 JSON file or an ee.explain.performance.v1 report."
+                        .to_owned(),
+                ),
+            }),
+    }
+}
+
+fn explain_performance_artifact_summary(
+    surface: PerfLatencySurface,
+    path: &Path,
+    body: &str,
+) -> Option<models::ArtifactSummary> {
+    let value = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    let source_schema = value.get("schema")?.as_str()?;
+    if source_schema != "ee.explain.performance.v1" {
+        return None;
+    }
+
+    let mut artifact = models::ArtifactSummary::new(
+        format!("{}-explain-performance", surface.as_str()),
+        models::ArtifactKind::ExplainPerformanceReport,
+        source_schema,
+    )
+    .with_source_path(path.display().to_string())
+    .with_content_hash(format!("blake3:{}", blake3::hash(body.as_bytes()).to_hex()))
+    .with_command_family(surface.as_str());
+
+    if let Some(timings) = value
+        .get("data")
+        .and_then(|data| data.get("timings"))
+        .and_then(serde_json::Value::as_array)
+    {
+        for timing in timings {
+            let Some(name) = timing.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let Some(elapsed_ms) = timing.get("elapsedMs").and_then(serde_json::Value::as_f64)
+            else {
+                continue;
+            };
+            if elapsed_ms.is_finite() && elapsed_ms >= 0.0 {
+                artifact.add_metric(
+                    format!("{}_elapsed_ms", normalized_perf_token(name)),
+                    models::MetricValue::measured(elapsed_ms, "ms"),
+                );
+            }
+        }
+    }
+
+    if let Some(elapsed_ms) = value
+        .pointer("/data/search/elapsed/elapsedMs")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|elapsed_ms| elapsed_ms.is_finite() && *elapsed_ms >= 0.0)
+    {
+        artifact.add_metric(
+            "search_elapsed_ms",
+            models::MetricValue::measured(elapsed_ms, "ms"),
+        );
+    }
+
+    Some(artifact)
+}
+
 fn merge_j1_latency_log(
     surface: PerfLatencySurface,
     path: &Path,
@@ -1553,7 +1634,7 @@ pub fn explain_latency_report(
     log_path: Option<&Path>,
 ) -> Result<ExplainLatencyReport, DomainError> {
     let mut artifact = match report_path {
-        Some(path) => read_perf_artifact_summary(path)?,
+        Some(path) => read_latency_artifact_summary(surface, path)?,
         None => models::ArtifactSummary::new(
             format!("j1-{}-latency", surface.as_str()),
             models::ArtifactKind::ExplainPerformanceReport,
@@ -3011,6 +3092,48 @@ mod tests {
                 && stage
                     .source_metrics
                     .contains(&"search_command_end_elapsed_ms_0001".to_owned())
+        }));
+    }
+
+    #[test]
+    fn explain_latency_report_accepts_explain_performance_report_timings() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let report_path = tempdir.path().join("context-performance.json");
+        std::fs::write(
+            &report_path,
+            r#"{
+                "schema":"ee.explain.performance.v1",
+                "success":true,
+                "data":{
+                    "command":"context",
+                    "timings":[
+                        {"name":"dbOpen","elapsedMs":8.0},
+                        {"name":"search","elapsedMs":12.5},
+                        {"name":"packAssembly","elapsedMs":3.5}
+                    ]
+                }
+            }"#,
+        )
+        .expect("write report");
+
+        let report = explain_latency_report(PerfLatencySurface::Context, Some(&report_path), None)
+            .expect("latency report");
+
+        assert!(report.degraded.is_empty());
+        assert!(report.stage_timings.iter().any(|stage| {
+            stage.stage == "storage"
+                && stage.elapsed_ms == 8.0
+                && stage.source_metrics == vec!["db_open_elapsed_ms".to_owned()]
+        }));
+        assert!(report.stage_timings.iter().any(|stage| {
+            stage.stage == "retrieval"
+                && stage.elapsed_ms == 12.5
+                && stage.source_metrics == vec!["search_elapsed_ms".to_owned()]
+        }));
+        assert!(report.stage_timings.iter().any(|stage| {
+            stage.stage == "pack_selection"
+                && stage.elapsed_ms == 3.5
+                && stage.source_metrics == vec!["pack_assembly_elapsed_ms".to_owned()]
         }));
     }
 
