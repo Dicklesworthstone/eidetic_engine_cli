@@ -17,6 +17,10 @@ use std::str::FromStr;
 use crate::models::memory::MemoryLevel;
 use crate::models::rule::RuleMaturity;
 
+fn normalized_trust_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 /// Stable schema marker for local signing-key policy decisions.
 pub const LOCAL_SIGNING_KEY_POLICY_SCHEMA_V1: &str = "ee.local_signing_key_policy.v1";
 
@@ -116,7 +120,7 @@ impl FromStr for TrustClass {
     type Err = ParseTrustClassError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_trust_token(input).as_str() {
             "human_explicit" => Ok(Self::HumanExplicit),
             "agent_validated" => Ok(Self::AgentValidated),
             "agent_assertion" => Ok(Self::AgentAssertion),
@@ -277,6 +281,10 @@ mod tests {
             let parsed = TrustClass::from_str(&rendered);
             assert_eq!(parsed, Ok(class));
         }
+        assert_eq!(
+            TrustClass::from_str(" Agent-Validated "),
+            Ok(TrustClass::AgentValidated)
+        );
     }
 
     #[test]

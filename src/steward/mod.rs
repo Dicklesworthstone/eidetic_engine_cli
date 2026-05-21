@@ -191,7 +191,7 @@ fn release_maintenance_job_process_gate(lock_path: &Path) {
 pub struct MaintenanceJobLock {
     path: PathBuf,
     holder_id: String,
-    _file: File,
+    _file: Option<File>,
     process_gate_path: PathBuf,
 }
 
@@ -209,6 +209,10 @@ impl MaintenanceJobLock {
 
 impl Drop for MaintenanceJobLock {
     fn drop(&mut self) {
+        // Drop the file to release the OS-level flock before releasing the process gate.
+        // This prevents another thread from acquiring the process gate and immediately
+        // failing the flock attempt because the file was not yet closed.
+        self._file.take();
         release_maintenance_job_process_gate(&self.process_gate_path);
     }
 }
@@ -325,7 +329,7 @@ pub fn try_acquire_maintenance_job_lock(
     Ok(MaintenanceJobLock {
         path: lock_path,
         holder_id: holder_id.to_owned(),
-        _file: file,
+        _file: Some(file),
         process_gate_path,
     })
 }
@@ -573,7 +577,8 @@ impl FromStr for JobType {
     type Err = ParseJobTypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        let normalized = s.trim().to_ascii_lowercase().replace(['-', '.'], "_");
+        match normalized.as_str() {
             "index_rebuild" => Ok(Self::IndexRebuild),
             "index_coalesce" => Ok(Self::IndexCoalesce),
             "decay_sweep" => Ok(Self::DecaySweep),
@@ -909,7 +914,8 @@ impl FromStr for JobStatus {
     type Err = ParseJobStatusError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        let normalized = s.trim().to_ascii_lowercase();
+        match normalized.as_str() {
             "pending" => Ok(Self::Pending),
             "running" => Ok(Self::Running),
             "completed" => Ok(Self::Completed),
@@ -6607,6 +6613,20 @@ mod tests {
             let parsed: JobType = s.parse().map_err(|e: ParseJobTypeError| e.to_string())?;
             ensure(parsed, *job_type, &format!("roundtrip {s}"))?;
         }
+        ensure(
+            " Index-Rebuild "
+                .parse::<JobType>()
+                .map_err(|e: ParseJobTypeError| e.to_string())?,
+            JobType::IndexRebuild,
+            "trimmed mixed-case hyphenated job type",
+        )?;
+        ensure(
+            "centrality.refresh"
+                .parse::<JobType>()
+                .map_err(|e: ParseJobTypeError| e.to_string())?,
+            JobType::CentralityRefresh,
+            "dotted job type alias",
+        )?;
         Ok(())
     }
 
@@ -6634,6 +6654,13 @@ mod tests {
             let parsed: JobStatus = s.parse().map_err(|e: ParseJobStatusError| e.to_string())?;
             ensure(parsed, status, &format!("roundtrip {s}"))?;
         }
+        ensure(
+            " Completed "
+                .parse::<JobStatus>()
+                .map_err(|e: ParseJobStatusError| e.to_string())?,
+            JobStatus::Completed,
+            "trimmed mixed-case status",
+        )?;
         Ok(())
     }
 

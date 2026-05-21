@@ -18,6 +18,10 @@ use std::fmt;
 
 use super::{ClaimId, DemoId, EvidenceId, PolicyId, TraceId};
 
+fn normalized_claim_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 pub const CLAIMS_FILE_SCHEMA_V1: &str = "ee.claims_file.v1";
 pub const CLAIM_ENTRY_SCHEMA_V1: &str = "ee.claim_entry.v1";
 pub const CLAIM_MANIFEST_SCHEMA_V1: &str = "ee.claim_manifest.v1";
@@ -92,7 +96,7 @@ impl std::str::FromStr for ClaimStatus {
     type Err = ParseClaimStatusError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_claim_token(s).as_str() {
             "unverified" => Ok(Self::Unverified),
             "valid" => Ok(Self::Valid),
             "invalid" => Ok(Self::Invalid),
@@ -154,7 +158,7 @@ impl std::str::FromStr for VerificationFrequency {
     type Err = ParseVerificationFrequencyError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_claim_token(s).as_str() {
             "on_change" => Ok(Self::OnChange),
             "daily" => Ok(Self::Daily),
             "weekly" => Ok(Self::Weekly),
@@ -224,7 +228,7 @@ impl std::str::FromStr for ArtifactType {
     type Err = ParseArtifactTypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_claim_token(s).as_str() {
             "golden_fixture" => Ok(Self::GoldenFixture),
             "schema_contract" => Ok(Self::SchemaContract),
             "screenshot" => Ok(Self::Screenshot),
@@ -374,7 +378,7 @@ impl std::str::FromStr for ManifestVerificationStatus {
     type Err = ParseManifestVerificationStatusError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_claim_token(s).as_str() {
             "unverified" => Ok(Self::Unverified),
             "passing" => Ok(Self::Passing),
             "failing" => Ok(Self::Failing),
@@ -619,6 +623,13 @@ mod tests {
                 .map_err(|e: ParseClaimStatusError| e.to_string())?;
             ensure_equal(&parsed, &status, &format!("roundtrip for {s}"))?;
         }
+        ensure_equal(
+            &" Verified "
+                .parse::<ClaimStatus>()
+                .map_err(|e: ParseClaimStatusError| e.to_string())?,
+            &ClaimStatus::Verified,
+            "normalized claim status",
+        )?;
         Ok(())
     }
 
@@ -637,6 +648,13 @@ mod tests {
                 .map_err(|e: ParseVerificationFrequencyError| e.to_string())?;
             ensure_equal(&parsed, &freq, &format!("roundtrip for {s}"))?;
         }
+        ensure_equal(
+            &" On-Change "
+                .parse::<VerificationFrequency>()
+                .map_err(|e: ParseVerificationFrequencyError| e.to_string())?,
+            &VerificationFrequency::OnChange,
+            "normalized verification frequency",
+        )?;
         Ok(())
     }
 
@@ -649,6 +667,13 @@ mod tests {
                 .map_err(|e: ParseArtifactTypeError| e.to_string())?;
             ensure_equal(&parsed, &t, &format!("roundtrip for {s}"))?;
         }
+        ensure_equal(
+            &" Schema-Contract "
+                .parse::<ArtifactType>()
+                .map_err(|e: ParseArtifactTypeError| e.to_string())?,
+            &ArtifactType::SchemaContract,
+            "normalized artifact type",
+        )?;
         Ok(())
     }
 
@@ -661,6 +686,13 @@ mod tests {
                 .map_err(|e: ParseManifestVerificationStatusError| e.to_string())?;
             ensure_equal(&parsed, &status, &format!("roundtrip for {s}"))?;
         }
+        ensure_equal(
+            &" INCOMPLETE "
+                .parse::<ManifestVerificationStatus>()
+                .map_err(|e: ParseManifestVerificationStatusError| e.to_string())?,
+            &ManifestVerificationStatus::Incomplete,
+            "normalized manifest verification status",
+        )?;
         Ok(())
     }
 
