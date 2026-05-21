@@ -16,7 +16,7 @@
 set -eu
 
 README_FILE="README.md"
-PLAN_FILE="COMPREHENSIVE_PLAN_TO_MAKE_EE__OPUS.md"
+PLAN_FILE="COMPREHENSIVE_PLAN.md"
 CLI_MOD="src/cli/mod.rs"
 BEADS_FILE=".beads/issues.jsonl"
 REPORT_FILE=".vision-coverage-report.json"
@@ -454,8 +454,8 @@ build_report() {
             sources: {
               git_ref: (if $source_ref == "" then null else $source_ref end),
               readme: "README.md#Command Reference",
-              plan_cli_surface: "COMPREHENSIVE_PLAN_TO_MAKE_EE__OPUS.md#20-cli-surface",
-              plan_walking_skeleton: "COMPREHENSIVE_PLAN_TO_MAKE_EE__OPUS.md#29-walking-skeleton",
+              plan_cli_surface: "COMPREHENSIVE_PLAN.md#20-cli-surface",
+              plan_walking_skeleton: "COMPREHENSIVE_PLAN.md#29-walking-skeleton",
               cli: "src/cli/mod.rs",
               beads: ".beads/issues.jsonl"
             },

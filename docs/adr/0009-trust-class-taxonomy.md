@@ -12,10 +12,10 @@ memory fields) is queued for implementation:
 - `README.md` (the published surface) lists five classes and pins their
   initial confidences: `human_explicit (0.85)`, `agent_validated (0.65)`,
   `agent_assertion (0.50)`, `cass_evidence (0.45)`, `legacy_import (0.30)`.
-- `COMPREHENSIVE_PLAN_TO_MAKE_EE__OPUS.md` §22 (the canonical plan)
+- `COMPREHENSIVE_PLAN.md` §22 (the canonical plan)
   reuses the same five names but uses a different vocabulary for
   promotion and demotion transitions.
-- `COMPREHENSIVE_PLAN_TO_MAKE_EE.md` (the older long plan) describes a
+- `docs/archive/COMPREHENSIVE_PLAN_LEGACY.md` (the older long plan) describes a
   richer set (validated agent, project explicit, manual import, etc.)
   with promotion/demotion triggers tied to feedback evidence and
   validation count.
@@ -29,7 +29,7 @@ features could then disagree about whether a given memory is
 silent.
 
 The trust class field is also load-bearing for retrieval: it factors
-into the scoring composition described in `COMPREHENSIVE_PLAN_TO_MAKE_EE__OPUS.md`
+into the scoring composition described in `COMPREHENSIVE_PLAN.md`
 §13.6 and decides whether a memory is eligible for high-priority pack
 sections. Ambiguity here propagates to every section of the system.
 
@@ -208,7 +208,7 @@ the same class.
 - An integration test seeds the four trigger kinds in known order and
   asserts the audit log records the (prior, new) pair for every
   transition, including no-op transitions where only confidence shifts.
-- The README trust class table and `COMPREHENSIVE_PLAN_TO_MAKE_EE__OPUS.md`
+- The README trust class table and `COMPREHENSIVE_PLAN.md`
   §22 link to this ADR. CI does not enforce the back-link yet (no
   bead), but the ADR's `status: accepted` line is the canonical
   reference.

@@ -4,7 +4,7 @@
 //! file variants like `mainV2.rs`, `main_improved.rs`, `main_enhanced.rs`,
 //! and `__OPUS`-suffixed siblings. Without a CI gate, the policy relies on
 //! reviewer vigilance, which the 2026-05-14 reality-check audit found
-//! insufficient (COMPREHENSIVE_PLAN_TO_MAKE_EE__OPUS.md slipped in).
+//! insufficient when an `__OPUS` plan variant slipped in.
 //!
 //! This test walks the repo tree (excluding `.git`, `target`, `.beads`,
 //! `.beads.recovery_*`, `node_modules`, `/Volumes`) and asserts no file
@@ -15,9 +15,7 @@
 //! a documented reason. Each allowlist entry must reference either an
 //! open bead that tracks resolution or a permanent justification.
 //!
-//! See bd-3usjw.56. The companion bd-3usjw.15 tracks the
-//! COMPREHENSIVE_PLAN_TO_MAKE_EE__OPUS.md rename; once that lands the
-//! corresponding allowlist entry should be removed.
+//! See bd-3usjw.56.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -32,26 +30,13 @@ const FORBIDDEN_SUFFIX_PATTERNS: &[&str] = &["__OPUS", "_improved", "_enhanced",
 /// either (a) names an open tracking bead expected to remove the entry,
 /// or (b) explains why the suffix is a load-bearing fixture label rather
 /// than a duplicated source file.
-const FORBIDDEN_SUFFIX_ALLOWLIST: &[(&str, &str)] = &[
-    (
-        "COMPREHENSIVE_PLAN_TO_MAKE_EE__OPUS.md",
-        "transitional: bd-3usjw.15 (plan_doc_rename) tracks renaming this plan file. \
-         Remove this allowlist entry when bd-3usjw.15 closes.",
-    ),
-    (
-        "tests/snapshots/perf_compare_golden__perf_compare_improved.snap",
-        "permanent: insta golden snapshot for the `perf_compare_improved` test \
+const FORBIDDEN_SUFFIX_ALLOWLIST: &[(&str, &str)] = &[(
+    "tests/snapshots/perf_compare_golden__perf_compare_improved.snap",
+    "permanent: insta golden snapshot for the `perf_compare_improved` test \
          scenario in tests/perf_compare_golden.rs. The 'improved' substring is a \
          scenario label describing a perf comparison where a later run improved \
          over a baseline; it is not a duplicated-file pattern.",
-    ),
-    (
-        "tests/snapshots/perf_compare_golden__perf_compare_improved.snap.new",
-        "permanent: insta's pending-snapshot temp file (matches *.snap.new in \
-         .gitignore but tracked git instances may surface in working trees). \
-         Same scenario-label justification as the .snap above.",
-    ),
-];
+)];
 
 const PRUNE_DIRS: &[&str] = &[
     ".git",
@@ -283,10 +268,7 @@ mod unit_tests {
 
     #[test]
     fn matches_forbidden_catches_opus_suffix() {
-        assert_eq!(
-            matches_forbidden("COMPREHENSIVE_PLAN_TO_MAKE_EE__OPUS.md"),
-            Some("__OPUS")
-        );
+        assert_eq!(matches_forbidden("plan__OPUS.md"), Some("__OPUS"));
         assert_eq!(matches_forbidden("foo__OPUS"), Some("__OPUS"));
         assert_eq!(matches_forbidden("foo__OPUS.rs"), Some("__OPUS"));
     }
@@ -333,9 +315,8 @@ mod unit_tests {
     fn allowlist_documents_known_exceptions() {
         let paths: Vec<&str> = FORBIDDEN_SUFFIX_ALLOWLIST.iter().map(|(p, _)| *p).collect();
         assert!(
-            paths.contains(&"COMPREHENSIVE_PLAN_TO_MAKE_EE__OPUS.md"),
-            "the known plan-rename target must remain in the allowlist until \
-             bd-3usjw.15 closes"
+            paths.contains(&"tests/snapshots/perf_compare_golden__perf_compare_improved.snap"),
+            "the known perf comparison snapshot must remain documented"
         );
     }
 }

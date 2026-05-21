@@ -2,7 +2,7 @@
 
 **Generated:** 2026-05-06  
 **Bead:** eidetic_engine_cli-5rmx  
-**Plan document:** COMPREHENSIVE_PLAN_TO_MAKE_EE__OPUS.md (3652 lines)
+**Plan document:** COMPREHENSIVE_PLAN.md (3652 lines)
 
 ## Summary
 
