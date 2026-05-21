@@ -369,6 +369,13 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
                         status,
                     });
                     any_failed = true;
+                } else if harden_init_directory_mode(&ee_dir).is_err() {
+                    actions.push(InitAction {
+                        action: "create_directory",
+                        path: ee_dir.clone(),
+                        status: "failed",
+                    });
+                    any_failed = true;
                 } else {
                     actions.push(InitAction {
                         action: "create_directory",
@@ -410,6 +417,13 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
                         action: "create_directory",
                         path: index_dir.clone(),
                         status,
+                    });
+                    any_failed = true;
+                } else if harden_init_directory_mode(&index_dir).is_err() {
+                    actions.push(InitAction {
+                        action: "create_directory",
+                        path: index_dir.clone(),
+                        status: "failed",
                     });
                     any_failed = true;
                 } else {
@@ -574,6 +588,8 @@ fn initialize_database(
     connection
         .migrate()
         .map_err(|error| format!("failed to migrate database: {error}"))?;
+    harden_init_database_mode(database_path)
+        .map_err(|error| format!("failed to harden database permissions: {error}"))?;
 
     // Create workspace row if it doesn't exist (idempotent).
     let workspace_key = workspace_path.to_string_lossy().to_string();
@@ -593,6 +609,42 @@ fn initialize_database(
             .map_err(|error| format!("failed to create workspace row: {error}"))?;
     }
 
+    Ok(())
+}
+
+/// Tighten ee storage directory permissions to owner-only (0700) on Unix.
+///
+/// `.ee/` and `.ee/index/` hold workspace identity state and the search
+/// index; under umask 022 these would be created 0755 (group/world
+/// readable). The `audit-security-2-2026-05-20` review found this leaks
+/// data-at-rest even before any other agent writes secrets into them, so
+/// init now hardens both directory roots up front.
+#[cfg(unix)]
+fn harden_init_directory_mode(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn harden_init_directory_mode(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Tighten the ee SQLite database file permissions to owner-only (0600) on
+/// Unix. `.ee/ee.db` stores memories, the audit log, preflight token
+/// hashes, and other identity-bearing state; under umask 022 it would be
+/// created 0644 (group/world readable). Init now restricts the file before
+/// returning a successful workspace setup.
+#[cfg(unix)]
+fn harden_init_database_mode(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn harden_init_database_mode(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
@@ -851,6 +903,48 @@ mod tests {
         ensure(stored.id.len(), 30, "workspace id length")?;
 
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_creates_storage_with_owner_only_permissions() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let workspace = temp_dir.path().to_path_buf();
+        let database_path = workspace.join(".ee").join("ee.db");
+        let options = InitOptions {
+            workspace_path: workspace.clone(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        };
+
+        let report = init_workspace(&options);
+        ensure(report.status, InitStatus::Created, "init created status")?;
+
+        let ee_mode = fs::metadata(workspace.join(".ee"))
+            .map_err(|error| error.to_string())?
+            .permissions()
+            .mode()
+            & 0o777;
+        ensure(ee_mode, 0o700, ".ee directory mode must be 0700")?;
+
+        let index_mode = fs::metadata(workspace.join(".ee").join("index"))
+            .map_err(|error| error.to_string())?
+            .permissions()
+            .mode()
+            & 0o777;
+        ensure(index_mode, 0o700, ".ee/index directory mode must be 0700")?;
+
+        let database_mode = fs::metadata(&database_path)
+            .map_err(|error| error.to_string())?
+            .permissions()
+            .mode()
+            & 0o777;
+        ensure(database_mode, 0o600, ".ee/ee.db mode must be 0600")
     }
 
     #[test]
