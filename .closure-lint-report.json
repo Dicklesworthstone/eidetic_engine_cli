@@ -220,13 +220,13 @@
       "bead": "bd-3usjw.28",
       "label": "implements-surface",
       "surface": "mcp_parity_test_suite",
-      "reason": "tests/mcp_parity_coverage.rs lacks assertion-style coverage"
+      "reason": "referenced test path missing: tests/mcp_parity/*.rs"
     },
     {
       "bead": "bd-3usjw.28",
       "label": "implements-surface",
       "surface": "mcp_parity_test_suite",
-      "reason": "referenced test path missing: tests/mcp_parity/*.rs"
+      "reason": "tests/mcp_parity_coverage.rs lacks assertion-style coverage"
     },
     {
       "bead": "bd-3usjw.44",
