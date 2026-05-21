@@ -46,6 +46,10 @@ require_grep 'handler_returns_responder_mesh_disabled_when_env_false' src/mesh/h
 require_grep 'handler_returns_responder_shields_up_when_set' src/mesh/hello.rs
 require_grep 'handler_returns_responder_unauthenticated_tailscale_when_probe_says_so' src/mesh/hello.rs
 require_grep 'decline_response_omits_responder_metadata' src/mesh/hello.rs
+require_grep 'protocol_version_same_major_matrix_allows_minor_skew' src/mesh/hello.rs
+require_grep 'protocol_version_matrix_rejects_older_and_newer_majors' src/mesh/hello.rs
+require_grep 'handler_accepts_same_major_protocol_minor_skew_matrix' src/mesh/hello.rs
+require_grep 'handler_fail_closed_matrix_rejects_cross_major_and_malformed_protocols' src/mesh/hello.rs
 
 for schema in \
   docs/schemas/ee.mesh.hello.v1.json \
@@ -93,6 +97,27 @@ expected_errors = {
     "decline_no_metadata_leak": "discovery_consent_denied",
 }
 
+def emit_event(
+    name,
+    scenario,
+    detail,
+    negotiated_version="",
+    disabled_features=None,
+    repair_command="",
+):
+    payload = {
+        "schema": "ee.test_event.v1",
+        "test": "mesh_hello_handshake",
+        "status": "pass",
+        "name": name,
+        "scenario": scenario,
+        "detail": detail,
+        "negotiated_version": negotiated_version,
+        "disabled_features": disabled_features or [],
+        "repair_command": repair_command,
+    }
+    print(json.dumps(payload, sort_keys=True))
+
 for path in sorted(root.glob("*.json")):
     payload = json.loads(path.read_text(encoding="utf-8"))
     scenario = payload["scenario"]
@@ -119,11 +144,33 @@ for path in sorted(root.glob("*.json")):
 minor = json.loads((root / "version_skew_minor.json").read_text(encoding="utf-8"))
 assert minor["expected"]["kind"] == "granted"
 assert minor["request"]["requesterEeProtocolVersion"].startswith("1.")
+minor_response = minor["expected"]["response"]
+emit_event(
+    "simulated_node_version",
+    "version_skew_minor",
+    "same-major minor skew negotiated successfully",
+    negotiated_version=minor_response["responderEeProtocolVersion"],
+)
+
+major = json.loads((root / "version_skew_major.json").read_text(encoding="utf-8"))
+assert major["expected"]["kind"] == "declined"
+assert major["expected"]["error"]["code"] == "unsupported_protocol_version"
+emit_event(
+    "simulated_node_version",
+    "version_skew_major",
+    "cross-major protocol skew fails closed and stays local-only",
+    disabled_features=["mesh_event_exchange", "mesh_body_fetch"],
+    repair_command="ee mesh status --json",
+)
 
 unknown = json.loads((root / "unknown_fields.json").read_text(encoding="utf-8"))
 assert "futureRequesterHint" in unknown["request"], unknown
 
-print("mesh hello fixtures valid")
+emit_event(
+    "fixture_matrix",
+    "all",
+    "mesh hello protocol schemas and fixtures are valid",
+)
 PY
 
 emit pass "static_contracts" "mesh hello protocol schemas and fixtures present"
