@@ -762,16 +762,28 @@ impl SearchDegradation {
     /// and operators cannot tell evidence-broken from evidence-not-yet.
     #[must_use]
     fn search_score_calibration_unreadable(reason: &str) -> Self {
+        let (message, repair) = if reason.starts_with("feedback_events_") {
+            (
+                format!(
+                    "Search score calibration could not use feedback-event calibration evidence ({reason}); outcome-backed calibration samples were unavailable or ignored. Returning conservative [0, 1] intervals unless JSONL evidence provides enough usable samples.",
+                ),
+                "Run ee doctor and inspect the workspace feedback_events table; repair DB access or malformed evidence_json so outcome-backed calibration reaches the scorer."
+                    .to_string(),
+            )
+        } else {
+            (
+                format!(
+                    ".ee/search/calibration.jsonl exists but is unreadable ({reason}); search score calibration is dropping JSONL evidence and returning conservative [0, 1] intervals unless feedback events provide enough usable samples.",
+                ),
+                "Restore read permissions on .ee/search/calibration.jsonl (or rotate it via ee doctor) so calibration evidence reaches the scorer."
+                    .to_string(),
+            )
+        };
         Self {
             code: SEARCH_SCORE_CALIBRATION_UNREADABLE_CODE.to_string(),
             severity: "warning".to_string(),
-            message: format!(
-                ".ee/search/calibration.jsonl exists but is unreadable ({reason}); search score calibration is dropping JSONL evidence and returning conservative [0, 1] intervals unless feedback events provide enough usable samples.",
-            ),
-            repair: Some(
-                "Restore read permissions on .ee/search/calibration.jsonl (or rotate it via ee doctor) so calibration evidence reaches the scorer."
-                    .to_string(),
-            ),
+            message,
+            repair: Some(repair),
         }
     }
 
@@ -1710,11 +1722,35 @@ struct CachedSearchScoreCalibrationJsonl {
 }
 
 #[derive(Clone, Debug)]
+struct SearchScoreCalibrationFeedbackEvents {
+    events: Vec<StoredFeedbackEvent>,
+    unavailable_reason: Option<String>,
+}
+
+impl SearchScoreCalibrationFeedbackEvents {
+    fn available(events: Vec<StoredFeedbackEvent>) -> Self {
+        Self {
+            events,
+            unavailable_reason: None,
+        }
+    }
+
+    fn unavailable(reason: &str) -> Self {
+        Self {
+            events: Vec::new(),
+            unavailable_reason: Some(reason.to_owned()),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 struct SearchScoreCalibration {
     status: SearchScoreCalibrationStatus,
     sample_count: usize,
     jsonl_sample_count: usize,
     feedback_event_sample_count: usize,
+    feedback_event_malformed_count: usize,
+    feedback_event_unavailable_reason: Option<String>,
     corrupt_row_count: usize,
     corrupt_line_numbers: Vec<usize>,
     jsonl_file_size_bytes: Option<u64>,
@@ -1746,6 +1782,14 @@ impl SearchScoreCalibration {
         workspace_path: &Path,
         feedback_events: &[StoredFeedbackEvent],
     ) -> Self {
+        Self::for_workspace_with_feedback_event_status(workspace_path, feedback_events, None)
+    }
+
+    fn for_workspace_with_feedback_event_status(
+        workspace_path: &Path,
+        feedback_events: &[StoredFeedbackEvent],
+        feedback_event_unavailable_reason: Option<String>,
+    ) -> Self {
         let path = workspace_path
             .join(".ee")
             .join("search")
@@ -1762,12 +1806,14 @@ impl SearchScoreCalibration {
         // contributors does not bloat every search payload.
         let mut feedback_event_ids: Vec<String> = Vec::new();
         let mut feedback_event_ids_truncated = false;
+        let mut feedback_event_malformed_count = 0usize;
 
         for event in feedback_events {
             let Some(evidence_json) = &event.evidence_json else {
                 continue;
             };
             let Ok(value) = serde_json::from_str::<serde_json::Value>(evidence_json) else {
+                feedback_event_malformed_count = feedback_event_malformed_count.saturating_add(1);
                 continue;
             };
             let Some(residual) = calibration_residual_from_value(&value) else {
@@ -1802,6 +1848,8 @@ impl SearchScoreCalibration {
                 sample_count: residuals.len(),
                 jsonl_sample_count: 0,
                 feedback_event_sample_count,
+                feedback_event_malformed_count,
+                feedback_event_unavailable_reason,
                 corrupt_row_count: 0,
                 corrupt_line_numbers: Vec::new(),
                 jsonl_file_size_bytes: None,
@@ -1813,12 +1861,18 @@ impl SearchScoreCalibration {
             };
         }
 
-        if !jsonl_load.exists && feedback_event_sample_count == 0 {
+        if !jsonl_load.exists
+            && feedback_event_sample_count == 0
+            && feedback_event_malformed_count == 0
+            && feedback_event_unavailable_reason.is_none()
+        {
             return Self {
                 status: SearchScoreCalibrationStatus::Absent,
                 sample_count: 0,
                 jsonl_sample_count: 0,
                 feedback_event_sample_count: 0,
+                feedback_event_malformed_count: 0,
+                feedback_event_unavailable_reason: None,
                 corrupt_row_count: 0,
                 corrupt_line_numbers: Vec::new(),
                 jsonl_file_size_bytes: None,
@@ -1844,6 +1898,8 @@ impl SearchScoreCalibration {
                 sample_count: residuals.len(),
                 jsonl_sample_count,
                 feedback_event_sample_count,
+                feedback_event_malformed_count,
+                feedback_event_unavailable_reason,
                 corrupt_row_count,
                 corrupt_line_numbers,
                 jsonl_file_size_bytes: jsonl_load.file_size_bytes,
@@ -1872,6 +1928,8 @@ impl SearchScoreCalibration {
                 sample_count: residuals.len(),
                 jsonl_sample_count,
                 feedback_event_sample_count,
+                feedback_event_malformed_count,
+                feedback_event_unavailable_reason,
                 corrupt_row_count,
                 corrupt_line_numbers,
                 jsonl_file_size_bytes: jsonl_load.file_size_bytes,
@@ -1889,6 +1947,8 @@ impl SearchScoreCalibration {
                 sample_count: residuals.len(),
                 jsonl_sample_count,
                 feedback_event_sample_count,
+                feedback_event_malformed_count,
+                feedback_event_unavailable_reason,
                 corrupt_row_count: 0,
                 corrupt_line_numbers: Vec::new(),
                 jsonl_file_size_bytes: jsonl_load.file_size_bytes,
@@ -1905,6 +1965,8 @@ impl SearchScoreCalibration {
             sample_count: residuals.len(),
             jsonl_sample_count,
             feedback_event_sample_count,
+            feedback_event_malformed_count,
+            feedback_event_unavailable_reason,
             corrupt_row_count: 0,
             corrupt_line_numbers: Vec::new(),
             jsonl_file_size_bytes: jsonl_load.file_size_bytes,
@@ -1951,6 +2013,9 @@ impl SearchScoreCalibration {
             "sourceBreakdown": {
                 "jsonl": self.jsonl_sample_count,
                 "feedbackEvents": self.feedback_event_sample_count,
+                "feedbackEventsMalformed": self.feedback_event_malformed_count,
+                "feedbackEventsReadStatus": if self.feedback_event_unavailable_reason.is_some() { "unavailable" } else { "ok" },
+                "feedbackEventsUnavailableReason": self.feedback_event_unavailable_reason,
             },
             "corruptRowCount": self.corrupt_row_count,
             "corruptLineNumbers": &self.corrupt_line_numbers,
@@ -2205,10 +2270,21 @@ fn annotate_hits_with_score_calibration(
 ) {
     let feedback_events =
         search_score_calibration_feedback_events(workspace_path, database_path, read_connection);
-    let calibration = SearchScoreCalibration::for_workspace_with_feedback_events(
+    let calibration = SearchScoreCalibration::for_workspace_with_feedback_event_status(
         workspace_path,
-        &feedback_events,
+        &feedback_events.events,
+        feedback_events.unavailable_reason,
     );
+    if let Some(reason) = calibration.feedback_event_unavailable_reason.as_deref() {
+        degraded.push(SearchDegradation::search_score_calibration_unreadable(
+            reason,
+        ));
+    }
+    if calibration.feedback_event_malformed_count > 0 {
+        degraded.push(SearchDegradation::search_score_calibration_unreadable(
+            "feedback_events_malformed",
+        ));
+    }
     match calibration.status {
         SearchScoreCalibrationStatus::Insufficient => {
             degraded.push(SearchDegradation::conformal_calibration_insufficient(
@@ -2266,22 +2342,36 @@ fn search_score_calibration_feedback_events(
     workspace_path: &Path,
     database_path: Option<&Path>,
     read_connection: Option<&DbConnection>,
-) -> Vec<StoredFeedbackEvent> {
+) -> SearchScoreCalibrationFeedbackEvents {
     let workspace_id = crate::core::curate::stable_workspace_id(workspace_path);
     if let Some(connection) = read_connection {
-        return connection
-            .list_feedback_events(&workspace_id)
-            .unwrap_or_default();
+        return match connection.list_feedback_events(&workspace_id) {
+            Ok(events) => SearchScoreCalibrationFeedbackEvents::available(events),
+            Err(_error) => {
+                SearchScoreCalibrationFeedbackEvents::unavailable("feedback_events_read_failed")
+            }
+        };
     }
 
     let default_database_path = workspace_path.join(".ee").join("ee.db");
     let database_path = database_path.unwrap_or(&default_database_path);
     if !database_path.exists() {
-        return Vec::new();
+        return SearchScoreCalibrationFeedbackEvents::available(Vec::new());
     }
-    DbConnection::open_file(database_path)
-        .and_then(|connection| connection.list_feedback_events(&workspace_id))
-        .unwrap_or_default()
+    let connection = match DbConnection::open_file(database_path) {
+        Ok(connection) => connection,
+        Err(_error) => {
+            return SearchScoreCalibrationFeedbackEvents::unavailable(
+                "feedback_events_open_failed",
+            );
+        }
+    };
+    match connection.list_feedback_events(&workspace_id) {
+        Ok(events) => SearchScoreCalibrationFeedbackEvents::available(events),
+        Err(_error) => {
+            SearchScoreCalibrationFeedbackEvents::unavailable("feedback_events_read_failed")
+        }
+    }
 }
 
 fn search_hit_score_interval_json(hit: &SearchHit) -> serde_json::Value {
@@ -6208,7 +6298,7 @@ mod tests {
         );
         let calibration = SearchScoreCalibration::for_workspace_with_feedback_events(
             &workspace,
-            &feedback_events,
+            &feedback_events.events,
         );
 
         assert_eq!(calibration.status, SearchScoreCalibrationStatus::Calibrated);
@@ -6254,6 +6344,147 @@ mod tests {
                 })
                 .and_then(serde_json::Value::as_u64),
             Some(MIN_SEARCH_SCORE_CALIBRATION_SAMPLES as u64)
+        );
+        assert_eq!(
+            hits[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| {
+                    metadata.pointer("/scoreCalibration/sourceBreakdown/feedbackEventsReadStatus")
+                })
+                .and_then(serde_json::Value::as_str),
+            Some("ok")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn search_score_calibration_feedback_db_failure_surfaces_degradation() -> TestResult {
+        let workspace = unique_test_dir("score-calibration-feedback-db-failure");
+        let database_path = workspace.join(".ee").join("ee.db");
+        std::fs::create_dir_all(&database_path).map_err(|error| error.to_string())?;
+
+        let mut hits = vec![synthetic_hit("mem_feedback_db_failure", 0.8)];
+        let mut degraded = Vec::new();
+        annotate_hits_with_score_calibration(
+            &workspace,
+            Some(&database_path),
+            None,
+            &mut hits,
+            &mut degraded,
+        );
+
+        assert!(
+            degraded.iter().any(
+                |entry| entry.code == SEARCH_SCORE_CALIBRATION_UNREADABLE_CODE
+                    && entry
+                        .message
+                        .contains("feedback-event calibration evidence")
+            ),
+            "DB open failures must not erase feedback-event calibration samples silently: {degraded:?}"
+        );
+        assert_eq!(
+            hits[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| {
+                    metadata.pointer("/scoreCalibration/sourceBreakdown/feedbackEventsReadStatus")
+                })
+                .and_then(serde_json::Value::as_str),
+            Some("unavailable")
+        );
+        assert_eq!(
+            hits[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| {
+                    metadata.pointer(
+                        "/scoreCalibration/sourceBreakdown/feedbackEventsUnavailableReason",
+                    )
+                })
+                .and_then(serde_json::Value::as_str),
+            Some("feedback_events_open_failed")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn search_score_calibration_malformed_feedback_evidence_is_counted() -> TestResult {
+        let workspace = unique_test_dir("score-calibration-feedback-malformed");
+        let database_path = workspace.join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or_else(|| "database path must have a parent".to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::curate::stable_workspace_id(&workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("score-calibration-feedback-malformed".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_feedback_event(
+                "fb_malformed_calibration_0001",
+                &CreateFeedbackEventInput {
+                    workspace_id: workspace_id.clone(),
+                    target_type: "candidate".to_owned(),
+                    target_id: "cand_malformed".to_owned(),
+                    signal: "confirmation".to_owned(),
+                    weight: 1.0,
+                    source_type: "outcome_observed".to_owned(),
+                    source_id: Some("curate-validation".to_owned()),
+                    reason: Some("bad calibration evidence".to_owned()),
+                    evidence_json: Some("{not json".to_owned()),
+                    session_id: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut hits = vec![synthetic_hit("mem_feedback_malformed", 0.8)];
+        let mut degraded = Vec::new();
+        annotate_hits_with_score_calibration(
+            &workspace,
+            Some(&database_path),
+            Some(&connection),
+            &mut hits,
+            &mut degraded,
+        );
+
+        assert!(
+            degraded.iter().any(
+                |entry| entry.code == SEARCH_SCORE_CALIBRATION_UNREADABLE_CODE
+                    && entry.message.contains("feedback_events_malformed")
+            ),
+            "malformed evidence_json must surface as degraded calibration evidence: {degraded:?}"
+        );
+        assert_eq!(
+            hits[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| {
+                    metadata.pointer("/scoreCalibration/sourceBreakdown/feedbackEventsMalformed")
+                })
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            hits[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| {
+                    metadata.pointer("/scoreCalibration/sourceBreakdown/feedbackEvents")
+                })
+                .and_then(serde_json::Value::as_u64),
+            Some(0)
         );
         Ok(())
     }
