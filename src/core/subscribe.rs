@@ -588,6 +588,7 @@ pub fn classify_delta_kind(action: &str) -> &'static str {
         | audit_actions::MEMORY_SCORE_DECAY
         | audit_actions::MEMORY_DECAY_DEMOTE
         | audit_actions::MEMORY_BAYES_POSTERIOR_UPDATED
+        | audit_actions::OUTCOME_BAYES_UPDATE
         | audit_actions::TRUST_CLASS_TRANSITION => "updated",
         _ if action.contains("level") => "level_transitioned",
         _ if action.contains("expire") => "expired",
@@ -618,7 +619,9 @@ pub fn classify_changed_fields(action: &str) -> Vec<String> {
         | audit_actions::MEMORY_TAG_REMOVE
         | audit_actions::MEMORY_TAG_SET => &["tags"],
         audit_actions::MEMORY_SCORE_DECAY => &["confidence", "utility", "importance"],
-        audit_actions::MEMORY_BAYES_POSTERIOR_UPDATED => &["confidence", "trust_class"],
+        audit_actions::MEMORY_BAYES_POSTERIOR_UPDATED | audit_actions::OUTCOME_BAYES_UPDATE => {
+            &["confidence", "trust_class"]
+        }
         audit_actions::TRUST_CLASS_TRANSITION => &["trust_class"],
         audit_actions::MEMORY_REVISE | audit_actions::MEMORY_UPDATE => {
             &["content_hash", "confidence", "trust_class"]

@@ -83,7 +83,9 @@ the fields as additive optional memory-record fields.
 
 The two explicit backfill flags are mutually exclusive. Each changed memory
 gets a `memory.bayes_posterior_updated` audit row with `backfillSource`
-identifying the selected mode.
+identifying the selected mode. Live `ee outcome` writes use the distinct
+`outcome.bayes_update` audit action so operators can separate feedback-driven
+posterior changes from migration backfills in `ee audit timeline`.
 
 **Agent rewrite.**
 ```python

@@ -1145,6 +1145,19 @@ fn record_outcome_inner(
                 _ => (prior, 0.0),
             };
             if posterior != prior {
+                tracing::debug!(
+                    target: "ee::trust::bayes",
+                    memory_id = %target_id,
+                    signal = %signal,
+                    prior_alpha = prior.alpha(),
+                    prior_beta = prior.beta(),
+                    posterior_alpha = posterior.alpha(),
+                    posterior_beta = posterior.beta(),
+                    harmful_weight = DEFAULT_HARMFUL_WEIGHT,
+                    applied_weight,
+                    "applying Bayesian posterior outcome update"
+                );
+
                 connection
                     .update_memory_bayes_posterior(&target_id, posterior.alpha(), posterior.beta())
                     .map_err(|error| DomainError::Storage {
@@ -1172,7 +1185,7 @@ fn record_outcome_inner(
                         &CreateAuditInput {
                             workspace_id: Some(target.workspace_id.clone()),
                             actor: options.actor.clone(),
-                            action: audit_actions::MEMORY_BAYES_POSTERIOR_UPDATED.to_string(),
+                            action: audit_actions::OUTCOME_BAYES_UPDATE.to_string(),
                             target_type: Some("memory".to_string()),
                             target_id: Some(target_id.clone()),
                             details: Some(details),
@@ -3176,6 +3189,74 @@ mod tests {
             &crate::db::audit_actions::FEEDBACK_RECORD.to_string(),
             "audit action",
         )?;
+        let bayes_audit = audit
+            .iter()
+            .filter(|row| row.action == crate::db::audit_actions::OUTCOME_BAYES_UPDATE)
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &bayes_audit.len(),
+            &1_usize,
+            "Bayesian posterior outcome audit row count",
+        )?;
+        let bayes_row = bayes_audit
+            .first()
+            .ok_or_else(|| "bayes outcome audit row missing after length check".to_string())?;
+        ensure_equal(
+            &bayes_row.target_id,
+            &Some(OUTCOME_TEST_MEMORY_ID.to_string()),
+            "bayes outcome audit target",
+        )?;
+        let details = bayes_row
+            .details
+            .as_deref()
+            .ok_or_else(|| "bayes outcome audit details missing".to_string())?;
+        let details: serde_json::Value = serde_json::from_str(details)
+            .map_err(|error| format!("bayes outcome audit details must parse: {error}"))?;
+        ensure_equal(
+            &details["schema"],
+            &serde_json::json!("ee.audit.bayes_posterior_updated.v1"),
+            "bayes audit schema",
+        )?;
+        ensure_equal(
+            &details["feedbackEventId"],
+            &serde_json::json!("fb_11234567890123456789012345"),
+            "bayes audit event link",
+        )?;
+        ensure_equal(
+            &details["signal"],
+            &serde_json::json!("helpful"),
+            "bayes audit signal",
+        )?;
+        ensure_equal(
+            &details["appliedWeight"],
+            &serde_json::json!(1.0),
+            "bayes audit applied weight",
+        )?;
+        ensure_equal(
+            &details["priorAlpha"],
+            &serde_json::json!(0.5),
+            "bayes audit prior alpha",
+        )?;
+        ensure_equal(
+            &details["priorBeta"],
+            &serde_json::json!(0.5),
+            "bayes audit prior beta",
+        )?;
+        ensure_equal(
+            &details["posteriorAlpha"],
+            &serde_json::json!(1.5),
+            "bayes audit posterior alpha",
+        )?;
+        ensure_equal(
+            &details["posteriorBeta"],
+            &serde_json::json!(0.5),
+            "bayes audit posterior beta",
+        )?;
+        let posterior = connection
+            .get_memory_bayes_posterior(OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "posterior missing for outcome memory".to_string())?;
+        ensure_equal(&posterior, &(1.5, 0.5), "persisted Bayes posterior")?;
         let profile = connection
             .get_agent_context_profile(OUTCOME_TEST_WORKSPACE_ID, "test", OUTCOME_TEST_MEMORY_ID)
             .map_err(|error| error.to_string())?;

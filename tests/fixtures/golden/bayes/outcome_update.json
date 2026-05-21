@@ -1,0 +1,27 @@
+{
+  "schema": "ee.bayes.golden.v1",
+  "mode": "outcome_update",
+  "command": "ee outcome <memory-id> --signal helpful --json",
+  "memories": [
+    {
+      "memoryId": "mem_bayes_outcome_rule",
+      "prior": {
+        "alpha": 0.5,
+        "beta": 0.5
+      },
+      "bayesPosterior": {
+        "schema": "ee.bayes.posterior.v1",
+        "alpha": 1.5,
+        "beta": 0.5,
+        "mean": 0.75,
+        "effectiveSampleSize": 2.0
+      }
+    }
+  ],
+  "audit": {
+    "action": "outcome.bayes_update",
+    "feedbackEventId": "fb_bayes_outcome_helpful",
+    "signal": "helpful",
+    "appliedWeight": 1.0
+  }
+}

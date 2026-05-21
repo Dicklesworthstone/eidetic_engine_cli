@@ -1,0 +1,24 @@
+{
+  "schema": "ee.bayes.golden.v1",
+  "mode": "from_utility",
+  "command": "ee migrate run --workspace . --bayes-backfill-from-utility --json",
+  "memories": [
+    {
+      "memoryId": "mem_bayes_utility_rule",
+      "legacyConfidence": 0.8,
+      "bayesPosterior": {
+        "schema": "ee.bayes.posterior.v1",
+        "alpha": 1.6,
+        "beta": 0.4,
+        "mean": 0.8,
+        "effectiveSampleSize": 2.0
+      }
+    }
+  ],
+  "audit": {
+    "action": "memory.bayes_posterior_updated",
+    "backfillSource": "backfill_from_utility",
+    "updated": 1,
+    "skipped": 0
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "schema": "ee.bayes.golden.v1",
+  "mode": "default_jeffreys",
+  "command": "ee migrate run --workspace . --json",
+  "memories": [
+    {
+      "memoryId": "mem_bayes_default_rule",
+      "bayesPosterior": {
+        "schema": "ee.bayes.posterior.v1",
+        "alpha": 0.5,
+        "beta": 0.5,
+        "mean": 0.5,
+        "effectiveSampleSize": 1.0
+      }
+    }
+  ],
+  "audit": {
+    "action": "migration.bayes_v1.applied",
+    "backfillSource": "jeffreys_default",
+    "updated": 0,
+    "skipped": 0
+  }
+}

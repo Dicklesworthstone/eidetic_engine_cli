@@ -80,6 +80,12 @@ pub mod audit_actions {
     /// (N7.1 / ADR 0032). Details carry prior (alpha, beta), event
     /// signal + weight, posterior (alpha, beta), and the new mean.
     pub const MEMORY_BAYES_POSTERIOR_UPDATED: &str = "memory.bayes_posterior_updated";
+    /// Outcome write applied a Beta-Bernoulli posterior update for a
+    /// memory (N7.1 / bd-17c65.14.7.2). Backfill paths use
+    /// `memory.bayes_posterior_updated`; live feedback writes use this
+    /// action so the audit timeline can distinguish operator feedback
+    /// from migration-derived posterior rewrites.
+    pub const OUTCOME_BAYES_UPDATE: &str = "outcome.bayes_update";
 
     /// Trust-class transitioned for a memory because its 90% credible
     /// interval crossed a transition threshold (N7.1 / ADR 0032

@@ -1,0 +1,33 @@
+{
+  "schema": "ee.bayes.golden.v1",
+  "mode": "from_feedback_events",
+  "command": "ee migrate run --workspace . --bayes-backfill-from-feedback-events --json",
+  "memories": [
+    {
+      "memoryId": "mem_bayes_feedback_rule",
+      "feedbackEvents": [
+        {
+          "signal": "helpful",
+          "weight": 1.0
+        },
+        {
+          "signal": "harmful",
+          "weight": 2.5
+        }
+      ],
+      "bayesPosterior": {
+        "schema": "ee.bayes.posterior.v1",
+        "alpha": 1.5,
+        "beta": 3.0,
+        "mean": 0.3333333333333333,
+        "effectiveSampleSize": 4.5
+      }
+    }
+  ],
+  "audit": {
+    "action": "memory.bayes_posterior_updated",
+    "backfillSource": "backfill_from_feedback_events",
+    "updated": 1,
+    "skipped": 0
+  }
+}

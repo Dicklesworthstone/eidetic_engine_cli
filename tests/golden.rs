@@ -223,6 +223,77 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bayes_golden_fixtures_pin_backfill_and_outcome_contracts() -> TestResult {
+        let fixtures = [
+            (
+                "jeffreys_default_backfill",
+                include_str!("fixtures/golden/bayes/jeffreys_default_backfill.json"),
+                "default_jeffreys",
+                "migration.bayes_v1.applied",
+            ),
+            (
+                "utility_derived_backfill",
+                include_str!("fixtures/golden/bayes/utility_derived_backfill.json"),
+                "from_utility",
+                "memory.bayes_posterior_updated",
+            ),
+            (
+                "feedback_replay_backfill",
+                include_str!("fixtures/golden/bayes/feedback_replay_backfill.json"),
+                "from_feedback_events",
+                "memory.bayes_posterior_updated",
+            ),
+            (
+                "outcome_update",
+                include_str!("fixtures/golden/bayes/outcome_update.json"),
+                "outcome_update",
+                "outcome.bayes_update",
+            ),
+        ];
+
+        for (name, raw, mode, action) in fixtures {
+            let parsed: serde_json::Value = serde_json::from_str(raw)
+                .map_err(|error| format!("{name} fixture must parse as JSON: {error}"))?;
+            ensure_equal(
+                &parsed["schema"],
+                &serde_json::json!("ee.bayes.golden.v1"),
+                &format!("{name} schema"),
+            )?;
+            ensure_equal(
+                &parsed["mode"],
+                &serde_json::json!(mode),
+                &format!("{name} mode"),
+            )?;
+            ensure_equal(
+                &parsed["audit"]["action"],
+                &serde_json::json!(action),
+                &format!("{name} audit action"),
+            )?;
+            ensure(
+                parsed["memories"]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty()),
+                format!("{name} has at least one memory fixture"),
+            )?;
+            ensure_equal(
+                &parsed["memories"][0]["bayesPosterior"]["schema"],
+                &serde_json::json!("ee.bayes.posterior.v1"),
+                &format!("{name} posterior schema"),
+            )?;
+        }
+
+        let why_snapshot = include_str!("snapshots/why_with_bayes_posterior.snap");
+        ensure(
+            why_snapshot.contains("ee.bayes.posterior.v1"),
+            "why snapshot pins the posterior schema",
+        )?;
+        ensure(
+            why_snapshot.contains("\"credibleInterval90\""),
+            "why snapshot pins ci90 output",
+        )
+    }
+
     fn ensure_json_number_close(
         actual: &serde_json::Value,
         expected: &serde_json::Value,

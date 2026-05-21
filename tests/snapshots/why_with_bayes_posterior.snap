@@ -1,0 +1,28 @@
+---
+source: tests/why_renders_credible_interval_unit.rs
+expression: why_with_bayes_posterior
+---
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "memoryId": "mem_bayes_why_rule",
+    "bayesPosterior": {
+      "schema": "ee.bayes.posterior.v1",
+      "alpha": 0.5,
+      "beta": 0.5,
+      "mean": 0.5,
+      "effectiveSampleSize": 1.0,
+      "credibleInterval90": {
+        "level": 0.9,
+        "lower": 0.0061558297,
+        "upper": 0.9938441703
+      },
+      "credibleInterval50": {
+        "level": 0.5,
+        "lower": 0.1464466094,
+        "upper": 0.8535533906
+      }
+    }
+  }
+}
