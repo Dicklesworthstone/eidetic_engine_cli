@@ -22,9 +22,9 @@ use crate::db::shard::{
 };
 use crate::db::{
     CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
-    DatabaseConfig, DbConnection, GraphSnapshotType, StoredAuditEntry, StoredGraphAlgorithmResult,
-    StoredGraphAlgorithmWitness, StoredGraphSnapshot, StoredMemory, StoredMemoryLink,
-    StoredTaskEpisode, audit_actions,
+    DatabaseConfig, DbConnection, GraphSnapshotType, MeshStorageStatus, StoredAuditEntry,
+    StoredGraphAlgorithmResult, StoredGraphAlgorithmWitness, StoredGraphSnapshot, StoredMemory,
+    StoredMemoryLink, StoredTaskEpisode, audit_actions,
 };
 use crate::models::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
@@ -81,6 +81,62 @@ pub struct BackupRestoreOptions {
     pub side_path: PathBuf,
     pub restore_graph_cache: bool,
     pub dry_run: bool,
+}
+
+/// Redaction-safe summary of mesh state captured in a backup manifest.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BackupMeshSummary {
+    pub included: bool,
+    pub peer_count: u32,
+    pub cursor_count: u32,
+    pub imported_event_count: u32,
+    pub policy_decision_event_count: u32,
+    pub policy_failure_event_count: u32,
+    pub mapped_memory_count: u32,
+    pub cached_body_count: u32,
+}
+
+impl BackupMeshSummary {
+    #[must_use]
+    pub fn from_storage_status(status: &MeshStorageStatus) -> Self {
+        Self {
+            included: mesh_storage_status_has_rows(status),
+            peer_count: status.peer_count,
+            cursor_count: status.cursor_count,
+            imported_event_count: status.imported_event_count,
+            policy_decision_event_count: status.policy_decision_event_count,
+            policy_failure_event_count: status.policy_failure_event_count,
+            mapped_memory_count: status.mapped_memory_count,
+            cached_body_count: status.cached_body_count,
+        }
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        json!({
+            "included": self.included,
+            "tables": {
+                "mesh_peers": self.peer_count,
+                "mesh_peer_cursors": self.cursor_count,
+                "mesh_import_ledger": self.imported_event_count,
+                "mesh_policy_decision_events": self.policy_decision_event_count,
+                "mesh_policy_failure_events": self.policy_failure_event_count,
+                "mesh_memory_mappings": self.mapped_memory_count,
+                "mesh_body_cache_metadata": self.cached_body_count,
+            },
+            "restorePolicy": {
+                "peerCredentials": "redacted",
+                "peers": "disabled_until_repaired",
+                "cursors": "preserved_as_diagnostics_not_replayed",
+                "cachedBodies": "metadata_only_revalidate_after_restore",
+            },
+            "nextAction": if self.included {
+                "run ee mesh doctor --workspace <side-path> --json and re-pair peers before enabling mesh sync"
+            } else {
+                "none"
+            },
+        })
+    }
 }
 
 /// Stable report returned by `ee backup create`.
@@ -786,6 +842,11 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         .iter()
         .map(|payload| payload.report.clone())
         .collect::<Vec<_>>();
+    let mesh = backup_mesh_summary(
+        &connection,
+        &export_data.workspace.workspace_id,
+        &mut degraded,
+    );
 
     let (records_bytes, stats) = render_records(
         &backup_id,
@@ -848,7 +909,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         degraded,
     };
 
-    let manifest_json = manifest_json(&report, &created_at, None);
+    let manifest_json = manifest_json(&report, &created_at, None, &mesh);
     if options.dry_run {
         report.artifacts.push(BackupArtifactReport {
             path: MANIFEST_FILE.to_owned(),
@@ -1412,7 +1473,7 @@ pub fn restore_backup_to_side_path(
     let restore_records_path = restore_artifact_dir.join(RECORDS_FILE);
     let restore_manifest_path = restore_artifact_dir.join(MANIFEST_FILE);
     let restored_database_path = side_path.join(WORKSPACE_MARKER).join(DEFAULT_DB_FILE);
-    let next_actions = vec![
+    let mut next_actions = vec![
         format!("ee backup inspect {} --json", inspect.backup_id),
         format!(
             "ee search \"<query>\" --workspace {} --json",
@@ -1462,6 +1523,15 @@ pub fn restore_backup_to_side_path(
         repair: Some("verify the backup directory and retry restore".to_owned()),
     })?;
     let restore_degraded = restore_manifest_degradations(&manifest_bytes);
+    if restore_degraded
+        .iter()
+        .any(|entry| entry.code == "mesh_restore_requires_repair")
+    {
+        next_actions.push(format!(
+            "ee mesh doctor --workspace {} --json",
+            side_path.to_string_lossy()
+        ));
+    }
     write_new_file(&restore_manifest_path, &manifest_bytes)?;
 
     copy_new_file(&source_records_path, &restore_records_path)?;
@@ -1532,29 +1602,39 @@ fn restore_manifest_degradations(manifest_bytes: &[u8]) -> Vec<BackupDegradation
     let Ok(manifest) = serde_json::from_slice::<JsonValue>(manifest_bytes) else {
         return Vec::new();
     };
+    let mut degraded = Vec::new();
     let backup_schema_version = manifest
         .pointer("/graphCache/schemaVersion")
         .and_then(JsonValue::as_u64)
         .and_then(|value| u32::try_from(value).ok());
-    let Some(backup_schema_version) = backup_schema_version else {
-        return Vec::new();
-    };
-    let Some(current_schema_version) = crate::db::MIGRATIONS
-        .last()
-        .map(|migration| migration.version())
-    else {
-        return Vec::new();
-    };
-    if backup_schema_version >= current_schema_version {
-        return Vec::new();
+    if let (Some(backup_schema_version), Some(current_schema_version)) = (
+        backup_schema_version,
+        crate::db::MIGRATIONS
+            .last()
+            .map(|migration| migration.version()),
+    ) && backup_schema_version < current_schema_version
+    {
+        degraded.push(BackupDegradation::warning(
+            "graph_cache_schema_older_than_binary",
+            format!(
+                "backup graph cache was captured at schema version {backup_schema_version}, while this binary restores with schema version {current_schema_version}"
+            ),
+            "restore imports records through the current migrations before replaying graph-cache assets; run ee db status --workspace <side-path> --json after restore to inspect the migrated database",
+        ));
     }
-    vec![BackupDegradation::warning(
-        "graph_cache_schema_older_than_binary",
-        format!(
-            "backup graph cache was captured at schema version {backup_schema_version}, while this binary restores with schema version {current_schema_version}"
-        ),
-        "restore imports records through the current migrations before replaying graph-cache assets; run ee db status --workspace <side-path> --json after restore to inspect the migrated database",
-    )]
+
+    if manifest
+        .pointer("/mesh/included")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false)
+    {
+        degraded.push(BackupDegradation::warning(
+            "mesh_restore_requires_repair",
+            "backup contains mesh coordination state; restored workspaces keep mesh sync disabled until peers are explicitly re-paired",
+            "run ee mesh doctor --workspace <side-path> --json and re-pair peers before enabling mesh sync",
+        ));
+    }
+    degraded
 }
 
 fn restore_shard_fanout_assets(
@@ -2896,6 +2976,7 @@ fn manifest_json(
     report: &BackupCreateReport,
     created_at: &str,
     manifest_hash: Option<&str>,
+    mesh: &BackupMeshSummary,
 ) -> JsonValue {
     let mut manifest = json!({
         "schema": if report.include_derived || report.include_graph_cache {
@@ -2916,6 +2997,7 @@ fn manifest_json(
         "exportScope": report.export_scope.as_str(),
         "includeGraphCache": report.include_graph_cache,
         "graphCache": graph_cache_summary_json(report),
+        "mesh": mesh.data_json(),
         "counts": {
             "totalRecords": report.total_records,
             "memoryRecords": report.memory_count,
@@ -2972,6 +3054,34 @@ fn graph_cache_summary_json(report: &BackupCreateReport) -> JsonValue {
             "graphAlgorithmResults": result_assets,
         },
     })
+}
+
+fn backup_mesh_summary(
+    connection: &DbConnection,
+    workspace_id: &str,
+    degraded: &mut Vec<BackupDegradation>,
+) -> BackupMeshSummary {
+    match connection.mesh_storage_status(workspace_id) {
+        Ok(status) => BackupMeshSummary::from_storage_status(&status),
+        Err(error) => {
+            degraded.push(BackupDegradation::warning(
+                "mesh_backup_status_unavailable",
+                format!("mesh backup status could not be summarized: {error}"),
+                "run ee doctor --workspace . --json before relying on mesh restore diagnostics",
+            ));
+            BackupMeshSummary::default()
+        }
+    }
+}
+
+fn mesh_storage_status_has_rows(status: &MeshStorageStatus) -> bool {
+    status.peer_count > 0
+        || status.cursor_count > 0
+        || status.imported_event_count > 0
+        || status.policy_decision_event_count > 0
+        || status.policy_failure_event_count > 0
+        || status.mapped_memory_count > 0
+        || status.cached_body_count > 0
 }
 
 fn collect_derived_payloads(
@@ -4401,6 +4511,98 @@ mod tests {
         .to_string()
     }
 
+    fn seed_mesh_backup_fixture(
+        connection: &DbConnection,
+        workspace_id: &str,
+        local_memory_id: &str,
+    ) -> TestResult {
+        let peer_id = "peer_backup_fixture";
+        let origin_node_id = "node_backup_fixture";
+        let origin_workspace_id = "wsp_remote_backup_fixture";
+        let logical_memory_id = "mem_remote_backup_fixture";
+        connection
+            .upsert_mesh_peer(&crate::db::UpsertMeshPeerInput {
+                workspace_id: workspace_id.to_owned(),
+                peer_id: peer_id.to_owned(),
+                origin_node_id: origin_node_id.to_owned(),
+                display_name: Some("remote builder".to_owned()),
+                policy_summary_json: Some(json!({"token": "secret-peer-token"}).to_string()),
+                enabled: true,
+                last_seen_at: Some("2026-05-21T00:00:00Z".to_owned()),
+            })
+            .map_err(|error| error.to_string())?;
+        connection
+            .upsert_mesh_peer_cursor(&crate::db::UpsertMeshPeerCursorInput {
+                workspace_id: workspace_id.to_owned(),
+                peer_id: peer_id.to_owned(),
+                origin_node_id: origin_node_id.to_owned(),
+                origin_workspace_id: origin_workspace_id.to_owned(),
+                last_seq: 7,
+                tip_event_hash: Some("blake3:mesh-tip".to_owned()),
+                tip_audit_hash: Some("blake3:mesh-audit".to_owned()),
+                status: "current".to_owned(),
+                updated_at: Some("2026-05-21T00:01:00Z".to_owned()),
+            })
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_mesh_import_ledger_event(&crate::db::InsertMeshImportLedgerEventInput {
+                workspace_id: workspace_id.to_owned(),
+                event_id: "mesh_evt_backup_fixture".to_owned(),
+                origin_node_id: origin_node_id.to_owned(),
+                origin_workspace_id: origin_workspace_id.to_owned(),
+                producer_peer_id: Some(peer_id.to_owned()),
+                seq: 7,
+                prev_event_hash: None,
+                event_hash: "blake3:mesh-event".to_owned(),
+                event_kind: "create".to_owned(),
+                logical_memory_id: logical_memory_id.to_owned(),
+                content_hash: "blake3:mesh-content".to_owned(),
+                material_lane: "metadata".to_owned(),
+                redaction_class: "metadataOnly".to_owned(),
+                trust_lane: "peerAgent".to_owned(),
+                import_decision: "allow".to_owned(),
+                local_memory_id: Some(local_memory_id.to_owned()),
+                body_cache_key: Some("body-cache-backup-fixture".to_owned()),
+                policy_failure_surface_json: None,
+                policy_decision_json: None,
+                event_json: json!({"schema": "ee.mesh.event.fixture.v1"}).to_string(),
+                imported_at: Some("2026-05-21T00:02:00Z".to_owned()),
+            })
+            .map_err(|error| error.to_string())?;
+        connection
+            .upsert_mesh_memory_mapping(&crate::db::UpsertMeshMemoryMappingInput {
+                workspace_id: workspace_id.to_owned(),
+                origin_node_id: origin_node_id.to_owned(),
+                origin_workspace_id: origin_workspace_id.to_owned(),
+                logical_memory_id: logical_memory_id.to_owned(),
+                local_memory_id: Some(local_memory_id.to_owned()),
+                latest_event_hash: "blake3:mesh-event".to_owned(),
+                content_hash: "blake3:mesh-content".to_owned(),
+                trust_lane: "peerAgent".to_owned(),
+                redaction_class: "metadataOnly".to_owned(),
+                updated_at: Some("2026-05-21T00:03:00Z".to_owned()),
+            })
+            .map_err(|error| error.to_string())?;
+        connection
+            .upsert_mesh_body_cache_metadata(&crate::db::UpsertMeshBodyCacheMetadataInput {
+                workspace_id: workspace_id.to_owned(),
+                body_cache_key: "body-cache-backup-fixture".to_owned(),
+                origin_node_id: origin_node_id.to_owned(),
+                origin_workspace_id: origin_workspace_id.to_owned(),
+                logical_memory_id: logical_memory_id.to_owned(),
+                content_hash: "blake3:mesh-content".to_owned(),
+                body_ref_json: Some(json!({"credential": "secret-body-ref"}).to_string()),
+                preview_hash: Some("blake3:mesh-preview".to_owned()),
+                size_bytes: Some(128),
+                cache_status: "available".to_owned(),
+                local_body_hash: Some("blake3:mesh-body".to_owned()),
+                cached_at: Some("2026-05-21T00:04:00Z".to_owned()),
+                expires_at: None,
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     fn sample_import_jsonl_with_graph_fields() -> String {
         [
             r#"{"schema":"ee.export.header.v1","format_version":1,"created_at":"2026-04-30T00:00:00Z","workspace_id":"wsp_01234567890123456789012345","workspace_path":"/source","export_scope":"memories","redaction_level":"none","record_count":3,"ee_version":"0.1.0","hostname":null,"export_id":"exp-001","import_source":"native","trust_level":"validated","checksum":null,"signature":null,"source_schema_version":null}"#,
@@ -4881,6 +5083,112 @@ mod tests {
             export.links[0].id.as_str(),
             allowed_link_id.as_str(),
             "only allowed local link exported",
+        )
+    }
+
+    #[test]
+    fn backup_manifest_summarizes_mesh_without_credentials_and_restore_warns() -> TestResult {
+        let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let workspace_record =
+            load_workspace(&connection, &workspace).map_err(|error| error.message())?;
+        let local_memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+        seed_mesh_backup_fixture(&connection, &workspace_record.id, &local_memory_id)?;
+
+        let out = workspace.join("mesh-backups");
+        let report = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(out),
+            label: Some("mesh-dr".to_owned()),
+            redaction_level: RedactionLevel::None,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let manifest_text =
+            fs::read_to_string(&report.manifest_path).map_err(|error| error.to_string())?;
+        ensure(
+            !manifest_text.contains("secret-peer-token")
+                && !manifest_text.contains("secret-body-ref"),
+            "mesh backup manifest must not include peer credentials or cached body refs",
+        )?;
+        let manifest =
+            serde_json::from_str::<JsonValue>(&manifest_text).map_err(|error| error.to_string())?;
+        ensure_equal(
+            manifest
+                .pointer("/mesh/included")
+                .and_then(JsonValue::as_bool),
+            Some(true),
+            "manifest mesh included flag",
+        )?;
+        ensure_equal(
+            manifest
+                .pointer("/mesh/tables/mesh_peers")
+                .and_then(JsonValue::as_u64),
+            Some(1),
+            "manifest mesh peer count",
+        )?;
+        ensure_equal(
+            manifest
+                .pointer("/mesh/tables/mesh_peer_cursors")
+                .and_then(JsonValue::as_u64),
+            Some(1),
+            "manifest mesh cursor count",
+        )?;
+        ensure_equal(
+            manifest
+                .pointer("/mesh/tables/mesh_import_ledger")
+                .and_then(JsonValue::as_u64),
+            Some(1),
+            "manifest mesh event count",
+        )?;
+        ensure_equal(
+            manifest
+                .pointer("/mesh/tables/mesh_memory_mappings")
+                .and_then(JsonValue::as_u64),
+            Some(1),
+            "manifest mesh mapping count",
+        )?;
+        ensure_equal(
+            manifest
+                .pointer("/mesh/restorePolicy/peerCredentials")
+                .and_then(JsonValue::as_str),
+            Some("redacted"),
+            "manifest mesh credential policy",
+        )?;
+        ensure_equal(
+            manifest
+                .pointer("/mesh/tables/mesh_body_cache_metadata")
+                .and_then(JsonValue::as_u64),
+            Some(1),
+            "manifest mesh body cache count",
+        )?;
+
+        let side_path = tempdir.path().join("mesh-restore-side");
+        let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace,
+            backup_path: PathBuf::from(&report.backup_path),
+            side_path,
+            restore_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        ensure(
+            restored
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "mesh_restore_requires_repair"),
+            "mesh restore must warn that peers need explicit repair",
+        )?;
+        ensure(
+            restored
+                .next_actions
+                .iter()
+                .any(|action| action.contains("ee mesh doctor")),
+            "mesh restore next actions include mesh doctor",
         )
     }
 
