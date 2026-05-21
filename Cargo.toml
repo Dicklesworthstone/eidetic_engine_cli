@@ -228,6 +228,10 @@ name = "graph_hits"
 harness = false
 
 [[bench]]
+name = "graph_refresh_cooperative"
+harness = false
+
+[[bench]]
 name = "agent_profile"
 harness = false
 

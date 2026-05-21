@@ -177,6 +177,31 @@
         }
       }
     },
+    "ee_graph_centrality_refresh_cooperative": {
+      "p50_ms": 120.0,
+      "p99_ms": 800.0,
+      "tolerance_pct_p50": 20,
+      "tolerance_pct_p99": 50,
+      "unstable": true,
+      "hardware_class": "local_256gb",
+      "source_bead": "bd-dre9v",
+      "required_speedup_on_manycore": 3.0,
+      "scales": {
+        "1000_links": {
+          "p50_ms": 120.0,
+          "p99_ms": 800.0
+        },
+        "5000_links": {
+          "p50_ms": 500.0,
+          "p99_ms": 2500.0
+        },
+        "25000_links_64_core": {
+          "p50_ms": 1800.0,
+          "p99_ms": 9000.0,
+          "required_speedup": 3.0
+        }
+      }
+    },
     "ee_index_rebuild": {
       "p50_ms": 18000.0,
       "p99_ms": 41000.0,

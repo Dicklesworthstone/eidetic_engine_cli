@@ -54,6 +54,7 @@ benches = [
   "graph_gomory_hu",
   "graph_hits",
   "curate_candidates",
+  "graph_refresh_cooperative",
 ]
 sample_size = 20
 measurement_time_secs = 2.0
@@ -88,6 +89,7 @@ benches = [
   "graph_gomory_hu",
   "graph_hits",
   "curate_candidates",
+  "graph_refresh_cooperative",
 ]
 sample_size = 100
 measurement_time_secs = 5.0
@@ -220,6 +222,11 @@ description = "Build Gomory-Hu proximity tree and run cached-style min-cut query
 p50_ms_max = 100.0
 p99_ms_max = 400.0
 description = "Compute HITS hub and authority scores over 10/100/1000 memory-link graphs"
+
+[operations.ee_graph_centrality_refresh_cooperative]
+p50_ms_max = 500.0
+p99_ms_max = 2500.0
+description = "Compare sequential vs cooperative graph centrality refresh over 1k/5k links, with 25k links enabled for 64-core stress runs"
 
 [operations.ee_curate_candidates]
 p50_ms_max = 50.0
