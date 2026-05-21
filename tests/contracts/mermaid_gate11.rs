@@ -206,6 +206,7 @@ fn doctor_fixture() -> DoctorReport {
             degraded: Vec::new(),
         },
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+        host_calibration: None,
         checks: vec![
             CheckResult {
                 name: "database",

@@ -1348,6 +1348,7 @@ fn status_missing_db_report() -> StatusReport {
         pack_budget_buckets: PackBudgetBucketReport::default(),
         qos_posture: fixture_qos_posture(),
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+        host_calibration: None,
         memory_health: unavailable_memory_health(),
         curation_health: CurationHealthReport::unavailable(),
         feedback_health: unavailable_feedback_health(),
@@ -1415,6 +1416,7 @@ fn status_pending_migration_report() -> StatusReport {
         pack_budget_buckets: PackBudgetBucketReport::default(),
         qos_posture: fixture_qos_posture(),
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+        host_calibration: None,
         memory_health: unavailable_memory_health(),
         curation_health: CurationHealthReport::unavailable(),
         feedback_health: unavailable_feedback_health(),
@@ -1482,6 +1484,7 @@ fn status_stale_index_lexical_only_report() -> StatusReport {
         pack_budget_buckets: PackBudgetBucketReport::default(),
         qos_posture: fixture_qos_posture(),
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+        host_calibration: None,
         memory_health: healthy_memory_health(),
         curation_health: CurationHealthReport::not_inspected(),
         feedback_health: healthy_feedback_health(),
@@ -1538,6 +1541,7 @@ fn status_search_unimplemented_report() -> StatusReport {
         pack_budget_buckets: PackBudgetBucketReport::default(),
         qos_posture: fixture_qos_posture(),
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+        host_calibration: None,
         memory_health: healthy_memory_health(),
         curation_health: CurationHealthReport::not_inspected(),
         feedback_health: healthy_feedback_health(),
@@ -1640,6 +1644,7 @@ fn doctor_missing_db_report() -> DoctorReport {
         flight_recorder: fixture_flight_recorder(),
         qos_posture: fixture_qos_posture(),
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+        host_calibration: None,
         checks: vec![
             CheckResult::ok("runtime", "Asupersync runtime initialized successfully."),
             CheckResult::warning(
@@ -1675,6 +1680,7 @@ fn doctor_pending_migration_report() -> DoctorReport {
         flight_recorder: fixture_flight_recorder(),
         qos_posture: fixture_qos_posture(),
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+        host_calibration: None,
         checks: vec![
             CheckResult::ok("runtime", "Asupersync runtime initialized successfully."),
             CheckResult::ok("workspace", "Workspace inspected at /workspace."),

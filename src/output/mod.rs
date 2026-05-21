@@ -3318,6 +3318,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
         render_pack_budget_buckets_json(d, &report.pack_budget_buckets);
         render_qos_status_json(d, &report.qos_posture, false);
         render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
+        render_host_calibration_posture_json(d, report.host_calibration.as_ref());
         render_memory_health_json(d, &report.memory_health);
         render_curation_health_json(d, &report.curation_health);
         render_feedback_health_json(d, &report.feedback_health);
@@ -3525,6 +3526,31 @@ fn render_rch_worker_pressure_json(parent: &mut JsonBuilder, report: &RchWorkerP
         );
         pressure.field_array_of_objects("workers", &report.workers, render_rch_worker_json);
     });
+}
+
+fn render_host_calibration_posture_json(
+    parent: &mut JsonBuilder,
+    report: Option<&crate::core::budget_delta_recommender::HostCalibrationPostureReport>,
+) {
+    if let Some(report) = report {
+        let rendered = serde_json::to_string(report).unwrap_or_else(|_| {
+            r#"{"schema":"ee.host_calibration.posture.v1","status":"serialization_failed"}"#
+                .to_owned()
+        });
+        parent.field_raw("hostCalibration", &rendered);
+    } else {
+        parent.field_object("hostCalibration", |calibration| {
+            calibration.field_str(
+                "schema",
+                crate::core::budget_delta_recommender::HOST_CALIBRATION_POSTURE_SCHEMA_V1,
+            );
+            calibration.field_str("status", "not_collected");
+            calibration.field_str(
+                "repair",
+                "Run `ee status --workspace . --json` from an initialized workspace.",
+            );
+        });
+    }
 }
 
 fn render_rch_worker_json(parent: &mut JsonBuilder, worker: &RchWorkerPressureObservation) {
@@ -4532,6 +4558,7 @@ pub fn render_doctor_json(report: &DoctorReport) -> String {
         render_flight_recorder_status_json(d, &report.flight_recorder);
         render_qos_status_json(d, &report.qos_posture, false);
         render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
+        render_host_calibration_posture_json(d, report.host_calibration.as_ref());
         d.field_raw("meshAutoEnrollment", &mesh_auto_enrollment);
         d.field_array_of_objects("checks", &report.checks, |obj, check| {
             obj.field_str("name", check.name);
@@ -8447,6 +8474,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: host_calibration_recommendation_schema_definition,
         },
         SchemaEntry {
+            id: "ee.host_calibration.posture.v1",
+            version: "1",
+            description: "Redaction-safe host calibration posture embedded in status, doctor, and support bundles.",
+            category: "ops",
+            definition: host_calibration_posture_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.insights.v1",
             version: "1",
             description: "Insights bundle response data for graph-accretion findings.",
@@ -9423,6 +9457,10 @@ fn host_calibration_host_class_schema_definition() -> String {
 
 fn host_calibration_recommendation_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.host_calibration.recommendation.v1.json").to_string()
+}
+
+fn host_calibration_posture_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.host_calibration.posture.v1.json").to_string()
 }
 
 fn insights_schema_definition() -> String {
@@ -11775,6 +11813,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
             render_flight_recorder_status_json(d, &report.flight_recorder);
             render_qos_status_json(d, &report.qos_posture, profile.include_verbose_details());
             render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
+            render_host_calibration_posture_json(d, report.host_calibration.as_ref());
             d.field_object("capabilities", |c| {
                 c.field_str("runtime", report.capabilities.runtime.as_str());
                 c.field_str("storage", report.capabilities.storage.as_str());
@@ -11937,6 +11976,7 @@ pub fn render_doctor_json_filtered(report: &DoctorReport, profile: FieldProfile)
             render_flight_recorder_status_json(d, &report.flight_recorder);
             render_qos_status_json(d, &report.qos_posture, profile.include_verbose_details());
             render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
+            render_host_calibration_posture_json(d, report.host_calibration.as_ref());
             if let Some(mesh_auto_enrollment) = mesh_auto_enrollment.as_deref() {
                 d.field_raw("meshAutoEnrollment", mesh_auto_enrollment);
             }
@@ -18911,6 +18951,30 @@ mod tests {
     }
 
     #[test]
+    fn render_doctor_json_exposes_host_calibration() -> TestResult {
+        let report = DoctorReport::gather();
+        let json = render_doctor_json_filtered(&report, FieldProfile::Standard);
+        let value = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("doctor JSON should parse: {error}"))?;
+        let calibration = value
+            .pointer("/data/hostCalibration")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| "doctor JSON has data.hostCalibration object".to_string())?;
+
+        ensure_equal(
+            &calibration
+                .get("schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.host_calibration.posture.v1"),
+            "hostCalibration schema",
+        )?;
+        ensure(
+            calibration.contains_key("targetDirPosture"),
+            "hostCalibration includes target-dir posture",
+        )
+    }
+
+    #[test]
     fn render_doctor_json_exposes_mesh_auto_enrollment_checks() -> TestResult {
         let report = DoctorReport::gather();
         let json = render_doctor_json_filtered(&report, FieldProfile::Standard);
@@ -19458,6 +19522,10 @@ mod tests {
             data.contains_key("rchWorkerPressure"),
             "has RCH worker pressure posture",
         )?;
+        ensure(
+            data.contains_key("hostCalibration"),
+            "has host calibration posture",
+        )?;
         ensure(!data.contains_key("runtime"), "no runtime object")?;
         ensure(!data.contains_key("degraded"), "no degraded array")
     }
@@ -19475,6 +19543,7 @@ mod tests {
         ensure_contains(&json, "\"packBudgetBuckets\":", "has pack budget buckets")?;
         ensure_contains(&json, "\"singleFlight\":", "has singleFlight")?;
         ensure_contains(&json, "\"rchWorkerPressure\":", "has RCH worker pressure")?;
+        ensure_contains(&json, "\"hostCalibration\":", "has host calibration")?;
         ensure_contains(
             &json,
             "\"schema\":\"ee.singleflight.posture.v1\"",

@@ -47,6 +47,9 @@ use crate::search::lexical_ram_tier::{
 };
 
 use super::agent_detect::AgentInventoryReport;
+use super::budget_delta_recommender::{
+    HostCalibrationPostureReport, gather_host_calibration_posture,
+};
 use super::curate::stable_workspace_id;
 use super::derived_asset_freshness::{
     DerivedAssetFreshnessInput, DerivedAssetFreshnessReport, FreshnessDependency,
@@ -1706,6 +1709,7 @@ pub struct StatusReport {
     pub pack_budget_buckets: PackBudgetBucketReport,
     pub qos_posture: super::qos::QosLaneSummary,
     pub rch_worker_pressure: RchWorkerPressureReport,
+    pub host_calibration: Option<HostCalibrationPostureReport>,
     pub memory_health: MemoryHealthReport,
     pub curation_health: CurationHealthReport,
     pub feedback_health: FeedbackHealthReport,
@@ -1785,6 +1789,7 @@ impl StatusReport {
         let pack_budget_buckets = gather_pack_budget_buckets(options.workspace_path.as_deref());
         let qos_posture = gather_qos_posture(options.workspace_path.as_deref());
         let rch_worker_pressure = gather_rch_worker_pressure(options.workspace_path.as_deref());
+        let host_calibration = gather_host_calibration_status(options.workspace_path.as_deref());
         let (memory_health, memory_health_degradations) =
             gather_memory_health(options.workspace_path.as_deref());
         let workspace = gather_workspace_status(options.workspace_path.as_deref());
@@ -1871,6 +1876,7 @@ impl StatusReport {
             pack_budget_buckets,
             qos_posture,
             rch_worker_pressure,
+            host_calibration,
             memory_health,
             curation_health,
             feedback_health,
@@ -2196,6 +2202,17 @@ fn gather_qos_posture(workspace_path: Option<&Path>) -> super::qos::QosLaneSumma
         .unwrap_or(".");
     let now_epoch_ms = Utc::now().timestamp_millis().try_into().unwrap_or_default();
     super::qos::summarize_qos_lane_registry(workspace, workspace_identity, now_epoch_ms)
+}
+
+fn gather_host_calibration_status(
+    workspace_path: Option<&Path>,
+) -> Option<HostCalibrationPostureReport> {
+    let workspace = workspace_path?;
+    let runtime = super::profile::runtime_profile_for_workspace(workspace);
+    Some(gather_host_calibration_posture(
+        workspace,
+        runtime.active_profile,
+    ))
 }
 
 #[must_use]

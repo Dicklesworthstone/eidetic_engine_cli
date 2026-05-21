@@ -12,7 +12,7 @@
     "fields": {"type": "string"},
     "data": {
       "type": "object",
-      "required": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "meshAutoEnrollment", "checks"],
+      "required": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "hostCalibration", "meshAutoEnrollment", "checks"],
       "additionalProperties": false,
       "properties": {
         "command": {"type": "string", "const": "doctor"},
@@ -23,6 +23,7 @@
         "flightRecorder": {"type": "object", "additionalProperties": true},
         "qos": {"$ref": "#/$defs/qosStatus"},
         "rchWorkerPressure": {"$ref": "#/$defs/rchWorkerPressure"},
+        "hostCalibration": {"$ref": "ee.host_calibration.posture.v1.json"},
         "meshAutoEnrollment": {"$ref": "#/$defs/meshAutoEnrollment"},
         "checks": {
           "type": "array",
@@ -44,8 +45,8 @@
   },
   "field_presets": {
     "minimal": ["command", "version", "posture", "healthy"],
-    "summary": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "meshAutoEnrollment"],
-    "standard": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "meshAutoEnrollment", "checks"],
+    "summary": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "hostCalibration", "meshAutoEnrollment"],
+    "standard": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "hostCalibration", "meshAutoEnrollment", "checks"],
     "full": ["*"]
   },
   "$defs": {

@@ -905,6 +905,8 @@ fn profile_evidence_json(workspace: &Path) -> String {
     let runtime = super::profile::runtime_profile_for_workspace(workspace);
     let active_profile = runtime.active_profile;
     let runtime_source = runtime.source;
+    let host_calibration =
+        super::budget_delta_recommender::build_host_calibration_posture(&probe, active_profile);
     let budgets = super::profile::ProfileBudgets::for_profile(active_profile);
     let verification_recipe = super::profile::VerificationRecipe::for_profile(active_profile);
     let probe_degraded = probe.degraded.clone();
@@ -926,6 +928,7 @@ fn profile_evidence_json(workspace: &Path) -> String {
             "confidence": recommendation.confidence,
             "reasons": recommendation.reasons,
         },
+        "hostCalibration": host_calibration,
         "probe": probe,
         "budgets": budgets,
         "verificationRecipe": verification_recipe,
@@ -945,6 +948,12 @@ fn profile_evidence_json(workspace: &Path) -> String {
                 "sourceKind": "host_probe",
                 "source": super::profile::HOST_PROFILE_PROBE_SCHEMA_V1,
                 "redaction": "label_only_paths_presence_only_env",
+            },
+            {
+                "field": "hostCalibration",
+                "sourceKind": "host_calibration",
+                "source": super::budget_delta_recommender::HOST_CALIBRATION_POSTURE_SCHEMA_V1,
+                "redaction": "label_only_paths_presence_only_env_no_raw_values",
             },
             {
                 "field": "probe",

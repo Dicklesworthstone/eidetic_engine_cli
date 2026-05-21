@@ -30,6 +30,9 @@ use crate::mesh::repair_action_graph::{
 use crate::models::error_codes::{self, ErrorCode};
 use crate::models::{SingleFlightPostureReport, TrustClass};
 
+use super::budget_delta_recommender::{
+    HostCalibrationPostureReport, gather_host_calibration_posture,
+};
 use super::build_cli_runtime;
 use super::curate::stable_workspace_id;
 use super::index::{IndexHealth, IndexStatusOptions, get_index_status};
@@ -231,6 +234,8 @@ pub struct DoctorReport {
     pub qos_posture: QosLaneSummary,
     /// Redaction-safe remote compilation worker pressure posture.
     pub rch_worker_pressure: RchWorkerPressureReport,
+    /// Redaction-safe host calibration posture and budget-delta guidance.
+    pub host_calibration: Option<HostCalibrationPostureReport>,
     /// Redaction-safe command flight-recorder posture.
     pub flight_recorder: FlightRecorderStatusReport,
     pub checks: Vec<CheckResult>,
@@ -254,6 +259,7 @@ impl DoctorReport {
         let singleflight_posture = singleflight_posture_report();
         let qos_posture = gather_qos_posture(workspace_path);
         let rch_worker_pressure = gather_rch_worker_pressure(workspace_path);
+        let host_calibration = gather_host_calibration_status(workspace_path);
         let flight_recorder = gather_flight_recorder_status(workspace_path);
         let checks = vec![
             check_runtime(),
@@ -281,6 +287,7 @@ impl DoctorReport {
             singleflight_posture,
             qos_posture,
             rch_worker_pressure,
+            host_calibration,
             flight_recorder,
             checks,
         }
@@ -329,6 +336,17 @@ impl DoctorReport {
             cass_import_guidance: CassImportGuidance::from_agent_inventory(agent_inventory),
         }
     }
+}
+
+fn gather_host_calibration_status(
+    workspace_path: Option<&Path>,
+) -> Option<HostCalibrationPostureReport> {
+    let workspace = workspace_path?;
+    let runtime = super::profile::runtime_profile_for_workspace(workspace);
+    Some(gather_host_calibration_posture(
+        workspace,
+        runtime.active_profile,
+    ))
 }
 
 /// Doctor-local status vocabulary for SRR6.46 auto-enrollment readiness checks.
@@ -1109,7 +1127,11 @@ fn close_action_dependencies(required: &mut BTreeSet<String>) {
                 "ee_daemon_start" => vec!["tailscale_up", "tailscale_disable_shields_up"],
                 "ee_mesh_discovery_refresh" => vec!["tailscale_up", "ee_daemon_start"],
                 "ee_mesh_auto_enroll" => {
-                    vec!["ee_mesh_discovery_refresh", "ee_daemon_start", "ee_mesh_disable"]
+                    vec![
+                        "ee_mesh_discovery_refresh",
+                        "ee_daemon_start",
+                        "ee_mesh_disable",
+                    ]
                 }
                 "ee_mcp_parity_check" => vec!["ee_mesh_auto_enroll"],
                 _ => Vec::new(),
@@ -3499,6 +3521,7 @@ mod tests {
             singleflight_posture: singleflight_posture_report(),
             qos_posture: super::gather_qos_posture(None),
             rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+            host_calibration: None,
             flight_recorder: FlightRecorderStatusReport::disabled(PathBuf::from(
                 "obs/flight_recorder",
             )),
@@ -3523,6 +3546,7 @@ mod tests {
             singleflight_posture: singleflight_posture_report(),
             qos_posture: super::gather_qos_posture(None),
             rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+            host_calibration: None,
             flight_recorder: FlightRecorderStatusReport::disabled(PathBuf::from(
                 "obs/flight_recorder",
             )),
@@ -3562,6 +3586,7 @@ mod tests {
             singleflight_posture: singleflight_posture_report(),
             qos_posture: super::gather_qos_posture(None),
             rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+            host_calibration: None,
             flight_recorder: FlightRecorderStatusReport::disabled(PathBuf::from(
                 "obs/flight_recorder",
             )),
@@ -4142,6 +4167,7 @@ mod tests {
             singleflight_posture: singleflight_posture_report(),
             qos_posture: super::gather_qos_posture(None),
             rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+            host_calibration: None,
             flight_recorder: FlightRecorderStatusReport::disabled(PathBuf::from(
                 "obs/flight_recorder",
             )),

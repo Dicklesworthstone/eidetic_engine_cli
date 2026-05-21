@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.host_calibration.posture.v1.json",
+  "title": "ee.host_calibration.posture.v1",
+  "description": "Redaction-safe host calibration posture embedded in status, doctor, and support-bundle profile evidence.",
+  "type": "object",
+  "required": [
+    "schema",
+    "redactionStatus",
+    "hostProfileSchema",
+    "hostClass",
+    "calibrationFreshness",
+    "confidence",
+    "profileCeiling",
+    "configuredProfile",
+    "recommendedProfile",
+    "effectiveProfile",
+    "targetDirPosture",
+    "topologyWarnings",
+    "reasonCodes",
+    "repairActions",
+    "budgetDeltas",
+    "degraded"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.host_calibration.posture.v1"},
+    "redactionStatus": {"type": "string"},
+    "hostProfileSchema": {"type": "string", "const": "ee.host_profile.v1"},
+    "hostClass": {
+      "type": "string",
+      "enum": ["constrained", "portable", "laptop", "workstation", "local_256gb", "rch_only_topology"]
+    },
+    "calibrationFreshness": {
+      "type": "string",
+      "enum": ["fresh", "stale", "partial", "synthetic_only", "contradictory", "missing", "unavailable"]
+    },
+    "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+    "profileCeiling": {"$ref": "#/$defs/operatingProfile"},
+    "configuredProfile": {"$ref": "#/$defs/operatingProfile"},
+    "recommendedProfile": {"$ref": "#/$defs/operatingProfile"},
+    "effectiveProfile": {"$ref": "#/$defs/operatingProfile"},
+    "targetDirPosture": {
+      "type": "string",
+      "enum": ["shared", "isolated", "external", "unknown"]
+    },
+    "topologyWarnings": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "reasonCodes": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "repairActions": {"type": "array", "items": {"$ref": "#/$defs/repairAction"}},
+    "budgetDeltas": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": true}}
+  },
+  "$defs": {
+    "operatingProfile": {
+      "type": "string",
+      "enum": ["constrained", "portable", "workstation", "swarm"]
+    },
+    "repairAction": {
+      "type": "object",
+      "required": ["priority", "kind", "command", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "priority": {"type": "integer", "minimum": 0},
+        "kind": {"type": "string"},
+        "command": {"type": ["string", "null"]},
+        "message": {"type": "string"}
+      }
+    }
+  }
+}

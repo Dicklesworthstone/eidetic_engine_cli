@@ -25,6 +25,7 @@
         "packBudgetBuckets",
         "qos",
         "rchWorkerPressure",
+        "hostCalibration",
         "memoryHealth",
         "curationHealth",
         "feedbackHealth",
@@ -49,6 +50,7 @@
         "packBudgetBuckets": {"$ref": "#/$defs/packBudgetBuckets"},
         "qos": {"$ref": "#/$defs/qosStatus"},
         "rchWorkerPressure": {"$ref": "#/$defs/rchWorkerPressure"},
+        "hostCalibration": {"$ref": "ee.host_calibration.posture.v1.json"},
         "memoryHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "curationHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "feedbackHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
@@ -63,8 +65,8 @@
   },
   "field_presets": {
     "minimal": ["command", "version", "workspace"],
-    "summary": ["command", "version", "workspace", "posture", "singleFlight", "qos", "rchWorkerPressure", "capabilities"],
-    "standard": ["command", "version", "workspace", "posture", "capabilities", "runtime", "read_pool", "wal", "shardFanout", "packBudgetBuckets", "qos", "rchWorkerPressure", "memoryHealth", "curationHealth", "feedbackHealth", "singleFlight", "graphCompute", "graphSnapshotArtifact", "derivedAssets", "agentInventory", "degraded"],
+    "summary": ["command", "version", "workspace", "posture", "singleFlight", "qos", "rchWorkerPressure", "hostCalibration", "capabilities"],
+    "standard": ["command", "version", "workspace", "posture", "capabilities", "runtime", "read_pool", "wal", "shardFanout", "packBudgetBuckets", "qos", "rchWorkerPressure", "hostCalibration", "memoryHealth", "curationHealth", "feedbackHealth", "singleFlight", "graphCompute", "graphSnapshotArtifact", "derivedAssets", "agentInventory", "degraded"],
     "full": ["*"]
   },
   "$defs": {

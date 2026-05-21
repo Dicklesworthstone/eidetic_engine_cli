@@ -16,6 +16,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::core::agent_detect::{AgentInventoryStatus, AgentStatusOptions, gather_agent_status};
+use crate::core::budget_delta_recommender::build_host_calibration_posture;
 use crate::core::profile::{HostResourceProbeReport, recommend_operating_profile};
 use crate::core::singleflight::singleflight_posture_report;
 use crate::core::workspace::{
@@ -559,6 +560,12 @@ pub struct SwarmBriefResourcePressureHint {
 pub struct SwarmBriefHostProfileSummary {
     pub recommended_profile: String,
     pub confidence: String,
+    pub host_class: String,
+    pub calibration_freshness: String,
+    pub target_dir_posture: String,
+    pub topology_warnings: Vec<String>,
+    pub repair_action_kinds: Vec<String>,
+    pub budget_delta_count: usize,
     pub logical_cores: Option<u32>,
     pub memory_total_bytes: Option<u64>,
     pub memory_available_bytes: Option<u64>,
@@ -1596,9 +1603,24 @@ impl SwarmBriefSourceAdapter for HostProfileSourceAdapter {
         let provenance = SwarmBriefSourceProvenance::local_probe();
         let probe = HostResourceProbeReport::gather_for_workspace(&options.workspace);
         let recommendation = recommend_operating_profile(&probe);
+        let host_calibration = build_host_calibration_posture(&probe, recommendation.effective);
         let summary = SwarmBriefHostProfileSummary {
             recommended_profile: recommendation.recommended.as_str().to_string(),
             confidence: recommendation.confidence.to_string(),
+            host_class: host_calibration.host_class.as_str().to_string(),
+            calibration_freshness: host_calibration.calibration_freshness.as_str().to_string(),
+            target_dir_posture: host_calibration.target_dir_posture.to_string(),
+            topology_warnings: host_calibration
+                .topology_warnings
+                .iter()
+                .map(|warning| (*warning).to_string())
+                .collect(),
+            repair_action_kinds: host_calibration
+                .repair_actions
+                .iter()
+                .map(|action| action.kind.to_string())
+                .collect(),
+            budget_delta_count: host_calibration.budget_deltas.len(),
             logical_cores: probe.cpu.logical_cores,
             memory_total_bytes: probe.memory.total_bytes,
             memory_available_bytes: probe.memory.available_bytes,
@@ -6737,6 +6759,12 @@ mod tests {
         report.host_profile = Some(SwarmBriefHostProfileSummary {
             recommended_profile: "constrained".to_string(),
             confidence: "high".to_string(),
+            host_class: "constrained".to_string(),
+            calibration_freshness: "fresh".to_string(),
+            target_dir_posture: "shared".to_string(),
+            topology_warnings: Vec::new(),
+            repair_action_kinds: Vec::new(),
+            budget_delta_count: 5,
             logical_cores: Some(1),
             memory_total_bytes: Some(4),
             memory_available_bytes: Some(2),

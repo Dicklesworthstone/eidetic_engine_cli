@@ -19,11 +19,14 @@
 //! this recommender never claims to have already applied a profile.
 
 use std::cmp::Ordering;
+use std::path::Path;
 
 use serde::{Serialize, Serializer};
 
 use super::profile::{
-    HostCalibrationFreshness, HostClass, HostClassDegradation, HostClassReport, OperatingProfile,
+    HOST_PROFILE_PROBE_SCHEMA_V1, HostCalibrationFreshness, HostClass, HostClassDegradation,
+    HostClassRepairAction, HostClassReport, HostClassificationOptions, HostResourceProbeReport,
+    OperatingProfile, classify_host_profile,
 };
 
 /// Public schema identifier for the recommender's response shape. Surfaces
@@ -31,6 +34,28 @@ use super::profile::{
 /// MUST hold this constant rather than redeclaring the string literal so the
 /// schema lifecycle can register it in one place.
 pub const BUDGET_DELTA_RECOMMENDATION_SCHEMA_V1: &str = "ee.host_calibration.budget_delta.v1";
+pub const HOST_CALIBRATION_POSTURE_SCHEMA_V1: &str = "ee.host_calibration.posture.v1";
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostCalibrationPostureReport {
+    pub schema: &'static str,
+    pub redaction_status: &'static str,
+    pub host_profile_schema: &'static str,
+    pub host_class: HostClass,
+    pub calibration_freshness: HostCalibrationFreshness,
+    pub confidence: &'static str,
+    pub profile_ceiling: OperatingProfile,
+    pub configured_profile: OperatingProfile,
+    pub recommended_profile: OperatingProfile,
+    pub effective_profile: OperatingProfile,
+    pub target_dir_posture: &'static str,
+    pub topology_warnings: Vec<&'static str>,
+    pub reason_codes: Vec<&'static str>,
+    pub repair_actions: Vec<HostClassRepairAction>,
+    pub budget_deltas: Vec<BudgetDelta>,
+    pub degraded: Vec<HostClassDegradation>,
+}
 
 /// Stable reason-code vocabulary. Listed here so contract tests (H3.5) can pin
 /// the set without relying on free-form strings produced by the recommender.
@@ -184,6 +209,77 @@ pub fn recommend_budget_deltas(
         budget_deltas,
         degraded: host_class_report.degraded.clone(),
     }
+}
+
+#[must_use]
+pub fn gather_host_calibration_posture(
+    workspace: &Path,
+    configured_profile: OperatingProfile,
+) -> HostCalibrationPostureReport {
+    let probe = HostResourceProbeReport::gather_for_workspace(workspace);
+    build_host_calibration_posture(&probe, configured_profile)
+}
+
+#[must_use]
+pub fn build_host_calibration_posture(
+    probe: &HostResourceProbeReport,
+    configured_profile: OperatingProfile,
+) -> HostCalibrationPostureReport {
+    let host_class_report = classify_host_profile(probe, &HostClassificationOptions::default());
+    let recommendation = recommend_budget_deltas(&host_class_report, configured_profile);
+    let mut reason_codes = host_class_report
+        .reason_codes
+        .iter()
+        .copied()
+        .chain(recommendation.global_reason_codes.iter().copied())
+        .collect::<Vec<_>>();
+    reason_codes.sort_unstable();
+    reason_codes.dedup();
+
+    HostCalibrationPostureReport {
+        schema: HOST_CALIBRATION_POSTURE_SCHEMA_V1,
+        redaction_status: "label_only_paths_presence_only_env_no_raw_values",
+        host_profile_schema: HOST_PROFILE_PROBE_SCHEMA_V1,
+        host_class: host_class_report.host_class,
+        calibration_freshness: host_class_report.calibration_freshness,
+        confidence: host_class_report.confidence,
+        profile_ceiling: host_class_report.profile_ceiling,
+        configured_profile,
+        recommended_profile: recommendation.recommended_profile,
+        effective_profile: recommendation.effective_profile,
+        target_dir_posture: target_dir_posture(probe),
+        topology_warnings: topology_warnings(&host_class_report, probe),
+        reason_codes,
+        repair_actions: host_class_report.repair_actions,
+        budget_deltas: recommendation.budget_deltas,
+        degraded: recommendation.degraded,
+    }
+}
+
+fn target_dir_posture(probe: &HostResourceProbeReport) -> &'static str {
+    let cargo_target = probe.paths.iter().find(|path| path.label == "cargo_target");
+    match cargo_target.and_then(|path| path.same_filesystem_as_workspace) {
+        Some(false) if probe.environment.cargo_target_dir_configured => "external",
+        Some(false) => "isolated",
+        Some(true) => "shared",
+        None => "unknown",
+    }
+}
+
+fn topology_warnings(
+    report: &HostClassReport,
+    probe: &HostResourceProbeReport,
+) -> Vec<&'static str> {
+    let mut warnings = Vec::new();
+    if !probe.topology.rch.available {
+        warnings.push("rch_topology_missing");
+    }
+    if report.host_class == HostClass::RchOnlyTopology {
+        warnings.push("rch_only_topology_blocks_local_classification");
+    }
+    warnings.sort_unstable();
+    warnings.dedup();
+    warnings
 }
 
 const BUDGET_SURFACES: &[BudgetSurface] = &[
