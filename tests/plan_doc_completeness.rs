@@ -1,8 +1,10 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 type TestResult = Result<(), String>;
 
 const REPORT: &str = include_str!("../docs/plan-sweep-report.md");
+const BEADS: &str = include_str!("../.beads/issues.jsonl");
 
 #[derive(Debug)]
 struct PlanRow<'a> {
@@ -65,6 +67,38 @@ fn matrix_rows() -> Result<Vec<PlanRow<'static>>, String> {
     Ok(rows)
 }
 
+fn bead_statuses() -> Result<BTreeMap<String, String>, String> {
+    let mut statuses = BTreeMap::new();
+    for (index, line) in BEADS.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(line)
+            .map_err(|error| format!(".beads/issues.jsonl line {}: {error}", index + 1))?;
+        let id = value
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!(".beads/issues.jsonl line {} missing id", index + 1))?;
+        let status = value
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!(".beads/issues.jsonl line {} missing status", index + 1))?;
+        statuses.insert(id.to_owned(), status.to_owned());
+    }
+    Ok(statuses)
+}
+
+fn evidence_paths(evidence_path: &str) -> impl Iterator<Item = &str> {
+    evidence_path
+        .split(';')
+        .map(str::trim)
+        .filter(|path| !path.is_empty() && *path != "-")
+}
+
+fn evidence_path_exists(path: &str) -> bool {
+    Path::new(path).exists()
+}
+
 #[test]
 fn plan_sweep_matrix_covers_every_major_plan_section() -> TestResult {
     let rows = matrix_rows()?;
@@ -100,6 +134,7 @@ fn plan_sweep_matrix_covers_every_major_plan_section() -> TestResult {
 
 #[test]
 fn plan_sweep_matrix_rows_have_evidence_or_tracking_beads() -> TestResult {
+    let bead_statuses = bead_statuses()?;
     let allowed = BTreeSet::from([
         "Implemented-verified",
         "Implemented-unverified",
@@ -121,17 +156,47 @@ fn plan_sweep_matrix_rows_have_evidence_or_tracking_beads() -> TestResult {
         )?;
 
         match row.classification {
-            "Implemented-verified" => ensure(
-                row.evidence_path != "-" && !row.evidence_path.is_empty(),
-                format!("{} is verified but has no evidence path", row.section_id),
-            )?,
-            "Implemented-unverified" | "Stubbed" | "Missing" => ensure(
-                row.follow_up_bead_id.starts_with("bd-"),
-                format!(
-                    "{} is {} but lacks a follow-up bead id",
-                    row.section_id, row.classification
-                ),
-            )?,
+            "Implemented-verified" => {
+                let evidence = evidence_paths(row.evidence_path).collect::<Vec<_>>();
+                ensure(
+                    !evidence.is_empty(),
+                    format!("{} is verified but has no evidence path", row.section_id),
+                )?;
+                for path in evidence {
+                    ensure(
+                        evidence_path_exists(path),
+                        format!(
+                            "{} verified evidence path does not exist: {path}",
+                            row.section_id
+                        ),
+                    )?;
+                }
+            }
+            "Implemented-unverified" | "Stubbed" | "Missing" => {
+                ensure(
+                    row.follow_up_bead_id.starts_with("bd-"),
+                    format!(
+                        "{} is {} but lacks a follow-up bead id",
+                        row.section_id, row.classification
+                    ),
+                )?;
+                let status = bead_statuses.get(row.follow_up_bead_id).ok_or_else(|| {
+                    format!(
+                        "{} references unknown follow-up bead {}",
+                        row.section_id, row.follow_up_bead_id
+                    )
+                })?;
+                ensure(
+                    matches!(
+                        status.as_str(),
+                        "open" | "claimed" | "in_progress" | "blocked" | "closed"
+                    ),
+                    format!(
+                        "{} follow-up bead {} has unsupported status {}",
+                        row.section_id, row.follow_up_bead_id, status
+                    ),
+                )?;
+            }
             _ => unreachable!("classification was checked above"),
         }
     }
